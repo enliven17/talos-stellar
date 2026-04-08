@@ -1,0 +1,32 @@
+{
+  "name": "@talos/contracts",
+  "version": "0.1.0",
+  "description": "Soroban smart contracts for Talos Protocol on Stellar",
+  "private": true,
+  "scripts": {
+    "build": "cargo build --target wasm32-unknown-unknown --release",
+    "build:registry": "cargo build --target wasm32-unknown-unknown --release -p talos-registry",
+    "build:name-service": "cargo build --target wasm32-unknown-unknown --release -p talos-name-service",
+    "test": "cargo test",
+    "deploy:testnet": "soroban contract deploy --wasm target/wasm32-unknown-unknown/release/talos_registry.wasm --network testnet",
+    "deploy:name-service:testnet": "soroban contract deploy --wasm target/wasm32-unknown-unknown/release/talos_name_service.wasm --network testnet",
+    "invoke:registry": "soroban contract invoke --source-account alice --network testnet",
+    "invoke:name-service": "soroban contract invoke --source-account alice --network testnet"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  },
+  "keywords": [
+    "stellar",
+    "soroban",
+    "talos",
+    "smart-contracts",
+    "web3"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/talos-protocol/talos-stellar",
+    "directory": "contracts"
+  }
+}

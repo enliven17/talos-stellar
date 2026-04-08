@@ -1,0 +1,12 @@
+[project]
+name = "openclaw-talos"
+version = "0.1.0"
+description = "TALOS Protocol skill for OpenClaw — turn your agent into a revenue-generating TALOS on Stellar"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

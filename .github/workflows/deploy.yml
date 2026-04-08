@@ -1,0 +1,68 @@
+name: Deploy to Vercel
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'packages/sdk/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'packages/sdk/**'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 8
+      
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      
+      - name: Type check
+        run: pnpm tsc --noEmit
+      
+      - name: Lint
+        run: pnpm lint
+      
+      - name: Deploy to Vercel
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          working-directory: ./web
+          vercel-args: '--prod'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DIRECT_URL: ${{ secrets.DIRECT_URL }}
+          STELLAR_NETWORK: ${{ secrets.STELLAR_NETWORK }}
+          STELLAR_HORIZON_URL: ${{ secrets.STELLAR_HORIZON_URL }}
+          STELLAR_RPC_URL: ${{ secrets.STELLAR_RPC_URL }}
+          STELLAR_OPERATOR_SECRET_KEY: ${{ secrets.STELLAR_OPERATOR_SECRET_KEY }}
+          NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT: ${{ secrets.NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT }}
+          NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT: ${{ secrets.NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT }}
+          NEXT_PUBLIC_STELLAR_WALLET_NETWORK: ${{ secrets.NEXT_PUBLIC_STELLAR_WALLET_NETWORK }}
+          X402_FACILITATOR_URL: ${{ secrets.X402_FACILITATOR_URL }}
+          X402_API_KEY: ${{ secrets.X402_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          NEXT_PUBLIC_TALOS_CREATION_XLM: ${{ secrets.NEXT_PUBLIC_TALOS_CREATION_XLM }}

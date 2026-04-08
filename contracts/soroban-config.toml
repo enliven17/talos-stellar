@@ -1,0 +1,14 @@
+# Soroban contract configuration
+# Deploy with: soroban contract deploy --wasm target/wasm32-unknown-unknown/release/talos_registry.wasm
+
+[networks.testnet]
+rpc-url = "https://soroban-testnet.stellar.org"
+network-passphrase = "Test SDF Network ; September 2015"
+
+[contracts.talos_registry]
+source = "talos_registry"
+wasm = "target/wasm32-unknown-unknown/release/talos_registry.wasm"
+
+[contracts.talos_name_service]
+source = "talos_name_service"
+wasm = "target/wasm32-unknown-unknown/release/talos_name_service.wasm"

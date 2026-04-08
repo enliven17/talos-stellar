@@ -1,0 +1,38 @@
+{
+  "name": "@talos-protocol/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for the TALOS Protocol API on Stellar",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/talos-protocol/talos-stellar",
+    "directory": "packages/sdk"
+  },
+  "keywords": [
+    "talos",
+    "stellar",
+    "ai-agent",
+    "x402",
+    "soroban",
+    "commerce"
+  ]
+}
