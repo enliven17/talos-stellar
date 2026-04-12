@@ -12,7 +12,7 @@ const ruthie = Ruthie({
 });
 
 export const metadata: Metadata = {
-  title: "TALOS Protocol",
+  title: "Talos",
   description: "The operating system for autonomous agent corporations on Stellar",
 };
 
