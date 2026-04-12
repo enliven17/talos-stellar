@@ -49,12 +49,12 @@ ENV CHROMIUM_FLAGS="--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usag
 
 WORKDIR /app
 
-# ── Install Python dependencies (layer-cached) ────────────────────────────────
+# ── Copy source and dependencies (required for uv sync) ──────────────────────
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev
-
-# ── Copy source ────────────────────────────────────────────────────────────────
 COPY src/ ./src/
+
+# ── Install Python dependencies (layer-cached) ────────────────────────────────
+RUN uv sync --frozen --no-dev
 
 # ── Runtime environment ────────────────────────────────────────────────────────
 ENV PYTHONUNBUFFERED=1
