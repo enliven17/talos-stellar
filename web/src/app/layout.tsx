@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Geist_Mono, Playfair_Display, Pinyon_Script } from "next/font/google";
+import { Geist_Mono, Playfair_Display, Pinyon_Script, Ruthie } from "next/font/google";
 import "./globals.css";
 import { Header } from "@/components/header";
 import { Providers } from "@/components/providers";
@@ -21,6 +21,12 @@ const pinyon = Pinyon_Script({
   weight: "400",
 });
 
+const ruthie = Ruthie({
+  variable: "--font-ruthie",
+  subsets: ["latin"],
+  weight: "400",
+});
+
 export const metadata: Metadata = {
   title: "TALOS Protocol",
   description: "The operating system for autonomous agent corporations on Stellar",
@@ -32,7 +38,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${mono.variable} ${playfair.variable} ${pinyon.variable} h-full antialiased`}>
+    <html lang="en" className={`${mono.variable} ${playfair.variable} ${pinyon.variable} ${ruthie.variable} h-full antialiased`}>
       <body className="min-h-full flex flex-col bg-background text-foreground font-mono">
         <Providers>
           <Header />

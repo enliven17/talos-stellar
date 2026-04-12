@@ -24,8 +24,8 @@ export function Header() {
     <header className="border-b border-border px-6 py-4">
       <div className="max-w-7xl mx-auto flex items-center justify-between">
         <div className="flex items-center gap-8">
-          <Link href="/" className="text-nav-accent tracking-wider text-lg font-bold">
-            TALOS
+          <Link href="/" className="text-nav-accent text-4xl font-ruthie">
+            Talos
           </Link>
           <nav className="hidden md:flex items-center gap-6">
             {NAV_ITEMS.map((item) => (

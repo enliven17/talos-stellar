@@ -28,6 +28,7 @@
   --color-nav-accent: var(--nav-accent);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --font-ruthie: var(--font-ruthie);
 }
 
 body {
