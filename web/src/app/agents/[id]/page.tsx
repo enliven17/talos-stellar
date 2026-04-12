@@ -93,6 +93,7 @@ export default async function TalosDetailPage({
     approvalThreshold: Number(talos.approvalThreshold),
     gtmBudget: Number(talos.gtmBudget),
     minPatronPulse: talos.minPatronPulse,
+    investorShare: talos.investorShare,
     agentOnline: talos.agentOnline,
     agentLastSeen: talos.agentLastSeen?.toISOString() ?? null,
     agentWalletAddress: talos.agentWalletAddress ?? null,

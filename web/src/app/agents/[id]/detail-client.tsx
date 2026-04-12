@@ -51,6 +51,7 @@ interface TalosDetail {
   approvalThreshold: number;
   gtmBudget: number;
   minPatronPulse: number | null;
+  investorShare: number;
   agentOnline: boolean;
   agentLastSeen: string | null;
   createdAt: string;
@@ -134,6 +135,94 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
   const [buyStatus, setBuyStatus] = useState<"idle" | "buying" | "success" | "error">("idle");
   const [buyResult, setBuyResult] = useState<{ txHash: string; message: string } | null>(null);
   const buyInputRef = useRef<HTMLInputElement>(null);
+
+  // ─── Service Request modal state ─────────────────────
+  const [serviceOpen, setServiceOpen] = useState(false);
+  const [servicePayload, setServicePayload] = useState("");
+  const [serviceStatus, setServiceStatus] = useState<"idle" | "paying" | "success" | "error">("idle");
+  const [serviceResult, setServiceResult] = useState<{ jobId: string; txHash: string } | null>(null);
+
+  const handleRequestService = useCallback(async () => {
+    if (!address || !talos.service) return;
+    setServiceStatus("paying");
+    try {
+      const { Asset, TransactionBuilder, Operation, BASE_FEE, Horizon } = await import("@stellar/stellar-sdk");
+      const HORIZON_URL = "https://horizon-testnet.stellar.org";
+      const NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
+      const USDC_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
+      const recipient = talos.service.stellarPublicKey || talos.agentWalletAddress || "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
+
+      const server = new Horizon.Server(HORIZON_URL);
+      const account = await server.loadAccount(address);
+      const usdc = new Asset("USDC", USDC_ISSUER);
+
+      const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASE })
+        .addOperation(Operation.payment({ destination: recipient, asset: usdc, amount: String(talos.service.price) }))
+        .setTimeout(60).build();
+
+      const signedXdr = await signTransaction(tx.toXDR());
+      const { TransactionBuilder: TB } = await import("@stellar/stellar-sdk");
+      const signedTx = TB.fromXDR(signedXdr, NETWORK_PASSPHRASE);
+      const result = await server.submitTransaction(signedTx);
+      const txHash = result.hash;
+
+      let payload: Record<string, unknown> = {};
+      try { payload = servicePayload.trim() ? JSON.parse(servicePayload) : {}; } catch { payload = { request: servicePayload }; }
+
+      const res = await fetch(`/api/talos/${talos.id}/jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ buyerPublicKey: address, txHash, payload }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setServiceResult({ jobId: data.jobId, txHash });
+        setServiceStatus("success");
+      } else {
+        alert(data.error || "Job creation failed");
+        setServiceStatus("error");
+      }
+    } catch (err: any) {
+      console.error("[request-service]", err);
+      alert(err?.message ?? "Transaction failed");
+      setServiceStatus("error");
+    }
+  }, [address, talos.id, talos.service, talos.agentWalletAddress, servicePayload, signTransaction]);
+
+  // ─── Revenue distribution state ──────────────────────
+  const [distLoading, setDistLoading] = useState(false);
+  const [distPreview, setDistPreview] = useState<{
+    totalRevenue: number;
+    distributableAmount: number;
+    investorSharePercent: number;
+    breakdown: { stellarPublicKey: string; pulseAmount: number; sharePercent: string; estimatedUsdc: string }[];
+  } | null>(null);
+
+  const loadDistPreview = useCallback(async () => {
+    const res = await fetch(`/api/talos/${talos.id}/revenue/distribute`);
+    if (res.ok) setDistPreview(await res.json());
+  }, [talos.id]);
+
+  const handleDistribute = useCallback(async () => {
+    if (!address) return;
+    setDistLoading(true);
+    try {
+      const res = await fetch(`/api/talos/${talos.id}/revenue/distribute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ requesterPublicKey: address }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        alert(`Distributed! ${data.message}`);
+        loadDistPreview();
+      } else {
+        alert(data.error || "Distribution failed");
+      }
+    } finally {
+      setDistLoading(false);
+    }
+  }, [address, talos.id, loadDistPreview]);
 
   const priceNum = parseFloat(talos.pulsePrice.replace("$", "")) || 0;
   const buyQty = Math.max(0, parseInt(buyAmount, 10) || 0);
@@ -625,26 +714,58 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                 </div>
               </div>
 
+              {/* Request Service button */}
+              {isConnected ? (
+                <div className="bg-surface border border-accent/20 p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="text-xs text-accent">[REQUEST SERVICE]</div>
+                    <span className="text-xs text-muted">
+                      Pay {talos.service.price} {talos.service.currency} · wallet signing required
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted mb-4">
+                    Submit a job to this agent. Your USDC payment is sent on-chain and the agent processes your request.
+                  </p>
+                  <button
+                    onClick={() => { setServiceOpen(true); setServiceStatus("idle"); setServiceResult(null); }}
+                    disabled={!talos.agentOnline}
+                    className={`px-6 py-2.5 text-sm font-medium transition-colors ${
+                      talos.agentOnline
+                        ? "bg-accent text-background hover:bg-foreground"
+                        : "bg-surface text-muted border border-border cursor-not-allowed"
+                    }`}
+                  >
+                    {talos.agentOnline ? `Request — ${talos.service.price} USDC` : "Agent Offline"}
+                  </button>
+                </div>
+              ) : (
+                <div className="bg-surface border border-border p-6 text-center">
+                  <p className="text-sm text-muted mb-4">Connect your wallet to request this service</p>
+                  <button onClick={connect} className="bg-accent text-background px-6 py-2.5 text-sm font-medium hover:bg-foreground transition-colors">
+                    Connect Wallet
+                  </button>
+                </div>
+              )}
+
               {/* Integration guide */}
               <div className="bg-surface border border-border p-6">
-                <div className="text-xs text-muted mb-4">[INTEGRATION GUIDE]</div>
+                <div className="text-xs text-muted mb-4">[API INTEGRATION]</div>
                 <p className="text-xs text-muted mb-4">
-                  Call this agent&apos;s service programmatically via the x402 commerce protocol on Stellar.
+                  Integrate programmatically — pay USDC on-chain, then call the jobs endpoint.
                 </p>
                 <div className="bg-background border border-border p-4 text-xs text-foreground overflow-x-auto font-mono space-y-1">
-                  <div className="text-green-400"># Discover service</div>
-                  <div className="text-muted">GET /api/services?category={talos.category.toLowerCase()}</div>
-                  <div className="mt-3 text-green-400"># Submit a job request</div>
-                  <div className="text-muted">POST /api/talos/{talos.id}/commerce/jobs</div>
-                  <div className="text-muted">Content-Type: application/json</div>
-                  <div className="text-muted">X-Payment: &lt;x402_stellar_payment_token&gt;</div>
+                  <div className="text-green-400"># 1. Send USDC payment on Stellar</div>
+                  <div className="text-muted">destination: {talos.service.stellarPublicKey.slice(0, 12)}...</div>
+                  <div className="text-muted">amount: {talos.service.price} USDC</div>
+                  <div className="mt-3 text-green-400"># 2. Create job with txHash</div>
+                  <div className="text-muted">POST /api/talos/{talos.id}/jobs</div>
                   <div className="mt-1">{"{"}</div>
-                  <div className="pl-4">&quot;serviceName&quot;: &quot;{talos.service.name}&quot;,</div>
-                  <div className="pl-4">&quot;payload&quot;: {"{"} &quot;...your request data&quot; {"}"},</div>
-                  <div className="pl-4">&quot;amount&quot;: &quot;{talos.service.price}&quot;</div>
+                  <div className="pl-4">&quot;buyerPublicKey&quot;: &quot;G...&quot;,</div>
+                  <div className="pl-4">&quot;txHash&quot;: &quot;&lt;stellar_tx_hash&gt;&quot;,</div>
+                  <div className="pl-4">&quot;payload&quot;: {"{"} &quot;request&quot;: &quot;your task here&quot; {"}"}</div>
                   <div>{"}"}</div>
-                  <div className="mt-3 text-green-400"># Poll for result</div>
-                  <div className="text-muted">GET /api/talos/{talos.id}/commerce/jobs/:jobId</div>
+                  <div className="mt-3 text-green-400"># 3. Poll for result</div>
+                  <div className="text-muted">GET /api/talos/{talos.id}/jobs?jobId=:id</div>
                 </div>
               </div>
 
@@ -707,23 +828,78 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
 
       {/* ─── Patrons Tab ──────────────────────────────────── */}
       {tab === "Patrons" && (
-        <div className="bg-surface border border-border">
-          <div className="grid grid-cols-4 gap-4 px-4 py-3 border-b border-border text-xs text-muted">
-            <span>Stellar Address</span>
-            <span>Role</span>
-            <span className="text-right">{talos.tokenSymbol} Amount</span>
-            <span className="text-right">Share</span>
-          </div>
-          {talos.patrons.map((p, i) => (
-            <div key={i} className="grid grid-cols-4 gap-4 px-4 py-3 border-b border-border last:border-0 hover:bg-surface-hover transition-colors text-sm">
-              <span className="text-foreground font-mono text-xs truncate">{p.stellarPublicKey.slice(0, 8)}...{p.stellarPublicKey.slice(-4)}</span>
-              <span className={`text-xs ${p.role === "Creator" ? "text-accent" : p.role === "Treasury" ? "text-yellow-400" : "text-foreground"}`}>
-                [{p.role.toUpperCase()}]
-              </span>
-              <span className="text-right text-foreground">{p.pulseAmount.toLocaleString()}</span>
-              <span className="text-right text-muted">{p.share}%</span>
+        <div className="space-y-6">
+          {/* My Holdings (if connected) */}
+          {isConnected && address && (() => {
+            const me = talos.patrons.find(p => p.stellarPublicKey === address);
+            const totalPulse = talos.patrons.reduce((s, p) => s + p.pulseAmount, 0);
+            const myShare = totalPulse > 0 && me ? (me.pulseAmount / totalPulse * 100).toFixed(2) : "0";
+            return (
+              <div className="bg-surface border border-accent/20 p-6">
+                <div className="text-xs text-accent mb-4">[MY HOLDINGS]</div>
+                {me ? (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div>
+                      <div className="text-xs text-muted">{talos.tokenSymbol} Held</div>
+                      <div className="text-lg font-bold text-accent mt-1">{me.pulseAmount.toLocaleString()}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-muted">Network Share</div>
+                      <div className="text-lg font-bold text-foreground mt-1">{myShare}%</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-muted">Role</div>
+                      <div className="text-lg font-bold text-foreground mt-1">{me.role}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-muted">Status</div>
+                      <div className={`text-lg font-bold mt-1 ${me.status === "active" ? "text-green-400" : "text-muted"}`}>
+                        {me.status.toUpperCase()}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm text-muted">
+                      You are not a patron yet. Buy at least {minRequired.toLocaleString()} {talos.tokenSymbol} to join.
+                    </p>
+                    <button
+                      onClick={() => { setBuyOpen(true); setTimeout(() => buyInputRef.current?.focus(), 100); }}
+                      className="border border-accent/40 text-accent px-4 py-1.5 text-xs font-medium hover:bg-accent hover:text-background transition-colors"
+                    >
+                      Buy {talos.tokenSymbol}
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* All Patrons table */}
+          <div className="bg-surface border border-border">
+            <div className="grid grid-cols-4 gap-4 px-4 py-3 border-b border-border text-xs text-muted">
+              <span>Stellar Address</span>
+              <span>Role</span>
+              <span className="text-right">{talos.tokenSymbol} Amount</span>
+              <span className="text-right">Share</span>
             </div>
-          ))}
+            {talos.patrons.length === 0 ? (
+              <div className="py-12 text-center text-sm text-muted">No patrons yet. Be the first.</div>
+            ) : (
+              talos.patrons.map((p, i) => (
+                <div key={i} className={`grid grid-cols-4 gap-4 px-4 py-3 border-b border-border last:border-0 transition-colors text-sm ${p.stellarPublicKey === address ? "bg-accent/5" : "hover:bg-surface-hover"}`}>
+                  <span className="text-foreground font-mono text-xs truncate">
+                    {p.stellarPublicKey === address ? "You" : `${p.stellarPublicKey.slice(0, 8)}...${p.stellarPublicKey.slice(-4)}`}
+                  </span>
+                  <span className={`text-xs ${p.role === "Creator" ? "text-accent" : p.role === "Treasury" ? "text-yellow-400" : "text-foreground"}`}>
+                    [{p.role.toUpperCase()}]
+                  </span>
+                  <span className="text-right text-foreground">{p.pulseAmount.toLocaleString()}</span>
+                  <span className="text-right text-muted">{p.share}%</span>
+                </div>
+              ))
+            )}
+          </div>
         </div>
       )}
 
@@ -742,6 +918,70 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                 <div className="text-xs text-muted">{s.label}</div>
               </div>
             ))}
+          </div>
+
+          {/* Distribution Panel */}
+          <div className="bg-surface border border-border p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div className="text-xs text-accent">[REVENUE DISTRIBUTION]</div>
+              <button
+                onClick={loadDistPreview}
+                className="text-xs text-muted hover:text-accent transition-colors"
+              >
+                Load preview &rarr;
+              </button>
+            </div>
+            <p className="text-xs text-muted mb-4">
+              {talos.investorShare ?? 25}% of treasury revenue is distributable to {talos.tokenSymbol} holders
+              proportionally to their holdings.
+            </p>
+            {distPreview ? (
+              <div className="space-y-4">
+                <div className="grid grid-cols-3 gap-4 text-xs">
+                  <div className="bg-background border border-border p-3 text-center">
+                    <div className="text-accent font-bold text-sm">${distPreview.totalRevenue.toFixed(2)}</div>
+                    <div className="text-muted">Total Treasury</div>
+                  </div>
+                  <div className="bg-background border border-border p-3 text-center">
+                    <div className="text-accent font-bold text-sm">${distPreview.distributableAmount.toFixed(2)}</div>
+                    <div className="text-muted">To Distribute ({distPreview.investorSharePercent}%)</div>
+                  </div>
+                  <div className="bg-background border border-border p-3 text-center">
+                    <div className="text-foreground font-bold text-sm">${(distPreview.totalRevenue - distPreview.distributableAmount).toFixed(2)}</div>
+                    <div className="text-muted">Treasury Retained</div>
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  {distPreview.breakdown.map((b) => (
+                    <div key={b.stellarPublicKey} className={`flex items-center justify-between text-xs py-1.5 border-b border-border last:border-0 ${b.stellarPublicKey === address ? "text-accent" : "text-muted"}`}>
+                      <span className="font-mono">{b.stellarPublicKey === address ? "You" : `${b.stellarPublicKey.slice(0, 8)}...`}</span>
+                      <span>{b.pulseAmount.toLocaleString()} {talos.tokenSymbol} ({b.sharePercent}%)</span>
+                      <span className="font-bold">${b.estimatedUsdc} USDC</span>
+                    </div>
+                  ))}
+                </div>
+                {isConnected && (
+                  <button
+                    onClick={handleDistribute}
+                    disabled={distLoading || distPreview.distributableAmount <= 0}
+                    className={`w-full py-2.5 text-sm font-medium transition-colors ${
+                      distPreview.distributableAmount > 0
+                        ? "bg-accent text-background hover:bg-foreground"
+                        : "bg-surface text-muted border border-border cursor-not-allowed"
+                    }`}
+                  >
+                    {distLoading ? "Distributing..." : `Distribute ${distPreview.distributableAmount.toFixed(2)} USDC to Holders`}
+                  </button>
+                )}
+              </div>
+            ) : (
+              <button
+                onClick={loadDistPreview}
+                className="border border-border px-4 py-2 text-xs text-muted hover:text-accent hover:border-accent transition-colors"
+              >
+                Load distribution preview
+              </button>
+            )}
           </div>
 
           <div className="bg-surface border border-border p-6">
@@ -926,7 +1166,86 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                 </button>
 
                 <p className="text-xs text-muted/50 text-center">
-                  Stellar testnet &mdash; no real tokens will be transferred
+                  Stellar testnet &mdash; real transaction, real tokens
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ─── Service Request Modal ────────────────────────── */}
+      {serviceOpen && talos.service && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/60" onClick={() => !serviceStatus.match(/paying/) && setServiceOpen(false)} />
+          <div className="relative bg-background border border-border w-full max-w-md mx-4 p-0">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+              <div className="text-xs text-accent tracking-wider">[REQUEST SERVICE]</div>
+              <button onClick={() => setServiceOpen(false)} className="text-muted hover:text-foreground text-sm">&times;</button>
+            </div>
+
+            {serviceStatus === "success" && serviceResult ? (
+              <div className="px-6 py-8 text-center">
+                <div className="w-12 h-12 mx-auto mb-4 border border-green-400/40 flex items-center justify-center text-green-400 text-lg">&#10003;</div>
+                <p className="text-sm text-foreground mb-2">Job Submitted</p>
+                <p className="text-xs text-muted mb-4">The agent will process your request. Poll for results using your job ID.</p>
+                <div className="bg-surface border border-border p-3 text-xs font-mono text-muted break-all mb-2">
+                  job: {serviceResult.jobId}
+                </div>
+                <div className="bg-surface border border-border p-3 text-xs font-mono text-muted break-all mb-6">
+                  tx: {serviceResult.txHash.slice(0, 18)}...{serviceResult.txHash.slice(-8)}
+                </div>
+                <div className="text-xs text-muted mb-6">
+                  Poll: <span className="font-mono">GET /api/talos/{talos.id}/jobs?jobId={serviceResult.jobId}</span>
+                </div>
+                <button
+                  onClick={() => setServiceOpen(false)}
+                  className="bg-accent text-background px-8 py-2.5 text-sm font-medium hover:bg-foreground transition-colors"
+                >
+                  Done
+                </button>
+              </div>
+            ) : (
+              <div className="px-6 py-6 space-y-5">
+                <div>
+                  <div className="text-sm font-bold text-foreground">{talos.service.name}</div>
+                  {talos.service.description && (
+                    <p className="text-xs text-muted mt-1">{talos.service.description}</p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="text-xs text-muted block mb-1.5">Request / Payload (optional JSON or plain text)</label>
+                  <textarea
+                    rows={4}
+                    value={servicePayload}
+                    onChange={(e) => setServicePayload(e.target.value)}
+                    placeholder={`{"request": "describe what you want the agent to do"}`}
+                    className="w-full bg-surface border border-border px-4 py-2.5 text-xs text-foreground placeholder:text-muted/40 focus:outline-none focus:border-accent font-mono resize-none"
+                  />
+                </div>
+
+                <div className="bg-surface border border-border p-4 space-y-2">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-muted">Service Price</span>
+                    <span className="text-accent font-bold">{talos.service.price} {talos.service.currency}</span>
+                  </div>
+                  <div className="flex justify-between text-xs">
+                    <span className="text-muted">Payment</span>
+                    <span className="text-foreground">Stellar · wallet signing</span>
+                  </div>
+                </div>
+
+                <button
+                  onClick={handleRequestService}
+                  disabled={serviceStatus === "paying"}
+                  className="w-full py-3 text-sm font-medium bg-accent text-background hover:bg-foreground transition-colors disabled:opacity-50"
+                >
+                  {serviceStatus === "paying" ? "Processing payment..." : `Pay ${talos.service.price} USDC & Submit Job`}
+                </button>
+
+                <p className="text-xs text-muted/50 text-center">
+                  USDC is transferred on-chain before job creation
                 </p>
               </div>
             )}
