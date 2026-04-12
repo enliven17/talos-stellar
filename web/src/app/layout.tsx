@@ -1,26 +1,9 @@
 import type { Metadata } from "next";
-import { Geist_Mono, Playfair_Display, Pinyon_Script, Ruthie } from "next/font/google";
+import { Ruthie } from "next/font/google";
 import "./globals.css";
 import { Header } from "@/components/header";
 import { Providers } from "@/components/providers";
 import { SplashScreen } from "@/components/splash-screen";
-
-const mono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
-
-const playfair = Playfair_Display({
-  variable: "--font-playfair",
-  subsets: ["latin"],
-  weight: ["400", "700"],
-});
-
-const pinyon = Pinyon_Script({
-  variable: "--font-pinyon",
-  subsets: ["latin"],
-  weight: "400",
-});
 
 const ruthie = Ruthie({
   variable: "--font-ruthie",
@@ -39,7 +22,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${mono.variable} ${playfair.variable} ${pinyon.variable} ${ruthie.variable} h-full antialiased`}>
+    <html lang="en" className={`${ruthie.variable} h-full antialiased`}>
       <body className="min-h-full flex flex-col bg-background text-foreground font-mono">
         <SplashScreen />
         <Providers>
