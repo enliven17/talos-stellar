@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsRevenues } from "@/db/schema";
-import { eq, sum } from "drizzle-orm";
+import { and, eq, sum } from "drizzle-orm";
 
 /**
  * POST /api/talos/:id/revenue/buyback
@@ -134,12 +134,7 @@ export async function GET(
       db.select({ total: sum(tlsRevenues.amount) }).from(tlsRevenues).where(eq(tlsRevenues.talosId, id)),
       db.select({ total: sum(tlsRevenues.amount) })
         .from(tlsRevenues)
-        .where(eq(tlsRevenues.talosId, id))
-        .then(() => db
-          .select({ total: sum(tlsRevenues.amount) })
-          .from(tlsRevenues)
-          .where(eq(tlsRevenues.source, "buyback") && eq(tlsRevenues.talosId, id) as any)
-        ),
+        .where(and(eq(tlsRevenues.talosId, id), eq(tlsRevenues.source, "buyback"))),
     ]);
 
     const totalRevenue = parseFloat(revenueResult[0]?.total ?? "0");

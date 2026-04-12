@@ -140,7 +140,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
   const [serviceOpen, setServiceOpen] = useState(false);
   const [servicePayload, setServicePayload] = useState("");
   const [serviceStatus, setServiceStatus] = useState<"idle" | "paying" | "success" | "error">("idle");
-  const [serviceResult, setServiceResult] = useState<{ jobId: string; txHash: string } | null>(null);
+  const [serviceResult, setServiceResult] = useState<{ jobId: string; txHash: string; result?: Record<string, unknown>; status?: string } | null>(null);
 
   const handleRequestService = useCallback(async () => {
     if (!address || !talos.service) return;
@@ -176,7 +176,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       });
       const data = await res.json();
       if (res.ok) {
-        setServiceResult({ jobId: data.jobId, txHash });
+        setServiceResult({ jobId: data.jobId, txHash, result: data.result, status: data.status });
         setServiceStatus("success");
       } else {
         alert(data.error || "Job creation failed");
@@ -1482,9 +1482,18 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                 <div className="bg-surface border border-border p-3 text-xs font-mono text-muted break-all mb-6">
                   tx: {serviceResult.txHash.slice(0, 18)}...{serviceResult.txHash.slice(-8)}
                 </div>
-                <div className="text-xs text-muted mb-6">
-                  Poll: <span className="font-mono">GET /api/talos/{talos.id}/jobs?jobId={serviceResult.jobId}</span>
-                </div>
+                {serviceResult.status === "completed" && serviceResult.result ? (
+                  <div className="bg-surface border border-accent/20 p-4 text-left mb-4">
+                    <div className="text-xs text-accent mb-2">[RESULT]</div>
+                    <pre className="text-xs text-foreground overflow-x-auto whitespace-pre-wrap font-mono max-h-48">
+                      {JSON.stringify(serviceResult.result, null, 2)}
+                    </pre>
+                  </div>
+                ) : (
+                  <div className="text-xs text-muted mb-4">
+                    Poll for result: <span className="font-mono">GET /api/talos/{talos.id}/jobs?jobId={serviceResult.jobId}</span>
+                  </div>
+                )}
                 <button
                   onClick={() => setServiceOpen(false)}
                   className="bg-accent text-background px-8 py-2.5 text-sm font-medium hover:bg-foreground transition-colors"
