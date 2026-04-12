@@ -29,35 +29,12 @@ fn emit_name_registered(env: &Env, talos_id: u32, name: String) {
 }
 
 // ── Validation ──────────────────────────────────────────────────────
+// Character-level validation is handled off-chain (Next.js regex).
+// On-chain we only enforce the byte-length bounds.
 
 fn validate_name(name: &String) -> bool {
-    let len = name.len() as usize;
-    if len < 3 || len > 32 {
-        return false;
-    }
-
-    // Check each character
-    for i in 0..len {
-        let c = name.get(i as u32);
-        let is_lowercase = c >= 'a' as u32 && c <= 'z' as u32;
-        let is_digit = c >= '0' as u32 && c <= '9' as u32;
-        let is_hyphen = c == '-' as u32;
-
-        if !is_lowercase && !is_digit && !is_hyphen {
-            return false;
-        }
-    }
-
-    // No consecutive hyphens
-    for i in 0..len.saturating_sub(1) {
-        let c1 = name.get(i as u32);
-        let c2 = name.get((i + 1) as u32);
-        if c1 == '-' as u32 && c2 == '-' as u32 {
-            return false;
-        }
-    }
-
-    true
+    let len = name.len();
+    len >= 3 && len <= 32
 }
 
 // ── Contract ────────────────────────────────────────────────────────

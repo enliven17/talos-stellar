@@ -69,12 +69,12 @@ pub enum DataKey {
 // ── Events ──────────────────────────────────────────────────────────
 
 fn emit_talos_created(env: &Env, talos_id: u32, creator: Address, name: String) {
-    let topics = (symbol_short!("talos_created"), talos_id);
+    let topics = (symbol_short!("tls_crt"), talos_id);
     env.events().publish(topics, (creator, name));
 }
 
 fn emit_patron_updated(env: &Env, talos_id: u32, creator_share: u32, investor_share: u32) {
-    let topics = (symbol_short!("patron_updated"), talos_id);
+    let topics = (symbol_short!("pat_upd"), talos_id);
     env.events()
         .publish(topics, (creator_share, investor_share));
 }
