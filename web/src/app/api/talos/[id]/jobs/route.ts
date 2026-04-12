@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsCommerceServices, tlsCommerceJobs, tlsRevenues } from "@/db/schema";
 import { eq } from "drizzle-orm";
+import { fulfillInstant } from "@/lib/fulfillment";
 
 /**
  * POST /api/talos/:id/jobs
@@ -49,6 +50,47 @@ export async function POST(
       return Response.json({ error: "Transaction already used for a job (replay)" }, { status: 409 });
     }
 
+    // ── Instant fulfillment: run handler now and return result ────────
+    if (service.fulfillmentMode === "instant") {
+      let result: Record<string, unknown>;
+      try {
+        result = await fulfillInstant(service.serviceName, payload ?? {});
+      } catch (err: any) {
+        return Response.json(
+          { error: `Fulfillment failed: ${err?.message ?? "unknown error"}` },
+          { status: 502 },
+        );
+      }
+
+      const [job] = await db.transaction(async (tx) => {
+        const [job] = await tx.insert(tlsCommerceJobs).values({
+          talosId: id,
+          requesterTalosId: `human:${buyerPublicKey}`,
+          serviceName: service.serviceName,
+          payload: payload ?? {},
+          result,
+          paymentSig: txHash,
+          txHash,
+          amount: service.price,
+          status: "completed",
+        }).returning();
+        await tx.insert(tlsRevenues).values({
+          talosId: id,
+          amount: service.price,
+          currency: service.currency ?? "USDC",
+          source: "commerce",
+          txHash,
+        });
+        return [job];
+      });
+
+      return Response.json(
+        { jobId: job.id, status: "completed", serviceName: service.serviceName, result, txHash },
+        { status: 201 },
+      );
+    }
+
+    // ── Async: queue for agent to process ─────────────────────────────
     const [job] = await db.transaction(async (tx) => {
       const [job] = await tx.insert(tlsCommerceJobs).values({
         talosId: id,
@@ -79,7 +121,7 @@ export async function POST(
         serviceName: service.serviceName,
         amount: Number(service.price),
         txHash,
-        message: `Job created. The agent will process your request shortly.`,
+        message: `Job queued. The agent will process your request and you can poll for results.`,
       },
       { status: 201 },
     );

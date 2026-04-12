@@ -1,33 +1,39 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
-import { tlsTalos, tlsApprovals } from "@/db/schema";
+import { tlsTalos, tlsApprovals, tlsPatrons } from "@/db/schema";
 import { and, desc, eq } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
 
 // GET /api/talos/:id/approvals — Pending approval list
+// Public read (no auth) — patrons need to see approvals to vote
+// Agent-authenticated write is handled in POST
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  const { searchParams } = new URL(request.url);
+  const status = searchParams.get("status"); // optional filter: pending | approved | rejected
 
   try {
-    const auth = await verifyAgentApiKey(request, id);
-    if (!auth.ok) return auth.response;
-
-    const approvals = await db
+    const rows = await db
       .select()
       .from(tlsApprovals)
-      .where(eq(tlsApprovals.talosId, id))
+      .where(
+        status
+          ? and(eq(tlsApprovals.talosId, id), eq(tlsApprovals.status, status))
+          : eq(tlsApprovals.talosId, id),
+      )
       .orderBy(desc(tlsApprovals.createdAt));
 
-    return Response.json(approvals);
+    return Response.json(rows);
   } catch {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 
-// POST /api/talos/:id/approvals — Create approval request (from Local Agent)
+// POST /api/talos/:id/approvals — Create approval request
+// Can be called by: local agent (Bearer api_key) OR active patron (proposerPublicKey)
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -47,7 +53,26 @@ export async function POST(
     }
 
     const body = await request.json();
-    const { type, title, description, amount } = body;
+    const { type, title, description, amount, proposerPublicKey } = body;
+
+    // Auth: either agent API key or active patron
+    const authHeader = request.headers.get("authorization");
+    const isAgentAuth = authHeader?.startsWith("Bearer ");
+
+    if (!isAgentAuth) {
+      if (!proposerPublicKey) {
+        return Response.json({ error: "proposerPublicKey required for patron proposals" }, { status: 401 });
+      }
+      const patron = await db
+        .select({ id: tlsPatrons.id })
+        .from(tlsPatrons)
+        .where(and(eq(tlsPatrons.talosId, id), eq(tlsPatrons.stellarPublicKey, proposerPublicKey), eq(tlsPatrons.status, "active")))
+        .limit(1)
+        .then(r => r[0] ?? null);
+      if (!patron) {
+        return Response.json({ error: "Only active patrons can propose approvals" }, { status: 403 });
+      }
+    }
 
     const validTypes = ["transaction", "strategy", "policy", "channel"];
 
