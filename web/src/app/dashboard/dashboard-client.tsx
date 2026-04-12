@@ -503,9 +503,13 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
                     {c.name}
                   </h3>
                   <div className="space-y-2 text-xs">
-                    <div className="flex justify-between">
-                      <span className="text-muted">Asset Code</span>
-                      <span className="text-foreground font-mono">{c.stellarAssetCode || "—"}</span>
+                    <div className="flex justify-between gap-2">
+                      <span className="text-muted shrink-0">Asset Code</span>
+                      <span className="text-foreground font-mono truncate text-right">
+                        {c.stellarAssetCode?.includes(":")
+                          ? `${c.stellarAssetCode.split(":")[0]}:${c.stellarAssetCode.split(":")[1].slice(0, 6)}…`
+                          : c.stellarAssetCode || "—"}
+                      </span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-muted">Network</span>
@@ -575,7 +579,9 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
                     </div>
                     <div>
                       <span className="text-muted">Asset</span>
-                      <p className="text-foreground mt-0.5 font-mono">{c.stellarAssetCode || "—"}</p>
+                      <p className="text-foreground mt-0.5 font-mono break-all text-xs">
+                        {c.stellarAssetCode || "—"}
+                      </p>
                     </div>
                   </div>
                   <div className="mt-3 pt-3 border-t border-border text-xs">

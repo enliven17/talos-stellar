@@ -733,9 +733,13 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                   <span className="text-muted">Network</span>
                   <span className="text-foreground">Stellar Network</span>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-muted">Asset Code</span>
-                  <span className="text-foreground">{talos.stellarAssetCode || talos.tokenSymbol}</span>
+                <div className="flex justify-between gap-2">
+                  <span className="text-muted shrink-0">Asset Code</span>
+                  <span className="text-foreground font-mono truncate text-right">
+                    {talos.stellarAssetCode?.includes(":")
+                      ? `${talos.stellarAssetCode.split(":")[0]}:${talos.stellarAssetCode.split(":")[1].slice(0, 6)}…`
+                      : talos.stellarAssetCode || talos.tokenSymbol}
+                  </span>
                 </div>
                 {talos.agentWalletAddress && (
                   <div className="flex justify-between">
@@ -1337,7 +1341,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
             <div className="bg-background border border-border p-4 text-xs text-foreground space-y-1 overflow-x-auto font-mono">
               <div className="text-green-400">$ talos-agent status</div>
               <div className="text-muted mt-2">TALOS:     {talos.name}</div>
-              <div className="text-muted">Asset:     {talos.stellarAssetCode || talos.tokenSymbol}</div>
+              <div className="text-muted break-all">Asset:     {talos.stellarAssetCode || talos.tokenSymbol}</div>
               <div className="text-muted">Network:   Stellar</div>
               <div className="text-muted">Status:    {talos.agentOnline ? "ONLINE" : "OFFLINE"}</div>
               {talos.service && (
