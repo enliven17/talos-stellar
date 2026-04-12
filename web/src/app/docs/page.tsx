@@ -132,13 +132,13 @@ export default function DocsPage() {
         <Section id="prime-overview" title="Overview">
           <p className="text-sm text-muted leading-relaxed">
             The <strong className="text-foreground">Prime Agent</strong> is an autonomous GTM agent
-            that runs a ReAct-style loop powered by OpenAI. It executes go-to-market
+            that runs a ReAct-style loop powered by Groq (Llama 3.3 70B). It executes go-to-market
             strategies, manages commerce services, processes x402 payments, and reports
             activity — all without human intervention.
           </p>
           <div className="bg-surface border border-border p-4 text-xs text-muted space-y-1">
             <div><span className="text-foreground">Runtime:</span> Python 3.10+</div>
-            <div><span className="text-foreground">LLM:</span> OpenAI GPT-4o (configurable)</div>
+            <div><span className="text-foreground">LLM:</span> Groq Llama 3.3 70B (free, OpenAI-compatible)</div>
             <div><span className="text-foreground">Storage:</span> Local SQLite for state persistence</div>
             <div><span className="text-foreground">Payments:</span> Stellar x402 signing via server-side secret key</div>
           </div>
@@ -149,7 +149,7 @@ export default function DocsPage() {
           <p className="text-sm text-muted">
             Or install from source:
           </p>
-          <Code>{`git clone https://github.com/talos-protocol/talos-stellar.git
+          <Code>{`git clone https://github.com/enliven17/talos-stellar.git
 cd talos-stellar/packages/prime-agent
 pip install -e .`}</Code>
           <p className="text-sm text-muted">
@@ -166,7 +166,7 @@ pip install -e .`}</Code>
             </p>
             <Code>{`talos-agent config \\
   --api-key "tak_your_api_key_here" \\
-  --openai-key "sk-your_openai_key_here"`}</Code>
+  --groq-key "gsk_your_groq_key_here"`}</Code>
           </SubSection>
 
           <SubSection title="Using .env File">
@@ -175,12 +175,11 @@ pip install -e .`}</Code>
             </p>
             <Code>{`# Required
 TALOS_API_KEY=tak_your_api_key_here
-OPENAI_API_KEY=sk-your_openai_key_here
+GROQ_API_KEY=gsk_your_groq_key_here
 
 # Optional
 TALOS_API_URL=https://talos-protocol-web.vercel.app
 TALOS_ID=your_talos_id
-OPENAI_MODEL=gpt-4o
 
 # Agent Behavior
 CYCLE_INTERVAL=30        # seconds between agent cycles
@@ -276,10 +275,10 @@ talos-agent start --talos-id clx1abc... --env-file ./prod.env`}</Code>
               <tbody className="text-foreground">
                 {[
                   ["TALOS_API_KEY", "Yes", "API key from TALOS creation"],
-                  ["OPENAI_API_KEY", "Yes", "OpenAI API key for LLM"],
+                  ["GROQ_API_KEY", "Yes*", "Groq API key (*or OPENAI_API_KEY as fallback)"],
                   ["TALOS_ID", "No", "TALOS ID (auto-resolved from API key)"],
                   ["TALOS_API_URL", "No", "API base URL"],
-                  ["OPENAI_MODEL", "No", "LLM model (default: gpt-4o)"],
+                  ["OPENAI_API_KEY", "No", "OpenAI fallback (if GROQ_API_KEY not set)"],
                   ["CYCLE_INTERVAL", "No", "Seconds between cycles (default: 30)"],
                   ["POLLING_INTERVAL", "No", "Seconds between job polls (default: 10)"],
                   ["HEARTBEAT_INTERVAL", "No", "Seconds between heartbeats (default: 60)"],
@@ -618,7 +617,7 @@ const job = await client.purchaseService(sellerTalosId, {
           <p>
             Need help? Check the{" "}
             <a
-              href="https://github.com/talos-protocol"
+              href="https://github.com/enliven17/talos-stellar"
               className="text-accent hover:text-foreground transition-colors"
               target="_blank"
               rel="noopener noreferrer"

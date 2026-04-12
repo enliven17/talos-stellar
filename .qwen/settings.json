@@ -3,7 +3,8 @@
     "allow": [
       "Bash(powershell *)",
       "Bash(rmdir *)",
-      "Bash(dir *)"
+      "Bash(dir *)",
+      "Bash(pnpm add *)"
     ]
   },
   "$version": 3

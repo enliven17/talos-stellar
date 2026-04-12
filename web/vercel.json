@@ -1,4 +1,3 @@
-# Vercel deployment configuration
 {
   "buildCommand": "pnpm build",
   "devCommand": "pnpm dev",
