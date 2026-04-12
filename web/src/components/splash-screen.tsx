@@ -34,12 +34,12 @@ export function SplashScreen() {
       <div className="flex flex-col items-center gap-6">
         {/* Core Logo with Ruthie font */}
         <div className="relative">
-          <h1 className="text-8xl md:text-9xl font-ruthie text-nav-accent flex gap-1">
+          <h1 className="text-8xl md:text-9xl font-ruthie text-nav-accent flex gap-x-2">
             {"Talos".split("").map((char, i) => (
               <span
                 key={i}
-                className="animate-letter-in opacity-0"
-                style={{ animationDelay: `${i * 0.15}s` }}
+                className="animate-letter-in inline-block text-center"
+                style={{ animationDelay: `${i * 0.1}s` }}
               >
                 {char}
               </span>
