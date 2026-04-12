@@ -17,7 +17,7 @@ class TalosClient:
         api_key: str | None = None,
         talos_id: str | None = None,
     ):
-        self.base_url = (base_url or os.getenv("TALOS_API_URL", "https://talos-protocol-web.vercel.app")).rstrip("/")
+        self.base_url = (base_url or os.getenv("TALOS_API_URL", "https://talos-stellar.vercel.app")).rstrip("/")
         self.api_key = api_key or os.getenv("TALOS_API_KEY", "")
         self.talos_id = talos_id or os.getenv("TALOS_ID", "")
         headers: dict[str, str] = {"Content-Type": "application/json"}

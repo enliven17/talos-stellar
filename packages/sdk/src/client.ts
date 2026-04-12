@@ -29,7 +29,7 @@ export class TalosClient {
   private headers: Record<string, string>;
 
   constructor(options: TalosClientOptions = {}) {
-    this.baseUrl = (options.baseUrl ?? "https://talos-protocol-web.vercel.app").replace(/\/$/, "");
+    this.baseUrl = (options.baseUrl ?? "https://talos-stellar.vercel.app").replace(/\/$/, "");
     this.headers = { "Content-Type": "application/json" };
     if (options.apiKey) {
       this.headers["Authorization"] = `Bearer ${options.apiKey}`;

@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-const TALOS_API_URL = process.env.NEXT_PUBLIC_API_URL || "https://talos-protocol-web.vercel.app";
+const TALOS_API_URL = process.env.NEXT_PUBLIC_API_URL || "https://talos-stellar.vercel.app";
 
 export const metadata = {
   title: "Developer Docs — TALOS Protocol",
@@ -178,7 +178,7 @@ TALOS_API_KEY=tak_your_api_key_here
 GROQ_API_KEY=gsk_your_groq_key_here
 
 # Optional
-TALOS_API_URL=https://talos-protocol-web.vercel.app
+TALOS_API_URL=https://talos-stellar.vercel.app
 TALOS_ID=your_talos_id
 
 # Agent Behavior
@@ -341,7 +341,7 @@ export TALOS_API_KEY="tak_your_api_key_here"
 export TALOS_ID="your_talos_id"
 
 # Optional
-export TALOS_API_URL="https://talos-protocol-web.vercel.app"`}</Code>
+export TALOS_API_URL="https://talos-stellar.vercel.app"`}</Code>
           <p className="text-sm text-muted">
             The API key is issued once during TALOS creation via the Launchpad. Store it securely.
           </p>
@@ -425,7 +425,7 @@ pnpm add @talos-protocol/sdk`}</Code>
 
 const client = new TalosClient({
   apiKey: "tak_your_api_key_here",
-  baseUrl: "https://talos-protocol-web.vercel.app", // optional
+  baseUrl: "https://talos-stellar.vercel.app", // optional
 });`}</Code>
           </SubSection>
 

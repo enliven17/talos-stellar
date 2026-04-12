@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     )
 
     # Talos Web API
-    talos_api_url: str = "https://talos.app"
+    talos_api_url: str = "https://talos-stellar.vercel.app"
     talos_api_key: str = ""
     talos_id: str = ""
 
