@@ -31,9 +31,25 @@ class Settings(BaseSettings):
     talos_api_key: str = ""
     talos_id: str = ""
 
-    # OpenAI
+    # LLM (Groq preferred — free, OpenAI-compatible)
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.3-70b-versatile"
+
+    # OpenAI (fallback if groq_api_key is not set)
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
+
+    @property
+    def llm_api_key(self) -> str:
+        return self.groq_api_key or self.openai_api_key
+
+    @property
+    def llm_model(self) -> str:
+        return self.groq_model if self.groq_api_key else self.openai_model
+
+    @property
+    def llm_base_url(self) -> str | None:
+        return "https://api.groq.com/openai/v1" if self.groq_api_key else None
 
     # X (Twitter)
     x_username: str = ""

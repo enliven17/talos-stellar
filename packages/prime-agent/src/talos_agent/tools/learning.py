@@ -105,9 +105,9 @@ async def run_performance_review() -> dict:
         ],
     }
 
-    client = get_openai_client(_settings.openai_api_key)
+    client = get_openai_client(_settings.llm_api_key, _settings.llm_base_url)
     response = await client.chat.completions.create(
-        model=_settings.openai_model,
+        model=_settings.llm_model,
         messages=[
             {
                 "role": "system",
@@ -210,9 +210,9 @@ async def evolve_strategy() -> dict:
     if not learnings:
         return {"status": "no_learnings", "message": "Run performance reviews first to accumulate learnings."}
 
-    client = get_openai_client(_settings.openai_api_key)
+    client = get_openai_client(_settings.llm_api_key, _settings.llm_base_url)
     response = await client.chat.completions.create(
-        model=_settings.openai_model,
+        model=_settings.llm_model,
         messages=[
             {
                 "role": "system",

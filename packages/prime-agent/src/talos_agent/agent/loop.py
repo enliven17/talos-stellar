@@ -23,10 +23,13 @@ console = Console()
 _openai_client: AsyncOpenAI | None = None
 
 
-def get_openai_client(api_key: str) -> AsyncOpenAI:
+def get_openai_client(api_key: str, base_url: str | None = None) -> AsyncOpenAI:
     global _openai_client
     if _openai_client is None:
-        _openai_client = AsyncOpenAI(api_key=api_key)
+        kwargs: dict = {"api_key": api_key}
+        if base_url:
+            kwargs["base_url"] = base_url
+        _openai_client = AsyncOpenAI(**kwargs)
     return _openai_client
 
 
@@ -40,7 +43,7 @@ async def agent_loop(
     shutdown_event: asyncio.Event | None = None,
 ) -> list[dict]:
     """Run one agent cycle: LLM decides tools to call until done."""
-    client = get_openai_client(settings.openai_api_key)
+    client = get_openai_client(settings.llm_api_key, settings.llm_base_url)
 
     system_prompt = system_prompt_override or build_system_prompt(talos_config, context)
     tool_schemas = tools.openai_schemas()
@@ -58,7 +61,7 @@ async def agent_loop(
         console.print(f"[dim]Agent iteration {iteration + 1}...[/dim]")
 
         response = await client.chat.completions.create(
-            model=settings.openai_model,
+            model=settings.llm_model,
             messages=messages,
             tools=tool_schemas if tool_schemas else None,
             tool_choice="auto" if tool_schemas else None,
