@@ -83,7 +83,7 @@ export default async function TalosDetailPage({
     description: talos.description,
     status: talos.status,
     stellarAssetCode: talos.stellarAssetCode ?? "",
-    tokenSymbol: talos.tokenSymbol ?? "PULSE",
+    tokenSymbol: talos.tokenSymbol ?? "MITOS",
     pulsePrice: `$${Number(talos.pulsePrice).toFixed(2)}`,
     totalSupply: talos.totalSupply,
     creatorPublicKey: talos.creatorPublicKey,

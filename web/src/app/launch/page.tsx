@@ -15,7 +15,7 @@ import {
 const STEPS = [
   "Product",
   "Patron",
-  "Pulse",
+  "Mitos",
   "Kernel",
   "Agent",
   "Review",
@@ -404,7 +404,7 @@ function LaunchForm() {
               productName: "Nexus",
               productDesc: "AI-powered payment agent that automates invoicing, subscription billing, and cross-border settlements. Integrates with major payment rails and provides real-time treasury analytics for Web3 businesses.",
               category: "finance",
-              tokenName: "Nexus Pulse",
+              tokenName: "Nexus Mitos",
               tokenSymbol: "NEXUS",
               totalSupply: "1000000",
               initialPrice: "0.50",
@@ -530,11 +530,11 @@ function LaunchForm() {
 
         {step === 2 && (
           <div className="space-y-6">
-            <h2 className="text-lg font-bold text-accent mb-1">Pulse Configuration</h2>
+            <h2 className="text-lg font-bold text-accent mb-1">Mitos Configuration</h2>
             <p className="text-sm text-muted mb-6">
-              Configure your TALOS&apos;s Pulse token on Stellar.
+              Configure your TALOS&apos;s Mitos token on Stellar.
             </p>
-            <Field label="Token Name" value={form.tokenName} onChange={(v) => update("tokenName", v)} placeholder="e.g. ImageGen Pulse" />
+            <Field label="Token Name" value={form.tokenName} onChange={(v) => update("tokenName", v)} placeholder="e.g. ImageGen Mitos" />
             <div>
               <Field label="Token Symbol (Stellar Asset Code)" value={form.tokenSymbol} onChange={(v) => update("tokenSymbol", v.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8))} placeholder="e.g. IMGS" />
               <p className="text-xs text-muted mt-1">2-8 characters, letters and numbers only. Used as Stellar asset code.</p>

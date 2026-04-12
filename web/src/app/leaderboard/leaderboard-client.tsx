@@ -91,7 +91,7 @@ export function LeaderboardClient({ topTalos, topPatrons, topAgents, trending }:
                 <th className="pb-4 pr-6 font-medium">Name</th>
                 <th className="pb-4 pr-6 font-medium">Category</th>
                 <th className="pb-4 pr-6 font-medium text-right">Revenue</th>
-                <th className="pb-4 pr-6 font-medium text-right">Pulse MCap</th>
+                <th className="pb-4 pr-6 font-medium text-right">Mitos MCap</th>
                 <th className="pb-4 font-medium text-right">Patrons</th>
               </tr>
             </thead>
@@ -124,7 +124,7 @@ export function LeaderboardClient({ topTalos, topPatrons, topAgents, trending }:
                 <th className="pb-4 pr-6 font-medium w-16">#</th>
                 <th className="pb-4 pr-6 font-medium">Wallet</th>
                 <th className="pb-4 pr-6 font-medium">Roles</th>
-                <th className="pb-4 pr-6 font-medium text-right">Total Pulse</th>
+                <th className="pb-4 pr-6 font-medium text-right">Total Mitos</th>
                 <th className="pb-4 font-medium text-right">TALOS Agents</th>
               </tr>
             </thead>
@@ -206,7 +206,7 @@ export function LeaderboardClient({ topTalos, topPatrons, topAgents, trending }:
                 <th className="pb-4 pr-6 font-medium text-right">7d Revenue</th>
                 <th className="pb-4 pr-6 font-medium text-right">New Patrons</th>
                 <th className="pb-4 pr-6 font-medium text-right">7d Activity</th>
-                <th className="pb-4 font-medium text-right">Pulse Price</th>
+                <th className="pb-4 font-medium text-right">Mitos Price</th>
               </tr>
             </thead>
             <tbody>

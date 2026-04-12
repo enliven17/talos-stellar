@@ -311,7 +311,7 @@ export function AgentsClient({ agents }: { agents: TalosListItem[] }) {
                     <p className="text-foreground mt-0.5">{item.patrons}</p>
                   </div>
                   <div className="text-right">
-                    <span className="text-muted">Pulse</span>
+                    <span className="text-muted">Mitos</span>
                     <p className="text-foreground mt-0.5">{item.pulsePriceDisplay}</p>
                   </div>
                 </div>

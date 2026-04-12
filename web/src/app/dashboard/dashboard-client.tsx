@@ -464,7 +464,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
                       <span className="text-sm text-foreground font-bold">${rs.totalRevenue.toFixed(2)}</span>
                     </div>
                     <div className="mb-4 px-3 py-2 bg-background border border-border text-xs text-muted">
-                      100% Agent Treasury &mdash; revenue funds operations &amp; Pulse buyback
+                      100% Agent Treasury &mdash; revenue funds operations &amp; Mitos buyback
                     </div>
                     <div className="flex gap-3 mb-4">
                       {Object.entries(rs.bySource).map(([source, amount]) => (
@@ -516,7 +516,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
                       <span className="text-foreground">{c.totalSupply.toLocaleString()}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-muted">Pulse Price</span>
+                      <span className="text-muted">Mitos Price</span>
                       <span className="text-accent">${c.pulsePrice.toFixed(2)}</span>
                     </div>
                     <div className="flex justify-between">
