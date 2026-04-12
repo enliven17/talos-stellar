@@ -67,6 +67,13 @@ _quiet_sea_server()
 
 MAX_RECONNECT_ATTEMPTS = 3
 
+# Serialize browser/stagehand initialization across all agents in the same process.
+# Stagehand downloads its binary on first use; concurrent initializations cause a
+# rename() race on the same .tmp file → "No such file or directory" crash.
+# One semaphore ensures only one Stagehand() constructor runs at a time; after the
+# binary is cached every subsequent init is instant.
+_INIT_SEM = asyncio.Semaphore(1)
+
 
 class BrowserSession:
     """Wrapper around Stagehand for local Chrome automation with reconnect."""
@@ -98,7 +105,10 @@ class BrowserSession:
             session_id = session.id if hasattr(session, "id") else str(session)
             return client, session_id
 
-        client, session_id = await asyncio.to_thread(_start)
+        # Serialize across all agents: only one Stagehand() constructor runs at a
+        # time so the binary download + rename never races.
+        async with _INIT_SEM:
+            client, session_id = await asyncio.to_thread(_start)
         return cls(client, session_id)
 
     async def reconnect(self) -> None:

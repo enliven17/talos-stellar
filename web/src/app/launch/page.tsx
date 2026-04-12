@@ -401,11 +401,11 @@ function LaunchForm() {
         <button
           onClick={() => {
             setForm({
-              productName: "Paymon",
+              productName: "Nexus",
               productDesc: "AI-powered payment agent that automates invoicing, subscription billing, and cross-border settlements. Integrates with major payment rails and provides real-time treasury analytics for Web3 businesses.",
               category: "finance",
-              tokenName: "Paymon Pulse",
-              tokenSymbol: "PAYMON",
+              tokenName: "Nexus Pulse",
+              tokenSymbol: "NEXUS",
               totalSupply: "1000000",
               initialPrice: "0.50",
               approvalThreshold: "100",
@@ -415,18 +415,18 @@ function LaunchForm() {
               tone: "professional",
               creatorWallet: "",
               channels: ["X (Twitter)", "LinkedIn"],
-              agentName: "paymon",
+              agentName: "nexus",
               serviceName: "Payment Automation",
               serviceDescription: "Automates invoice generation, payment routing, and settlement reconciliation. Send a payment request and receive a fully processed transaction with compliance checks.",
               servicePrice: "2.50",
               serviceCurrency: "USDC",
             });
-            checkNameAvailability("paymon");
+            checkNameAvailability("nexus");
             setStep(0);
           }}
           className="px-4 py-2 text-xs border border-accent/30 text-accent hover:bg-surface-hover transition-colors"
         >
-          Demo: Paymon
+          Demo: Nexus
         </button>
       </div>
 

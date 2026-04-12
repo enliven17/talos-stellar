@@ -185,13 +185,13 @@ async function main() {
     },
     // ── DEVELOPMENT Category ──
     {
-      name: "Paymon",
+      name: "Nexus",
       category: "Development",
       description:
         "Crypto payments in 3 lines of code. The Stripe for Web3 — accept USDC, ETH, SOL with a single SDK. No gas headaches, no complexity.",
       status: "Active",
       stellarAssetCode: "USDC-STELLAR-4816200",
-      tokenSymbol: "PAYMO",
+      tokenSymbol: "NEXUS",
       pulsePrice: "3.00",
       totalSupply: 800000,
       creatorShare: 0,
@@ -205,7 +205,7 @@ async function main() {
       gtmBudget: "300",
       creatorAddress: "0x4eA3...d7F1",
       onChainId: 107,
-      agentName: "paymon",
+      agentName: "nexus",
       serviceName: "crypto_payment_integration",
       servicePrice: "0.01",
       serviceDesc: "Integrate crypto payments (USDC, ETH, SOL) into any app with a single SDK call. Returns payment link and webhook config.",
@@ -313,7 +313,7 @@ async function main() {
         { wallet: "0xC1d2...E3f4", role: "Governor", sharePct: 0.15, name: "audience-dao.eth" },
         { wallet: "0xG5h6...I7j8", role: "Contributor", sharePct: 0.10, name: "persona-builder.eth" },
       ],
-      "Paymon": [
+      "Nexus": [
         { wallet: "0x4eA3...d7F1", role: "Creator", sharePct: 0.35, name: "greg.eth" },
         { wallet: "0xH8i9...J0k1", role: "Governor", sharePct: 0.20, name: "payment-dao.eth" },
         { wallet: "0xL2m3...N4o5", role: "Investor", sharePct: 0.25, name: "polychain.eth" },
@@ -397,9 +397,9 @@ async function main() {
         { type: "commerce", content: "Fulfilled audience_insight: FinTech developer personas with community heatmap", channel: "x402", status: "completed" },
         { type: "reply", content: "Responded to @pmm_weekly about ICP definition methodologies", channel: "LinkedIn", status: "completed" },
       ],
-      "Paymon": [
+      "Nexus": [
         { type: "commerce", content: "Fulfilled crypto_payment_integration: generated USDC checkout for NFT marketplace — 3 lines of code", channel: "x402", status: "completed" },
-        { type: "post", content: "Crypto payments are still broken. 47 steps to accept USDC? That's not Web3, that's Web0. import { Paymon } from '@paymon/sdk' — done.", channel: "X", status: "completed" },
+        { type: "post", content: "Crypto payments are still broken. 47 steps to accept USDC? That's not Web3, that's Web0. import { Nexus } from '@nexus/sdk' — done.", channel: "X", status: "completed" },
         { type: "commerce", content: "Fulfilled crypto_payment_integration: multi-chain payment widget for DeFi dashboard", channel: "x402", status: "completed" },
         { type: "research", content: "Benchmarked gas costs across 8 L2s — Arbitrum and Base cheapest for payment settlement", channel: "X", status: "completed" },
         { type: "reply", content: "Replied to @ethdev on why crypto checkout UX is worse than Stripe circa 2012", channel: "X", status: "completed" },
@@ -445,7 +445,7 @@ async function main() {
       "Scout Audience": [
         { type: "strategy", title: "Add Discord community analysis", description: "Expand audience research to Discord servers for developer communities" },
       ],
-      "Paymon": [
+      "Nexus": [
         { type: "transaction", title: "$25 USDC — Audit smart contract gas optimization", description: "Third-party audit of payment relay contract to reduce settlement costs", amount: "25" },
         { type: "strategy", title: "Add SOL and Base chain support", description: "Expand multi-chain coverage beyond ETH and Arbitrum to Solana and Base" },
       ],
@@ -509,7 +509,7 @@ async function main() {
         { amount: "0.005", source: "audience_insight" },
         { amount: "0.005", source: "audience_insight" },
       ],
-      "Paymon": [
+      "Nexus": [
         { amount: "0.01", source: "crypto_payment_integration" },
         { amount: "0.01", source: "crypto_payment_integration" },
         { amount: "0.01", source: "crypto_payment_integration" },
@@ -715,7 +715,7 @@ async function main() {
       },
     },
     {
-      talosName: "Paymon",
+      talosName: "Nexus",
       title: "Crypto Checkout Integration Guide",
       category: "Developer Tools",
       channel: "X",
@@ -731,7 +731,7 @@ async function main() {
       content: {
         schedule: { scans_per_day: 3, best_hours_utc: [10, 15, 20], platforms: ["X", "Discord", "GitHub"] },
         templates: [
-          { type: "integration", pattern: "import { Paymon } from '@paymon/sdk'\nconst pay = new Paymon({ apiKey: 'pk_...' })\npay.checkout({ amount: {price}, currency: '{token}' })", usage: "3-line checkout" },
+          { type: "integration", pattern: "import { Nexus } from '@nexus/sdk'\nconst pay = new Nexus({ apiKey: 'pk_...' })\npay.checkout({ amount: {price}, currency: '{token}' })", usage: "3-line checkout" },
           { type: "webhook", pattern: "pay.on('payment.confirmed', (tx) => { /* settle */ })", usage: "webhook handler" },
         ],
         hashtags: ["#cryptopayments", "#web3dev", "#usdc"],

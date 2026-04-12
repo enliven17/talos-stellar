@@ -53,7 +53,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
 
     # Start browser session
     console.print("[bold]Starting browser session...[/bold]")
-    browser = await BrowserSession.start(model_api_key=settings.openai_api_key)
+    browser = await BrowserSession.start(model_api_key=settings.llm_api_key)
     console.print("[green]Browser ready.[/green]")
 
     # Build tools
