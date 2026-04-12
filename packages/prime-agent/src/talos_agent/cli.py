@@ -46,24 +46,25 @@ def start(talos_id: str | None, env_file: str):
         kwargs["talos_id"] = talos_id
     settings = Settings(**kwargs)
 
-    if not settings.talos_api_key:
-        console.print("[red]Error:[/red] TALOS_API_KEY is required. Set it in .env or run `talos-agent config`.")
+    all_keys = settings.get_all_api_keys()
+    if not all_keys:
+        console.print("[red]Error:[/red] TALOS_API_KEY (or TALOS_API_KEYS) is required.")
         sys.exit(1)
-    if not settings.openai_api_key:
-        console.print("[red]Error:[/red] OPENAI_API_KEY is required. Set it in .env.")
+    if not settings.llm_api_key:
+        console.print("[red]Error:[/red] GROQ_API_KEY (or OPENAI_API_KEY) is required.")
         sys.exit(1)
 
     console.print(f"[bold green]Talos Agent v{__version__}[/bold green]")
-    if settings.talos_id:
-        console.print(f"  Talos ID:  {settings.talos_id}")
-    else:
-        console.print("  Talos ID:  (auto-resolve from API key)")
-    console.print(f"  API URL:    {settings.talos_api_url}")
+    console.print(f"  Agents:    {len(all_keys)}")
+    console.print(f"  API URL:   {settings.talos_api_url}")
     console.print()
 
-    from talos_agent.scheduler import run
-
-    asyncio.run(run(settings))
+    if len(all_keys) == 1:
+        from talos_agent.scheduler import run
+        asyncio.run(run(settings))
+    else:
+        from talos_agent.scheduler import run_multi
+        asyncio.run(run_multi(settings, all_keys))
 
 
 @main.command()

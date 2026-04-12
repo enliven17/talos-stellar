@@ -17,12 +17,13 @@ console = Console()
 SHUTDOWN_GRACE_PERIOD = 10  # seconds before force-exit on second signal
 
 
-async def run(settings: Settings) -> None:
-    """Entry point called by `talos-agent start`."""
+async def run(settings: Settings, agent_slot: int = 0) -> None:
+    """Entry point called by `talos-agent start`. agent_slot used for log prefixes in multi mode."""
     from talos_agent.api_client import TalosAPIClient
-    from talos_agent.db import LocalDB
+    from talos_agent.db import LocalDB, get_db_path
 
-    db = LocalDB()
+    tag = f"[{settings.talos_api_key[:12]}]" if agent_slot > 0 else ""
+    db = LocalDB(path=get_db_path(settings.talos_api_key[:16] if agent_slot > 0 else None))
     api = TalosAPIClient(settings)
 
     # Download Talos config
@@ -238,3 +239,23 @@ async def run(settings: Settings) -> None:
         await api.close()
         db.close()
         console.print("[bold]Agent stopped.[/bold]")
+
+
+async def run_multi(base_settings: Settings, api_keys: list[str]) -> None:
+    """Run multiple agents concurrently in a single process."""
+    console.print(f"[bold green]Starting {len(api_keys)} agents...[/bold green]")
+
+    async def run_one(api_key: str, slot: int) -> None:
+        from dataclasses import replace as dc_replace
+        import copy
+        agent_settings = copy.copy(base_settings)
+        object.__setattr__(agent_settings, "talos_api_key", api_key)
+        object.__setattr__(agent_settings, "talos_id", "")
+        try:
+            await run(agent_settings, agent_slot=slot)
+        except Exception as e:
+            console.print(f"[red]Agent {slot} ({api_key[:12]}...) crashed: {e}[/red]")
+
+    await asyncio.gather(*[
+        run_one(key, i + 1) for i, key in enumerate(api_keys)
+    ])

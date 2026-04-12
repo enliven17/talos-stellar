@@ -31,6 +31,18 @@ class Settings(BaseSettings):
     talos_api_key: str = ""
     talos_id: str = ""
 
+    # Multi-agent mode: comma-separated list of API keys
+    # e.g. TALOS_API_KEYS=tak_aaa,tak_bbb,tak_ccc
+    talos_api_keys: str = ""
+
+    def get_all_api_keys(self) -> list[str]:
+        """Return all agent API keys — multi-agent list if set, else single key."""
+        if self.talos_api_keys:
+            return [k.strip() for k in self.talos_api_keys.split(",") if k.strip()]
+        if self.talos_api_key:
+            return [self.talos_api_key]
+        return []
+
     # LLM (Groq preferred — free, OpenAI-compatible)
     groq_api_key: str = ""
     groq_model: str = "llama-3.3-70b-versatile"

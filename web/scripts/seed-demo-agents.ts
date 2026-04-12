@@ -1,11 +1,9 @@
 /**
- * Seed script: registers 6 service agents on the Talos platform.
+ * Seed script: registers 6 production service agents on the Talos platform.
  *
  * Usage:
  *   cd web
- *   npx tsx scripts/seed-demo-agents.ts
- *
- * Requires DATABASE_URL in .env
+ *   DATABASE_URL=<pooler_url> npx tsx scripts/seed-demo-agents.ts
  */
 
 import "dotenv/config";
@@ -22,15 +20,8 @@ function generateApiKey() {
   return `tak_${createId()}${createId()}`;
 }
 
-// Deterministic demo Stellar public keys (not real — for demo only)
-const DEMO_PUBLIC_KEYS = {
-  scoutAudience:    "GDEMO1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1",
-  scoutTrend:       "GDEMO2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2",
-  scoutCompetitor:  "GDEMO3AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA3",
-  prospectLeads:    "GDEMO4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA4",
-  prospectEnrich:   "GDEMO5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA5",
-  prospectSignal:   "GDEMO6AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA6",
-};
+// Real operator wallet — all agents are owned by this key
+const OPERATOR_WALLET = "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
 
 interface AgentDef {
   agentName: string;
@@ -38,7 +29,6 @@ interface AgentDef {
   category: string;
   description: string;
   persona: string;
-  walletKey: keyof typeof DEMO_PUBLIC_KEYS;
   service: {
     serviceName: string;
     description: string;
@@ -48,38 +38,35 @@ interface AgentDef {
 
 const SERVICE_AGENTS: AgentDef[] = [
   {
-    agentName: "scout-audience",
-    name: "Scout Audience",
+    agentName: "vega",
+    name: "Vega",
     category: "Analytics",
-    description: "AI agent that analyzes target audiences — personas, communities, pain points, and channels.",
-    persona: "Precise audience research analyst with deep knowledge of online communities and user behavior.",
-    walletKey: "scoutAudience",
+    description: "Audience intelligence agent. Analyzes target audiences — personas, communities, pain points, and the best channels to reach them.",
+    persona: "Precise audience research analyst with deep knowledge of online communities and user behavior patterns.",
     service: {
       serviceName: "audience_insight",
-      description: "Analyze target audience: personas, communities they frequent, pain points, and best channels to reach them.",
+      description: "Analyze a target audience: personas, communities they frequent, pain points, and best channels to reach them.",
       price: 0.005,
     },
   },
   {
-    agentName: "scout-trend",
-    name: "Scout Trend",
+    agentName: "atlas",
+    name: "Atlas",
     category: "Analytics",
-    description: "AI agent that tracks market trends, hot topics, and emerging opportunities in real-time.",
+    description: "Trend research agent. Tracks market trends, hot topics, and emerging opportunities across X, Reddit, and Hacker News in real-time.",
     persona: "Trend analyst tracking discussions across X, Reddit, Hacker News, and Product Hunt.",
-    walletKey: "scoutTrend",
     service: {
       serviceName: "trend_research",
-      description: "Research latest trends and hot topics for a given market. Includes trending discussions, momentum, and opportunities.",
+      description: "Research latest trends and hot topics for a given market. Includes trending discussions, momentum scores, and opportunities.",
       price: 0.005,
     },
   },
   {
-    agentName: "scout-competitor",
-    name: "Scout Competitor",
+    agentName: "nova",
+    name: "Nova",
     category: "Analytics",
-    description: "AI agent that performs competitive intelligence — features, pricing, positioning, and market gaps.",
-    persona: "Competitive intelligence analyst who dissects products and finds positioning opportunities.",
-    walletKey: "scoutCompetitor",
+    description: "Competitive intelligence agent. Deep-dives on competitors — features, pricing, positioning, and market gaps.",
+    persona: "Competitive intelligence analyst who dissects products and surfaces positioning opportunities.",
     service: {
       serviceName: "competitor_analysis",
       description: "Analyze competitors: features, pricing, strengths/weaknesses, market gaps, and positioning recommendations.",
@@ -87,38 +74,35 @@ const SERVICE_AGENTS: AgentDef[] = [
     },
   },
   {
-    agentName: "prospect-leads",
-    name: "Prospect Leads",
+    agentName: "forge",
+    name: "Forge",
     category: "Sales",
-    description: "AI agent that finds potential customers on social platforms based on target profile and product fit.",
-    persona: "Lead generation specialist who identifies high-relevance prospects from social signals.",
-    walletKey: "prospectLeads",
+    description: "Lead generation agent. Finds potential customers on social platforms based on target profile and product-market fit signals.",
+    persona: "Lead generation specialist who identifies high-relevance prospects from social signals and behavioral data.",
     service: {
       serviceName: "find_leads",
-      description: "Find potential customers on X, Reddit, GitHub who match a target profile and show interest in related topics.",
+      description: "Find potential customers on X, Reddit, and GitHub who match a target profile and show interest in related topics.",
       price: 0.01,
     },
   },
   {
-    agentName: "prospect-enrich",
-    name: "Prospect Enrich",
+    agentName: "lens",
+    name: "Lens",
     category: "Sales",
-    description: "AI agent that enriches profiles with professional details, interests, and social links.",
-    persona: "Profile enrichment specialist who builds comprehensive prospect profiles from public data.",
-    walletKey: "prospectEnrich",
+    description: "Profile enrichment agent. Enriches prospect profiles with professional details, interests, and social links from public data.",
+    persona: "Profile enrichment specialist who builds comprehensive prospect profiles from publicly available data.",
     service: {
       serviceName: "enrich_profile",
-      description: "Enrich a person's profile: job title, company, interests, recent topics, and social links.",
+      description: "Enrich a person's profile: job title, company, interests, recent activity, and social links.",
       price: 0.008,
     },
   },
   {
-    agentName: "prospect-signal",
-    name: "Prospect Signal",
+    agentName: "radar",
+    name: "Radar",
     category: "Sales",
-    description: "AI agent that detects buying intent signals — people actively seeking solutions related to your product.",
+    description: "Intent signal agent. Detects buying intent across platforms — people actively seeking solutions related to your product.",
     persona: "Intent signal analyst detecting 'looking for', 'need help', 'switching from' patterns across platforms.",
-    walletKey: "prospectSignal",
     service: {
       serviceName: "intent_signal",
       description: "Detect buying intent signals: people seeking solutions, switching tools, or frustrated with alternatives.",
@@ -128,7 +112,7 @@ const SERVICE_AGENTS: AgentDef[] = [
 ];
 
 async function main() {
-  console.log("🌱 Seeding demo agents...\n");
+  console.log("🚀 Seeding production agents...\n");
 
   const results: { name: string; id: string; apiKey: string; service: string; price: number }[] = [];
 
@@ -146,7 +130,6 @@ async function main() {
     }
 
     const apiKey = generateApiKey();
-    const publicKey = DEMO_PUBLIC_KEYS[agent.walletKey];
 
     const [talos] = await db
       .insert(schema.tlsTalos)
@@ -160,10 +143,10 @@ async function main() {
         agentOnline: true,
         agentLastSeen: new Date(),
         apiKey,
-        walletPublicKey: publicKey,
-        agentWalletAddress: publicKey,
-        creatorPublicKey: publicKey,
-        channels: [],
+        walletPublicKey: OPERATOR_WALLET,
+        agentWalletAddress: OPERATOR_WALLET,
+        creatorPublicKey: OPERATOR_WALLET,
+        channels: ["X (Twitter)", "LinkedIn"],
         pulsePrice: "0.01",
         totalSupply: 1_000_000,
         creatorShare: 60,
@@ -179,18 +162,17 @@ async function main() {
       serviceName: agent.service.serviceName,
       description: agent.service.description,
       price: String(agent.service.price),
-      stellarPublicKey: publicKey,
+      stellarPublicKey: OPERATOR_WALLET,
       chains: ["stellar"],
       fulfillmentMode: "instant",
     });
 
     results.push({ name: agent.agentName, id: talos.id, apiKey, service: agent.service.serviceName, price: agent.service.price });
-    console.log(`  ✅ ${agent.agentName} — ${agent.service.serviceName} @ $${agent.service.price}`);
+    console.log(`  ✅ ${agent.name} (${agent.agentName}) — ${agent.service.serviceName} @ $${agent.service.price}`);
   }
 
-  // --- Print summary ---
   console.log("\n" + "═".repeat(70));
-  console.log("  DEMO AGENTS SUMMARY");
+  console.log("  PRODUCTION AGENTS");
   console.log("═".repeat(70));
 
   for (const r of results) {
@@ -201,7 +183,7 @@ async function main() {
   }
 
   console.log("\n" + "═".repeat(70));
-  console.log("\n✨ Done! Service agents are ready to receive x402 requests.\n");
+  console.log("\n✨ Done! Agents are live.\n");
 
   await pool.end();
 }

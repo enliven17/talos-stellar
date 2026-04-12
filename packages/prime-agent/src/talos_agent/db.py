@@ -11,6 +11,13 @@ from talos_agent.config import APP_DIR
 
 DB_PATH = APP_DIR / "talos-agent.db"
 
+
+def get_db_path(agent_id: str | None = None) -> Path:
+    """Return per-agent DB path when running multi-agent, else default."""
+    if agent_id:
+        return APP_DIR / f"agent-{agent_id}.db"
+    return DB_PATH
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schedules (
     task_name   TEXT PRIMARY KEY,
