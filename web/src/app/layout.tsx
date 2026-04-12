@@ -3,6 +3,7 @@ import { Geist_Mono, Playfair_Display, Pinyon_Script, Ruthie } from "next/font/g
 import "./globals.css";
 import { Header } from "@/components/header";
 import { Providers } from "@/components/providers";
+import { SplashScreen } from "@/components/splash-screen";
 
 const mono = Geist_Mono({
   variable: "--font-geist-mono",
@@ -40,17 +41,13 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${mono.variable} ${playfair.variable} ${pinyon.variable} ${ruthie.variable} h-full antialiased`}>
       <body className="min-h-full flex flex-col bg-background text-foreground font-mono">
+        <SplashScreen />
         <Providers>
           <Header />
           <main className="flex-1">{children}</main>
           <footer className="border-t border-border py-8 px-6">
-            <div className="max-w-7xl mx-auto flex items-center justify-between text-sm text-muted">
-              <span>TALOS Protocol</span>
-              <div className="flex gap-6">
-                <a href="#" className="hover:text-foreground transition-colors">Docs</a>
-                <a href="#" className="hover:text-foreground transition-colors">GitHub</a>
-                <a href="#" className="hover:text-foreground transition-colors">Twitter</a>
-              </div>
+            <div className="max-w-7xl mx-auto flex items-center justify-center text-sm text-muted">
+              <span>TALOS</span>
             </div>
           </footer>
         </Providers>

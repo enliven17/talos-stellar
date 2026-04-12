@@ -52,4 +52,40 @@ body {
   background: var(--accent);
   border-radius: 3px;
 }
+/* Splash Screen Animations */
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 0.3; transform: scale(1.5); }
+  50% { opacity: 0.6; transform: scale(1.7); }
+}
+
+@keyframes loading-bar {
+  0% { left: -40%; }
+  100% { left: 110%; }
+}
+
+@keyframes letter-in {
+  0% { opacity: 0; transform: translateY(10px) rotate(-5deg); filter: blur(5px); }
+  100% { opacity: 1; transform: translateY(0) rotate(0); filter: blur(0); }
+}
+
+.animate-letter-in {
+  animation: letter-in 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+.animate-float {
+  animation: float 3s ease-in-out infinite;
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 4s ease-in-out infinite;
+}
+
+.animate-loading-bar {
+  animation: loading-bar 1.5s linear infinite;
+}
 
