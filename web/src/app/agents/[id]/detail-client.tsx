@@ -143,7 +143,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
     if (!address || buyQty <= 0) return;
     setBuyStatus("buying");
     try {
-      // ── Step 1: Build USDC payment TX ──────────────────────────────
+      // ── Step 1: Build TX (trustline + USDC payment) ────────────────
       const {
         Asset, TransactionBuilder, Operation, BASE_FEE, Horizon,
       } = await import("@stellar/stellar-sdk");
@@ -161,19 +161,34 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       const account = await server.loadAccount(address);
       const usdc = new Asset("USDC", USDC_ISSUER);
 
-      const tx = new TransactionBuilder(account, {
+      const txBuilder = new TransactionBuilder(account, {
         fee: BASE_FEE,
         networkPassphrase: NETWORK_PASSPHRASE,
-      })
-        .addOperation(
-          Operation.payment({
-            destination: recipient,
-            asset: usdc,
-            amount: buyCost.toFixed(7),
-          }),
-        )
-        .setTimeout(60)
-        .build();
+      });
+
+      // ── Add Mitos trustline if not already present ─────────────────
+      const assetCode = talos.stellarAssetCode; // format: "SYMBOL:ISSUER"
+      if (assetCode && assetCode.includes(":")) {
+        const [mitosCode, mitosIssuer] = assetCode.split(":");
+        const mitosAsset = new Asset(mitosCode, mitosIssuer);
+        const hasTrustline = (account.balances as any[]).some(
+          (b) => b.asset_type !== "native" && b.asset_code === mitosCode && b.asset_issuer === mitosIssuer,
+        );
+        if (!hasTrustline) {
+          txBuilder.addOperation(Operation.changeTrust({ asset: mitosAsset }));
+        }
+      }
+
+      // ── USDC payment ───────────────────────────────────────────────
+      txBuilder.addOperation(
+        Operation.payment({
+          destination: recipient,
+          asset: usdc,
+          amount: buyCost.toFixed(7),
+        }),
+      );
+
+      const tx = txBuilder.setTimeout(60).build();
 
       // ── Step 2: Sign with wallet (Freighter/Albedo/xBull) ──────────
       const signedXdr = await signTransaction(tx.toXDR());
