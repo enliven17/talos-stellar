@@ -1,5 +1,5 @@
 import { db } from "@/db";
-import { tlsTalos, tlsPatrons } from "@/db/schema";
+import { tlsTalos, tlsPatrons, tlsRevenues } from "@/db/schema";
 import { eq, and, gt } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { getAccountInfo } from "@/lib/stellar";
@@ -91,31 +91,30 @@ export async function POST(
       .update(tlsPatrons)
       .set({
         pulseAmount: newPulseAmount,
-        updatedAt: new Date().toISOString(),
+        updatedAt: new Date(),
       })
       .where(eq(tlsPatrons.id, existingPatron.id));
   } else {
     // Register as new patron
     await db.insert(tlsPatrons).values({
-      id: crypto.randomUUID(),
       talosId: id,
       stellarPublicKey: buyerPublicKey,
       role: "patron",
       share: "0",
       pulseAmount: newPulseAmount,
       status: "active",
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
     });
   }
 
   // Record revenue if txHash is provided (payment already executed)
   if (txHash) {
-    await db.execute(
-      `INSERT INTO tls_revenues (id, "talosId", amount, currency, source, "txHash", "createdAt")
-       VALUES ($1, $2, $3, 'USDC', 'token_sale', $4, NOW())`,
-      [crypto.randomUUID(), id, totalCost, txHash],
-    );
+    await db.insert(tlsRevenues).values({
+      talosId: id,
+      amount: String(totalCost),
+      currency: "USDC",
+      source: "token_sale",
+      txHash,
+    });
   }
 
   return NextResponse.json({

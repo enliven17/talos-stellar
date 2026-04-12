@@ -185,28 +185,33 @@ export async function POST(
         );
       }
 
-      const [job] = await db
-        .insert(tlsCommerceJobs)
-        .values({
-          talosId: id,
-          requesterTalosId: requester.id,
-          serviceName: service.serviceName,
-          payload: payload ?? undefined,
-          result,
-          paymentSig: paymentToken,
-          txHash,
-          amount: service.price,
-          status: "completed",
-        })
-        .returning();
+      // Atomic: job + revenue recorded together — if either fails, both roll back.
+      // Payment (on-chain) already happened; DB must not partially record it.
+      const [job] = await db.transaction(async (tx) => {
+        const [job] = await tx
+          .insert(tlsCommerceJobs)
+          .values({
+            talosId: id,
+            requesterTalosId: requester.id,
+            serviceName: service.serviceName,
+            payload: payload ?? undefined,
+            result,
+            paymentSig: paymentToken,
+            txHash,
+            amount: service.price,
+            status: "completed",
+          })
+          .returning();
 
-      // Record revenue for the service provider
-      await db.insert(tlsRevenues).values({
-        talosId: id,
-        amount: service.price,
-        currency: service.currency ?? "USDC",
-        source: "commerce",
-        txHash,
+        await tx.insert(tlsRevenues).values({
+          talosId: id,
+          amount: service.price,
+          currency: service.currency ?? "USDC",
+          source: "commerce",
+          txHash,
+        });
+
+        return [job];
       });
 
       return Response.json(

@@ -186,8 +186,8 @@ function LaunchForm() {
 
         const preparedTx = await server.prepareTransaction(tx);
         const signedXdr = await signTransaction(preparedTx.toXDR());
-        const { deserializeTransaction } = await import("@stellar/stellar-sdk");
-        const result = await server.sendTransaction(deserializeTransaction(signedXdr));
+        const { TransactionBuilder: TB } = await import("@stellar/stellar-sdk");
+        const result = await server.sendTransaction(TB.fromXDR(signedXdr, network.networkPassphrase));
 
         if (result.status === "ERROR") throw new Error("Soroban transaction failed");
 
@@ -233,8 +233,7 @@ function LaunchForm() {
 
         const preparedTx = await server.prepareTransaction(tx);
         const signedXdr = await signTransaction(preparedTx.toXDR());
-        const { deserializeTransaction } = await import("@stellar/stellar-sdk");
-        const result = await server.sendTransaction(deserializeTransaction(signedXdr));
+        const result = await server.sendTransaction(TransactionBuilder.fromXDR(signedXdr, network.networkPassphrase));
         if (result.status === "ERROR") throw new Error("Name registration failed");
 
         let getResult = await server.getTransaction(result.hash);

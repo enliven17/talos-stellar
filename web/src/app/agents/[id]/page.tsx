@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic';
+
 import { db } from "@/db";
 import { tlsTalos, tlsCommerceJobs } from "@/db/schema";
 import { eq, sql } from "drizzle-orm";

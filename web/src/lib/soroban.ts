@@ -6,9 +6,13 @@
  * Write calls (create TALOS, register name) go through the user's wallet via WalletKit.
  */
 
-const STELLAR_NETWORK = process.env.STELLAR_NETWORK ?? "testnet";
+// NEXT_PUBLIC_ prefix required — soroban.ts is imported by client components (launch/page.tsx)
+const STELLAR_NETWORK =
+  process.env.NEXT_PUBLIC_STELLAR_NETWORK ?? process.env.STELLAR_NETWORK ?? "testnet";
 const STELLAR_SOROBAN_RPC =
-  process.env.STELLAR_SOROBAN_RPC ?? "https://soroban-testnet.stellar.org";
+  process.env.NEXT_PUBLIC_STELLAR_RPC_URL ??
+  process.env.STELLAR_RPC_URL ??
+  "https://soroban-testnet.stellar.org";
 
 export const TALOS_REGISTRY_CONTRACT_ID =
   process.env.NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT ?? "";
@@ -59,7 +63,7 @@ export async function isNameAvailableOnChain(name: string): Promise<boolean> {
     );
 
     if ("error" in result) return true;
-    return scValToNative((result as { result: { retval: unknown } }).result.retval) as boolean;
+    return scValToNative((result as { result: { retval: import("@stellar/stellar-sdk").xdr.ScVal } }).result.retval) as boolean;
   } catch {
     // Contract not deployed yet — fall back to regex validation
     return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(name) && !/--/.test(name);
@@ -85,7 +89,7 @@ export async function resolveNameOnChain(name: string): Promise<number | null> {
     );
 
     if ("error" in result) return null;
-    const id = scValToNative((result as { result: { retval: unknown } }).result.retval) as number;
+    const id = scValToNative((result as { result: { retval: import("@stellar/stellar-sdk").xdr.ScVal } }).result.retval) as number;
     return id > 0 ? id : null;
   } catch {
     return null;

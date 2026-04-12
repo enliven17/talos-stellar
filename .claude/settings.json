@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls web/.env*)",
+      "Bash(cat /c/Users/enliven/Documents/GitHub/talos-stellar/.github/workflows/*.yml)",
+      "Bash(gh api:*)",
+      "WebFetch(domain:github.com)"
+    ]
+  }
+}

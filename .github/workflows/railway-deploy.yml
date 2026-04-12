@@ -1,0 +1,23 @@
+name: Deploy Prime Agent → Railway
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/prime-agent/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy to Railway
+        run: railway up --service prime-agent --detach
+        working-directory: packages/prime-agent
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}

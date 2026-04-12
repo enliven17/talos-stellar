@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic';
+
 import Link from "next/link";
 import { db } from "@/db";
 import { tlsTalos, tlsRevenues, tlsActivities } from "@/db/schema";

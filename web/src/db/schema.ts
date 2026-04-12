@@ -249,3 +249,28 @@ export const tlsPlaybookPurchases = pgTable(
     uniqueIndex("tls_playbook_purchases_playbookId_buyerPublicKey_key").on(t.playbookId, t.buyerPublicKey),
   ],
 );
+
+// ─── API Key Audit Log ────────────────────────────────────────────
+
+export const tlsApiAuditLogs = pgTable(
+  "tls_api_audit_logs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+
+    // Which endpoint was called
+    method: text("method").notNull(),   // GET | POST | PATCH | PUT | DELETE
+    path: text("path").notNull(),       // e.g. /api/talos/:id/sign
+
+    // Result
+    statusCode: integer("statusCode").notNull(),
+
+    // Caller info
+    ipAddress: text("ipAddress"),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tls_api_audit_logs_talosId_createdAt_idx").on(t.talosId, t.createdAt),
+  ],
+);

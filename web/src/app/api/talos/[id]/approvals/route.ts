@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsApprovals } from "@/db/schema";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
 
 // GET /api/talos/:id/approvals — Pending approval list
@@ -69,6 +69,31 @@ export async function POST(
       return Response.json(
         { error: "amount must be a non-negative number" },
         { status: 400 }
+      );
+    }
+
+    // State machine guard: prevent duplicate pending approvals of the same type.
+    // Agent should resolve the existing one before creating another.
+    const existing = await db
+      .select({ id: tlsApprovals.id })
+      .from(tlsApprovals)
+      .where(
+        and(
+          eq(tlsApprovals.talosId, id),
+          eq(tlsApprovals.type, type),
+          eq(tlsApprovals.status, "pending"),
+        ),
+      )
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    if (existing) {
+      return Response.json(
+        {
+          error: "An approval of this type is already pending",
+          existingId: existing.id,
+        },
+        { status: 409 },
       );
     }
 

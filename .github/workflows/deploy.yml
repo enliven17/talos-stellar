@@ -1,4 +1,4 @@
-name: Deploy to Vercel
+name: Deploy Web → Vercel
 
 on:
   push:
@@ -18,51 +18,60 @@ jobs:
     defaults:
       run:
         working-directory: web
-    
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v3
+
+      - uses: pnpm/action-setup@v4
         with:
-          version: 8
-      
+          version: 9
+          run_install: false
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        run: echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('web/pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      
+
       - name: Type check
         run: pnpm tsc --noEmit
-      
+
       - name: Lint
         run: pnpm lint
-      
-      - name: Deploy to Vercel
+
+      # Deploy to Vercel (main branch only, using Vercel CLI)
+      - name: Install Vercel CLI
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: amondnet/vercel-action@v25
-        with:
-          vercel-token: ${{ secrets.VERCEL_TOKEN }}
-          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
-          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
-          working-directory: ./web
-          vercel-args: '--prod'
+        run: npm install -g vercel@latest
+
+      - name: Pull Vercel environment
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DIRECT_URL: ${{ secrets.DIRECT_URL }}
-          STELLAR_NETWORK: ${{ secrets.STELLAR_NETWORK }}
-          STELLAR_HORIZON_URL: ${{ secrets.STELLAR_HORIZON_URL }}
-          STELLAR_RPC_URL: ${{ secrets.STELLAR_RPC_URL }}
-          STELLAR_OPERATOR_SECRET_KEY: ${{ secrets.STELLAR_OPERATOR_SECRET_KEY }}
-          NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT: ${{ secrets.NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT }}
-          NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT: ${{ secrets.NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT }}
-          NEXT_PUBLIC_STELLAR_WALLET_NETWORK: ${{ secrets.NEXT_PUBLIC_STELLAR_WALLET_NETWORK }}
-          X402_FACILITATOR_URL: ${{ secrets.X402_FACILITATOR_URL }}
-          X402_API_KEY: ${{ secrets.X402_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-          NEXT_PUBLIC_TALOS_CREATION_XLM: ${{ secrets.NEXT_PUBLIC_TALOS_CREATION_XLM }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Build project
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Deploy prebuilt to Vercel
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}

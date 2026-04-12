@@ -2,9 +2,12 @@
   "name": "talos-protocol",
   "private": true,
   "scripts": {
-    "dev": "pnpm --filter web dev",
-    "build": "pnpm --filter web build",
-    "lint": "pnpm --filter web lint"
+    "dev": "pnpm --dir web dev",
+    "build": "pnpm --dir web build",
+    "lint": "pnpm --dir web lint",
+    "web:install": "pnpm --dir web install",
+    "web:db:push": "pnpm --dir web db:push",
+    "web:db:seed": "pnpm --dir web db:seed"
   },
   "engines": {
     "node": ">=20"

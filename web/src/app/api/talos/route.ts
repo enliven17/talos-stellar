@@ -125,75 +125,91 @@ export async function POST(request: NextRequest) {
     const apiKey = `tak_${randomBytes(24).toString("hex")}`;
 
     // Create Stellar keypair for the agent wallet
+    // Keypair creation happens BEFORE the DB transaction.
+    // If the transaction later fails, the keypair is simply discarded — Stellar
+    // accounts only exist once funded, so an unfunded keypair has no on-chain state.
     let agentWalletId: string | null = null;
     let agentWalletAddress: string | null = null;
+    let agentWalletPublicKey: string | null = null;
     try {
       const keypair = await createAgentKeypair();
       agentWalletId = keypair.publicKey;
       agentWalletAddress = keypair.publicKey;
-      // Fund testnet account (best-effort, non-blocking)
-      fundTestnetAccount(keypair.publicKey).catch(() => {});
+      agentWalletPublicKey = keypair.publicKey;
     } catch (err) {
       console.error("Stellar keypair creation failed:", err);
+      // Non-fatal: TALOS can be created without an agent wallet
     }
 
-    const [talos] = await db
-      .insert(tlsTalos)
-      .values({
-        name,
-        category,
-        description,
-        apiKey,
-        totalSupply: supply,
-        creatorShare: 0,
-        investorShare: 0,
-        treasuryShare: 100,
-        persona,
-        targetAudience,
-        channels: channels ?? [],
-        toneVoice: toneVoice ?? null,
-        approvalThreshold: String(approvalThreshold ?? 10),
-        gtmBudget: String(gtmBudget ?? 200),
-        pulsePrice: String(initialPrice ?? 0),
-        minPatronPulse: minPatronPulse ?? null,
-        creatorPublicKey,
-        walletPublicKey,
-        onChainId: onChainId ?? null,
-        agentName: agentName ?? null,
-        stellarAssetCode: stellarAssetCode ?? null,
-        tokenSymbol: tokenSymbol ?? null,
-        agentWalletId,
-        agentWalletAddress,
-      })
-      .returning();
+    // Atomic genesis: TALOS + Patron + Service created together or not at all
+    const { talos, generatedKey } = await db.transaction(async (tx) => {
+      const [talos] = await tx
+        .insert(tlsTalos)
+        .values({
+          name,
+          category,
+          description,
+          apiKey,
+          totalSupply: supply,
+          creatorShare: 0,
+          investorShare: 0,
+          treasuryShare: 100,
+          persona,
+          targetAudience,
+          channels: channels ?? [],
+          toneVoice: toneVoice ?? null,
+          approvalThreshold: String(approvalThreshold ?? 10),
+          gtmBudget: String(gtmBudget ?? 200),
+          pulsePrice: String(initialPrice ?? 0),
+          minPatronPulse: minPatronPulse ?? null,
+          creatorPublicKey,
+          walletPublicKey,
+          onChainId: onChainId ?? null,
+          agentName: agentName ?? null,
+          stellarAssetCode: stellarAssetCode ?? null,
+          tokenSymbol: tokenSymbol ?? null,
+          agentWalletId,
+          agentWalletAddress,
+        })
+        .returning();
 
-    // Create initial Patron (Creator)
-    const CREATOR_GOVERNANCE_FRACTION = 0.6;
-    if (creatorPublicKey) {
-      await db.insert(tlsPatrons).values({
-        talosId: talos.id,
-        stellarPublicKey: creatorPublicKey,
-        role: "Creator",
-        pulseAmount: Math.floor(supply * CREATOR_GOVERNANCE_FRACTION),
-        share: "0",
-      });
-    }
-
-    // Create Commerce Service if provided
-    if (serviceName && servicePrice) {
-      const serviceWallet = agentWalletAddress || creatorPublicKey || walletPublicKey;
-      if (serviceWallet) {
-        await db.insert(tlsCommerceServices).values({
+      // Create initial Patron (Creator)
+      const CREATOR_GOVERNANCE_FRACTION = 0.6;
+      if (creatorPublicKey) {
+        await tx.insert(tlsPatrons).values({
           talosId: talos.id,
-          serviceName,
-          description: serviceDescription ?? description,
-          price: String(servicePrice),
-          stellarPublicKey: serviceWallet,
+          stellarPublicKey: creatorPublicKey,
+          role: "Creator",
+          pulseAmount: Math.floor(supply * CREATOR_GOVERNANCE_FRACTION),
+          share: "0",
         });
       }
+
+      // Create Commerce Service if provided
+      if (serviceName && servicePrice) {
+        const serviceWallet = agentWalletAddress || creatorPublicKey || walletPublicKey;
+        if (serviceWallet) {
+          await tx.insert(tlsCommerceServices).values({
+            talosId: talos.id,
+            serviceName,
+            description: serviceDescription ?? description,
+            price: String(servicePrice),
+            stellarPublicKey: serviceWallet,
+          });
+        }
+      }
+
+      return { talos, generatedKey: apiKey };
+    });
+
+    // DB transaction succeeded — now fund the testnet wallet (best-effort, non-blocking).
+    // Kept outside the transaction deliberately: Friendbot is an external call and
+    // must not cause a DB rollback if it fails.
+    if (agentWalletPublicKey) {
+      fundTestnetAccount(agentWalletPublicKey).catch(() => {});
     }
 
-    const { apiKey: generatedKey, ...safeTalos } = talos;
+    const { apiKey: _key, ...safeTalos } = talos;
     return Response.json(
       { ...safeTalos, apiKeyOnce: generatedKey },
       { status: 201 },

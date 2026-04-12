@@ -117,9 +117,24 @@ function DashboardLoader() {
     }
   }, [address]);
 
+  // Initial load
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // SSE: auto-refresh when the agent creates approvals or logs activities
+  useEffect(() => {
+    if (!address) return;
+
+    const es = new EventSource(
+      `/api/events?wallet=${encodeURIComponent(address)}`,
+    );
+
+    es.addEventListener("update", () => fetchData());
+    es.addEventListener("approval", () => fetchData());
+
+    return () => es.close();
+  }, [address, fetchData]);
 
   if (loading) {
     return (

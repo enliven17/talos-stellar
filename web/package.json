@@ -14,7 +14,7 @@
     "db:seed-demo": "tsx scripts/seed-demo-agents.ts"
   },
   "dependencies": {
-    "@creit-tech/stellar-wallets-kit": "^1.7.0",
+    "@creit.tech/stellar-wallets-kit": "^2.1.0",
     "@paralleldrive/cuid2": "^3.3.0",
     "@stellar/stellar-sdk": "^13.3.0",
     "drizzle-orm": "^0.45.2",

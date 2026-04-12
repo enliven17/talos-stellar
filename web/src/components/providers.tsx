@@ -1,18 +1,27 @@
 "use client";
 
-import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
-import {
-  StellarWalletsKit,
-  WalletNetwork,
-  FREIGHTER_ID,
-  FreighterModule,
-  xBullModule,
-  ALBEDO_ID,
-  AlbedoModule,
-} from "@creit-tech/stellar-wallets-kit";
+import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react";
+import { StellarWalletsKit, Networks } from "@creit.tech/stellar-wallets-kit";
+import { FreighterModule } from "@creit.tech/stellar-wallets-kit/modules/freighter";
+import { xBullModule } from "@creit.tech/stellar-wallets-kit/modules/xbull";
+import { AlbedoModule } from "@creit.tech/stellar-wallets-kit/modules/albedo";
+
+function getNetwork(): Networks {
+  return process.env.NEXT_PUBLIC_STELLAR_NETWORK === "mainnet"
+    ? Networks.PUBLIC
+    : Networks.TESTNET;
+}
+
+// Initialise once on module load (client-side only)
+if (typeof window !== "undefined") {
+  StellarWalletsKit.init({
+    modules: [new FreighterModule(), new xBullModule(), new AlbedoModule()],
+    network: getNetwork(),
+  });
+}
 
 interface WalletContextValue {
-  kit: StellarWalletsKit | null;
+  kit: typeof StellarWalletsKit;
   publicKey: string | null;
   isConnected: boolean;
   connect: () => Promise<void>;
@@ -21,7 +30,7 @@ interface WalletContextValue {
 }
 
 const WalletContext = createContext<WalletContextValue>({
-  kit: null,
+  kit: StellarWalletsKit,
   publicKey: null,
   isConnected: false,
   connect: async () => {},
@@ -33,61 +42,43 @@ export function useStellarWallet(): WalletContextValue {
   return useContext(WalletContext);
 }
 
-function createKit(): StellarWalletsKit {
-  const network =
-    process.env.NEXT_PUBLIC_STELLAR_NETWORK === "mainnet"
-      ? WalletNetwork.PUBLIC
-      : WalletNetwork.TESTNET;
-
-  return new StellarWalletsKit({
-    network,
-    selectedWalletId: FREIGHTER_ID,
-    modules: [
-      new FreighterModule(),
-      new xBullModule(),
-      new AlbedoModule(),
-    ],
-  });
-}
-
 export function Providers({ children }: { children: ReactNode }) {
-  const [kit] = useState<StellarWalletsKit>(() => createKit());
   const [publicKey, setPublicKey] = useState<string | null>(null);
+
+  // Restore session on mount
+  useEffect(() => {
+    StellarWalletsKit.getAddress()
+      .then(({ address }) => { if (address) setPublicKey(address); })
+      .catch(() => {});
+  }, []);
 
   const connect = useCallback(async () => {
     try {
-      await kit.openModal({
-        onWalletSelected: async (option) => {
-          kit.setWallet(option.id);
-          const { address } = await kit.getAddress();
-          setPublicKey(address);
-        },
-      });
+      const { address } = await StellarWalletsKit.authModal();
+      setPublicKey(address);
     } catch (err) {
       console.error("[wallet] Connection failed:", err);
     }
-  }, [kit]);
+  }, []);
 
-  const disconnect = useCallback(() => {
+  const disconnect = useCallback(async () => {
+    try {
+      await StellarWalletsKit.disconnect();
+    } catch { /* ignore */ }
     setPublicKey(null);
   }, []);
 
-  const signTransaction = useCallback(
-    async (xdr: string): Promise<string> => {
-      const network =
-        process.env.NEXT_PUBLIC_STELLAR_NETWORK === "mainnet"
-          ? WalletNetwork.PUBLIC
-          : WalletNetwork.TESTNET;
-      const { signedTxXdr } = await kit.signTransaction(xdr, { network });
-      return signedTxXdr;
-    },
-    [kit],
-  );
+  const signTransaction = useCallback(async (xdr: string): Promise<string> => {
+    const { signedTxXdr } = await StellarWalletsKit.signTransaction(xdr, {
+      networkPassphrase: getNetwork(),
+    });
+    return signedTxXdr;
+  }, []);
 
   return (
     <WalletContext.Provider
       value={{
-        kit,
+        kit: StellarWalletsKit,
         publicKey,
         isConnected: !!publicKey,
         connect,

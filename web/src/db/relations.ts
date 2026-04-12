@@ -9,6 +9,7 @@ import {
   tlsCommerceJobs,
   tlsPlaybooks,
   tlsPlaybookPurchases,
+  tlsApiAuditLogs,
 } from "./schema";
 
 export const talosRelations = relations(tlsTalos, ({ many, one }) => ({
@@ -19,6 +20,7 @@ export const talosRelations = relations(tlsTalos, ({ many, one }) => ({
   commerceServices: one(tlsCommerceServices),
   commerceJobs: many(tlsCommerceJobs),
   playbooks: many(tlsPlaybooks),
+  auditLogs: many(tlsApiAuditLogs),
 }));
 
 export const patronRelations = relations(tlsPatrons, ({ one }) => ({
@@ -52,4 +54,8 @@ export const playbookRelations = relations(tlsPlaybooks, ({ one, many }) => ({
 
 export const playbookPurchaseRelations = relations(tlsPlaybookPurchases, ({ one }) => ({
   playbook: one(tlsPlaybooks, { fields: [tlsPlaybookPurchases.playbookId], references: [tlsPlaybooks.id] }),
+}));
+
+export const apiAuditLogRelations = relations(tlsApiAuditLogs, ({ one }) => ({
+  talos: one(tlsTalos, { fields: [tlsApiAuditLogs.talosId], references: [tlsTalos.id] }),
 }));

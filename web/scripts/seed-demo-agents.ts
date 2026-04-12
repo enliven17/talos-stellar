@@ -158,7 +158,7 @@ async function main() {
         persona: agent.persona,
         status: "Active",
         agentOnline: true,
-        agentLastSeen: new Date().toISOString(),
+        agentLastSeen: new Date(),
         apiKey,
         walletPublicKey: publicKey,
         agentWalletAddress: publicKey,
