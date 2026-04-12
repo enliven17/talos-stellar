@@ -146,37 +146,38 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
     if (!address || !talos.service) return;
     setServiceStatus("paying");
     try {
-      const { Asset, TransactionBuilder, Operation, BASE_FEE, Horizon } = await import("@stellar/stellar-sdk");
+      const { Asset, TransactionBuilder, Operation, BASE_FEE, Horizon, Networks } = await import("@stellar/stellar-sdk");
       const HORIZON_URL = "https://horizon-testnet.stellar.org";
-      const NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
+      const NETWORK_PASSPHRASE = Networks.TESTNET;
       const USDC_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
-      const recipient = talos.service.stellarPublicKey || talos.agentWalletAddress || "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
+      const OPERATOR = "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
+      const recipient = talos.service.stellarPublicKey || talos.agentWalletAddress || OPERATOR;
 
+      // Build payment TX — don't submit in browser; server will submit + verify
       const server = new Horizon.Server(HORIZON_URL);
       const account = await server.loadAccount(address);
       const usdc = new Asset("USDC", USDC_ISSUER);
 
       const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASE })
         .addOperation(Operation.payment({ destination: recipient, asset: usdc, amount: String(talos.service.price) }))
-        .setTimeout(60).build();
+        .setTimeout(60)
+        .build();
 
+      // Sign via wallet (Freighter / Albedo / etc.)
       const signedXdr = await signTransaction(tx.toXDR());
-      const { TransactionBuilder: TB } = await import("@stellar/stellar-sdk");
-      const signedTx = TB.fromXDR(signedXdr, NETWORK_PASSPHRASE);
-      const result = await server.submitTransaction(signedTx);
-      const txHash = result.hash;
 
       let payload: Record<string, unknown> = {};
       try { payload = servicePayload.trim() ? JSON.parse(servicePayload) : {}; } catch { payload = { request: servicePayload }; }
 
+      // Server submits TX, verifies payment, creates job
       const res = await fetch(`/api/talos/${talos.id}/jobs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ buyerPublicKey: address, txHash, payload }),
+        body: JSON.stringify({ buyerPublicKey: address, signedXdr, payload }),
       });
       const data = await res.json();
       if (res.ok) {
-        setServiceResult({ jobId: data.jobId, txHash, result: data.result, status: data.status });
+        setServiceResult({ jobId: data.jobId, txHash: data.txHash, result: data.result, status: data.status });
         setServiceStatus("success");
       } else {
         alert(data.error || "Job creation failed");

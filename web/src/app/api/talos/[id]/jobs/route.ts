@@ -8,11 +8,42 @@ import { fulfillInstant } from "@/lib/fulfillment";
  * POST /api/talos/:id/jobs
  *
  * Human user requests a service from an agent.
- * The USDC payment TX must be submitted on-chain first (client-side),
- * then this endpoint creates the job and records revenue.
+ * Accepts either:
+ *   - signedXdr: signed transaction XDR (server submits + verifies payment)
+ *   - txHash: already-submitted tx hash (legacy; no server-side payment check)
  *
- * Body: { buyerPublicKey, txHash, payload? }
+ * Body: { buyerPublicKey, signedXdr?, txHash?, payload? }
  */
+async function submitAndVerifyPayment(
+  signedXdr: string,
+  expectedAmount: string,
+  expectedRecipient: string,
+): Promise<{ txHash: string }> {
+  const { TransactionBuilder, Horizon, Networks, Asset } = await import("@stellar/stellar-sdk");
+  const server = new Horizon.Server("https://horizon-testnet.stellar.org");
+  const tx = TransactionBuilder.fromXDR(signedXdr, Networks.TESTNET);
+  const result = await server.submitTransaction(tx);
+  const txHash = result.hash;
+
+  // Verify at least one operation is a USDC payment to the expected recipient
+  const USDC_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
+  const usdc = new Asset("USDC", USDC_ISSUER);
+  const ops = tx.operations as unknown as Array<{ type: string; asset?: { code: string; issuer: string }; destination?: string; amount?: string }>;
+  const valid = ops.some(
+    (op) =>
+      op.type === "payment" &&
+      op.asset?.code === usdc.code &&
+      op.asset?.issuer === usdc.issuer &&
+      op.destination === expectedRecipient &&
+      parseFloat(op.amount ?? "0") >= parseFloat(expectedAmount),
+  );
+  if (!valid) {
+    throw new Error("Payment TX does not include required USDC payment to service recipient");
+  }
+
+  return { txHash };
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -21,8 +52,9 @@ export async function POST(
 
   try {
     const body = await request.json();
-    const { buyerPublicKey, txHash, payload } = body as {
+    const { buyerPublicKey, signedXdr, txHash: legacyTxHash, payload } = body as {
       buyerPublicKey?: string;
+      signedXdr?: string;
       txHash?: string;
       payload?: Record<string, unknown>;
     };
@@ -30,18 +62,32 @@ export async function POST(
     if (!buyerPublicKey) {
       return Response.json({ error: "buyerPublicKey is required" }, { status: 400 });
     }
-    if (!txHash) {
-      return Response.json({ error: "txHash is required — submit USDC payment first" }, { status: 400 });
+    if (!signedXdr && !legacyTxHash) {
+      return Response.json({ error: "signedXdr (or txHash) is required" }, { status: 400 });
     }
 
     const [service, talos] = await Promise.all([
       db.select().from(tlsCommerceServices).where(eq(tlsCommerceServices.talosId, id)).limit(1).then(r => r[0] ?? null),
-      db.select({ id: tlsTalos.id, agentOnline: tlsTalos.agentOnline, name: tlsTalos.name })
+      db.select({ id: tlsTalos.id, agentOnline: tlsTalos.agentOnline, name: tlsTalos.name, agentWalletAddress: tlsTalos.agentWalletAddress })
         .from(tlsTalos).where(eq(tlsTalos.id, id)).limit(1).then(r => r[0] ?? null),
     ]);
 
     if (!talos) return Response.json({ error: "TALOS not found" }, { status: 404 });
     if (!service) return Response.json({ error: "This agent offers no services" }, { status: 404 });
+
+    // Submit + verify payment if signedXdr provided; otherwise use legacy txHash
+    let txHash: string;
+    if (signedXdr) {
+      const OPERATOR = "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
+      const recipient = service.stellarPublicKey ?? talos.agentWalletAddress ?? OPERATOR;
+      try {
+        ({ txHash } = await submitAndVerifyPayment(signedXdr, String(service.price), recipient));
+      } catch (err: any) {
+        return Response.json({ error: err?.message ?? "Payment submission failed" }, { status: 402 });
+      }
+    } else {
+      txHash = legacyTxHash!;
+    }
 
     // Replay prevention — same txHash can't be used twice
     const duplicate = await db.select({ id: tlsCommerceJobs.id })

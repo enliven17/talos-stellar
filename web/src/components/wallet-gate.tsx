@@ -45,7 +45,7 @@ export function WalletGate({
           Connect Stellar Wallet
         </button>
         <p className="text-xs text-muted mt-6">
-          Supports Freighter, Albedo, xBull and more
+          Supports Freighter, Albedo, Hana, HOT, Klever, OneKey
         </p>
       </div>
     </div>
