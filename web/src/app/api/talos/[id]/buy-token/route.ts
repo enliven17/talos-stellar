@@ -120,7 +120,7 @@ export async function POST(
   return NextResponse.json({
     success: true,
     txHash: txHash || "pending_client_payment",
-    tokenSymbol: talos.tokenSymbol ?? "PULSE",
+    tokenSymbol: talos.tokenSymbol ?? "MITOS",
     amount,
     pricePerToken,
     totalCost,

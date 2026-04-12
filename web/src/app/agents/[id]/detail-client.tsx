@@ -85,7 +85,7 @@ const JOB_STATUS_STYLES: Record<string, string> = {
 export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
   const [tab, setTab] = useState<Tab>("Overview");
   const [patronStatus, setPatronStatus] = useState<"none" | "loading" | "patron">("none");
-  const { isConnected, connect, address } = useWallet();
+  const { isConnected, connect, address, signTransaction } = useWallet();
 
   const minRequired = talos.minPatronPulse ?? Math.floor(talos.totalSupply * 0.001);
 
@@ -143,23 +143,67 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
     if (!address || buyQty <= 0) return;
     setBuyStatus("buying");
     try {
+      // ── Step 1: Build USDC payment TX ──────────────────────────────
+      const {
+        Asset, TransactionBuilder, Operation, BASE_FEE, Horizon,
+      } = await import("@stellar/stellar-sdk");
+
+      const HORIZON_URL = "https://horizon-testnet.stellar.org";
+      const NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
+      const USDC_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
+
+      // Payment goes to agent treasury (agentWalletAddress) or operator
+      const recipient =
+        talos.agentWalletAddress ??
+        "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
+
+      const server = new Horizon.Server(HORIZON_URL);
+      const account = await server.loadAccount(address);
+      const usdc = new Asset("USDC", USDC_ISSUER);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: NETWORK_PASSPHRASE,
+      })
+        .addOperation(
+          Operation.payment({
+            destination: recipient,
+            asset: usdc,
+            amount: buyCost.toFixed(7),
+          }),
+        )
+        .setTimeout(60)
+        .build();
+
+      // ── Step 2: Sign with wallet (Freighter/Albedo/xBull) ──────────
+      const signedXdr = await signTransaction(tx.toXDR());
+
+      // ── Step 3: Submit to Horizon ──────────────────────────────────
+      const { TransactionBuilder: TB } = await import("@stellar/stellar-sdk");
+      const signedTx = TB.fromXDR(signedXdr, NETWORK_PASSPHRASE);
+      const result = await server.submitTransaction(signedTx);
+      const txHash = result.hash;
+
+      // ── Step 4: Record in DB ───────────────────────────────────────
       const res = await fetch(`/api/talos/${talos.id}/buy-token`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ buyerPublicKey: address, amount: buyQty }),
+        body: JSON.stringify({ buyerPublicKey: address, amount: buyQty, txHash }),
       });
       const data = await res.json();
       if (res.ok && data.success) {
-        setBuyResult({ txHash: data.txHash, message: data.message });
+        setBuyResult({ txHash, message: data.message });
         setBuyStatus("success");
       } else {
         alert(data.error || "Purchase failed");
         setBuyStatus("error");
       }
-    } catch {
+    } catch (err: any) {
+      console.error("[buy-token]", err);
+      alert(err?.message ?? "Transaction failed");
       setBuyStatus("error");
     }
-  }, [address, buyQty, talos.id]);
+  }, [address, buyQty, buyCost, talos.id, talos.agentWalletAddress, signTransaction]);
 
   const closeBuyModal = useCallback(() => {
     setBuyOpen(false);

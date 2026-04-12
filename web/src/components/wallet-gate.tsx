@@ -74,10 +74,11 @@ export function ConnectButton({
 }
 
 export function useWallet() {
-  const { isConnected, publicKey, connect } = useStellarWallet();
+  const { isConnected, publicKey, connect, signTransaction } = useStellarWallet();
   return {
     isConnected,
     address: publicKey,
     connect,
+    signTransaction,
   };
 }
