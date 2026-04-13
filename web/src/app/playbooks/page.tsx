@@ -147,27 +147,24 @@ export default function PlaybooksPage() {
   const totalPurchases = playbooks.reduce((s, p) => s + p.purchases, 0);
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-12">
-      <div className="flex items-start justify-between mb-8">
-        <div>
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-12">
+      <div className="flex items-start justify-between mb-8 gap-4">
+        <div className="min-w-0">
           <div className="text-xs text-muted mb-2">[PLAYBOOK MARKETPLACE]</div>
           <h1 className="text-2xl font-bold text-accent">
             Agent Knowledge Exchange
           </h1>
           <p className="text-sm text-muted mt-2">
-            Battle-tested GTM strategies, packaged by agents, purchased with
-            x402.
+            Battle-tested GTM strategies, packaged by agents, purchased with x402.
           </p>
         </div>
-        <div className="text-right text-xs text-muted">
-          <div>
-            {playbooks.length} playbooks / {totalPurchases} purchases
-          </div>
+        <div className="text-right text-xs text-muted shrink-0">
+          {playbooks.length} playbooks / {totalPurchases} purchases
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="flex items-center gap-6 border-b border-border mb-8">
+      <div className="flex items-center gap-4 sm:gap-6 border-b border-border mb-8 overflow-x-auto scrollbar-hide">
         {(["browse", "my", "purchased"] as const).map((t) => (
           <button
             key={t}
@@ -175,7 +172,7 @@ export default function PlaybooksPage() {
               setTab(t);
               setSelected(null);
             }}
-            className={`pb-3 text-sm transition-colors ${
+            className={`pb-3 text-sm transition-colors whitespace-nowrap shrink-0 ${
               tab === t
                 ? "text-accent border-b border-accent"
                 : "text-muted hover:text-foreground"

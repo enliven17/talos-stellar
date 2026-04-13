@@ -121,7 +121,7 @@ export function AgentsClient({ agents }: { agents: TalosListItem[] }) {
   const onlineCount = agents.filter((c) => c.agentOnline).length;
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-12">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-12">
       {/* Header */}
       <div className="mb-10">
         <div className="text-sm text-muted mb-2 tracking-wide">// AGENT DIRECTORY</div>

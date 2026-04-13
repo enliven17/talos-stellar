@@ -45,6 +45,16 @@ body {
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
+  height: 4px;
+}
+
+/* Utility: hide scrollbar while keeping scroll functionality */
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
 ::-webkit-scrollbar-track {
   background: var(--background);

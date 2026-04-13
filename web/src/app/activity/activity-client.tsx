@@ -153,7 +153,7 @@ export function ActivityClient({ stats: initialStats, transactions: initialTrans
   }, [transactions, filter]);
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-12">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-12">
       {/* Header */}
       <div className="mb-10">
         <div className="text-sm text-muted mb-2 tracking-wide">// AGENT ECONOMY</div>
@@ -230,7 +230,7 @@ export function ActivityClient({ stats: initialStats, transactions: initialTrans
           </div>
         </div>
 
-        <div className="bg-surface border border-border overflow-x-auto">
+        <div className="bg-surface border border-border">
           {filtered.length === 0 ? (
             <div className="p-12 text-center text-muted text-sm">
               No transactions yet. Agents will appear here as they trade.
@@ -242,8 +242,28 @@ export function ActivityClient({ stats: initialStats, transactions: initialTrans
                   key={tx.id}
                   className="px-4 py-3 hover:bg-surface-hover transition-colors"
                 >
+                  {/* Mobile layout */}
+                  <div className="sm:hidden">
+                    <div className="flex items-center gap-2 mb-1">
+                      <StatusDot status={tx.status} />
+                      <span className={`text-[10px] uppercase tracking-wider ${tx.type === "service" ? "text-accent font-bold" : "text-accent/70 font-semibold"}`}>{tx.type}</span>
+                      <span className="text-accent font-bold tabular-nums ml-auto">
+                        {tx.amount < 0.01 ? tx.amount.toFixed(3) : tx.amount.toFixed(2)} USDC
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5 text-xs min-w-0">
+                      <AgentLabel name={tx.buyerName} agent={tx.buyerAgent} />
+                      <span className="text-muted shrink-0">→</span>
+                      <AgentLabel name={tx.sellerName} agent={tx.sellerAgent} />
+                    </div>
+                    <div className="flex items-center gap-2 mt-1 text-xs text-muted/50">
+                      <span className="truncate max-w-[180px]">&ldquo;{tx.itemName}&rdquo;</span>
+                      <span className="ml-auto shrink-0" suppressHydrationWarning>{getRelativeTime(tx.timestamp)}</span>
+                    </div>
+                  </div>
+                  {/* Desktop layout */}
                   <div
-                    className="grid items-center gap-x-3 text-sm"
+                    className="hidden sm:grid items-center gap-x-3 text-sm"
                     style={{ gridTemplateColumns: "auto 4rem minmax(0,12rem) auto 7rem auto minmax(0,14rem) 1fr 4rem auto" }}
                   >
                     {/* 1. Status dot */}
@@ -271,15 +291,15 @@ export function ActivityClient({ stats: initialStats, transactions: initialTrans
                     {/* 7. Seller */}
                     <AgentLabel name={tx.sellerName} agent={tx.sellerAgent} />
                     {/* 8. Item name */}
-                    <span className="hidden sm:inline text-muted text-xs max-w-48 truncate">
+                    <span className="text-muted text-xs max-w-48 truncate">
                       &ldquo;{tx.itemName}&rdquo;
                     </span>
                     {/* 9. Time */}
-                    <span className="hidden sm:inline text-muted/50 text-xs tabular-nums text-right" suppressHydrationWarning>
+                    <span className="text-muted/50 text-xs tabular-nums text-right" suppressHydrationWarning>
                       {getRelativeTime(tx.timestamp)}
                     </span>
                     {/* 10. Explorer link */}
-                    <span className="hidden sm:inline">
+                    <span>
                       {tx.txHash ? (
                         <a
                           href={`https://testnet.arcscan.app/tx/${tx.txHash}`}
@@ -296,33 +316,6 @@ export function ActivityClient({ stats: initialStats, transactions: initialTrans
                         </a>
                       ) : <span className="w-3.5" />}
                     </span>
-                  </div>
-
-                  {/* Mobile: item + time */}
-                  <div className="sm:hidden flex items-center justify-between mt-1.5 ml-[calc(0.375rem+4.5rem)] text-xs">
-                    <span className="text-muted truncate">
-                      &ldquo;{tx.itemName}&rdquo;
-                    </span>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <span className="text-muted/50 tabular-nums" suppressHydrationWarning>
-                        {getRelativeTime(tx.timestamp)}
-                      </span>
-                      {tx.txHash && (
-                        <a
-                          href={`https://testnet.arcscan.app/tx/${tx.txHash}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-accent hover:text-accent/70 transition-colors"
-                          title="View on ArcScan"
-                        >
-                          <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                            <path d="M6 3H3v10h10v-3" />
-                            <path d="M9 2h5v5" />
-                            <path d="M14 2L7 9" />
-                          </svg>
-                        </a>
-                      )}
-                    </div>
                   </div>
                 </div>
               ))}

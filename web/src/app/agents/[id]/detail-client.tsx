@@ -95,7 +95,6 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
   );
 
   const [myPulseBalance, setPulseBalance] = useState(0);
-  const [pulseLoading, setPulseLoading] = useState(false);
 
   useEffect(() => {
     if (!address) return;
@@ -412,7 +411,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
   const maxRevenue = Math.max(...REVENUE_HISTORY.map((r) => r.amount), 1);
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-12">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-12">
       <Link href="/agents" className="text-xs text-muted hover:text-foreground transition-colors">
         &larr; Agent Directory
       </Link>
@@ -451,7 +450,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
           </div>
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           {isConnected ? (
             <>
               {isPatron || patronStatus === "patron" ? (
@@ -502,7 +501,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       </div>
 
       {/* Key metrics */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-px bg-border mb-8">
+      <div className="grid grid-cols-3 md:grid-cols-5 gap-px bg-border mb-8">
         {[
           { label: `${talos.tokenSymbol} Price`, value: talos.pulsePrice },
           { label: "Patrons", value: talos.patronCount.toString() },
@@ -521,12 +520,12 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       </div>
 
       {/* Tabs */}
-      <div className="flex items-center gap-6 border-b border-border mb-8 overflow-x-auto">
+      <div className="flex items-center gap-4 sm:gap-6 border-b border-border mb-8 overflow-x-auto scrollbar-hide -mx-4 px-4 sm:mx-0 sm:px-0">
         {TABS.map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`pb-3 text-sm transition-colors whitespace-nowrap ${
+            className={`pb-3 pt-1 text-sm transition-colors whitespace-nowrap shrink-0 ${
               tab === t ? "text-accent border-b border-accent" : "text-muted hover:text-foreground"
             }`}
           >
@@ -583,7 +582,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
             {/* Kernel Policy */}
             <div className="bg-surface border border-border p-6">
               <div className="text-xs text-muted mb-4">[KERNEL POLICY]</div>
-              <div className="grid grid-cols-2 gap-4 text-sm">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
                 <div>
                   <span className="text-muted">Approval Threshold</span>
                   <p className="text-foreground mt-1">&gt; ${talos.approvalThreshold} USDC</p>
@@ -788,7 +787,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                 {talos.service.description && (
                   <p className="text-sm text-muted mb-4">{talos.service.description}</p>
                 )}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
                   <div>
                     <span className="text-muted text-xs">Price</span>
                     <p className="text-accent font-bold mt-1">
@@ -934,7 +933,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
               <div className="bg-surface border border-accent/20 p-6">
                 <div className="text-xs text-accent mb-4">[MY HOLDINGS]</div>
                 {me ? (
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                     <div>
                       <div className="text-xs text-muted">{talos.tokenSymbol} Held</div>
                       <div className="text-lg font-bold text-accent mt-1">{me.pulseAmount.toLocaleString()}</div>
@@ -1002,7 +1001,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       {/* ─── Revenue Tab ──────────────────────────────────── */}
       {tab === "Revenue" && (
         <div className="space-y-6">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
             {[
               { label: "Total Revenue", value: talos.revenue },
               { label: "This Month", value: `$${(REVENUE_HISTORY[REVENUE_HISTORY.length - 1]?.amount ?? 0).toLocaleString()}` },
@@ -1033,7 +1032,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
             </p>
             {distPreview ? (
               <div className="space-y-4">
-                <div className="grid grid-cols-3 gap-4 text-xs">
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 text-xs">
                   <div className="bg-background border border-border p-3 text-center">
                     <div className="text-accent font-bold text-sm">${distPreview.totalRevenue.toFixed(2)}</div>
                     <div className="text-muted">Total Treasury</div>
@@ -1244,7 +1243,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
             </p>
             {buybackPreview ? (
               <div className="space-y-4">
-                <div className="grid grid-cols-3 gap-3 text-xs">
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
                   {[
                     { label: "Treasury Balance", value: `$${buybackPreview.treasuryBalance.toFixed(2)}` },
                     { label: "Total Burned", value: `$${buybackPreview.totalBuybackExecuted.toFixed(2)}` },
@@ -1257,7 +1256,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                   ))}
                 </div>
                 {isConnected && (
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <label className="text-xs text-muted block mb-1">USDC to spend</label>
                       <input
@@ -1307,7 +1306,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                 {talos.agentOnline ? "[ONLINE]" : "[OFFLINE]"}
               </span>
             </div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
               <div>
                 <span className="text-muted text-xs">Posts Today</span>
                 <p className="text-foreground mt-1">{talos.agentStats.postsToday}</p>

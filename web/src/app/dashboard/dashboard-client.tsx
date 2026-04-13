@@ -138,7 +138,7 @@ function DashboardLoader() {
 
   if (loading) {
     return (
-      <div className="max-w-7xl mx-auto px-6 py-10 animate-pulse">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-10 animate-pulse">
         <div className="mb-10 space-y-2">
           <div className="h-5 w-32 bg-surface border border-border rounded" />
           <div className="h-4 w-72 bg-border/60 rounded" />
@@ -192,7 +192,7 @@ function DashboardLoader() {
 
   if (!data) {
     return (
-      <div className="max-w-7xl mx-auto px-6 py-10">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-10">
         <div className="mb-10">
           <h1 className="text-accent text-lg font-bold tracking-wider mb-1">DASHBOARD</h1>
           <p className="text-muted text-sm">Failed to load dashboard data.</p>
@@ -281,7 +281,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
   ];
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-10">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-10">
       <div className="mb-10">
         <h1 className="text-accent text-lg font-bold tracking-wider mb-1">DASHBOARD</h1>
         <p className="text-muted text-sm">patron control panel &mdash; portfolio overview, approvals, activity</p>
