@@ -16,7 +16,7 @@
   "dependencies": {
     "@creit.tech/stellar-wallets-kit": "^2.1.0",
     "@paralleldrive/cuid2": "^3.3.0",
-    "@stellar/stellar-sdk": "^13.3.0",
+    "@stellar/stellar-sdk": "^14.2.0",
     "drizzle-orm": "^0.45.2",
     "next": "16.2.2",
     "openai": "^6.33.0",
