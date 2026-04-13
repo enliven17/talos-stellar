@@ -156,7 +156,7 @@ function LaunchForm() {
         setDeployStep("Registering TALOS on Soroban...");
         setDeployProgress(2);
 
-        const { TransactionBuilder, BASE_FEE, Account, Contract, nativeToScVal, scValToNative, rpc } =
+        const { TransactionBuilder, BASE_FEE, Account, Contract, nativeToScVal, scValToNative, rpc, xdr } =
           await import("@stellar/stellar-sdk");
         const network = getNetwork();
         const server = new rpc.Server(network.sorobanRpc);
@@ -165,6 +165,41 @@ function LaunchForm() {
         const registry = new Contract(TALOS_REGISTRY_CONTRACT_ID);
         const categoryCapitalized = form.category.charAt(0).toUpperCase() + form.category.slice(1);
 
+        const OPERATOR = "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
+
+        // Helper: build an ScMap entry (key as Symbol, value as ScVal)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const scEntry = (key: string, val: any) =>
+          new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol(key), val });
+
+        // Helper: i128 ScVal from a number
+        const scI128 = (n: number) =>
+          nativeToScVal(BigInt(Math.round(n)), { type: "i128" });
+
+        // Patron struct — fields MUST be in alphabetical order for Soroban ScMap
+        const patronVal = xdr.ScVal.scvMap([
+          scEntry("creator_addr",  nativeToScVal(creatorAddr, { type: "address" })),
+          scEntry("creator_share", xdr.ScVal.scvU32(60)),
+          scEntry("investor_addr", nativeToScVal(creatorAddr, { type: "address" })),
+          scEntry("investor_share", xdr.ScVal.scvU32(25)),
+          scEntry("treasury_addr", nativeToScVal(OPERATOR, { type: "address" })),
+          scEntry("treasury_share", xdr.ScVal.scvU32(15)),
+        ]);
+
+        // Kernel struct (alphabetical)
+        const kernelVal = xdr.ScVal.scvMap([
+          scEntry("approval_threshold", scI128(Number(form.approvalThreshold) || 10)),
+          scEntry("gtm_budget",         scI128(Number(form.gtmBudget) || 100)),
+          scEntry("min_patron_pulse",   scI128(100)),
+        ]);
+
+        // Pulse struct (alphabetical)
+        const pulseVal = xdr.ScVal.scvMap([
+          scEntry("price_usd_cents", scI128(Math.round(parseFloat(form.initialPrice || "0.01") * 100))),
+          scEntry("token_symbol",    nativeToScVal(form.tokenSymbol.toUpperCase(), { type: "string" })),
+          scEntry("total_supply",    scI128(Number(form.totalSupply) || 1_000_000)),
+        ]);
+
         const tx = new TransactionBuilder(new Account(account.accountId(), account.sequenceNumber()), {
           fee: BASE_FEE,
           networkPassphrase: network.networkPassphrase,
@@ -172,13 +207,13 @@ function LaunchForm() {
           .addOperation(
             registry.call(
               "create_talos",
-              nativeToScVal(form.productName, { type: "string" }),
-              nativeToScVal(categoryCapitalized, { type: "string" }),
-              nativeToScVal(creatorAddr, { type: "address" }),
-              nativeToScVal(form.persona, { type: "string" }),
-              nativeToScVal(form.tokenName, { type: "string" }),
-              nativeToScVal(form.tokenSymbol.toUpperCase(), { type: "string" }),
-              nativeToScVal(Number(form.totalSupply), { type: "i128" }),
+              nativeToScVal(form.productName,       { type: "string" }),
+              nativeToScVal(categoryCapitalized,    { type: "string" }),
+              nativeToScVal(form.persona || form.productDesc, { type: "string" }),
+              patronVal,
+              kernelVal,
+              pulseVal,
+              nativeToScVal(OPERATOR, { type: "address" }),
             ),
           )
           .setTimeout(60)
