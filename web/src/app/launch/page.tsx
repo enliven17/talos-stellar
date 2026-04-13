@@ -233,7 +233,9 @@ function LaunchForm() {
           getResult = await server.getTransaction(result.hash);
         }
         if (getResult.status === "SUCCESS" && getResult.returnValue) {
-          onChainId = scValToNative(getResult.returnValue) as number;
+          const raw = scValToNative(getResult.returnValue);
+          // create_talos returns u32 — may come back as number or BigInt
+          onChainId = typeof raw === "bigint" ? Number(raw) : (raw as number);
         }
       } else {
         // Contracts not deployed yet — skip on-chain step
@@ -259,8 +261,8 @@ function LaunchForm() {
           .addOperation(
             nameService.call(
               "register_name",
-              nativeToScVal(onChainId, { type: "u64" }),
-              nativeToScVal(form.agentName, { type: "string" }),
+              nativeToScVal(onChainId, { type: "u32" }),
+              nativeToScVal(form.agentName.toLowerCase().trim(), { type: "string" }),
             ),
           )
           .setTimeout(60)
