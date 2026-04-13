@@ -9,6 +9,9 @@
     "web:db:push": "pnpm --dir web db:push",
     "web:db:seed": "pnpm --dir web db:seed"
   },
+  "dependencies": {
+    "next": "16.2.2"
+  },
   "engines": {
     "node": ">=20"
   }
