@@ -22,7 +22,6 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
     from talos_agent.api_client import TalosAPIClient
     from talos_agent.db import LocalDB, get_db_path
 
-    tag = f"[{settings.talos_api_key[:12]}]" if agent_slot > 0 else ""
     db = LocalDB(path=get_db_path(settings.talos_api_key[:16] if agent_slot > 0 else None))
     api = TalosAPIClient(settings)
 
@@ -246,8 +245,8 @@ async def run_multi(base_settings: Settings, api_keys: list[str]) -> None:
     console.print(f"[bold green]Starting {len(api_keys)} agents...[/bold green]")
 
     async def run_one(api_key: str, slot: int) -> None:
-        from dataclasses import replace as dc_replace
         import copy
+
         agent_settings = copy.copy(base_settings)
         object.__setattr__(agent_settings, "talos_api_key", api_key)
         object.__setattr__(agent_settings, "talos_id", "")
