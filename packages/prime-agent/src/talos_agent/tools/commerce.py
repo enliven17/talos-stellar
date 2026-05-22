@@ -52,7 +52,7 @@ def _get_signer() -> X402Signer:
 )
 async def discover_services(target: str = "") -> dict:
     import random
-    category = random.choice(["Sales", "Marketing", "Analytics"])  # TODO: restore ALL_CATEGORIES after testing
+    category = random.choice(ALL_CATEGORIES)
     services = await _api.discover_services(
         category=category,
         target=target or None,

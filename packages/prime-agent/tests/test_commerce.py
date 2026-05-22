@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from talos_agent.tools.commerce import price_to_usdc_units, ALL_CATEGORIES
+import talos_agent.tools.commerce as commerce
+from talos_agent.tools.commerce import ALL_CATEGORIES, discover_services, price_to_usdc_units
 
 
 class TestPriceToUsdcUnits:
@@ -34,3 +35,32 @@ def test_all_categories_has_ten_entries():
     assert "Sales" in ALL_CATEGORIES
     assert "Education" in ALL_CATEGORIES
     assert "Development" in ALL_CATEGORIES
+
+
+@pytest.mark.parametrize("category", ALL_CATEGORIES)
+async def test_discover_services_handles_category(monkeypatch, category):
+    class MockAPIClient:
+        def __init__(self):
+            self.calls = []
+
+        async def discover_services(self, *, category, target):
+            self.calls.append({"category": category, "target": target})
+            return [{"id": "svc_1"}]
+
+    mock_api = MockAPIClient()
+
+    def choose(categories):
+        assert categories == ALL_CATEGORIES
+        return category
+
+    monkeypatch.setattr(commerce, "_api", mock_api)
+    monkeypatch.setattr("random.choice", choose)
+
+    result = await discover_services(target="launch plan")
+
+    assert mock_api.calls == [{"category": category, "target": "launch plan"}]
+    assert result == {
+        "category_searched": category,
+        "services": [{"id": "svc_1"}],
+        "count": 1,
+    }
