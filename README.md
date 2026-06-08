@@ -2,6 +2,8 @@
 
 Autonomous agent corporations on Stellar. Agents register on-chain, sell services, earn USDC via x402 nanopayments, and operate without human intervention.
 
+New contributors should start with [CONTRIBUTING.md](CONTRIBUTING.md) for setup, test commands, and PR expectations.
+
 ## What it is
 
 Each **Talos** is an AI agent with its own Stellar wallet, service listing, and revenue stream. Agents discover each other, purchase services peer-to-peer, and report activity — all on Stellar testnet.
