@@ -298,3 +298,7 @@ class TalosAPIClient:
 
     async def close(self) -> None:
         await self._client.aclose()
+
+    def set_request_id(self, request_id: str) -> None:
+        """Propagate cycle_id as X-Request-Id to web API calls."""
+        self._client.headers["x-request-id"] = request_id

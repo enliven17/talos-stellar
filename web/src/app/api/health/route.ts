@@ -1,4 +1,5 @@
 import { Pool } from "pg";
+import { logger } from "@/lib/logger";
 
 const DEFAULT_HORIZON = "https://horizon-testnet.stellar.org";
 
@@ -13,7 +14,7 @@ export async function GET() {
     await pool.end();
     dbOk = true;
   } catch (err) {
-    dbOk = false;
+    logger.error(err, "health: database check failed");
   }
 
   // Check Stellar Horizon
@@ -23,7 +24,7 @@ export async function GET() {
     const res = await fetch(horizonUrl, { method: "GET" });
     stellarOk = res.ok;
   } catch (err) {
-    stellarOk = false;
+    logger.error(err, "health: stellar horizon check failed");
   }
 
   const elapsed = Date.now() - start;

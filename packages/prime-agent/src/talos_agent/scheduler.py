@@ -5,20 +5,26 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import uuid
 from typing import TYPE_CHECKING
 
+import structlog
 from rich.console import Console
 
 if TYPE_CHECKING:
     from talos_agent.config import Settings
 
+from talos_agent.observability import setup as setup_observability
+
 console = Console()
+log = structlog.get_logger(__name__)
 
 SHUTDOWN_GRACE_PERIOD = 10  # seconds before force-exit on second signal
 
 
 async def run(settings: Settings, agent_slot: int = 0) -> None:
     """Entry point called by `talos-agent start`. agent_slot used for log prefixes in multi mode."""
+    setup_observability()
     from talos_agent.api_client import TalosAPIClient
     from talos_agent.db import LocalDB, get_db_path
 
@@ -91,8 +97,12 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             async with agent_lock:
                 if shutdown_event.is_set():
                     break
+                cycle_id = str(uuid.uuid4())
+                structlog.contextvars.bind_contextvars(cycle_id=cycle_id)
+                api.set_request_id(cycle_id)
                 try:
                     context = AgentContext.from_db(db, talos_config)
+                    log.info("agent_cycle_start", talos=talos_config.get("name"), cycle_id=cycle_id)
                     await agent_loop(
                         settings=settings,
                         tools=tools,
@@ -102,8 +112,14 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                         shutdown_event=shutdown_event,
                     )
                     db.update_schedule("agent_cycle")
+                    log.info("agent_cycle_complete", cycle_id=cycle_id)
                 except Exception as e:
                     console.print(f"[red]Agent cycle error: {e}[/red]")
+                    log.error("agent_cycle_error", error=str(e), cycle_id=cycle_id)
+                    import sentry_sdk
+                    sentry_sdk.capture_exception(e)
+                finally:
+                    structlog.contextvars.unbind_contextvars("cycle_id")
             try:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=settings.agent_cycle_interval)
                 break

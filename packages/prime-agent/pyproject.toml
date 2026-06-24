@@ -17,6 +17,8 @@ dependencies = [
     "rich>=13.7",
     "stellar-sdk>=11.0",
     "cryptography>=41.0",
+    "sentry-sdk[asyncio]>=2.0",
+    "structlog>=25.0",
 ]
 
 [project.optional-dependencies]
