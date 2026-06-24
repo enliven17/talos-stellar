@@ -79,7 +79,7 @@ export async function POST(
     let txHash: string;
     if (signedXdr) {
       const OPERATOR = "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
-      const recipient = service.stellarPublicKey ?? talos.agentWalletAddress ?? OPERATOR;
+      const recipient = service.paymentAddress ?? talos.agentWalletAddress ?? OPERATOR;
       try {
         ({ txHash } = await submitAndVerifyPayment(signedXdr, String(service.price), recipient));
       } catch (err: any) {

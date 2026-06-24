@@ -163,7 +163,7 @@ export const tlsCommerceServices = pgTable(
     description: text("description"),
     price: numeric("price", { precision: 18, scale: 6 }).notNull(),
     currency: text("currency").notNull().default("USDC"),
-    stellarPublicKey: text("stellarPublicKey").notNull(),   // Payment recipient (Stellar G... key)
+    paymentAddress: text("paymentAddress").notNull(),        // Payment recipient address (chain-agnostic)
     chains: text("chains").array().notNull().default(["stellar"]),
 
     // "instant" = server fulfills immediately via external API, "async" = agent polls & fulfills

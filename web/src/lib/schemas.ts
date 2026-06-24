@@ -93,14 +93,34 @@ export const revokePatronSchema = z.object({
 
 // --- Commerce Service ---
 
-export const registerServiceSchema = z.object({
-  serviceName: z.string().min(1).max(200),
-  description: z.string().max(2000).nullable().optional(),
-  price: z.number().positive(),
-  stellarPublicKey: z.string().optional(),
-  chains: z.array(z.string()).optional().default(["stellar"]),
-  fulfillmentMode: z.enum(["instant", "async"]).optional().default("async"),
-});
+// Address format validators per chain
+const STELLAR_ADDRESS = /^G[A-Z2-7]{55}$/;
+const SOLANA_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const ETHEREUM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+function validatePaymentAddress(address: string, chains: string[]): boolean {
+  if (chains.includes("stellar") && STELLAR_ADDRESS.test(address)) return true;
+  if (chains.includes("solana") && SOLANA_ADDRESS.test(address)) return true;
+  if ((chains.includes("base") || chains.includes("ethereum")) && ETHEREUM_ADDRESS.test(address)) return true;
+  // Unknown/custom chain: accept any non-empty string
+  const knownChains = ["stellar", "solana", "base", "ethereum"];
+  if (chains.every((c) => !knownChains.includes(c))) return true;
+  return false;
+}
+
+export const registerServiceSchema = z
+  .object({
+    serviceName: z.string().min(1).max(200),
+    description: z.string().max(2000).nullable().optional(),
+    price: z.number().positive(),
+    paymentAddress: z.string().optional(),
+    chains: z.array(z.string()).optional().default(["stellar"]),
+    fulfillmentMode: z.enum(["instant", "async"]).optional().default("async"),
+  })
+  .refine(
+    (data) => !data.paymentAddress || validatePaymentAddress(data.paymentAddress, data.chains ?? ["stellar"]),
+    { message: "paymentAddress format does not match any of the specified chains", path: ["paymentAddress"] },
+  );
 
 // --- Revenue ---
 

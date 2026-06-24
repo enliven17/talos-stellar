@@ -194,7 +194,7 @@ export async function POST(request: NextRequest) {
             serviceName,
             description: serviceDescription ?? description,
             price: String(servicePrice),
-            stellarPublicKey: serviceWallet,
+            paymentAddress: serviceWallet,
           });
         }
       }
