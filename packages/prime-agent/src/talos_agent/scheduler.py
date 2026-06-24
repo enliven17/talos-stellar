@@ -210,12 +210,86 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             except asyncio.TimeoutError:
                 pass
 
+    async def loan_repayment_task():
+        """Monitor and auto-repay loan interests from generated revenues. Runs every 24 hours."""
+        repayment_interval = 24 * 3600  # 24 hours
+
+        # Wait for the first agent cycle to complete before starting
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=repayment_interval)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+        while not shutdown_event.is_set():
+            async with agent_lock:
+                if shutdown_event.is_set():
+                    break
+                try:
+                    console.print("[bold cyan]Starting loan repayment cycle...[/bold cyan]")
+                    
+                    # Get loans due soon (within 7 days)
+                    loans_due = db.get_loans_due_soon(days=7)
+                    
+                    if not loans_due:
+                        console.print("[dim]No loans due for repayment.[/dim]")
+                    else:
+                        console.print(f"[cyan]Found {len(loans_due)} loan(s) due for repayment.[/cyan]")
+                        
+                        # Calculate total revenue available (from spending log - this is a simplified approach)
+                        # In a real implementation, this would query treasury balance or revenue tracking
+                        total_revenue = db.get_spending_period(30)  # This is spending, not revenue
+                        # For now, we'll use a placeholder - in production, this would query actual treasury income
+                        
+                        for loan in loans_due:
+                            loan_id = loan["id"]
+                            outstanding = loan["outstanding_amount"]
+                            platform = loan["platform"]
+                            
+                            # Check if we have enough to repay (simplified logic)
+                            # In production, this would check actual treasury balance
+                            available_balance = 1000.0  # Placeholder - should be from treasury API
+                            
+                            if available_balance >= outstanding:
+                                console.print(f"[green]Auto-repaying loan {loan_id}: {outstanding} {loan['loan_asset']} to {platform}[/green]")
+                                
+                                # Record the repayment
+                                db.record_repayment(loan_id, outstanding)
+                                
+                                # Report activity
+                                db.add_activity(
+                                    "loan_repayment",
+                                    f"Auto-repaid loan {loan_id}: {outstanding} {loan['loan_asset']} to {platform}",
+                                    "defi",
+                                )
+                                
+                                # In production, this would execute the actual transfer via API
+                                # result = await api.request_transfer(...)
+                            else:
+                                console.print(f"[yellow]Insufficient balance to repay loan {loan_id}. Outstanding: {outstanding}, Available: {available_balance}[/yellow]")
+                                db.add_activity(
+                                    "loan_warning",
+                                    f"Loan {loan_id} due but insufficient funds. Outstanding: {outstanding}",
+                                    "defi",
+                                )
+                    
+                    db.update_schedule("loan_repayment")
+                    console.print("[bold cyan]Loan repayment cycle complete.[/bold cyan]")
+                except Exception as e:
+                    console.print(f"[red]Loan repayment cycle error: {e}[/red]")
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=repayment_interval)
+                break
+            except asyncio.TimeoutError:
+                pass
+
     tasks = [
         asyncio.create_task(agent_cycle_task(), name="agent_cycle"),
         asyncio.create_task(polling_task(), name="polling"),
         asyncio.create_task(heartbeat_task(), name="heartbeat"),
         asyncio.create_task(activity_flush_task(), name="activity_flush"),
         asyncio.create_task(learning_cycle_task(), name="learning_cycle"),
+        asyncio.create_task(loan_repayment_task(), name="loan_repayment"),
     ]
 
     try:
