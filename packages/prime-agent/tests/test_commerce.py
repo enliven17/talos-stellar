@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
 import pytest
-from talos_agent.tools.commerce import price_to_usdc_units, ALL_CATEGORIES
+from talos_agent.tools.commerce import price_to_usdc_units, ALL_CATEGORIES, discover_services
 
 
 class TestPriceToUsdcUnits:
@@ -34,3 +35,26 @@ def test_all_categories_has_ten_entries():
     assert "Sales" in ALL_CATEGORIES
     assert "Education" in ALL_CATEGORIES
     assert "Development" in ALL_CATEGORIES
+
+
+class MockAPIClient:
+    def __init__(self):
+        self.discover_services = AsyncMock(return_value=[])
+
+
+@pytest.fixture
+def mock_api_client():
+    return MockAPIClient()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("category", ALL_CATEGORIES)
+async def test_discover_services_handles_category(category, mock_api_client):
+    with patch("talos_agent.tools.commerce._api", mock_api_client), \
+         patch("random.choice", return_value=category):
+        res = await discover_services()
+        assert res["category_searched"] == category
+        mock_api_client.discover_services.assert_called_once_with(
+            category=category,
+            target=None
+        )
