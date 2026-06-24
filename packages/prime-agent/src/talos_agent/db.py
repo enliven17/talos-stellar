@@ -18,7 +18,10 @@ def get_db_path(agent_id: str | None = None) -> Path:
         return APP_DIR / f"agent-{agent_id}.db"
     return DB_PATH
 
-_SCHEMA = """
+_MIGRATIONS = [
+    (
+        1,
+        """
 CREATE TABLE IF NOT EXISTS schedules (
     task_name   TEXT PRIMARY KEY,
     last_run_at TEXT NOT NULL
@@ -117,7 +120,13 @@ CREATE TABLE IF NOT EXISTS audience_insights (
     keywords    TEXT,
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
-"""
+        """,
+    ),
+    (
+        2,
+        "-- no-op example migration",
+    ),
+]
 
 
 class LocalDB:
@@ -127,7 +136,47 @@ class LocalDB:
         self._conn = sqlite3.connect(str(path))
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.executescript(_SCHEMA)
+        self._run_migrations()
+
+    def _run_migrations(self) -> None:
+        """Run all pending migrations in a single transaction."""
+        cursor = self._conn.cursor()
+        cursor.execute("PRAGMA user_version;")
+        current_version = cursor.fetchone()[0]
+
+        pending = [m for m in _MIGRATIONS if m[0] > current_version]
+        if not pending:
+            return
+
+        try:
+            self._conn.execute("BEGIN TRANSACTION;")
+            for version, sql in pending:
+                statements = []
+                current = []
+                for line in sql.splitlines():
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("--"):
+                        continue
+                    current.append(line)
+                    joined = "\n".join(current)
+                    if sqlite3.complete_statement(joined):
+                        statements.append(joined)
+                        current = []
+
+                if current:
+                    remaining = "\n".join(current).strip()
+                    if remaining:
+                        statements.append(remaining)
+
+                for stmt in statements:
+                    cursor.execute(stmt)
+
+            latest_version = pending[-1][0]
+            cursor.execute(f"PRAGMA user_version = {latest_version};")
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
 
     # ── Schedules ──────────────────────────────────────────
 
