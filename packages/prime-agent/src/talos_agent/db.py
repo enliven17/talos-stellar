@@ -18,7 +18,10 @@ def get_db_path(agent_id: str | None = None) -> Path:
         return APP_DIR / f"agent-{agent_id}.db"
     return DB_PATH
 
-_SCHEMA = """
+_MIGRATIONS = [
+    (
+        1,
+        """
 CREATE TABLE IF NOT EXISTS schedules (
     task_name   TEXT PRIMARY KEY,
     last_run_at TEXT NOT NULL
@@ -117,7 +120,13 @@ CREATE TABLE IF NOT EXISTS audience_insights (
     keywords    TEXT,
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
-"""
+        """,
+    ),
+    (
+        2,
+        "-- no-op example migration",
+    ),
+]
 
 
 class LocalDB:
@@ -127,7 +136,47 @@ class LocalDB:
         self._conn = sqlite3.connect(str(path))
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.executescript(_SCHEMA)
+        self._run_migrations()
+
+    def _run_migrations(self) -> None:
+        """Run all pending migrations in a single transaction."""
+        cursor = self._conn.cursor()
+        cursor.execute("PRAGMA user_version;")
+        current_version = cursor.fetchone()[0]
+
+        pending = [m for m in _MIGRATIONS if m[0] > current_version]
+        if not pending:
+            return
+
+        try:
+            self._conn.execute("BEGIN TRANSACTION;")
+            for version, sql in pending:
+                statements = []
+                current = []
+                for line in sql.splitlines():
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("--"):
+                        continue
+                    current.append(line)
+                    joined = "\n".join(current)
+                    if sqlite3.complete_statement(joined):
+                        statements.append(joined)
+                        current = []
+
+                if current:
+                    remaining = "\n".join(current).strip()
+                    if remaining:
+                        statements.append(remaining)
+
+                for stmt in statements:
+                    cursor.execute(stmt)
+
+            latest_version = pending[-1][0]
+            cursor.execute(f"PRAGMA user_version = {latest_version};")
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
 
     # ── Schedules ──────────────────────────────────────────
 
@@ -180,6 +229,14 @@ class LocalDB:
         ).fetchone()
         return row["cnt"] if row else 0
 
+    def count_today_by_channel(self, type_: str, channel: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) as cnt FROM activity_log "
+            "WHERE type = ? AND channel = ? AND date(created_at) = date('now')",
+            (type_, channel),
+        ).fetchone()
+        return row["cnt"] if row else 0
+
     # ── Content History ────────────────────────────────────
 
     def add_content(self, content: str, channel: str) -> None:
@@ -193,6 +250,14 @@ class LocalDB:
         rows = self._conn.execute(
             "SELECT content, channel, posted_at FROM content_history ORDER BY posted_at DESC LIMIT ?",
             (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_recent_content_by_channel(self, channel: str, limit: int = 20) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT content, channel, posted_at FROM content_history "
+            "WHERE channel = ? ORDER BY posted_at DESC LIMIT ?",
+            (channel, limit),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -369,6 +434,21 @@ class LocalDB:
             "LEFT JOIN content_performance cp ON cp.content_id = ch.id "
             "WHERE ch.posted_at >= datetime('now', ?)",
             (f"-{days} days",),
+        ).fetchone()
+        return dict(row) if row else {}
+
+    def get_performance_summary_by_channel(self, channel: str, days: int = 7) -> dict:
+        row = self._conn.execute(
+            "SELECT COUNT(*) as total_posts, "
+            "COALESCE(SUM(cp.likes), 0) as total_likes, "
+            "COALESCE(SUM(cp.reposts), 0) as total_reposts, "
+            "COALESCE(SUM(cp.replies), 0) as total_replies, "
+            "COALESCE(SUM(cp.impressions), 0) as total_impressions, "
+            "COALESCE(AVG(cp.likes + cp.reposts * 2 + cp.replies * 1.5), 0) as avg_engagement "
+            "FROM content_history ch "
+            "LEFT JOIN content_performance cp ON cp.content_id = ch.id "
+            "WHERE ch.channel = ? AND ch.posted_at >= datetime('now', ?)",
+            (channel, f"-{days} days"),
         ).fetchone()
         return dict(row) if row else {}
 
