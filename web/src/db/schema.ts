@@ -189,6 +189,7 @@ export const tlsCommerceJobs = pgTable(
     paymentSig: text("paymentSig").unique(),   // Stellar x402 payment token hash (replay prevention)
     txHash: text("txHash"),                    // Stellar transaction hash after settlement
     amount: numeric("amount", { precision: 18, scale: 6 }).notNull(),
+    bidPrice: numeric("bidPrice", { precision: 18, scale: 6 }), // Negotiated bid price (nullable)
 
     createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
     updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),

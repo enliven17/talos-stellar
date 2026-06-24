@@ -5,7 +5,7 @@ import { eq } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
 import { verifyX402Payment, settleX402Payment } from "@/lib/stellar-x402";
 import { fulfillInstant } from "@/lib/fulfillment";
-import { registerServiceSchema, parseBody } from "@/lib/schemas";
+import { registerServiceSchema, submitBidSchema, parseBody } from "@/lib/schemas";
 
 const STELLAR_NETWORK = process.env.STELLAR_NETWORK ?? "testnet";
 
@@ -94,6 +94,10 @@ export async function POST(
     // 1b. Read body once (request body can only be consumed once)
     const requestBody = await request.json().catch(() => ({})) as Record<string, unknown>;
 
+    // 1c. Validate bid payload if provided
+    const bidValidation = submitBidSchema.safeParse(requestBody);
+    const bidData = bidValidation.success ? bidValidation.data : { bidPrice: undefined, status: undefined };
+
     // 2. Validate X-PAYMENT header (Stellar x402 token)
     const paymentHeader = request.headers.get("x-payment");
     if (!paymentHeader) {
@@ -147,7 +151,8 @@ export async function POST(
     }
 
     // 4. Verify x402 payment via facilitator (checks signature, amount, destination)
-    const expectedAmount = String(service.price);
+    // If bidPrice is provided, use it for verification; otherwise use service price
+    const expectedAmount = bidData.bidPrice ? String(bidData.bidPrice) : String(service.price);
     const verified = await verifyX402Payment(paymentToken, expectedAmount, expectedPayee);
     if (!verified) {
       return Response.json(
@@ -198,14 +203,15 @@ export async function POST(
             result,
             paymentSig: paymentToken,
             txHash,
-            amount: service.price,
-            status: "completed",
+            amount: bidData.bidPrice ?? service.price,
+            bidPrice: bidData.bidPrice ? String(bidData.bidPrice) : undefined,
+            status: bidData.status ?? "completed",
           })
           .returning();
 
         await tx.insert(tlsRevenues).values({
           talosId: id,
-          amount: service.price,
+          amount: bidData.bidPrice ?? service.price,
           currency: service.currency ?? "USDC",
           source: "commerce",
           txHash,
@@ -231,8 +237,9 @@ export async function POST(
         payload: payload ?? undefined,
         paymentSig: paymentToken,
         txHash,
-        amount: service.price,
-        status: "pending",
+        amount: bidData.bidPrice ?? service.price,
+        bidPrice: bidData.bidPrice ? String(bidData.bidPrice) : undefined,
+        status: bidData.status ?? "pending",
       })
       .returning();
 

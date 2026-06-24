@@ -84,6 +84,7 @@ export const tlsCommerceJobs = pgTable("tls_commerce_jobs", {
 	status: text().default('pending').notNull(),
 	paymentSig: text(),
 	amount: numeric({ precision: 18, scale:  6 }).notNull(),
+	bidPrice: numeric({ precision: 18, scale:  6 }),
 	createdAt: timestamp({ precision: 3, mode: 'string' }).default(sql`CURRENT_TIMESTAMP`).notNull(),
 	updatedAt: timestamp({ precision: 3, mode: 'string' }).notNull(),
 	txHash: text(),
