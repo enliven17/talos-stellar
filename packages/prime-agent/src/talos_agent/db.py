@@ -180,6 +180,14 @@ class LocalDB:
         ).fetchone()
         return row["cnt"] if row else 0
 
+    def count_today_by_channel(self, type_: str, channel: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) as cnt FROM activity_log "
+            "WHERE type = ? AND channel = ? AND date(created_at) = date('now')",
+            (type_, channel),
+        ).fetchone()
+        return row["cnt"] if row else 0
+
     # ── Content History ────────────────────────────────────
 
     def add_content(self, content: str, channel: str) -> None:
@@ -193,6 +201,14 @@ class LocalDB:
         rows = self._conn.execute(
             "SELECT content, channel, posted_at FROM content_history ORDER BY posted_at DESC LIMIT ?",
             (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_recent_content_by_channel(self, channel: str, limit: int = 20) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT content, channel, posted_at FROM content_history "
+            "WHERE channel = ? ORDER BY posted_at DESC LIMIT ?",
+            (channel, limit),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -369,6 +385,21 @@ class LocalDB:
             "LEFT JOIN content_performance cp ON cp.content_id = ch.id "
             "WHERE ch.posted_at >= datetime('now', ?)",
             (f"-{days} days",),
+        ).fetchone()
+        return dict(row) if row else {}
+
+    def get_performance_summary_by_channel(self, channel: str, days: int = 7) -> dict:
+        row = self._conn.execute(
+            "SELECT COUNT(*) as total_posts, "
+            "COALESCE(SUM(cp.likes), 0) as total_likes, "
+            "COALESCE(SUM(cp.reposts), 0) as total_reposts, "
+            "COALESCE(SUM(cp.replies), 0) as total_replies, "
+            "COALESCE(SUM(cp.impressions), 0) as total_impressions, "
+            "COALESCE(AVG(cp.likes + cp.reposts * 2 + cp.replies * 1.5), 0) as avg_engagement "
+            "FROM content_history ch "
+            "LEFT JOIN content_performance cp ON cp.content_id = ch.id "
+            "WHERE ch.channel = ? AND ch.posted_at >= datetime('now', ?)",
+            (channel, f"-{days} days"),
         ).fetchone()
         return dict(row) if row else {}
 
