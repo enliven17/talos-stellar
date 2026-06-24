@@ -1,4 +1,4 @@
-"""Main async scheduler — orchestrates all agent tasks."""
+﻿"""Main async scheduler — orchestrates all agent tasks."""
 
 from __future__ import annotations
 
@@ -60,6 +60,58 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
     tools = build_all_tools(api=api, db=db, browser=browser, settings=settings)
     console.print(f"[green]Registered {len(tools)} tools.[/green]")
 
+    # Tracking restart parameters
+    browser_restart_attempts = 0
+    max_restart_attempts = 3
+    is_degraded = False
+
+    async def ensure_browser_healthy() -> bool:
+        """Checks browser health, attempts automatic recovery, and updates tools reference."""
+        nonlocal browser, tools, browser_restart_attempts, is_degraded
+        
+        if is_degraded:
+            return False
+
+        is_healthy = False
+        if browser is not None:
+            try:
+                if hasattr(browser, "context") and browser.context:
+                    is_healthy = True
+            except Exception:
+                is_healthy = False
+
+        if is_healthy:
+            return True
+
+        console.print("[yellow]Browser session health check failed. Attempting recovery...[/yellow]")
+        while browser_restart_attempts < max_restart_attempts:
+            browser_restart_attempts += 1
+            console.print(f"[bold yellow]Attempting browser reconnection ({browser_restart_attempts}/{max_restart_attempts})...[/bold yellow]")
+            
+            try:
+                if browser:
+                    try:
+                        await asyncio.wait_for(browser.close(), timeout=3)
+                    except Exception:
+                        pass
+                
+                browser = await BrowserSession.start(model_api_key=settings.llm_api_key)
+                tools = build_all_tools(api=api, db=db, browser=browser, settings=settings)
+                
+                console.print(f"[bold green]Browser reconnection event logged successfully on attempt {browser_restart_attempts}.[/bold green]")
+                return True
+            except Exception as restart_err:
+                console.print(f"[red]Browser reconnection failed on attempt {browser_restart_attempts}: {restart_err}[/red]")
+                await asyncio.sleep(2)
+
+        console.print("[bold red]Maximum browser restart attempts reached. Marking agent runtime status as degraded.[/bold red]")
+        is_degraded = True
+        try:
+            await api.update_status(settings.talos_id, online=True)
+        except Exception:
+            pass
+        return False
+
     # Shutdown handler — force-exit on second signal
     shutdown_event = asyncio.Event()
     _signal_count = 0
@@ -91,19 +143,23 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             async with agent_lock:
                 if shutdown_event.is_set():
                     break
-                try:
-                    context = AgentContext.from_db(db, talos_config)
-                    await agent_loop(
-                        settings=settings,
-                        tools=tools,
-                        talos_config=talos_config,
-                        context=context,
-                        db=db,
-                        shutdown_event=shutdown_event,
-                    )
-                    db.update_schedule("agent_cycle")
-                except Exception as e:
-                    console.print(f"[red]Agent cycle error: {e}[/red]")
+                
+                if not await ensure_browser_healthy():
+                    console.print("[red]Skipping agent cycle: browser session is down and unrecoverable.[/red]")
+                else:
+                    try:
+                        context = AgentContext.from_db(db, talos_config)
+                        await agent_loop(
+                            settings=settings,
+                            tools=tools,
+                            talos_config=talos_config,
+                            context=context,
+                            db=db,
+                            shutdown_event=shutdown_event,
+                        )
+                        db.update_schedule("agent_cycle")
+                    except Exception as e:
+                        console.print(f"[red]Agent cycle error: {e}[/red]")
             try:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=settings.agent_cycle_interval)
                 break
@@ -114,7 +170,6 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         """Poll Web API for approvals and commerce jobs."""
         while not shutdown_event.is_set():
             try:
-                # Poll approvals
                 approvals = await api.get_approvals(settings.talos_id, status="pending")
                 for a in approvals:
                     cached = db.get_pending_approvals()
@@ -122,7 +177,6 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                     if a["id"] not in cached_ids:
                         db.cache_approval(a["id"], a["type"], a["title"], a.get("description"), a.get("amount"))
 
-                # Poll pending jobs (as service provider)
                 jobs = await api.get_pending_jobs()
                 for job in jobs:
                     db.add_commerce_job(job["id"], job["talosId"], job.get("serviceName", ""), job.get("payload"))
@@ -173,7 +227,6 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         """Run a dedicated learning cycle every 6 hours: measure → review → evolve."""
         learning_interval = 6 * 3600  # 6 hours
 
-        # Wait for the first agent cycle to complete before starting
         try:
             await asyncio.wait_for(shutdown_event.wait(), timeout=learning_interval)
             return
@@ -184,26 +237,29 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             async with agent_lock:
                 if shutdown_event.is_set():
                     break
-                try:
-                    context = AgentContext.from_db(db, talos_config)
+                
+                if not await ensure_browser_healthy():
+                    console.print("[red]Skipping learning cycle: browser session is down and unrecoverable.[/red]")
+                else:
+                    try:
+                        context = AgentContext.from_db(db, talos_config)
 
-                    # Only run if there are unmeasured posts or enough data for a review
-                    if context.unmeasured_count > 0 or context.performance_summary.get("total_posts", 0) >= 5:
-                        console.print("[bold magenta]Starting learning cycle...[/bold magenta]")
-                        learning_prompt = build_learning_prompt(talos_config, context)
-                        await agent_loop(
-                            settings=settings,
-                            tools=tools,
-                            talos_config=talos_config,
-                            context=context,
-                            db=db,
-                            system_prompt_override=learning_prompt,
-                            shutdown_event=shutdown_event,
-                        )
-                        db.update_schedule("learning_cycle")
-                        console.print("[bold magenta]Learning cycle complete.[/bold magenta]")
-                except Exception as e:
-                    console.print(f"[red]Learning cycle error: {e}[/red]")
+                        if context.unmeasured_count > 0 or context.performance_summary.get("total_posts", 0) >= 5:
+                            console.print("[bold magenta]Starting learning cycle...[/bold magenta]")
+                            learning_prompt = build_learning_prompt(talos_config, context)
+                            await agent_loop(
+                                settings=settings,
+                                tools=tools,
+                                talos_config=talos_config,
+                                context=context,
+                                db=db,
+                                system_prompt_override=learning_prompt,
+                                shutdown_event=shutdown_event,
+                            )
+                            db.update_schedule("learning_cycle")
+                            console.print("[bold magenta]Learning cycle complete.[/bold magenta]")
+                    except Exception as e:
+                        console.print(f"[red]Learning cycle error: {e}[/red]")
             try:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=learning_interval)
                 break
@@ -219,21 +275,20 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
     ]
 
     try:
-        # Wait until shutdown is requested, then cancel all tasks
         await shutdown_event.wait()
 
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
     finally:
-        # Graceful shutdown with timeout
         console.print("[yellow]Cleaning up...[/yellow]")
         try:
             await asyncio.wait_for(api.update_status(settings.talos_id, online=False), timeout=5)
         except Exception:
             pass
         try:
-            await asyncio.wait_for(browser.close(), timeout=5)
+            if browser:
+                await asyncio.wait_for(browser.close(), timeout=5)
         except Exception:
             pass
         await api.close()
@@ -254,7 +309,7 @@ async def run_multi(base_settings: Settings, api_keys: list[str]) -> None:
         try:
             await run(agent_settings, agent_slot=slot)
         except Exception as e:
-            console.print(f"[red]Agent {slot} ({api_key[:12]}...) crashed: {e}[/red]")
+            print(f"[red]Agent {slot} ({api_key[:12]}...) crashed: {e}[/red]")
 
     await asyncio.gather(*[
         run_one(key, i + 1) for i, key in enumerate(api_keys)
