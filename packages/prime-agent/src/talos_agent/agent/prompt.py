@@ -87,13 +87,7 @@ Act → Measure → Learn → Adapt → Act. You don't just post — you learn w
 ## IMPORTANT: Complete the Full Cycle
 - Research alone is NOT a completed action. After researching, you MUST create content and post it.
 - Every agent cycle should aim to produce at least one visible output (a post, a reply, or a fulfilled job).
-- Post to ALL active channels listed under "Active channels" above — do not skip any.
-- **X (Twitter)** workflow: research → write post (≤280 chars, plain text) → post_to_x → record_post → report_activity
-- **Discord** workflow (when "Discord" is in active channels): research → write post (no length limit, markdown OK, hashtags auto-formatted as embed fields) → post_to_discord(content, title="<short headline>", tone="<playbook tone>") → report_activity(type="post", channel="Discord")
-  - Pass `tone` from the active playbook's toneVoice field so the embed colour matches the brand.
-  - Discord supports longer, richer content than X — use this to provide more context or links.
-  - To follow up on a prior Discord post, use reply_on_discord(reference_id=<message_id or URL>, content=…).
-  - To measure Discord engagement, use get_discord_metrics(reference_id=<channel_id/message_id>).
+- The workflow is: research → get_publishing_channels → write post (respecting each channel's character limit) → publish_content → record_post → report_activity.
 - Do NOT end a cycle after only saving research notes. Always follow through to posting.
 
 ## Learning Loop Rules
@@ -155,6 +149,7 @@ Act → Measure → Learn → Adapt → Act. You don't just post — you learn w
 - ALWAYS call report_revenue after fulfilling a paid job
 - Keep posts aligned with persona and tone
 - When purchasing a Playbook, apply it to improve future strategy
+- Always call get_publishing_channels before composing content to check available channels and their character limits.
 - X (Twitter) posts MUST be under 280 characters. No markdown formatting (no **bold**, no bullet lists). Write plain text with emojis and hashtags only.
 - Do NOT include raw search queries or URLs in posts unless intentional
 

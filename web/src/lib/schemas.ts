@@ -81,6 +81,14 @@ export const transferSchema = z.object({
 export const becomePatronSchema = z.object({
   stellarPublicKey: z.string().min(1),
   pulseAmount: z.number().positive(),
+  signature: z.string().min(1),
+  message: z.string().min(1),
+});
+
+export const revokePatronSchema = z.object({
+  stellarPublicKey: z.string().min(1),
+  signature: z.string().min(1),
+  message: z.string().min(1),
 });
 
 // --- Commerce Service ---

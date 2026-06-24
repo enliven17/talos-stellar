@@ -68,10 +68,9 @@ class Settings(BaseSettings):
     x_password: str = ""
     x_email: str = ""
 
-    # Discord
-    discord_webhook_url: str = ""
-    discord_bot_token: str = ""
-    discord_agent_avatar_url: str = ""
+    # Per-channel credential configs for additional adapters.
+    # Set as JSON in env: CHANNEL_CONFIGS={"linkedin": {"access_token": "..."}}
+    channel_configs: dict = Field(default_factory=dict, description="Per-channel credentials map")
 
     # Agent behaviour
     agent_cycle_interval: int = Field(default=30, description="Seconds between agent cycles")

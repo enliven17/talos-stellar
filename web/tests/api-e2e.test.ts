@@ -852,6 +852,47 @@ describe("GET /api/talos — pagination", () => {
 // 8. Full lifecycle verification
 // ────────────────────────────────────────────
 
+// ────────────────────────────────────────────
+// 9. Financial Projection
+// ────────────────────────────────────────────
+
+describe("GET /api/talos/:id/financial-projection", () => {
+  it("returns financial projections with LLM analysis", async () => {
+    const res = await api(`/api/talos/${talosId}/financial-projection`);
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body.projection).toBeDefined();
+    expect(body.metadata).toBeDefined();
+    expect(body.metadata.talosId).toBe(talosId);
+    expect(body.metadata.generatedAt).toBeDefined();
+    expect(body.metadata.dataPoints).toBeDefined();
+
+    // Validate projection structure
+    expect(body.projection.expectedRevenue).toBeDefined();
+    expect(Array.isArray(body.projection.expectedRevenue.monthly)).toBe(true);
+    expect(Array.isArray(body.projection.expectedRevenue.quarterly)).toBe(true);
+    expect(typeof body.projection.expectedRevenue.yearly).toBe("number");
+
+    expect(body.projection.budgetSuggestions).toBeDefined();
+    expect(Array.isArray(body.projection.budgetSuggestions)).toBe(true);
+
+    expect(body.projection.roiEstimations).toBeDefined();
+    expect(typeof body.projection.roiEstimations.shortTerm).toBe("number");
+    expect(typeof body.projection.roiEstimations.mediumTerm).toBe("number");
+    expect(typeof body.projection.roiEstimations.longTerm).toBe("number");
+    expect(["low", "medium", "high"]).toContain(body.projection.roiEstimations.confidence);
+
+    expect(body.projection.insights).toBeDefined();
+    expect(Array.isArray(body.projection.insights)).toBe(true);
+  });
+
+  it("returns 404 for non-existent talos", async () => {
+    const res = await api("/api/talos/nonexistent_12345/financial-projection");
+    expect(res.status).toBe(404);
+  });
+});
+
 describe("Full lifecycle — verify talos detail reflects all writes", () => {
   it("detail endpoint shows activity, approval, and revenue", async () => {
     const res = await api(`/api/talos/${talosId}`);
