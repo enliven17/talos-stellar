@@ -1,15 +1,11 @@
-[package]
-name = "talos-governance"
-version = "0.1.0"
-edition = "2021"
-publish = false
+[workspace]
+resolver = "2"
+members = ["talos_registry", "talos_name_service", "talos_governance"]
 
-[lib]
-crate-type = ["cdylib"]
-doctest = false
+[workspace.dependencies]
+soroban-sdk = "21.0.0"
+stellar-asset-contract = "21.0.0"
 
-[dependencies]
-soroban-sdk = { workspace = true }
-
-[dev-dependencies]
-soroban-sdk = { workspace = true, features = ["testutils"] }
+[profile.release]
+opt-level = "z"
+# ...
