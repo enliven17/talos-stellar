@@ -1,0 +1,38 @@
+name: Contracts CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'contracts/**'
+      - '.github/workflows/contracts-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'contracts/**'
+      - '.github/workflows/contracts-ci.yml'
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Run contract tests
+        run: cargo test
+
+      - name: Run wasm-target contract tests
+        run: cargo test --target wasm32-unknown-unknown
+
+      - name: Build Soroban WASM contracts
+        run: cargo build --target wasm32-unknown-unknown --release

@@ -8,9 +8,10 @@
 
 #![no_std]
 
-use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, vec, Address, Env, Map, String, Vec,
-};
+#[cfg(all(test, not(target_arch = "wasm32")))]
+extern crate std;
+
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String};
 
 // ── Data Types ──────────────────────────────────────────────────────
 
@@ -82,6 +83,7 @@ fn emit_patron_updated(env: &Env, talos_id: u32, creator_share: u32, investor_sh
 // ── Constants ───────────────────────────────────────────────────────
 
 const PROTOCOL_FEE_BPS: u32 = 300; // 3%
+const MAX_PROTOCOL_FEE_BPS: u32 = 10_000; // 100%
 
 // ── Contract ────────────────────────────────────────────────────────
 
@@ -115,6 +117,19 @@ impl TalosRegistry {
     ) -> u32 {
         // Require creator authorization
         patron.creator_addr.require_auth();
+
+        // If the registry has been initialized, ensure callers use the configured
+        // protocol wallet. This keeps the create_talos ABI backwards compatible
+        // while preventing a mismatched fee recipient from being supplied.
+        if let Some(configured_wallet) = e
+            .storage()
+            .persistent()
+            .get::<_, Address>(&DataKey::ProtocolWallet)
+        {
+            if configured_wallet != protocol_wallet {
+                panic!("Protocol wallet mismatch");
+            }
+        }
 
         // Get next Talos ID
         let next_id: u32 = e
@@ -186,11 +201,7 @@ impl TalosRegistry {
     }
 
     /// Update patron shares for a Talos.
-    pub fn update_patron(
-        e: Env,
-        talos_id: u32,
-        patron: Patron,
-    ) {
+    pub fn update_patron(e: Env, talos_id: u32, patron: Patron) {
         let mut talos: Talos = e
             .storage()
             .persistent()
@@ -206,12 +217,7 @@ impl TalosRegistry {
             .persistent()
             .set(&DataKey::Talos(talos_id), &talos);
 
-        emit_patron_updated(
-            &e,
-            talos_id,
-            patron.creator_share,
-            patron.investor_share,
-        );
+        emit_patron_updated(&e, talos_id, patron.creator_share, patron.investor_share);
     }
 
     /// Update kernel policy for a Talos.
@@ -266,26 +272,246 @@ impl TalosRegistry {
 
     /// Initialize the contract with protocol wallet and fee.
     pub fn initialize(e: Env, protocol_wallet: Address) {
+        if e.storage()
+            .persistent()
+            .get::<_, Address>(&DataKey::ProtocolWallet)
+            .is_some()
+        {
+            panic!("Already initialized");
+        }
+
         e.storage()
             .persistent()
             .set(&DataKey::ProtocolWallet, &protocol_wallet);
         e.storage()
             .persistent()
             .set(&DataKey::ProtocolFeeBps, &PROTOCOL_FEE_BPS);
-        e.storage()
-            .persistent()
-            .set(&DataKey::NextTalosId, &1u32);
+        e.storage().persistent().set(&DataKey::NextTalosId, &1u32);
     }
 
     /// Get the protocol wallet address.
     pub fn protocol_wallet(e: Env) -> Option<Address> {
-        e.storage()
-            .persistent()
-            .get(&DataKey::ProtocolWallet)
+        e.storage().persistent().get(&DataKey::ProtocolWallet)
     }
 
     /// Get the protocol fee in basis points.
     pub fn protocol_fee_bps(e: Env) -> Option<u32> {
         e.storage().persistent().get(&DataKey::ProtocolFeeBps)
+    }
+
+    /// Update the protocol fee in basis points.
+    ///
+    /// Only the configured protocol wallet may update the fee.
+    pub fn set_protocol_fee(e: Env, fee_bps: u32) {
+        if fee_bps > MAX_PROTOCOL_FEE_BPS {
+            panic!("Protocol fee cannot exceed 100%");
+        }
+
+        let admin: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::ProtocolWallet)
+            .expect("Contract not initialized");
+
+        admin.require_auth();
+
+        e.storage()
+            .persistent()
+            .set(&DataKey::ProtocolFeeBps, &fee_bps);
+    }
+
+    /// Calculate the protocol fee for an amount using the configured fee bps.
+    pub fn calculate_protocol_fee(e: Env, amount: i128) -> i128 {
+        if amount < 0 {
+            panic!("Amount must be non-negative");
+        }
+
+        let fee_bps: u32 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::ProtocolFeeBps)
+            .unwrap_or(PROTOCOL_FEE_BPS);
+
+        amount * fee_bps as i128 / MAX_PROTOCOL_FEE_BPS as i128
+    }
+}
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod tests {
+    use super::*;
+    use soroban_sdk::{
+        testutils::{Address as _, MockAuth, MockAuthInvoke},
+        Address, Env, IntoVal,
+    };
+
+    fn setup() -> (Env, Address) {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, TalosRegistry);
+        (env, contract_id)
+    }
+
+    fn s(env: &Env, value: &str) -> String {
+        String::from_str(env, value)
+    }
+
+    fn patron(env: &Env, creator: &Address) -> Patron {
+        Patron {
+            creator_share: 60,
+            investor_share: 25,
+            treasury_share: 15,
+            creator_addr: creator.clone(),
+            investor_addr: Address::generate(env),
+            treasury_addr: Address::generate(env),
+        }
+    }
+
+    fn kernel() -> Kernel {
+        Kernel {
+            approval_threshold: 10,
+            gtm_budget: 1_000,
+            min_patron_pulse: 100,
+        }
+    }
+
+    fn pulse(env: &Env) -> Pulse {
+        Pulse {
+            total_supply: 1_000_000,
+            price_usd_cents: 100,
+            token_symbol: s(env, "TLOS"),
+        }
+    }
+
+    fn create_talos_with_auth(
+        env: &Env,
+        client: &TalosRegistryClient,
+        contract_id: &Address,
+        creator: &Address,
+        protocol_wallet: &Address,
+    ) -> u32 {
+        let name = s(env, "Genesis");
+        let category = s(env, "Marketing");
+        let description = s(env, "Autonomous marketing agent");
+        let patron = patron(env, creator);
+        let kernel = kernel();
+        let pulse = pulse(env);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: creator,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "create_talos",
+                    args: (
+                        name.clone(),
+                        category.clone(),
+                        description.clone(),
+                        patron.clone(),
+                        kernel.clone(),
+                        pulse.clone(),
+                        protocol_wallet.clone(),
+                    )
+                        .into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .create_talos(
+                &name,
+                &category,
+                &description,
+                &patron,
+                &kernel,
+                &pulse,
+                protocol_wallet,
+            )
+    }
+
+    #[test]
+    fn create_talos_happy_path() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        assert_eq!(id, 1);
+        assert_eq!(client.next_talos_id(), 2);
+        assert_eq!(client.creator_of(&id), Some(creator.clone()));
+        assert!(client.is_active(&id));
+
+        let talos = client.get_talos(&id).expect("talos should be stored");
+        assert_eq!(talos.id, id);
+        assert_eq!(talos.name, s(&env, "Genesis"));
+        assert_eq!(talos.category, s(&env, "Marketing"));
+        assert_eq!(talos.creator, creator);
+        assert!(talos.active);
+    }
+
+    #[test]
+    fn initialize_guard_rejects_reinitialization() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+
+        client.initialize(&Address::generate(&env));
+
+        assert!(client.try_initialize(&Address::generate(&env)).is_err());
+    }
+
+    #[test]
+    fn update_patron_requires_creator_auth() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let new_patron = Patron {
+            creator_share: 50,
+            investor_share: 30,
+            treasury_share: 20,
+            creator_addr: creator,
+            investor_addr: Address::generate(&env),
+            treasury_addr: Address::generate(&env),
+        };
+
+        assert!(client.try_update_patron(&id, &new_patron).is_err());
+    }
+
+    #[test]
+    fn set_protocol_fee_requires_admin_auth() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let protocol_wallet = Address::generate(&env);
+
+        client.initialize(&protocol_wallet);
+
+        assert!(client.try_set_protocol_fee(&500).is_err());
+    }
+
+    #[test]
+    fn protocol_fee_calculation_uses_configured_basis_points() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let protocol_wallet = Address::generate(&env);
+
+        client.initialize(&protocol_wallet);
+        assert_eq!(client.protocol_fee_bps(), Some(300));
+        assert_eq!(client.calculate_protocol_fee(&10_000), 300);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &protocol_wallet,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_protocol_fee",
+                    args: (250u32,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_protocol_fee(&250);
+
+        assert_eq!(client.protocol_fee_bps(), Some(250));
+        assert_eq!(client.calculate_protocol_fee(&40_000), 1_000);
     }
 }

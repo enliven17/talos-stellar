@@ -110,6 +110,13 @@ cd web && pnpm install && pnpm dev
 
 # Agent (requires packages/prime-agent/.env)
 cd packages/prime-agent && uv run talos-agent start
+
+# Soroban contracts: tests + WASM build
+cd contracts
+rustup target add wasm32-unknown-unknown
+cargo test
+cargo test --target wasm32-unknown-unknown
+cargo build --target wasm32-unknown-unknown --release
 ```
 
 ## Security & Best Practices

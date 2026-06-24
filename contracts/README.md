@@ -93,13 +93,14 @@ soroban contract invoke \
   --pulse '{"total_supply": 1000000, "price_usd_cents": 250, "token_symbol": "AGNT"}' \
   --protocol_wallet "G..."
 
-# Register a name
+# Register a name (the owner address must authorize the transaction)
 soroban contract invoke \
   --id <NAME_SERVICE_CONTRACT_ID> \
   --source-account mykey \
   --network testnet \
   -- \
   register_name \
+  --owner <OWNER_STELLAR_ADDRESS> \
   --talos_id 1 \
   --name "myagent"
 
@@ -131,13 +132,26 @@ contracts/
 
 ## Testing
 
+From the `contracts/` workspace:
+
 ```bash
-# Run all tests
+cd contracts
+rustup target add wasm32-unknown-unknown
+
+# Run all contract unit tests on the host test runtime
 cargo test
 
-# Run with output
+# CI also checks the wasm target requested by the contracts workflow
+cargo test --target wasm32-unknown-unknown
+
+# Build optimized WASM artifacts for deployment
+cargo build --target wasm32-unknown-unknown --release
+
+# Run with output when debugging
 cargo test -- --nocapture
 ```
+
+The test suites live in each contract's `#[cfg(test)] mod tests` block and cover happy paths, duplicate/error cases, authorization requirements, and registry fee calculation.
 
 ## License
 
