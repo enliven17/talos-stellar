@@ -237,6 +237,28 @@ export async function recordApprovalOnChain(
 }
 
 /**
+ * Verify an ED25519 signature was produced by the private key corresponding
+ * to `publicKey`. `signature` is base64-encoded; `message` is the UTF-8 text
+ * the wallet signed. Returns false on any error (invalid key, bad base64, etc).
+ */
+export async function verifyStellarSignature(
+  publicKey: string,
+  message: string,
+  signature: string,
+): Promise<boolean> {
+  try {
+    const { Keypair } = await import("@stellar/stellar-sdk");
+    const keypair = Keypair.fromPublicKey(publicKey);
+    return keypair.verify(
+      Buffer.from(message, "utf8"),
+      Buffer.from(signature, "base64"),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Check if a Stellar account exists on the network.
  */
 export async function getAccountInfo(
