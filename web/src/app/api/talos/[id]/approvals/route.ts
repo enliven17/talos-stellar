@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsApprovals, tlsPatrons } from "@/db/schema";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
 
 // GET /api/talos/:id/approvals — Pending approval list
@@ -13,20 +13,27 @@ export async function GET(
 ) {
   const { id } = await params;
   const { searchParams } = new URL(request.url);
-  const status = searchParams.get("status"); // optional filter: pending | approved | rejected
+  const status = searchParams.get("status");
+  const cursor = searchParams.get("cursor");
+  const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 1), 200);
 
   try {
+    const conditions = [eq(tlsApprovals.talosId, id)];
+    if (status) conditions.push(eq(tlsApprovals.status, status));
+    if (cursor) conditions.push(sql`${tlsApprovals.createdAt} < ${new Date(cursor)}`);
+
     const rows = await db
       .select()
       .from(tlsApprovals)
-      .where(
-        status
-          ? and(eq(tlsApprovals.talosId, id), eq(tlsApprovals.status, status))
-          : eq(tlsApprovals.talosId, id),
-      )
-      .orderBy(desc(tlsApprovals.createdAt));
+      .where(and(...conditions))
+      .orderBy(desc(tlsApprovals.createdAt))
+      .limit(limit + 1);
 
-    return Response.json(rows);
+    const hasMore = rows.length > limit;
+    const approvals = hasMore ? rows.slice(0, limit) : rows;
+    const nextCursor = hasMore ? approvals[approvals.length - 1]?.createdAt.toISOString() ?? null : null;
+
+    return Response.json({ approvals, nextCursor });
   } catch {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
