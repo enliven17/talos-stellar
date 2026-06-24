@@ -2,7 +2,7 @@ import { db } from "@/db";
 import { tlsTalos, tlsPatrons, tlsRevenues } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { NextResponse } from "next/server";
-import { getAccountInfo } from "@/lib/stellar";
+import { getAccountInfo, getNetworkPassphrase, getUSDCIssuer } from "@/lib/stellar";
 
 /**
  * Buy Mitos tokens from a Talos.
@@ -53,6 +53,79 @@ export async function POST(
   }
 
   const totalCost = Math.round(amount * pricePerToken * 1e6) / 1e6;
+
+  // ── Replay prevention ──────────────────────────────────────────────
+  const duplicate = await db.query.tlsRevenues.findFirst({
+    where: eq(tlsRevenues.txHash, txHash),
+  });
+  if (duplicate) {
+    return NextResponse.json({ error: "Transaction already used (replay)" }, { status: 409 });
+  }
+
+  // ── Horizon Transaction Verification ────────────────────────────────
+  let txResult;
+  try {
+    const { Horizon } = await import("@stellar/stellar-sdk");
+    const server = new Horizon.Server(process.env.STELLAR_HORIZON_URL ?? "https://horizon-testnet.stellar.org");
+    txResult = await server.transactions().transaction(txHash).call();
+  } catch (err: any) {
+    console.error("[buy-token] Transaction fetch failed:", err?.message ?? err);
+    return NextResponse.json({ error: "Transaction not found on Stellar network" }, { status: 400 });
+  }
+
+  if (!txResult.successful) {
+    return NextResponse.json({ error: "Transaction was not successful on-chain" }, { status: 400 });
+  }
+
+  try {
+    const { TransactionBuilder, Asset } = await import("@stellar/stellar-sdk");
+    const networkPassphrase = getNetworkPassphrase();
+    const usdcIssuer = getUSDCIssuer();
+    const usdcAsset = new Asset("USDC", usdcIssuer);
+
+    const tx = TransactionBuilder.fromXDR(txResult.envelope_xdr, networkPassphrase);
+
+    // Validate: source_account == buyerPublicKey
+    if (tx.source !== buyerPublicKey && txResult.source_account !== buyerPublicKey) {
+      return NextResponse.json(
+        { error: "Transaction signer does not match buyerPublicKey" },
+        { status: 400 },
+      );
+    }
+
+    // Validate at least one operation is a USDC payment of the correct amount to the treasury
+    const ops = tx.operations as unknown as Array<{
+      type: string;
+      asset?: { code: string; issuer: string };
+      destination?: string;
+      amount?: string;
+    }>;
+
+    const operatorTreasury = "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
+    const expectedDestinations = [operatorTreasury];
+    if (talos.agentWalletAddress) {
+      expectedDestinations.push(talos.agentWalletAddress);
+    }
+
+    const hasValidPayment = ops.some(
+      (op) =>
+        op.type === "payment" &&
+        op.asset?.code === usdcAsset.code &&
+        op.asset?.issuer === usdcAsset.issuer &&
+        expectedDestinations.includes(op.destination ?? "") &&
+        Math.abs(parseFloat(op.amount ?? "0") - totalCost) <= 1e-6
+    );
+
+    if (!hasValidPayment) {
+      return NextResponse.json(
+        { error: "No matching USDC payment found in transaction" },
+        { status: 400 },
+      );
+    }
+  } catch (err: any) {
+    console.error("[buy-token] Transaction verification failed:", err?.message ?? err);
+    return NextResponse.json({ error: "Failed to verify transaction details" }, { status: 400 });
+  }
 
   // Verify buyer's Stellar account exists
   const accountInfo = await getAccountInfo(buyerPublicKey);
