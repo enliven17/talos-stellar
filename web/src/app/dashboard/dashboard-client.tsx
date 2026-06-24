@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { WalletGate, useWallet } from "@/components/wallet-gate";
 import { AgentAvatar } from "@/components/agent-avatar";
+import { FinancialProjectionChart } from "@/components/financial-projection-chart";
 
 interface DashboardData {
   stats: {
@@ -446,6 +447,20 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
               </div>
             </section>
           </div>
+
+          {/* Financial Projection Charts */}
+          <section className="mb-10">
+            <h2 className="text-sm text-muted mb-4 tracking-wide">// FINANCIAL PROJECTION</h2>
+            {talosManagement.length === 0 ? (
+              <div className="bg-surface border border-border p-6 text-muted text-sm text-center">No TALOS agents available for projection.</div>
+            ) : (
+              <div className="space-y-6">
+                {talosManagement.slice(0, 3).map((talos) => (
+                  <FinancialProjectionChart key={talos.id} talosId={talos.id} />
+                ))}
+              </div>
+            )}
+          </section>
 
           {/* Revenue Stream */}
           <section className="mb-10">
