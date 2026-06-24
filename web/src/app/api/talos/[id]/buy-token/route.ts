@@ -3,6 +3,7 @@ import { tlsTalos, tlsPatrons, tlsRevenues } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { getAccountInfo } from "@/lib/stellar";
+import { withRateLimit } from "@/lib/rate-limit";
 
 /**
  * Buy Mitos tokens from a Talos.
@@ -16,11 +17,12 @@ import { getAccountInfo } from "@/lib/stellar";
  * 6. Record patron status if buyer meets minimum threshold
  * 7. Record revenue
  */
-export async function POST(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const { id } = await params;
+export const POST = withRateLimit(
+  async (
+    request: Request,
+    { params }: { params: Promise<{ id: string }> },
+  ) => {
+    const { id } = await params;
   const body = await request.json();
 
   const { buyerPublicKey, amount, txHash } = body as {
@@ -184,4 +186,7 @@ export async function POST(
         : "active",
     message: `Successfully purchased ${amount.toLocaleString()} ${tokenSymbol} for ${totalCost.toFixed(2)} USDC`,
   });
-}
+},
+{ limit: 10, windowMs: 60 * 1000 }, // 10/min
+"talos:buy-token",
+);

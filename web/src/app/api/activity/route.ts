@@ -1,8 +1,10 @@
 import { fetchActivityStats, fetchActivityTransactions } from "./query";
+import { withRateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(request: Request) {
+export const GET = withRateLimit(
+  async (request: Request) => {
   const { searchParams } = new URL(request.url);
   const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "25", 10) || 25, 1), 100);
   const cursor = searchParams.get("cursor");
@@ -19,4 +21,7 @@ export async function GET(request: Request) {
   ]);
 
   return Response.json({ stats, transactions, nextCursor });
-}
+},
+{ limit: 120, windowMs: 60 * 1000 }, // 120/min
+"activity",
+);

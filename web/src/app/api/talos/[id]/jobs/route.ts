@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { tlsTalos, tlsCommerceServices, tlsCommerceJobs, tlsRevenues } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { fulfillInstant } from "@/lib/fulfillment";
+import { withRateLimit } from "@/lib/rate-limit";
 
 /**
  * POST /api/talos/:id/jobs
@@ -44,11 +45,12 @@ async function submitAndVerifyPayment(
   return { txHash };
 }
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const { id } = await params;
+export const POST = withRateLimit(
+  async (
+    request: NextRequest,
+    { params }: { params: Promise<{ id: string }> },
+  ) => {
+    const { id } = await params;
 
   try {
     const body = await request.json();
@@ -179,7 +181,10 @@ export async function POST(
     console.error("[jobs POST]", err);
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
-}
+},
+{ limit: 30, windowMs: 60 * 1000 }, // 30/min
+"talos:jobs",
+);
 
 /**
  * GET /api/talos/:id/jobs?txHash=xxx  or  ?jobId=xxx

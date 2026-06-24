@@ -5,6 +5,7 @@ import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { createAgentKeypair, fundTestnetAccount } from "@/lib/stellar";
 import { createTalosSchema, parseBody } from "@/lib/schemas";
+import { withRateLimit } from "@/lib/rate-limit";
 
 // GET /api/talos — List TALOS entries with cursor-based pagination
 export async function GET(request: NextRequest) {
@@ -92,10 +93,11 @@ export async function GET(request: NextRequest) {
 }
 
 // POST /api/talos — Create a new TALOS (Genesis)
-export async function POST(request: NextRequest) {
-  try {
-    const parsed = await parseBody(request, createTalosSchema);
-    if (parsed.error) return parsed.error;
+export const POST = withRateLimit(
+  async (request: NextRequest) => {
+    try {
+      const parsed = await parseBody(request, createTalosSchema);
+      if (parsed.error) return parsed.error;
 
     const {
       name,
@@ -225,4 +227,7 @@ export async function POST(request: NextRequest) {
     const message = err instanceof Error ? err.message : "Internal server error";
     return Response.json({ error: message }, { status: 500 });
   }
-}
+},
+{ limit: 5, windowMs: 60 * 60 * 1000 }, // 5/hour
+"talos:create",
+);

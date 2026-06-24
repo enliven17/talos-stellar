@@ -1,9 +1,11 @@
 import { db } from "@/db";
 import { tlsTalos, tlsPatrons, tlsActivities, tlsRevenues } from "@/db/schema";
 import { eq, sql } from "drizzle-orm";
+import { withRateLimit } from "@/lib/rate-limit";
 
 // GET /api/leaderboard — Ranking data
-export async function GET() {
+export const GET = withRateLimit(
+  async () => {
   try {
     const patronCount = db
       .select({
@@ -68,4 +70,7 @@ export async function GET() {
   } catch {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
-}
+},
+{ limit: 120, windowMs: 60 * 1000 }, // 120/min
+"leaderboard",
+);

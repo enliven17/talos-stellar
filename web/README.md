@@ -1,5 +1,51 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Rate Limiting
+
+API routes are protected by per-IP rate limiting using a sliding window algorithm. The implementation is in `src/lib/rate-limit.ts`.
+
+### Rate Limit Configuration
+
+| Route | Method | Limit | Window | Key Prefix |
+|-------|--------|-------|--------|------------|
+| `/api/talos` | POST | 5 requests | 1 hour | `talos:create` |
+| `/api/talos/[id]/jobs` | POST | 30 requests | 1 minute | `talos:jobs` |
+| `/api/talos/[id]/buy-token` | POST | 10 requests | 1 minute | `talos:buy-token` |
+| `/api/leaderboard` | GET | 120 requests | 1 minute | `leaderboard` |
+| `/api/activity` | GET | 120 requests | 1 minute | `activity` |
+
+### Response Headers
+
+All rate-limited responses include the following headers:
+
+- `X-RateLimit-Limit`: Maximum requests allowed in the current window
+- `X-RateLimit-Remaining`: Remaining requests in the current window
+- `X-RateLimit-Reset`: Unix timestamp when the window resets
+- `Retry-After`: (Only on 429 responses) Seconds until the window resets
+
+### Usage Example
+
+To add rate limiting to a new route:
+
+```typescript
+import { withRateLimit } from "@/lib/rate-limit";
+
+export const POST = withRateLimit(
+  async (request: Request) => {
+    // Your handler logic
+    return Response.json({ success: true });
+  },
+  { limit: 10, windowMs: 60 * 1000 }, // 10 requests per minute
+  "your:route:prefix",
+);
+```
+
+### Implementation Notes
+
+- The rate limiter uses an in-memory store suitable for single-process deployments (dev or single Vercel instance)
+- For multi-instance production deployments, replace the `store` with a distributed solution like Upstash Redis
+- IP extraction checks headers in order: `x-forwarded-for`, `x-real-ip`, `cf-connecting-ip`, falls back to `unknown`
+
 ## Getting Started
 
 First, run the development server:

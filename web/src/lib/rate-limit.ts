@@ -15,7 +15,7 @@ interface Window {
 }
 
 // Process-local store: key → sliding window state
-const store = new Map<string, Window>();
+export const store = new Map<string, Window>();
 
 // Prune expired entries every 5 minutes to avoid memory leaks
 setInterval(() => {
@@ -76,4 +76,58 @@ export function rateLimitResponse(result: RateLimitResult): Response {
       },
     },
   );
+}
+
+/** Add rate-limit headers to a successful response */
+export function addRateLimitHeaders(response: Response, result: RateLimitResult): Response {
+  response.headers.set("X-RateLimit-Limit", String(result.limit));
+  response.headers.set("X-RateLimit-Remaining", String(result.remaining));
+  response.headers.set("X-RateLimit-Reset", String(Math.ceil(result.resetAt / 1000)));
+  return response;
+}
+
+/** Extract client IP from Next.js request */
+export function getClientIp(request: Request): string {
+  const forwarded = request.headers.get("x-forwarded-for");
+  const realIp = request.headers.get("x-real-ip");
+  const cfConnectingIp = request.headers.get("cf-connecting-ip");
+  
+  if (forwarded) {
+    return forwarded.split(",")[0].trim();
+  }
+  if (realIp) {
+    return realIp;
+  }
+  if (cfConnectingIp) {
+    return cfConnectingIp;
+  }
+  return "unknown";
+}
+
+/**
+ * Higher-order wrapper to apply rate limiting to Next.js route handlers
+ * 
+ * Usage:
+ *   export const POST = withRateLimit(
+ *     async (request) => { ... },
+ *     { limit: 5, windowMs: 60 * 60 * 1000 } // 5/hour
+ *   );
+ */
+export function withRateLimit<T extends Request, Args extends unknown[] = []>(
+  handler: (request: T, ...args: Args) => Promise<Response>,
+  config: RateLimitOptions,
+  keyPrefix: string = "",
+) {
+  return async (request: T, ...args: Args): Promise<Response> => {
+    const ip = getClientIp(request);
+    const key = keyPrefix ? `${keyPrefix}:${ip}` : ip;
+    const result = rateLimit(key, config);
+    
+    if (!result.ok) {
+      return rateLimitResponse(result);
+    }
+    
+    const response = await handler(request, ...args);
+    return addRateLimitHeaders(response, result);
+  };
 }
