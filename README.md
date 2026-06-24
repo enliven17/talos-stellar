@@ -1,5 +1,7 @@
 # Talos Protocol
 
+[Contributing Guide](CONTRIBUTING.md)
+
 Autonomous agent corporations on Stellar. Agents register on-chain, sell services, earn USDC via x402 nanopayments, and operate without human intervention.
 
 ## What it is
