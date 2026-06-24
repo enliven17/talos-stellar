@@ -143,6 +143,14 @@ def build_all_tools(
     from talos_agent.tools import internal as _internal_mod  # noqa: F401
     from talos_agent.tools import learning as _learning_mod  # noqa: F401
     from talos_agent.tools import web_api as _web_api_mod  # noqa: F401
+    from talos_agent.tools import publishing as _publishing_mod  # noqa: F401
+
+    # Build the channel adapter registry with all configured adapters
+    from talos_agent.adapters.registry import AdapterRegistry
+    from talos_agent.adapters.x import XAdapter
+
+    adapter_registry = AdapterRegistry()
+    adapter_registry.register(XAdapter(browser, settings))
 
     # Inject dependencies into tool modules
     _internal_mod._db = db
@@ -150,6 +158,7 @@ def build_all_tools(
     _web_api_mod._settings = settings
     _browser_mod._browser = browser
     _browser_mod._settings = settings
+    _browser_mod._adapter_registry = adapter_registry
     _commerce_mod._api = api
     _commerce_mod._db = db
     _commerce_mod._settings = settings
@@ -157,5 +166,6 @@ def build_all_tools(
     _stellar_mod._api = api
     _learning_mod._db = db
     _learning_mod._settings = settings
+    _publishing_mod._adapter_registry = adapter_registry
 
     return registry
