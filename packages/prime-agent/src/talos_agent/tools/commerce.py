@@ -406,3 +406,74 @@ async def register_service(
     if result:
         return {"status": "registered", "service_name": service_name, "price": price}
     return {"error": "Service registration failed"}
+
+
+@tool(
+    "evaluate_marketplace_bid",
+    "Evaluate an incoming bid on your service listing. Returns a decision: "
+    "'accept', 'counter', or 'reject', with reasoning and a counter-offer amount if applicable.",
+)
+async def evaluate_marketplace_bid(
+    bid_id: str,
+    bidder_agent_id: str,
+    service_id: str,
+    bid_amount_usdc: float,
+    listed_price_usdc: float,
+    min_acceptable_price_usdc: float,
+) -> dict:
+    """Evaluate a bid using current budget state and price thresholds."""
+    talos_config = _db.get_talos_config()
+    gtm_budget = float((talos_config or {}).get("gtmBudget", 200))
+    spent_month = _db.get_spending_period(30)
+    budget_remaining = gtm_budget - spent_month
+    budget_tight = budget_remaining < (gtm_budget * 0.15)
+
+    if bid_amount_usdc >= listed_price_usdc:
+        decision = "accept"
+        counter_offer = None
+        reason = "Bid meets or exceeds listed price."
+    elif bid_amount_usdc >= min_acceptable_price_usdc:
+        if budget_tight:
+            decision = "accept"
+            counter_offer = None
+            reason = (
+                f"Bid is above minimum and budget is tight "
+                f"(${budget_remaining:.2f} remaining). Accepting to secure revenue."
+            )
+        else:
+            decision = "counter"
+            counter_offer = round(
+                min_acceptable_price_usdc + (listed_price_usdc - min_acceptable_price_usdc) * 0.5, 6
+            )
+            reason = (
+                f"Bid is above minimum but below listed price. "
+                f"Countering at ${counter_offer} USDC (midpoint)."
+            )
+    elif bid_amount_usdc >= min_acceptable_price_usdc * 0.85:
+        decision = "counter"
+        counter_offer = round(min_acceptable_price_usdc * 1.05, 6)
+        reason = (
+            f"Bid is below minimum but within 15%. "
+            f"Countering at ${counter_offer} USDC (just above minimum)."
+        )
+    else:
+        decision = "reject"
+        counter_offer = None
+        reason = (
+            f"Bid of ${bid_amount_usdc} is too far below minimum "
+            f"acceptable price of ${min_acceptable_price_usdc}."
+        )
+
+    return {
+        "bid_id": bid_id,
+        "bidder_agent_id": bidder_agent_id,
+        "service_id": service_id,
+        "decision": decision,
+        "counter_offer_usdc": counter_offer,
+        "reason": reason,
+        "budget_context": {
+            "monthly_budget": gtm_budget,
+            "spent_this_month": spent_month,
+            "remaining": budget_remaining,
+        },
+    }
