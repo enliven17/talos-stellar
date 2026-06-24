@@ -22,6 +22,15 @@ Stellar-based smart contracts for the Talos Protocol, built with Rust and the So
   - No consecutive hyphens allowed
   - Events: `name_registered`
 
+### 3. TalosGovernance
+- **Purpose**: DAO-based governance decisions for Talos entities
+- **Features**:
+  - Proposal creation with title, description, target budget, and status
+  - Proposal lifecycle: Pending → Active → Approved / Rejected / Executed
+  - Per-Talos proposal indexing
+  - Authorization: only proposer can update status before finalization
+  - Events: `proposal_created`, `proposal_status_updated`
+
 ## Prerequisites
 
 ```bash
@@ -45,6 +54,7 @@ pnpm build
 # Build individual contracts
 pnpm build:registry
 pnpm build:name-service
+pnpm build:governance
 ```
 
 ## Deploy to Stellar Testnet
@@ -65,6 +75,12 @@ soroban contract deploy \
   --source-account mykey \
   --network testnet
 
+# Deploy TalosGovernance
+soroban contract deploy \
+  --wasm target/wasm32-unknown-unknown/release/talos_governance.wasm \
+  --source-account mykey \
+  --network testnet
+
 # Initialize TalosRegistry (set protocol wallet)
 soroban contract invoke \
   --id <REGISTRY_CONTRACT_ID> \
@@ -73,6 +89,14 @@ soroban contract invoke \
   -- \
   initialize \
   --protocol_wallet <PROTOCOL_WALLET_ADDRESS>
+
+# Initialize TalosGovernance
+soroban contract invoke \
+  --id <GOVERNANCE_CONTRACT_ID> \
+  --source-account mykey \
+  --network testnet \
+  -- \
+  initialize
 ```
 
 ## Invoke Examples
@@ -111,6 +135,28 @@ soroban contract invoke \
   -- \
   resolve_name \
   --name "myagent"
+
+# Create a governance proposal
+soroban contract invoke \
+  --id <GOVERNANCE_CONTRACT_ID> \
+  --source-account mykey \
+  --network testnet \
+  -- \
+  create_proposal \
+  --talos_id 1 \
+  --title "Q3 Marketing Campaign" \
+  --description "Social media push for Q3" \
+  --target_budget 50000 \
+  --proposer <PROPOSER_ADDRESS>
+
+# Get a proposal
+soroban contract invoke \
+  --id <GOVERNANCE_CONTRACT_ID> \
+  --source-account mykey \
+  --network testnet \
+  -- \
+  get_proposal \
+  --proposal_id 1
 ```
 
 ## Project Structure
@@ -123,10 +169,14 @@ contracts/
 │   ├── Cargo.toml
 │   └── src/
 │       └── lib.rs                  # TalosRegistry contract
-└── talos_name_service/
+├── talos_name_service/
+│   ├── Cargo.toml
+│   └── src/
+│       └── lib.rs                  # TalosNameService contract
+└── talos_governance/
     ├── Cargo.toml
     └── src/
-        └── lib.rs                  # TalosNameService contract
+        └── lib.rs                  # TalosGovernance contract
 ```
 
 ## Testing

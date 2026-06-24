@@ -12,3 +12,7 @@ wasm = "target/wasm32-unknown-unknown/release/talos_registry.wasm"
 [contracts.talos_name_service]
 source = "talos_name_service"
 wasm = "target/wasm32-unknown-unknown/release/talos_name_service.wasm"
+
+[contracts.talos_governance]
+source = "talos_governance"
+wasm = "target/wasm32-unknown-unknown/release/talos_governance.wasm"

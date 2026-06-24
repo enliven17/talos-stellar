@@ -28,6 +28,7 @@ cargo build --target wasm32-unknown-unknown --release 2>&1 | tail -5
 
 REGISTRY_WASM="target/wasm32-unknown-unknown/release/talos_registry.wasm"
 NAME_SERVICE_WASM="target/wasm32-unknown-unknown/release/talos_name_service.wasm"
+GOVERNANCE_WASM="target/wasm32-unknown-unknown/release/talos_governance.wasm"
 
 if [[ ! -f "$REGISTRY_WASM" ]]; then
   echo "✗  Build failed — $REGISTRY_WASM not found"
@@ -53,9 +54,19 @@ NAME_SERVICE_ID=$(stellar contract deploy \
 echo "   TalosNameService: $NAME_SERVICE_ID"
 
 echo ""
+echo "▶  Deploying TalosGovernance to $NETWORK..."
+GOVERNANCE_ID=$(stellar contract deploy \
+  --wasm "$GOVERNANCE_WASM" \
+  --network "$NETWORK" \
+  --source "$SOURCE")
+
+echo "   TalosGovernance:  $GOVERNANCE_ID"
+
+echo ""
 echo "═══════════════════════════════════════════════════════"
 echo "  Add these to web/.env.local:"
 echo ""
 echo "  NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT=$REGISTRY_ID"
 echo "  NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT=$NAME_SERVICE_ID"
+echo "  NEXT_PUBLIC_TALOS_GOVERNANCE_CONTRACT=$GOVERNANCE_ID"
 echo "═══════════════════════════════════════════════════════"

@@ -7,6 +7,7 @@
     "build": "cargo build --target wasm32-unknown-unknown --release",
     "build:registry": "cargo build --target wasm32-unknown-unknown --release -p talos-registry",
     "build:name-service": "cargo build --target wasm32-unknown-unknown --release -p talos-name-service",
+    "build:governance": "cargo build --target wasm32-unknown-unknown --release -p talos-governance",
     "test": "cargo test",
     "deploy:testnet": "soroban contract deploy --wasm target/wasm32-unknown-unknown/release/talos_registry.wasm --network testnet",
     "deploy:name-service:testnet": "soroban contract deploy --wasm target/wasm32-unknown-unknown/release/talos_name_service.wasm --network testnet",
