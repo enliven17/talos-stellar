@@ -3,6 +3,8 @@ import { db } from "@/db";
 import { tlsTalos, tlsCommerceServices, tlsCommerceJobs, tlsRevenues } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { fulfillInstant } from "@/lib/fulfillment";
+import { OPERATOR_PUBLIC_KEY, USDC_ISSUER } from "@/lib/stellar-config";
+
 
 /**
  * POST /api/talos/:id/jobs
@@ -26,8 +28,8 @@ async function submitAndVerifyPayment(
   const txHash = result.hash;
 
   // Verify at least one operation is a USDC payment to the expected recipient
-  const USDC_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
-  const usdc = new Asset("USDC", USDC_ISSUER);
+  const USDC_ISSUER_VAL = USDC_ISSUER;
+  const usdc = new Asset("USDC", USDC_ISSUER_VAL);
   const ops = tx.operations as unknown as Array<{ type: string; asset?: { code: string; issuer: string }; destination?: string; amount?: string }>;
   const valid = ops.some(
     (op) =>
@@ -78,7 +80,7 @@ export async function POST(
     // Submit + verify payment if signedXdr provided; otherwise use legacy txHash
     let txHash: string;
     if (signedXdr) {
-      const OPERATOR = "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
+      const OPERATOR = OPERATOR_PUBLIC_KEY;
       const recipient = service.stellarPublicKey ?? talos.agentWalletAddress ?? OPERATOR;
       try {
         ({ txHash } = await submitAndVerifyPayment(signedXdr, String(service.price), recipient));

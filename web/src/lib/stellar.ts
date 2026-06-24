@@ -6,6 +6,8 @@
  * They are held server-side in environment variables or a secret manager.
  */
 
+import { USDC_ISSUER } from "./stellar-config";
+
 const STELLAR_NETWORK = process.env.STELLAR_NETWORK ?? "testnet";
 const STELLAR_HORIZON_URL =
   process.env.STELLAR_HORIZON_URL ?? "https://horizon-testnet.stellar.org";
@@ -15,7 +17,7 @@ const USDC_ISSUER_TESTNET = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZL
 const USDC_ISSUER_MAINNET = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
 
 export function getUSDCIssuer(): string {
-  return STELLAR_NETWORK === "mainnet" ? USDC_ISSUER_MAINNET : USDC_ISSUER_TESTNET;
+  return USDC_ISSUER;
 }
 
 export function getNetworkPassphrase(): string {
