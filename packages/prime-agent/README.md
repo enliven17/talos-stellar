@@ -59,3 +59,19 @@ _MIGRATIONS.append(
    pytest tests/
    ```
 3. Deploy. The database will automatically upgrade on startup.
+
+## Deployment
+
+### Running the Docker Container
+
+The container is configured to run as an unprivileged non-root user `talos` (UID 1000) for security hardening.
+
+To build and run the Docker container locally:
+```bash
+# Build the image
+docker build -t prime-agent .
+
+# Run the container (which automatically runs as user 'talos')
+docker run --rm prime-agent
+```
+
