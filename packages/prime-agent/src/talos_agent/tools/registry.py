@@ -143,6 +143,7 @@ def build_all_tools(
     from talos_agent.tools import internal as _internal_mod  # noqa: F401
     from talos_agent.tools import learning as _learning_mod  # noqa: F401
     from talos_agent.tools import web_api as _web_api_mod  # noqa: F401
+    from talos_agent.tools import discord as _discord_mod  # noqa: F401
 
     # Inject dependencies into tool modules
     _internal_mod._db = db
@@ -157,5 +158,15 @@ def build_all_tools(
     _stellar_mod._api = api
     _learning_mod._db = db
     _learning_mod._settings = settings
+    _discord_mod._settings = settings
+
+    if settings.discord_webhook_url:
+        from talos_agent.adapters.discord_adapter import DiscordAdapter
+        _discord_mod._adapter = DiscordAdapter(
+            webhook_url=settings.discord_webhook_url,
+            agent_name=settings.talos_id or "Talos Agent",
+            agent_avatar_url=settings.discord_agent_avatar_url or None,
+            bot_token=settings.discord_bot_token,
+        )
 
     return registry

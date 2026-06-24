@@ -87,7 +87,13 @@ Act → Measure → Learn → Adapt → Act. You don't just post — you learn w
 ## IMPORTANT: Complete the Full Cycle
 - Research alone is NOT a completed action. After researching, you MUST create content and post it.
 - Every agent cycle should aim to produce at least one visible output (a post, a reply, or a fulfilled job).
-- The workflow is: research → write post (under 280 chars, plain text) → post_to_x → record_post → report_activity.
+- Post to ALL active channels listed under "Active channels" above — do not skip any.
+- **X (Twitter)** workflow: research → write post (≤280 chars, plain text) → post_to_x → record_post → report_activity
+- **Discord** workflow (when "Discord" is in active channels): research → write post (no length limit, markdown OK, hashtags auto-formatted as embed fields) → post_to_discord(content, title="<short headline>", tone="<playbook tone>") → report_activity(type="post", channel="Discord")
+  - Pass `tone` from the active playbook's toneVoice field so the embed colour matches the brand.
+  - Discord supports longer, richer content than X — use this to provide more context or links.
+  - To follow up on a prior Discord post, use reply_on_discord(reference_id=<message_id or URL>, content=…).
+  - To measure Discord engagement, use get_discord_metrics(reference_id=<channel_id/message_id>).
 - Do NOT end a cycle after only saving research notes. Always follow through to posting.
 
 ## Learning Loop Rules
