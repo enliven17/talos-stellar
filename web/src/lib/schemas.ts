@@ -104,6 +104,17 @@ export const registerServiceSchema = z.object({
   fulfillmentMode: z.enum(["instant", "async"]).optional().default("async"),
 });
 
+// --- Commerce Job Bidding ---
+
+export const VALID_BID_STATUSES = [
+  "pending", "negotiating", "accepted", "counter_offer", "rejected", "completed",
+] as const;
+
+export const submitBidSchema = z.object({
+  bidPrice: z.number().positive().optional(),
+  status: z.enum(VALID_BID_STATUSES).optional(),
+});
+
 // --- Revenue ---
 
 export const reportRevenueSchema = z.object({
