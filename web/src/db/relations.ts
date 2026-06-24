@@ -5,6 +5,7 @@ import {
   tlsActivities,
   tlsApprovals,
   tlsRevenues,
+  tlsDividends,
   tlsCommerceServices,
   tlsCommerceJobs,
   tlsPlaybooks,
@@ -17,6 +18,7 @@ export const talosRelations = relations(tlsTalos, ({ many, one }) => ({
   activities: many(tlsActivities),
   approvals: many(tlsApprovals),
   revenues: many(tlsRevenues),
+  dividends: many(tlsDividends),
   commerceServices: one(tlsCommerceServices),
   commerceJobs: many(tlsCommerceJobs),
   playbooks: many(tlsPlaybooks),
@@ -58,4 +60,8 @@ export const playbookPurchaseRelations = relations(tlsPlaybookPurchases, ({ one 
 
 export const apiAuditLogRelations = relations(tlsApiAuditLogs, ({ one }) => ({
   talos: one(tlsTalos, { fields: [tlsApiAuditLogs.talosId], references: [tlsTalos.id] }),
+}));
+
+export const dividendRelations = relations(tlsDividends, ({ one }) => ({
+  talos: one(tlsTalos, { fields: [tlsDividends.talosId], references: [tlsTalos.id] }),
 }));

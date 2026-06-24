@@ -103,6 +103,16 @@ export const reportRevenueSchema = z.object({
   txHash: z.string().nullable().optional(),
 });
 
+// --- Dividends ---
+
+export const reportDividendSchema = z.object({
+  amount: z.number().positive(),
+  currency: z.string().optional().default("USDC"),
+  txHash: z.string().nullable().optional(),
+  totalPatrons: z.number().int().nonnegative().optional().default(0),
+  perShareAmount: z.number().nonnegative().optional().default(0),
+});
+
 // --- Status ---
 
 export const updateStatusSchema = z.object({

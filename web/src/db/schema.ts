@@ -152,6 +152,26 @@ export const tlsRevenues = pgTable(
   ],
 );
 
+// ─── Dividends ────────────────────────────────────────────────────
+
+export const tlsDividends = pgTable(
+  "tls_dividends",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    amount: numeric("amount", { precision: 18, scale: 6 }).notNull(),
+    currency: text("currency").notNull().default("USDC"),
+    txHash: text("txHash"),
+    totalPatrons: integer("totalPatrons").notNull().default(0),
+    perShareAmount: numeric("perShareAmount", { precision: 18, scale: 6 }).notNull().default("0"),
+    status: text("status").notNull().default("completed"),
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tls_dividends_talosId_createdAt_idx").on(t.talosId, t.createdAt),
+  ],
+);
+
 // ─── Commerce Service (Storefront) ────────────────────────────────
 
 export const tlsCommerceServices = pgTable(

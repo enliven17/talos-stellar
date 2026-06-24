@@ -22,6 +22,7 @@ export async function GET(
         activities: { orderBy: (a, { desc }) => [desc(a.createdAt)], limit: 20 },
         approvals: { orderBy: (a, { desc }) => [desc(a.createdAt)], limit: 10 },
         revenues: { orderBy: (r, { desc }) => [desc(r.createdAt)], limit: 20 },
+        dividends: { orderBy: (d, { desc }) => [desc(d.createdAt)], limit: 20 },
         commerceServices: true,
       },
     });
