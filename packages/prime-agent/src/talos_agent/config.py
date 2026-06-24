@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     x_password: str = ""
     x_email: str = ""
 
+    # Per-channel credential configs for additional adapters.
+    # Set as JSON in env: CHANNEL_CONFIGS={"linkedin": {"access_token": "..."}}
+    channel_configs: dict = Field(default_factory=dict, description="Per-channel credentials map")
+
     # Agent behaviour
     agent_cycle_interval: int = Field(default=30, description="Seconds between agent cycles")
     polling_interval: int = Field(default=10, description="Seconds between API polls")

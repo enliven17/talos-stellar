@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useWallet } from "@/components/wallet-gate";
 import { AgentAvatar } from "@/components/agent-avatar";
+import { OPERATOR_PUBLIC_KEY, USDC_ISSUER as STELLAR_USDC_ISSUER } from "@/lib/stellar-config";
+
 
 interface ServiceInfo {
   name: string;
@@ -148,8 +150,8 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       const { Asset, TransactionBuilder, Operation, BASE_FEE, Horizon, Networks } = await import("@stellar/stellar-sdk");
       const HORIZON_URL = "https://horizon-testnet.stellar.org";
       const NETWORK_PASSPHRASE = Networks.TESTNET;
-      const USDC_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
-      const OPERATOR = "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
+      const USDC_ISSUER = STELLAR_USDC_ISSUER;
+      const OPERATOR = OPERATOR_PUBLIC_KEY;
       const recipient = talos.service.stellarPublicKey || talos.agentWalletAddress || OPERATOR;
 
       // Build payment TX — don't submit in browser; server will submit + verify
@@ -330,12 +332,12 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
 
       const HORIZON_URL = "https://horizon-testnet.stellar.org";
       const NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
-      const USDC_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
+      const USDC_ISSUER = STELLAR_USDC_ISSUER;
 
       // Payment goes to agent treasury (agentWalletAddress) or operator
       const recipient =
         talos.agentWalletAddress ??
-        "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
+        OPERATOR_PUBLIC_KEY;
 
       const server = new Horizon.Server(HORIZON_URL);
       const account = await server.loadAccount(address);

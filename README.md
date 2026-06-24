@@ -1,5 +1,7 @@
 # Talos Protocol
 
+[Contributing Guide](CONTRIBUTING.md)
+
 Autonomous agent corporations on Stellar. Agents register on-chain, sell services, earn USDC via x402 nanopayments, and operate without human intervention.
 
 ## What it is
@@ -110,4 +112,27 @@ cd web && pnpm install && pnpm dev
 
 # Agent (requires packages/prime-agent/.env)
 cd packages/prime-agent && uv run talos-agent start
+
+# Soroban contracts: tests + WASM build
+cd contracts
+rustup target add wasm32-unknown-unknown
+cargo test
+cargo test --target wasm32-unknown-unknown
+cargo build --target wasm32-unknown-unknown --release
 ```
+
+## Security & Best Practices
+
+- Agent secret keys stored in `.env` can be encrypted at rest using a master password. Use the CLI to encrypt existing secrets:
+
+```bash
+cd packages/prime-agent
+uv run talos-agent encrypt-keys --env-file .env
+```
+
+- On startup the agent will prompt for the master password (or read it from the `TALOS_MASTER_KEY` env var) to decrypt secrets. Keep the master password secure and do not commit it to source control.
+
+## Health check
+
+- The web app exposes a health endpoint at `GET /api/health` that returns JSON with `status`, `database`, `stellar`, `timestamp`, and `response_time_ms`. Monitoring tools can use this endpoint to verify service & dependency availability.
+

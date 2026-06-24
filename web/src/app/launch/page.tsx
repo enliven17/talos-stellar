@@ -11,6 +11,8 @@ import {
   TALOS_REGISTRY_CONTRACT_ID,
   TALOS_NAME_SERVICE_CONTRACT_ID,
 } from "@/lib/soroban";
+import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
+
 
 const STEPS = [
   "Product",
@@ -165,7 +167,7 @@ function LaunchForm() {
         const registry = new Contract(TALOS_REGISTRY_CONTRACT_ID);
         const categoryCapitalized = form.category.charAt(0).toUpperCase() + form.category.slice(1);
 
-        const OPERATOR = "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
+        const OPERATOR = OPERATOR_PUBLIC_KEY;
 
         // Helper: build an ScMap entry (key as Symbol, value as ScVal)
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -261,6 +263,7 @@ function LaunchForm() {
           .addOperation(
             nameService.call(
               "register_name",
+              nativeToScVal(creatorAddr, { type: "address" }),
               nativeToScVal(onChainId, { type: "u32" }),
               nativeToScVal(form.agentName.toLowerCase().trim(), { type: "string" }),
             ),

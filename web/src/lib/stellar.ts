@@ -6,6 +6,8 @@
  * They are held server-side in environment variables or a secret manager.
  */
 
+import { USDC_ISSUER } from "./stellar-config";
+
 const STELLAR_NETWORK = process.env.STELLAR_NETWORK ?? "testnet";
 const STELLAR_HORIZON_URL =
   process.env.STELLAR_HORIZON_URL ?? "https://horizon-testnet.stellar.org";
@@ -15,7 +17,7 @@ const USDC_ISSUER_TESTNET = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZL
 const USDC_ISSUER_MAINNET = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
 
 export function getUSDCIssuer(): string {
-  return STELLAR_NETWORK === "mainnet" ? USDC_ISSUER_MAINNET : USDC_ISSUER_TESTNET;
+  return USDC_ISSUER;
 }
 
 export function getNetworkPassphrase(): string {
@@ -233,6 +235,28 @@ export async function recordApprovalOnChain(
   } catch (err) {
     console.error("[stellar] Failed to record approval on-chain:", err);
     return null;
+  }
+}
+
+/**
+ * Verify an ED25519 signature was produced by the private key corresponding
+ * to `publicKey`. `signature` is base64-encoded; `message` is the UTF-8 text
+ * the wallet signed. Returns false on any error (invalid key, bad base64, etc).
+ */
+export async function verifyStellarSignature(
+  publicKey: string,
+  message: string,
+  signature: string,
+): Promise<boolean> {
+  try {
+    const { Keypair } = await import("@stellar/stellar-sdk");
+    const keypair = Keypair.fromPublicKey(publicKey);
+    return keypair.verify(
+      Buffer.from(message, "utf8"),
+      Buffer.from(signature, "base64"),
+    );
+  } catch {
+    return false;
   }
 }
 

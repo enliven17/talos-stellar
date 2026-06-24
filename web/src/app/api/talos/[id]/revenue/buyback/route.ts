@@ -2,6 +2,8 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsRevenues } from "@/db/schema";
 import { and, eq, sum } from "drizzle-orm";
+import { OPERATOR_PUBLIC_KEY, USDC_ISSUER } from "@/lib/stellar-config";
+
 
 /**
  * POST /api/talos/:id/revenue/buyback
@@ -44,7 +46,7 @@ export async function POST(
     const talos = await db.query.tlsTalos.findFirst({ where: eq(tlsTalos.id, id) });
     if (!talos) return Response.json({ error: "TALOS not found" }, { status: 404 });
 
-    const OPERATOR = "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
+    const OPERATOR = OPERATOR_PUBLIC_KEY;
     if (requesterPublicKey !== talos.creatorPublicKey && requesterPublicKey !== OPERATOR) {
       return Response.json({ error: "Only creator or operator can trigger buyback" }, { status: 403 });
     }
@@ -60,7 +62,7 @@ export async function POST(
     }
 
     const [mitosCode, mitosIssuer] = assetCode.split(":");
-    const USDC_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
+    const USDC_ISSUER_VAL = USDC_ISSUER;
 
     const {
       Keypair, Asset, TransactionBuilder, Operation, BASE_FEE, Networks, Horizon,
@@ -70,7 +72,7 @@ export async function POST(
     const server = new Horizon.Server("https://horizon-testnet.stellar.org");
     const account = await server.loadAccount(operatorKeypair.publicKey());
 
-    const usdc = new Asset("USDC", USDC_ISSUER);
+    const usdc = new Asset("USDC", USDC_ISSUER_VAL);
     const mitos = new Asset(mitosCode, mitosIssuer);
 
     // Build TX: send USDC to burn address (issuer) + burn Mitos (send to issuer)
@@ -150,7 +152,7 @@ export async function GET(
         const [mitosCode, mitosIssuer] = talos.stellarAssetCode.split(":");
         const { Horizon } = await import("@stellar/stellar-sdk");
         const server = new Horizon.Server("https://horizon-testnet.stellar.org");
-        const OPERATOR = "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
+        const OPERATOR = OPERATOR_PUBLIC_KEY;
         const account = await server.loadAccount(OPERATOR);
         const balance = (account.balances as any[]).find(
           b => b.asset_code === mitosCode && b.asset_issuer === mitosIssuer,

@@ -1,0 +1,7 @@
+# CODEOWNERS for Talos Protocol
+# Rules for routing reviews of critical paths
+
+contracts/**                                            @enliven17
+web/src/lib/stellar*                                    @enliven17
+web/src/lib/auth.ts                                     @enliven17
+packages/prime-agent/src/talos_agent/payments/**        @enliven17

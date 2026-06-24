@@ -515,9 +515,10 @@ describe("GET /api/leaderboard", () => {
     expect(res.status).toBe(200);
 
     const body = await res.json();
-    expect(Array.isArray(body)).toBe(true);
+    expect(Array.isArray(body.data)).toBe(true);
+    expect(body).toHaveProperty("nextCursor");
 
-    const found = body.find((c: { id: string }) => c.id === talosId);
+    const found = body.data.find((c: { id: string }) => c.id === talosId);
     expect(found).toBeDefined();
     expect(found.name).toBe("E2E Test Agent");
     expect(typeof found.totalRevenue).toBe("number");
@@ -774,14 +775,48 @@ describe("GET /api/leaderboard", () => {
     expect(res.status).toBe(200);
 
     const body = await res.json();
-    expect(Array.isArray(body)).toBe(true);
+    expect(Array.isArray(body.data)).toBe(true);
+    expect(body).toHaveProperty("nextCursor");
 
-    const found = body.find((c: { id: string }) => c.id === talosId);
+    const found = body.data.find((c: { id: string }) => c.id === talosId);
     expect(found).toBeDefined();
     expect(typeof found.patronCount).toBe("number");
     expect(typeof found.activityCount).toBe("number");
     expect(typeof found.totalRevenue).toBe("number");
     expect(typeof found.marketCap).toBe("number");
+  });
+});
+
+describe("GET /api/leaderboard — cursor traversal", () => {
+  it("paginates correctly from page 1 to page 2", async () => {
+    // Fetch first page with limit=1
+    const res1 = await api("/api/leaderboard?limit=1");
+    expect(res1.status).toBe(200);
+
+    const page1 = await res1.json();
+    expect(Array.isArray(page1.data)).toBe(true);
+    expect(page1.data.length).toBeLessThanOrEqual(1);
+
+    // If no nextCursor, there's nothing to page through
+    if (!page1.nextCursor) return;
+
+    const id1 = page1.data[0]?.id;
+
+    // Fetch page 2 using cursor
+    const res2 = await api(`/api/leaderboard?limit=1&cursor=${encodeURIComponent(page1.nextCursor)}`);
+    expect(res2.status).toBe(200);
+
+    const page2 = await res2.json();
+    expect(Array.isArray(page2.data)).toBe(true);
+    expect(page2.data.length).toBeLessThanOrEqual(1);
+
+    // Page 2 should not contain the same item as page 1
+    if (id1 && page2.data.length > 0) {
+      expect(page2.data[0].id).not.toBe(id1);
+    }
+
+    // nextCursor should exist if more pages remain
+    expect(page2).toHaveProperty("nextCursor");
   });
 });
 
@@ -851,6 +886,47 @@ describe("GET /api/talos — pagination", () => {
 // ────────────────────────────────────────────
 // 8. Full lifecycle verification
 // ────────────────────────────────────────────
+
+// ────────────────────────────────────────────
+// 9. Financial Projection
+// ────────────────────────────────────────────
+
+describe("GET /api/talos/:id/financial-projection", () => {
+  it("returns financial projections with LLM analysis", async () => {
+    const res = await api(`/api/talos/${talosId}/financial-projection`);
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body.projection).toBeDefined();
+    expect(body.metadata).toBeDefined();
+    expect(body.metadata.talosId).toBe(talosId);
+    expect(body.metadata.generatedAt).toBeDefined();
+    expect(body.metadata.dataPoints).toBeDefined();
+
+    // Validate projection structure
+    expect(body.projection.expectedRevenue).toBeDefined();
+    expect(Array.isArray(body.projection.expectedRevenue.monthly)).toBe(true);
+    expect(Array.isArray(body.projection.expectedRevenue.quarterly)).toBe(true);
+    expect(typeof body.projection.expectedRevenue.yearly).toBe("number");
+
+    expect(body.projection.budgetSuggestions).toBeDefined();
+    expect(Array.isArray(body.projection.budgetSuggestions)).toBe(true);
+
+    expect(body.projection.roiEstimations).toBeDefined();
+    expect(typeof body.projection.roiEstimations.shortTerm).toBe("number");
+    expect(typeof body.projection.roiEstimations.mediumTerm).toBe("number");
+    expect(typeof body.projection.roiEstimations.longTerm).toBe("number");
+    expect(["low", "medium", "high"]).toContain(body.projection.roiEstimations.confidence);
+
+    expect(body.projection.insights).toBeDefined();
+    expect(Array.isArray(body.projection.insights)).toBe(true);
+  });
+
+  it("returns 404 for non-existent talos", async () => {
+    const res = await api("/api/talos/nonexistent_12345/financial-projection");
+    expect(res.status).toBe(404);
+  });
+});
 
 describe("Full lifecycle — verify talos detail reflects all writes", () => {
   it("detail endpoint shows activity, approval, and revenue", async () => {
