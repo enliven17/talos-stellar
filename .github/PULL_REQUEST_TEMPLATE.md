@@ -22,7 +22,7 @@ For any user interface changes, please add screenshots or screen recordings show
 
 ## Checklist
 
-- [ ] I have read the [CONTRIBUTING.md](file:///c:/Users/Wittig_Lyon/Desktop/wae/wave%206/talos-stellar/CONTRIBUTING.md) guide.
+- [ ] I have read the [CONTRIBUTING.md](../CONTRIBUTING.md) guide.
 - [ ] My code follows the style guidelines of this project.
 - [ ] I have commented my code, particularly in hard-to-understand areas.
 - [ ] I have made corresponding changes to the documentation.
