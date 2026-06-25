@@ -221,6 +221,10 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         except asyncio.TimeoutError:
             pass
 
+        # Import StellarKit for balance queries
+        from talos_agent.payments.stellar_kit import StellarKit
+        stellar_kit = StellarKit(api)
+
         while not shutdown_event.is_set():
             async with agent_lock:
                 if shutdown_event.is_set():
@@ -236,42 +240,83 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                     else:
                         console.print(f"[cyan]Found {len(loans_due)} loan(s) due for repayment.[/cyan]")
                         
-                        # Calculate total revenue available (from spending log - this is a simplified approach)
-                        # In a real implementation, this would query treasury balance or revenue tracking
-                        total_revenue = db.get_spending_period(30)  # This is spending, not revenue
-                        # For now, we'll use a placeholder - in production, this would query actual treasury income
-                        
-                        for loan in loans_due:
-                            loan_id = loan["id"]
-                            outstanding = loan["outstanding_amount"]
-                            platform = loan["platform"]
-                            
-                            # Check if we have enough to repay (simplified logic)
-                            # In production, this would check actual treasury balance
-                            available_balance = 1000.0  # Placeholder - should be from treasury API
-                            
-                            if available_balance >= outstanding:
-                                console.print(f"[green]Auto-repaying loan {loan_id}: {outstanding} {loan['loan_asset']} to {platform}[/green]")
-                                
-                                # Record the repayment
-                                db.record_repayment(loan_id, outstanding)
-                                
-                                # Report activity
-                                db.add_activity(
-                                    "loan_repayment",
-                                    f"Auto-repaid loan {loan_id}: {outstanding} {loan['loan_asset']} to {platform}",
-                                    "defi",
-                                )
-                                
-                                # In production, this would execute the actual transfer via API
-                                # result = await api.request_transfer(...)
-                            else:
-                                console.print(f"[yellow]Insufficient balance to repay loan {loan_id}. Outstanding: {outstanding}, Available: {available_balance}[/yellow]")
+                        # Check if auto-repay is enabled
+                        if not settings.auto_repay_loans:
+                            console.print("[yellow]AUTO_REPAY_LOANS is disabled. Skipping auto-repayment.[/yellow]")
+                            for loan in loans_due:
                                 db.add_activity(
                                     "loan_warning",
-                                    f"Loan {loan_id} due but insufficient funds. Outstanding: {outstanding}",
+                                    f"Loan {loan['id']} due but auto-repay disabled. Outstanding: {loan['outstanding_amount']} {loan['loan_asset']}",
                                     "defi",
                                 )
+                        else:
+                            # Get treasury balance from Stellar
+                            await stellar_kit.initialize()
+                            balance_result = await stellar_kit.get_balance()
+                            
+                            if "error" in balance_result:
+                                console.print(f"[red]Failed to query treasury balance: {balance_result['error']}[/red]")
+                                for loan in loans_due:
+                                    db.add_activity(
+                                        "loan_warning",
+                                        f"Loan {loan['id']} due but balance query failed. Outstanding: {loan['outstanding_amount']} {loan['loan_asset']}",
+                                        "defi",
+                                    )
+                            else:
+                                available_balance = balance_result.get("balance_xlm", 0)
+                                console.print(f"[dim]Treasury balance: {available_balance} XLM[/dim]")
+                                
+                                for loan in loans_due:
+                                    loan_id = loan["id"]
+                                    outstanding = loan["outstanding_amount"]
+                                    platform = loan["platform"]
+                                    loan_asset = loan["loan_asset"]
+                                    
+                                    # For now, we only support XLM loans. Add USDC support when needed.
+                                    if loan_asset != "XLM":
+                                        console.print(f"[yellow]Skipping loan {loan_id}: only XLM auto-repayment supported (asset: {loan_asset})[/yellow]")
+                                        db.add_activity(
+                                            "loan_warning",
+                                            f"Loan {loan_id} due but auto-repay only supports XLM (asset: {loan_asset})",
+                                            "defi",
+                                        )
+                                        continue
+                                    
+                                    if available_balance >= outstanding:
+                                        console.print(f"[green]Auto-repaying loan {loan_id}: {outstanding} XLM to {platform}[/green]")
+                                        
+                                        # Execute the actual transfer via API
+                                        transfer_result = await api.request_transfer(
+                                            to_account=platform,  # In production, this should be the lending platform's address
+                                            amount=outstanding,
+                                            currency="XLM",
+                                        )
+                                        
+                                        if transfer_result and "error" not in transfer_result:
+                                            # Record the repayment only if transfer succeeded
+                                            db.record_repayment(loan_id, outstanding, tx_hash=transfer_result.get("tx_hash"))
+                                            
+                                            # Report activity
+                                            db.add_activity(
+                                                "loan_repayment",
+                                                f"Auto-repaid loan {loan_id}: {outstanding} XLM to {platform}. TX: {transfer_result.get('tx_hash', 'pending')}",
+                                                "defi",
+                                            )
+                                            console.print(f"[green]Transfer successful for loan {loan_id}[/green]")
+                                        else:
+                                            console.print(f"[red]Transfer failed for loan {loan_id}: {transfer_result.get('error', 'Unknown error')}[/red]")
+                                            db.add_activity(
+                                                "loan_error",
+                                                f"Auto-repay failed for loan {loan_id}: {transfer_result.get('error', 'Unknown error')}",
+                                                "defi",
+                                            )
+                                    else:
+                                        console.print(f"[yellow]Insufficient balance to repay loan {loan_id}. Outstanding: {outstanding}, Available: {available_balance}[/yellow]")
+                                        db.add_activity(
+                                            "loan_warning",
+                                            f"Loan {loan_id} due but insufficient funds. Outstanding: {outstanding}, Available: {available_balance}",
+                                            "defi",
+                                        )
                     
                     db.update_schedule("loan_repayment")
                     console.print("[bold cyan]Loan repayment cycle complete.[/bold cyan]")
