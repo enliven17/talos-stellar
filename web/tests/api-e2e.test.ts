@@ -65,7 +65,6 @@ describe("POST /api/talos — create", () => {
     });
     expect(res.status).toBe(400);
   });
-
 });
 
 describe("GET /api/talos — list", () => {
@@ -79,7 +78,6 @@ describe("GET /api/talos — list", () => {
     const found = body.find((c: { id: string }) => c.id === talosId);
     expect(found).toBeDefined();
     expect(found.name).toBe("E2E Test Agent");
-    // apiKey should NOT be exposed in list
     expect(found.apiKey).toBeUndefined();
   });
 });
@@ -254,7 +252,6 @@ describe("POST /api/talos/:id/patrons — become patron", () => {
   });
 
   it("rejects when below minimum threshold", async () => {
-    // Default min = totalSupply(500_000) * 0.001 = 500
     const res = await api(`/api/talos/${talosId}/patrons`, {
       method: "POST",
       body: JSON.stringify({ walletAddress: "0xE2E_PATRON", pulseAmount: 100 }),
@@ -345,7 +342,7 @@ describe("DELETE /api/talos/:id/patrons — withdraw patron", () => {
       method: "POST",
       body: JSON.stringify({ walletAddress: "0xE2E_PATRON", pulseAmount: 2000 }),
     });
-    expect(res.status).toBe(200); // re-activation returns 200, not 201
+    expect(res.status).toBe(200);
 
     const body = await res.json();
     expect(body.status).toBe("active");
@@ -762,10 +759,6 @@ describe("GET /api/playbooks/my — my playbooks", () => {
 });
 
 // ────────────────────────────────────────────
-// 8. Full lifecycle verification
-// ────────────────────────────────────────────
-
-// ────────────────────────────────────────────
 // 7.5 Read endpoints (dashboard, leaderboard, activity, services)
 // ────────────────────────────────────────────
 
@@ -787,9 +780,25 @@ describe("GET /api/leaderboard", () => {
   });
 });
 
+describe("GET /api/leaderboard — malformed cursor", () => {
+  it("returns 400 for a completely malformed cursor", async () => {
+    const res = await api("/api/leaderboard?cursor=garbage");
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body).toHaveProperty("error");
+  });
+
+  it("returns 400 for valid base64 that decodes to wrong shape", async () => {
+    // eyJub3RfYW5fYXJyYXkiOnRydWV9 == {"not_an_array":true}
+    const res = await api("/api/leaderboard?cursor=eyJub3RfYW5fYXJyYXkiOnRydWV9");
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body).toHaveProperty("error");
+  });
+});
+
 describe("GET /api/leaderboard — cursor traversal", () => {
   it("paginates correctly from page 1 to page 2", async () => {
-    // Fetch first page with limit=1
     const res1 = await api("/api/leaderboard?limit=1");
     expect(res1.status).toBe(200);
 
@@ -797,12 +806,10 @@ describe("GET /api/leaderboard — cursor traversal", () => {
     expect(Array.isArray(page1.data)).toBe(true);
     expect(page1.data.length).toBeLessThanOrEqual(1);
 
-    // If no nextCursor, there's nothing to page through
     if (!page1.nextCursor) return;
 
     const id1 = page1.data[0]?.id;
 
-    // Fetch page 2 using cursor
     const res2 = await api(`/api/leaderboard?limit=1&cursor=${encodeURIComponent(page1.nextCursor)}`);
     expect(res2.status).toBe(200);
 
@@ -810,12 +817,10 @@ describe("GET /api/leaderboard — cursor traversal", () => {
     expect(Array.isArray(page2.data)).toBe(true);
     expect(page2.data.length).toBeLessThanOrEqual(1);
 
-    // Page 2 should not contain the same item as page 1
     if (id1 && page2.data.length > 0) {
       expect(page2.data[0].id).not.toBe(id1);
     }
 
-    // nextCursor should exist if more pages remain
     expect(page2).toHaveProperty("nextCursor");
   });
 });
@@ -876,16 +881,11 @@ describe("GET /api/talos — pagination", () => {
     expect(body.data).toBeDefined();
     expect(Array.isArray(body.data)).toBe(true);
     expect(body.data.length).toBeLessThanOrEqual(1);
-    // nextCursor may or may not exist depending on total count
     if (body.data.length === 1) {
       expect(typeof body.nextCursor).toBe("string");
     }
   });
 });
-
-// ────────────────────────────────────────────
-// 8. Full lifecycle verification
-// ────────────────────────────────────────────
 
 // ────────────────────────────────────────────
 // 9. Financial Projection
@@ -903,7 +903,6 @@ describe("GET /api/talos/:id/financial-projection", () => {
     expect(body.metadata.generatedAt).toBeDefined();
     expect(body.metadata.dataPoints).toBeDefined();
 
-    // Validate projection structure
     expect(body.projection.expectedRevenue).toBeDefined();
     expect(Array.isArray(body.projection.expectedRevenue.monthly)).toBe(true);
     expect(Array.isArray(body.projection.expectedRevenue.quarterly)).toBe(true);
@@ -935,14 +934,12 @@ describe("Full lifecycle — verify talos detail reflects all writes", () => {
 
     const body = await res.json();
 
-    // Activity we created
     expect(body.activities.length).toBeGreaterThanOrEqual(1);
     const activity = body.activities.find(
       (a: { content: string }) => a.content === "E2E test post on X"
     );
     expect(activity).toBeDefined();
 
-    // Approval we created and approved
     expect(body.approvals.length).toBeGreaterThanOrEqual(1);
     const approval = body.approvals.find(
       (a: { id: string }) => a.id === approvalId
@@ -950,7 +947,6 @@ describe("Full lifecycle — verify talos detail reflects all writes", () => {
     expect(approval).toBeDefined();
     expect(approval.status).toBe("approved");
 
-    // Revenue we recorded
     expect(body.revenues.length).toBeGreaterThanOrEqual(1);
     const revenue = body.revenues.find(
       (r: { txHash: string | null }) => r.txHash === "0xE2E_TEST_TX"
