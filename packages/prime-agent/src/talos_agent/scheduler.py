@@ -49,6 +49,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
     from talos_agent.agent.loop import agent_loop
     from talos_agent.agent.prompt import build_learning_prompt
     from talos_agent.browser.session import BrowserSession
+    from talos_agent.payments.stellar_kit import StellarKit
     from talos_agent.tools.registry import build_all_tools
 
     # Start browser session
@@ -59,6 +60,10 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
     # Build tools
     tools = build_all_tools(api=api, db=db, browser=browser, settings=settings)
     console.print(f"[green]Registered {len(tools)} tools.[/green]")
+
+    # Initialize StellarKit for balance checks
+    stellar = StellarKit(api)
+    await stellar.initialize()
 
     # Shutdown handler — force-exit on second signal
     shutdown_event = asyncio.Event()
@@ -210,12 +215,70 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             except asyncio.TimeoutError:
                 pass
 
+    async def dividend_distribution_task():
+        """Periodically check USDC balance and distribute dividends to patrons when threshold is met."""
+        distribution_interval = settings.dividend_distribution_interval
+
+        # Wait for the first interval before starting
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=distribution_interval)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+        while not shutdown_event.is_set():
+            try:
+                # Get agent's Stellar account ID from talos config
+                stellar_account_id = talos_config.get("stellarAccountId", "")
+                if not stellar_account_id:
+                    console.print("[dim yellow]No Stellar account ID configured for dividend distribution[/dim yellow]")
+                else:
+                    # Check USDC balance
+                    balance_result = await stellar.get_token_balance(stellar_account_id, "USDC")
+                    if "error" not in balance_result:
+                        usdc_balance = balance_result.get("balance", 0)
+                        console.print(f"[dim]USDC balance check: {usdc_balance} USDC (threshold: {settings.dividend_usdc_threshold})[/dim]")
+
+                        # Check if balance exceeds threshold
+                        if usdc_balance >= float(settings.dividend_usdc_threshold):
+                            console.print(f"[bold green]USDC balance {usdc_balance} exceeds threshold {settings.dividend_usdc_threshold}. Initiating dividend distribution...[/bold green]")
+
+                            # Get distribution preview
+                            preview = await api.get_distribution_preview(settings.talos_id)
+                            if preview and "error" not in preview:
+                                console.print(f"[cyan]Distribution preview: {preview.get('distributableAmount', 0)} USDC to {len(preview.get('breakdown', []))} patrons[/cyan]")
+
+                                # Execute distribution using agent's public key as requester
+                                result = await api.distribute_dividends(
+                                    settings.talos_id,
+                                    requester_public_key=stellar_account_id
+                                )
+
+                                if result and "error" not in result:
+                                    console.print(f"[bold green]Dividend distribution successful: {result.get('message', 'Distribution complete')}[/bold green]")
+                                    db.update_schedule("dividend_distribution")
+                                else:
+                                    console.print(f"[red]Dividend distribution failed: {result.get('error', 'Unknown error') if result else 'No result'}[/red]")
+                            else:
+                                console.print(f"[yellow]Failed to get distribution preview: {preview.get('error', 'Unknown error') if preview else 'No preview'}[/yellow]")
+                    else:
+                        console.print(f"[dim red]USDC balance check failed: {balance_result.get('error')}[/dim red]")
+            except Exception as e:
+                console.print(f"[red]Dividend distribution task error: {e}[/red]")
+
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=distribution_interval)
+                break
+            except asyncio.TimeoutError:
+                pass
+
     tasks = [
         asyncio.create_task(agent_cycle_task(), name="agent_cycle"),
         asyncio.create_task(polling_task(), name="polling"),
         asyncio.create_task(heartbeat_task(), name="heartbeat"),
         asyncio.create_task(activity_flush_task(), name="activity_flush"),
         asyncio.create_task(learning_cycle_task(), name="learning_cycle"),
+        asyncio.create_task(dividend_distribution_task(), name="dividend_distribution"),
     ]
 
     try:
