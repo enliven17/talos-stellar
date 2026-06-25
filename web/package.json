@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:unit": "vitest run tests/health.test.ts",
+    "test:unit": "vitest run tests/health.test.ts tests/async-jobs-revenue.unit.test.ts tests/sse.test.ts",
     "test:e2e": "vitest run tests/api-e2e.test.ts",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
