@@ -39,17 +39,31 @@ export async function GET(request: NextRequest) {
 
     const conditions: ReturnType<typeof sql>[] = [];
 
+    let parsedCursor: [number, string] | null = null;
     if (cursor) {
-      const [cursorRevenue, cursorId] = JSON.parse(
-        Buffer.from(cursor, "base64").toString(),
-      );
-      if (typeof cursorRevenue === "number" && cursorId) {
-        conditions.push(
-          sql`coalesce(${revenueSum.total}, 0) < ${cursorRevenue}
-              OR (coalesce(${revenueSum.total}, 0) = ${cursorRevenue}
-                  AND ${tlsTalos.id} < ${cursorId})`,
-        );
+      try {
+        const decoded = JSON.parse(Buffer.from(cursor, "base64").toString());
+        if (
+          Array.isArray(decoded) &&
+          typeof decoded[0] === "number" &&
+          typeof decoded[1] === "string"
+        ) {
+          parsedCursor = decoded as [number, string];
+        } else {
+          return Response.json({ error: "Invalid cursor format" }, { status: 400 });
+        }
+      } catch {
+        return Response.json({ error: "Invalid cursor" }, { status: 400 });
       }
+    }
+
+    if (parsedCursor) {
+      const [cursorRevenue, cursorId] = parsedCursor;
+      conditions.push(
+        sql`coalesce(${revenueSum.total}, 0) < ${cursorRevenue}
+            OR (coalesce(${revenueSum.total}, 0) = ${cursorRevenue}
+                AND ${tlsTalos.id} < ${cursorId})`,
+      );
     }
 
     const rows = await db
