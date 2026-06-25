@@ -11,36 +11,39 @@ export interface CreateTalosParams {
   toneVoice?: string;
   approvalThreshold?: number;
   gtmBudget?: number;
-  creatorAddress?: string;
-  walletAddress?: string;
+  creatorPublicKey?: string;
+  walletPublicKey?: string;
   onChainId?: number;
   agentName?: string;
   initialPrice?: number;
   minPatronPulse?: number;
   stellarAssetCode?: string;
+  tokenSymbol?: string;
   serviceName?: string;
   serviceDescription?: string;
   servicePrice?: number;
 }
 
 export interface ReportActivityParams {
-  type: string;
+  type: "post" | "research" | "reply" | "commerce" | "approval";
   content: string;
   channel: string;
+  status?: "completed" | "pending" | "failed";
 }
 
 export interface ReportRevenueParams {
   amount: number;
-  currency?: string;
-  source: string;
+  currency?: "USDC" | "XLM" | "USDT";
+  source: "commerce" | "direct" | "subscription";
   txHash?: string;
 }
 
 export interface CreateApprovalParams {
-  type: string;
+  type: "transaction" | "strategy" | "policy" | "channel";
   title: string;
   description?: string;
   amount?: number;
+  proposerPublicKey?: string;
 }
 
 export interface RegisterServiceParams {
@@ -59,12 +62,33 @@ export interface SignPaymentParams {
 
 export interface DiscoverServicesParams {
   category?: string;
-  target?: string;
+  self?: string;
+  cursor?: string;
+  limit?: number;
 }
 
 export interface PurchaseServiceParams {
   paymentHeader: string;
   payload?: Record<string, unknown>;
+}
+
+export interface CreatePlaybookParams {
+  title: string;
+  category: string;
+  channel: string;
+  description: string;
+  price: number;
+  tags?: string[];
+  content?: Record<string, unknown>;
+  impressions?: number;
+  engagementRate?: number;
+  conversions?: number;
+  periodDays?: number;
+}
+
+export interface TransferParams {
+  to: string;
+  amount: number;
 }
 
 // ── Response types ───────────────────────────────────────────────
@@ -78,6 +102,7 @@ export interface Talos {
   description: string;
   status: string;
   stellarAssetCode?: string;
+  tokenSymbol?: string;
   pulsePrice: string;
   totalSupply: number;
   creatorShare: number;
@@ -96,6 +121,8 @@ export interface Talos {
   creatorPublicKey?: string;
   investorPublicKey?: string;
   treasuryPublicKey?: string;
+  agentWalletId?: string;
+  agentWalletAddress?: string;
   createdAt: string;
   updatedAt: string;
   patrons?: number;
@@ -107,6 +134,7 @@ export interface TalosDetail extends Talos {
   approvals?: Approval[];
   revenues?: Revenue[];
   commerceServices?: CommerceService[];
+  patronsList?: Patron[];
 }
 
 export interface TalosCreated extends Talos {
@@ -133,6 +161,7 @@ export interface Approval {
   status: string;
   decidedAt?: string;
   decidedBy?: string;
+  txHash?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -157,6 +186,8 @@ export interface CommerceService {
   stellarPublicKey: string;
   chains: string[];
   fulfillmentMode: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface CommerceJob {
@@ -168,14 +199,68 @@ export interface CommerceJob {
   result?: unknown;
   status: string;
   amount: string;
+  paymentSig?: string;
+  txHash?: string;
   createdAt: string;
+  updatedAt: string;
 }
 
-export interface PaymentDetails {
-  price: number;
-  payee: string;
-  token: string;
-  network: string;
+export interface Patron {
+  id: string;
+  talosId: string;
+  stellarPublicKey: string;
+  role: string;
+  pulseAmount: number;
+  share: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Playbook {
+  id: string;
+  talosId: string;
+  talosName?: string;
+  title: string;
+  category: string;
+  channel: string;
+  description: string;
+  price: string;
+  currency: string;
+  version: number;
+  tags: string[];
+  status: string;
+  content?: unknown;
+  impressions: number;
+  engagementRate: string;
+  conversions: number;
+  periodDays: number;
+  purchases?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LeaderboardEntry {
+  id: string;
+  name: string;
+  category: string;
+  status: string;
+  pulsePrice: string;
+  totalSupply: number;
+  patronCount: number;
+  activityCount: number;
+  totalRevenue: number;
+  marketCap: number;
+}
+
+export interface PaginatedResponse<T> {
+  data: T[];
+  nextCursor: string | null;
+}
+
+export interface Wallet {
+  agentWalletId: string;
+  agentWalletAddress: string;
 }
 
 export interface SignedPayment {
@@ -185,7 +270,10 @@ export interface SignedPayment {
   amount: string;
 }
 
-export interface Wallet {
-  walletId: string;
-  publicKey: string;
+export interface TransferResponse {
+  status: string;
+  currency: string;
+  to: string;
+  amount: number;
+  txHash: string;
 }
