@@ -23,10 +23,13 @@ pub enum DataKey {
 }
 
 // ── Events ──────────────────────────────────────────────────────────
+//
+// Event schema (topics → data):
+//   name_reg : (symbol, talos_id: u32) → (name: String, owner: Address)
 
-fn emit_name_registered(env: &Env, talos_id: u32, name: String) {
+fn emit_name_registered(env: &Env, talos_id: u32, name: String, owner: Address) {
     let topics = (symbol_short!("name_reg"), talos_id);
-    env.events().publish(topics, name);
+    env.events().publish(topics, (name, owner));
 }
 
 // ── Validation ──────────────────────────────────────────────────────
@@ -75,7 +78,7 @@ impl TalosNameService {
             .persistent()
             .set(&DataKey::TalosName(talos_id), &name);
 
-        emit_name_registered(&e, talos_id, name);
+        emit_name_registered(&e, talos_id, name, owner);
     }
 
     /// Resolve a name to a Talos ID.
@@ -115,8 +118,8 @@ impl TalosNameService {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, MockAuth, MockAuthInvoke},
-        Address, Env, IntoVal,
+        testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
+        Address, Env, IntoVal, Symbol, TryFromVal,
     };
 
     fn setup() -> (Env, Address) {
@@ -234,5 +237,32 @@ mod tests {
             .try_register_name(&owner, &1, &invalid_name);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn register_name_emits_name_reg_event() {
+        let (env, contract_id) = setup();
+        let client = TalosNameServiceClient::new(&env, &contract_id);
+        let owner = Address::generate(&env);
+        let name = s(&env, "marketbot");
+
+        register_name_with_auth(&env, &client, &contract_id, &owner, 7, &name);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (addr, topics, data) = events.get(0).unwrap();
+
+        assert_eq!(addr, contract_id);
+        assert_eq!(topics.len(), 2);
+
+        let t0: Symbol = TryFromVal::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+        assert_eq!(t0, symbol_short!("name_reg"));
+        let t1: u32 = TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+        assert_eq!(t1, 7u32);
+
+        let (got_name, got_owner): (String, Address) =
+            TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(got_name, name);
+        assert_eq!(got_owner, owner);
     }
 }
