@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 doctest = false
 
 [dependencies]
@@ -16,3 +16,4 @@ soroban-sdk = { workspace = true, features = ["testutils"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 soroban-sdk = { workspace = true, features = ["alloc"] }
+
