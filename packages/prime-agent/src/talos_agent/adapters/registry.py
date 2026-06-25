@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities
+from talos_agent.adapters.base import BaseSocialAdapter
 
 
 class AdapterRegistry:

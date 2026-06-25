@@ -233,7 +233,7 @@ async def evolve_strategy() -> dict:
                 "role": "user",
                 "content": json.dumps(
                     {
-                        "learnings": [{"category": l["category"], "insight": l["insight"], "confidence": l["confidence"]} for l in learnings],
+                        "learnings": [{"category": learning["category"], "insight": learning["insight"], "confidence": learning["confidence"]} for learning in learnings],
                         "top_performing_content": [{"content": t["content"][:120], "likes": t["likes"], "reposts": t["reposts"]} for t in top],
                         "audience_segments": audience,
                         "performance_summary_14d": summary,
@@ -262,8 +262,8 @@ async def evolve_strategy() -> dict:
         _db.apply_playbook(row["id"])
 
     # Mark learnings as applied
-    for l in learnings:
-        _db.mark_learning_applied(l["id"])
+    for learning in learnings:
+        _db.mark_learning_applied(learning["id"])
 
     return {
         "status": "evolved",

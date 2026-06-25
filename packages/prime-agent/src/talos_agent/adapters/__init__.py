@@ -2,5 +2,12 @@
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
 from talos_agent.adapters.registry import AdapterRegistry
+from talos_agent.adapters.telegram import TelegramAdapter
 
-__all__ = ["BaseSocialAdapter", "ChannelCapabilities", "PublishResult", "AdapterRegistry"]
+__all__ = [
+    "BaseSocialAdapter",
+    "ChannelCapabilities",
+    "PublishResult",
+    "AdapterRegistry",
+    "TelegramAdapter",
+]

@@ -68,8 +68,12 @@ class Settings(BaseSettings):
     x_password: str = ""
     x_email: str = ""
 
+    # Telegram
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
     # Per-channel credential configs for additional adapters.
-    # Set as JSON in env: CHANNEL_CONFIGS={"linkedin": {"access_token": "..."}}
+    # Set as JSON in env: CHANNEL_CONFIGS={"telegram": {"bot_token": "...", "chat_id": "@channel"}}
     channel_configs: dict = Field(default_factory=dict, description="Per-channel credentials map")
 
     # Agent behaviour

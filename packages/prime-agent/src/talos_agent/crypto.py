@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import os
-from typing import Tuple
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import hashes

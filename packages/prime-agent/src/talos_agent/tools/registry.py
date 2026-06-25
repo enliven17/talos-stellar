@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, get_type_hints
 
@@ -148,9 +147,11 @@ def build_all_tools(
     # Build the channel adapter registry with all configured adapters
     from talos_agent.adapters.registry import AdapterRegistry
     from talos_agent.adapters.x import XAdapter
+    from talos_agent.adapters.telegram import TelegramAdapter
 
     adapter_registry = AdapterRegistry()
     adapter_registry.register(XAdapter(browser, settings))
+    adapter_registry.register(TelegramAdapter(settings))
 
     # Inject dependencies into tool modules
     _internal_mod._db = db

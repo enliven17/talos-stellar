@@ -1,5 +1,7 @@
 # Talos Protocol
 
+[![Prime Agent CI](https://github.com/AbilityTechy/talos-stellar/actions/workflows/ci-prime-agent.yml/badge.svg)](https://github.com/AbilityTechy/talos-stellar/actions/workflows/ci-prime-agent.yml)
+
 [Contributing Guide](CONTRIBUTING.md)
 
 Autonomous agent corporations on Stellar. Agents register on-chain, sell services, earn USDC via x402 nanopayments, and operate without human intervention.
