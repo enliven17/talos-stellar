@@ -19,6 +19,33 @@ jobs:
       run:
         working-directory: web
 
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: talos_test
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/talos_test
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/talos_test
+      STELLAR_NETWORK: testnet
+      STELLAR_HORIZON_URL: https://horizon-testnet.stellar.org
+      STELLAR_RPC_URL: https://soroban-testnet.stellar.org
+      NEXT_PUBLIC_STELLAR_NETWORK: testnet
+      NEXT_PUBLIC_STELLAR_RPC_URL: https://soroban-testnet.stellar.org
+      STELLAR_OPERATOR_SECRET_KEY: SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+      NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT: CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+      NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT: CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
     steps:
       - uses: actions/checkout@v4
 
@@ -49,6 +76,30 @@ jobs:
 
       - name: Lint
         run: pnpm lint
+
+      - name: Push database schema
+        run: pnpm db:push
+
+      - name: Start Next.js development server
+        run: pnpm dev > next-dev.log 2>&1 &
+
+      - name: Wait for server to start
+        run: |
+          for i in {1..60}; do
+            if curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/health | grep -qE "200|503"; then
+              echo "Server is up!"
+              exit 0
+            fi
+            echo "Waiting for server to start..."
+            sleep 2
+          done
+          echo "Server failed to start! Printing logs:"
+          cat next-dev.log
+          exit 1
+        shell: bash
+
+      - name: Run E2E and Unit Tests
+        run: pnpm test
 
       # Deploy to Vercel (main branch only, using Vercel CLI)
       - name: Install Vercel CLI
