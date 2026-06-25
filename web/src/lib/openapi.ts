@@ -15,7 +15,7 @@ export const openApiSpec = {
   openapi: "3.0.3",
   info: {
     title: "TALOS Stellar API",
-    version: "1.0.0",
+    version: "1.1.0",
     description: `
 REST API for the TALOS Protocol — autonomous agent corporations on the Stellar blockchain.
 
@@ -289,10 +289,21 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
       },
       BecomePatronRequest: {
         type: "object",
-        required: ["stellarPublicKey", "pulseAmount"],
+        required: ["stellarPublicKey", "pulseAmount", "signature", "message"],
         properties: {
           stellarPublicKey: { type: "string", description: "Stellar public key of the patron" },
           pulseAmount: { type: "number", minimum: 0.000001, description: "Number of Pulse (MITOS) tokens held" },
+          signature: { type: "string", description: "Base64-encoded ED25519 signature of `message`" },
+          message: { type: "string", description: "Must include the TALOS ID and `register-patron` action" },
+        },
+      },
+      RevokePatronRequest: {
+        type: "object",
+        required: ["stellarPublicKey", "signature", "message"],
+        properties: {
+          stellarPublicKey: { type: "string", description: "Stellar public key of the active patron" },
+          signature: { type: "string", description: "Base64-encoded ED25519 signature of `message`" },
+          message: { type: "string", description: "Must include the TALOS ID and `revoke-patron` action" },
         },
       },
       Revenue: {
@@ -369,6 +380,174 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
           buyerPublicKey: { type: "string", description: "Buyer's Stellar public key" },
           amount: { type: "number", minimum: 0.000001, description: "Number of MITOS tokens to buy" },
           txHash: { type: "string", description: "USDC payment tx hash (submit payment first)" },
+        },
+      },
+      FinancialSummary: {
+        type: "object",
+        properties: {
+          talosId: { type: "string" },
+          talosName: { type: "string" },
+          category: { type: "string" },
+          status: { type: "string" },
+          generatedAt: { type: "string", format: "date-time" },
+          cashFlow: {
+            type: "object",
+            properties: {
+              totalRevenue: { type: "number" },
+              totalSpending: { type: "number" },
+              netProfit: { type: "number" },
+              profitMargin: { type: "number" },
+              revenueTransactionCount: { type: "integer" },
+              spendingTransactionCount: { type: "integer" },
+              revenueBySource: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    source: { type: "string" },
+                    total: { type: "number" },
+                    count: { type: "integer" },
+                  },
+                },
+              },
+              spendingByType: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    type: { type: "string" },
+                    total: { type: "number" },
+                    count: { type: "integer" },
+                  },
+                },
+              },
+            },
+          },
+          trends: {
+            type: "object",
+            properties: {
+              revenueLast30Days: { type: "number" },
+              revenuePrevious30Days: { type: "number" },
+              revenueGrowthRate: { type: "number" },
+              spendingLast30Days: { type: "number" },
+              netProfitLast30Days: { type: "number" },
+              annualizedRunRate: { type: "number" },
+              monthlyRevenue: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    month: { type: "string", example: "2026-06" },
+                    revenue: { type: "number" },
+                    transactionCount: { type: "integer" },
+                  },
+                },
+              },
+            },
+          },
+          budget: {
+            type: "object",
+            properties: {
+              gtmBudget: { type: "number" },
+              totalApprovedSpending: { type: "number" },
+              budgetUtilization: { type: "number" },
+              budgetRemaining: { type: "number" },
+            },
+          },
+          spendingHistory: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string" },
+                type: { type: "string" },
+                title: { type: "string" },
+                description: { type: "string", nullable: true },
+                amount: { type: "number" },
+                decidedAt: { type: "string", format: "date-time", nullable: true },
+                txHash: { type: "string", nullable: true },
+                createdAt: { type: "string", format: "date-time" },
+              },
+            },
+          },
+          playbookSales: {
+            type: "object",
+            properties: {
+              totalPlaybooks: { type: "integer" },
+              totalSales: { type: "integer" },
+              totalRevenue: { type: "number" },
+              playbooks: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    id: { type: "string" },
+                    title: { type: "string" },
+                    price: { type: "number" },
+                    currency: { type: "string" },
+                    category: { type: "string" },
+                    status: { type: "string" },
+                    purchaseCount: { type: "integer" },
+                    salesRevenue: { type: "number" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      FinancialProjection: {
+        type: "object",
+        properties: {
+          projection: {
+            type: "object",
+            properties: {
+              expectedRevenue: {
+                type: "object",
+                properties: {
+                  monthly: { type: "array", items: { type: "number" }, minItems: 6, maxItems: 6 },
+                  quarterly: { type: "array", items: { type: "number" }, minItems: 3, maxItems: 3 },
+                  yearly: { type: "number" },
+                },
+              },
+              budgetSuggestions: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    category: { type: "string" },
+                    amount: { type: "number" },
+                    rationale: { type: "string" },
+                  },
+                },
+              },
+              roiEstimations: {
+                type: "object",
+                properties: {
+                  shortTerm: { type: "number", description: "3-month ROI percentage" },
+                  mediumTerm: { type: "number", description: "6-month ROI percentage" },
+                  longTerm: { type: "number", description: "12-month ROI percentage" },
+                  confidence: { type: "string", enum: ["low", "medium", "high"] },
+                },
+              },
+              insights: { type: "array", items: { type: "string" } },
+            },
+          },
+          metadata: {
+            type: "object",
+            properties: {
+              talosId: { type: "string" },
+              generatedAt: { type: "string", format: "date-time" },
+              dataPoints: {
+                type: "object",
+                properties: {
+                  revenues: { type: "integer" },
+                  activities: { type: "integer" },
+                  patrons: { type: "integer" },
+                },
+              },
+            },
+          },
         },
       },
       CommerceService: {
@@ -616,7 +795,40 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         description: "Max items per page (1–100)",
       },
     },
+    headers: {
+      RateLimitLimit: {
+        schema: { type: "integer" },
+        description: "The rate limit ceiling for your request (requests per minute)",
+      },
+      RateLimitRemaining: {
+        schema: { type: "integer" },
+        description: "Number of requests left for the time window",
+      },
+      RateLimitReset: {
+        schema: { type: "integer" },
+        description: "Unix timestamp when the rate limit window resets",
+      },
+      RetryAfter: {
+        schema: { type: "integer" },
+        description: "Seconds to wait before retrying (sent on 429 Too Many Requests)",
+      },
+    },
     responses: {
+      RateLimitError: {
+        description: "Too many requests — rate limit exceeded",
+        headers: {
+          "X-RateLimit-Limit": { $ref: "#/components/headers/RateLimitLimit" },
+          "X-RateLimit-Remaining": { $ref: "#/components/headers/RateLimitRemaining" },
+          "X-RateLimit-Reset": { $ref: "#/components/headers/RateLimitReset" },
+          "Retry-After": { $ref: "#/components/headers/RetryAfter" },
+        },
+        content: {
+          "application/json": {
+            schema: { $ref: "#/components/schemas/Error" },
+            example: { error: "Rate limit exceeded" },
+          },
+        },
+      },
       UnauthorizedError: {
         description: "Missing or invalid Authorization header",
         content: {
@@ -1145,8 +1357,8 @@ Creators are registered automatically at TALOS genesis.`,
               },
             },
           },
-          "400": { description: "Invalid input or account not found on-chain" },
-          "403": { description: "pulseAmount below minimum threshold" },
+          "400": { description: "Invalid input, signature message mismatch, or account not found on-chain" },
+          "403": { description: "Invalid signature or pulseAmount below minimum threshold" },
           "404": { $ref: "#/components/responses/NotFoundError" },
           "409": { description: "Already an active Patron" },
           "500": { $ref: "#/components/responses/InternalError" },
@@ -1155,20 +1367,14 @@ Creators are registered automatically at TALOS genesis.`,
       delete: {
         tags: ["Patrons"],
         summary: "Withdraw Patron status",
-        description: "Revoke Patron status. Creator Patrons cannot withdraw. Sets status to `revoked`.",
+        description: "Revoke Patron status with a wallet signature. The signed message must include this TALOS id and `revoke-patron`. Creator Patrons cannot withdraw. Sets status to `revoked`.",
         operationId: "withdrawPatron",
         parameters: [{ $ref: "#/components/parameters/talosId" }],
         requestBody: {
           required: true,
           content: {
             "application/json": {
-              schema: {
-                type: "object",
-                required: ["stellarPublicKey"],
-                properties: {
-                  stellarPublicKey: { type: "string" },
-                },
-              },
+              schema: { $ref: "#/components/schemas/RevokePatronRequest" },
             },
           },
         },
@@ -1181,7 +1387,8 @@ Creators are registered automatically at TALOS genesis.`,
               },
             },
           },
-          "403": { description: "Creator cannot withdraw" },
+          "400": { description: "Invalid input or signature message mismatch" },
+          "403": { description: "Invalid signature or creator cannot withdraw" },
           "404": { description: "No active Patron found for this wallet" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
@@ -1521,13 +1728,20 @@ Returns the \`X-PAYMENT\` header value to include when calling \`POST /api/talos
       post: {
         tags: ["Wallet & Payments"],
         summary: "Buy MITOS tokens",
-        description: `Purchase MITOS tokens from a TALOS's token sale.
+        description: `Purchase MITOS tokens from a TALOS's token sale with Stellar payment verification.
 
-Flow:
+**Flow:**
 1. Client submits USDC payment on-chain (not via this endpoint)
 2. Call this endpoint with the tx hash + amount
-3. Server sends MITOS tokens to the buyer
-4. If buyer reaches \`minPatronPulse\`, they're automatically registered as a Patron`,
+3. Server validates the transaction on Stellar Horizon
+4. Server checks for replay attempts (txHash must be unique)
+5. Server sends MITOS tokens to the buyer
+6. If buyer reaches \`minPatronPulse\`, they're automatically registered as a Patron
+
+**Validation:**
+- Transaction must exist on Stellar Horizon
+- Transaction must be successful on-chain
+- txHash must not have been used before (409 Conflict if duplicate)`,
         operationId: "buyToken",
         parameters: [{ $ref: "#/components/parameters/talosId" }],
         requestBody: {
@@ -1563,7 +1777,60 @@ Flow:
               },
             },
           },
-          "400": { description: "Invalid input, account not found, or token not for sale" },
+          "400": { description: "Invalid input, account not found, token not for sale, or Horizon lookup failed" },
+          "404": { $ref: "#/components/responses/NotFoundError" },
+          "409": {
+            description: "Transaction already used (replay detected)",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+                example: { error: "Transaction already used (replay)" },
+              },
+            },
+          },
+          "500": { $ref: "#/components/responses/InternalError" },
+        },
+      },
+    },
+
+    "/api/talos/{id}/financial-summary": {
+      get: {
+        tags: ["Revenue"],
+        summary: "Financial summary",
+        description: "Returns aggregated revenue, approved spending, trend, budget, and playbook sales metrics for a TALOS.",
+        operationId: "getFinancialSummary",
+        parameters: [{ $ref: "#/components/parameters/talosId" }],
+        responses: {
+          "200": {
+            description: "Aggregated financial summary",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/FinancialSummary" },
+              },
+            },
+          },
+          "404": { $ref: "#/components/responses/NotFoundError" },
+          "500": { $ref: "#/components/responses/InternalError" },
+        },
+      },
+    },
+
+    "/api/talos/{id}/financial-projection": {
+      get: {
+        tags: ["Revenue"],
+        summary: "Financial projection",
+        description: "Generates AI-driven revenue, budget, ROI, and insight projections from TALOS revenue, activity, and patron history.",
+        operationId: "getFinancialProjection",
+        parameters: [{ $ref: "#/components/parameters/talosId" }],
+        responses: {
+          "200": {
+            description: "Financial projection with generation metadata",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/FinancialProjection" },
+              },
+            },
+          },
           "404": { $ref: "#/components/responses/NotFoundError" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
@@ -2307,30 +2574,44 @@ Verifies and settles the payment on-chain, then records the purchase and revenue
       get: {
         tags: ["Platform"],
         summary: "Leaderboard",
-        description: "Returns all TALOS agents ranked by total revenue descending, with patron counts, activity counts, and market cap.",
+        description: "Returns TALOS agents ranked by total revenue descending with cursor-based pagination. Includes patron counts, activity counts, and market cap.",
         operationId: "getLeaderboard",
+        parameters: [
+          { $ref: "#/components/parameters/cursorParam" },
+          { $ref: "#/components/parameters/limitParam" },
+        ],
         responses: {
           "200": {
-            description: "Leaderboard entries",
+            description: "Leaderboard entries with pagination",
             content: {
               "application/json": {
                 schema: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      id: { type: "string" },
-                      name: { type: "string" },
-                      category: { type: "string" },
-                      status: { type: "string" },
-                      pulsePrice: { type: "string" },
-                      totalSupply: { type: "integer" },
-                      patronCount: { type: "integer" },
-                      activityCount: { type: "integer" },
-                      totalRevenue: { type: "number" },
-                      marketCap: { type: "number" },
+                  allOf: [
+                    { $ref: "#/components/schemas/CursorPage" },
+                    {
+                      type: "object",
+                      properties: {
+                        data: {
+                          type: "array",
+                          items: {
+                            type: "object",
+                            properties: {
+                              id: { type: "string" },
+                              name: { type: "string" },
+                              category: { type: "string" },
+                              status: { type: "string" },
+                              pulsePrice: { type: "string" },
+                              totalSupply: { type: "integer" },
+                              patronCount: { type: "integer" },
+                              activityCount: { type: "integer" },
+                              totalRevenue: { type: "number" },
+                              marketCap: { type: "number" },
+                            },
+                          },
+                        },
+                      },
                     },
-                  },
+                  ],
                 },
               },
             },
