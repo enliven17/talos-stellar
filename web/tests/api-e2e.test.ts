@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll } from "vitest";
+import { Keypair } from "@stellar/stellar-sdk";
 
 const BASE = process.env.TEST_BASE_URL || "http://localhost:3000";
 
@@ -12,6 +13,7 @@ function api(path: string, init?: RequestInit) {
 // Shared state across the test flow
 let talosId: string;
 let apiKey: string;
+const creatorKeypair = Keypair.random();
 let approvalId: string;
 let playbookId: string;
 
@@ -21,13 +23,22 @@ let playbookId: string;
 
 describe("POST /api/talos — create", () => {
   it("creates a talos and returns apiKeyOnce", async () => {
+    const name = "E2E Test Agent";
+    const totalSupply = 500_000;
+    const onChainId = null;
+    const message = `talos-genesis:${name}:${onChainId ?? "null"}:${totalSupply}`;
+    const signature = creatorKeypair.sign(Buffer.from(message, "utf-8")).toString("base64");
+
     const res = await api("/api/talos", {
       method: "POST",
       body: JSON.stringify({
-        name: "E2E Test Agent",
+        name,
         category: "Development",
         description: "Created by e2e test suite",
-        totalSupply: 500_000,
+        totalSupply,
+        creatorPublicKey: creatorKeypair.publicKey(),
+        signature,
+        message,
       }),
     });
 
@@ -47,15 +58,47 @@ describe("POST /api/talos — create", () => {
   });
 
   it("rejects invalid category", async () => {
+    const name = "Bad";
+    const totalSupply = 1_000_000;
+    const onChainId = null;
+    const message = `talos-genesis:${name}:${onChainId ?? "null"}:${totalSupply}`;
+    const signature = creatorKeypair.sign(Buffer.from(message, "utf-8")).toString("base64");
+
     const res = await api("/api/talos", {
       method: "POST",
       body: JSON.stringify({
-        name: "Bad",
+        name,
         category: "InvalidCategory",
         description: "Should fail",
+        totalSupply,
+        creatorPublicKey: creatorKeypair.publicKey(),
+        signature,
+        message,
       }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it("rejects invalid signature", async () => {
+    const name = "Invalid Sig Agent";
+    const totalSupply = 500_000;
+    const onChainId = null;
+    const message = `talos-genesis:${name}:${onChainId ?? "null"}:${totalSupply}`;
+    const signature = "bm90IGEgc2lnbmF0dXJl"; // "not a signature" in base64
+
+    const res = await api("/api/talos", {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        category: "Development",
+        description: "Should fail due to signature",
+        totalSupply,
+        creatorPublicKey: creatorKeypair.publicKey(),
+        signature,
+        message,
+      }),
+    });
+    expect(res.status).toBe(403);
   });
 
   it("rejects missing required fields", async () => {
