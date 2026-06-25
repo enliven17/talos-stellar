@@ -9,7 +9,7 @@ This package implements an automated schema versioning and migration framework u
 ### How Schema Versioning Works
 
 1. **Schema Version Tracking**: SQLite's native `PRAGMA user_version` integer is used to track the database schema version. Fresh databases start at version `0`.
-2. **Ordered Migrations**: Migrations are registered in `_MIGRATIONS` inside [db.py](file:///home/gamp/drips/talos-stellar/packages/prime-agent/src/talos_agent/db.py). They are ordered sequentially ascending by their version integer.
+2. **Ordered Migrations**: Migrations are registered in `_MIGRATIONS` inside [db.py](./src/talos_agent/db.py). They are ordered sequentially ascending by their version integer.
 3. **Automatic Upgrades**: When a `LocalDB` connection is initialized:
    - The current `user_version` is checked.
    - Any migrations in `_MIGRATIONS` with a version greater than `user_version` are run sequentially.
@@ -43,7 +43,7 @@ _MIGRATIONS.append(
 
 ### Example Workflow
 
-1. Update the migrations registry in [db.py](file:///home/gamp/drips/talos-stellar/packages/prime-agent/src/talos_agent/db.py):
+1. Update the migrations registry in [db.py](./src/talos_agent/db.py):
    ```python
    _MIGRATIONS = [
        (1, "..."),
