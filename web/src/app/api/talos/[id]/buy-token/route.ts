@@ -85,8 +85,11 @@ export async function POST(
 
     const tx = TransactionBuilder.fromXDR(txResult.envelope_xdr, networkPassphrase);
 
-    // Validate: source_account == buyerPublicKey
-    if (tx.source !== buyerPublicKey && txResult.source_account !== buyerPublicKey) {
+    // Validate: the payment originated from the buyer.
+    // Horizon's source_account is the canonical value; some SDK transaction unions
+    // (e.g. FeeBumpTransaction) do not expose `source` directly.
+    const envelopeSource = "source" in tx ? String(tx.source) : null;
+    if (envelopeSource !== buyerPublicKey && txResult.source_account !== buyerPublicKey) {
       return NextResponse.json(
         { error: "Transaction signer does not match buyerPublicKey" },
         { status: 400 },
