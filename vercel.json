@@ -2,5 +2,10 @@
   "framework": "nextjs",
   "buildCommand": "pnpm run build",
   "installCommand": "pnpm install",
-  "outputDirectory": "web/.next"
+  "outputDirectory": "web/.next",
+  "functions": {
+    "web/src/app/api/health/route.ts": {
+      "maxDuration": 10
+    }
+  }
 }
