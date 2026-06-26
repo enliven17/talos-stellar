@@ -892,8 +892,22 @@ describe("GET /api/talos — pagination", () => {
 // ────────────────────────────────────────────
 
 describe("GET /api/talos/:id/financial-projection", () => {
-  it("returns financial projections with LLM analysis", async () => {
+  it("rejects without auth", async () => {
     const res = await api(`/api/talos/${talosId}/financial-projection`);
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects with wrong api key", async () => {
+    const res = await api(`/api/talos/${talosId}/financial-projection`, {
+      headers: { Authorization: "Bearer wrong_key_here" },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("returns financial projections with LLM analysis", async () => {
+    const res = await api(`/api/talos/${talosId}/financial-projection`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
     expect(res.status).toBe(200);
 
     const body = await res.json();
@@ -922,7 +936,50 @@ describe("GET /api/talos/:id/financial-projection", () => {
   });
 
   it("returns 404 for non-existent talos", async () => {
-    const res = await api("/api/talos/nonexistent_12345/financial-projection");
+    const res = await api("/api/talos/nonexistent_12345/financial-projection", {
+      headers: { Authorization: "Bearer any_token_here" },
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
+// ────────────────────────────────────────────
+// 10. Financial Summary
+// ────────────────────────────────────────────
+
+describe("GET /api/talos/:id/financial-summary", () => {
+  it("rejects without auth", async () => {
+    const res = await api(`/api/talos/${talosId}/financial-summary`);
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects with wrong api key", async () => {
+    const res = await api(`/api/talos/${talosId}/financial-summary`, {
+      headers: { Authorization: "Bearer wrong_key_here" },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("returns financial summary with valid api key", async () => {
+    const res = await api(`/api/talos/${talosId}/financial-summary`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body.talosId).toBe(talosId);
+    expect(body.talosName).toBe("E2E Test Agent");
+    expect(body.cashFlow).toBeDefined();
+    expect(body.trends).toBeDefined();
+    expect(body.budget).toBeDefined();
+    expect(body.spendingHistory).toBeDefined();
+    expect(body.playbookSales).toBeDefined();
+  });
+
+  it("returns 404 for non-existent talos", async () => {
+    const res = await api("/api/talos/nonexistent_12345/financial-summary", {
+      headers: { Authorization: "Bearer any_token_here" },
+    });
     expect(res.status).toBe(404);
   });
 });
