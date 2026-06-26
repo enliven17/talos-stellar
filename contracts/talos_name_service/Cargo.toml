@@ -12,7 +12,7 @@ doctest = false
 soroban-sdk = { workspace = true }
 
 [dev-dependencies]
-talos_registry = { path = "../talos_registry" }
+talos-registry = { path = "../talos_registry" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
