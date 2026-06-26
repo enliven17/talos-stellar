@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { rateLimit, rateLimitResponse, RateLimitResult } from "@/lib/rate-limit";
+import {
+  applyRateLimitHeaders,
+  rateLimit,
+  rateLimitResponse,
+  RateLimitResult,
+} from "@/lib/rate-limit";
 
 function getClientIp(request: NextRequest): string {
   return (
@@ -40,27 +45,24 @@ export function proxy(request: NextRequest) {
   if (isAuthRoute) {
     result = rateLimit(`auth:${ip}`, { limit: 20, windowMs: 60_000 });
   } else if (method === "GET") {
-    // Public GET endpoints: 100 req/min per IP
     result = rateLimit(`read:${ip}`, { limit: 100, windowMs: 60_000 });
   } else if (method === "POST" && apiKey) {
-    // Authenticated POST endpoints: 30 req/min per API Key
-    result = rateLimit(`write_key:${apiKey}`, { limit: 30, windowMs: 60_000 });
+    result = rateLimit(`write_key:${apiKey}`, {
+      limit: 30,
+      windowMs: 60_000,
+    });
   } else {
-    // Other mutating requests or public POST: 30 req/min per IP
-    result = rateLimit(`write_ip:${ip}`, { limit: 30, windowMs: 60_000 });
+    result = rateLimit(`write_ip:${ip}`, {
+      limit: 30,
+      windowMs: 60_000,
+    });
   }
 
   if (!result.ok) {
     return rateLimitResponse(result);
   }
 
-  // Return standard headers on successful responses
-  const response = NextResponse.next();
-  response.headers.set("X-RateLimit-Limit", String(result.limit));
-  response.headers.set("X-RateLimit-Remaining", String(result.remaining));
-  response.headers.set("X-RateLimit-Reset", String(Math.ceil(result.resetAt / 1000)));
-
-  return response;
+  return applyRateLimitHeaders(NextResponse.next(), result);
 }
 
 export const config = {
