@@ -71,9 +71,10 @@ pub struct GovernanceConfig {
 pub enum DataKey {
     NextProposalId,
     Proposal(u32),
-    Vote(u32, Address), // proposal_id, voter
+    Vote(u32, Address),
     Config,
-    TokenBalanceSnapshot(u32, Address), // snapshot_ledger, address
+    Admin,
+    TokenBalanceSnapshot(u32, Address),
 }
 
 // ── Events ──────────────────────────────────────────────────────────
@@ -140,11 +141,13 @@ impl TalosGovernance {
     ///
     /// Returns the new proposal ID.
     pub fn create_proposal(
-        e: Env,
-        talos_id: u32,
-        title: String,
-        description: String,
-    ) -> u32 {
+    e: Env,
+    caller: Address,
+    talos_id: u32,
+    title: String,
+    description: String,
+) -> u32 {
+    caller.require_auth();
         let config: GovernanceConfig = e
             .storage()
             .persistent()
@@ -163,7 +166,7 @@ impl TalosGovernance {
         let proposal = Proposal {
             id: next_id,
             talos_id,
-            proposer: e.current_contract_address(),
+            proposer: caller.clone(),
             title: title.clone(),
             description,
             snapshot_ledger,
@@ -196,7 +199,13 @@ impl TalosGovernance {
     /// * `choice` - Vote choice (Approve or Reject)
     ///
     /// Vote weight is calculated based on the voter's Pulse token balance at the snapshot ledger.
-    pub fn vote(e: Env, proposal_id: u32, choice: VoteChoice) {
+    pub fn vote(
+    e: Env,
+    caller: Address,
+    proposal_id: u32,
+    choice: VoteChoice,
+) {
+    caller.require_auth();
         let config: GovernanceConfig = e
             .storage()
             .persistent()
@@ -226,7 +235,7 @@ impl TalosGovernance {
             panic!("Voting period has not started");
         }
 
-        let voter = e.current_contract_address();
+        let voter = caller.clone();
 
         // Check if already voted
         if e.storage()
