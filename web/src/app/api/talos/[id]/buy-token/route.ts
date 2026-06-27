@@ -3,6 +3,7 @@ import { tlsTalos, tlsPatrons, tlsRevenues } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { getAccountInfo, getNetworkPassphrase, getUSDCIssuer } from "@/lib/stellar";
+import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
 
 /**
  * Buy Mitos tokens from a Talos.
@@ -101,8 +102,7 @@ export async function POST(
       amount?: string;
     }>;
 
-    const operatorTreasury = "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
-    const expectedDestinations = [operatorTreasury];
+    const expectedDestinations = [OPERATOR_PUBLIC_KEY];
     if (talos.agentWalletAddress) {
       expectedDestinations.push(talos.agentWalletAddress);
     }

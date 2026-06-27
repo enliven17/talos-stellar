@@ -151,14 +151,6 @@ export async function POST(
         status: "pending",
       }).returning();
 
-      await tx.insert(tlsRevenues).values({
-        talosId: id,
-        amount: service.price,
-        currency: service.currency ?? "USDC",
-        source: "commerce",
-        txHash,
-      });
-
       return [job];
     });
 

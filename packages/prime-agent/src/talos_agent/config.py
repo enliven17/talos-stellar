@@ -68,9 +68,13 @@ class Settings(BaseSettings):
     x_password: str = ""
     x_email: str = ""
 
-    # Telegram
-    telegram_bot_token: str = ""
-    telegram_chat_id: str = ""
+    # Discord
+    # Webhook URL is sufficient for posting. Bot token + channel/guild IDs
+    # unlock replies, mentions, and analytics via the REST API.
+    discord_webhook_url: str = ""
+    discord_bot_token: str = ""
+    discord_channel_id: str = ""
+    discord_guild_id: str = ""
 
     # Per-channel credential configs for additional adapters.
     # Set as JSON in env: CHANNEL_CONFIGS={"telegram": {"bot_token": "...", "chat_id": "@channel"}}

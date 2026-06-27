@@ -130,6 +130,50 @@ contracts/
         └── lib.rs                  # TalosNameService contract
 ```
 
+## Event Schema
+
+Both contracts emit typed Soroban events on every meaningful state change. Off-chain consumers (dashboards, indexers, Stellar Expert) can subscribe using topic filters.
+
+### TalosRegistry
+
+| Event | Topics | Data | Emitted on |
+|-------|--------|------|-----------|
+| `tls_crt` | `(symbol_short!("tls_crt"), creator: Address)` | `(talos_id: u32, name: String, category: String)` | `create_talos` success |
+| `pat_upd` | `(symbol_short!("pat_upd"), talos_id: u32)` | `(creator: Address, creator_share: u32, investor_share: u32)` | `update_patron` success |
+| `fee_chg` | `(symbol_short!("fee_chg"),)` | `(old_bps: u32, new_bps: u32)` | `set_protocol_fee` success |
+
+**Filtering examples**
+
+```rust
+// All Talos created by a specific address — filter on topics[1] == creator
+(symbol_short!("tls_crt"), creator_address)
+
+// All patron updates for a specific Talos — filter on topics[1] == talos_id
+(symbol_short!("pat_upd"), 42u32)
+
+// Any protocol fee change — filter on topics[0] == "fee_chg"
+(symbol_short!("fee_chg"),)
+```
+
+### TalosNameService
+
+| Event | Topics | Data | Emitted on |
+|-------|--------|------|-----------|
+| `name_reg` | `(symbol_short!("name_reg"), talos_id: u32)` | `(name: String, owner: Address)` | `register_name` success |
+
+**Filtering examples**
+
+```rust
+// Name registration for a specific Talos — filter on topics[1] == talos_id
+(symbol_short!("name_reg"), 42u32)
+```
+
+### Design rationale
+
+- The first topic is always the event-type symbol so generic listeners can dispatch on it.
+- Filterable entities (creator, talos_id) are placed in subsequent topic slots so Soroban's topic-indexed subscriptions can narrow results without fetching all events.
+- Event data carries the full context needed to act without a follow-up RPC call.
+
 ## Testing
 
 From the `contracts/` workspace:

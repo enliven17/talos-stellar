@@ -68,16 +68,32 @@ pub enum DataKey {
 }
 
 // ── Events ──────────────────────────────────────────────────────────
+//
+// Event schema (topics → data):
+//   tls_crt : (symbol, creator: Address)   → (talos_id: u32, name: String, category: String)
+//   pat_upd : (symbol, talos_id: u32)      → (creator: Address, creator_share: u32, investor_share: u32)
+//   fee_chg : (symbol,)                    → (old_bps: u32, new_bps: u32)
 
-fn emit_talos_created(env: &Env, talos_id: u32, creator: Address, name: String) {
-    let topics = (symbol_short!("tls_crt"), talos_id);
-    env.events().publish(topics, (creator, name));
+fn emit_talos_created(env: &Env, talos_id: u32, creator: Address, name: String, category: String) {
+    let topics = (symbol_short!("tls_crt"), creator);
+    env.events().publish(topics, (talos_id, name, category));
 }
 
-fn emit_patron_updated(env: &Env, talos_id: u32, creator_share: u32, investor_share: u32) {
+fn emit_patron_updated(env: &Env, talos_id: u32, patron: &Patron) {
     let topics = (symbol_short!("pat_upd"), talos_id);
-    env.events()
-        .publish(topics, (creator_share, investor_share));
+    env.events().publish(
+        topics,
+        (
+            patron.creator_addr.clone(),
+            patron.creator_share,
+            patron.investor_share,
+        ),
+    );
+}
+
+fn emit_protocol_fee_changed(env: &Env, old_bps: u32, new_bps: u32) {
+    let topics = (symbol_short!("fee_chg"),);
+    env.events().publish(topics, (old_bps, new_bps));
 }
 
 // ── Constants ───────────────────────────────────────────────────────
@@ -168,7 +184,7 @@ impl TalosRegistry {
             .set(&DataKey::NextTalosId, &(next_id + 1));
 
         // Emit event
-        emit_talos_created(&e, next_id, talos.creator.clone(), name);
+        emit_talos_created(&e, next_id, talos.creator.clone(), name, talos.category.clone());
 
         next_id
     }
@@ -217,7 +233,7 @@ impl TalosRegistry {
             .persistent()
             .set(&DataKey::Talos(talos_id), &talos);
 
-        emit_patron_updated(&e, talos_id, patron.creator_share, patron.investor_share);
+        emit_patron_updated(&e, talos_id, &patron);
     }
 
     /// Update kernel policy for a Talos.
@@ -315,9 +331,17 @@ impl TalosRegistry {
 
         admin.require_auth();
 
+        let old_bps: u32 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::ProtocolFeeBps)
+            .unwrap_or(PROTOCOL_FEE_BPS);
+
         e.storage()
             .persistent()
             .set(&DataKey::ProtocolFeeBps, &fee_bps);
+
+        emit_protocol_fee_changed(&e, old_bps, fee_bps);
     }
 
     /// Calculate the protocol fee for an amount using the configured fee bps.
@@ -341,8 +365,8 @@ impl TalosRegistry {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, MockAuth, MockAuthInvoke},
-        Address, Env, IntoVal,
+        testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
+        Address, Env, IntoVal, Symbol, TryFromVal,
     };
 
     fn setup() -> (Env, Address) {
@@ -513,5 +537,128 @@ mod tests {
 
         assert_eq!(client.protocol_fee_bps(), Some(250));
         assert_eq!(client.calculate_protocol_fee(&40_000), 1_000);
+    }
+
+    fn assert_topic_symbol(env: &Env, topics: &soroban_sdk::Vec<soroban_sdk::Val>, idx: u32, expected: Symbol) {
+        let val = topics.get(idx).expect("topic index out of range");
+        let sym: Symbol = TryFromVal::try_from_val(env, &val).expect("topic is not a Symbol");
+        assert_eq!(sym, expected);
+    }
+
+    fn assert_topic_address(env: &Env, topics: &soroban_sdk::Vec<soroban_sdk::Val>, idx: u32, expected: &Address) {
+        let val = topics.get(idx).expect("topic index out of range");
+        let addr: Address = TryFromVal::try_from_val(env, &val).expect("topic is not an Address");
+        assert_eq!(addr, *expected);
+    }
+
+    fn assert_topic_u32(env: &Env, topics: &soroban_sdk::Vec<soroban_sdk::Val>, idx: u32, expected: u32) {
+        let val = topics.get(idx).expect("topic index out of range");
+        let n: u32 = TryFromVal::try_from_val(env, &val).expect("topic is not a u32");
+        assert_eq!(n, expected);
+    }
+
+    #[test]
+    fn create_talos_emits_tls_crt_event() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (addr, topics, data) = events.get(0).unwrap();
+
+        assert_eq!(addr, contract_id);
+        assert_eq!(topics.len(), 2);
+        assert_topic_symbol(&env, &topics, 0, symbol_short!("tls_crt"));
+        assert_topic_address(&env, &topics, 1, &creator);
+
+        let (got_id, got_name, got_cat): (u32, String, String) =
+            TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(got_id, id);
+        assert_eq!(got_name, s(&env, "Genesis"));
+        assert_eq!(got_cat, s(&env, "Marketing"));
+    }
+
+    #[test]
+    fn update_patron_emits_pat_upd_event() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let new_patron = Patron {
+            creator_share: 50,
+            investor_share: 30,
+            treasury_share: 20,
+            creator_addr: creator.clone(),
+            investor_addr: Address::generate(&env),
+            treasury_addr: Address::generate(&env),
+        };
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_patron",
+                    args: (id, new_patron.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_patron(&id, &new_patron);
+
+        // tls_crt from create_talos + pat_upd from update_patron
+        let events = env.events().all();
+        assert_eq!(events.len(), 2);
+        let (addr, topics, data) = events.get(1).unwrap();
+
+        assert_eq!(addr, contract_id);
+        assert_eq!(topics.len(), 2);
+        assert_topic_symbol(&env, &topics, 0, symbol_short!("pat_upd"));
+        assert_topic_u32(&env, &topics, 1, id);
+
+        let (got_creator, got_cs, got_is): (Address, u32, u32) =
+            TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(got_creator, creator);
+        assert_eq!(got_cs, 50);
+        assert_eq!(got_is, 30);
+    }
+
+    #[test]
+    fn set_protocol_fee_emits_fee_chg_event() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let protocol_wallet = Address::generate(&env);
+
+        client.initialize(&protocol_wallet);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &protocol_wallet,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_protocol_fee",
+                    args: (500u32,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_protocol_fee(&500);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (addr, topics, data) = events.get(0).unwrap();
+
+        assert_eq!(addr, contract_id);
+        assert_eq!(topics.len(), 1);
+        assert_topic_symbol(&env, &topics, 0, symbol_short!("fee_chg"));
+
+        let (old_bps, new_bps): (u32, u32) =
+            TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(old_bps, 300);
+        assert_eq!(new_bps, 500);
     }
 }

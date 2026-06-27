@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from talos_agent.payments import USDC_TESTNET_ISSUER
 from talos_agent.payments.x402_signer import X402Signer
 from talos_agent.tools.registry import tool
 
@@ -134,8 +135,8 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
     sign_result = await signer.sign_payment(
         payee=payee,
         amount=amount_units,
-        token_address=token,
-        chain_id=chain_id,
+        asset_code="USDC",
+        asset_issuer=USDC_TESTNET_ISSUER,
     )
 
 
