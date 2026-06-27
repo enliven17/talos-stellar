@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from rich.console import Console
@@ -228,46 +229,108 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
 
         while not shutdown_event.is_set():
             try:
+                # Prevent duplicate runs after restart
+                last_run = db.get_last_run("dividend_distribution")
+                if last_run:
+                    elapsed = (datetime.now(timezone.utc) - last_run).total_seconds()
+                    remaining = distribution_interval - elapsed
+                    if remaining > 0:
+                        console.print(
+                            f"[dim]Dividend distribution skipped — "
+                            f"next run in {int(remaining)}s[/dim]"
+                        )
+                        try:
+                            await asyncio.wait_for(shutdown_event.wait(), timeout=remaining)
+                            return  # shutdown requested during wait
+                        except asyncio.TimeoutError:
+                            pass
+                        continue
+
                 # Get agent's Stellar account ID from talos config
                 stellar_account_id = talos_config.get("stellarAccountId", "")
                 if not stellar_account_id:
-                    console.print("[dim yellow]No Stellar account ID configured for dividend distribution[/dim yellow]")
+                    console.print(
+                        "[dim yellow]No Stellar account ID configured for dividend distribution[/dim yellow]"
+                    )
                 else:
                     # Check USDC balance
-                    balance_result = await stellar.get_token_balance(stellar_account_id, "USDC")
+                    balance_result = await stellar.get_token_balance(
+                        stellar_account_id, "USDC"
+                    )
+
                     if "error" not in balance_result:
                         usdc_balance = balance_result.get("balance", 0)
-                        console.print(f"[dim]USDC balance check: {usdc_balance} USDC (threshold: {settings.dividend_usdc_threshold})[/dim]")
+                        console.print(
+                            f"[dim]USDC balance check: {usdc_balance} USDC "
+                            f"(threshold: {settings.dividend_usdc_threshold})[/dim]"
+                        )
 
                         # Check if balance exceeds threshold
                         if usdc_balance >= float(settings.dividend_usdc_threshold):
-                            console.print(f"[bold green]USDC balance {usdc_balance} exceeds threshold {settings.dividend_usdc_threshold}. Initiating dividend distribution...[/bold green]")
+                            console.print(
+                                f"[bold green]USDC balance {usdc_balance} exceeds "
+                                f"threshold {settings.dividend_usdc_threshold}. "
+                                "Initiating dividend distribution...[/bold green]"
+                            )
 
                             # Get distribution preview
                             preview = await api.get_distribution_preview(settings.talos_id)
-                            if preview and "error" not in preview:
-                                console.print(f"[cyan]Distribution preview: {preview.get('distributableAmount', 0)} USDC to {len(preview.get('breakdown', []))} patrons[/cyan]")
-
-                                # Execute distribution using agent's public key as requester
-                                result = await api.distribute_dividends(
-                                    settings.talos_id,
-                                    requester_public_key=stellar_account_id
+                            if not preview:
+                                console.print(
+                                    "[bold red]Dividend distribution aborted — "
+                                    "no response from preview endpoint[/bold red]"
+                                )
+                            elif "error" in preview:
+                                console.print(
+                                    f"[bold red]Dividend distribution aborted — "
+                                    f"preview failed: {preview.get('error', 'Unknown error')}[/bold red]"
+                                )
+                            else:
+                                console.print(
+                                    f"[cyan]Distribution preview: "
+                                    f"{preview.get('distributableAmount', 0)} USDC to "
+                                    f"{len(preview.get('breakdown', []))} patrons[/cyan]"
                                 )
 
-                                if result and "error" not in result:
-                                    console.print(f"[bold green]Dividend distribution successful: {result.get('message', 'Distribution complete')}[/bold green]")
-                                    db.update_schedule("dividend_distribution")
+                                # Execute distribution only if preview succeeded
+                                result = await api.distribute_dividends(
+                                    settings.talos_id,
+                                    requester_public_key=stellar_account_id,
+                                )
+
+                                if not result:
+                                    console.print(
+                                        "[bold red]Dividend distribution failed — "
+                                        "no response from distribute endpoint[/bold red]"
+                                    )
+                                elif "error" in result:
+                                    console.print(
+                                        f"[bold red]Dividend distribution failed — "
+                                        f"{result.get('error', 'Unknown error')}[/bold red]"
+                                    )
                                 else:
-                                    console.print(f"[red]Dividend distribution failed: {result.get('error', 'Unknown error') if result else 'No result'}[/red]")
-                            else:
-                                console.print(f"[yellow]Failed to get distribution preview: {preview.get('error', 'Unknown error') if preview else 'No preview'}[/yellow]")
+                                    console.print(
+                                        f"[bold green]Dividend distribution successful: "
+                                        f"{result.get('message', 'Distribution complete')}[/bold green]"
+                                    )
+                                    db.update_schedule("dividend_distribution")
                     else:
-                        console.print(f"[dim red]USDC balance check failed: {balance_result.get('error')}[/dim red]")
+                        error_msg = balance_result.get("error", "Unknown error")
+                        console.print(
+                            f"[bold red]Dividend distribution skipped — "
+                            f"USDC balance check failed: {error_msg}[/bold red]"
+                        )
+                        db.update_schedule("dividend_distribution")  # still advance the timestamp to avoid retry storm
+
+
             except Exception as e:
                 console.print(f"[red]Dividend distribution task error: {e}[/red]")
 
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=distribution_interval)
+                await asyncio.wait_for(
+                    shutdown_event.wait(),
+                    timeout=distribution_interval,
+                )
                 break
             except asyncio.TimeoutError:
                 pass
