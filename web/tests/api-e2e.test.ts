@@ -787,6 +787,23 @@ describe("GET /api/leaderboard", () => {
   });
 });
 
+describe("GET /api/leaderboard — malformed cursor", () => {
+  it("returns 400 for a completely malformed cursor", async () => {
+    const res = await api("/api/leaderboard?cursor=garbage");
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body).toHaveProperty("error");
+  });
+
+  it("returns 400 for valid base64 that decodes to wrong shape", async () => {
+    // eyJub3RfYW5fYXJyYXkiOnRydWV9 == {"not_an_array":true}
+    const res = await api("/api/leaderboard?cursor=eyJub3RfYW5fYXJyYXkiOnRydWV9");
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body).toHaveProperty("error");
+  });
+});
+
 describe("GET /api/leaderboard — cursor traversal", () => {
   it("paginates correctly from page 1 to page 2", async () => {
     // Fetch first page with limit=1
