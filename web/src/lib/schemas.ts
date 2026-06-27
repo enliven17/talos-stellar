@@ -67,6 +67,8 @@ export const createApprovalSchema = z.object({
 export const decideApprovalSchema = z.object({
   status: z.enum(["approved", "rejected"]),
   decidedBy: z.string().min(1),
+  signature: z.string().min(1),
+  message: z.string().min(1),
   txHash: z.string().optional(),
 });
 

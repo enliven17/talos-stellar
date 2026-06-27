@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsApprovals, tlsPatrons } from "@/db/schema";
 import { and, eq, sql } from "drizzle-orm";
-import { recordApprovalOnChain } from "@/lib/stellar";
+import { recordApprovalOnChain, verifyStellarSignature } from "@/lib/stellar";
 
 // PATCH /api/talos/:id/approvals/:approvalId — Approve/reject
 export async function PATCH(
@@ -35,7 +35,7 @@ export async function PATCH(
     }
 
     const body = await request.json();
-    const { status, decidedBy } = body;
+    const { status, decidedBy, signature, message } = body;
 
     if (!status || !["approved", "rejected"].includes(status)) {
       return Response.json(
@@ -47,6 +47,13 @@ export async function PATCH(
     if (!decidedBy) {
       return Response.json(
         { error: "decidedBy (Stellar public key) is required" },
+        { status: 400 }
+      );
+    }
+
+    if (!signature || !message) {
+      return Response.json(
+        { error: "signature and message are required" },
         { status: 400 }
       );
     }
@@ -68,6 +75,14 @@ export async function PATCH(
     if (!patron) {
       return Response.json(
         { error: "Only active Patrons can approve or reject decisions" },
+        { status: 403 }
+      );
+    }
+
+    const signatureIsValid = await verifyStellarSignature(decidedBy, message, signature);
+    if (!signatureIsValid) {
+      return Response.json(
+        { error: "Signature verification failed for the deciding patron" },
         { status: 403 }
       );
     }
