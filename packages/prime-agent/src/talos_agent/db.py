@@ -157,6 +157,26 @@ CREATE INDEX IF NOT EXISTS idx_loans_due_date ON loans(due_date);
 CREATE INDEX IF NOT EXISTS idx_loan_repayments_loan_id ON loan_repayments(loan_id);
         """,
     ),
+    (
+        4,
+        """
+CREATE TABLE IF NOT EXISTS dividends_log (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    spending_log_id     INTEGER REFERENCES spending_log(id),
+    recipient_address   TEXT NOT NULL,
+    token_symbol        TEXT NOT NULL,
+    amount              REAL NOT NULL,
+    currency            TEXT NOT NULL DEFAULT 'USDC',
+    status              TEXT NOT NULL DEFAULT 'pending',
+    tx_hash             TEXT,
+    note                TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dividends_log_status ON dividends_log(status);
+CREATE INDEX IF NOT EXISTS idx_dividends_log_recipient ON dividends_log(recipient_address);
+        """,
+    ),
 ]
 
 
@@ -557,6 +577,48 @@ class LocalDB:
             result.append(d)
         return result
 
+    # ── Dividends ──────────────────────────────────────────
+
+    def record_dividend(
+        self,
+        recipient_address: str,
+        token_symbol: str,
+        amount: float,
+        currency: str = "USDC",
+        spending_log_id: int | None = None,
+        tx_hash: str | None = None,
+        note: str = "",
+    ) -> int:
+        """Record a dividend distribution to a Patron and return its ID."""
+        cursor = self._conn.execute(
+            """INSERT INTO dividends_log
+               (spending_log_id, recipient_address, token_symbol, amount, currency, tx_hash, note)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (spending_log_id, recipient_address, token_symbol, amount, currency, tx_hash, note),
+        )
+        self._conn.commit()
+        return cursor.lastrowid
+
+    def get_dividend_history(self, limit: int = 50, recipient_address: str | None = None) -> list[dict]:
+        """Get dividend distribution history, optionally filtered by recipient."""
+        if recipient_address:
+            rows = self._conn.execute(
+                """SELECT id, spending_log_id, recipient_address, token_symbol, amount,
+                          currency, status, tx_hash, note, created_at
+                   FROM dividends_log WHERE recipient_address = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (recipient_address, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT id, spending_log_id, recipient_address, token_symbol, amount,
+                          currency, status, tx_hash, note, created_at
+                   FROM dividends_log
+                   ORDER BY created_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     # ── Loans ───────────────────────────────────────────────
 
     def create_loan(
@@ -570,10 +632,10 @@ class LocalDB:
     ) -> int:
         """Create a new loan record and return its ID."""
         from datetime import datetime, timedelta, timezone
-        
+
         created_at = datetime.now(timezone.utc)
         due_date = created_at + timedelta(days=duration_days)
-        
+
         cursor = self._conn.execute(
             """INSERT INTO loans 
                (platform, amount, collateral_asset, loan_asset, duration_days, purpose, 
@@ -607,13 +669,10 @@ class LocalDB:
 
     def record_repayment(self, loan_id: int, amount: float, tx_hash: str | None = None) -> None:
         """Record a repayment for a loan and update outstanding amount."""
-        # Record the repayment
         self._conn.execute(
             "INSERT INTO loan_repayments (loan_id, amount, tx_hash) VALUES (?, ?, ?)",
             (loan_id, amount, tx_hash),
         )
-        
-        # Update outstanding amount
         self._conn.execute(
             """UPDATE loans 
                SET outstanding_amount = outstanding_amount - ?, 
@@ -621,15 +680,12 @@ class LocalDB:
                WHERE id = ?""",
             (amount, loan_id),
         )
-        
-        # Check if loan is fully repaid
         loan = self.get_loan_by_id(loan_id)
         if loan and loan["outstanding_amount"] <= 0:
             self._conn.execute(
                 "UPDATE loans SET status = 'repaid', updated_at = datetime('now') WHERE id = ?",
                 (loan_id,),
             )
-        
         self._conn.commit()
 
     def get_loans_due_soon(self, days: int = 7) -> list[dict]:

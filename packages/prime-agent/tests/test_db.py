@@ -21,7 +21,7 @@ def test_all_tables_exist(mock_db: LocalDB):
         "schedules", "activity_log", "content_history", "commerce_queue",
         "approval_cache", "spending_log", "talos_config", "playbooks",
         "content_performance", "strategy_learnings", "audience_insights",
-        "loans", "loan_repayments",
+        "loans", "loan_repayments", "dividends_log",
     }
     assert expected.issubset(tables), f"Missing tables: {expected - tables}"
 
@@ -177,3 +177,46 @@ class TestLoanLifecycle:
         
         assert loan_id_1 in loan_ids
         assert loan_id_2 not in loan_ids
+
+class TestDividendLifecycle:
+    def test_record_dividend_returns_id(self, mock_db):
+        div_id = mock_db.record_dividend(
+            recipient_address="GABC123",
+            token_symbol="VEGA",
+            amount=10.0,
+        )
+        assert isinstance(div_id, int)
+        assert div_id > 0
+
+    def test_get_dividend_history_all(self, mock_db):
+        mock_db.record_dividend("GABC123", "VEGA", 10.0)
+        mock_db.record_dividend("GXYZ456", "ATLAS", 5.0)
+        history = mock_db.get_dividend_history()
+        assert len(history) == 2
+
+    def test_get_dividend_history_filtered_by_recipient(self, mock_db):
+        mock_db.record_dividend("GABC123", "VEGA", 10.0)
+        mock_db.record_dividend("GXYZ456", "ATLAS", 5.0)
+        history = mock_db.get_dividend_history(recipient_address="GABC123")
+        assert len(history) == 1
+        assert history[0]["recipient_address"] == "GABC123"
+
+    def test_record_dividend_with_spending_log_link(self, mock_db):
+        mock_db.record_spending(10.0, "dividend", "payout")
+        row = mock_db._conn.execute(
+            "SELECT id FROM spending_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        spending_id = row["id"]
+        div_id = mock_db.record_dividend(
+            recipient_address="GABC123",
+            token_symbol="VEGA",
+            amount=10.0,
+            spending_log_id=spending_id,
+        )
+        history = mock_db.get_dividend_history()
+        assert history[0]["spending_log_id"] == spending_id
+
+    def test_record_dividend_with_tx_hash(self, mock_db):
+        mock_db.record_dividend("GABC123", "VEGA", 10.0, tx_hash="txabc123")
+        history = mock_db.get_dividend_history()
+        assert history[0]["tx_hash"] == "txabc123"
