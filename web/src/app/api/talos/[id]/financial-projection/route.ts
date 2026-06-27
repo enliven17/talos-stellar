@@ -1,7 +1,9 @@
+import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsRevenues, tlsActivities, tlsPatrons } from "@/db/schema";
 import { eq, desc } from "drizzle-orm";
 import { analyzeWithGPT } from "@/lib/fulfillment/clients";
+import { verifyAgentApiKey } from "@/lib/auth";
 
 interface FinancialProjection {
   expectedRevenue: {
@@ -25,12 +27,15 @@ interface FinancialProjection {
 
 // GET /api/talos/:id/financial-projection - AI-driven financial projections
 export async function GET(
-  _request: Request,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   try {
+    const auth = await verifyAgentApiKey(request, id);
+    if (!auth.ok) return auth.response;
+
     // Fetch TALOS basic info
     const talos = await db.query.tlsTalos.findFirst({
       where: eq(tlsTalos.id, id),

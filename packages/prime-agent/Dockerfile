@@ -38,8 +38,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && rm -rf /var/lib/apt/lists/*
 
 # ── uv (fast Python package manager) ──────────────────────────────────────────
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:$PATH"
+RUN curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh
 
 # ── Playwright Chromium (keyboard fallback) ────────────────────────────────────
 # Tell Playwright to use the system Chromium installed above
@@ -55,6 +54,10 @@ COPY src/ ./src/
 
 # ── Install Python dependencies (layer-cached) ────────────────────────────────
 RUN uv sync --frozen --no-dev
+
+# ── Non-root user setup ────────────────────────────────────────────────────────
+RUN useradd -m -u 1000 talos && chown -R talos:talos /app
+USER talos
 
 # ── Runtime environment ────────────────────────────────────────────────────────
 ENV PYTHONUNBUFFERED=1
