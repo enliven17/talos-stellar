@@ -523,4 +523,19 @@ mod tests {
         assert_eq!(client.resolve_name(&name1), None);
         assert!(client.is_name_available(&name1));
     }
+    #[test]
+    fn has_name_returns_false_for_unknown_talos_id() {
+        let (env, registry_contract, contract_id, _registry_client, client) = setup();
+
+        // talos_id = 999 does not exist
+        assert!(!client.has_name(&999));
+    }
+
+    #[test]
+    fn name_of_returns_none_for_unknown_talos_id() {
+        let (env, _registry_contract, _contract_id, _registry_client, client) = setup();
+
+        assert!(client.name_of(&999).is_none());
+    }
+
 }

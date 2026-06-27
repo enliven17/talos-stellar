@@ -661,4 +661,95 @@ mod tests {
         assert_eq!(old_bps, 300);
         assert_eq!(new_bps, 500);
     }
+    #[test]
+    fn get_talos_returns_none_for_missing_id() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+
+        // IDs are 1-indexed, 0 does not exist
+        assert!(client.get_talos(&0).is_none());
+    }
+
+    #[test]
+    fn update_kernel_requires_creator_auth() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let new_kernel = Kernel {
+            approval_threshold: 20,
+            gtm_budget: 5_000,
+            min_patron_pulse: 500,
+        };
+
+        // Non-creator must not be able to update kernel
+        let imposter = Address::generate(&env);
+        assert!(client.try_update_kernel(&id, &new_kernel).is_err());
+    }
+
+    #[test]
+    fn update_kernel_persists_changes() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let new_kernel = Kernel {
+            approval_threshold: 20,
+            gtm_budget: 5_000,
+            min_patron_pulse: 500,
+        };
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_kernel",
+                    args: (id, new_kernel.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_kernel(&id, &new_kernel);
+
+        let updated = client.get_talos(&id).expect("talos should exist");
+        assert_eq!(updated.kernel.approval_threshold, 20);
+        assert_eq!(updated.kernel.gtm_budget, 5_000);
+        assert_eq!(updated.kernel.min_patron_pulse, 500);
+    }
+
+    #[test]
+    fn deactivate_talos_requires_creator_auth_and_sets_inactive() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        // Initially active
+        assert!(client.is_active(&id));
+
+        // Non-creator can't deactivate
+        let imposter = Address::generate(&env);
+        assert!(client.try_deactivate_talos(&id).is_err());
+
+        // Creator can deactivate
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "deactivate_talos",
+                    args: (id,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .deactivate_talos(&id);
+
+        assert!(!client.is_active(&id));
+    }
+
 }
