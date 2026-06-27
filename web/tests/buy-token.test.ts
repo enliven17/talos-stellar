@@ -64,12 +64,11 @@ vi.mock("@/db", () => {
 
 vi.mock("@/lib/stellar", () => {
   return {
-    getAccountInfo: (...args: any[]) => mocks.mockGetAccountInfo(...args),
-    getNetworkPassphrase: (...args: any[]) => mocks.mockGetNetworkPassphrase(...args),
-    getUSDCIssuer: (...args: any[]) => mocks.mockGetUSDCIssuer(...args),
+    getAccountInfo: () => mocks.mockGetAccountInfo(),
+    getNetworkPassphrase: () => mocks.mockGetNetworkPassphrase(),
+    getUSDCIssuer: () => mocks.mockGetUSDCIssuer(),
   };
 });
-
 vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
   const original = await importOriginal<typeof import("@stellar/stellar-sdk")>();
   return {
@@ -82,7 +81,7 @@ vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
           return account;
         });
         transactions = mocks.mockTransactions;
-        submitTransaction = (...args: any[]) => mocks.mockSubmitTransaction(...args);
+       submitTransaction = () => mocks.mockSubmitTransaction()
       },
     },
   };

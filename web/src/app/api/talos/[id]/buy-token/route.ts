@@ -93,8 +93,8 @@ export async function POST(
       return NextResponse.json(
         { error: "Transaction signer does not match buyerPublicKey" },
         { status: 400 },
-      );
-    }
+    );
+}
 
     // Validate at least one operation is a USDC payment of the correct amount to the treasury
     const ops = tx.operations as unknown as Array<{
