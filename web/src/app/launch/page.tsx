@@ -11,6 +11,8 @@ import {
   TALOS_REGISTRY_CONTRACT_ID,
   TALOS_NAME_SERVICE_CONTRACT_ID,
 } from "@/lib/soroban";
+import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
+
 
 const STEPS = [
   "Product",
@@ -165,7 +167,7 @@ function LaunchForm() {
         const registry = new Contract(TALOS_REGISTRY_CONTRACT_ID);
         const categoryCapitalized = form.category.charAt(0).toUpperCase() + form.category.slice(1);
 
-        const OPERATOR = "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
+        const OPERATOR = OPERATOR_PUBLIC_KEY;
 
         // Helper: build an ScMap entry (key as Symbol, value as ScVal)
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -261,6 +263,7 @@ function LaunchForm() {
           .addOperation(
             nameService.call(
               "register_name",
+              nativeToScVal(creatorAddr, { type: "address" }),
               nativeToScVal(onChainId, { type: "u32" }),
               nativeToScVal(form.agentName.toLowerCase().trim(), { type: "string" }),
             ),
@@ -380,12 +383,12 @@ function LaunchForm() {
 
           <div>
             <div className="text-xs text-muted mb-2">Agent Identity</div>
-            <div className="text-foreground font-mono text-sm">{genesisResult.agentName}.talos</div>
+            <div data-testid="launched-agent-identity" className="text-foreground font-mono text-sm">{genesisResult.agentName}.talos</div>
           </div>
 
           <div>
             <div className="text-xs text-accent font-bold mb-2">API Key (shown only once — save it now)</div>
-            <div className="bg-background border border-border p-3 font-mono text-xs text-accent break-all select-all">
+            <div data-testid="launched-api-key" className="bg-background border border-border p-3 font-mono text-xs text-accent break-all select-all">
               {genesisResult.apiKey}
             </div>
           </div>
@@ -411,6 +414,7 @@ function LaunchForm() {
                 setTimeout(() => setCopied(false), 2000);
               });
             }}
+            data-testid="copy-api-key-button"
             className={`px-6 py-2.5 text-sm border transition-colors ${
               copied ? "border-accent text-accent font-bold" : "border-border text-foreground hover:bg-surface-hover"
             }`}
@@ -419,6 +423,7 @@ function LaunchForm() {
           </button>
           <button
             onClick={() => router.push(`/agents/${genesisResult.talosId}`)}
+            data-testid="view-launched-talos-button"
             className="px-8 py-2.5 text-sm bg-accent text-background font-medium hover:bg-foreground transition-colors"
           >
             View TALOS &rarr;
@@ -461,6 +466,7 @@ function LaunchForm() {
             checkNameAvailability("nexus");
             setStep(0);
           }}
+          data-testid="load-demo-launch-form-button"
           className="px-4 py-2 text-xs border border-accent/30 text-accent hover:bg-surface-hover transition-colors"
         >
           Demo: Nexus
@@ -473,6 +479,7 @@ function LaunchForm() {
           <button
             key={s}
             onClick={() => i <= step && setStep(i)}
+            data-testid={`launch-step-${s.toLowerCase()}`}
             className={`px-3 py-1.5 text-xs border transition-colors whitespace-nowrap ${
               i === step
                 ? "border-accent text-accent bg-surface"
@@ -501,6 +508,7 @@ function LaunchForm() {
               <select
                 value={form.category}
                 onChange={(e) => update("category", e.target.value)}
+                data-testid="launch-input-category"
                 className="w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground focus:outline-none focus:border-accent"
               >
                 <option value="marketing">Marketing</option>
@@ -531,6 +539,7 @@ function LaunchForm() {
                     value={form.servicePrice}
                     onChange={(e) => update("servicePrice", e.target.value)}
                     placeholder="e.g. 5.00"
+                    data-testid="launch-input-service-price"
                     className="w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent"
                   />
                 </div>
@@ -547,7 +556,10 @@ function LaunchForm() {
             </p>
             <div>
               <label className="block text-xs text-muted mb-2">Creator Public Key (Stellar)</label>
-              <div className="w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground/70 font-mono select-all break-all">
+              <div
+                data-testid="creator-wallet-display"
+                className="w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground/70 font-mono select-all break-all"
+              >
                 {form.creatorWallet || address || "—"}
               </div>
               <p className="text-xs text-muted mt-1">This Stellar public key will be registered as the TALOS Creator on-chain.</p>
@@ -616,6 +628,7 @@ function LaunchForm() {
                     checkNameAvailability(v);
                   }}
                   placeholder="e.g. marketbot"
+                  data-testid="launch-input-agent-identity"
                   className="flex-1 bg-background border border-border px-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent"
                 />
                 <span className="text-sm text-muted">.talos</span>
@@ -641,6 +654,7 @@ function LaunchForm() {
               <select
                 value={form.tone}
                 onChange={(e) => update("tone", e.target.value)}
+                data-testid="launch-input-tone"
                 className="w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground focus:outline-none focus:border-accent"
               >
                 <option value="professional">Professional</option>
@@ -661,6 +675,7 @@ function LaunchForm() {
                         : [...form.channels, ch];
                       update("channels", channels);
                     }}
+                    data-testid={`launch-channel-${ch.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
                     className={`px-3 py-1.5 text-xs border transition-colors ${
                       form.channels.includes(ch)
                         ? "border-accent text-accent bg-surface"
@@ -745,6 +760,7 @@ function LaunchForm() {
         <button
           onClick={() => setStep(Math.max(0, step - 1))}
           disabled={step === 0}
+          data-testid="launch-back-button"
           className="px-6 py-2.5 text-sm border border-border text-foreground hover:bg-surface-hover transition-colors disabled:opacity-30 disabled:cursor-default"
         >
           Back
@@ -753,6 +769,7 @@ function LaunchForm() {
           <button
             onClick={() => setStep(step + 1)}
             disabled={!canNext()}
+            data-testid="launch-next-button"
             className="px-6 py-2.5 text-sm bg-accent text-background font-medium hover:bg-foreground transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-default"
           >
             Next
@@ -761,6 +778,7 @@ function LaunchForm() {
           <button
             onClick={handleLaunch}
             disabled={submitting}
+            data-testid="launch-submit-button"
             className="px-8 py-2.5 text-sm bg-accent text-background font-medium hover:bg-foreground transition-colors disabled:opacity-50"
           >
             {submitting ? (deployStep || "Deploying...") : "Launch TALOS"}
@@ -786,6 +804,7 @@ function Field({
   type?: string;
   multiline?: boolean;
 }) {
+  const testId = `launch-input-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
   const cls =
     "w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent";
   return (
@@ -797,6 +816,7 @@ function Field({
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
           rows={3}
+          data-testid={testId}
           className={`${cls} resize-none`}
         />
       ) : (
@@ -805,6 +825,7 @@ function Field({
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
+          data-testid={testId}
           className={cls}
         />
       )}

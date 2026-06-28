@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import random
 import signal
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -14,6 +16,7 @@ if TYPE_CHECKING:
     from talos_agent.config import Settings
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 SHUTDOWN_GRACE_PERIOD = 10  # seconds before force-exit on second signal
 
@@ -61,6 +64,51 @@ async def run_dividend_distribution(
 
     db.update_schedule("dividend_distribution")
     return "success"
+
+class Backoff:
+    """Exponential backoff with jitter for task retries."""
+
+    def __init__(
+        self,
+        base_delay: float,
+        initial_backoff: float = 2.0,
+        max_backoff: float = 300.0,
+        jitter: float = 0.2,
+    ):
+        self.base_delay = base_delay
+        self.initial_backoff = initial_backoff
+        self.max_backoff = max_backoff
+        self.jitter = jitter
+        self.fail_count = 0
+
+    def next_delay(self) -> float:
+        if self.fail_count == 0:
+            return self.base_delay
+
+        # Exponential backoff: initial * 2^(fail_count - 1)
+        delay = self.initial_backoff * (2 ** (self.fail_count - 1))
+        delay = min(delay, self.max_backoff)
+
+        # Add jitter (+- 20%)
+        if self.jitter > 0:
+            j = delay * self.jitter
+            delay = delay + random.uniform(-j, j)
+
+        actual_delay = max(delay, 0.1)  # floor at 100ms
+        logger.debug(
+            f"Backoff state: fail_count={self.fail_count}, next_delay={actual_delay:.2f}s"
+        )
+        return actual_delay
+
+    def success(self):
+        if self.fail_count > 0:
+            logger.debug("Backoff reset on success")
+        self.fail_count = 0
+
+    def failure(self):
+        self.fail_count += 1
+
+
 async def run(settings: Settings, agent_slot: int = 0) -> None:
     """Entry point called by `talos-agent start`. agent_slot used for log prefixes in multi mode."""
     from talos_agent.api_client import TalosAPIClient
@@ -161,6 +209,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
 
     async def polling_task():
         """Poll Web API for approvals and commerce jobs."""
+        backoff = Backoff(base_delay=settings.polling_interval)
         while not shutdown_event.is_set():
             try:
                 # Poll approvals
@@ -169,35 +218,52 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                     cached = db.get_pending_approvals()
                     cached_ids = {c["approval_id"] for c in cached}
                     if a["id"] not in cached_ids:
-                        db.cache_approval(a["id"], a["type"], a["title"], a.get("description"), a.get("amount"))
+                        db.cache_approval(
+                            a["id"],
+                            a["type"],
+                            a["title"],
+                            a.get("description"),
+                            a.get("amount"),
+                        )
 
                 # Poll pending jobs (as service provider)
                 jobs = await api.get_pending_jobs()
                 for job in jobs:
-                    db.add_commerce_job(job["id"], job["talosId"], job.get("serviceName", ""), job.get("payload"))
+                    db.add_commerce_job(
+                        job["id"], job["talosId"], job.get("serviceName", ""), job.get("payload")
+                    )
+
+                backoff.success()
             except Exception as e:
                 console.print(f"[dim red]Polling error: {e}[/dim red]")
+                backoff.failure()
+
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=settings.polling_interval)
+                await asyncio.wait_for(shutdown_event.wait(), timeout=backoff.next_delay())
                 break
             except asyncio.TimeoutError:
                 pass
 
     async def heartbeat_task():
         """Report online status periodically."""
+        backoff = Backoff(base_delay=settings.heartbeat_interval)
         while not shutdown_event.is_set():
             try:
                 await api.update_status(settings.talos_id, online=True)
-            except Exception:
-                pass
+                backoff.success()
+            except Exception as e:
+                logger.debug(f"Heartbeat error: {e}")
+                backoff.failure()
+
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=settings.heartbeat_interval)
+                await asyncio.wait_for(shutdown_event.wait(), timeout=backoff.next_delay())
                 break
             except asyncio.TimeoutError:
                 pass
 
     async def activity_flush_task():
         """Flush buffered activity logs to Web API."""
+        backoff = Backoff(base_delay=30)
         while not shutdown_event.is_set():
             try:
                 pending = db.get_pending_activities()
@@ -210,10 +276,13 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                             channel=act["channel"],
                         )
                     db.mark_activities_sent([a["id"] for a in pending])
-            except Exception:
-                pass
+                backoff.success()
+            except Exception as e:
+                logger.debug(f"Activity flush error: {e}")
+                backoff.failure()
+
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=30)
+                await asyncio.wait_for(shutdown_event.wait(), timeout=backoff.next_delay())
                 break
             except asyncio.TimeoutError:
                 pass

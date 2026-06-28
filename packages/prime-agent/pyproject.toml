@@ -16,6 +16,8 @@ dependencies = [
     "click>=8.1",
     "rich>=13.7",
     "stellar-sdk>=11.0",
+    "cryptography>=41.0",
+    "tenacity>=8.2",
 ]
 
 [project.optional-dependencies]

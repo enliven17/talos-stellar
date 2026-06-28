@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { AgentAvatar } from "@/components/agent-avatar";
 
 const TABS = ["Top TALOS", "Top Patrons", "Top Agents", "Trending"] as const;
@@ -48,20 +48,85 @@ interface TrendingEntry {
   pulsePrice: number;
 }
 
+interface ApiEntry {
+  id: string;
+  name: string;
+  category: string;
+  status: string;
+  pulsePrice: string;
+  totalSupply: number;
+  patronCount: number;
+  activityCount: number;
+  totalRevenue: number;
+  marketCap: number;
+}
+
+function formatRevenue(revenue: number): string {
+  return `$${revenue.toLocaleString()}`;
+}
+
+function formatMarketCap(marketCap: number): string {
+  return marketCap >= 1_000_000
+    ? `$${(marketCap / 1_000_000).toFixed(1)}M`
+    : `$${(marketCap / 1000).toFixed(0)}K`;
+}
+
+function toDisplayEntry(e: ApiEntry, rank: number): TopTalosEntry {
+  return {
+    rank,
+    id: e.id,
+    name: e.name,
+    category: e.category,
+    revenueStr: formatRevenue(e.totalRevenue),
+    marketCapStr: formatMarketCap(e.marketCap),
+    patrons: e.patronCount,
+  };
+}
+
 interface Props {
-  topTalos: TopTalosEntry[];
   topPatrons: TopPatronEntry[];
   topAgents: TopAgentEntry[];
   trending: TrendingEntry[];
 }
 
-export function LeaderboardClient({ topTalos, topPatrons, topAgents, trending }: Props) {
+export function LeaderboardClient({ topPatrons, topAgents, trending }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>("Top TALOS");
+  const [entries, setEntries] = useState<TopTalosEntry[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const fetchPage = useCallback(async (cursor: string | null) => {
+    const params = new URLSearchParams({ limit: "50" });
+    if (cursor) params.set("cursor", cursor);
+    const res = await fetch(`/api/leaderboard?${params}`);
+    const body = await res.json();
+    return body as { data: ApiEntry[]; nextCursor: string | null };
+  }, []);
+
+  useEffect(() => {
+    fetchPage(null).then((body) => {
+      setEntries(body.data.map((e, i) => toDisplayEntry(e, i + 1)));
+      setNextCursor(body.nextCursor);
+      setLoading(false);
+    });
+  }, [fetchPage]);
+
+  const handleLoadMore = useCallback(async () => {
+    if (!nextCursor) return;
+    setLoading(true);
+    const body = await fetchPage(nextCursor);
+    setEntries((prev) => [
+      ...prev,
+      ...body.data.map((e, i) => toDisplayEntry(e, prev.length + i + 1)),
+    ]);
+    setNextCursor(body.nextCursor);
+    setLoading(false);
+  }, [nextCursor, fetchPage]);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-12">
       <div className="mb-10">
-        <div className="text-sm text-muted mb-2 tracking-wide">// RANKINGS</div>
+        <div className="text-sm text-muted mb-2 tracking-wide">RANKINGS</div>
         <h1 className="text-accent text-2xl font-bold tracking-wide mb-2">Leaderboard</h1>
         <p className="text-muted text-sm">Rankings across the TALOS ecosystem</p>
       </div>
@@ -86,7 +151,7 @@ export function LeaderboardClient({ topTalos, topPatrons, topAgents, trending }:
         <>
           {/* Mobile cards */}
           <div className="sm:hidden space-y-2">
-            {topTalos.map((e) => (
+            {entries.map((e) => (
               <div key={e.id} className="bg-surface border border-border p-4">
                 <div className="flex items-center gap-3 mb-2">
                   <span className="text-accent font-bold w-6 shrink-0">{e.rank}</span>
@@ -116,7 +181,7 @@ export function LeaderboardClient({ topTalos, topPatrons, topAgents, trending }:
                 </tr>
               </thead>
               <tbody>
-                {topTalos.map((e) => (
+                {entries.map((e) => (
                   <tr key={e.id} className="border-b border-border hover:bg-surface transition-colors">
                     <td className="py-3 pr-6 text-accent font-bold">{e.rank}</td>
                     <td className="py-3 pr-6 text-foreground">
@@ -134,6 +199,18 @@ export function LeaderboardClient({ topTalos, topPatrons, topAgents, trending }:
               </tbody>
             </table>
           </div>
+          {/* Load more */}
+          {nextCursor && (
+            <div className="flex justify-center mt-8">
+              <button
+                onClick={handleLoadMore}
+                disabled={loading}
+                className="border border-accent text-accent bg-transparent px-6 py-2 text-sm font-medium hover:bg-accent/10 transition-all disabled:opacity-40"
+              >
+                {loading ? "Loading..." : "Load More"}
+              </button>
+            </div>
+          )}
         </>
       )}
 

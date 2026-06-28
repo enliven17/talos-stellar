@@ -2,7 +2,8 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPatrons } from "@/db/schema";
 import { and, desc, eq } from "drizzle-orm";
-import { getAccountInfo } from "@/lib/stellar";
+import { getAccountInfo, verifyStellarSignature } from "@/lib/stellar";
+import { becomePatronSchema, revokePatronSchema, parseBody } from "@/lib/schemas";
 
 // GET /api/talos/:id/patrons — List patrons for a TALOS
 export async function GET(
@@ -36,6 +37,8 @@ export async function GET(
 }
 
 // POST /api/talos/:id/patrons — Register as patron (requires min Pulse holding)
+// Caller must sign a message containing both the TALOS id and the literal
+// "register-patron" with their Stellar wallet, proving control of the key.
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -43,21 +46,30 @@ export async function POST(
   try {
     const { id } = await params;
 
-    const body = await request.json();
-    const { stellarPublicKey, pulseAmount } = body;
+    const parsed = await parseBody(request, becomePatronSchema);
+    if (parsed.error) return parsed.error;
 
-    if (!stellarPublicKey) {
+    const { stellarPublicKey, pulseAmount, signature, message } = parsed.data;
+
+    // Bind the signature to this TALOS and this action to prevent replay
+    // across TALOSes and across the register/revoke endpoints.
+    if (!message.includes(id) || !message.includes("register-patron")) {
       return Response.json(
-        { error: "stellarPublicKey is required" },
+        {
+          error:
+            "Signature message must contain the TALOS id and the action 'register-patron'",
+        },
         { status: 400 }
       );
     }
 
-    if (pulseAmount == null || typeof pulseAmount !== "number" || pulseAmount <= 0) {
-      return Response.json(
-        { error: "pulseAmount must be a positive number" },
-        { status: 400 }
-      );
+    const sigOk = await verifyStellarSignature(
+      stellarPublicKey,
+      message,
+      signature
+    );
+    if (!sigOk) {
+      return Response.json({ error: "Invalid signature" }, { status: 403 });
     }
 
     const talos = await db
@@ -158,6 +170,8 @@ export async function POST(
 }
 
 // DELETE /api/talos/:id/patrons — Withdraw patron status
+// Caller must sign a message containing both the TALOS id and the literal
+// "revoke-patron" with their Stellar wallet, proving control of the key.
 export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -165,14 +179,28 @@ export async function DELETE(
   try {
     const { id } = await params;
 
-    const body = await request.json();
-    const { stellarPublicKey } = body;
+    const parsed = await parseBody(request, revokePatronSchema);
+    if (parsed.error) return parsed.error;
 
-    if (!stellarPublicKey) {
+    const { stellarPublicKey, signature, message } = parsed.data;
+
+    if (!message.includes(id) || !message.includes("revoke-patron")) {
       return Response.json(
-        { error: "stellarPublicKey is required" },
+        {
+          error:
+            "Signature message must contain the TALOS id and the action 'revoke-patron'",
+        },
         { status: 400 }
       );
+    }
+
+    const sigOk = await verifyStellarSignature(
+      stellarPublicKey,
+      message,
+      signature
+    );
+    if (!sigOk) {
+      return Response.json({ error: "Invalid signature" }, { status: 403 });
     }
 
     const patron = await db

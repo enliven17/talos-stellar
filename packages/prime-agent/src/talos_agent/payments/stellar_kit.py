@@ -10,7 +10,10 @@ from __future__ import annotations
 import os
 from typing import Any
 
+import httpx
 from rich.console import Console
+
+from talos_agent.http import request_with_retry
 
 _HORIZON_URL = os.getenv("STELLAR_HORIZON_URL", "https://horizon-testnet.stellar.org")
 
@@ -46,10 +49,9 @@ class StellarKit:
             if not acct:
                 return {"error": "No Stellar account configured"}
             # Horizon is public — no auth needed
-            import httpx
-            async with httpx.AsyncClient() as client:
-                r = await client.get(
-                    f"{_HORIZON_URL}/accounts/{acct}"
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await request_with_retry(
+                    lambda: client.get(f"{_HORIZON_URL}/accounts/{acct}")
                 )
                 if r.status_code == 200:
                     data = r.json()
@@ -65,10 +67,9 @@ class StellarKit:
     async def get_token_balance(self, account_id: str, token_id: str) -> dict[str, Any]:
         """Query Stellar asset balance via Horizon."""
         try:
-            import httpx
-            async with httpx.AsyncClient() as client:
-                r = await client.get(
-                    f"{_HORIZON_URL}/accounts/{account_id}",
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await request_with_retry(
+                    lambda: client.get(f"{_HORIZON_URL}/accounts/{account_id}")
                 )
                 if r.status_code == 200:
                     data = r.json()

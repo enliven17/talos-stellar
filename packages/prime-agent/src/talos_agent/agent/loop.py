@@ -11,6 +11,7 @@ from rich.console import Console
 
 from talos_agent.agent.context import AgentContext
 from talos_agent.agent.prompt import build_system_prompt
+from talos_agent.http import call_with_retry
 
 if TYPE_CHECKING:
     from talos_agent.config import Settings
@@ -60,11 +61,13 @@ async def agent_loop(
 
         console.print(f"[dim]Agent iteration {iteration + 1}...[/dim]")
 
-        response = await client.chat.completions.create(
-            model=settings.llm_model,
-            messages=messages,
-            tools=tool_schemas if tool_schemas else None,
-            tool_choice="auto" if tool_schemas else None,
+        response = await call_with_retry(
+            lambda: client.chat.completions.create(
+                model=settings.llm_model,
+                messages=messages,
+                tools=tool_schemas if tool_schemas else None,
+                tool_choice="auto" if tool_schemas else None,
+            )
         )
 
         msg = response.choices[0].message

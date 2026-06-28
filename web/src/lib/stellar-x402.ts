@@ -8,6 +8,8 @@
  *   Mainnet: https://channels.openzeppelin.com/x402
  */
 
+import { USDC_ISSUER } from "./stellar-config";
+
 const X402_FACILITATOR_URL =
   process.env.X402_FACILITATOR_URL ??
   "https://channels.openzeppelin.com/x402/testnet";
@@ -34,77 +36,88 @@ export async function signX402Payment(
   agentSecretKey: string,
   payload: X402PaymentPayload,
 ): Promise<{ paymentToken: string }> {
-  // x402-stellar: sign Soroban auth entry for USDC transfer
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const x402 = await import("x402-stellar").catch(() => null) as any;
+  // Helper: redact any Stellar secret-like patterns from messages
+  const sanitize = (input: unknown) => {
+    const s = typeof input === "string" ? input : String(input);
+    // Stellar secret seeds begin with 'S' and are 56 chars total (1 + 55)
+    return s.replace(/S[A-Z2-7]{55}/g, "[REDACTED]");
+  };
 
-  if (x402?.signPayment) {
-    const { Keypair } = await import("@stellar/stellar-sdk");
+  try {
+    // x402-stellar: sign Soroban auth entry for USDC transfer
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const x402 = await import("x402-stellar").catch(() => null) as any;
+
+    if (x402?.signPayment) {
+      const { Keypair } = await import("@stellar/stellar-sdk");
+      const keypair = Keypair.fromSecret(agentSecretKey);
+      const networkPassphrase =
+        process.env.STELLAR_NETWORK === "mainnet"
+          ? "Public Global Stellar Network ; September 2015"
+          : "Test SDF Network ; September 2015";
+
+      const token = await x402.signPayment({
+        secretKey: agentSecretKey,
+        publicKey: keypair.publicKey(),
+        from: payload.from,
+        to: payload.to,
+        amount: payload.amount,
+        assetCode: payload.assetCode ?? "USDC",
+        networkPassphrase,
+        facilitatorUrl: X402_FACILITATOR_URL,
+      });
+      return { paymentToken: token };
+    }
+
+    // Fallback: manual Stellar transaction as payment proof
+    // Build + sign a Stellar tx and return the XDR as the payment token
+    console.warn("[stellar-x402] x402-stellar package not available, using manual tx fallback");
+    const {
+      Keypair,
+      Asset,
+      TransactionBuilder,
+      Operation,
+      BASE_FEE,
+    } = await import("@stellar/stellar-sdk");
+    const { Horizon } = await import("@stellar/stellar-sdk");
+
+    const horizonUrl =
+      process.env.STELLAR_HORIZON_URL ?? "https://horizon-testnet.stellar.org";
     const keypair = Keypair.fromSecret(agentSecretKey);
+    const server = new Horizon.Server(horizonUrl);
+    const account = await server.loadAccount(keypair.publicKey());
+
     const networkPassphrase =
       process.env.STELLAR_NETWORK === "mainnet"
         ? "Public Global Stellar Network ; September 2015"
         : "Test SDF Network ; September 2015";
 
-    const token = await x402.signPayment({
-      secretKey: agentSecretKey,
-      publicKey: keypair.publicKey(),
-      from: payload.from,
-      to: payload.to,
-      amount: payload.amount,
-      assetCode: payload.assetCode ?? "USDC",
+    const usdc = new Asset(
+      payload.assetCode ?? "USDC",
+      USDC_ISSUER,
+    );
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
       networkPassphrase,
-      facilitatorUrl: X402_FACILITATOR_URL,
-    });
-    return { paymentToken: token };
+    })
+      .addOperation(
+        Operation.payment({
+          destination: payload.to,
+          asset: usdc,
+          amount: payload.amount,
+        }),
+      )
+      .setTimeout(60)
+      .build();
+
+    tx.sign(keypair);
+    return { paymentToken: tx.toXDR() };
+  } catch (err) {
+    const msg = sanitize(err instanceof Error ? err.message : err);
+    console.error("[stellar-x402] signX402Payment failed:", msg);
+    throw new Error(msg);
   }
-
-  // Fallback: manual Stellar transaction as payment proof
-  // Build + sign a Stellar tx and return the XDR as the payment token
-  console.warn("[stellar-x402] x402-stellar package not available, using manual tx fallback");
-  const {
-    Keypair,
-    Asset,
-    TransactionBuilder,
-    Operation,
-    BASE_FEE,
-  } = await import("@stellar/stellar-sdk");
-  const { Horizon } = await import("@stellar/stellar-sdk");
-
-  const horizonUrl =
-    process.env.STELLAR_HORIZON_URL ?? "https://horizon-testnet.stellar.org";
-  const keypair = Keypair.fromSecret(agentSecretKey);
-  const server = new Horizon.Server(horizonUrl);
-  const account = await server.loadAccount(keypair.publicKey());
-
-  const networkPassphrase =
-    process.env.STELLAR_NETWORK === "mainnet"
-      ? "Public Global Stellar Network ; September 2015"
-      : "Test SDF Network ; September 2015";
-
-  const usdc = new Asset(
-    payload.assetCode ?? "USDC",
-    process.env.STELLAR_NETWORK === "mainnet"
-      ? "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
-      : "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
-  );
-
-  const tx = new TransactionBuilder(account, {
-    fee: BASE_FEE,
-    networkPassphrase,
-  })
-    .addOperation(
-      Operation.payment({
-        destination: payload.to,
-        asset: usdc,
-        amount: payload.amount,
-      }),
-    )
-    .setTimeout(60)
-    .build();
-
-  tx.sign(keypair);
-  return { paymentToken: tx.toXDR() };
 }
 
 /**
@@ -148,7 +161,8 @@ export async function verifyX402Payment(
     const data = await res.json();
     return data.valid === true;
   } catch (err) {
-    console.error("[stellar-x402] verifyX402Payment failed:", err);
+    const msg = String(err).replace(/S[A-Z2-7]{55}/g, "[REDACTED]");
+    console.error("[stellar-x402] verifyX402Payment failed:", msg);
     return false;
   }
 }
@@ -191,6 +205,7 @@ export async function settleX402Payment(
     return { txHash: result.hash };
   } catch (err) {
     // Also try facilitator /settle directly
+    const sanitize = (input: unknown) => String(input).replace(/S[A-Z2-7]{55}/g, "[REDACTED]");
     const res = await fetch(`${X402_FACILITATOR_URL}/settle`, {
       method: "POST",
       headers: {
@@ -201,7 +216,9 @@ export async function settleX402Payment(
     });
 
     if (!res.ok) {
-      throw new Error(`x402 settle failed: ${res.status} ${await res.text()}`);
+      const body = await res.text();
+      const msg = sanitize(`x402 settle failed: ${res.status} ${body}`);
+      throw new Error(msg);
     }
     const data = await res.json();
     return { txHash: data.txHash };

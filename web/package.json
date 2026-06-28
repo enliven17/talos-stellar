@@ -7,7 +7,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test:unit": "vitest run tests/health.test.ts",
     "test:e2e": "vitest run tests/api-e2e.test.ts",
+    "test:openapi": "vitest run tests/openapi-snapshot.test.ts",
+    "openapi:snapshot": "tsx scripts/write-openapi-snapshot.ts",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "db:seed": "tsx src/db/seed.ts",
@@ -23,6 +26,7 @@
     "pg": "^8.20.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "recharts": "^3.9.0",
     "x402-stellar": "^0.1.0",
     "zod": "^4.3.6"
   },

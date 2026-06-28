@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
-import { tlsTalos, tlsCommerceJobs } from "@/db/schema";
+import { tlsTalos, tlsCommerceJobs, tlsRevenues, tlsCommerceServices } from "@/db/schema";
 import { eq } from "drizzle-orm";
 
 /**
@@ -56,14 +56,35 @@ export async function POST(
       return Response.json({ error: "Not authorized to fulfill this job" }, { status: 403 });
     }
 
-    const [updated] = await db
-      .update(tlsCommerceJobs)
-      .set({
-        result,
-        status: "completed",
-      })
-      .where(eq(tlsCommerceJobs.id, id))
-      .returning();
+    const [updated] = await db.transaction(async (tx) => {
+      const [updatedJob] = await tx
+        .update(tlsCommerceJobs)
+        .set({
+          result,
+          status: "completed",
+        })
+        .where(eq(tlsCommerceJobs.id, id))
+        .returning();
+
+      if (job.status !== "completed") {
+        const service = await tx
+          .select({ currency: tlsCommerceServices.currency })
+          .from(tlsCommerceServices)
+          .where(eq(tlsCommerceServices.talosId, job.talosId))
+          .limit(1)
+          .then((r) => r[0] ?? null);
+
+        await tx.insert(tlsRevenues).values({
+          talosId: job.talosId,
+          amount: job.amount,
+          currency: service?.currency ?? "USDC",
+          source: "commerce",
+          txHash: job.txHash,
+        });
+      }
+
+      return [updatedJob];
+    });
 
     return Response.json(updated);
   } catch {
