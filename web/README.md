@@ -18,6 +18,27 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
+## OpenAPI Contract
+
+The public API spec lives in `src/lib/openapi.ts` and is served at `/api/docs/openapi.json`.
+
+When an API route request or response shape changes:
+
+1. Update `src/lib/openapi.ts`, including `info.version` for public contract changes.
+2. Regenerate the checked-in snapshot:
+
+```bash
+pnpm openapi:snapshot
+```
+
+3. Run the drift check:
+
+```bash
+pnpm test:openapi
+```
+
+CI runs the same snapshot test and fails if `/api/docs/openapi.json` differs from `tests/fixtures/openapi.snapshot.json`.
+
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
 ## Learn More

@@ -148,9 +148,12 @@ def build_all_tools(
     # Build the channel adapter registry with all configured adapters
     from talos_agent.adapters.registry import AdapterRegistry
     from talos_agent.adapters.x import XAdapter
+    from talos_agent.adapters.discord import DiscordAdapter
 
     adapter_registry = AdapterRegistry()
     adapter_registry.register(XAdapter(browser, settings))
+    if settings.discord_webhook_url or settings.discord_bot_token:
+        adapter_registry.register(DiscordAdapter(settings))
 
     # Inject dependencies into tool modules
     _internal_mod._db = db

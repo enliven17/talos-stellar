@@ -3,7 +3,7 @@ import { db } from "@/db";
 import { tlsTalos, tlsPatrons, tlsCommerceServices } from "@/db/schema";
 import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 import { randomBytes } from "crypto";
-import { createAgentKeypair, fundTestnetAccount } from "@/lib/stellar";
+import { createAgentKeypair, fundTestnetAccount, verifyStellarSignature } from "@/lib/stellar";
 import { createTalosSchema, parseBody } from "@/lib/schemas";
 
 // GET /api/talos — List TALOS entries with cursor-based pagination
@@ -119,7 +119,24 @@ export async function POST(request: NextRequest) {
       serviceName,
       serviceDescription,
       servicePrice,
+      signature,
+      message,
     } = parsed.data;
+
+    // Verify signature to prove ownership of creatorPublicKey
+    // Message includes core immutable fields to prevent parameter tampering.
+    const expectedMessage = `talos-genesis:${name}:${onChainId ?? "null"}:${supply}`;
+    if (message !== expectedMessage) {
+      return Response.json(
+        { error: `Signature message must be exactly '${expectedMessage}'` },
+        { status: 400 },
+      );
+    }
+
+    const sigOk = await verifyStellarSignature(creatorPublicKey, message, signature);
+    if (!sigOk) {
+      return Response.json({ error: "Invalid signature for creatorPublicKey" }, { status: 403 });
+    }
 
     // Generate API key (tak_ prefix = TALOS API Key)
     const apiKey = `tak_${randomBytes(24).toString("hex")}`;

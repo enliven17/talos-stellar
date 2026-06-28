@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll } from "vitest";
+import { Keypair } from "@stellar/stellar-sdk";
 
 const BASE = process.env.TEST_BASE_URL || "http://localhost:3000";
 
@@ -12,6 +13,7 @@ function api(path: string, init?: RequestInit) {
 // Shared state across the test flow
 let talosId: string;
 let apiKey: string;
+const creatorKeypair = Keypair.random();
 let approvalId: string;
 let playbookId: string;
 
@@ -21,13 +23,22 @@ let playbookId: string;
 
 describe("POST /api/talos — create", () => {
   it("creates a talos and returns apiKeyOnce", async () => {
+    const name = "E2E Test Agent";
+    const totalSupply = 500_000;
+    const onChainId = null;
+    const message = `talos-genesis:${name}:${onChainId ?? "null"}:${totalSupply}`;
+    const signature = creatorKeypair.sign(Buffer.from(message, "utf-8")).toString("base64");
+
     const res = await api("/api/talos", {
       method: "POST",
       body: JSON.stringify({
-        name: "E2E Test Agent",
+        name,
         category: "Development",
         description: "Created by e2e test suite",
-        totalSupply: 500_000,
+        totalSupply,
+        creatorPublicKey: creatorKeypair.publicKey(),
+        signature,
+        message,
       }),
     });
 
@@ -47,15 +58,47 @@ describe("POST /api/talos — create", () => {
   });
 
   it("rejects invalid category", async () => {
+    const name = "Bad";
+    const totalSupply = 1_000_000;
+    const onChainId = null;
+    const message = `talos-genesis:${name}:${onChainId ?? "null"}:${totalSupply}`;
+    const signature = creatorKeypair.sign(Buffer.from(message, "utf-8")).toString("base64");
+
     const res = await api("/api/talos", {
       method: "POST",
       body: JSON.stringify({
-        name: "Bad",
+        name,
         category: "InvalidCategory",
         description: "Should fail",
+        totalSupply,
+        creatorPublicKey: creatorKeypair.publicKey(),
+        signature,
+        message,
       }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it("rejects invalid signature", async () => {
+    const name = "Invalid Sig Agent";
+    const totalSupply = 500_000;
+    const onChainId = null;
+    const message = `talos-genesis:${name}:${onChainId ?? "null"}:${totalSupply}`;
+    const signature = "bm90IGEgc2lnbmF0dXJl"; // "not a signature" in base64
+
+    const res = await api("/api/talos", {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        category: "Development",
+        description: "Should fail due to signature",
+        totalSupply,
+        creatorPublicKey: creatorKeypair.publicKey(),
+        signature,
+        message,
+      }),
+    });
+    expect(res.status).toBe(403);
   });
 
   it("rejects missing required fields", async () => {
@@ -892,8 +935,22 @@ describe("GET /api/talos — pagination", () => {
 // ────────────────────────────────────────────
 
 describe("GET /api/talos/:id/financial-projection", () => {
-  it("returns financial projections with LLM analysis", async () => {
+  it("rejects without auth", async () => {
     const res = await api(`/api/talos/${talosId}/financial-projection`);
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects with wrong api key", async () => {
+    const res = await api(`/api/talos/${talosId}/financial-projection`, {
+      headers: { Authorization: "Bearer wrong_key_here" },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("returns financial projections with LLM analysis", async () => {
+    const res = await api(`/api/talos/${talosId}/financial-projection`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
     expect(res.status).toBe(200);
 
     const body = await res.json();
@@ -922,7 +979,50 @@ describe("GET /api/talos/:id/financial-projection", () => {
   });
 
   it("returns 404 for non-existent talos", async () => {
-    const res = await api("/api/talos/nonexistent_12345/financial-projection");
+    const res = await api("/api/talos/nonexistent_12345/financial-projection", {
+      headers: { Authorization: "Bearer any_token_here" },
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
+// ────────────────────────────────────────────
+// 10. Financial Summary
+// ────────────────────────────────────────────
+
+describe("GET /api/talos/:id/financial-summary", () => {
+  it("rejects without auth", async () => {
+    const res = await api(`/api/talos/${talosId}/financial-summary`);
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects with wrong api key", async () => {
+    const res = await api(`/api/talos/${talosId}/financial-summary`, {
+      headers: { Authorization: "Bearer wrong_key_here" },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("returns financial summary with valid api key", async () => {
+    const res = await api(`/api/talos/${talosId}/financial-summary`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body.talosId).toBe(talosId);
+    expect(body.talosName).toBe("E2E Test Agent");
+    expect(body.cashFlow).toBeDefined();
+    expect(body.trends).toBeDefined();
+    expect(body.budget).toBeDefined();
+    expect(body.spendingHistory).toBeDefined();
+    expect(body.playbookSales).toBeDefined();
+  });
+
+  it("returns 404 for non-existent talos", async () => {
+    const res = await api("/api/talos/nonexistent_12345/financial-summary", {
+      headers: { Authorization: "Bearer any_token_here" },
+    });
     expect(res.status).toBe(404);
   });
 });

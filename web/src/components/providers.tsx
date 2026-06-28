@@ -158,6 +158,7 @@ function WalletModal({
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
       onClick={onClose}
+      data-testid="wallet-modal"
     >
       <div
         className="bg-background border border-border w-full max-w-sm mx-4"
@@ -171,6 +172,7 @@ function WalletModal({
           </div>
           <button
             onClick={onClose}
+            data-testid="wallet-modal-close-button"
             className="text-muted hover:text-foreground transition-colors text-lg leading-none"
           >
             ×
@@ -184,6 +186,7 @@ function WalletModal({
               key={w.id}
               onClick={() => handleSelect(w.id)}
               disabled={!!connecting}
+              data-testid={`wallet-option-${w.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
               className="w-full flex items-center gap-3 px-4 py-3 border border-transparent hover:border-accent/40 hover:bg-surface text-left transition-all disabled:opacity-50 group"
             >
               <span className="text-xl w-7 text-center">{w.icon}</span>

@@ -172,6 +172,7 @@ export default function PlaybooksPage() {
               setTab(t);
               setSelected(null);
             }}
+            data-testid={`playbooks-tab-${t}`}
             className={`pb-3 text-sm transition-colors whitespace-nowrap shrink-0 ${
               tab === t
                 ? "text-accent border-b border-accent"
@@ -196,6 +197,7 @@ export default function PlaybooksPage() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search playbooks..."
+              data-testid="playbooks-search-input"
               className="w-full bg-surface border border-border px-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent"
             />
             <div className="flex flex-wrap gap-4">
@@ -206,6 +208,7 @@ export default function PlaybooksPage() {
                     <button
                       key={c}
                       onClick={() => setCategory(c)}
+                      data-testid={`playbooks-category-filter-${c.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
                       className={`px-2.5 py-1 text-xs border transition-colors ${
                         category === c
                           ? "border-accent text-accent"
@@ -224,6 +227,7 @@ export default function PlaybooksPage() {
                     <button
                       key={c}
                       onClick={() => setChannel(c)}
+                      data-testid={`playbooks-channel-filter-${c.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
                       className={`px-2.5 py-1 text-xs border transition-colors ${
                         channel === c
                           ? "border-accent text-accent"
@@ -253,6 +257,7 @@ export default function PlaybooksPage() {
                 <button
                   key={p.id}
                   onClick={() => setSelected(p)}
+                  data-testid={`playbook-card-${p.id}`}
                   className="bg-surface border border-border p-5 text-left hover:bg-surface-hover transition-colors group"
                 >
                   <div className="flex items-center justify-between mb-3">
@@ -293,6 +298,7 @@ export default function PlaybooksPage() {
         <div>
           <button
             onClick={() => setSelected(null)}
+            data-testid="playbook-detail-back-button"
             className="text-xs text-muted hover:text-foreground mb-6 transition-colors"
           >
             &larr; Back to browse
@@ -373,6 +379,7 @@ export default function PlaybooksPage() {
                 {isConnected ? (
                   <button
                     onClick={() => handlePurchase(selected.id)}
+                    data-testid={`purchase-playbook-${selected.id}`}
                     className="w-full bg-accent text-background py-2.5 text-sm font-medium hover:bg-foreground transition-colors mb-3"
                   >
                     Purchase Playbook
@@ -380,6 +387,7 @@ export default function PlaybooksPage() {
                 ) : (
                   <button
                     onClick={connect}
+                    data-testid="connect-to-purchase-button"
                     className="w-full bg-accent text-background py-2.5 text-sm font-medium hover:bg-foreground transition-colors mb-3 flex items-center justify-center gap-2"
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -547,6 +555,7 @@ export default function PlaybooksPage() {
                     {!pp.appliedAt && (
                       <button
                         onClick={() => handleApply(pp.playbook.id)}
+                        data-testid={`apply-playbook-${pp.playbook.id}`}
                         className="px-3 py-1.5 text-xs bg-accent text-background hover:bg-foreground transition-colors"
                       >
                         Apply to Agent
@@ -679,6 +688,7 @@ function WalletRequiredTab({ message, onConnect }: { message: string; onConnect:
       <p className="text-sm text-muted mb-6">{message}</p>
       <button
         onClick={onConnect}
+        data-testid="connect-wallet-required-tab-button"
         className="bg-accent text-background px-6 py-2.5 text-sm font-medium hover:bg-foreground transition-colors inline-flex items-center gap-2"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
