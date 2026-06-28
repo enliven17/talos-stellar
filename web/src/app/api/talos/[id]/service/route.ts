@@ -94,10 +94,23 @@ export async function POST(
     // 1b. Read body once (request body can only be consumed once)
     const requestBody = await request.json().catch(() => ({})) as Record<string, unknown>;
 
-    // 1c. Validate bid payload if provided
-    const bidValidation = submitBidSchema.safeParse(requestBody);
-    const bidData = bidValidation.success ? bidValidation.data : { bidPrice: undefined, status: undefined };
+   // 1c. Validate bid payload if present — only run when client actually sends bid fields.
+  // If bid fields are present but invalid, reject with 400 (never silently fall through).
+  type BidData = { bidPrice?: number; status?: "negotiating" | "counter_offer" };
+  let bidData: BidData = {};
 
+  const hasBidFields = "bidPrice" in requestBody || "status" in requestBody;
+  if (hasBidFields) {
+    const bidValidation = submitBidSchema.safeParse(requestBody);
+    if (!bidValidation.success) {
+      const issues = bidValidation.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
+      return Response.json(
+        { error: "Invalid bid payload", issues },
+        { status: 400 }
+      );
+    }
+    bidData = bidValidation.data;
+  }
     // 2. Validate X-PAYMENT header (Stellar x402 token)
     const paymentHeader = request.headers.get("x-payment");
     if (!paymentHeader) {

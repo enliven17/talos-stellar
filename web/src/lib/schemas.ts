@@ -106,13 +106,19 @@ export const registerServiceSchema = z.object({
 
 // --- Commerce Job Bidding ---
 
+// Full set of statuses used internally / by the server
 export const VALID_BID_STATUSES = [
   "pending", "negotiating", "accepted", "counter_offer", "rejected", "completed",
 ] as const;
 
+// Only these statuses may be submitted by a client in a bid payload.
+// Terminal states (accepted, rejected, completed) and initial states (pending)
+// are set exclusively by the server after verification/settlement.
+export const CLIENT_BID_STATUSES = ["negotiating", "counter_offer"] as const;
+
 export const submitBidSchema = z.object({
   bidPrice: z.number().positive().optional(),
-  status: z.enum(VALID_BID_STATUSES).optional(),
+  status: z.enum(CLIENT_BID_STATUSES).optional(),
 });
 
 // --- Revenue ---
