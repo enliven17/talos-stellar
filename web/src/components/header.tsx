@@ -29,6 +29,7 @@ export function Header() {
         <div className="flex items-center gap-6 lg:gap-8 min-w-0">
           <Link
             href="/"
+            data-testid="nav-link-home"
             className="text-nav-accent text-3xl sm:text-4xl font-ruthie shrink-0"
             onClick={() => setMenuOpen(false)}
           >
@@ -39,6 +40,7 @@ export function Header() {
               <Link
                 key={item.href}
                 href={item.href}
+                data-testid={`nav-link-${item.href.slice(1)}`}
                 className={`text-sm transition-colors flex items-center gap-1.5 whitespace-nowrap ${
                   item.highlight
                     ? pathname === item.href
@@ -65,6 +67,7 @@ export function Header() {
           {isConnected && (
             <Link
               href="/dashboard"
+              data-testid="nav-link-dashboard"
               className={`hidden md:inline-flex text-sm transition-colors items-center gap-1.5 ${
                 pathname === "/dashboard" ? "text-nav-accent" : "text-muted hover:text-nav-foreground"
               }`}
@@ -74,6 +77,7 @@ export function Header() {
           )}
           <Link
             href="/launch"
+            data-testid="nav-link-launch"
             className={`hidden md:inline-flex px-4 py-2 text-sm font-medium transition-colors ${
               pathname === "/launch"
                 ? "bg-accent text-background"
@@ -84,11 +88,15 @@ export function Header() {
           </Link>
           {isConnected ? (
             <div className="hidden md:flex items-center gap-3">
-              <span className="text-xs text-nav-foreground font-mono bg-surface border border-border px-3 py-1.5">
+              <span
+                data-testid="connected-wallet-address"
+                className="text-xs text-nav-foreground font-mono bg-surface border border-border px-3 py-1.5"
+              >
                 {truncatedAddress}
               </span>
               <button
                 onClick={disconnect}
+                data-testid="disconnect-wallet-button"
                 className="text-xs text-muted hover:text-nav-foreground transition-colors"
               >
                 Disconnect
@@ -97,6 +105,7 @@ export function Header() {
           ) : (
             <button
               onClick={connect}
+              data-testid="connect-wallet-button"
               className="hidden md:inline-flex border border-border px-4 py-2 text-sm text-nav-foreground hover:bg-surface-hover transition-colors cursor-pointer"
             >
               Connect Wallet
@@ -115,6 +124,7 @@ export function Header() {
             className="md:hidden flex flex-col justify-center items-center w-8 h-8 gap-1.5 text-foreground"
             onClick={() => setMenuOpen((v) => !v)}
             aria-label={menuOpen ? "Close menu" : "Open menu"}
+            data-testid="mobile-menu-toggle"
           >
             <span
               className={`block h-px w-5 bg-current transition-transform origin-center ${menuOpen ? "translate-y-[7px] rotate-45" : ""}`}
@@ -138,6 +148,7 @@ export function Header() {
                 key={item.href}
                 href={item.href}
                 onClick={() => setMenuOpen(false)}
+                data-testid={`mobile-nav-link-${item.href.slice(1)}`}
                 className={`flex items-center gap-2 px-2 py-3 text-sm border-b border-border/50 last:border-0 ${
                   item.highlight
                     ? pathname === item.href
@@ -156,6 +167,7 @@ export function Header() {
               <Link
                 href="/dashboard"
                 onClick={() => setMenuOpen(false)}
+                data-testid="mobile-nav-link-dashboard"
                 className={`flex items-center px-2 py-3 text-sm border-b border-border/50 ${
                   pathname === "/dashboard" ? "text-nav-accent" : "text-muted"
                 }`}
@@ -166,6 +178,7 @@ export function Header() {
             <Link
               href="/launch"
               onClick={() => setMenuOpen(false)}
+              data-testid="mobile-nav-link-launch"
               className="flex items-center px-2 py-3 text-sm text-accent font-medium border-b border-border/50"
             >
               Launchpad →
@@ -174,6 +187,7 @@ export function Header() {
               {isConnected ? (
                 <button
                   onClick={() => { disconnect(); setMenuOpen(false); }}
+                  data-testid="mobile-disconnect-wallet-button"
                   className="text-xs text-muted hover:text-foreground transition-colors"
                 >
                   Disconnect wallet
@@ -181,6 +195,7 @@ export function Header() {
               ) : (
                 <button
                   onClick={() => { connect(); setMenuOpen(false); }}
+                  data-testid="mobile-connect-wallet-button"
                   className="w-full border border-border py-2.5 text-sm text-foreground hover:bg-surface transition-colors"
                 >
                   Connect Wallet

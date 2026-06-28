@@ -30,7 +30,9 @@ export const createTalosSchema = z.object({
   toneVoice: z.string().max(500).nullable().optional(),
   approvalThreshold: z.number().nonnegative().optional().default(10),
   gtmBudget: z.number().nonnegative().optional().default(200),
-  creatorPublicKey: z.string().optional(),
+  creatorPublicKey: z.string().min(1),
+  signature: z.string().min(1),
+  message: z.string().min(1),
   walletPublicKey: z.string().optional(),
   onChainId: z.number().int().nullable().optional(),
   agentName: z.string().max(100).nullable().optional(),
@@ -116,6 +118,21 @@ export const crossChainWebhookSchema = z.object({
   currency: z.string().optional().default("USDC"),
   simulatedVerified: z.boolean().optional().default(false),
   payload: z.record(z.string(), z.unknown()).optional().default({}),
+// --- Commerce Job Bidding ---
+
+// Full set of statuses used internally / by the server
+export const VALID_BID_STATUSES = [
+  "pending", "negotiating", "accepted", "counter_offer", "rejected", "completed",
+] as const;
+
+// Only these statuses may be submitted by a client in a bid payload.
+// Terminal states (accepted, rejected, completed) and initial states (pending)
+// are set exclusively by the server after verification/settlement.
+export const CLIENT_BID_STATUSES = ["negotiating", "counter_offer"] as const;
+
+export const submitBidSchema = z.object({
+  bidPrice: z.number().positive().optional(),
+  status: z.enum(CLIENT_BID_STATUSES).optional(),
 });
 
 // --- Revenue ---

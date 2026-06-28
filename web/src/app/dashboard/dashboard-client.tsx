@@ -299,12 +299,15 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
           <section className="mb-10">
             <h2 className="text-sm text-muted mb-4 tracking-wide">// PORTFOLIO OVERVIEW</h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              {PORTFOLIO_STATS.map((stat) => (
-                <div key={stat.label} className="bg-surface border border-border p-5 hover:bg-surface-hover transition-colors">
-                  <p className="text-muted text-sm mb-2 uppercase tracking-wider">{stat.label}</p>
-                  <p className="text-accent text-2xl font-bold">{stat.value}</p>
-                </div>
-              ))}
+              {PORTFOLIO_STATS.map((stat) => {
+                const testId = `portfolio-stat-${stat.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+                return (
+                  <div key={stat.label} data-testid={testId} className="bg-surface border border-border p-5 hover:bg-surface-hover transition-colors">
+                    <p className="text-muted text-sm mb-2 uppercase tracking-wider">{stat.label}</p>
+                    <p data-testid={`${testId}-value`} className="text-accent text-2xl font-bold">{stat.value}</p>
+                  </div>
+                );
+              })}
             </div>
           </section>
 
@@ -345,7 +348,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
                           <div className="flex items-center gap-2 mb-1">
                             <TypeBadge type={item.type} />
                             <span className="text-xs text-muted">{item.talosName}</span>
-                            {item.amount && <span className="text-xs text-accent">{item.amount}</span>}
+                            {item.amount && <span data-testid={`approval-amount-${item.id}`} className="text-xs text-accent">{item.amount}</span>}
                           </div>
                           <p className="text-sm text-foreground truncate">{item.title}</p>
                           {item.description && (
@@ -355,12 +358,14 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
                         <div className="flex gap-2 shrink-0">
                           <button
                             onClick={() => handleDecision(item.id, item.talosId, "approved")}
+                            data-testid={`approve-approval-${item.id}`}
                             className="border border-accent text-accent px-3 py-1.5 text-xs hover:bg-accent hover:text-white transition-colors font-bold"
                           >
                             APPROVE
                           </button>
                           <button
                             onClick={() => handleDecision(item.id, item.talosId, "rejected")}
+                            data-testid={`reject-approval-${item.id}`}
                             className="border border-muted text-muted px-3 py-1.5 text-xs hover:bg-muted hover:text-white transition-colors"
                           >
                             REJECT
@@ -384,7 +389,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
                           <div className="flex items-center gap-2 mb-1">
                             <TypeBadge type={item.type} />
                             <span className="text-xs text-muted">{item.talosName}</span>
-                            {item.amount && <span className="text-xs text-accent">{item.amount}</span>}
+                            {item.amount && <span data-testid={`approval-history-amount-${item.id}`} className="text-xs text-accent">{item.amount}</span>}
                             <span className={`text-xs font-bold ${item.status === "approved" ? "text-accent" : "text-muted"}`}>
                               [{item.status.toUpperCase()}]
                             </span>
@@ -476,7 +481,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
                         <AgentAvatar name={rs.talosName} size={18} className="shrink-0" />
                         {rs.talosName}
                       </h3>
-                      <span className="text-sm text-foreground font-bold">${rs.totalRevenue.toFixed(2)}</span>
+                      <span data-testid={`revenue-total-${rs.talosId}`} className="text-sm text-foreground font-bold">${rs.totalRevenue.toFixed(2)}</span>
                     </div>
                     <div className="mb-4 px-3 py-2 bg-background border border-border text-xs text-muted">
                       100% Agent Treasury &mdash; revenue funds operations &amp; Mitos buyback
@@ -484,7 +489,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
                     <div className="flex gap-3 mb-4">
                       {Object.entries(rs.bySource).map(([source, amount]) => (
                         <span key={source} className="text-xs text-muted">
-                          {source}: <span className="text-foreground">${amount.toFixed(2)}</span>
+                          {source}: <span data-testid={`revenue-source-${rs.talosId}-${source.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`} className="text-foreground">${amount.toFixed(2)}</span>
                         </span>
                       ))}
                     </div>
@@ -496,7 +501,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
                               <span className="text-muted">{new Date(tx.date).toLocaleDateString()}</span>
                               <span className="text-muted">[{tx.source.toUpperCase()}]</span>
                             </div>
-                            <span className="text-foreground">+${tx.amount.toFixed(2)} {tx.currency}</span>
+                            <span data-testid={`recent-revenue-${rs.talosId}-${i}`} className="text-foreground">+${tx.amount.toFixed(2)} {tx.currency}</span>
                           </div>
                         ))}
                       </div>

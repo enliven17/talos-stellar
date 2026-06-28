@@ -5,7 +5,7 @@ import { eq } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
 import { verifyX402Payment, settleX402Payment } from "@/lib/stellar-x402";
 import { fulfillInstant } from "@/lib/fulfillment";
-import { registerServiceSchema, parseBody } from "@/lib/schemas";
+import { registerServiceSchema, submitBidSchema, parseBody } from "@/lib/schemas";
 
 const STELLAR_NETWORK = process.env.STELLAR_NETWORK ?? "testnet";
 
@@ -94,6 +94,23 @@ export async function POST(
     // 1b. Read body once (request body can only be consumed once)
     const requestBody = await request.json().catch(() => ({})) as Record<string, unknown>;
 
+    // 1c. Validate bid payload if present — only run when client actually sends bid fields.
+    // If bid fields are present but invalid, reject with 400 (never silently fall through).
+    type BidData = { bidPrice?: number; status?: "negotiating" | "counter_offer" };
+    let bidData: BidData = {};
+
+    const hasBidFields = "bidPrice" in requestBody || "status" in requestBody;
+    if (hasBidFields) {
+      const bidValidation = submitBidSchema.safeParse(requestBody);
+      if (!bidValidation.success) {
+        const issues = bidValidation.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
+        return Response.json(
+          { error: "Invalid bid payload", issues },
+          { status: 400 }
+        );
+      }
+      bidData = bidValidation.data;
+    }
     // 2. Validate X-PAYMENT header (Stellar x402 token)
     const paymentHeader = request.headers.get("x-payment");
     if (!paymentHeader) {
@@ -146,7 +163,8 @@ export async function POST(
       return Response.json({ error: "Payment token already used (replay detected)" }, { status: 409 });
     }
 
-    // 4. Verify x402 payment via facilitator (checks signature, amount, destination)
+    // Always verify against the listed service price — bidPrice is stored for negotiation
+    // records only and must not reduce the payment amount until server-side accepted.
     const expectedAmount = String(service.price);
     const verified = await verifyX402Payment(paymentToken, expectedAmount, expectedPayee);
     if (!verified) {
@@ -199,7 +217,8 @@ export async function POST(
             paymentSig: paymentToken,
             txHash,
             amount: service.price,
-            status: "completed",
+            bidPrice: bidData.bidPrice ? String(bidData.bidPrice) : undefined,
+            status: bidData.status ?? "completed",
           })
           .returning();
 
@@ -232,7 +251,8 @@ export async function POST(
         paymentSig: paymentToken,
         txHash,
         amount: service.price,
-        status: "pending",
+        bidPrice: bidData.bidPrice ? String(bidData.bidPrice) : undefined,
+        status: bidData.status ?? "pending",
       })
       .returning();
 

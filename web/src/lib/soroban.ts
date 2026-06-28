@@ -17,6 +17,21 @@ const STELLAR_SOROBAN_RPC =
 export const TALOS_REGISTRY_CONTRACT_ID =
   process.env.NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT ?? "";
 
+
+
+// Dummy keypair used as source account for read-only Soroban simulations.
+// Keypair.random() guarantees a valid Ed25519 public key that always satisfies
+// the SDK's key-format checks, unlike any hardcoded string which would be
+// rejected by stricter validation. No signing key is required for read-only calls.
+let DUMMY_ACCOUNT_PUBLIC: string | null = null;
+
+async function getDummyAccountPublicKey(): Promise<string> {
+  if (!DUMMY_ACCOUNT_PUBLIC) {
+    const { Keypair } = await import("@stellar/stellar-sdk");
+    DUMMY_ACCOUNT_PUBLIC = Keypair.random().publicKey();
+  }
+  return DUMMY_ACCOUNT_PUBLIC;
+}
 export const TALOS_NAME_SERVICE_CONTRACT_ID =
   process.env.NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT ?? "";
 
@@ -106,7 +121,7 @@ async function buildReadOnlyTx(operation: unknown) {
 
   // Dummy account for read-only simulation
   const dummyAccount = new Account(
-    "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN",
+    await getDummyAccountPublicKey(),
     "0",
   );
 

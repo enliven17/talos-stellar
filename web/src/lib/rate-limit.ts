@@ -77,3 +77,16 @@ export function rateLimitResponse(result: RateLimitResult): Response {
     },
   );
 }
+export function applyRateLimitHeaders(
+  response: Response,
+  result: RateLimitResult,
+): Response {
+  response.headers.set("X-RateLimit-Limit", String(result.limit));
+  response.headers.set("X-RateLimit-Remaining", String(result.remaining));
+  response.headers.set(
+    "X-RateLimit-Reset",
+    String(Math.ceil(result.resetAt / 1000)),
+  );
+
+  return response;
+}
