@@ -17,7 +17,50 @@ console = Console()
 
 SHUTDOWN_GRACE_PERIOD = 10  # seconds before force-exit on second signal
 
+async def run_dividend_distribution(
+    *,
+    talos_id: str,
+    talos_config: dict,
+    settings,
+    stellar,
+    api,
+    db,
+) -> str:
+    """
+    Core dividend distribution logic extracted for testability.
+    Returns a status string: 'no_wallet', 'below_threshold', 'preview_failed',
+    'distribution_failed', 'success', or 'balance_error'.
+    """
+    stellar_account_id = talos_config.get("walletPublicKey", "")
+    if not stellar_account_id:
+        return "no_wallet"
 
+    balance_result = await stellar.get_token_balance(stellar_account_id, "USDC")
+
+    if "error" in balance_result:
+        db.update_schedule("dividend_distribution")
+        return "balance_error"
+
+    usdc_balance = balance_result.get("balance", 0)
+
+    if usdc_balance < float(settings.dividend_usdc_threshold):
+        return "below_threshold"
+
+    preview = await api.get_distribution_preview(talos_id)
+    if not preview or "error" in preview:
+        return "preview_failed"
+
+    creator_public_key = talos_config.get("creatorPublicKey", "")
+    result = await api.distribute_dividends(
+        talos_id,
+        requester_public_key=creator_public_key,
+    )
+
+    if not result or "error" in result:
+        return "distribution_failed"
+
+    db.update_schedule("dividend_distribution")
+    return "success"
 async def run(settings: Settings, agent_slot: int = 0) -> None:
     """Entry point called by `talos-agent start`. agent_slot used for log prefixes in multi mode."""
     from talos_agent.api_client import TalosAPIClient
@@ -247,10 +290,10 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                         continue
 
                 # Get agent's Stellar account ID from talos config
-                stellar_account_id = talos_config.get("stellarAccountId", "")
+                stellar_account_id = talos_config.get("walletPublicKey", "")
                 if not stellar_account_id:
                     console.print(
-                        "[dim yellow]No Stellar account ID configured for dividend distribution[/dim yellow]"
+                        "[dim yellow]No wallet public key configured for dividend distribution[/dim yellow]"
                     )
                 else:
                     # Check USDC balance
@@ -293,9 +336,10 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                                 )
 
                                 # Execute distribution only if preview succeeded
+                                creator_public_key = talos_config.get("creatorPublicKey", "")
                                 result = await api.distribute_dividends(
                                     settings.talos_id,
-                                    requester_public_key=stellar_account_id,
+                                    requester_public_key=creator_public_key,
                                 )
 
                                 if not result:
