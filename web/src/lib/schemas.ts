@@ -118,6 +118,7 @@ export const crossChainWebhookSchema = z.object({
   currency: z.string().optional().default("USDC"),
   simulatedVerified: z.boolean().optional().default(false),
   payload: z.record(z.string(), z.unknown()).optional().default({}),
+});
 // --- Commerce Job Bidding ---
 
 // Full set of statuses used internally / by the server
