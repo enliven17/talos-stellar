@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect } from "vitest";
 import { Keypair } from "@stellar/stellar-sdk";
 
 const BASE = process.env.TEST_BASE_URL || "http://localhost:3000";
@@ -1052,5 +1052,113 @@ describe("Full lifecycle — verify talos detail reflects all writes", () => {
       (r: { txHash: string | null }) => r.txHash === "0xE2E_TEST_TX"
     );
     expect(revenue).toBeDefined();
+  });
+});
+// ────────────────────────────────────────────────
+// 9. Bidding — /api/talos/:id/service
+// ────────────────────────────────────────────────
+
+describe("POST /api/talos/:id/service — bid schema validation (no payment needed)", () => {
+  it("rejects malformed bidPrice (string instead of number)", async () => {
+    const res = await api(`/api/talos/${talosId}/service`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ bidPrice: "not-a-number" }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("Invalid bid payload");
+    expect(Array.isArray(body.issues)).toBe(true);
+    expect(body.issues.length).toBeGreaterThan(0);
+  });
+
+  it("rejects negative bidPrice", async () => {
+    const res = await api(`/api/talos/${talosId}/service`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ bidPrice: -5 }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("Invalid bid payload");
+  });
+
+  it("rejects zero bidPrice", async () => {
+    const res = await api(`/api/talos/${talosId}/service`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ bidPrice: 0 }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("Invalid bid payload");
+  });
+
+  it("rejects terminal status 'completed' submitted by client", async () => {
+    const res = await api(`/api/talos/${talosId}/service`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ status: "completed" }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("Invalid bid payload");
+  });
+
+  it("rejects terminal status 'accepted' submitted by client", async () => {
+    const res = await api(`/api/talos/${talosId}/service`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ status: "accepted" }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("Invalid bid payload");
+  });
+
+  it("rejects terminal status 'rejected' submitted by client", async () => {
+    const res = await api(`/api/talos/${talosId}/service`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ status: "rejected" }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("Invalid bid payload");
+  });
+
+  it("passes bid validation with valid negotiating status — fails at missing x-payment (400)", async () => {
+    // No x-payment header — bid validation passes, then hits the payment header check
+    const res = await api(`/api/talos/${talosId}/service`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ bidPrice: 10.5, status: "negotiating" }),
+    });
+    // Must be 400 from missing x-payment, NOT from bid schema rejection
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain("X-PAYMENT");
+  });
+
+  it("passes bid validation with valid counter_offer status — fails at missing x-payment (400)", async () => {
+    const res = await api(`/api/talos/${talosId}/service`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ bidPrice: 8.0, status: "counter_offer" }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain("X-PAYMENT");
+  });
+
+  it("passes bid validation when no bid fields present — fails at missing x-payment (400)", async () => {
+    const res = await api(`/api/talos/${talosId}/service`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ payload: { task: "do something" } }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain("X-PAYMENT");
   });
 });
