@@ -3,7 +3,7 @@
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
 from talos_agent.adapters.discord import DiscordAdapter
 from talos_agent.adapters.registry import AdapterRegistry
-from talos_agent.adapters.telegram import TelegramAdapter
+from talos_agent.adapters.telegram import TelegramAdapter  # noqa: F401
 
 __all__ = [
     "BaseSocialAdapter",

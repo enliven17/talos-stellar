@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import json
 import pytest
-import respx
 from httpx import Response
 from unittest.mock import AsyncMock, MagicMock, patch
-from pathlib import Path
 
 from talos_agent.config import Settings
 from talos_agent.db import LocalDB
