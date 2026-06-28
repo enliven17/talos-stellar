@@ -181,8 +181,8 @@ mod tests {
         let name_service_contract = env.register_contract(None, TalosNameService);
         let name_service_client = TalosNameServiceClient::new(&env, &name_service_contract);
         name_service_client.initialize(&registry_contract);
-       let registry_client = TalosRegistryClient::new(&env, &registry_contract);
-(env, registry_contract, name_service_contract, registry_client, name_service_client)
+        let registry_client = TalosRegistryClient::new(&env, &registry_contract);
+        (env, registry_contract, name_service_contract, registry_client, name_service_client)
     }
 
     fn s(env: &Env, value: &str) -> String {
@@ -284,12 +284,12 @@ mod tests {
                     }],
                 },
             }])
-            .register_name(owner, talos_id, name);
+            .register_name(owner, &talos_id, name);
     }
 
     #[test]
     fn register_name_success() {
-       let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
         let owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         let name = s(&env, "marketbot");
@@ -316,12 +316,12 @@ mod tests {
         assert!(!client.is_name_available(&name));
         assert!(client.has_name(&talos_id));
         assert_eq!(client.resolve_name(&name), Some(talos_id));
-        assert_eq!(client.name_of(talos_id), Some(name));
+        assert_eq!(client.name_of(&talos_id), Some(name));
     }
 
     #[test]
     fn duplicate_name_rejected() {
-       let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
         let owner = Address::generate(&env);
         let second_owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
@@ -355,14 +355,14 @@ mod tests {
                     sub_invokes: &[],
                 },
             }])
-            .try_register_name(&second_owner, talos_id, &name);
+            .try_register_name(&second_owner, &talos_id, &name);
 
         assert!(duplicate_result.is_err());
     }
 
     #[test]
     fn unauthorized_caller_rejected() {
-       let (env, registry_contract, contract_id, registry_client, client) 
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
         let creator = Address::generate(&env);
         let unauthorized = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
@@ -404,12 +404,11 @@ mod tests {
 
     #[test]
     fn lookup_by_name_returns_correct_talos_id() {
-       let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
         let owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         let name = s(&env, "atlas-agent");
-let creator = Address::generate(&env);
-let unauthorized = Address::generate(&env);
+
         let talos_id = create_talos_with_auth(
             &env,
             &registry_client,
@@ -421,13 +420,14 @@ let unauthorized = Address::generate(&env);
         register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &name);
 
         assert_eq!(client.resolve_name(&name), Some(talos_id));
-        assert_eq!(client.name_of(talos_id), Some(name));
+        assert_eq!(client.name_of(&talos_id), Some(name));
     }
 
     #[test]
     fn invalid_name_rejected() {
-        let (env, registry_contract, contract_id, _registry_client, client) = setup();
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
         let invalid_name = s(&env, "ab");
+        let owner = Address::generate(&env);
 
         let result = client
             .mock_auths(&[MockAuth {
@@ -435,7 +435,6 @@ let unauthorized = Address::generate(&env);
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "register_name",
-                    let owner = Address::generate(&env);
                     args: (owner.clone(), 1u32, invalid_name.clone()).into_val(&env),
                     sub_invokes: &[],
                 },
@@ -447,7 +446,8 @@ let unauthorized = Address::generate(&env);
 
     #[test]
     fn register_name_emits_name_reg_event() {
-       let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         let name = s(&env, "marketbot");
 
@@ -464,12 +464,12 @@ let unauthorized = Address::generate(&env);
         let all_events = env.events().all();
         let events = all_events.iter().filter(|e| e.0 == contract_id).collect::<std::vec::Vec<_>>();
         assert_eq!(events.len(), 1);
-       let (_addr, topics, data) = events.get(0).unwrap();
-       assert_eq!(topics.len() as u32, 2);
-       let t0: Symbol = TryFromVal::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
-       let t1: u32 = TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+        let (_addr, topics, data) = events.get(0).unwrap();
+        assert_eq!(topics.len() as u32, 2);
+        let t0: Symbol = TryFromVal::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+        let t1: u32 = TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
         let (got_name, got_owner): (String, Address) =
-       TryFromVal::try_from_val(&env, data).unwrap();
+            TryFromVal::try_from_val(&env, data).unwrap();
         assert_eq!(got_name, name);
         assert_eq!(got_owner, owner);
     }
@@ -505,14 +505,14 @@ let unauthorized = Address::generate(&env);
 
         // Register second name
         register_name_with_auth(
-    &env,
-    &client,
-    &contract_id,
-    &registry_contract,
-    &owner,
-    talos_id,
-    &name2,
-);
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &name2,
+        );
 
         assert_eq!(client.resolve_name(&name2), Some(talos_id));
         // Verify old name is cleared
