@@ -84,10 +84,17 @@ export async function POST(
     const usdcIssuer = getUSDCIssuer();
     const usdcAsset = new Asset("USDC", usdcIssuer);
 
-    const tx = TransactionBuilder.fromXDR(txResult.envelope_xdr, networkPassphrase);
+           const tx = TransactionBuilder.fromXDR(txResult.envelope_xdr, networkPassphrase);
+
+    // `fromXDR` may return a FeeBumpTransaction (which has no `source`); in
+    // that case the relevant source is on the wrapped inner transaction.
+    const innerTx = "innerTransaction" in tx ? tx.innerTransaction : tx;
 
     // Validate: source_account == buyerPublicKey
-    if (tx.source !== buyerPublicKey && txResult.source_account !== buyerPublicKey) {
+    if (
+      innerTx.source !== buyerPublicKey &&
+      txResult.source_account !== buyerPublicKey
+    ) {
       return NextResponse.json(
         { error: "Transaction signer does not match buyerPublicKey" },
         { status: 400 },
@@ -95,7 +102,7 @@ export async function POST(
     }
 
     // Validate at least one operation is a USDC payment of the correct amount to the treasury
-    const ops = tx.operations as unknown as Array<{
+            const ops = innerTx.operations as unknown as Array<{
       type: string;
       asset?: { code: string; issuer: string };
       destination?: string;

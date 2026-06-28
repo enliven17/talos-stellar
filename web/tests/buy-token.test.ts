@@ -66,8 +66,8 @@ vi.mock("@/db", () => {
 vi.mock("@/lib/stellar", () => {
   return {
     getAccountInfo: (...args: any[]) => mocks.mockGetAccountInfo(...args),
-    getNetworkPassphrase: (...args: any[]) => mocks.mockGetNetworkPassphrase(...args),
-    getUSDCIssuer: (...args: any[]) => mocks.mockGetUSDCIssuer(...args),
+            getNetworkPassphrase: () => mocks.mockGetNetworkPassphrase(),
+    getUSDCIssuer: () => mocks.mockGetUSDCIssuer(),
   };
 });
 
