@@ -288,9 +288,7 @@ mod tests {
 
     #[test]
     fn register_name_success() {
-        let (env, registry_contract, contract_id) = setup();
-        let registry_client = TalosRegistryClient::new(&env, &registry_contract);
-        let client = TalosNameServiceClient::new(&env, &contract_id);
+       let (env, registry_contract, contract_id, _registry_client, client) = setup();
         let owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         let name = s(&env, "marketbot");
@@ -409,8 +407,7 @@ mod tests {
 
     #[test]
     fn lookup_by_name_returns_correct_talos_id() {
-        let (env, registry_contract, contract_id, registry_client, client) = setup();
-        let owner = Address::generate(&env);
+       let (env, registry_contract, contract_id, _registry_client, client) = setup();
         let protocol_wallet = Address::generate(&env);
         let name = s(&env, "atlas-agent");
 
@@ -430,8 +427,7 @@ mod tests {
 
     #[test]
     fn invalid_name_rejected() {
-        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
-        let owner = Address::generate(&env);
+        let (env, registry_contract, contract_id, _registry_client, client) = setup();
         let invalid_name = s(&env, "ab");
 
         let result = client
@@ -451,8 +447,7 @@ mod tests {
 
     #[test]
     fn register_name_emits_name_reg_event() {
-        let (env, registry_contract, contract_id, registry_client, client) = setup();
-        let owner = Address::generate(&env);
+       let (env, registry_contract, contract_id, _registry_client, client) = setup();
         let protocol_wallet = Address::generate(&env);
         let name = s(&env, "marketbot");
 
