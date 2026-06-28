@@ -320,9 +320,7 @@ mod tests {
 
     #[test]
     fn duplicate_name_rejected() {
-        let (env, registry_contract, contract_id) = setup();
-        let registry_client = TalosRegistryClient::new(&env, &registry_contract);
-        let client = TalosNameServiceClient::new(&env, &contract_id);
+       let (env, registry_contract, contract_id, registry_client, client) = setup();
         let owner = Address::generate(&env);
         let second_owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
@@ -363,9 +361,7 @@ mod tests {
 
     #[test]
     fn unauthorized_caller_rejected() {
-        let (env, registry_contract, contract_id) = setup();
-        let registry_client = TalosRegistryClient::new(&env, &registry_contract);
-        let client = TalosNameServiceClient::new(&env, &contract_id);
+       let (env, registry_contract, contract_id, registry_client, client) = setup();
         let creator = Address::generate(&env);
         let unauthorized = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
