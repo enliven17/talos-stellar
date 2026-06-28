@@ -16,6 +16,12 @@ describe("OpenAPI snapshot", () => {
       "utf8",
     );
 
-    expect(actual).toEqual(expected);
+    // Normalize line endings to handle Windows CRLF vs Unix LF
+    const normalizeLineEndings = (str: string) =>
+      str.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+    expect(normalizeLineEndings(actual)).toEqual(
+      normalizeLineEndings(expected),
+    );
   });
 });
