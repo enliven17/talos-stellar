@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect } from "vitest";
 import { Keypair } from "@stellar/stellar-sdk";
 
 const BASE = process.env.TEST_BASE_URL || "http://localhost:3000";

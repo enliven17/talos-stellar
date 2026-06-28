@@ -216,7 +216,7 @@ export async function POST(
             result,
             paymentSig: paymentToken,
             txHash,
-            amount: bidData.bidPrice ?? service.price,
+            amount: service.price,
             bidPrice: bidData.bidPrice ? String(bidData.bidPrice) : undefined,
             status: bidData.status ?? "completed",
           })
@@ -224,7 +224,7 @@ export async function POST(
 
         await tx.insert(tlsRevenues).values({
           talosId: id,
-          amount: bidData.bidPrice ?? service.price,
+          amount: service.price,
           currency: service.currency ?? "USDC",
           source: "commerce",
           txHash,
@@ -250,7 +250,7 @@ export async function POST(
         payload: payload ?? undefined,
         paymentSig: paymentToken,
         txHash,
-        amount: bidData.bidPrice ?? service.price,
+        amount: service.price,
         bidPrice: bidData.bidPrice ? String(bidData.bidPrice) : undefined,
         status: bidData.status ?? "pending",
       })
