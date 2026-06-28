@@ -31,8 +31,8 @@ async def run_dividend_distribution(
 ) -> str:
     """
     Core dividend distribution logic extracted for testability.
-    Returns a status string: 'no_wallet', 'below_threshold', 'preview_failed',
-    'distribution_failed', 'success', or 'balance_error'.
+    Returns a status string: 'no_wallet', 'missing_creator', 'below_threshold',
+    'preview_failed', 'distribution_failed', 'success', or 'balance_error'.
     """
     stellar_account_id = talos_config.get("walletPublicKey", "")
     if not stellar_account_id:
@@ -54,6 +54,9 @@ async def run_dividend_distribution(
         return "preview_failed"
 
     creator_public_key = talos_config.get("creatorPublicKey", "")
+    if not creator_public_key:
+        return "missing_creator"
+
     result = await api.distribute_dividends(
         talos_id,
         requester_public_key=creator_public_key,
@@ -108,13 +111,12 @@ class Backoff:
     def failure(self):
         self.fail_count += 1
 
-
 async def run(settings: Settings, agent_slot: int = 0) -> None:
     """Entry point called by `talos-agent start`. agent_slot used for log prefixes in multi mode."""
     from talos_agent.api_client import TalosAPIClient
     from talos_agent.db import LocalDB, get_db_path
 
-    tag = f"[{settings.talos_api_key[:12]}]" if agent_slot > 0 else ""
+    
     db = LocalDB(path=get_db_path(settings.talos_api_key[:16] if agent_slot > 0 else None))
     api = TalosAPIClient(settings)
 
@@ -358,83 +360,26 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                             pass
                         continue
 
-                # Get agent's Stellar account ID from talos config
-                stellar_account_id = talos_config.get("walletPublicKey", "")
-                if not stellar_account_id:
-                    console.print(
-                        "[dim yellow]No wallet public key configured for dividend distribution[/dim yellow]"
-                    )
-                else:
-                    # Check USDC balance
-                    balance_result = await stellar.get_token_balance(
-                        stellar_account_id, "USDC"
-                    )
+                result = await run_dividend_distribution(
+                    talos_id=settings.talos_id,
+                    talos_config=talos_config,
+                    settings=settings,
+                    stellar=stellar,
+                    api=api,
+                    db=db,
+                )
 
-                    if "error" not in balance_result:
-                        usdc_balance = balance_result.get("balance", 0)
-                        console.print(
-                            f"[dim]USDC balance check: {usdc_balance} USDC "
-                            f"(threshold: {settings.dividend_usdc_threshold})[/dim]"
-                        )
-
-                        # Check if balance exceeds threshold
-                        if usdc_balance >= float(settings.dividend_usdc_threshold):
-                            console.print(
-                                f"[bold green]USDC balance {usdc_balance} exceeds "
-                                f"threshold {settings.dividend_usdc_threshold}. "
-                                "Initiating dividend distribution...[/bold green]"
-                            )
-
-                            # Get distribution preview
-                            preview = await api.get_distribution_preview(settings.talos_id)
-                            if not preview:
-                                console.print(
-                                    "[bold red]Dividend distribution aborted — "
-                                    "no response from preview endpoint[/bold red]"
-                                )
-                            elif "error" in preview:
-                                console.print(
-                                    f"[bold red]Dividend distribution aborted — "
-                                    f"preview failed: {preview.get('error', 'Unknown error')}[/bold red]"
-                                )
-                            else:
-                                console.print(
-                                    f"[cyan]Distribution preview: "
-                                    f"{preview.get('distributableAmount', 0)} USDC to "
-                                    f"{len(preview.get('breakdown', []))} patrons[/cyan]"
-                                )
-
-                                # Execute distribution only if preview succeeded
-                                creator_public_key = talos_config.get("creatorPublicKey", "")
-                                result = await api.distribute_dividends(
-                                    settings.talos_id,
-                                    requester_public_key=creator_public_key,
-                                )
-
-                                if not result:
-                                    console.print(
-                                        "[bold red]Dividend distribution failed — "
-                                        "no response from distribute endpoint[/bold red]"
-                                    )
-                                elif "error" in result:
-                                    console.print(
-                                        f"[bold red]Dividend distribution failed — "
-                                        f"{result.get('error', 'Unknown error')}[/bold red]"
-                                    )
-                                else:
-                                    console.print(
-                                        f"[bold green]Dividend distribution successful: "
-                                        f"{result.get('message', 'Distribution complete')}[/bold green]"
-                                    )
-                                    db.update_schedule("dividend_distribution")
-                    else:
-                        error_msg = balance_result.get("error", "Unknown error")
-                        console.print(
-                            f"[bold red]Dividend distribution skipped — "
-                            f"USDC balance check failed: {error_msg}[/bold red]"
-                        )
-                        db.update_schedule("dividend_distribution")  # still advance the timestamp to avoid retry storm
-
+                _RESULT_MESSAGES = {
+                    "no_wallet": ("[dim yellow]", "No wallet public key configured — skipping dividend distribution"),
+                    "missing_creator": ("[bold red]", "No creator public key configured — aborting dividend distribution"),
+                    "balance_error": ("[bold red]", "USDC balance check failed — skipping dividend distribution"),
+                    "below_threshold": ("[dim]", f"USDC balance below threshold {settings.dividend_usdc_threshold} — skipping"),
+                    "preview_failed": ("[bold red]", "Distribution preview failed — aborting"),
+                    "distribution_failed": ("[bold red]", "Dividend distribution failed"),
+                    "success": ("[bold green]", "Dividend distribution successful"),
+                }
+                color, msg = _RESULT_MESSAGES.get(result, ("[dim]", f"Unknown result: {result}"))
+                console.print(f"{color}{msg}[/]")
 
             except Exception as e:
                 console.print(f"[red]Dividend distribution task error: {e}[/red]")
@@ -485,7 +430,6 @@ async def run_multi(base_settings: Settings, api_keys: list[str]) -> None:
     console.print(f"[bold green]Starting {len(api_keys)} agents...[/bold green]")
 
     async def run_one(api_key: str, slot: int) -> None:
-        from dataclasses import replace as dc_replace
         import copy
         agent_settings = copy.copy(base_settings)
         object.__setattr__(agent_settings, "talos_api_key", api_key)

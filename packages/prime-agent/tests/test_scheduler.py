@@ -288,3 +288,21 @@ async def test_dividend_uses_creator_public_key_not_wallet():
     call_kwargs = api.distribute_dividends.call_args
     assert call_kwargs.kwargs["requester_public_key"] == "GCREATOR456"
     assert call_kwargs.kwargs["requester_public_key"] != "GWALLET999"
+
+    @pytest.mark.asyncio
+    async def test_dividend_missing_creator_aborts_before_distribute():
+        """Missing creatorPublicKey should abort before distribute_dividends is called."""
+        talos_config, settings, stellar, api, db = _make_deps(creator_public_key="")
+
+        result = await run_dividend_distribution(
+            talos_id="talos-1",
+            talos_config=talos_config,
+            settings=settings,
+            stellar=stellar,
+            api=api,
+            db=db,
+        )
+
+        assert result == "missing_creator"
+        api.distribute_dividends.assert_not_called()
+        db.update_schedule.assert_not_called()
