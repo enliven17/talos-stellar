@@ -94,23 +94,23 @@ export async function POST(
     // 1b. Read body once (request body can only be consumed once)
     const requestBody = await request.json().catch(() => ({})) as Record<string, unknown>;
 
-   // 1c. Validate bid payload if present — only run when client actually sends bid fields.
-  // If bid fields are present but invalid, reject with 400 (never silently fall through).
-  type BidData = { bidPrice?: number; status?: "negotiating" | "counter_offer" };
-  let bidData: BidData = {};
+    // 1c. Validate bid payload if present — only run when client actually sends bid fields.
+    // If bid fields are present but invalid, reject with 400 (never silently fall through).
+    type BidData = { bidPrice?: number; status?: "negotiating" | "counter_offer" };
+    let bidData: BidData = {};
 
-  const hasBidFields = "bidPrice" in requestBody || "status" in requestBody;
-  if (hasBidFields) {
-    const bidValidation = submitBidSchema.safeParse(requestBody);
-    if (!bidValidation.success) {
-      const issues = bidValidation.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
-      return Response.json(
-        { error: "Invalid bid payload", issues },
-        { status: 400 }
-      );
+    const hasBidFields = "bidPrice" in requestBody || "status" in requestBody;
+    if (hasBidFields) {
+      const bidValidation = submitBidSchema.safeParse(requestBody);
+      if (!bidValidation.success) {
+        const issues = bidValidation.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
+        return Response.json(
+          { error: "Invalid bid payload", issues },
+          { status: 400 }
+        );
+      }
+      bidData = bidValidation.data;
     }
-    bidData = bidValidation.data;
-  }
     // 2. Validate X-PAYMENT header (Stellar x402 token)
     const paymentHeader = request.headers.get("x-payment");
     if (!paymentHeader) {
@@ -163,9 +163,9 @@ export async function POST(
       return Response.json({ error: "Payment token already used (replay detected)" }, { status: 409 });
     }
 
-    // 4. Verify x402 payment via facilitator (checks signature, amount, destination)
-    // If bidPrice is provided, use it for verification; otherwise use service price
-    const expectedAmount = bidData.bidPrice ? String(bidData.bidPrice) : String(service.price);
+    // Always verify against the listed service price — bidPrice is stored for negotiation
+    // records only and must not reduce the payment amount until server-side accepted.
+    const expectedAmount = String(service.price);
     const verified = await verifyX402Payment(paymentToken, expectedAmount, expectedPayee);
     if (!verified) {
       return Response.json(
