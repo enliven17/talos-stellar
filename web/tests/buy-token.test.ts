@@ -1,6 +1,7 @@
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import { POST } from "../src/app/api/talos/[id]/buy-token/route";
 import { Keypair, Asset, TransactionBuilder, Operation, Networks, Account } from "@stellar/stellar-sdk";
+import { OPERATOR_PUBLIC_KEY } from "../src/lib/stellar-config";
 
 // Use vi.hoisted to declare mock functions so they are hoisted along with the vi.mock calls,
 // preventing any TypeScript linting or execution scoping warnings.
@@ -64,11 +65,12 @@ vi.mock("@/db", () => {
 
 vi.mock("@/lib/stellar", () => {
   return {
-    getAccountInfo: () => mocks.mockGetAccountInfo(),
-    getNetworkPassphrase: () => mocks.mockGetNetworkPassphrase(),
-    getUSDCIssuer: () => mocks.mockGetUSDCIssuer(),
+    getAccountInfo: (...args: any[]) => mocks.mockGetAccountInfo(...args),
+    getNetworkPassphrase: (...args: any[]) => mocks.mockGetNetworkPassphrase(...args),
+    getUSDCIssuer: (...args: any[]) => mocks.mockGetUSDCIssuer(...args),
   };
 });
+
 vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
   const original = await importOriginal<typeof import("@stellar/stellar-sdk")>();
   return {
@@ -81,14 +83,14 @@ vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
           return account;
         });
         transactions = mocks.mockTransactions;
-       submitTransaction = () => mocks.mockSubmitTransaction()
+        submitTransaction = (...args: any[]) => mocks.mockSubmitTransaction(...args);
       },
     },
   };
 });
 
 describe("POST /api/talos/[id]/buy-token — Verification Tests", () => {
-  const operatorTreasury = "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
+  const operatorTreasury = OPERATOR_PUBLIC_KEY;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -327,7 +329,7 @@ describe("POST /api/talos/[id]/buy-token — Verification Tests", () => {
     })
       .addOperation(
         Operation.payment({
-          destination: "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL",
+          destination: operatorTreasury,
           asset: usdcAsset,
           amount: "5.0000000",
         })

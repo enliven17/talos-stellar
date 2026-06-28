@@ -3,6 +3,7 @@ import { tlsTalos, tlsPatrons, tlsRevenues } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { getAccountInfo, getNetworkPassphrase, getUSDCIssuer } from "@/lib/stellar";
+import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
 
 /**
  * Buy Mitos tokens from a Talos.
@@ -85,16 +86,13 @@ export async function POST(
 
     const tx = TransactionBuilder.fromXDR(txResult.envelope_xdr, networkPassphrase);
 
-    // Validate: the payment originated from the buyer.
-    // Horizon's source_account is the canonical value; some SDK transaction unions
-    // (e.g. FeeBumpTransaction) do not expose `source` directly.
-    const envelopeSource = "source" in tx ? String(tx.source) : null;
-    if (envelopeSource !== buyerPublicKey && txResult.source_account !== buyerPublicKey) {
+    // Validate: source_account == buyerPublicKey
+    if (tx.source !== buyerPublicKey && txResult.source_account !== buyerPublicKey) {
       return NextResponse.json(
         { error: "Transaction signer does not match buyerPublicKey" },
         { status: 400 },
-    );
-}
+      );
+    }
 
     // Validate at least one operation is a USDC payment of the correct amount to the treasury
     const ops = tx.operations as unknown as Array<{
@@ -104,8 +102,7 @@ export async function POST(
       amount?: string;
     }>;
 
-    const operatorTreasury = "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
-    const expectedDestinations = [operatorTreasury];
+    const expectedDestinations = [OPERATOR_PUBLIC_KEY];
     if (talos.agentWalletAddress) {
       expectedDestinations.push(talos.agentWalletAddress);
     }

@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
-import { POST } from "../src/app/api/cross-chain-webhook/route";
+import { POST } from "@/app/api/commerce/cross-chain-webhook/route";
 import { tlsCommerceJobs, tlsRevenues } from "@/db/schema";
 
 const WEBHOOK_SECRET = "test-cross-chain-secret";
@@ -24,8 +24,8 @@ vi.mock("@/lib/fulfillment", () => ({
 
 const { mockDb, fulfillInstant } = mocks;
 
-const mockSelectChain = (result: any) => {
-  const chain: any = {
+const mockSelectChain = (result: unknown) => {
+  const chain = {
     from: vi.fn().mockReturnThis(),
     where: vi.fn().mockReturnThis(),
     limit: vi.fn().mockReturnThis(),
@@ -118,9 +118,9 @@ describe("POST /api/commerce/cross-chain-webhook", () => {
       returning: vi.fn().mockResolvedValue([mockJob]),
     });
 
-    const mockTxInsert = vi.fn(() => ({
+    const mockTxInsert = vi.fn().mockReturnValue({
       values: jobValues,
-    }));
+    });
 
     mockDb.transaction.mockImplementation(async (callback) => {
       const tx = {
@@ -151,7 +151,7 @@ describe("POST /api/commerce/cross-chain-webhook", () => {
     expect(body.bridge.sourceChain).toBe("base");
 
     expect(mockTxInsert).toHaveBeenCalledTimes(1);
-    expect((mockTxInsert as any).mock.calls[0][0]).toBe(tlsCommerceJobs);
+    expect(mockTxInsert.mock.calls[0][0]).toBe(tlsCommerceJobs);
     expect(fulfillInstant).not.toHaveBeenCalled();
   });
 
@@ -187,7 +187,7 @@ describe("POST /api/commerce/cross-chain-webhook", () => {
     });
     const revenueValues = vi.fn().mockResolvedValue([]);
 
-    const mockTxInsert = vi.fn((table) => {
+    const mockTxInsert = vi.fn((table: unknown) => {
       if (table === tlsCommerceJobs) {
         return { values: jobValues };
       }
