@@ -15,6 +15,62 @@
       "when": 1775378697002,
       "tag": "0001_enable_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1775465097002,
+      "tag": "0002_rls_postgres_role",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1775551497002,
+      "tag": "0003_add_commerce_jobs_txhash",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1775637897002,
+      "tag": "0004_add_token_symbol",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1775724297002,
+      "tag": "0005_add_missing_corpus_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1775810697002,
+      "tag": "0006_unique_payment_sig",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1775897097002,
+      "tag": "0007_add_api_audit_logs",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1775983497002,
+      "tag": "0008_add_bidding_support",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1776069897002,
+      "tag": "0009_add_dividends",
+      "breakpoints": true
     }
   ]
 }

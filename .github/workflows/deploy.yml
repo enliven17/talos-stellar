@@ -77,8 +77,8 @@ jobs:
       - name: Lint
         run: pnpm lint
 
-      - name: Push database schema
-        run: pnpm db:push
+      - name: Run database migrations
+        run: pnpm db:migrate
 
       - name: Start Next.js development server
         run: pnpm dev > next-dev.log 2>&1 &

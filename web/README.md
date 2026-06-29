@@ -18,6 +18,26 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
+## Database Migrations
+
+Migration files live in `drizzle/` and are tracked in git.
+
+**Generate** a new migration after changing `src/db/schema.ts`:
+
+```bash
+pnpm db:generate
+```
+
+**Apply** pending migrations against the database:
+
+```bash
+pnpm db:migrate
+```
+
+`db:migrate` uses `DIRECT_URL` (or `DATABASE_URL`) so it bypasses connection poolers and can run DDL safely. CI runs this automatically before tests.
+
+> **`db:push` is for local development only** — it compares the schema directly to the database and issues DDL without tracking history. Never use it against a shared or production database.
+
 ## OpenAPI Contract
 
 The public API spec lives in `src/lib/openapi.ts` and is served at `/api/docs/openapi.json`.
