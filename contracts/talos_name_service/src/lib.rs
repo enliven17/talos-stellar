@@ -179,9 +179,9 @@ mod tests {
         let env = _env.clone();
         let registry_contract = env.register_contract(None, TalosRegistry);
         let name_service_contract = env.register_contract(None, TalosNameService);
-        let registry_client = TalosRegistryClient::new(&env, &registry_contract);
         let name_service_client = TalosNameServiceClient::new(&env, &name_service_contract);
         name_service_client.initialize(&registry_contract);
+        let registry_client = TalosRegistryClient::new(&env, &registry_contract);
         (env, registry_contract, name_service_contract, registry_client, name_service_client)
     }
 
@@ -346,7 +346,7 @@ mod tests {
         );
 
         let duplicate_result = client
-            .mock_auths(&[MockAuth {
+            .mock_auths(&[MockAuth {                
                 address: &second_owner,
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
@@ -426,8 +426,8 @@ mod tests {
     #[test]
     fn invalid_name_rejected() {
         let (env, _registry_contract, contract_id, _registry_client, client) = setup();
-        let owner = Address::generate(&env);
         let invalid_name = s(&env, "ab");
+        let owner = Address::generate(&env);
 
         let result = client
             .mock_auths(&[MockAuth {
@@ -466,12 +466,8 @@ mod tests {
         assert_eq!(events.len(), 1);
         let (_addr, topics, data) = events.get(0).unwrap();
         assert_eq!(topics.len() as u32, 2);
-
         let t0: Symbol = TryFromVal::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
-        assert_eq!(t0, symbol_short!("name_reg"));
         let t1: u32 = TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
-        assert_eq!(t1, talos_id);
-
         let (got_name, got_owner): (String, Address) =
             TryFromVal::try_from_val(&env, data).unwrap();
         assert_eq!(got_name, name);

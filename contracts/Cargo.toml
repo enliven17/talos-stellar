@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "talos_registry",
     "talos_name_service",
+    "talos_governance",
 ]
 
 [workspace.dependencies]
