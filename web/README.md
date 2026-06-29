@@ -50,6 +50,55 @@ To learn more about Next.js, take a look at the following resources:
 
 You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
 
+## Real-time Events (SSE)
+
+`GET /api/events?wallet=<G…>` streams Server-Sent Events to dashboard clients.
+
+### How it works
+
+1. On connect, the server resolves all TALOS IDs for the wallet (2 DB queries, cached for the connection lifetime).
+2. Every 8 s it polls for new approvals and activities (2 DB queries per poll).
+3. Every 30 s it sends a `ping` event that doubles as a zombie-connection probe — if the write fails, the connection slot is released immediately.
+
+**DB query budget:** 2 (init) + 2 per 8 s poll, per connection.  
+At 50 concurrent users: ~750 queries/min → **~150 queries/min** (5× reduction vs. the original per-tick lookup).
+
+### Connection cap
+
+The server rejects connections beyond `SSE_MAX_CONNECTIONS` (default `200`) with `503 Service Unavailable` + `Retry-After: 10`.
+
+```
+SSE_MAX_CONNECTIONS=100   # tune per deployment
+```
+
+The cap is enforced per-process. On multi-container deployments each container maintains its own count independently.
+
+### Deployment trade-offs
+
+| Deployment | Behaviour | Recommendation |
+|---|---|---|
+| **Vercel Hobby** | 60 s function timeout — stream is killed and the browser reconnects | Use short-poll (Option B) |
+| **Vercel Pro** | 300 s timeout — marginally better but still limits session length | Evaluate Fluid Compute (beta) or Option A |
+| **Railway / Fly.io** | No function timeout — connections live indefinitely | Recommended for production at scale |
+
+**Option A — persistent service (best real-time fidelity)**  
+Move only this endpoint to a long-running container on Railway or Fly.io (~$5–10/mo for 512 MB). The rest of the Next.js app stays on Vercel.
+
+**Option B — short-poll + ETag (simplest, zero extra infra)**  
+Replace with `GET /api/events/poll` that returns `304 Not Modified` when nothing has changed. Clients poll every 10–15 s. Slightly lower real-time fidelity but fully serverless-compatible and eliminates the connection-count problem entirely.
+
+### Metrics
+
+`getSseMetrics()` (exported from `src/app/api/events/route.ts`) returns:
+
+```ts
+{ activeConnections: number; totalDbQueries: number }
+```
+
+Wire this into `/api/health` or a dedicated `/api/metrics` endpoint for monitoring.
+
+---
+
 ## Deploy on Vercel
 
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.

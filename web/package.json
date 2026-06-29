@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:unit": "vitest run tests/health.test.ts tests/*.unit.test.ts",
+    "test:unit": "vitest run tests/health.test.ts tests/*.unit.test.ts tests/sse.test.ts",
     "test:e2e": "vitest run tests/api-e2e.test.ts",
     "test:openapi": "vitest run tests/openapi-snapshot.test.ts",
     "openapi:snapshot": "tsx scripts/write-openapi-snapshot.ts",
