@@ -94,9 +94,6 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
     payment_details = response.json()
     price = payment_details.get("price", 0)
     payee = payment_details.get("payee", "")
-    token = payment_details.get("token")
-    chain_id = payment_details.get("chainId")
-
     # Check if purchase would exceed GTM budget
     if spent_month + float(price) > gtm_budget:
         return {
@@ -110,7 +107,7 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
 
     # Check approval threshold
     threshold = float(_settings.approval_threshold)
-    if price >= threshold:
+    if price > threshold:
         result = await _api.create_approval(
             _settings.talos_id,
             type_="transaction",

@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     max_iterations: int = Field(default=20, description="Max tool-call iterations per cycle")
     approval_threshold: Decimal = Field(default=Decimal("10"), description="USD threshold for auto-approval")
     browser_headless: bool = Field(default=False, description="Run browser in headless mode")
+    auto_repay_loans: bool = Field(default=False, description="Enable automatic loan repayment from treasury")
 
     # Dividend distribution
     dividend_distribution_interval: int = Field(default=3600, description="Seconds between dividend distribution checks")

@@ -1,5 +1,4 @@
 
-import pytest
 import logging
 from talos_agent.scheduler import Backoff
 

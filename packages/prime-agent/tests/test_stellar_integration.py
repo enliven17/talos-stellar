@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import respx
 from httpx import Response
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 from talos_agent.payments.stellar_kit import StellarKit
 from talos_agent.payments.x402_signer import X402Signer

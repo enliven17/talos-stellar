@@ -84,6 +84,7 @@ class X402Signer:
             return {
                 "status": "signed",
                 "payment_header": result["paymentHeader"],
+                "paymentHeader": result["paymentHeader"],
                 "from": result.get("from", self._wallet_address),
                 "to": payee,
                 "amount": amount,

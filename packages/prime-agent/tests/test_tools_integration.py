@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import json
 import pytest
-import respx
 from httpx import Response
 from unittest.mock import AsyncMock, MagicMock, patch
-from pathlib import Path
 
 from talos_agent.config import Settings
 from talos_agent.db import LocalDB
@@ -60,13 +58,13 @@ class TestCommerceDiscoverServices:
         with patch(
             "talos_agent.tools.commerce._api", mock_commerce_env["api"]
         ), patch("talos_agent.tools.commerce._db", mock_commerce_env["db"]):
-            from talos_agent.tools.commerce import discover_services
+            from talos_agent.tools.commerce import ALL_CATEGORIES, discover_services
 
             result = await discover_services()
 
             assert result["count"] == 2
             assert len(result["services"]) == 2
-            assert result["category_searched"] in ["Sales", "Marketing", "Analytics"]
+            assert result["category_searched"] in ALL_CATEGORIES
 
 
 class TestCommercePriceConversion:

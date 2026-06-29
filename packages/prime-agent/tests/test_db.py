@@ -18,6 +18,7 @@ def test_all_tables_exist(mock_db: LocalDB):
         "schedules", "activity_log", "content_history", "commerce_queue",
         "approval_cache", "spending_log", "talos_config", "playbooks",
         "content_performance", "strategy_learnings", "audience_insights",
+        "loans", "loan_repayments",
     }
     assert expected.issubset(tables), f"Missing tables: {expected - tables}"
 
@@ -107,3 +108,69 @@ class TestLearningsLifecycle:
         learnings = mock_db.get_active_learnings(10)
         confidences = [learning["confidence"] for learning in learnings]
         assert confidences == sorted(confidences, reverse=True)
+
+
+class TestLoanLifecycle:
+    def test_create_loan_returns_id(self, mock_db: LocalDB):
+        loan_id = mock_db.create_loan(
+            platform="aave",
+            amount=100.0,
+            collateral_asset="USDC",
+            loan_asset="XLM",
+            duration_days=30,
+            purpose="Test loan",
+        )
+        assert isinstance(loan_id, int)
+        assert loan_id > 0
+
+    def test_get_active_loans(self, mock_db: LocalDB):
+        mock_db.create_loan("aave", 100.0, "USDC", "XLM", 30, "Test 1")
+        mock_db.create_loan("compound", 50.0, "USDC", "XLM", 15, "Test 2")
+        loans = mock_db.get_active_loans()
+        assert len(loans) == 2
+        assert all(loan["status"] == "active" for loan in loans)
+
+    def test_get_loan_by_id(self, mock_db: LocalDB):
+        loan_id = mock_db.create_loan("aave", 100.0, "USDC", "XLM", 30, "Test")
+        loan = mock_db.get_loan_by_id(loan_id)
+        assert loan is not None
+        assert loan["platform"] == "aave"
+        assert loan["amount"] == 100.0
+        assert loan["outstanding_amount"] == 100.0
+
+    def test_partial_repayment_decreases_outstanding(self, mock_db: LocalDB):
+        loan_id = mock_db.create_loan("aave", 100.0, "USDC", "XLM", 30, "Test")
+        mock_db.record_repayment(loan_id, 25.0)
+        loan = mock_db.get_loan_by_id(loan_id)
+        assert loan["outstanding_amount"] == 75.0
+        assert loan["status"] == "active"
+
+    def test_full_repayment_sets_status_repaid(self, mock_db: LocalDB):
+        loan_id = mock_db.create_loan("aave", 100.0, "USDC", "XLM", 30, "Test")
+        mock_db.record_repayment(loan_id, 100.0)
+        loan = mock_db.get_loan_by_id(loan_id)
+        assert loan["outstanding_amount"] == 0.0
+        assert loan["status"] == "repaid"
+
+    def test_repayment_records_tx_hash(self, mock_db: LocalDB):
+        loan_id = mock_db.create_loan("aave", 100.0, "USDC", "XLM", 30, "Test")
+        mock_db.record_repayment(loan_id, 50.0, tx_hash="abc123")
+        # Check repayment record
+        rows = mock_db._conn.execute(
+            "SELECT tx_hash FROM loan_repayments WHERE loan_id = ?",
+            (loan_id,),
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["tx_hash"] == "abc123"
+
+    def test_get_loans_due_soon(self, mock_db: LocalDB):
+        # Create a loan due in 5 days
+        loan_id_1 = mock_db.create_loan("aave", 100.0, "USDC", "XLM", 5, "Due soon")
+        # Create a loan due in 30 days
+        loan_id_2 = mock_db.create_loan("compound", 50.0, "USDC", "XLM", 30, "Due later")
+        
+        loans_due = mock_db.get_loans_due_soon(days=7)
+        loan_ids = [loan["id"] for loan in loans_due]
+        
+        assert loan_id_1 in loan_ids
+        assert loan_id_2 not in loan_ids

@@ -68,6 +68,122 @@ async def run_dividend_distribution(
     db.update_schedule("dividend_distribution")
     return "success"
 
+
+def _is_stellar_public_key(value: object) -> bool:
+    return isinstance(value, str) and value.startswith("G") and len(value) == 56
+
+
+async def run_loan_repayment(
+    *,
+    settings,
+    stellar_kit,
+    api,
+    db,
+    days: int = 7,
+) -> dict:
+    loans_due = db.get_loans_due_soon(days=days)
+    result = {
+        "status": "no_loans" if not loans_due else "processed",
+        "processed": 0,
+        "repaid": 0,
+        "warnings": 0,
+        "errors": 0,
+    }
+
+    if not loans_due:
+        db.update_schedule("loan_repayment")
+        return result
+
+    if not settings.auto_repay_loans:
+        for loan in loans_due:
+            db.add_activity(
+                "loan_warning",
+                f"Loan {loan['id']} due but auto-repay disabled. Outstanding: {loan['outstanding_amount']} {loan['loan_asset']}",
+                "defi",
+            )
+            result["warnings"] += 1
+        db.update_schedule("loan_repayment")
+        return result
+
+    await stellar_kit.initialize()
+    balance_result = await stellar_kit.get_balance()
+    if "error" in balance_result:
+        for loan in loans_due:
+            db.add_activity(
+                "loan_warning",
+                f"Loan {loan['id']} due but balance query failed. Outstanding: {loan['outstanding_amount']} {loan['loan_asset']}",
+                "defi",
+            )
+            result["warnings"] += 1
+        result["status"] = "balance_error"
+        db.update_schedule("loan_repayment")
+        return result
+
+    available_balance = float(balance_result.get("balance_xlm", 0))
+
+    for loan in loans_due:
+        result["processed"] += 1
+        loan_id = loan["id"]
+        outstanding = float(loan["outstanding_amount"])
+        loan_asset = loan["loan_asset"]
+        repayment_address = loan.get("repayment_address")
+
+        if loan_asset != "XLM":
+            db.add_activity(
+                "loan_warning",
+                f"Loan {loan_id} due but auto-repay only supports XLM (asset: {loan_asset})",
+                "defi",
+            )
+            result["warnings"] += 1
+            continue
+
+        if not _is_stellar_public_key(repayment_address):
+            db.add_activity(
+                "loan_warning",
+                f"Loan {loan_id} due but repayment destination is missing or invalid",
+                "defi",
+            )
+            result["warnings"] += 1
+            continue
+
+        repay_amount = min(outstanding, available_balance)
+        if repay_amount <= 0:
+            db.add_activity(
+                "loan_warning",
+                f"Loan {loan_id} due but insufficient funds. Outstanding: {outstanding}, Available: {available_balance}",
+                "defi",
+            )
+            result["warnings"] += 1
+            continue
+
+        transfer_result = await api.request_transfer(
+            to_account=repayment_address,
+            amount=repay_amount,
+            currency="XLM",
+        )
+
+        if not transfer_result or "error" in transfer_result:
+            db.add_activity(
+                "loan_error",
+                f"Auto-repay failed for loan {loan_id}: {transfer_result.get('error', 'Unknown error') if transfer_result else 'No result'}",
+                "defi",
+            )
+            result["errors"] += 1
+            continue
+
+        db.record_repayment(loan_id, repay_amount, tx_hash=transfer_result.get("tx_hash"))
+        db.add_activity(
+            "loan_repayment",
+            f"Auto-repaid loan {loan_id}: {repay_amount} XLM. TX: {transfer_result.get('tx_hash', 'pending')}",
+            "defi",
+        )
+        available_balance -= repay_amount
+        result["repaid"] += 1
+
+    db.update_schedule("loan_repayment")
+    return result
+
+
 class Backoff:
     """Exponential backoff with jitter for task retries."""
 
@@ -393,6 +509,42 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             except asyncio.TimeoutError:
                 pass
 
+    async def loan_repayment_task():
+        """Monitor and auto-repay loan interests from generated revenues. Runs every 24 hours."""
+        repayment_interval = 24 * 3600
+
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=repayment_interval)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+        from talos_agent.payments.stellar_kit import StellarKit
+
+        stellar_kit = StellarKit(api)
+
+        while not shutdown_event.is_set():
+            async with agent_lock:
+                if shutdown_event.is_set():
+                    break
+                try:
+                    result = await run_loan_repayment(
+                        settings=settings,
+                        stellar_kit=stellar_kit,
+                        api=api,
+                        db=db,
+                    )
+                    console.print(
+                        f"[bold cyan]Loan repayment cycle complete: {result}[/bold cyan]"
+                    )
+                except Exception as e:
+                    console.print(f"[red]Loan repayment cycle error: {e}[/red]")
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=repayment_interval)
+                break
+            except asyncio.TimeoutError:
+                pass
+
     tasks = [
         asyncio.create_task(agent_cycle_task(), name="agent_cycle"),
         asyncio.create_task(polling_task(), name="polling"),
@@ -400,6 +552,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         asyncio.create_task(activity_flush_task(), name="activity_flush"),
         asyncio.create_task(learning_cycle_task(), name="learning_cycle"),
         asyncio.create_task(dividend_distribution_task(), name="dividend_distribution"),
+        asyncio.create_task(loan_repayment_task(), name="loan_repayment"),
     ]
 
     try:
