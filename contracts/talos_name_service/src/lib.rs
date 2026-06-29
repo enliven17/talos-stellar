@@ -41,12 +41,34 @@ fn emit_name_registered(env: &Env, talos_id: u32, name: String, owner: Address) 
 }
 
 // ── Validation ──────────────────────────────────────────────────────
-// Character-level validation is handled off-chain (Next.js regex).
-// On-chain we only enforce the byte-length bounds.
-
 fn validate_name(name: &String) -> bool {
     let len = name.len();
-    len >= 3 && len <= 32
+    if len < 3 || len > 32 {
+        return false;
+    }
+
+    let bytes = name.to_string().as_bytes();
+    if bytes.first().is_none() || bytes.last().is_none() {
+        return false;
+    }
+
+    let mut prev_hyphen = false;
+    for &b in bytes {
+        if (b'a'..=b'z').contains(&b) || (b'0'..=b'9').contains(&b) {
+            prev_hyphen = false;
+            continue;
+        }
+        if b == b'-' {
+            if prev_hyphen || bytes.first() == Some(&b) || bytes.last() == Some(&b) {
+                return false;
+            }
+            prev_hyphen = true;
+            continue;
+        }
+        return false;
+    }
+
+    true
 }
 
 // ── Contract ────────────────────────────────────────────────────────
@@ -442,6 +464,50 @@ mod tests {
             .try_register_name(&owner, &1, &invalid_name);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn accepts_valid_name_patterns() {
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let valid_name = s(&env, "alpha-1");
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), 1u32, valid_name.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_register_name(&owner, &1, &valid_name);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_name_patterns() {
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let invalid_names = [s(&env, "Alpha"), s(&env, "bad--name"), s(&env, "-bad"), s(&env, "bad-")];
+
+        for invalid_name in invalid_names {
+            let result = client
+                .mock_auths(&[MockAuth {
+                    address: &owner,
+                    invoke: &MockAuthInvoke {
+                        contract: &contract_id,
+                        fn_name: "register_name",
+                        args: (owner.clone(), 1u32, invalid_name.clone()).into_val(&env),
+                        sub_invokes: &[],
+                    },
+                }])
+                .try_register_name(&owner, &1, &invalid_name);
+
+            assert!(result.is_err(), "expected invalid name {:?} to be rejected", invalid_name.to_string());
+        }
     }
 
     #[test]
