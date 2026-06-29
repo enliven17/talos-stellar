@@ -309,6 +309,30 @@ class TalosAPIClient:
             return r.json()
         return None
 
+    # ── Dividend Distribution ─────────────────────────────
+
+    async def get_distribution_preview(self, talos_id: str) -> dict | None:
+        """Preview dividend distribution without executing."""
+        r = await self._client.get(f"/api/talos/{talos_id}/revenue/distribute")
+        if r.status_code == 200:
+            return r.json()
+        return None
+
+    async def distribute_dividends(
+        self, talos_id: str, *, requester_public_key: str
+    ) -> dict | None:
+        """Execute dividend distribution to patrons."""
+        r = await self._client.post(
+            f"/api/talos/{talos_id}/revenue/distribute",
+            json={"requesterPublicKey": requester_public_key},
+        )
+        if r.status_code in (200, 201):
+            return r.json()
+        try:
+            return r.json()
+        except Exception:
+            return {"error": f"Distribution failed with status {r.status_code}"}
+
     # ── Lifecycle ──────────────────────────────────────────
 
     async def close(self) -> None:

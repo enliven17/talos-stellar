@@ -7,6 +7,7 @@ import logging
 import os
 import random
 import signal
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from rich.console import Console
@@ -19,6 +20,53 @@ logger = logging.getLogger(__name__)
 
 SHUTDOWN_GRACE_PERIOD = 10  # seconds before force-exit on second signal
 
+async def run_dividend_distribution(
+    *,
+    talos_id: str,
+    talos_config: dict,
+    settings,
+    stellar,
+    api,
+    db,
+) -> str:
+    """
+    Core dividend distribution logic extracted for testability.
+    Returns a status string: 'no_wallet', 'missing_creator', 'below_threshold',
+    'preview_failed', 'distribution_failed', 'success', or 'balance_error'.
+    """
+    stellar_account_id = talos_config.get("walletPublicKey", "")
+    if not stellar_account_id:
+        return "no_wallet"
+
+    balance_result = await stellar.get_token_balance(stellar_account_id, "USDC")
+
+    if "error" in balance_result:
+        db.update_schedule("dividend_distribution")
+        return "balance_error"
+
+    usdc_balance = balance_result.get("balance", 0)
+
+    if usdc_balance < float(settings.dividend_usdc_threshold):
+        return "below_threshold"
+
+    preview = await api.get_distribution_preview(talos_id)
+    if not preview or "error" in preview:
+        return "preview_failed"
+
+    creator_public_key = talos_config.get("creatorPublicKey", "")
+    if not creator_public_key:
+        return "missing_creator"
+
+    result = await api.distribute_dividends(
+        talos_id,
+        requester_public_key=creator_public_key,
+    )
+
+    if not result or "error" in result:
+        return "distribution_failed"
+
+    db.update_schedule("dividend_distribution")
+    return "success"
 
 class Backoff:
     """Exponential backoff with jitter for task retries."""
@@ -63,13 +111,12 @@ class Backoff:
     def failure(self):
         self.fail_count += 1
 
-
 async def run(settings: Settings, agent_slot: int = 0) -> None:
     """Entry point called by `talos-agent start`. agent_slot used for log prefixes in multi mode."""
     from talos_agent.api_client import TalosAPIClient
     from talos_agent.db import LocalDB, get_db_path
 
-    tag = f"[{settings.talos_api_key[:12]}]" if agent_slot > 0 else ""
+    
     db = LocalDB(path=get_db_path(settings.talos_api_key[:16] if agent_slot > 0 else None))
     api = TalosAPIClient(settings)
 
@@ -96,6 +143,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
     from talos_agent.agent.loop import agent_loop
     from talos_agent.agent.prompt import build_learning_prompt
     from talos_agent.browser.session import BrowserSession
+    from talos_agent.payments.stellar_kit import StellarKit
     from talos_agent.tools.registry import build_all_tools
 
     # Start browser session
@@ -106,6 +154,10 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
     # Build tools
     tools = build_all_tools(api=api, db=db, browser=browser, settings=settings)
     console.print(f"[green]Registered {len(tools)} tools.[/green]")
+
+    # Initialize StellarKit for balance checks
+    stellar = StellarKit(api)
+    await stellar.initialize()
 
     # Shutdown handler — force-exit on second signal
     shutdown_event = asyncio.Event()
@@ -278,12 +330,76 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             except asyncio.TimeoutError:
                 pass
 
+    async def dividend_distribution_task():
+        """Periodically check USDC balance and distribute dividends to patrons when threshold is met."""
+        distribution_interval = settings.dividend_distribution_interval
+
+        # Wait for the first interval before starting
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=distribution_interval)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+        while not shutdown_event.is_set():
+            try:
+                # Prevent duplicate runs after restart
+                last_run = db.get_last_run("dividend_distribution")
+                if last_run:
+                    elapsed = (datetime.now(timezone.utc) - last_run).total_seconds()
+                    remaining = distribution_interval - elapsed
+                    if remaining > 0:
+                        console.print(
+                            f"[dim]Dividend distribution skipped — "
+                            f"next run in {int(remaining)}s[/dim]"
+                        )
+                        try:
+                            await asyncio.wait_for(shutdown_event.wait(), timeout=remaining)
+                            return  # shutdown requested during wait
+                        except asyncio.TimeoutError:
+                            pass
+                        continue
+
+                result = await run_dividend_distribution(
+                    talos_id=settings.talos_id,
+                    talos_config=talos_config,
+                    settings=settings,
+                    stellar=stellar,
+                    api=api,
+                    db=db,
+                )
+
+                _RESULT_MESSAGES = {
+                    "no_wallet": ("[dim yellow]", "No wallet public key configured — skipping dividend distribution"),
+                    "missing_creator": ("[bold red]", "No creator public key configured — aborting dividend distribution"),
+                    "balance_error": ("[bold red]", "USDC balance check failed — skipping dividend distribution"),
+                    "below_threshold": ("[dim]", f"USDC balance below threshold {settings.dividend_usdc_threshold} — skipping"),
+                    "preview_failed": ("[bold red]", "Distribution preview failed — aborting"),
+                    "distribution_failed": ("[bold red]", "Dividend distribution failed"),
+                    "success": ("[bold green]", "Dividend distribution successful"),
+                }
+                color, msg = _RESULT_MESSAGES.get(result, ("[dim]", f"Unknown result: {result}"))
+                console.print(f"{color}{msg}[/]")
+
+            except Exception as e:
+                console.print(f"[red]Dividend distribution task error: {e}[/red]")
+
+            try:
+                await asyncio.wait_for(
+                    shutdown_event.wait(),
+                    timeout=distribution_interval,
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+
     tasks = [
         asyncio.create_task(agent_cycle_task(), name="agent_cycle"),
         asyncio.create_task(polling_task(), name="polling"),
         asyncio.create_task(heartbeat_task(), name="heartbeat"),
         asyncio.create_task(activity_flush_task(), name="activity_flush"),
         asyncio.create_task(learning_cycle_task(), name="learning_cycle"),
+        asyncio.create_task(dividend_distribution_task(), name="dividend_distribution"),
     ]
 
     try:
@@ -314,7 +430,6 @@ async def run_multi(base_settings: Settings, api_keys: list[str]) -> None:
     console.print(f"[bold green]Starting {len(api_keys)} agents...[/bold green]")
 
     async def run_one(api_key: str, slot: int) -> None:
-        from dataclasses import replace as dc_replace
         import copy
         agent_settings = copy.copy(base_settings)
         object.__setattr__(agent_settings, "talos_api_key", api_key)

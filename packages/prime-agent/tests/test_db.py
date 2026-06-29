@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import sqlite3
-from datetime import datetime, timedelta, timezone
 
-import pytest
 from talos_agent.db import LocalDB
 
 
@@ -101,12 +98,12 @@ class TestLearningsLifecycle:
         )
         mock_db._conn.commit()
         learnings = mock_db.get_active_learnings(10)
-        assert all(l["insight"] != "stale insight" for l in learnings)
+        assert all(learning["insight"] != "stale insight" for learning in learnings)
 
     def test_ordered_by_confidence(self, mock_db: LocalDB):
         mock_db.save_learning("a", "low", confidence=0.3)
         mock_db.save_learning("b", "high", confidence=0.9)
         mock_db.save_learning("c", "mid", confidence=0.6)
         learnings = mock_db.get_active_learnings(10)
-        confidences = [l["confidence"] for l in learnings]
+        confidences = [learning["confidence"] for learning in learnings]
         assert confidences == sorted(confidences, reverse=True)
