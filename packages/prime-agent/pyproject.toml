@@ -18,6 +18,8 @@ dependencies = [
     "stellar-sdk>=11.0",
     "cryptography>=41.0",
     "tenacity>=8.2",
+    "structlog>=25.5",
+    "sentry-sdk>=2.47",
 ]
 
 [project.optional-dependencies]
