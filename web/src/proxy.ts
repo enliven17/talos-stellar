@@ -1,14 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { rateLimit, rateLimitResponse } from "@/lib/rate-limit";
-
-/**
- * Next.js Middleware — IP-based rate limiting for all /api routes.
- *
- * Tiers:
- *   - POST/PUT/PATCH (mutating): 30 req / 60 s per IP
- *   - GET  (read):               120 req / 60 s per IP
- *   - Auth routes (/api/talos/me, check-name): 20 req / 60 s per IP (brute-force guard)
- */
+import {
+  applyRateLimitHeaders,
+  rateLimit,
+  rateLimitResponse,
+  RateLimitResult,
+} from "@/lib/rate-limit";
 
 function getClientIp(request: NextRequest): string {
   return (
@@ -16,6 +12,14 @@ function getClientIp(request: NextRequest): string {
     request.headers.get("x-real-ip") ??
     "unknown"
   );
+}
+
+function getApiKey(request: NextRequest): string | null {
+  const authHeader = request.headers.get("authorization");
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    return authHeader.substring(7).trim();
+  }
+  return null;
 }
 
 export function proxy(request: NextRequest) {
@@ -27,6 +31,7 @@ export function proxy(request: NextRequest) {
   }
 
   const ip = getClientIp(request);
+  const apiKey = getApiKey(request);
   const method = request.method.toUpperCase();
 
   // Strict tier: auth-sensitive endpoints
@@ -35,24 +40,29 @@ export function proxy(request: NextRequest) {
     pathname.includes("check-name") ||
     pathname.includes("regenerate-key");
 
+  let result: RateLimitResult;
+
   if (isAuthRoute) {
-    const result = rateLimit(`auth:${ip}`, { limit: 20, windowMs: 60_000 });
-    if (!result.ok) return rateLimitResponse(result);
-    return NextResponse.next();
+    result = rateLimit(`auth:${ip}`, { limit: 20, windowMs: 60_000 });
+  } else if (method === "GET") {
+    result = rateLimit(`read:${ip}`, { limit: 100, windowMs: 60_000 });
+  } else if (method === "POST" && apiKey) {
+    result = rateLimit(`write_key:${apiKey}`, {
+      limit: 30,
+      windowMs: 60_000,
+    });
+  } else {
+    result = rateLimit(`write_ip:${ip}`, {
+      limit: 30,
+      windowMs: 60_000,
+    });
   }
 
-  // Mutating requests: stricter limit
-  if (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE") {
-    const result = rateLimit(`write:${ip}`, { limit: 30, windowMs: 60_000 });
-    if (!result.ok) return rateLimitResponse(result);
-    return NextResponse.next();
+  if (!result.ok) {
+    return rateLimitResponse(result);
   }
 
-  // Read requests
-  const result = rateLimit(`read:${ip}`, { limit: 120, windowMs: 60_000 });
-  if (!result.ok) return rateLimitResponse(result);
-
-  return NextResponse.next();
+  return applyRateLimitHeaders(NextResponse.next(), result);
 }
 
 export const config = {

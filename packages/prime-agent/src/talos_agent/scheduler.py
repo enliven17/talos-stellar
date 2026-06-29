@@ -1,28 +1,242 @@
-"""Main async scheduler — orchestrates all agent tasks."""
+﻿"""Main async scheduler — orchestrates all agent tasks."""
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import random
 import signal
+import uuid
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+import structlog
 from rich.console import Console
 
 if TYPE_CHECKING:
     from talos_agent.config import Settings
 
+from talos_agent.observability import log, setup as setup_observability
+
 console = Console()
+logger = logging.getLogger(__name__)
 
 SHUTDOWN_GRACE_PERIOD = 10  # seconds before force-exit on second signal
 
+async def run_dividend_distribution(
+    *,
+    talos_id: str,
+    talos_config: dict,
+    settings,
+    stellar,
+    api,
+    db,
+) -> str:
+    """
+    Core dividend distribution logic extracted for testability.
+    Returns a status string: 'no_wallet', 'missing_creator', 'below_threshold',
+    'preview_failed', 'distribution_failed', 'success', or 'balance_error'.
+    """
+    stellar_account_id = talos_config.get("walletPublicKey", "")
+    if not stellar_account_id:
+        return "no_wallet"
+
+    balance_result = await stellar.get_token_balance(stellar_account_id, "USDC")
+
+    if "error" in balance_result:
+        db.update_schedule("dividend_distribution")
+        return "balance_error"
+
+    usdc_balance = balance_result.get("balance", 0)
+
+    if usdc_balance < float(settings.dividend_usdc_threshold):
+        return "below_threshold"
+
+    preview = await api.get_distribution_preview(talos_id)
+    if not preview or "error" in preview:
+        return "preview_failed"
+
+    creator_public_key = talos_config.get("creatorPublicKey", "")
+    if not creator_public_key:
+        return "missing_creator"
+
+    result = await api.distribute_dividends(
+        talos_id,
+        requester_public_key=creator_public_key,
+    )
+
+    if not result or "error" in result:
+        return "distribution_failed"
+
+    db.update_schedule("dividend_distribution")
+    return "success"
+
+
+def _is_stellar_public_key(value: object) -> bool:
+    return isinstance(value, str) and value.startswith("G") and len(value) == 56
+
+
+async def run_loan_repayment(
+    *,
+    settings,
+    stellar_kit,
+    api,
+    db,
+    days: int = 7,
+) -> dict:
+    loans_due = db.get_loans_due_soon(days=days)
+    result = {
+        "status": "no_loans" if not loans_due else "processed",
+        "processed": 0,
+        "repaid": 0,
+        "warnings": 0,
+        "errors": 0,
+    }
+
+    if not loans_due:
+        db.update_schedule("loan_repayment")
+        return result
+
+    if not settings.auto_repay_loans:
+        for loan in loans_due:
+            db.add_activity(
+                "loan_warning",
+                f"Loan {loan['id']} due but auto-repay disabled. Outstanding: {loan['outstanding_amount']} {loan['loan_asset']}",
+                "defi",
+            )
+            result["warnings"] += 1
+        db.update_schedule("loan_repayment")
+        return result
+
+    await stellar_kit.initialize()
+    balance_result = await stellar_kit.get_balance()
+    if "error" in balance_result:
+        for loan in loans_due:
+            db.add_activity(
+                "loan_warning",
+                f"Loan {loan['id']} due but balance query failed. Outstanding: {loan['outstanding_amount']} {loan['loan_asset']}",
+                "defi",
+            )
+            result["warnings"] += 1
+        result["status"] = "balance_error"
+        db.update_schedule("loan_repayment")
+        return result
+
+    available_balance = float(balance_result.get("balance_xlm", 0))
+
+    for loan in loans_due:
+        result["processed"] += 1
+        loan_id = loan["id"]
+        outstanding = float(loan["outstanding_amount"])
+        loan_asset = loan["loan_asset"]
+        repayment_address = loan.get("repayment_address")
+
+        if loan_asset != "XLM":
+            db.add_activity(
+                "loan_warning",
+                f"Loan {loan_id} due but auto-repay only supports XLM (asset: {loan_asset})",
+                "defi",
+            )
+            result["warnings"] += 1
+            continue
+
+        if not _is_stellar_public_key(repayment_address):
+            db.add_activity(
+                "loan_warning",
+                f"Loan {loan_id} due but repayment destination is missing or invalid",
+                "defi",
+            )
+            result["warnings"] += 1
+            continue
+
+        repay_amount = min(outstanding, available_balance)
+        if repay_amount <= 0:
+            db.add_activity(
+                "loan_warning",
+                f"Loan {loan_id} due but insufficient funds. Outstanding: {outstanding}, Available: {available_balance}",
+                "defi",
+            )
+            result["warnings"] += 1
+            continue
+
+        transfer_result = await api.request_transfer(
+            to_account=repayment_address,
+            amount=repay_amount,
+            currency="XLM",
+        )
+
+        if not transfer_result or "error" in transfer_result:
+            db.add_activity(
+                "loan_error",
+                f"Auto-repay failed for loan {loan_id}: {transfer_result.get('error', 'Unknown error') if transfer_result else 'No result'}",
+                "defi",
+            )
+            result["errors"] += 1
+            continue
+
+        db.record_repayment(loan_id, repay_amount, tx_hash=transfer_result.get("tx_hash"))
+        db.add_activity(
+            "loan_repayment",
+            f"Auto-repaid loan {loan_id}: {repay_amount} XLM. TX: {transfer_result.get('tx_hash', 'pending')}",
+            "defi",
+        )
+        available_balance -= repay_amount
+        result["repaid"] += 1
+
+    db.update_schedule("loan_repayment")
+    return result
+
+
+class Backoff:
+    """Exponential backoff with jitter for task retries."""
+
+    def __init__(
+        self,
+        base_delay: float,
+        initial_backoff: float = 2.0,
+        max_backoff: float = 300.0,
+        jitter: float = 0.2,
+    ):
+        self.base_delay = base_delay
+        self.initial_backoff = initial_backoff
+        self.max_backoff = max_backoff
+        self.jitter = jitter
+        self.fail_count = 0
+
+    def next_delay(self) -> float:
+        if self.fail_count == 0:
+            return self.base_delay
+
+        # Exponential backoff: initial * 2^(fail_count - 1)
+        delay = self.initial_backoff * (2 ** (self.fail_count - 1))
+        delay = min(delay, self.max_backoff)
+
+        # Add jitter (+- 20%)
+        if self.jitter > 0:
+            j = delay * self.jitter
+            delay = delay + random.uniform(-j, j)
+
+        actual_delay = max(delay, 0.1)  # floor at 100ms
+        logger.debug(
+            f"Backoff state: fail_count={self.fail_count}, next_delay={actual_delay:.2f}s"
+        )
+        return actual_delay
+
+    def success(self):
+        if self.fail_count > 0:
+            logger.debug("Backoff reset on success")
+        self.fail_count = 0
+
+    def failure(self):
+        self.fail_count += 1
 
 async def run(settings: Settings, agent_slot: int = 0) -> None:
     """Entry point called by `talos-agent start`. agent_slot used for log prefixes in multi mode."""
+    setup_observability()
     from talos_agent.api_client import TalosAPIClient
     from talos_agent.db import LocalDB, get_db_path
 
-    tag = f"[{settings.talos_api_key[:12]}]" if agent_slot > 0 else ""
     db = LocalDB(path=get_db_path(settings.talos_api_key[:16] if agent_slot > 0 else None))
     api = TalosAPIClient(settings)
 
@@ -49,6 +263,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
     from talos_agent.agent.loop import agent_loop
     from talos_agent.agent.prompt import build_learning_prompt
     from talos_agent.browser.session import BrowserSession
+    from talos_agent.payments.stellar_kit import StellarKit
     from talos_agent.tools.registry import build_all_tools
 
     # Start browser session
@@ -59,6 +274,62 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
     # Build tools
     tools = build_all_tools(api=api, db=db, browser=browser, settings=settings)
     console.print(f"[green]Registered {len(tools)} tools.[/green]")
+
+    # Initialize StellarKit for balance checks
+    stellar = StellarKit(api)
+    await stellar.initialize()
+
+    # Tracking restart parameters
+    browser_restart_attempts = 0
+    max_restart_attempts = 3
+    is_degraded = False
+
+    async def ensure_browser_healthy() -> bool:
+        """Checks browser health, attempts automatic recovery, and updates tools reference."""
+        nonlocal browser, tools, browser_restart_attempts, is_degraded
+        
+        if is_degraded:
+            return False
+
+        is_healthy = False
+        if browser is not None:
+            try:
+                if hasattr(browser, "context") and browser.context:
+                    is_healthy = True
+            except Exception:
+                is_healthy = False
+
+        if is_healthy:
+            return True
+
+        console.print("[yellow]Browser session health check failed. Attempting recovery...[/yellow]")
+        while browser_restart_attempts < max_restart_attempts:
+            browser_restart_attempts += 1
+            console.print(f"[bold yellow]Attempting browser reconnection ({browser_restart_attempts}/{max_restart_attempts})...[/bold yellow]")
+            
+            try:
+                if browser:
+                    try:
+                        await asyncio.wait_for(browser.close(), timeout=3)
+                    except Exception:
+                        pass
+                
+                browser = await BrowserSession.start(model_api_key=settings.llm_api_key)
+                tools = build_all_tools(api=api, db=db, browser=browser, settings=settings)
+                
+                console.print(f"[bold green]Browser reconnection event logged successfully on attempt {browser_restart_attempts}.[/bold green]")
+                return True
+            except Exception as restart_err:
+                console.print(f"[red]Browser reconnection failed on attempt {browser_restart_attempts}: {restart_err}[/red]")
+                await asyncio.sleep(2)
+
+        console.print("[bold red]Maximum browser restart attempts reached. Marking agent runtime status as degraded.[/bold red]")
+        is_degraded = True
+        try:
+            await api.update_status(settings.talos_id, online=True)
+        except Exception:
+            pass
+        return False
 
     # Shutdown handler — force-exit on second signal
     shutdown_event = asyncio.Event()
@@ -91,19 +362,42 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             async with agent_lock:
                 if shutdown_event.is_set():
                     break
+                cycle_id = str(uuid.uuid4())
+                structlog.contextvars.bind_contextvars(cycle_id=cycle_id)
+                api.set_request_id(cycle_id)
                 try:
-                    context = AgentContext.from_db(db, talos_config)
-                    await agent_loop(
-                        settings=settings,
-                        tools=tools,
-                        talos_config=talos_config,
-                        context=context,
-                        db=db,
-                        shutdown_event=shutdown_event,
-                    )
-                    db.update_schedule("agent_cycle")
+                    if not await ensure_browser_healthy():
+                        console.print(
+                            "[red]Skipping agent cycle: browser session is down and unrecoverable.[/red]"
+                        )
+                    else:
+                        log.info(
+                            "agent_cycle_start",
+                            talos=talos_config.get("name"),
+                            cycle_id=cycle_id,
+                        )
+                        context = AgentContext.from_db(db, talos_config)
+                        await agent_loop(
+                            settings=settings,
+                            tools=tools,
+                            talos_config=talos_config,
+                            context=context,
+                            db=db,
+                            shutdown_event=shutdown_event,
+                        )
+                        db.update_schedule("agent_cycle")
+                        log.info("agent_cycle_complete", cycle_id=cycle_id)
                 except Exception as e:
                     console.print(f"[red]Agent cycle error: {e}[/red]")
+                    log.error("agent_cycle_error", error=str(e), cycle_id=cycle_id)
+                    try:
+                        import sentry_sdk
+
+                        sentry_sdk.capture_exception(e)
+                    except Exception:
+                        pass
+                finally:
+                    structlog.contextvars.unbind_contextvars("cycle_id")
             try:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=settings.agent_cycle_interval)
                 break
@@ -112,43 +406,59 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
 
     async def polling_task():
         """Poll Web API for approvals and commerce jobs."""
+        backoff = Backoff(base_delay=settings.polling_interval)
         while not shutdown_event.is_set():
             try:
-                # Poll approvals
                 approvals = await api.get_approvals(settings.talos_id, status="pending")
                 for a in approvals:
                     cached = db.get_pending_approvals()
                     cached_ids = {c["approval_id"] for c in cached}
                     if a["id"] not in cached_ids:
-                        db.cache_approval(a["id"], a["type"], a["title"], a.get("description"), a.get("amount"))
+                        db.cache_approval(
+                            a["id"],
+                            a["type"],
+                            a["title"],
+                            a.get("description"),
+                            a.get("amount"),
+                        )
 
-                # Poll pending jobs (as service provider)
                 jobs = await api.get_pending_jobs()
                 for job in jobs:
-                    db.add_commerce_job(job["id"], job["talosId"], job.get("serviceName", ""), job.get("payload"))
+                    db.add_commerce_job(
+                        job["id"], job["talosId"], job.get("serviceName", ""), job.get("payload")
+                    )
+
+                backoff.success()
             except Exception as e:
                 console.print(f"[dim red]Polling error: {e}[/dim red]")
+                backoff.failure()
+
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=settings.polling_interval)
+                await asyncio.wait_for(shutdown_event.wait(), timeout=backoff.next_delay())
                 break
             except asyncio.TimeoutError:
                 pass
 
     async def heartbeat_task():
         """Report online status periodically."""
+        backoff = Backoff(base_delay=settings.heartbeat_interval)
         while not shutdown_event.is_set():
             try:
                 await api.update_status(settings.talos_id, online=True)
-            except Exception:
-                pass
+                backoff.success()
+            except Exception as e:
+                logger.debug(f"Heartbeat error: {e}")
+                backoff.failure()
+
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=settings.heartbeat_interval)
+                await asyncio.wait_for(shutdown_event.wait(), timeout=backoff.next_delay())
                 break
             except asyncio.TimeoutError:
                 pass
 
     async def activity_flush_task():
         """Flush buffered activity logs to Web API."""
+        backoff = Backoff(base_delay=30)
         while not shutdown_event.is_set():
             try:
                 pending = db.get_pending_activities()
@@ -161,10 +471,13 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                             channel=act["channel"],
                         )
                     db.mark_activities_sent([a["id"] for a in pending])
-            except Exception:
-                pass
+                backoff.success()
+            except Exception as e:
+                logger.debug(f"Activity flush error: {e}")
+                backoff.failure()
+
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=30)
+                await asyncio.wait_for(shutdown_event.wait(), timeout=backoff.next_delay())
                 break
             except asyncio.TimeoutError:
                 pass
@@ -173,7 +486,6 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         """Run a dedicated learning cycle every 6 hours: measure → review → evolve."""
         learning_interval = 6 * 3600  # 6 hours
 
-        # Wait for the first agent cycle to complete before starting
         try:
             await asyncio.wait_for(shutdown_event.wait(), timeout=learning_interval)
             return
@@ -184,28 +496,130 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             async with agent_lock:
                 if shutdown_event.is_set():
                     break
-                try:
-                    context = AgentContext.from_db(db, talos_config)
+                
+                if not await ensure_browser_healthy():
+                    console.print("[red]Skipping learning cycle: browser session is down and unrecoverable.[/red]")
+                else:
+                    try:
+                        context = AgentContext.from_db(db, talos_config)
 
-                    # Only run if there are unmeasured posts or enough data for a review
-                    if context.unmeasured_count > 0 or context.performance_summary.get("total_posts", 0) >= 5:
-                        console.print("[bold magenta]Starting learning cycle...[/bold magenta]")
-                        learning_prompt = build_learning_prompt(talos_config, context)
-                        await agent_loop(
-                            settings=settings,
-                            tools=tools,
-                            talos_config=talos_config,
-                            context=context,
-                            db=db,
-                            system_prompt_override=learning_prompt,
-                            shutdown_event=shutdown_event,
-                        )
-                        db.update_schedule("learning_cycle")
-                        console.print("[bold magenta]Learning cycle complete.[/bold magenta]")
-                except Exception as e:
-                    console.print(f"[red]Learning cycle error: {e}[/red]")
+                        if context.unmeasured_count > 0 or context.performance_summary.get("total_posts", 0) >= 5:
+                            console.print("[bold magenta]Starting learning cycle...[/bold magenta]")
+                            learning_prompt = build_learning_prompt(talos_config, context)
+                            await agent_loop(
+                                settings=settings,
+                                tools=tools,
+                                talos_config=talos_config,
+                                context=context,
+                                db=db,
+                                system_prompt_override=learning_prompt,
+                                shutdown_event=shutdown_event,
+                            )
+                            db.update_schedule("learning_cycle")
+                            console.print("[bold magenta]Learning cycle complete.[/bold magenta]")
+                    except Exception as e:
+                        console.print(f"[red]Learning cycle error: {e}[/red]")
             try:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=learning_interval)
+                break
+            except asyncio.TimeoutError:
+                pass
+
+    async def dividend_distribution_task():
+        """Periodically check USDC balance and distribute dividends to patrons when threshold is met."""
+        distribution_interval = settings.dividend_distribution_interval
+
+        # Wait for the first interval before starting
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=distribution_interval)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+        while not shutdown_event.is_set():
+            try:
+                # Prevent duplicate runs after restart
+                last_run = db.get_last_run("dividend_distribution")
+                if last_run:
+                    elapsed = (datetime.now(timezone.utc) - last_run).total_seconds()
+                    remaining = distribution_interval - elapsed
+                    if remaining > 0:
+                        console.print(
+                            f"[dim]Dividend distribution skipped — "
+                            f"next run in {int(remaining)}s[/dim]"
+                        )
+                        try:
+                            await asyncio.wait_for(shutdown_event.wait(), timeout=remaining)
+                            return  # shutdown requested during wait
+                        except asyncio.TimeoutError:
+                            pass
+                        continue
+
+                result = await run_dividend_distribution(
+                    talos_id=settings.talos_id,
+                    talos_config=talos_config,
+                    settings=settings,
+                    stellar=stellar,
+                    api=api,
+                    db=db,
+                )
+
+                _RESULT_MESSAGES = {
+                    "no_wallet": ("[dim yellow]", "No wallet public key configured — skipping dividend distribution"),
+                    "missing_creator": ("[bold red]", "No creator public key configured — aborting dividend distribution"),
+                    "balance_error": ("[bold red]", "USDC balance check failed — skipping dividend distribution"),
+                    "below_threshold": ("[dim]", f"USDC balance below threshold {settings.dividend_usdc_threshold} — skipping"),
+                    "preview_failed": ("[bold red]", "Distribution preview failed — aborting"),
+                    "distribution_failed": ("[bold red]", "Dividend distribution failed"),
+                    "success": ("[bold green]", "Dividend distribution successful"),
+                }
+                color, msg = _RESULT_MESSAGES.get(result, ("[dim]", f"Unknown result: {result}"))
+                console.print(f"{color}{msg}[/]")
+
+            except Exception as e:
+                console.print(f"[red]Dividend distribution task error: {e}[/red]")
+
+            try:
+                await asyncio.wait_for(
+                    shutdown_event.wait(),
+                    timeout=distribution_interval,
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+
+    async def loan_repayment_task():
+        """Monitor and auto-repay loan interests from generated revenues. Runs every 24 hours."""
+        repayment_interval = 24 * 3600
+
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=repayment_interval)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+        from talos_agent.payments.stellar_kit import StellarKit
+
+        stellar_kit = StellarKit(api)
+
+        while not shutdown_event.is_set():
+            async with agent_lock:
+                if shutdown_event.is_set():
+                    break
+                try:
+                    result = await run_loan_repayment(
+                        settings=settings,
+                        stellar_kit=stellar_kit,
+                        api=api,
+                        db=db,
+                    )
+                    console.print(
+                        f"[bold cyan]Loan repayment cycle complete: {result}[/bold cyan]"
+                    )
+                except Exception as e:
+                    console.print(f"[red]Loan repayment cycle error: {e}[/red]")
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=repayment_interval)
                 break
             except asyncio.TimeoutError:
                 pass
@@ -216,24 +630,25 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         asyncio.create_task(heartbeat_task(), name="heartbeat"),
         asyncio.create_task(activity_flush_task(), name="activity_flush"),
         asyncio.create_task(learning_cycle_task(), name="learning_cycle"),
+        asyncio.create_task(dividend_distribution_task(), name="dividend_distribution"),
+        asyncio.create_task(loan_repayment_task(), name="loan_repayment"),
     ]
 
     try:
-        # Wait until shutdown is requested, then cancel all tasks
         await shutdown_event.wait()
 
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
     finally:
-        # Graceful shutdown with timeout
         console.print("[yellow]Cleaning up...[/yellow]")
         try:
             await asyncio.wait_for(api.update_status(settings.talos_id, online=False), timeout=5)
         except Exception:
             pass
         try:
-            await asyncio.wait_for(browser.close(), timeout=5)
+            if browser:
+                await asyncio.wait_for(browser.close(), timeout=5)
         except Exception:
             pass
         await api.close()
@@ -246,15 +661,15 @@ async def run_multi(base_settings: Settings, api_keys: list[str]) -> None:
     console.print(f"[bold green]Starting {len(api_keys)} agents...[/bold green]")
 
     async def run_one(api_key: str, slot: int) -> None:
-        from dataclasses import replace as dc_replace
         import copy
+
         agent_settings = copy.copy(base_settings)
         object.__setattr__(agent_settings, "talos_api_key", api_key)
         object.__setattr__(agent_settings, "talos_id", "")
         try:
             await run(agent_settings, agent_slot=slot)
         except Exception as e:
-            console.print(f"[red]Agent {slot} ({api_key[:12]}...) crashed: {e}[/red]")
+            print(f"[red]Agent {slot} ({api_key[:12]}...) crashed: {e}[/red]")
 
     await asyncio.gather(*[
         run_one(key, i + 1) for i, key in enumerate(api_keys)

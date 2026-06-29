@@ -17,6 +17,9 @@ dependencies = [
     "rich>=13.7",
     "stellar-sdk>=11.0",
     "cryptography>=41.0",
+    "tenacity>=8.2",
+    "structlog>=25.5",
+    "sentry-sdk>=2.47",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +27,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "respx>=0.21",
+    "ruff>=0.8",
 ]
 
 [project.scripts]
@@ -34,3 +38,8 @@ asyncio_mode = "auto"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.19",
+]

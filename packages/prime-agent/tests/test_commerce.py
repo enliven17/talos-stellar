@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
-from talos_agent.tools.commerce import price_to_usdc_units, ALL_CATEGORIES
+from talos_agent.payments import USDC_TESTNET_ISSUER
+from talos_agent.tools.commerce import price_to_usdc_units, ALL_CATEGORIES, discover_services, purchase_service
 
 
 class TestPriceToUsdcUnits:
@@ -34,3 +36,106 @@ def test_all_categories_has_ten_entries():
     assert "Sales" in ALL_CATEGORIES
     assert "Education" in ALL_CATEGORIES
     assert "Development" in ALL_CATEGORIES
+
+
+class MockAPIClient:
+    def __init__(self):
+        self.discover_services = AsyncMock(return_value=[])
+
+
+@pytest.fixture
+def mock_api_client():
+    return MockAPIClient()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("category", ALL_CATEGORIES)
+async def test_discover_services_handles_category(category, mock_api_client):
+    with patch("talos_agent.tools.commerce._api", mock_api_client), \
+         patch("random.choice", return_value=category):
+        res = await discover_services()
+        assert res["category_searched"] == category
+        mock_api_client.discover_services.assert_called_once_with(
+            category=category,
+            target=None
+        )
+
+
+class TestPurchaseServiceSignPayment:
+    """Verify purchase_service forwards correct asset kwargs to sign_payment."""
+
+    @pytest.mark.asyncio
+    async def test_sign_payment_receives_asset_code_and_issuer(self):
+        mock_sign = AsyncMock(return_value={
+            "status": "signed",
+            "payment_header": "x402-header-value",
+        })
+        mock_signer = MagicMock()
+        mock_signer.initialize = AsyncMock()
+        mock_signer.sign_payment = mock_sign
+
+        mock_api = MagicMock()
+        mock_api.get_service = AsyncMock(return_value=MagicMock(
+            status_code=402,
+            json=lambda: {"price": 1.00, "payee": "GDEST...", "token": "0xabc", "chainId": 1},
+        ))
+        mock_api.submit_commerce = AsyncMock(return_value={"jobId": "job-1", "status": "submitted"})
+
+        mock_db = MagicMock()
+        mock_db.get_talos_config.return_value = {"gtmBudget": 200}
+        mock_db.get_spending_period.return_value = 0.0
+        mock_db.add_commerce_job.return_value = None
+        mock_db.record_spending.return_value = None
+
+        mock_settings = MagicMock()
+        mock_settings.approval_threshold = "50"
+        mock_settings.talos_id = "talos-test"
+
+        with patch("talos_agent.tools.commerce._api", mock_api), \
+             patch("talos_agent.tools.commerce._db", mock_db), \
+             patch("talos_agent.tools.commerce._settings", mock_settings), \
+             patch("talos_agent.tools.commerce._get_signer", return_value=mock_signer):
+            result = await purchase_service("other-talos", "analytics", "{}")
+
+        assert "error" not in result or "TypeError" not in result.get("error", "")
+        mock_sign.assert_called_once_with(
+            payee="GDEST...",
+            amount=1_000_000,
+            asset_code="USDC",
+            asset_issuer=USDC_TESTNET_ISSUER,
+        )
+
+    @pytest.mark.asyncio
+    async def test_sign_payment_no_unexpected_kwargs(self):
+        """token_address and chain_id must NOT appear in the sign_payment call."""
+        mock_sign = AsyncMock(return_value={"status": "signed", "payment_header": "hdr"})
+        mock_signer = MagicMock()
+        mock_signer.initialize = AsyncMock()
+        mock_signer.sign_payment = mock_sign
+
+        mock_api = MagicMock()
+        mock_api.get_service = AsyncMock(return_value=MagicMock(
+            status_code=402,
+            json=lambda: {"price": 0.50, "payee": "GPAY...", "token": "0xtoken", "chainId": 42},
+        ))
+        mock_api.submit_commerce = AsyncMock(return_value={"jobId": "j2", "status": "submitted"})
+
+        mock_db = MagicMock()
+        mock_db.get_talos_config.return_value = {"gtmBudget": 100}
+        mock_db.get_spending_period.return_value = 0.0
+        mock_db.add_commerce_job.return_value = None
+        mock_db.record_spending.return_value = None
+
+        mock_settings = MagicMock()
+        mock_settings.approval_threshold = "50"
+        mock_settings.talos_id = "talos-test"
+
+        with patch("talos_agent.tools.commerce._api", mock_api), \
+             patch("talos_agent.tools.commerce._db", mock_db), \
+             patch("talos_agent.tools.commerce._settings", mock_settings), \
+             patch("talos_agent.tools.commerce._get_signer", return_value=mock_signer):
+            await purchase_service("other-talos", "research", "{}")
+
+        _, call_kwargs = mock_sign.call_args
+        assert "token_address" not in call_kwargs
+        assert "chain_id" not in call_kwargs

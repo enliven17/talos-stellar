@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, get_type_hints
 
@@ -144,13 +143,17 @@ def build_all_tools(
     from talos_agent.tools import learning as _learning_mod  # noqa: F401
     from talos_agent.tools import web_api as _web_api_mod  # noqa: F401
     from talos_agent.tools import publishing as _publishing_mod  # noqa: F401
+    from talos_agent.tools import defi as _defi_mod  # noqa: F401
 
     # Build the channel adapter registry with all configured adapters
     from talos_agent.adapters.registry import AdapterRegistry
     from talos_agent.adapters.x import XAdapter
+    from talos_agent.adapters.discord import DiscordAdapter
 
     adapter_registry = AdapterRegistry()
     adapter_registry.register(XAdapter(browser, settings))
+    if settings.discord_webhook_url or settings.discord_bot_token:
+        adapter_registry.register(DiscordAdapter(settings))
 
     # Inject dependencies into tool modules
     _internal_mod._db = db
@@ -167,5 +170,8 @@ def build_all_tools(
     _learning_mod._db = db
     _learning_mod._settings = settings
     _publishing_mod._adapter_registry = adapter_registry
+    _defi_mod._api = api
+    _defi_mod._db = db
+    _defi_mod._settings = settings
 
     return registry

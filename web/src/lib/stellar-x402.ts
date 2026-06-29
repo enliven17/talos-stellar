@@ -8,6 +8,8 @@
  *   Mainnet: https://channels.openzeppelin.com/x402
  */
 
+import { USDC_ISSUER } from "./stellar-config";
+
 const X402_FACILITATOR_URL =
   process.env.X402_FACILITATOR_URL ??
   "https://channels.openzeppelin.com/x402/testnet";
@@ -92,9 +94,7 @@ export async function signX402Payment(
 
     const usdc = new Asset(
       payload.assetCode ?? "USDC",
-      process.env.STELLAR_NETWORK === "mainnet"
-        ? "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
-        : "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+      USDC_ISSUER,
     );
 
     const tx = new TransactionBuilder(account, {

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 
 import click
 from rich.console import Console
 import re
-import os
 
 from talos_agent import __version__
 from talos_agent.config import APP_DIR, Settings, ensure_app_dir
@@ -39,7 +39,11 @@ def start(talos_id: str | None, env_file: str):
 
         raw = env_path.read_text().splitlines()
         # detect whether any encrypted entries exist
-        has_encrypted = any("ENC::" in l for l in raw if l and "=" in l and not l.strip().startswith("#"))
+        has_encrypted = any(
+            "ENC::" in line
+            for line in raw
+            if line and "=" in line and not line.strip().startswith("#")
+        )
         master_key = os.environ.get("TALOS_MASTER_KEY")
         if has_encrypted and not master_key:
             master_key = click.prompt("Master password (to decrypt secrets)", hide_input=True)

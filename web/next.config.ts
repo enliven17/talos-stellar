@@ -1,13 +1,17 @@
 import type { NextConfig } from "next";
 import path from "path";
+import { withSentryConfig } from "@sentry/nextjs";
 
 const nextConfig: NextConfig = {
   turbopack: {
-    // pnpm workspace: next is a symlink → ../../node_modules/.pnpm/…
-    // Turbopack follows symlinks, so root must include the monorepo root
-    // to avoid "files outside of project directory" security restriction.
     root: path.resolve(__dirname, ".."),
   },
 };
 
-export default nextConfig;
+export default withSentryConfig(nextConfig, {
+  silent: true,
+  telemetry: false,
+  widenClientFileUpload: false,
+  disableLogger: true,
+  automaticVercelMonitors: false,
+});

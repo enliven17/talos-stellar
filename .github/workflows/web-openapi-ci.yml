@@ -1,0 +1,54 @@
+name: Web OpenAPI CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'web/src/app/api/**'
+      - 'web/src/lib/openapi.ts'
+      - 'web/tests/openapi-snapshot.test.ts'
+      - 'web/tests/fixtures/openapi.snapshot.json'
+      - 'web/scripts/write-openapi-snapshot.ts'
+      - 'web/package.json'
+      - 'web/pnpm-lock.yaml'
+      - '.github/workflows/web-openapi-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'web/src/app/api/**'
+      - 'web/src/lib/openapi.ts'
+      - 'web/tests/openapi-snapshot.test.ts'
+      - 'web/tests/fixtures/openapi.snapshot.json'
+      - 'web/scripts/write-openapi-snapshot.ts'
+      - 'web/package.json'
+      - 'web/pnpm-lock.yaml'
+      - '.github/workflows/web-openapi-ci.yml'
+
+jobs:
+  openapi-snapshot:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check OpenAPI snapshot
+        run: pnpm test:openapi

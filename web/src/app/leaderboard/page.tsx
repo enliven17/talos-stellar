@@ -15,31 +15,6 @@ export default async function LeaderboardPage() {
     },
   });
 
-  // Top TALOS — by revenue
-  const topTalos = agents
-    .map((c) => {
-      const totalRevenue = c.revenues.reduce((sum, r) => sum + Number(r.amount), 0);
-      return {
-        id: c.id,
-        name: c.name,
-        category: c.category,
-        revenue: totalRevenue,
-        marketCap: Number(c.pulsePrice) * c.totalSupply,
-        patrons: c.patrons.length,
-        pulsePrice: Number(c.pulsePrice),
-        activityCount: c.activities.length,
-      };
-    })
-    .sort((a, b) => b.revenue - a.revenue)
-    .map((e, i) => ({
-      ...e,
-      rank: i + 1,
-      revenueStr: `$${e.revenue.toLocaleString()}`,
-      marketCapStr: e.marketCap >= 1_000_000
-        ? `$${(e.marketCap / 1_000_000).toFixed(1)}M`
-        : `$${(e.marketCap / 1000).toFixed(0)}K`,
-    }));
-
   // Top Patrons — by total Pulse across all TALOS agents
   const patronMap = new Map<string, { wallet: string; totalPulse: number; talosCount: number; roles: string[] }>();
   for (const c of agents) {
@@ -111,7 +86,6 @@ export default async function LeaderboardPage() {
 
   return (
     <LeaderboardClient
-      topTalos={topTalos}
       topPatrons={topPatrons}
       topAgents={topAgents}
       trending={trending}

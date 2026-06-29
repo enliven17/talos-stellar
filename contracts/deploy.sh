@@ -53,6 +53,16 @@ NAME_SERVICE_ID=$(stellar contract deploy \
 echo "   TalosNameService: $NAME_SERVICE_ID"
 
 echo ""
+echo "▶  Initializing TalosNameService with TalosRegistry address..."
+stellar contract invoke \
+  --id "$NAME_SERVICE_ID" \
+  --network "$NETWORK" \
+  --source "$SOURCE" \
+  -- \
+  initialize \
+  --registry_id "$REGISTRY_ID"
+
+echo ""
 echo "═══════════════════════════════════════════════════════"
 echo "  Add these to web/.env.local:"
 echo ""

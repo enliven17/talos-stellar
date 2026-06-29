@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from talos_agent.payments import USDC_TESTNET_ISSUER
 from talos_agent.payments.x402_signer import X402Signer
 from talos_agent.tools.registry import tool
 
@@ -52,7 +53,7 @@ def _get_signer() -> X402Signer:
 )
 async def discover_services(target: str = "") -> dict:
     import random
-    category = random.choice(["Sales", "Marketing", "Analytics"])  # TODO: restore ALL_CATEGORIES after testing
+    category = random.choice(ALL_CATEGORIES)
     services = await _api.discover_services(
         category=category,
         target=target or None,
@@ -93,9 +94,6 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
     payment_details = response.json()
     price = payment_details.get("price", 0)
     payee = payment_details.get("payee", "")
-    token = payment_details.get("token")
-    chain_id = payment_details.get("chainId")
-
     # Check if purchase would exceed GTM budget
     if spent_month + float(price) > gtm_budget:
         return {
@@ -109,7 +107,7 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
 
     # Check approval threshold
     threshold = float(_settings.approval_threshold)
-    if price >= threshold:
+    if price > threshold:
         result = await _api.create_approval(
             _settings.talos_id,
             type_="transaction",
@@ -134,8 +132,8 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
     sign_result = await signer.sign_payment(
         payee=payee,
         amount=amount_units,
-        token_address=token,
-        chain_id=chain_id,
+        asset_code="USDC",
+        asset_issuer=USDC_TESTNET_ISSUER,
     )
 
 
@@ -302,7 +300,6 @@ async def generate_playbook(
     """Generate a playbook from agent's accumulated GTM data and publish it."""
     # Gather agent's activity data for playbook content
     recent_content = _db.get_recent_content(50)
-    posts_total = _db.count_today("post")  # today only; full history below
     active_playbook = _db.get_active_playbook()
 
     # Compile content history into structured playbook
@@ -406,3 +403,74 @@ async def register_service(
     if result:
         return {"status": "registered", "service_name": service_name, "price": price}
     return {"error": "Service registration failed"}
+
+
+@tool(
+    "evaluate_marketplace_bid",
+    "Evaluate an incoming bid on your service listing. Returns a decision: "
+    "'accept', 'counter', or 'reject', with reasoning and a counter-offer amount if applicable.",
+)
+async def evaluate_marketplace_bid(
+    bid_id: str,
+    bidder_agent_id: str,
+    service_id: str,
+    bid_amount_usdc: float,
+    listed_price_usdc: float,
+    min_acceptable_price_usdc: float,
+) -> dict:
+    """Evaluate a bid using current budget state and price thresholds."""
+    talos_config = _db.get_talos_config()
+    gtm_budget = float((talos_config or {}).get("gtmBudget", 200))
+    spent_month = _db.get_spending_period(30)
+    budget_remaining = gtm_budget - spent_month
+    budget_tight = budget_remaining < (gtm_budget * 0.15)
+
+    if bid_amount_usdc >= listed_price_usdc:
+        decision = "accept"
+        counter_offer = None
+        reason = "Bid meets or exceeds listed price."
+    elif bid_amount_usdc >= min_acceptable_price_usdc:
+        if budget_tight:
+            decision = "accept"
+            counter_offer = None
+            reason = (
+                f"Bid is above minimum and budget is tight "
+                f"(${budget_remaining:.2f} remaining). Accepting to secure revenue."
+            )
+        else:
+            decision = "counter"
+            counter_offer = round(
+                min_acceptable_price_usdc + (listed_price_usdc - min_acceptable_price_usdc) * 0.5, 6
+            )
+            reason = (
+                f"Bid is above minimum but below listed price. "
+                f"Countering at ${counter_offer} USDC (midpoint)."
+            )
+    elif bid_amount_usdc >= min_acceptable_price_usdc * 0.85:
+        decision = "counter"
+        counter_offer = round(min_acceptable_price_usdc * 1.05, 6)
+        reason = (
+            f"Bid is below minimum but within 15%. "
+            f"Countering at ${counter_offer} USDC (just above minimum)."
+        )
+    else:
+        decision = "reject"
+        counter_offer = None
+        reason = (
+            f"Bid of ${bid_amount_usdc} is too far below minimum "
+            f"acceptable price of ${min_acceptable_price_usdc}."
+        )
+
+    return {
+        "bid_id": bid_id,
+        "bidder_agent_id": bidder_agent_id,
+        "service_id": service_id,
+        "decision": decision,
+        "counter_offer_usdc": counter_offer,
+        "reason": reason,
+        "budget_context": {
+            "monthly_budget": gtm_budget,
+            "spent_this_month": spent_month,
+            "remaining": budget_remaining,
+        },
+    }

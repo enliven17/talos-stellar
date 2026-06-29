@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from talos_agent.config import Settings
+from talos_agent.http import request_with_retry
 
 
 class TalosAPIClient:
@@ -22,17 +23,31 @@ class TalosAPIClient:
             timeout=30.0,
         )
 
+    # ── Retry-wrapped HTTP verbs ──────────────────────────
+
+    async def _get(self, url: str, **kwargs: Any) -> httpx.Response:
+        return await request_with_retry(lambda: self._client.get(url, **kwargs))
+
+    async def _post(self, url: str, **kwargs: Any) -> httpx.Response:
+        return await request_with_retry(lambda: self._client.post(url, **kwargs))
+
+    async def _put(self, url: str, **kwargs: Any) -> httpx.Response:
+        return await request_with_retry(lambda: self._client.put(url, **kwargs))
+
+    async def _patch(self, url: str, **kwargs: Any) -> httpx.Response:
+        return await request_with_retry(lambda: self._client.patch(url, **kwargs))
+
     # ── Talos Config ──────────────────────────────────────
 
     async def get_talos(self, talos_id: str) -> dict | None:
-        r = await self._client.get(f"/api/talos/{talos_id}")
+        r = await self._get(f"/api/talos/{talos_id}")
         if r.status_code == 200:
             return r.json()
         return None
 
     async def get_talos_me(self) -> dict | None:
         """Resolve Talos from API key — no Talos ID needed."""
-        r = await self._client.get("/api/talos/me")
+        r = await self._get("/api/talos/me")
         if r.status_code == 200:
             return r.json()
         return None
@@ -42,7 +57,7 @@ class TalosAPIClient:
     async def report_activity(
         self, talos_id: str, *, type_: str, content: str, channel: str
     ) -> dict | None:
-        r = await self._client.post(
+        r = await self._post(
             f"/api/talos/{talos_id}/activity",
             json={"type": type_, "content": content, "channel": channel},
         )
@@ -53,7 +68,7 @@ class TalosAPIClient:
     # ── Status ─────────────────────────────────────────────
 
     async def update_status(self, talos_id: str, *, online: bool) -> None:
-        await self._client.patch(
+        await self._patch(
             f"/api/talos/{talos_id}/status",
             json={"agentOnline": online},
         )
@@ -63,7 +78,7 @@ class TalosAPIClient:
     async def report_revenue(
         self, talos_id: str, *, amount: float, source: str, tx_hash: str | None = None
     ) -> dict | None:
-        r = await self._client.post(
+        r = await self._post(
             f"/api/talos/{talos_id}/revenue",
             json={"amount": amount, "currency": "USDC", "source": source, "txHash": tx_hash},
         )
@@ -82,7 +97,7 @@ class TalosAPIClient:
         description: str | None = None,
         amount: float | None = None,
     ) -> dict | None:
-        r = await self._client.post(
+        r = await self._post(
             f"/api/talos/{talos_id}/approvals",
             json={"type": type_, "title": title, "description": description, "amount": amount},
         )
@@ -94,14 +109,14 @@ class TalosAPIClient:
         params: dict[str, Any] = {}
         if status:
             params["status"] = status
-        r = await self._client.get(f"/api/talos/{talos_id}/approvals", params=params)
+        r = await self._get(f"/api/talos/{talos_id}/approvals", params=params)
         if r.status_code == 200:
             data = r.json()
             return data if isinstance(data, list) else data.get("approvals", [])
         return []
 
     async def get_approval(self, talos_id: str, approval_id: str) -> dict | None:
-        r = await self._client.get(f"/api/talos/{talos_id}/approvals/{approval_id}")
+        r = await self._get(f"/api/talos/{talos_id}/approvals/{approval_id}")
         if r.status_code == 200:
             return r.json()
         return None
@@ -110,14 +125,14 @@ class TalosAPIClient:
 
     async def get_agent_wallet(self) -> dict | None:
         """Fetch agent wallet info (walletId, address) from Web."""
-        r = await self._client.get(f"/api/talos/{self._talos_id}/wallet")
+        r = await self._get(f"/api/talos/{self._talos_id}/wallet")
         if r.status_code == 200:
             return r.json()
         return None
 
     async def create_agent_wallet(self) -> dict | None:
         """Create a Circle MPC wallet for this Talos if one doesn't exist."""
-        r = await self._client.post(f"/api/talos/{self._talos_id}/wallet")
+        r = await self._post(f"/api/talos/{self._talos_id}/wallet")
         if r.status_code in (200, 201):
             return r.json()
         return None
@@ -136,7 +151,7 @@ class TalosAPIClient:
         payload: dict[str, Any] = {"payee": payee, "amount": amount, "assetCode": asset_code}
         if asset_issuer:
             payload["assetIssuer"] = asset_issuer
-        r = await self._client.post(f"/api/talos/{self._talos_id}/sign", json=payload)
+        r = await self._post(f"/api/talos/{self._talos_id}/sign", json=payload)
         if r.status_code == 200:
             return r.json()
         # Return error details
@@ -152,13 +167,13 @@ class TalosAPIClient:
         params = {}
         if service_type:
             params["type"] = service_type
-        return await self._client.get(f"/api/talos/{talos_id}/service", params=params)
+        return await self._get(f"/api/talos/{talos_id}/service", params=params)
 
     async def submit_commerce(
         self, talos_id: str, *, payment_header: str, payload: dict | None = None
     ) -> dict | None:
         """POST with x402 payment signature to purchase service."""
-        r = await self._client.post(
+        r = await self._post(
             f"/api/talos/{talos_id}/service",
             json={"payload": payload},
             headers={"X-PAYMENT": payment_header},
@@ -179,7 +194,7 @@ class TalosAPIClient:
             params["category"] = category
         if target:
             params["target"] = target
-        r = await self._client.get("/api/services", params=params)
+        r = await self._get("/api/services", params=params)
         if r.status_code == 200:
             data = r.json()
             return data if isinstance(data, list) else data.get("data", [])
@@ -202,7 +217,7 @@ class TalosAPIClient:
         }
         if wallet_address:
             payload["walletAddress"] = wallet_address
-        r = await self._client.put(f"/api/talos/{talos_id}/service", json=payload)
+        r = await self._put(f"/api/talos/{talos_id}/service", json=payload)
         if r.status_code in (200, 201):
             return r.json()
         return None
@@ -225,7 +240,7 @@ class TalosAPIClient:
         }
         if token_id:
             payload["tokenId"] = token_id
-        r = await self._client.post(
+        r = await self._post(
             f"/api/talos/{self._talos_id}/transfer", json=payload
         )
         if r.status_code in (200, 201):
@@ -238,20 +253,20 @@ class TalosAPIClient:
     # ── Jobs ───────────────────────────────────────────────
 
     async def get_pending_jobs(self) -> list[dict]:
-        r = await self._client.get("/api/jobs/pending")
+        r = await self._get("/api/jobs/pending")
         if r.status_code == 200:
             data = r.json()
             return data if isinstance(data, list) else data.get("jobs", [])
         return []
 
     async def submit_job_result(self, job_id: str, result: dict) -> dict | None:
-        r = await self._client.post(f"/api/jobs/{job_id}/result", json={"result": result})
+        r = await self._post(f"/api/jobs/{job_id}/result", json={"result": result})
         if r.status_code in (200, 201):
             return r.json()
         return None
 
     async def get_job_result(self, job_id: str) -> dict | None:
-        r = await self._client.get(f"/api/jobs/{job_id}/result")
+        r = await self._get(f"/api/jobs/{job_id}/result")
         if r.status_code == 200:
             return r.json()
         return None
@@ -274,7 +289,7 @@ class TalosAPIClient:
         period_days: int = 30,
     ) -> dict | None:
         """Publish a Playbook to the marketplace."""
-        r = await self._client.post(
+        r = await self._post(
             "/api/playbooks",
             json={
                 "title": title,
@@ -294,7 +309,35 @@ class TalosAPIClient:
             return r.json()
         return None
 
+    # ── Dividend Distribution ─────────────────────────────
+
+    async def get_distribution_preview(self, talos_id: str) -> dict | None:
+        """Preview dividend distribution without executing."""
+        r = await self._client.get(f"/api/talos/{talos_id}/revenue/distribute")
+        if r.status_code == 200:
+            return r.json()
+        return None
+
+    async def distribute_dividends(
+        self, talos_id: str, *, requester_public_key: str
+    ) -> dict | None:
+        """Execute dividend distribution to patrons."""
+        r = await self._client.post(
+            f"/api/talos/{talos_id}/revenue/distribute",
+            json={"requesterPublicKey": requester_public_key},
+        )
+        if r.status_code in (200, 201):
+            return r.json()
+        try:
+            return r.json()
+        except Exception:
+            return {"error": f"Distribution failed with status {r.status_code}"}
+
     # ── Lifecycle ──────────────────────────────────────────
 
     async def close(self) -> None:
         await self._client.aclose()
+
+    def set_request_id(self, request_id: str) -> None:
+        """Propagate cycle_id as X-Request-Id to web API calls."""
+        self._client.headers["x-request-id"] = request_id

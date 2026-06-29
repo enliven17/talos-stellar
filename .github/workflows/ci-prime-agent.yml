@@ -1,0 +1,48 @@
+name: Prime Agent CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packages/prime-agent/**'
+      - '.github/workflows/ci-prime-agent.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/prime-agent/**'
+      - '.github/workflows/ci-prime-agent.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/prime-agent
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: packages/prime-agent/uv.lock
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras --all-groups
+
+      - name: Lint
+        run: uv run ruff check src tests
+
+      - name: Test
+        run: uv run pytest tests/ -v

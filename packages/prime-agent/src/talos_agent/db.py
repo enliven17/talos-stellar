@@ -126,6 +126,63 @@ CREATE TABLE IF NOT EXISTS audience_insights (
         2,
         "-- no-op example migration",
     ),
+    (
+        3,
+        """
+CREATE TABLE IF NOT EXISTS loans (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform        TEXT NOT NULL,
+    amount          REAL NOT NULL,
+    collateral_asset TEXT NOT NULL,
+    loan_asset      TEXT NOT NULL,
+    duration_days   INTEGER NOT NULL,
+    purpose         TEXT,
+    status          TEXT NOT NULL DEFAULT 'active',
+    outstanding_amount REAL NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    due_date        TEXT NOT NULL,
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS loan_repayments (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    loan_id         INTEGER NOT NULL REFERENCES loans(id),
+    amount          REAL NOT NULL,
+    tx_hash         TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_loans_status ON loans(status);
+CREATE INDEX IF NOT EXISTS idx_loans_due_date ON loans(due_date);
+CREATE INDEX IF NOT EXISTS idx_loan_repayments_loan_id ON loan_repayments(loan_id);
+        """,
+    ),
+    (
+        4,
+        """
+ALTER TABLE loans ADD COLUMN repayment_address TEXT;
+        """,
+    ),
+    (
+        5,
+        """
+CREATE TABLE IF NOT EXISTS dividends_log (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    spending_log_id     INTEGER REFERENCES spending_log(id),
+    recipient_address   TEXT NOT NULL,
+    token_symbol        TEXT NOT NULL,
+    amount              REAL NOT NULL,
+    currency            TEXT NOT NULL DEFAULT 'USDC',
+    status              TEXT NOT NULL DEFAULT 'pending',
+    tx_hash             TEXT,
+    note                TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dividends_log_status ON dividends_log(status);
+CREATE INDEX IF NOT EXISTS idx_dividends_log_recipient ON dividends_log(recipient_address);
+        """,
+    ),
 ]
 
 
@@ -525,6 +582,130 @@ class LocalDB:
                 d["keywords"] = json.loads(d["keywords"])
             result.append(d)
         return result
+
+    # ── Dividends ──────────────────────────────────────────
+
+    def record_dividend(
+        self,
+        recipient_address: str,
+        token_symbol: str,
+        amount: float,
+        currency: str = "USDC",
+        spending_log_id: int | None = None,
+        tx_hash: str | None = None,
+        note: str = "",
+    ) -> int:
+        """Record a dividend distribution to a Patron and return its ID."""
+        cursor = self._conn.execute(
+            """INSERT INTO dividends_log
+               (spending_log_id, recipient_address, token_symbol, amount, currency, tx_hash, note)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (spending_log_id, recipient_address, token_symbol, amount, currency, tx_hash, note),
+        )
+        self._conn.commit()
+        return cursor.lastrowid
+
+    def get_dividend_history(self, limit: int = 50, recipient_address: str | None = None) -> list[dict]:
+        """Get dividend distribution history, optionally filtered by recipient."""
+        if recipient_address:
+            rows = self._conn.execute(
+                """SELECT id, spending_log_id, recipient_address, token_symbol, amount,
+                          currency, status, tx_hash, note, created_at
+                   FROM dividends_log WHERE recipient_address = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (recipient_address, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT id, spending_log_id, recipient_address, token_symbol, amount,
+                          currency, status, tx_hash, note, created_at
+                   FROM dividends_log
+                   ORDER BY created_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Loans ───────────────────────────────────────────────
+
+    def create_loan(
+        self,
+        platform: str,
+        amount: float,
+        collateral_asset: str,
+        loan_asset: str,
+        duration_days: int,
+        purpose: str = "",
+        repayment_address: str | None = None,
+    ) -> int:
+        """Create a new loan record and return its ID."""
+        from datetime import datetime, timedelta, timezone
+
+        created_at = datetime.now(timezone.utc)
+        due_date = created_at + timedelta(days=duration_days)
+
+        cursor = self._conn.execute(
+            """INSERT INTO loans 
+               (platform, amount, collateral_asset, loan_asset, duration_days, purpose, 
+                repayment_address, outstanding_amount, created_at, due_date)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (platform, amount, collateral_asset, loan_asset, duration_days, purpose,
+             repayment_address, amount, created_at.isoformat(), due_date.isoformat()),
+        )
+        self._conn.commit()
+        return cursor.lastrowid
+
+    def get_active_loans(self) -> list[dict]:
+        """Get all active loans."""
+        rows = self._conn.execute(
+            """SELECT id, platform, amount, collateral_asset, loan_asset, duration_days, 
+                      purpose, repayment_address, status, outstanding_amount, created_at, due_date
+               FROM loans WHERE status = 'active'
+               ORDER BY due_date ASC"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_loan_by_id(self, loan_id: int) -> dict | None:
+        """Get a specific loan by ID."""
+        row = self._conn.execute(
+            """SELECT id, platform, amount, collateral_asset, loan_asset, duration_days, 
+                      purpose, repayment_address, status, outstanding_amount, created_at, due_date
+               FROM loans WHERE id = ?""",
+            (loan_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def record_repayment(self, loan_id: int, amount: float, tx_hash: str | None = None) -> None:
+        """Record a repayment for a loan and update outstanding amount."""
+        self._conn.execute(
+            "INSERT INTO loan_repayments (loan_id, amount, tx_hash) VALUES (?, ?, ?)",
+            (loan_id, amount, tx_hash),
+        )
+        self._conn.execute(
+            """UPDATE loans 
+               SET outstanding_amount = outstanding_amount - ?, 
+                   updated_at = datetime('now')
+               WHERE id = ?""",
+            (amount, loan_id),
+        )
+        loan = self.get_loan_by_id(loan_id)
+        if loan and loan["outstanding_amount"] <= 0:
+            self._conn.execute(
+                "UPDATE loans SET status = 'repaid', updated_at = datetime('now') WHERE id = ?",
+                (loan_id,),
+            )
+        self._conn.commit()
+
+    def get_loans_due_soon(self, days: int = 7) -> list[dict]:
+        """Get loans that are due within the specified number of days."""
+        rows = self._conn.execute(
+            """SELECT id, platform, amount, collateral_asset, loan_asset, duration_days, 
+                      purpose, repayment_address, status, outstanding_amount, created_at, due_date
+               FROM loans 
+               WHERE status = 'active' AND due_date <= datetime('now', ?)
+               ORDER BY due_date ASC""",
+            (f"+{days} days",),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ── Cleanup ────────────────────────────────────────────
 

@@ -152,6 +152,50 @@ export const tlsRevenues = pgTable(
   ],
 );
 
+// ─── Dividend Distribution (Patron Revenue Share History) ─────────
+//
+// Records each dividend distribution event so Patrons can track the
+// history of revenue shared out to Mitos/Pulse token holders. One row
+// per distribution event (a single POST /revenue/distribute run or a
+// manually recorded distribution).
+
+export const tlsDividends = pgTable(
+  "tls_dividends",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+
+    // Total USDC (or other currency) distributed to patrons in this event
+    amount: numeric("amount", { precision: 18, scale: 6 }).notNull(),
+    currency: text("currency").notNull().default("USDC"),
+
+    // Number of patrons that received a payout in this event
+    patronCount: integer("patronCount").notNull().default(0),
+
+    // Total Mitos/Pulse outstanding among recipients at distribution time —
+    // lets the UI reconstruct per-share payout without re-querying balances.
+    totalPulse: integer("totalPulse").notNull().default(0),
+
+    // Where the distribution came from: "revenue-share" (auto from treasury),
+    // "manual" (recorded by creator/operator), etc.
+    source: text("source").notNull().default("revenue-share"),
+
+    // Optional reference to the on-chain settlement (or first tx of a batch)
+    txHash: text("txHash"),
+
+    // Optional structured per-patron breakdown of the distribution
+    // (e.g. [{ stellarPublicKey, pulseAmount, amount, txHash }])
+    breakdown: jsonb("breakdown"),
+
+    status: text("status").notNull().default("completed"),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tls_dividends_talosId_createdAt_idx").on(t.talosId, t.createdAt),
+  ],
+);
+
 // ─── Commerce Service (Storefront) ────────────────────────────────
 
 export const tlsCommerceServices = pgTable(
@@ -189,6 +233,7 @@ export const tlsCommerceJobs = pgTable(
     paymentSig: text("paymentSig").unique(),   // Stellar x402 payment token hash (replay prevention)
     txHash: text("txHash"),                    // Stellar transaction hash after settlement
     amount: numeric("amount", { precision: 18, scale: 6 }).notNull(),
+    bidPrice: numeric("bidPrice", { precision: 18, scale: 6 }), // Negotiated bid price (nullable)
 
     createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
     updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),

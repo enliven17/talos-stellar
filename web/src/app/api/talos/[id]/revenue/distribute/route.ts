@@ -1,7 +1,9 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
-import { tlsTalos, tlsPatrons, tlsRevenues } from "@/db/schema";
+import { tlsTalos, tlsPatrons, tlsRevenues, tlsDividends } from "@/db/schema";
 import { eq, and, sum } from "drizzle-orm";
+import { OPERATOR_PUBLIC_KEY, USDC_ISSUER } from "@/lib/stellar-config";
+
 
 /**
  * POST /api/talos/:id/revenue/distribute
@@ -31,7 +33,7 @@ export async function POST(
     if (!talos) return Response.json({ error: "TALOS not found" }, { status: 404 });
 
     // Only creator or operator can distribute
-    const OPERATOR = "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL";
+    const OPERATOR = OPERATOR_PUBLIC_KEY;
     if (requesterPublicKey !== talos.creatorPublicKey && requesterPublicKey !== OPERATOR) {
       return Response.json({ error: "Only the creator or operator can trigger distribution" }, { status: 403 });
     }
@@ -75,8 +77,8 @@ export async function POST(
       Keypair, Asset, TransactionBuilder, Operation, BASE_FEE, Networks, Horizon,
     } = await import("@stellar/stellar-sdk");
 
-    const USDC_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
-    const usdc = new Asset("USDC", USDC_ISSUER);
+    const USDC_ISSUER_VAL = USDC_ISSUER;
+    const usdc = new Asset("USDC", USDC_ISSUER_VAL);
     const operatorKeypair = Keypair.fromSecret(operatorSecret);
     const server = new Horizon.Server("https://horizon-testnet.stellar.org");
 
@@ -113,8 +115,37 @@ export async function POST(
       }
     }
 
+    // Persist a dividend distribution history record so Patrons can track
+    // distributions over time via GET /api/talos/:id/dividends. Only record
+    // when at least one transfer succeeded. Best-effort: a logging failure
+    // must not fail the distribution that already settled on-chain.
+    const distributedTotal = transfers.reduce((s, t) => s + t.amount, 0);
+    let dividendId: string | null = null;
+    if (transfers.length > 0 && distributedTotal > 0) {
+      try {
+        const [dividend] = await db
+          .insert(tlsDividends)
+          .values({
+            talosId: id,
+            amount: distributedTotal.toFixed(6),
+            currency: "USDC",
+            patronCount: transfers.length,
+            totalPulse,
+            source: "revenue-share",
+            txHash: transfers[0]?.txHash ?? null,
+            breakdown: transfers,
+            status: errors.length > 0 ? "partial" : "completed",
+          })
+          .returning({ id: tlsDividends.id });
+        dividendId = dividend?.id ?? null;
+      } catch (logErr) {
+        console.error("[revenue/distribute] failed to record dividend history", logErr);
+      }
+    }
+
     return Response.json({
       success: true,
+      dividendId,
       totalRevenue,
       distributableAmount,
       investorSharePercent: investorShare,

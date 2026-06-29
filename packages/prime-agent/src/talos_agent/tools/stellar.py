@@ -35,7 +35,7 @@ async def transfer_xlm(to_account: str, amount: float, reason: str = "") -> dict
 
     # Check threshold
     threshold = float(_settings.approval_threshold)
-    if amount >= threshold:
+    if amount > threshold:
         result = await _api.create_approval(
             _settings.talos_id,
             type_="transaction",
@@ -89,7 +89,7 @@ async def airdrop_pulse(token_id: str, recipients: str) -> dict:
     total_amount = sum(r.get("amount", 0) for r in recipient_list)
     threshold = float(_settings.approval_threshold)
 
-    if total_amount >= threshold:
+    if total_amount > threshold:
         result = await _api.create_approval(
             _settings.talos_id,
             type_="transaction",

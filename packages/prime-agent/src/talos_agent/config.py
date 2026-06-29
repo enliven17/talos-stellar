@@ -68,8 +68,16 @@ class Settings(BaseSettings):
     x_password: str = ""
     x_email: str = ""
 
+    # Discord
+    # Webhook URL is sufficient for posting. Bot token + channel/guild IDs
+    # unlock replies, mentions, and analytics via the REST API.
+    discord_webhook_url: str = ""
+    discord_bot_token: str = ""
+    discord_channel_id: str = ""
+    discord_guild_id: str = ""
+
     # Per-channel credential configs for additional adapters.
-    # Set as JSON in env: CHANNEL_CONFIGS={"linkedin": {"access_token": "..."}}
+    # Set as JSON in env: CHANNEL_CONFIGS={"telegram": {"bot_token": "...", "chat_id": "@channel"}}
     channel_configs: dict = Field(default_factory=dict, description="Per-channel credentials map")
 
     # Agent behaviour
@@ -79,6 +87,11 @@ class Settings(BaseSettings):
     max_iterations: int = Field(default=20, description="Max tool-call iterations per cycle")
     approval_threshold: Decimal = Field(default=Decimal("10"), description="USD threshold for auto-approval")
     browser_headless: bool = Field(default=False, description="Run browser in headless mode")
+    auto_repay_loans: bool = Field(default=False, description="Enable automatic loan repayment from treasury")
+
+    # Dividend distribution
+    dividend_distribution_interval: int = Field(default=3600, description="Seconds between dividend distribution checks")
+    dividend_usdc_threshold: Decimal = Field(default=Decimal("100"), description="USDC threshold to trigger dividend distribution")
 
     def __init__(self, **kwargs):
         overrides = _json_config_source()

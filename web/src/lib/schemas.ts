@@ -30,7 +30,9 @@ export const createTalosSchema = z.object({
   toneVoice: z.string().max(500).nullable().optional(),
   approvalThreshold: z.number().nonnegative().optional().default(10),
   gtmBudget: z.number().nonnegative().optional().default(200),
-  creatorPublicKey: z.string().optional(),
+  creatorPublicKey: z.string().min(1),
+  signature: z.string().min(1),
+  message: z.string().min(1),
   walletPublicKey: z.string().optional(),
   onChainId: z.number().int().nullable().optional(),
   agentName: z.string().max(100).nullable().optional(),
@@ -65,6 +67,8 @@ export const createApprovalSchema = z.object({
 export const decideApprovalSchema = z.object({
   status: z.enum(["approved", "rejected"]),
   decidedBy: z.string().min(1),
+  signature: z.string().min(1),
+  message: z.string().min(1),
   txHash: z.string().optional(),
 });
 
@@ -122,6 +126,38 @@ export const registerServiceSchema = z
     { message: "paymentAddress format does not match any of the specified chains", path: ["paymentAddress"] },
   );
 
+// --- Cross-Chain Commerce Webhook ---
+
+export const crossChainWebhookSchema = z.object({
+  jobId: z.string().min(1).optional(),
+  talosId: z.string().min(1),
+  requesterTalosId: z.string().min(1),
+  sourceChain: z.string().min(1),
+  destinationChain: z.string().optional().default("stellar"),
+  paymentReference: z.string().min(1),
+  sourceTxHash: z.string().min(1),
+  amount: z.coerce.number().positive(),
+  currency: z.string().optional().default("USDC"),
+  simulatedVerified: z.boolean().optional().default(false),
+  payload: z.record(z.string(), z.unknown()).optional().default({}),
+});
+// --- Commerce Job Bidding ---
+
+// Full set of statuses used internally / by the server
+export const VALID_BID_STATUSES = [
+  "pending", "negotiating", "accepted", "counter_offer", "rejected", "completed",
+] as const;
+
+// Only these statuses may be submitted by a client in a bid payload.
+// Terminal states (accepted, rejected, completed) and initial states (pending)
+// are set exclusively by the server after verification/settlement.
+export const CLIENT_BID_STATUSES = ["negotiating", "counter_offer"] as const;
+
+export const submitBidSchema = z.object({
+  bidPrice: z.number().positive().optional(),
+  status: z.enum(CLIENT_BID_STATUSES).optional(),
+});
+
 // --- Revenue ---
 
 export const reportRevenueSchema = z.object({
@@ -129,6 +165,27 @@ export const reportRevenueSchema = z.object({
   currency: z.string().optional().default("USDC"),
   source: z.string().min(1).max(200),
   txHash: z.string().nullable().optional(),
+});
+
+// --- Dividends (Patron distribution history) ---
+
+const dividendBreakdownEntrySchema = z.object({
+  stellarPublicKey: z.string().min(1),
+  pulseAmount: z.number().int().nonnegative().optional(),
+  amount: z.union([z.string(), z.number()]).optional(),
+  txHash: z.string().nullable().optional(),
+});
+
+export const recordDividendSchema = z.object({
+  // Total distributed amount. Accept string (numeric column) or number.
+  amount: z.union([z.string().min(1), z.number().positive()]),
+  currency: z.string().max(20).optional().default("USDC"),
+  patronCount: z.number().int().nonnegative().optional().default(0),
+  totalPulse: z.number().int().nonnegative().optional().default(0),
+  source: z.string().max(50).optional().default("revenue-share"),
+  txHash: z.string().nullable().optional(),
+  breakdown: z.array(dividendBreakdownEntrySchema).optional(),
+  status: z.enum(["completed", "pending", "failed"]).optional().default("completed"),
 });
 
 // --- Status ---
