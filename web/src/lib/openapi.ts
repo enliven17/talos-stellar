@@ -604,6 +604,55 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         },
         description: "Body is the job payload. Requires `Authorization: Bearer <api_key>` and `X-PAYMENT: x402 <token>` headers.",
       },
+      CrossChainWebhookRequest: {
+        type: "object",
+        required: [
+          "talosId",
+          "requesterTalosId",
+          "sourceChain",
+          "paymentReference",
+          "sourceTxHash",
+          "amount",
+          "simulatedVerified",
+        ],
+        properties: {
+          jobId: { type: "string", description: "Optional existing job to transition after verification" },
+          talosId: { type: "string", description: "Provider TALOS that will fulfill the job on Stellar" },
+          requesterTalosId: { type: "string", description: "Requester TALOS or human namespace identifier" },
+          sourceChain: { type: "string", example: "base" },
+          destinationChain: { type: "string", default: "stellar", example: "stellar" },
+          paymentReference: { type: "string", example: "bridge_payment_123" },
+          sourceTxHash: { type: "string", example: "0xabc123" },
+          amount: { type: "number", minimum: 0.000001, example: 5 },
+          currency: { type: "string", default: "USDC", example: "USDC" },
+          simulatedVerified: { type: "boolean", example: true },
+          payload: {
+            type: "object",
+            additionalProperties: true,
+            description: "Service-specific payload to fulfill once payment is verified",
+          },
+        },
+      },
+      CrossChainWebhookResponse: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          jobId: { type: "string" },
+          status: { type: "string", enum: ["pending", "completed"] },
+          serviceName: { type: "string" },
+          result: { type: "object", additionalProperties: true, nullable: true },
+          txHash: { type: "string", nullable: true },
+          bridge: {
+            type: "object",
+            properties: {
+              sourceChain: { type: "string" },
+              destinationChain: { type: "string" },
+              paymentReference: { type: "string" },
+              sourceTxHash: { type: "string" },
+            },
+          },
+        },
+      },
       CommerceJob: {
         type: "object",
         properties: {
@@ -1941,6 +1990,79 @@ The server verifies the payment on-chain, settles it, and creates a job.
           "400": { $ref: "#/components/responses/ValidationError" },
           "401": { $ref: "#/components/responses/UnauthorizedError" },
           "403": { $ref: "#/components/responses/ForbiddenError" },
+          "500": { $ref: "#/components/responses/InternalError" },
+        },
+      },
+    },
+    "/api/commerce/cross-chain-webhook": {
+      post: {
+        tags: ["Commerce"],
+        summary: "Simulated cross-chain payment receiver",
+        description: `Simulates a bridge receiver (e.g. CCIP/CCTP) notifying the Stellar app that a payment completed on another chain.
+
+**Required header:**
+- \`X-Signature\`: HMAC-SHA256 signature of the raw JSON body using \`CROSS_CHAIN_WEBHOOK_SECRET\`
+
+After validating the webhook payload and simulated verification flag:
+- \`instant\` services are fulfilled immediately and the job becomes \`completed\`
+- \`async\` services are queued and the job becomes \`pending\`
+
+Use this for multi-chain payment completion flows that should trigger fulfillment on Stellar.`,
+        operationId: "crossChainWebhook",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/CrossChainWebhookRequest" },
+              example: {
+                talosId: "clx1abc123def456",
+                requesterTalosId: "human:0xBuyer",
+                sourceChain: "base",
+                destinationChain: "stellar",
+                paymentReference: "bridge_payment_123",
+                sourceTxHash: "0xabc123",
+                amount: 5,
+                currency: "USDC",
+                simulatedVerified: true,
+                payload: {
+                  company: "Acme",
+                  objective: "competitor research",
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Existing job transitioned or duplicate webhook acknowledged",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/CrossChainWebhookResponse" },
+              },
+            },
+          },
+          "201": {
+            description: "New cross-chain commerce job created",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/CrossChainWebhookResponse" },
+              },
+            },
+          },
+          "400": { $ref: "#/components/responses/ValidationError" },
+          "401": {
+            description: "Missing or invalid webhook signature",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+                example: { error: "Invalid webhook signature" },
+              },
+            },
+          },
+          "402": { description: "Simulated payment verification failed or bridged amount was insufficient" },
+          "404": { description: "TALOS, service, or referenced job was not found" },
+          "409": { description: "paymentReference or requester does not match the existing job" },
+          "502": { description: "Instant fulfillment failed after verification" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
       },

@@ -106,6 +106,21 @@ export const registerServiceSchema = z.object({
   fulfillmentMode: z.enum(["instant", "async"]).optional().default("async"),
 });
 
+// --- Cross-Chain Commerce Webhook ---
+
+export const crossChainWebhookSchema = z.object({
+  jobId: z.string().min(1).optional(),
+  talosId: z.string().min(1),
+  requesterTalosId: z.string().min(1),
+  sourceChain: z.string().min(1),
+  destinationChain: z.string().optional().default("stellar"),
+  paymentReference: z.string().min(1),
+  sourceTxHash: z.string().min(1),
+  amount: z.coerce.number().positive(),
+  currency: z.string().optional().default("USDC"),
+  simulatedVerified: z.boolean().optional().default(false),
+  payload: z.record(z.string(), z.unknown()).optional().default({}),
+});
 // --- Commerce Job Bidding ---
 
 // Full set of statuses used internally / by the server
