@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-
 from talos_agent.db import LocalDB
 
 
@@ -111,7 +110,10 @@ class AgentContext:
         if self.active_learnings:
             lines.append("Strategy learnings (apply these to content):")
             for learning in self.active_learnings:
-                lines.append(f"  - [{learning['category']}] {learning['insight'][:100]} (confidence: {learning['confidence']:.0%})")
+                lines.append(
+                    f"  - [{learning['category']}] {learning['insight'][:100]} "
+                    f"(confidence: {learning['confidence']:.0%})"
+                )
 
         # Audience insights
         if self.audience_insights:

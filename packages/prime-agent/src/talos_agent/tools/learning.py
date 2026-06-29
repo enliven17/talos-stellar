@@ -233,7 +233,14 @@ async def evolve_strategy() -> dict:
                 "role": "user",
                 "content": json.dumps(
                     {
-                        "learnings": [{"category": learning["category"], "insight": learning["insight"], "confidence": learning["confidence"]} for learning in learnings],
+                        "learnings": [
+                            {
+                                "category": learning["category"],
+                                "insight": learning["insight"],
+                                "confidence": learning["confidence"],
+                            }
+                            for learning in learnings
+                        ],
                         "top_performing_content": [{"content": t["content"][:120], "likes": t["likes"], "reposts": t["reposts"]} for t in top],
                         "audience_segments": audience,
                         "performance_summary_14d": summary,

@@ -662,6 +662,7 @@ async def run_multi(base_settings: Settings, api_keys: list[str]) -> None:
 
     async def run_one(api_key: str, slot: int) -> None:
         import copy
+
         agent_settings = copy.copy(base_settings)
         object.__setattr__(agent_settings, "talos_api_key", api_key)
         object.__setattr__(agent_settings, "talos_id", "")
