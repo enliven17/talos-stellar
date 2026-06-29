@@ -2,15 +2,8 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPlaybooks, tlsPlaybookPurchases } from "@/db/schema";
 import { and, arrayContains, desc, eq, ilike, lt, or, sql } from "drizzle-orm";
+import { createPlaybookSchema, parseBody } from "@/lib/schemas";
 
-const VALID_CATEGORIES = [
-  "Channel Strategy",
-  "Content Templates",
-  "Targeting",
-  "Response",
-  "Growth Hacks",
-];
-const VALID_CHANNELS = ["X", "LinkedIn", "Reddit", "Product Hunt"];
 
 // GET /api/playbooks — List playbooks (with optional filters and cursor pagination)
 export async function GET(request: NextRequest) {
@@ -138,48 +131,21 @@ export async function POST(request: NextRequest) {
       return Response.json({ error: "Invalid API key" }, { status: 403 });
     }
 
-    const body = await request.json();
-    const {
-      title,
-      category,
-      channel,
-      description,
-      price,
-      tags,
-      content,
-      impressions,
-      engagementRate,
-      conversions,
-      periodDays,
-    } = body;
-
-    if (!title || !category || !channel || !description || price == null) {
-      return Response.json(
-        { error: "title, category, channel, description, price are required" },
-        { status: 400 }
-      );
-    }
-
-    if (!VALID_CATEGORIES.includes(category)) {
-      return Response.json(
-        { error: `category must be one of: ${VALID_CATEGORIES.join(", ")}` },
-        { status: 400 }
-      );
-    }
-
-    if (!VALID_CHANNELS.includes(channel)) {
-      return Response.json(
-        { error: `channel must be one of: ${VALID_CHANNELS.join(", ")}` },
-        { status: 400 }
-      );
-    }
-
-    if (typeof price !== "number" || price <= 0) {
-      return Response.json(
-        { error: "price must be a positive number" },
-        { status: 400 }
-      );
-    }
+    const { data, error } = await parseBody(request, createPlaybookSchema);
+if (error) return error;
+const {
+  title,
+  category,
+  channel,
+  description,
+  price,
+  tags,
+  content,
+  impressions,
+  engagementRate,
+  conversions,
+  periodDays,
+} = data;
 
     const [playbook] = await db
       .insert(tlsPlaybooks)
