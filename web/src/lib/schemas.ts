@@ -147,6 +147,27 @@ export const reportRevenueSchema = z.object({
   txHash: z.string().nullable().optional(),
 });
 
+// --- Dividends (Patron distribution history) ---
+
+const dividendBreakdownEntrySchema = z.object({
+  stellarPublicKey: z.string().min(1),
+  pulseAmount: z.number().int().nonnegative().optional(),
+  amount: z.union([z.string(), z.number()]).optional(),
+  txHash: z.string().nullable().optional(),
+});
+
+export const recordDividendSchema = z.object({
+  // Total distributed amount. Accept string (numeric column) or number.
+  amount: z.union([z.string().min(1), z.number().positive()]),
+  currency: z.string().max(20).optional().default("USDC"),
+  patronCount: z.number().int().nonnegative().optional().default(0),
+  totalPulse: z.number().int().nonnegative().optional().default(0),
+  source: z.string().max(50).optional().default("revenue-share"),
+  txHash: z.string().nullable().optional(),
+  breakdown: z.array(dividendBreakdownEntrySchema).optional(),
+  status: z.enum(["completed", "pending", "failed"]).optional().default("completed"),
+});
+
 // --- Status ---
 
 export const updateStatusSchema = z.object({

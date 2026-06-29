@@ -328,6 +328,61 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
           txHash: { type: "string", nullable: true },
         },
       },
+      Dividend: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          talosId: { type: "string" },
+          amount: { type: "string", example: "25.500000", description: "Total distributed to patrons in this event" },
+          currency: { type: "string", example: "USDC" },
+          patronCount: { type: "integer", example: 4, description: "Number of patrons paid in this event" },
+          totalPulse: { type: "integer", example: 100000, description: "Total Mitos/Pulse held by recipients at distribution time" },
+          source: { type: "string", example: "revenue-share", description: "revenue-share | manual" },
+          txHash: { type: "string", nullable: true },
+          breakdown: {
+            type: "array",
+            nullable: true,
+            description: "Optional per-patron breakdown of the distribution",
+            items: {
+              type: "object",
+              properties: {
+                stellarPublicKey: { type: "string" },
+                pulseAmount: { type: "integer" },
+                amount: { type: "string" },
+                txHash: { type: "string", nullable: true },
+              },
+            },
+          },
+          status: { type: "string", example: "completed", enum: ["completed", "pending", "failed", "partial"] },
+          createdAt: { type: "string", format: "date-time" },
+        },
+      },
+      RecordDividendRequest: {
+        type: "object",
+        required: ["amount"],
+        properties: {
+          amount: { type: "string", minLength: 1, example: "25.50", description: "Total distributed amount (string or positive number)" },
+          currency: { type: "string", default: "USDC", maxLength: 20 },
+          patronCount: { type: "integer", minimum: 0, default: 0 },
+          totalPulse: { type: "integer", minimum: 0, default: 0 },
+          source: { type: "string", maxLength: 50, default: "revenue-share" },
+          txHash: { type: "string", nullable: true },
+          breakdown: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["stellarPublicKey"],
+              properties: {
+                stellarPublicKey: { type: "string" },
+                pulseAmount: { type: "integer", minimum: 0 },
+                amount: { type: "string" },
+                txHash: { type: "string", nullable: true },
+              },
+            },
+          },
+          status: { type: "string", enum: ["completed", "pending", "failed"], default: "completed" },
+        },
+      },
       UpdateStatusRequest: {
         type: "object",
         required: ["agentOnline"],
@@ -1496,6 +1551,65 @@ Creators are registered automatically at TALOS genesis.`,
             },
           },
           "400": { description: "Missing required fields or invalid currency/source" },
+          "401": { $ref: "#/components/responses/UnauthorizedError" },
+          "403": { $ref: "#/components/responses/ForbiddenError" },
+          "500": { $ref: "#/components/responses/InternalError" },
+        },
+      },
+    },
+    "/api/talos/{id}/dividends": {
+      get: {
+        tags: ["Revenue"],
+        summary: "List dividend distribution history",
+        description: "Returns the last 50 dividend distributions for a TALOS, newest first, so Patrons can track revenue shared out to Mitos/Pulse holders. Public read.",
+        operationId: "listDividends",
+        parameters: [{ $ref: "#/components/parameters/talosId" }],
+        responses: {
+          "200": {
+            description: "Dividend distribution list",
+            content: {
+              "application/json": {
+                schema: { type: "array", items: { $ref: "#/components/schemas/Dividend" } },
+              },
+            },
+          },
+          "404": { $ref: "#/components/responses/NotFoundError" },
+          "500": { $ref: "#/components/responses/InternalError" },
+        },
+      },
+      post: {
+        tags: ["Revenue"],
+        summary: "Record a dividend distribution",
+        description: "Record a new dividend distribution event in the database. Requires Bearer auth (agent/operator).",
+        operationId: "recordDividend",
+        security: [{ BearerAuth: [] }],
+        parameters: [{ $ref: "#/components/parameters/talosId" }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/RecordDividendRequest" },
+              example: {
+                amount: "25.50",
+                currency: "USDC",
+                patronCount: 4,
+                totalPulse: 100000,
+                source: "revenue-share",
+                txHash: "abc123...",
+              },
+            },
+          },
+        },
+        responses: {
+          "201": {
+            description: "Dividend distribution recorded",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Dividend" },
+              },
+            },
+          },
+          "400": { description: "Validation failed or non-positive amount" },
           "401": { $ref: "#/components/responses/UnauthorizedError" },
           "403": { $ref: "#/components/responses/ForbiddenError" },
           "500": { $ref: "#/components/responses/InternalError" },
