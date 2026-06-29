@@ -22,6 +22,16 @@ Stellar-based smart contracts for the Talos Protocol, built with Rust and the So
   - No consecutive hyphens allowed
   - Events: `name_registered`
 
+### 3. TalosGovernance
+- **Purpose**: Token-weighted governance for Talos Protocol
+- **Features**:
+  - Proposal creation for Talos governance decisions
+  - Token-weighted voting based on Pulse token holdings
+  - Snapshot-based vote weight calculation (balances at proposal creation)
+  - Quorum and consensus-based proposal approval/rejection
+  - Configurable voting periods and thresholds
+  - Events: `proposal_created`, `vote_cast`, `proposal_status_changed`
+
 ## Prerequisites
 
 ```bash

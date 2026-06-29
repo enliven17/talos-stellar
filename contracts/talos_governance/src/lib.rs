@@ -1,9 +1,4 @@
-//! TalosGovernance — Soroban smart contract for DAO-based governance decisions.
-//!
-//! Handles:
-//! - Creating proposals with title, description, target budget, and status
-//! - Voting for or against proposals
-//! - Finalizing and executing proposals
+//! TalosGovernance - Soroban smart contract for token-weighted governance.
 
 #![no_std]
 
@@ -12,79 +7,138 @@ extern crate std;
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String};
 
-// ── Data Types ──────────────────────────────────────────────────────
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VoteChoice {
+    Approve,
+    Reject,
+}
 
 #[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProposalStatus {
     Active,
-    Passed,
-    Failed,
+    Approved,
+    Rejected,
     Executed,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Vote {
+    pub voter: Address,
+    pub choice: VoteChoice,
+    pub weight: i128,
+    pub voted_at: u64,
 }
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Proposal {
     pub id: u32,
+    pub talos_id: u32,
+    pub proposer: Address,
     pub title: String,
     pub description: String,
-    pub target_budget: i128,
+    pub snapshot_ledger: u32,
+    pub start_ledger: u32,
+    pub end_ledger: u32,
     pub status: ProposalStatus,
-    pub creator: Address,
-    pub votes_for: i128,
-    pub votes_against: i128,
+    pub yes_votes: i128,
+    pub no_votes: i128,
+    pub total_voters: u32,
     pub created_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GovernanceConfig {
+    pub quorum_threshold: i128,
+    pub consensus_threshold: i128,
+    pub voting_period_ledgers: u32,
+    pub pulse_token_address: Address,
 }
 
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
+    Admin,
+    Config,
     NextProposalId,
     Proposal(u32),
-    Voted(u32, Address),
+    Vote(u32, Address),
+    TokenBalanceSnapshot(u32, Address),
 }
 
-// ── Events ──────────────────────────────────────────────────────────
-
-fn emit_proposal_created(env: &Env, id: u32, creator: Address, budget: i128) {
-    let topics = (symbol_short!("prop_crt"), id);
-    env.events().publish(topics, (creator, budget));
+fn emit_proposal_created(env: &Env, proposal_id: u32, talos_id: u32, proposer: Address) {
+    env.events().publish(
+        (symbol_short!("prop_crt"), proposal_id),
+        (talos_id, proposer),
+    );
 }
 
-fn emit_voted(env: &Env, id: u32, voter: Address, approve: bool) {
-    let topics = (symbol_short!("voted"), id);
-    env.events().publish(topics, (voter, approve));
+fn emit_vote_cast(env: &Env, proposal_id: u32, voter: Address, choice: VoteChoice, weight: i128) {
+    env.events().publish(
+        (symbol_short!("vote"), proposal_id),
+        (voter, choice, weight),
+    );
 }
 
-fn emit_proposal_executed(env: &Env, id: u32, status: ProposalStatus) {
-    let topics = (symbol_short!("prop_exe"), id);
-    env.events().publish(topics, status);
+fn emit_proposal_status_changed(env: &Env, proposal_id: u32, status: ProposalStatus) {
+    env.events()
+        .publish((symbol_short!("prop_stat"), proposal_id), status);
 }
-
-// ── Contract ────────────────────────────────────────────────────────
 
 #[contract]
 pub struct TalosGovernance;
 
 #[contractimpl]
 impl TalosGovernance {
-    /// Create a new proposal for DAO-based governance.
-    ///
-    /// # Arguments
-    /// * `e` - Soroban environment
-    /// * `creator` - Address of the proposal creator
-    /// * `title` - Short title of the proposal
-    /// * `description` - Detailed description of the proposal
-    /// * `target_budget` - Target budget in i128
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        pulse_token_address: Address,
+        quorum_threshold: i128,
+        consensus_threshold: i128,
+        voting_period_ledgers: u32,
+    ) {
+        admin.require_auth();
+
+        if env.storage().persistent().has(&DataKey::Admin) {
+            panic!("Already initialized");
+        }
+        if quorum_threshold <= 0 {
+            panic!("Quorum must be positive");
+        }
+        if consensus_threshold <= 0 || consensus_threshold > 10_000 {
+            panic!("Consensus threshold must be 1..10000 bps");
+        }
+        if voting_period_ledgers == 0 {
+            panic!("Voting period must be positive");
+        }
+
+        let config = GovernanceConfig {
+            quorum_threshold,
+            consensus_threshold,
+            voting_period_ledgers,
+            pulse_token_address,
+        };
+
+        env.storage().persistent().set(&DataKey::Admin, &admin);
+        env.storage().persistent().set(&DataKey::Config, &config);
+        env.storage()
+            .persistent()
+            .set(&DataKey::NextProposalId, &1u32);
+    }
+
     pub fn create_proposal(
-        e: Env,
-        creator: Address,
+        env: Env,
+        proposer: Address,
+        talos_id: u32,
         title: String,
         description: String,
-        target_budget: i128,
     ) -> u32 {
-        creator.require_auth();
+        proposer.require_auth();
 
         if title.len() == 0 {
             panic!("Title cannot be empty");
@@ -92,58 +146,43 @@ impl TalosGovernance {
         if description.len() == 0 {
             panic!("Description cannot be empty");
         }
-        if target_budget < 0 {
-            panic!("Target budget cannot be negative");
-        }
 
-        // Get next proposal ID
-        let next_id: u32 = e
-            .storage()
-            .persistent()
-            .get(&DataKey::NextProposalId)
-            .unwrap_or(1);
+        let config = Self::require_config(&env);
+        let current_ledger = env.ledger().sequence();
+        let snapshot_ledger = current_ledger.saturating_sub(10);
+        let proposal_id = Self::next_proposal_id(env.clone());
 
-        // Build Proposal
         let proposal = Proposal {
-            id: next_id,
+            id: proposal_id,
+            talos_id,
+            proposer: proposer.clone(),
             title,
             description,
-            target_budget,
+            snapshot_ledger,
+            start_ledger: current_ledger,
+            end_ledger: current_ledger + config.voting_period_ledgers,
             status: ProposalStatus::Active,
-            creator: creator.clone(),
-            votes_for: 0,
-            votes_against: 0,
-            created_at: e.ledger().timestamp(),
+            yes_votes: 0,
+            no_votes: 0,
+            total_voters: 0,
+            created_at: env.ledger().timestamp(),
         };
 
-        // Store proposal
-        e.storage()
+        env.storage()
             .persistent()
-            .set(&DataKey::Proposal(next_id), &proposal);
-
-        // Increment next proposal ID
-        e.storage()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
+        env.storage()
             .persistent()
-            .set(&DataKey::NextProposalId, &(next_id + 1));
+            .set(&DataKey::NextProposalId, &(proposal_id + 1));
 
-        // Emit event
-        emit_proposal_created(&e, next_id, creator, target_budget);
-
-        next_id
+        emit_proposal_created(&env, proposal_id, talos_id, proposer);
+        proposal_id
     }
 
-    /// Cast a vote on an active proposal.
-    ///
-    /// # Arguments
-    /// * `e` - Soroban environment
-    /// * `proposal_id` - ID of the proposal to vote on
-    /// * `voter` - Address of the voter casting their vote
-    /// * `approve` - True to vote in favor, false to vote against
-    pub fn vote(e: Env, proposal_id: u32, voter: Address, approve: bool) {
+    pub fn vote(env: Env, voter: Address, proposal_id: u32, choice: VoteChoice) {
         voter.require_auth();
 
-        // Retrieve proposal
-        let mut proposal: Proposal = e
+        let mut proposal: Proposal = env
             .storage()
             .persistent()
             .get(&DataKey::Proposal(proposal_id))
@@ -153,37 +192,45 @@ impl TalosGovernance {
             panic!("Proposal is not active");
         }
 
-        // Check if already voted
-        let voted_key = DataKey::Voted(proposal_id, voter.clone());
-        if e.storage().persistent().has(&voted_key) {
+        let current_ledger = env.ledger().sequence();
+        if current_ledger > proposal.end_ledger {
+            panic!("Voting period has ended");
+        }
+
+        let vote_key = DataKey::Vote(proposal_id, voter.clone());
+        if env.storage().persistent().has(&vote_key) {
             panic!("Already voted on this proposal");
         }
 
-        // Record vote
-        if approve {
-            proposal.votes_for += 1;
-        } else {
-            proposal.votes_against += 1;
+        let vote_weight = Self::get_vote_weight(&env, proposal.snapshot_ledger, voter.clone());
+        if vote_weight <= 0 {
+            panic!("No voting power");
         }
 
-        // Update storage
-        e.storage().persistent().set(&voted_key, &true);
-        e.storage()
+        match choice {
+            VoteChoice::Approve => proposal.yes_votes += vote_weight,
+            VoteChoice::Reject => proposal.no_votes += vote_weight,
+        }
+        proposal.total_voters += 1;
+
+        let vote = Vote {
+            voter: voter.clone(),
+            choice: choice.clone(),
+            weight: vote_weight,
+            voted_at: env.ledger().timestamp(),
+        };
+
+        env.storage().persistent().set(&vote_key, &vote);
+        Self::update_status_if_quorum(&env, &mut proposal);
+        env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
 
-        // Emit vote event
-        emit_voted(&e, proposal_id, voter, approve);
+        emit_vote_cast(&env, proposal_id, voter, choice, vote_weight);
     }
 
-    /// Finalize and execute an active proposal based on voting results.
-    ///
-    /// # Arguments
-    /// * `e` - Soroban environment
-    /// * `proposal_id` - ID of the proposal to execute
-    pub fn execute_proposal(e: Env, proposal_id: u32) {
-        // Retrieve proposal
-        let mut proposal: Proposal = e
+    pub fn finalize_proposal(env: Env, proposal_id: u32) {
+        let mut proposal: Proposal = env
             .storage()
             .persistent()
             .get(&DataKey::Proposal(proposal_id))
@@ -192,282 +239,357 @@ impl TalosGovernance {
         if proposal.status != ProposalStatus::Active {
             panic!("Proposal is not active");
         }
-
-        // Determine outcome: simple majority passing
-        if proposal.votes_for > proposal.votes_against {
-            proposal.status = ProposalStatus::Passed;
-        } else {
-            proposal.status = ProposalStatus::Failed;
+        if env.ledger().sequence() <= proposal.end_ledger {
+            panic!("Voting period has not ended");
         }
 
-        // Update proposal in storage
-        e.storage()
+        Self::finalize_status(&env, &mut proposal);
+        env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
-
-        // Emit event
-        emit_proposal_executed(&e, proposal_id, proposal.status);
+        emit_proposal_status_changed(&env, proposal_id, proposal.status.clone());
     }
 
-    /// Query details of a specific proposal.
-    ///
-    /// # Arguments
-    /// * `e` - Soroban environment
-    /// * `proposal_id` - ID of the proposal to fetch
-    pub fn get_proposal(e: Env, proposal_id: u32) -> Option<Proposal> {
-        e.storage().persistent().get(&DataKey::Proposal(proposal_id))
-    }
-
-    /// Check if an address has voted on a proposal.
-    ///
-    /// # Arguments
-    /// * `e` - Soroban environment
-    /// * `proposal_id` - ID of the proposal
-    /// * `voter` - Address of the voter
-    pub fn has_voted(e: Env, proposal_id: u32, voter: Address) -> bool {
-        e.storage()
+    pub fn execute_proposal(env: Env, proposal_id: u32) {
+        let mut proposal: Proposal = env
+            .storage()
             .persistent()
-            .has(&DataKey::Voted(proposal_id, voter))
+            .get(&DataKey::Proposal(proposal_id))
+            .expect("Proposal not found");
+
+        if proposal.status != ProposalStatus::Approved {
+            panic!("Proposal is not approved");
+        }
+
+        proposal.status = ProposalStatus::Executed;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
+        emit_proposal_status_changed(&env, proposal_id, ProposalStatus::Executed);
     }
 
-    /// Get the next proposal ID.
-    ///
-    /// # Arguments
-    /// * `e` - Soroban environment
-    pub fn next_proposal_id(e: Env) -> u32 {
-        e.storage()
+    pub fn cache_token_balance(
+        env: Env,
+        admin: Address,
+        ledger: u32,
+        address: Address,
+        balance: i128,
+    ) {
+        Self::require_admin(&env, &admin);
+        if balance < 0 {
+            panic!("Balance cannot be negative");
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenBalanceSnapshot(ledger, address), &balance);
+    }
+
+    pub fn update_config(env: Env, admin: Address, config: GovernanceConfig) {
+        Self::require_admin(&env, &admin);
+        if config.quorum_threshold <= 0 {
+            panic!("Quorum must be positive");
+        }
+        if config.consensus_threshold <= 0 || config.consensus_threshold > 10_000 {
+            panic!("Consensus threshold must be 1..10000 bps");
+        }
+        if config.voting_period_ledgers == 0 {
+            panic!("Voting period must be positive");
+        }
+        env.storage().persistent().set(&DataKey::Config, &config);
+    }
+
+    pub fn get_proposal(env: Env, proposal_id: u32) -> Option<Proposal> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Proposal(proposal_id))
+    }
+
+    pub fn get_vote(env: Env, proposal_id: u32, voter: Address) -> Option<Vote> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Vote(proposal_id, voter))
+    }
+
+    pub fn get_config(env: Env) -> Option<GovernanceConfig> {
+        env.storage().persistent().get(&DataKey::Config)
+    }
+
+    pub fn get_admin(env: Env) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::Admin)
+    }
+
+    pub fn next_proposal_id(env: Env) -> u32 {
+        env.storage()
             .persistent()
             .get(&DataKey::NextProposalId)
             .unwrap_or(1)
     }
-}
 
-// ── Tests ───────────────────────────────────────────────────────────
+    fn require_config(env: &Env) -> GovernanceConfig {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .expect("Contract not initialized")
+    }
+
+    fn require_admin(env: &Env, admin: &Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
+        if stored_admin != *admin {
+            panic!("Unauthorized admin");
+        }
+    }
+
+    fn get_vote_weight(env: &Env, snapshot_ledger: u32, voter: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TokenBalanceSnapshot(snapshot_ledger, voter))
+            .unwrap_or(0)
+    }
+
+    fn update_status_if_quorum(env: &Env, proposal: &mut Proposal) {
+        let config = Self::require_config(env);
+        let total_votes = proposal.yes_votes + proposal.no_votes;
+        if total_votes >= config.quorum_threshold {
+            Self::finalize_status(env, proposal);
+            emit_proposal_status_changed(env, proposal.id, proposal.status.clone());
+        }
+    }
+
+    fn finalize_status(env: &Env, proposal: &mut Proposal) {
+        let config = Self::require_config(env);
+        let total_votes = proposal.yes_votes + proposal.no_votes;
+        if total_votes < config.quorum_threshold {
+            proposal.status = ProposalStatus::Rejected;
+            return;
+        }
+
+        let approval_bps = (proposal.yes_votes * 10_000) / total_votes;
+        proposal.status = if approval_bps >= config.consensus_threshold {
+            ProposalStatus::Approved
+        } else {
+            ProposalStatus::Rejected
+        };
+    }
+}
 
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, MockAuth, MockAuthInvoke},
+        testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
         IntoVal,
     };
 
-    fn setup() -> (Env, Address, TalosGovernanceClient<'static>) {
+    fn setup() -> (
+        Env,
+        Address,
+        Address,
+        Address,
+        TalosGovernanceClient<'static>,
+    ) {
         let env = Env::default();
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 100;
+            li.timestamp = 1_000;
+        });
+
         let contract_id = env.register_contract(None, TalosGovernance);
         let client = TalosGovernanceClient::new(&env, &contract_id);
-        (env, contract_id, client)
+        let admin = Address::generate(&env);
+        let pulse = Address::generate(&env);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "initialize",
+                    args: (admin.clone(), pulse.clone(), 100_i128, 5_100_i128, 20_u32)
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .initialize(&admin, &pulse, &100_i128, &5_100_i128, &20_u32);
+
+        (env, contract_id, admin, pulse, client)
     }
 
     fn s(env: &Env, value: &str) -> String {
         String::from_str(env, value)
     }
 
-    #[test]
-    fn test_create_proposal() {
-        let (env, contract_id, client) = setup();
-        let creator = Address::generate(&env);
-
-        let title = s(&env, "Upgrade core Protocol");
-        let description = s(&env, "This proposal upgrades the core contract functions.");
-        let target_budget = 50_000_i128;
-
-        let proposal_id = client
+    fn create_proposal_with_auth(
+        env: &Env,
+        contract_id: &Address,
+        client: &TalosGovernanceClient<'static>,
+        proposer: &Address,
+    ) -> u32 {
+        let title = s(env, "Treasury proposal");
+        let description = s(env, "Allocate funds for growth.");
+        client
             .mock_auths(&[MockAuth {
-                address: &creator,
+                address: proposer,
                 invoke: &MockAuthInvoke {
-                    contract: &contract_id,
+                    contract: contract_id,
                     fn_name: "create_proposal",
-                    args: (
-                        creator.clone(),
-                        title.clone(),
-                        description.clone(),
-                        target_budget,
-                    )
-                        .into_val(&env),
+                    args: (proposer.clone(), 7_u32, title.clone(), description.clone())
+                        .into_val(env),
                     sub_invokes: &[],
                 },
             }])
-            .create_proposal(&creator, &title, &description, &target_budget);
+            .create_proposal(proposer, &7_u32, &title, &description)
+    }
 
-        assert_eq!(proposal_id, 1);
-        assert_eq!(client.next_proposal_id(), 2);
-
-        let proposal = client.get_proposal(&proposal_id).expect("Proposal should exist");
-        assert_eq!(proposal.id, 1);
-        assert_eq!(proposal.title, title);
-        assert_eq!(proposal.description, description);
-        assert_eq!(proposal.target_budget, target_budget);
-        assert_eq!(proposal.status, ProposalStatus::Active);
-        assert_eq!(proposal.creator, creator);
-        assert_eq!(proposal.votes_for, 0);
-        assert_eq!(proposal.votes_against, 0);
+    fn cache_balance_with_auth(
+        env: &Env,
+        contract_id: &Address,
+        client: &TalosGovernanceClient<'static>,
+        admin: &Address,
+        ledger: u32,
+        voter: &Address,
+        balance: i128,
+    ) {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "cache_token_balance",
+                    args: (admin.clone(), ledger, voter.clone(), balance).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .cache_token_balance(admin, &ledger, voter, &balance);
     }
 
     #[test]
-    fn test_voting_flow() {
-        let (env, contract_id, client) = setup();
-        let creator = Address::generate(&env);
-        let voter1 = Address::generate(&env);
-        let voter2 = Address::generate(&env);
+    fn proposal_creation_requires_auth_and_records_proposer() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
 
-        let title = s(&env, "Community Grant");
-        let description = s(&env, "Grant for marketing campaigns.");
-        let target_budget = 10_000_i128;
-
-        let proposal_id = client
-            .mock_auths(&[MockAuth {
-                address: &creator,
-                invoke: &MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "create_proposal",
-                    args: (
-                        creator.clone(),
-                        title.clone(),
-                        description.clone(),
-                        target_budget,
-                    )
-                        .into_val(&env),
-                    sub_invokes: &[],
-                },
-            }])
-            .create_proposal(&creator, &title, &description, &target_budget);
-
-        // Cast yes vote from voter1
-        client
-            .mock_auths(&[MockAuth {
-                address: &voter1,
-                invoke: &MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "vote",
-                    args: (proposal_id, voter1.clone(), true).into_val(&env),
-                    sub_invokes: &[],
-                },
-            }])
-            .vote(&proposal_id, &voter1, &true);
-
-        // Cast no vote from voter2
-        client
-            .mock_auths(&[MockAuth {
-                address: &voter2,
-                invoke: &MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "vote",
-                    args: (proposal_id, voter2.clone(), false).into_val(&env),
-                    sub_invokes: &[],
-                },
-            }])
-            .vote(&proposal_id, &voter2, &false);
-
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
         let proposal = client.get_proposal(&proposal_id).unwrap();
-        assert_eq!(proposal.votes_for, 1);
-        assert_eq!(proposal.votes_against, 1);
-        assert!(client.has_voted(&proposal_id, &voter1));
-        assert!(client.has_voted(&proposal_id, &voter2));
+
+        assert_eq!(proposal.proposer, proposer);
+        assert_eq!(proposal.talos_id, 7);
+        assert_eq!(proposal.status, ProposalStatus::Active);
+        assert_eq!(proposal.snapshot_ledger, 90);
     }
 
     #[test]
-    fn test_proposal_execution() {
-        let (env, contract_id, client) = setup();
-        let creator = Address::generate(&env);
+    fn vote_uses_cached_snapshot_weight_and_approves_on_quorum() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
         let voter = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
 
-        let title = s(&env, "Execute action");
-        let description = s(&env, "Description of the action.");
-        let target_budget = 5_000_i128;
+        cache_balance_with_auth(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            proposal.snapshot_ledger,
+            &voter,
+            150,
+        );
 
-        let proposal_id = client
-            .mock_auths(&[MockAuth {
-                address: &creator,
-                invoke: &MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "create_proposal",
-                    args: (
-                        creator.clone(),
-                        title.clone(),
-                        description.clone(),
-                        target_budget,
-                    )
-                        .into_val(&env),
-                    sub_invokes: &[],
-                },
-            }])
-            .create_proposal(&creator, &title, &description, &target_budget);
-
-        // Vote yes
         client
             .mock_auths(&[MockAuth {
                 address: &voter,
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "vote",
-                    args: (proposal_id, voter.clone(), true).into_val(&env),
+                    args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
                     sub_invokes: &[],
                 },
             }])
-            .vote(&proposal_id, &voter, &true);
-
-        // Execute
-        client.execute_proposal(&proposal_id);
+            .vote(&voter, &proposal_id, &VoteChoice::Approve);
 
         let proposal = client.get_proposal(&proposal_id).unwrap();
-        assert_eq!(proposal.status, ProposalStatus::Passed);
+        assert_eq!(proposal.yes_votes, 150);
+        assert_eq!(proposal.status, ProposalStatus::Approved);
+
+        let vote = client.get_vote(&proposal_id, &voter).unwrap();
+        assert_eq!(vote.weight, 150);
     }
 
     #[test]
     #[should_panic(expected = "Already voted on this proposal")]
-    fn test_double_voting_panics() {
-        let (env, contract_id, client) = setup();
-        let creator = Address::generate(&env);
+    fn double_vote_is_rejected() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
         let voter = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        cache_balance_with_auth(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            proposal.snapshot_ledger,
+            &voter,
+            20,
+        );
 
-        let title = s(&env, "Unique vote test");
-        let description = s(&env, "Should not allow duplicate votes.");
-        let target_budget = 0_i128;
+        for _ in 0..2 {
+            client
+                .mock_auths(&[MockAuth {
+                    address: &voter,
+                    invoke: &MockAuthInvoke {
+                        contract: &contract_id,
+                        fn_name: "vote",
+                        args: (voter.clone(), proposal_id, VoteChoice::Reject).into_val(&env),
+                        sub_invokes: &[],
+                    },
+                }])
+                .vote(&voter, &proposal_id, &VoteChoice::Reject);
+        }
+    }
 
-        let proposal_id = client
-            .mock_auths(&[MockAuth {
-                address: &creator,
-                invoke: &MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "create_proposal",
-                    args: (
-                        creator.clone(),
-                        title.clone(),
-                        description.clone(),
-                        target_budget,
-                    )
-                        .into_val(&env),
-                    sub_invokes: &[],
-                },
-            }])
-            .create_proposal(&creator, &title, &description, &target_budget);
+    #[test]
+    fn finalize_after_period_rejects_without_quorum() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
 
-        // Vote once
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 200;
+        });
+
+        client.finalize_proposal(&proposal_id);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Rejected);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized admin")]
+    fn unauthorized_config_update_is_rejected() {
+        let (env, _contract_id, _admin, pulse, client) = setup();
+        let attacker = Address::generate(&env);
+        let config = GovernanceConfig {
+            quorum_threshold: 10,
+            consensus_threshold: 6_000,
+            voting_period_ledgers: 30,
+            pulse_token_address: pulse,
+        };
+
         client
             .mock_auths(&[MockAuth {
-                address: &voter,
+                address: &attacker,
                 invoke: &MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "vote",
-                    args: (proposal_id, voter.clone(), true).into_val(&env),
+                    contract: &client.address,
+                    fn_name: "update_config",
+                    args: (attacker.clone(), config.clone()).into_val(&env),
                     sub_invokes: &[],
                 },
             }])
-            .vote(&proposal_id, &voter, &true);
-
-        // Vote twice
-        client
-            .mock_auths(&[MockAuth {
-                address: &voter,
-                invoke: &MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "vote",
-                    args: (proposal_id, voter.clone(), true).into_val(&env),
-                    sub_invokes: &[],
-                },
-            }])
-            .vote(&proposal_id, &voter, &true);
+            .update_config(&attacker, &config);
     }
 }
