@@ -165,7 +165,7 @@ export async function POST(
 
     // Always verify against the listed service price — bidPrice is stored for negotiation
     // records only and must not reduce the payment amount until server-side accepted.
-    const expectedAmount = String(service.price);
+    const expectedAmount = Number(service.price).toFixed(2);
     const verified = await verifyX402Payment(paymentToken, expectedAmount, expectedPayee);
     if (!verified) {
       return Response.json(
