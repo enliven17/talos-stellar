@@ -11,6 +11,9 @@
 #[cfg(all(test, not(target_arch = "wasm32")))]
 extern crate std;
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+use std::string::ToString;
+
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     Env, IntoVal, String, Symbol,
@@ -50,7 +53,8 @@ fn validate_name(name: &String) -> bool {
         return false;
     }
 
-    let bytes = name.to_string().as_bytes();
+    let name_string = name.to_string();
+    let bytes = name_string.as_bytes();
     if bytes.first().is_none() || bytes.last().is_none() {
         return false;
     }
@@ -490,9 +494,17 @@ mod tests {
 
     #[test]
     fn accepts_valid_name_patterns() {
-        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
         let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
         let valid_name = s(&env, "alpha-1");
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
 
         let result = client
             .mock_auths(&[MockAuth {
@@ -500,11 +512,11 @@ mod tests {
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "register_name",
-                    args: (owner.clone(), 1u32, valid_name.clone()).into_val(&env),
+                    args: (owner.clone(), talos_id, valid_name.clone()).into_val(&env),
                     sub_invokes: &[],
                 },
             }])
-            .try_register_name(&owner, &1, &valid_name);
+            .try_register_name(&owner, &talos_id, &valid_name);
 
         assert!(result.is_ok());
     }
