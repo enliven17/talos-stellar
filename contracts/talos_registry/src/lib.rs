@@ -96,6 +96,15 @@ fn emit_protocol_fee_changed(env: &Env, old_bps: u32, new_bps: u32) {
     env.events().publish(topics, (old_bps, new_bps));
 }
 
+// ── Helpers ─────────────────────────────────────────────────────────
+
+fn validate_patron_shares(patron: &Patron) {
+    let total = patron.creator_share + patron.investor_share + patron.treasury_share;
+    if total != 100 {
+        panic!("Patron shares must sum to 100");
+    }
+}
+
 // ── Constants ───────────────────────────────────────────────────────
 
 const PROTOCOL_FEE_BPS: u32 = 300; // 3%
@@ -133,6 +142,8 @@ impl TalosRegistry {
     ) -> u32 {
         // Require creator authorization
         patron.creator_addr.require_auth();
+
+        validate_patron_shares(&patron);
 
         // If the registry has been initialized, ensure callers use the configured
         // protocol wallet. This keeps the create_talos ABI backwards compatible
@@ -232,6 +243,8 @@ impl TalosRegistry {
 
         // Require creator authorization
         talos.creator.require_auth();
+
+        validate_patron_shares(&patron);
 
         talos.patron = patron.clone();
 
@@ -770,5 +783,85 @@ mod tests {
             .deactivate_talos(&id);
 
         assert!(!client.is_active(&id));
+    }
+
+    #[test]
+    fn create_talos_rejects_shares_not_summing_to_100() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+
+        let bad_patron = Patron {
+            creator_share: 60,
+            investor_share: 25,
+            treasury_share: 10, // sums to 95
+            creator_addr: creator.clone(),
+            investor_addr: Address::generate(&env),
+            treasury_addr: Address::generate(&env),
+        };
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_talos",
+                    args: (
+                        s(&env, "Bad"),
+                        s(&env, "Marketing"),
+                        s(&env, "desc"),
+                        bad_patron.clone(),
+                        kernel(),
+                        pulse(&env),
+                        protocol_wallet.clone(),
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_talos(
+                &s(&env, "Bad"),
+                &s(&env, "Marketing"),
+                &s(&env, "desc"),
+                &bad_patron,
+                &kernel(),
+                &pulse(&env),
+                &protocol_wallet,
+            );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn update_patron_rejects_shares_not_summing_to_100() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let bad_patron = Patron {
+            creator_share: 50,
+            investor_share: 30,
+            treasury_share: 30, // sums to 110
+            creator_addr: creator.clone(),
+            investor_addr: Address::generate(&env),
+            treasury_addr: Address::generate(&env),
+        };
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_patron",
+                    args: (id, bad_patron.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_patron(&id, &bad_patron);
+
+        assert!(result.is_err());
     }
 }
