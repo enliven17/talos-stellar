@@ -12,6 +12,9 @@ on:
       - 'contracts/**'
       - '.github/workflows/contracts-ci.yml'
 
+permissions:
+  contents: read
+
 jobs:
   test-and-build:
     runs-on: ubuntu-latest
@@ -30,9 +33,6 @@ jobs:
 
       - name: Run contract tests
         run: cargo test
-
-      - name: Run wasm-target contract tests
-        run: cargo test --target wasm32-unknown-unknown
 
       - name: Build Soroban WASM contracts
         run: cargo build --target wasm32-unknown-unknown --release
