@@ -11,7 +11,10 @@
 #[cfg(all(test, not(target_arch = "wasm32")))]
 extern crate std;
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address, Env, String, Symbol, IntoVal};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    Env, IntoVal, String, Symbol,
+};
 
 // ── Data Types ──────────────────────────────────────────────────────
 
@@ -118,8 +121,14 @@ impl TalosNameService {
 
         // Retrieve the old name via TalosName(talos_id) and delete NameRecord(old_name)
         // to prevent dangling records when changing names.
-        if let Some(old_name) = e.storage().persistent().get::<_, String>(&DataKey::TalosName(talos_id)) {
-            e.storage().persistent().remove(&DataKey::NameRecord(old_name));
+        if let Some(old_name) = e
+            .storage()
+            .persistent()
+            .get::<_, String>(&DataKey::TalosName(talos_id))
+        {
+            e.storage()
+                .persistent()
+                .remove(&DataKey::NameRecord(old_name));
         }
 
         // Store mappings
@@ -134,8 +143,7 @@ impl TalosNameService {
     }
 
     pub fn initialize(e: Env, registry_id: Address) {
-        if e
-            .storage()
+        if e.storage()
             .persistent()
             .get::<_, Address>(&DataKey::RegistryContract)
             .is_some()
@@ -184,11 +192,11 @@ impl TalosNameService {
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
-    use talos_registry::{TalosRegistry, TalosRegistryClient, Patron, Kernel, Pulse};
     use soroban_sdk::{
         testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
         Address, Env, IntoVal, Symbol, TryFromVal,
     };
+    use talos_registry::{Kernel, Patron, Pulse, TalosRegistry, TalosRegistryClient};
 
     fn setup() -> (
         Env,
@@ -204,7 +212,13 @@ mod tests {
         let name_service_client = TalosNameServiceClient::new(&env, &name_service_contract);
         name_service_client.initialize(&registry_contract);
         let registry_client = TalosRegistryClient::new(&env, &registry_contract);
-        (env, registry_contract, name_service_contract, registry_client, name_service_client)
+        (
+            env,
+            registry_contract,
+            name_service_contract,
+            registry_client,
+            name_service_client,
+        )
     }
 
     fn s(env: &Env, value: &str) -> String {
@@ -368,7 +382,7 @@ mod tests {
         );
 
         let duplicate_result = client
-            .mock_auths(&[MockAuth {                
+            .mock_auths(&[MockAuth {
                 address: &second_owner,
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
@@ -439,7 +453,15 @@ mod tests {
             &protocol_wallet,
         );
 
-        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &name);
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &name,
+        );
 
         assert_eq!(client.resolve_name(&name), Some(talos_id));
         assert_eq!(client.name_of(&talos_id), Some(name));
@@ -491,7 +513,12 @@ mod tests {
     fn rejects_invalid_name_patterns() {
         let (env, _registry_contract, contract_id, _registry_client, client) = setup();
         let owner = Address::generate(&env);
-        let invalid_names = [s(&env, "Alpha"), s(&env, "bad--name"), s(&env, "-bad"), s(&env, "bad-")];
+        let invalid_names = [
+            s(&env, "Alpha"),
+            s(&env, "bad--name"),
+            s(&env, "-bad"),
+            s(&env, "bad-"),
+        ];
 
         for invalid_name in invalid_names {
             let result = client
@@ -506,7 +533,11 @@ mod tests {
                 }])
                 .try_register_name(&owner, &1, &invalid_name);
 
-            assert!(result.is_err(), "expected invalid name {:?} to be rejected", invalid_name.to_string());
+            assert!(
+                result.is_err(),
+                "expected invalid name {:?} to be rejected",
+                invalid_name.to_string()
+            );
         }
     }
 
@@ -525,10 +556,21 @@ mod tests {
             &protocol_wallet,
         );
 
-        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &name);
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &name,
+        );
 
         let all_events = env.events().all();
-        let events = all_events.iter().filter(|e| e.0 == contract_id).collect::<std::vec::Vec<_>>();
+        let events = all_events
+            .iter()
+            .filter(|e| e.0 == contract_id)
+            .collect::<std::vec::Vec<_>>();
         assert_eq!(events.len(), 1);
         let (_addr, topics, data) = events.get(0).unwrap();
         assert_eq!(topics.len() as u32, 2);
@@ -599,5 +641,4 @@ mod tests {
 
         assert!(client.name_of(&999).is_none());
     }
-
 }

@@ -184,7 +184,13 @@ impl TalosRegistry {
             .set(&DataKey::NextTalosId, &(next_id + 1));
 
         // Emit event
-        emit_talos_created(&e, next_id, talos.creator.clone(), name, talos.category.clone());
+        emit_talos_created(
+            &e,
+            next_id,
+            talos.creator.clone(),
+            name,
+            talos.category.clone(),
+        );
 
         next_id
     }
@@ -539,19 +545,34 @@ mod tests {
         assert_eq!(client.calculate_protocol_fee(&40_000), 1_000);
     }
 
-    fn assert_topic_symbol(env: &Env, topics: &soroban_sdk::Vec<soroban_sdk::Val>, idx: u32, expected: Symbol) {
+    fn assert_topic_symbol(
+        env: &Env,
+        topics: &soroban_sdk::Vec<soroban_sdk::Val>,
+        idx: u32,
+        expected: Symbol,
+    ) {
         let val = topics.get(idx).expect("topic index out of range");
         let sym: Symbol = TryFromVal::try_from_val(env, &val).expect("topic is not a Symbol");
         assert_eq!(sym, expected);
     }
 
-    fn assert_topic_address(env: &Env, topics: &soroban_sdk::Vec<soroban_sdk::Val>, idx: u32, expected: &Address) {
+    fn assert_topic_address(
+        env: &Env,
+        topics: &soroban_sdk::Vec<soroban_sdk::Val>,
+        idx: u32,
+        expected: &Address,
+    ) {
         let val = topics.get(idx).expect("topic index out of range");
         let addr: Address = TryFromVal::try_from_val(env, &val).expect("topic is not an Address");
         assert_eq!(addr, *expected);
     }
 
-    fn assert_topic_u32(env: &Env, topics: &soroban_sdk::Vec<soroban_sdk::Val>, idx: u32, expected: u32) {
+    fn assert_topic_u32(
+        env: &Env,
+        topics: &soroban_sdk::Vec<soroban_sdk::Val>,
+        idx: u32,
+        expected: u32,
+    ) {
         let val = topics.get(idx).expect("topic index out of range");
         let n: u32 = TryFromVal::try_from_val(env, &val).expect("topic is not a u32");
         assert_eq!(n, expected);
@@ -656,8 +677,7 @@ mod tests {
         assert_eq!(topics.len(), 1);
         assert_topic_symbol(&env, &topics, 0, symbol_short!("fee_chg"));
 
-        let (old_bps, new_bps): (u32, u32) =
-            TryFromVal::try_from_val(&env, &data).unwrap();
+        let (old_bps, new_bps): (u32, u32) = TryFromVal::try_from_val(&env, &data).unwrap();
         assert_eq!(old_bps, 300);
         assert_eq!(new_bps, 500);
     }
@@ -751,5 +771,4 @@ mod tests {
 
         assert!(!client.is_active(&id));
     }
-
 }
