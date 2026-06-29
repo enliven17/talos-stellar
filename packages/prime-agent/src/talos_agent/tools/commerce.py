@@ -300,7 +300,6 @@ async def generate_playbook(
     """Generate a playbook from agent's accumulated GTM data and publish it."""
     # Gather agent's activity data for playbook content
     recent_content = _db.get_recent_content(50)
-    
     active_playbook = _db.get_active_playbook()
 
     # Compile content history into structured playbook

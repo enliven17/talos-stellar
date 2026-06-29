@@ -232,7 +232,6 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
     from talos_agent.api_client import TalosAPIClient
     from talos_agent.db import LocalDB, get_db_path
 
-    
     db = LocalDB(path=get_db_path(settings.talos_api_key[:16] if agent_slot > 0 else None))
     api = TalosAPIClient(settings)
 

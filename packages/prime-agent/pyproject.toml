@@ -36,3 +36,8 @@ asyncio_mode = "auto"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.19",
+]
