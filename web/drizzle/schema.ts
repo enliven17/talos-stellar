@@ -105,7 +105,7 @@ export const tlsCommerceServices = pgTable("tls_commerce_services", {
 	description: text(),
 	price: numeric({ precision: 18, scale:  6 }).notNull(),
 	currency: text().default('USDC').notNull(),
-	stellarPublicKey: text().notNull(),
+	paymentAddress: text().notNull(),
 	chains: text().array().default(["stellar"]),
 	createdAt: timestamp({ precision: 3, mode: 'string' }).default(sql`CURRENT_TIMESTAMP`).notNull(),
 	updatedAt: timestamp({ precision: 3, mode: 'string' }).notNull(),

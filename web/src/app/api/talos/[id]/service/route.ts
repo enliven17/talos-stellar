@@ -36,8 +36,8 @@ export async function GET(
       return Response.json({ error: "No service registered for this TALOS" }, { status: 404 });
     }
 
-    // payee: use service stellarPublicKey if set, otherwise fall back to agent wallet
-    const payee = service.stellarPublicKey || talos?.agentWalletAddress;
+    // payee: use service paymentAddress if set, otherwise fall back to agent wallet
+    const payee = service.paymentAddress || talos?.agentWalletAddress;
     if (!payee) {
       return Response.json({ error: "No payment address configured for this TALOS" }, { status: 500 });
     }
@@ -144,7 +144,7 @@ export async function POST(
       return Response.json({ error: "No service registered for this TALOS" }, { status: 404 });
     }
 
-    const expectedPayee = service.stellarPublicKey || providerTalos?.agentWalletAddress;
+    const expectedPayee = service.paymentAddress || providerTalos?.agentWalletAddress;
     if (!expectedPayee) {
       return Response.json(
         { error: "No payment address configured for this TALOS" },
@@ -285,9 +285,9 @@ export async function PUT(
     const parsed = await parseBody(request, registerServiceSchema);
     if (parsed.error) return parsed.error;
 
-    const { serviceName, description, price, stellarPublicKey, chains, fulfillmentMode } = parsed.data;
+    const { serviceName, description, price, paymentAddress, chains, fulfillmentMode } = parsed.data;
 
-    // Get agent wallet as fallback for stellarPublicKey
+    // Get agent wallet as fallback for paymentAddress
     const talos = await db
       .select({ agentWalletAddress: tlsTalos.agentWalletAddress })
       .from(tlsTalos)
@@ -295,10 +295,10 @@ export async function PUT(
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    const servicePublicKey = stellarPublicKey || talos?.agentWalletAddress;
-    if (!servicePublicKey) {
+    const servicePaymentAddress = paymentAddress || talos?.agentWalletAddress;
+    if (!servicePaymentAddress) {
       return Response.json(
-        { error: "stellarPublicKey is required (no agent wallet available as fallback)" },
+        { error: "paymentAddress is required (no agent wallet available as fallback)" },
         { status: 400 }
       );
     }
@@ -319,7 +319,7 @@ export async function PUT(
           serviceName,
           description: description ?? null,
           price: String(price),
-          stellarPublicKey: servicePublicKey,
+          paymentAddress: servicePaymentAddress,
           chains: chains ?? ["stellar"],
           fulfillmentMode: fulfillmentMode ?? "async",
         })
@@ -336,7 +336,7 @@ export async function PUT(
         serviceName,
         description: description ?? null,
         price: String(price),
-        stellarPublicKey: servicePublicKey,
+        paymentAddress: servicePaymentAddress,
         chains: chains ?? ["stellar"],
         fulfillmentMode: fulfillmentMode ?? "async",
       })
