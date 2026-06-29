@@ -23,6 +23,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className={`${ruthie.variable} h-full antialiased bg-background`} style={{ colorScheme: "light", backgroundColor: "#FCF8F8" }}>
+      <head>
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="use-credentials" />
+      </head>
       <body className="min-h-full flex flex-col bg-background text-foreground font-mono" style={{ backgroundColor: "#FCF8F8" }}>
         <SplashScreen />
         <Providers>
