@@ -57,33 +57,166 @@ pnpm build:registry
 pnpm build:name-service
 ```
 
-## Deploy to Stellar Testnet
+## Deployment Guide
+
+### Step 1: Environment Setup
+
+Before deploying, ensure all prerequisites are installed and configured:
 
 ```bash
-# Setup testnet identity
-soroban keys generate --network testnet mykey
+# 1. Install/update Rust and WASM target
+rustup update
+rustup target add wasm32-unknown-unknown
 
+# 2. Install Stellar CLI (replaces soroban-cli)
+cargo install --locked stellar-cli --features opt
+
+# 3. Create a Stellar keypair for the deployer account
+stellar keys generate --network testnet deployer
+
+# 4. Fund the deployer account
+# Visit: https://lab.stellar.org (testnet) or contact Stellar support (mainnet)
+# Ensure the account has enough XLM (~2-5 XLM for deployment gas)
+
+# 5. (Optional) Set environment variables
+export STELLAR_NETWORK=testnet  # or mainnet
+export STELLAR_ACCOUNT_ID=<your-deployer-public-key>  # G...
+export TALOS_PROTOCOL_WALLET=<protocol-wallet-public-key>  # G...
+```
+
+### Step 2: Build Contracts
+
+From the `contracts/` directory:
+
+```bash
+cd contracts
+
+# Build all contracts in release mode (optimized for WASM)
+cargo build --target wasm32-unknown-unknown --release
+
+# Output location:
+# - target/wasm32-unknown-unknown/release/talos_registry.wasm
+# - target/wasm32-unknown-unknown/release/talos_name_service.wasm
+```
+
+**Testnet vs Mainnet**: The `--network` flag in deployment commands switches targets:
+- **Testnet** (`--network testnet`): Test environment, free XLM from friendbot, instant finality
+- **Mainnet** (`--network mainnet`): Production environment, real XLM costs, canonical ledger
+
+### Step 3: Deploy Contracts
+
+Option A: Manual Deployment (full control)
+
+```bash
 # Deploy TalosRegistry
-soroban contract deploy \
+REGISTRY_CONTRACT=$(stellar contract deploy \
   --wasm target/wasm32-unknown-unknown/release/talos_registry.wasm \
-  --source-account mykey \
-  --network testnet
-
-# Deploy TalosNameService
-soroban contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/talos_name_service.wasm \
-  --source-account mykey \
-  --network testnet
-
-# Initialize TalosRegistry (set protocol wallet)
-soroban contract invoke \
-  --id <REGISTRY_CONTRACT_ID> \
-  --source-account mykey \
   --network testnet \
+  --source deployer)
+echo "TalosRegistry: $REGISTRY_CONTRACT"
+
+# Deploy TalosNameService  
+NAME_SERVICE_CONTRACT=$(stellar contract deploy \
+  --wasm target/wasm32-unknown-unknown/release/talos_name_service.wasm \
+  --network testnet \
+  --source deployer)
+echo "TalosNameService: $NAME_SERVICE_CONTRACT"
+
+# Initialize TalosNameService with TalosRegistry address
+stellar contract invoke \
+  --id "$NAME_SERVICE_CONTRACT" \
+  --network testnet \
+  --source deployer \
   -- \
   initialize \
-  --protocol_wallet <PROTOCOL_WALLET_ADDRESS>
+  --registry_id "$REGISTRY_CONTRACT"
 ```
+
+Option B: Automated Deployment (recommended)
+
+```bash
+# Run the deployment script from contracts/ directory
+./deploy.sh testnet --source deployer
+
+# The script will:
+# 1. Build contracts in release mode
+# 2. Deploy both contracts
+# 3. Initialize TalosNameService
+# 4. Output environment variable assignments
+```
+
+### Step 4: Post-Deployment Configuration
+
+After deployment, save the contract IDs to your configuration:
+
+```bash
+# Add to web/.env.local:
+NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT=C...
+NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT=C...
+
+# Also add to contracts/.env if deploying from contracts/:
+TALOS_REGISTRY_CONTRACT=C...
+TALOS_NAME_SERVICE_CONTRACT=C...
+TALOS_PROTOCOL_WALLET=G...  # Receives protocol fees
+```
+
+### Step 5: Verify Deployment
+
+Confirm contracts are deployed and initialized:
+
+```bash
+# Check TalosRegistry exists and returns next ID
+stellar contract invoke \
+  --id "$REGISTRY_CONTRACT" \
+  --network testnet \
+  -- \
+  next_talos_id
+
+# Expected output: 0 (no Talos created yet)
+
+# Check TalosNameService is initialized
+stellar contract invoke \
+  --id "$NAME_SERVICE_CONTRACT" \
+  --network testnet \
+  -- \
+  is_name_available \
+  --name myagent
+
+# Expected output: true (no names registered yet)
+```
+
+### Environment Variables Reference
+
+| Variable | Format | Purpose | Example |
+|----------|--------|---------|---------|
+| `STELLAR_ACCOUNT_ID` | G-address | Deployer public key | `GBZLPFCWX4QIZTJQ6QXRZ...` |
+| `STELLAR_SECRET_KEY` | S-key | Deployer secret key (deploy only, never commit) | `SBZVYK6IXGLZ...` |
+| `TALOS_PROTOCOL_WALLET` | G-address | Receives 3% protocol fee on Talos creation | `GA3HQZTKR4U...` |
+| `NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT` | C-address | TalosRegistry contract ID | `CBZLPFCWX4QIZ...` |
+| `NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT` | C-address | TalosNameService contract ID | `CBZLPFCWX4QIZ...` |
+
+### Deployment Checklist
+
+- [ ] Rust toolchain installed: `rustc --version`
+- [ ] WASM target installed: `rustup target list --installed | grep wasm32`
+- [ ] Stellar CLI installed: `stellar --version`
+- [ ] Deployer keypair created: `stellar keys ls`
+- [ ] Deployer account has XLM: `stellar account info --source deployer --network testnet`
+- [ ] Contracts build successfully: `cargo build --target wasm32-unknown-unknown --release`
+- [ ] WASM files exist: `ls target/wasm32-unknown-unknown/release/*.wasm`
+- [ ] TalosRegistry deployed: `stellar contract info --id <REGISTRY_ID> --network testnet`
+- [ ] TalosNameService initialized: `stellar contract invoke --id <NAME_SERVICE_ID> -- next_talos_id`
+- [ ] Contract IDs added to `.env.local`
+
+### Troubleshooting
+
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| "Signature verification failed" | Wrong network | Verify `--network testnet\|mainnet` matches keypair |
+| "Account not found" | Deployer unfunded | Fund via lab.stellar.org or friendbot |
+| "Build failed" | Missing WASM target | Run `rustup target add wasm32-unknown-unknown` |
+| "Contract not initialized" | TalosNameService init skipped | Run initialize command with registry_id |
+| "WASM too large" | Optimization issue | Run release build only: `--release` flag |
 
 ## Invoke Examples
 
