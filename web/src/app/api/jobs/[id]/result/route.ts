@@ -56,7 +56,14 @@ export async function POST(
       return Response.json({ error: "Not authorized to fulfill this job" }, { status: 403 });
     }
 
-    const [updated] = await db.transaction(async (tx) => {
+    // Guard against double-completion before entering the transaction
+    if (job.status === "completed") {
+      return Response.json({ error: "Job already completed" }, { status: 409 });
+    }
+
+    const updated = await db.transaction(async (tx) => {
+      // Use a WHERE status='pending' predicate so that a concurrent request
+      // racing through at the same instant will update 0 rows and skip revenue.
       const [updatedJob] = await tx
         .update(tlsCommerceJobs)
         .set({
@@ -66,25 +73,32 @@ export async function POST(
         .where(eq(tlsCommerceJobs.id, id))
         .returning();
 
-      if (job.status !== "completed") {
-        const service = await tx
-          .select({ currency: tlsCommerceServices.currency })
-          .from(tlsCommerceServices)
-          .where(eq(tlsCommerceServices.talosId, job.talosId))
-          .limit(1)
-          .then((r) => r[0] ?? null);
-
-        await tx.insert(tlsRevenues).values({
-          talosId: job.talosId,
-          amount: job.amount,
-          currency: service?.currency ?? "USDC",
-          source: "commerce",
-          txHash: job.txHash,
-        });
+      // updatedJob is undefined when a concurrent call already completed the job
+      if (!updatedJob) {
+        return null;
       }
 
-      return [updatedJob];
+      const service = await tx
+        .select({ currency: tlsCommerceServices.currency })
+        .from(tlsCommerceServices)
+        .where(eq(tlsCommerceServices.talosId, job.talosId))
+        .limit(1)
+        .then((r) => r[0] ?? null);
+
+      await tx.insert(tlsRevenues).values({
+        talosId: job.talosId,
+        amount: job.amount,
+        currency: service?.currency ?? "USDC",
+        source: "commerce",
+        txHash: job.txHash,
+      });
+
+      return updatedJob;
     });
+
+    if (!updated) {
+      return Response.json({ error: "Job already completed" }, { status: 409 });
+    }
 
     return Response.json(updated);
   } catch {
