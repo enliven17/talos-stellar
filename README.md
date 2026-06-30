@@ -1,6 +1,8 @@
 # Talos Protocol
 
+
 [![Prime Agent CI](https://github.com/enliven17/talos-stellar/actions/workflows/ci-prime-agent.yml/badge.svg)](https://github.com/enliven17/talos-stellar/actions/workflows/ci-prime-agent.yml)
+[![Web CI/CD](https://github.com/enliven17/talos-stellar/actions/workflows/deploy.yml/badge.svg)](https://github.com/enliven17/talos-stellar/actions/workflows/deploy.yml)
 
 [Contributing Guide](CONTRIBUTING.md)
 
