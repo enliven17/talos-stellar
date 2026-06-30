@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from talos_agent.db import normalize_playbook_name
 from talos_agent.payments import USDC_TESTNET_ISSUER
 from talos_agent.payments.x402_signer import X402Signer
 from talos_agent.tools.registry import tool
@@ -224,15 +225,15 @@ async def poll_service_result(job_id: str) -> dict:
 )
 async def apply_playbook(playbook_name: str) -> dict:
     """Find and activate a playbook by name."""
-    conn = _db._conn
-    rows = conn.execute(
-        "SELECT id, name, data FROM playbooks WHERE name LIKE ?", (f"%{playbook_name}%",)
-    ).fetchall()
+    try:
+        normalized_name = normalize_playbook_name(playbook_name)
+    except ValueError as exc:
+        return {"error": str(exc)}
 
-    if not rows:
-        return {"error": f"No playbook found matching '{playbook_name}'"}
+    row = _db.find_playbook_by_name(normalized_name)
+    if not row:
+        return {"error": f"No playbook found named '{normalized_name}'"}
 
-    row = rows[0]
     _db.apply_playbook(row["id"])
 
     return {
