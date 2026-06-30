@@ -40,12 +40,13 @@ export async function POST(
     if (parsed.error) return parsed.error;
 
     const { payee, amount, assetCode } = parsed.data;
-    const amountStr = typeof amount === "number" ? String(amount) : amount;
-    const amountUsd = Number(amountStr);
+    const amountUsd = Number(amount);
 
     if (!Number.isFinite(amountUsd) || amountUsd <= 0) {
       return Response.json({ error: "amount must be a positive number" }, { status: 400 });
     }
+
+    const amountStr = amountUsd.toFixed(2);
 
     // 4. Check against Kernel approval threshold
     const threshold = Number(talos.approvalThreshold);
