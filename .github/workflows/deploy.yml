@@ -101,8 +101,12 @@ jobs:
           exit 1
         shell: bash
 
-      - name: Run E2E and Unit Tests
-        run: pnpm test
+      - name: Test
+        working-directory: web
+        run: pnpm test --run
+
+      - name: Coverage check
+        run: pnpm test --coverage --run
 
       # Deploy to Vercel (main branch only, using Vercel CLI)
       - name: Install Vercel CLI

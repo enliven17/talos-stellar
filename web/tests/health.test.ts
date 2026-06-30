@@ -27,7 +27,7 @@ describe("GET /api/health", () => {
 
     const res = await GET();
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(999); // DELIBERATELY BROKEN FOR CI VALIDATION
     const body = await res.json();
     expect(body.ok).toBe(true);
     expect(body.checks.db).toBe("ok");
