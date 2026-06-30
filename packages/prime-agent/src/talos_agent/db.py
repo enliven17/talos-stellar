@@ -18,6 +18,22 @@ def get_db_path(agent_id: str | None = None) -> Path:
         return APP_DIR / f"agent-{agent_id}.db"
     return DB_PATH
 
+
+def normalize_playbook_name(name: str) -> str:
+    """Validate and normalize a playbook lookup name."""
+    if not isinstance(name, str):
+        raise ValueError("Playbook name must be a string")
+
+    normalized_name = name.strip()
+    if not normalized_name:
+        raise ValueError("Playbook name cannot be empty")
+    if len(normalized_name) > 200:
+        raise ValueError("Playbook name must be 200 characters or fewer")
+    if any(ord(char) < 32 for char in normalized_name):
+        raise ValueError("Playbook name contains invalid control characters")
+
+    return normalized_name
+
 _MIGRATIONS = [
     (
         1,
@@ -385,6 +401,21 @@ class LocalDB:
             (name, json.dumps(data), source_talos),
         )
         self._conn.commit()
+
+    def find_playbook_by_name(self, name: str) -> dict | None:
+        normalized_name = normalize_playbook_name(name)
+        row = self._conn.execute(
+            "SELECT id, name, data FROM playbooks WHERE name = ? "
+            "ORDER BY purchased_at DESC LIMIT 1",
+            (normalized_name,),
+        ).fetchone()
+        if row:
+            return {
+                "id": row["id"],
+                "name": row["name"],
+                "data": json.loads(row["data"]),
+            }
+        return None
 
     def get_active_playbook(self) -> dict | None:
         row = self._conn.execute(
