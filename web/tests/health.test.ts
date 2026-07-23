@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, vi as vitest } from "vitest";
 
 vi.mock("@/db", () => ({
   db: { execute: vi.fn() },
@@ -12,11 +12,13 @@ const mockExecute = db.execute as ReturnType<typeof vi.fn>;
 describe("GET /api/health", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn());
+    vi.useFakeTimers();
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+    vi.useRealTimers();
   });
 
   it("returns 200 with ok=true when both checks pass", async () => {
@@ -74,5 +76,35 @@ describe("GET /api/health", () => {
     const res = await GET();
 
     expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("aborts fetch request on timeout", async () => {
+    mockExecute.mockResolvedValue([]);
+    let fetchSignal: AbortSignal | undefined;
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation((url, opts) => {
+      fetchSignal = opts?.signal;
+      return new Promise(() => {}); // Never resolve
+    });
+
+    const promise = GET();
+    vi.advanceTimersByTime(4000); // More than 3000ms for stellar timeout
+    await promise;
+
+    expect(fetchSignal?.aborted).toBe(true);
+  });
+
+  it("clears timers when main promise resolves before timeout", async () => {
+    const setTimeoutSpy = vi.spyOn(global, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(global, "clearTimeout");
+    mockExecute.mockResolvedValue([]);
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(null, { status: 200 }),
+    );
+
+    await GET();
+
+    expect(clearTimeoutSpy).toHaveBeenCalled();
+    setTimeoutSpy.mockRestore();
+    clearTimeoutSpy.mockRestore();
   });
 });
