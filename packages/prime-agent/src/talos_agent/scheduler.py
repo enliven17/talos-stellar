@@ -8,7 +8,7 @@ import os
 import random
 import signal
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import structlog
@@ -231,6 +231,146 @@ class Backoff:
     def failure(self):
         self.fail_count += 1
 
+
+class DurableBackoff:
+    """Backoff that persists state to SQLite so restarts resume where they left off.
+
+    On construction the persisted state (if any) is loaded immediately so the
+    first ``next_delay()`` call after a restart returns the *remaining* wait
+    time rather than the base delay.  A successful run clears the persisted
+    state; a failed run writes the updated attempt count and the wall-clock
+    time at which the next attempt is allowed.
+
+    ``max_attempts`` is enforced: once exceeded the task is marked *terminal*
+    and ``is_terminal`` returns ``True`` so callers can stop scheduling it.
+    Pass ``max_attempts=0`` (the default) to disable the cap entirely.
+    """
+
+    MAX_ATTEMPTS_DEFAULT = 0  # 0 = unlimited
+
+    def __init__(
+        self,
+        task_name: str,
+        db,
+        base_delay: float,
+        initial_backoff: float = 2.0,
+        max_backoff: float = 300.0,
+        jitter: float = 0.2,
+        max_attempts: int = MAX_ATTEMPTS_DEFAULT,
+    ):
+        self.task_name = task_name
+        self._db = db
+        self.base_delay = base_delay
+        self.initial_backoff = initial_backoff
+        self.max_backoff = max_backoff
+        self.jitter = jitter
+        self.max_attempts = max_attempts
+
+        # In-memory state — restored from DB on construction
+        self.fail_count: int = 0
+        self._next_attempt_at: datetime | None = None
+        self._terminal: bool = False
+
+        self._restore()
+
+    # ── Persistence helpers ────────────────────────────────
+
+    def _restore(self) -> None:
+        """Load persisted state from the DB (no-op if no row exists)."""
+        try:
+            state = self._db.get_retry_state(self.task_name)
+        except Exception:
+            # DB unavailable — start fresh rather than crash
+            return
+        if state is None:
+            return
+
+        self.fail_count = state["attempt_count"]
+        self._next_attempt_at = state["next_attempt_at"]
+        self._terminal = state["terminal"]
+        logger.debug(
+            "DurableBackoff restored: task=%s fail_count=%d terminal=%s",
+            self.task_name,
+            self.fail_count,
+            self._terminal,
+        )
+
+    def _persist(self) -> None:
+        """Write current in-memory state to the DB."""
+        next_at = self._next_attempt_at or datetime.now(timezone.utc)
+        try:
+            self._db.upsert_retry_state(
+                self.task_name,
+                attempt_count=self.fail_count,
+                next_attempt_at=next_at,
+                terminal=self._terminal,
+            )
+        except Exception as exc:
+            logger.warning("DurableBackoff: failed to persist state for %s: %s", self.task_name, exc)
+
+    # ── Public API ─────────────────────────────────────────
+
+    @property
+    def is_terminal(self) -> bool:
+        """True when max_attempts is set and has been exceeded."""
+        return self._terminal
+
+    def wait_remaining(self) -> float:
+        """Seconds until the next attempt is allowed (0 if overdue or no state)."""
+        if self._next_attempt_at is None:
+            return 0.0
+        remaining = (self._next_attempt_at - datetime.now(timezone.utc)).total_seconds()
+        return max(remaining, 0.0)
+
+    def next_delay(self) -> float:
+        """Compute the next sleep duration (same semantics as ``Backoff.next_delay``)."""
+        if self.fail_count == 0:
+            return self.base_delay
+
+        delay = self.initial_backoff * (2 ** (self.fail_count - 1))
+        delay = min(delay, self.max_backoff)
+
+        if self.jitter > 0:
+            j = delay * self.jitter
+            delay = delay + random.uniform(-j, j)
+
+        actual_delay = max(delay, 0.1)
+        logger.debug(
+            "DurableBackoff state: task=%s fail_count=%d next_delay=%.2fs",
+            self.task_name,
+            self.fail_count,
+            actual_delay,
+        )
+        return actual_delay
+
+    def success(self) -> None:
+        """Record a successful attempt: reset counters and remove persisted state."""
+        if self.fail_count > 0:
+            logger.debug("DurableBackoff reset on success: task=%s", self.task_name)
+        self.fail_count = 0
+        self._next_attempt_at = None
+        self._terminal = False
+        try:
+            self._db.clear_retry_state(self.task_name)
+        except Exception as exc:
+            logger.warning("DurableBackoff: failed to clear state for %s: %s", self.task_name, exc)
+
+    def failure(self) -> None:
+        """Record a failed attempt, advance counters, and persist state."""
+        self.fail_count += 1
+
+        if self.max_attempts > 0 and self.fail_count >= self.max_attempts:
+            self._terminal = True
+            logger.warning(
+                "DurableBackoff: task %s reached max_attempts=%d — marking terminal",
+                self.task_name,
+                self.max_attempts,
+            )
+
+        delay = self.next_delay()
+        self._next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        self._persist()
+
 async def run(settings: Settings, agent_slot: int = 0) -> None:
     """Entry point called by `talos-agent start`. agent_slot used for log prefixes in multi mode."""
     setup_observability()
@@ -406,7 +546,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
 
     async def polling_task():
         """Poll Web API for approvals and commerce jobs."""
-        backoff = Backoff(base_delay=settings.polling_interval)
+        backoff = DurableBackoff(task_name="polling", db=db, base_delay=settings.polling_interval)
         while not shutdown_event.is_set():
             try:
                 approvals = await api.get_approvals(settings.talos_id, status="pending")
@@ -441,7 +581,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
 
     async def heartbeat_task():
         """Report online status periodically."""
-        backoff = Backoff(base_delay=settings.heartbeat_interval)
+        backoff = DurableBackoff(task_name="heartbeat", db=db, base_delay=settings.heartbeat_interval)
         while not shutdown_event.is_set():
             try:
                 await api.update_status(settings.talos_id, online=True)
@@ -458,7 +598,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
 
     async def activity_flush_task():
         """Flush buffered activity logs to Web API."""
-        backoff = Backoff(base_delay=30)
+        backoff = DurableBackoff(task_name="activity_flush", db=db, base_delay=30)
         while not shutdown_event.is_set():
             try:
                 pending = db.get_pending_activities()
