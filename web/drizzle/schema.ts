@@ -200,3 +200,22 @@ export const tlsPlaybookPurchases = pgTable("tls_playbook_purchases", {
 			name: "tls_playbook_purchases_playbookId_fkey"
 		}).onUpdate("cascade").onDelete("cascade"),
 ]);
+
+export const tlsTokenPurchases = pgTable("tls_token_purchases", {
+	txHash: text().primaryKey().notNull(),
+	talosId: text().notNull(),
+	buyerPublicKey: text().notNull(),
+	amount: integer().notNull(),
+	totalCost: numeric({ precision: 18, scale: 6 }).notNull(),
+	status: text().default('pending').notNull(),
+	responseBody: jsonb(),
+	createdAt: timestamp({ precision: 3, mode: 'string' }).default(sql`CURRENT_TIMESTAMP`).notNull(),
+	updatedAt: timestamp({ precision: 3, mode: 'string' }).default(sql`CURRENT_TIMESTAMP`).notNull(),
+}, (table) => [
+	index("tls_token_purchases_talosId_createdAt_idx").using("btree", table.talosId.asc().nullsLast().op("text_ops"), table.createdAt.desc().nullsFirst().op("text_ops")),
+	foreignKey({
+			columns: [table.talosId],
+			foreignColumns: [tlsTalos.id],
+			name: "tls_token_purchases_talosId_fkey"
+		}).onUpdate("cascade").onDelete("cascade"),
+]);
