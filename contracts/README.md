@@ -12,6 +12,7 @@ Stellar-based smart contracts for the Talos Protocol, built with Rust and the So
   - Kernel policy management (approval thresholds, GTM budget)
   - Pulse token metadata storage
   - 3% protocol fee to protocol wallet on creation
+  - **Interface version query** (`version()` — immutable, compile-time constant)
   - Events: `talos_created`, `patron_updated`
 
 ### 2. TalosNameService
@@ -20,6 +21,7 @@ Stellar-based smart contracts for the Talos Protocol, built with Rust and the So
   - Name → Talos ID mapping (e.g., "marketbot" → 42)
   - Validation: 3-32 chars, lowercase alphanumeric + hyphens
   - No consecutive hyphens allowed
+  - **Interface version query** (`version()` — immutable, compile-time constant)
   - Events: `name_registered`
 
 ### 3. TalosGovernance
@@ -316,6 +318,73 @@ Both contracts emit typed Soroban events on every meaningful state change. Off-c
 - The first topic is always the event-type symbol so generic listeners can dispatch on it.
 - Filterable entities (creator, talos_id) are placed in subsequent topic slots so Soroban's topic-indexed subscriptions can narrow results without fetching all events.
 - Event data carries the full context needed to act without a follow-up RPC call.
+
+## Interface Versioning
+
+Both `TalosRegistry` and `TalosNameService` expose a `version()` entry-point that returns the contract's interface version as `(major: u32, minor: u32, patch: u32)`.
+
+```bash
+# Query TalosRegistry version
+stellar contract invoke \
+  --id "$REGISTRY_CONTRACT" \
+  --network testnet \
+  -- \
+  version
+# → [1, 0, 0]
+
+# Query TalosNameService version
+stellar contract invoke \
+  --id "$NAME_SERVICE_CONTRACT" \
+  --network testnet \
+  -- \
+  version
+# → [1, 0, 0]
+```
+
+### Design guarantees
+
+| Property | Behaviour |
+|----------|-----------|
+| **Compile-time constant** | The value is baked into the WASM binary as `pub const CONTRACT_VERSION: (u32, u32, u32)`. It is never read from nor written to ledger storage. |
+| **Immutable after deployment** | No admin call, `set_*` method, storage write, or cross-contract invocation can change the version of an already-deployed instance. |
+| **Spoofing impossible** | Because the value is a hardcoded constant (not a storage key), a compromised admin key cannot forge a version number. |
+| **Free to call** | `version()` consumes no meaningful ledger resources and does not require authorization. |
+
+### Semantic versioning bump rules
+
+| Version field | When to bump |
+|---------------|--------------|
+| `major` | Incompatible ABI change: an entry-point is removed, renamed, or its argument types change in a breaking way. Clients **must** re-validate before upgrading. |
+| `minor` | Backwards-compatible addition: a new entry-point is added or a new optional return field is appended. Existing clients continue to work without changes. |
+| `patch` | Bug-fix only, no observable ABI change. Safe to upgrade transparently. |
+
+### SDK / client compatibility check (JavaScript example)
+
+```typescript
+import { Contract, SorobanRpc } from "@stellar/stellar-sdk";
+
+const REQUIRED = { major: 1, minor: 0 };
+
+async function assertCompatible(contractId: string, server: SorobanRpc.Server) {
+  const contract = new Contract(contractId);
+  const result = await server.simulateTransaction(
+    // build a version() invocation …
+  );
+  const [major, minor] = parseVersionResult(result);
+  if (major !== REQUIRED.major) {
+    throw new Error(
+      `Breaking contract change: expected major=${REQUIRED.major}, got ${major}`
+    );
+  }
+  if (minor < REQUIRED.minor) {
+    throw new Error(
+      `Contract too old: need minor>=${REQUIRED.minor}, got ${minor}`
+    );
+  }
+}
+```
+
+> **Rule of thumb**: pin to `major` and enforce a minimum `minor`. Treat any `major` change as requiring an explicit SDK upgrade and re-audit.
 
 ## Testing
 

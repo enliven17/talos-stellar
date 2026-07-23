@@ -110,6 +110,20 @@ fn validate_patron_shares(patron: &Patron) {
 const PROTOCOL_FEE_BPS: u32 = 300; // 3%
 const MAX_PROTOCOL_FEE_BPS: u32 = 10_000; // 100%
 
+/// Compile-time interface version of TalosRegistry.
+///
+/// Format: `(major, minor, patch)` following Semantic Versioning.
+///
+/// Bump rules:
+/// - **major** — incompatible ABI change (removed/renamed entry-points, changed argument types)
+/// - **minor** — backwards-compatible new entry-point or return-field added
+/// - **patch** — bug-fix with no observable ABI change
+///
+/// This constant is embedded in the WASM binary at compile time and is
+/// therefore immutable once deployed; it cannot be altered by any admin
+/// call, storage write, or cross-contract invocation.
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 0, 0);
+
 // ── Contract ────────────────────────────────────────────────────────
 
 #[contract]
@@ -363,6 +377,23 @@ impl TalosRegistry {
         emit_protocol_fee_changed(&e, old_bps, fee_bps);
     }
 
+    /// Return the contract's interface version as `(major, minor, patch)`.
+    ///
+    /// The value is a compile-time constant baked into the WASM binary.
+    /// It is **not** stored in ledger state and cannot be altered by any
+    /// administrator, upgrade, or cross-contract call after deployment.
+    ///
+    /// Clients should call this method to verify ABI compatibility before
+    /// invoking other entry-points. A change in `major` signals a breaking
+    /// change; a change in `minor` adds new entry-points while remaining
+    /// backwards compatible; `patch` carries bug-fixes only.
+    ///
+    /// # Returns
+    /// `(major: u32, minor: u32, patch: u32)` — currently `(1, 0, 0)`.
+    pub fn version(_e: Env) -> (u32, u32, u32) {
+        CONTRACT_VERSION
+    }
+
     /// Calculate the protocol fee for an amount using the configured fee bps.
     pub fn calculate_protocol_fee(e: Env, amount: i128) -> i128 {
         if amount < 0 {
@@ -467,6 +498,61 @@ mod tests {
                 &pulse,
                 protocol_wallet,
             )
+    }
+
+    // ── version() tests ──────────────────────────────────────────────
+
+    #[test]
+    fn version_returns_compile_time_constant() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        assert_eq!(client.version(), (1u32, 0u32, 0u32));
+    }
+
+    #[test]
+    fn version_is_idempotent() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        // Calling version() multiple times must always return the same value.
+        assert_eq!(client.version(), client.version());
+    }
+
+    #[test]
+    fn version_is_unaffected_by_state_changes() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let protocol_wallet = Address::generate(&env);
+
+        let before = client.version();
+
+        // Initialize the contract and change the fee — state writes must not
+        // affect the version constant.
+        client.initialize(&protocol_wallet);
+        client
+            .mock_auths(&[MockAuth {
+                address: &protocol_wallet,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_protocol_fee",
+                    args: (500u32,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_protocol_fee(&500);
+
+        let after = client.version();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn version_matches_contract_version_constant() {
+        // Verify that the public CONTRACT_VERSION constant and the on-chain
+        // entry-point are in sync, so tooling that reads the constant directly
+        // agrees with what the deployed WASM reports.
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let (maj, min, patch) = client.version();
+        assert_eq!((maj, min, patch), CONTRACT_VERSION);
     }
 
     #[test]
