@@ -85,22 +85,55 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
     schemas: {
       Error: {
         type: "object",
-        required: ["error"],
+        required: ["code", "message", "requestId"],
         properties: {
-          error: { type: "string", example: "TALOS not found" },
+          code: {
+            type: "string",
+            description: "Stable machine-readable error identifier.",
+            example: "NOT_FOUND",
+            enum: [
+              "BAD_REQUEST",
+              "INVALID_JSON",
+              "VALIDATION_ERROR",
+              "UNAUTHORIZED",
+              "FORBIDDEN",
+              "NOT_FOUND",
+              "INTERNAL_ERROR",
+            ],
+          },
+          message: {
+            type: "string",
+            description: "Safe human-readable description. Never contains internal stack traces.",
+            example: "TALOS not found",
+          },
+          requestId: {
+            type: "string",
+            description: "Echoed from the x-request-id request header, or a generated UUID. Use for log correlation.",
+            example: "550e8400-e29b-41d4-a716-446655440000",
+          },
         },
       },
       ValidationError: {
-        type: "object",
-        required: ["error", "issues"],
-        properties: {
-          error: { type: "string", example: "Validation failed" },
-          issues: {
-            type: "array",
-            items: { type: "string" },
-            example: ["name: String must contain at least 1 character(s)"],
+        allOf: [
+          { $ref: "#/components/schemas/Error" },
+          {
+            type: "object",
+            required: ["issues"],
+            properties: {
+              code: {
+                type: "string",
+                enum: ["VALIDATION_ERROR"],
+                example: "VALIDATION_ERROR",
+              },
+              issues: {
+                type: "array",
+                items: { type: "string" },
+                description: "Per-field validation failure messages.",
+                example: ["name: String must contain at least 1 character(s)"],
+              },
+            },
           },
-        },
+        ],
       },
       TalosListItem: {
         type: "object",
@@ -929,7 +962,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "Rate limit exceeded" },
+            example: { code: "BAD_REQUEST", message: "Rate limit exceeded", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },
@@ -938,7 +971,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "Missing Authorization header. Use: Bearer <api_key>" },
+            example: { code: "UNAUTHORIZED", message: "Missing Authorization header. Use: Bearer <api_key>", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },
@@ -947,7 +980,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "Invalid API key" },
+            example: { code: "FORBIDDEN", message: "Invalid API key", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },
@@ -956,7 +989,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "TALOS not found" },
+            example: { code: "NOT_FOUND", message: "TALOS not found", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },
@@ -973,7 +1006,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "Internal server error" },
+            example: { code: "INTERNAL_ERROR", message: "An unexpected error occurred", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },

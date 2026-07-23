@@ -2,11 +2,12 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPatrons, tlsActivities, tlsRevenues } from "@/db/schema";
 import { and, desc, eq, sql } from "drizzle-orm";
+import { badRequest, internalError } from "@/lib/api-response";
 
 // GET /api/leaderboard — Ranking data with cursor-based pagination
 export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = request.nextUrl;
+    const { searchParams } = new URL(request.url);
     const cursor = searchParams.get("cursor");
     const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 1), 100);
 
@@ -50,10 +51,10 @@ export async function GET(request: NextRequest) {
         ) {
           parsedCursor = decoded as [number, string];
         } else {
-          return Response.json({ error: "Invalid cursor format" }, { status: 400 });
+          return badRequest(request, "Invalid cursor format");
         }
       } catch {
-        return Response.json({ error: "Invalid cursor" }, { status: 400 });
+        return badRequest(request, "Invalid cursor");
       }
     }
 
@@ -112,6 +113,6 @@ export async function GET(request: NextRequest) {
 
     return Response.json({ data, nextCursor });
   } catch {
-    return Response.json({ error: "Internal server error" }, { status: 500 });
+    return internalError(request);
   }
 }

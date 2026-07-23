@@ -217,29 +217,27 @@ export const createPlaybookSchema = z.object({
 /**
  * Parse and validate request body with a Zod schema.
  * Returns { data, error } — if error is set, return it as the Response.
+ *
+ * Error responses use the standardised envelope from @/lib/api-response
+ * so callers never need to import that module separately.
  */
 export async function parseBody<T extends z.ZodType>(
   request: Request,
   schema: T,
 ): Promise<{ data: z.infer<T>; error?: undefined } | { data?: undefined; error: Response }> {
+  const { invalidJson, validationError } = await import("@/lib/api-response");
+
   let raw: unknown;
   try {
     raw = await request.json();
   } catch {
-    return {
-      error: Response.json({ error: "Invalid JSON body" }, { status: 400 }),
-    };
+    return { error: invalidJson(request) };
   }
 
   const result = schema.safeParse(raw);
   if (!result.success) {
     const issues = result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
-    return {
-      error: Response.json(
-        { error: "Validation failed", issues },
-        { status: 400 },
-      ),
-    };
+    return { error: validationError(request, issues) };
   }
 
   return { data: result.data };

@@ -1,6 +1,7 @@
 import { db } from "@/db";
 import { tlsTalos } from "@/db/schema";
 import { eq } from "drizzle-orm";
+import { internalError, notFound } from "@/lib/api-response";
 
 function maskApiKey(key: string | null): string | null {
   if (!key || key.length < 12) return null;
@@ -9,7 +10,7 @@ function maskApiKey(key: string | null): string | null {
 
 // GET /api/talos/:id — TALOS detail + configuration
 export async function GET(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
@@ -27,12 +28,12 @@ export async function GET(
     });
 
     if (!talos) {
-      return Response.json({ error: "TALOS not found" }, { status: 404 });
+      return notFound(request, "TALOS not found");
     }
 
     const { apiKey, ...safeTalos } = talos;
     return Response.json({ ...safeTalos, apiKeyMasked: maskApiKey(apiKey) });
   } catch {
-    return Response.json({ error: "Internal server error" }, { status: 500 });
+    return internalError(request);
   }
 }

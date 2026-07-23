@@ -5,11 +5,12 @@ import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { createAgentKeypair, fundTestnetAccount, verifyStellarSignature } from "@/lib/stellar";
 import { createTalosSchema, parseBody } from "@/lib/schemas";
+import { badRequest, forbidden, internalError } from "@/lib/api-response";
 
 // GET /api/talos — List TALOS entries with cursor-based pagination
 export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = request.nextUrl;
+    const { searchParams } = new URL(request.url);
     const cursor = searchParams.get("cursor");
     const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 1), 100);
 
@@ -87,7 +88,7 @@ export async function GET(request: NextRequest) {
 
     return Response.json({ data, nextCursor });
   } catch {
-    return Response.json({ error: "Internal server error" }, { status: 500 });
+    return internalError(request);
   }
 }
 
@@ -127,15 +128,15 @@ export async function POST(request: NextRequest) {
     // Message includes core immutable fields to prevent parameter tampering.
     const expectedMessage = `talos-genesis:${name}:${onChainId ?? "null"}:${supply}`;
     if (message !== expectedMessage) {
-      return Response.json(
-        { error: `Signature message must be exactly '${expectedMessage}'` },
-        { status: 400 },
+      return badRequest(
+        request,
+        `Signature message must be exactly '${expectedMessage}'`,
       );
     }
 
     const sigOk = await verifyStellarSignature(creatorPublicKey, message, signature);
     if (!sigOk) {
-      return Response.json({ error: "Invalid signature for creatorPublicKey" }, { status: 403 });
+      return forbidden(request, "Invalid signature for creatorPublicKey");
     }
 
     // Generate API key (tak_ prefix = TALOS API Key)
@@ -239,7 +240,6 @@ export async function POST(request: NextRequest) {
       detail: e?.detail,
       constraint: e?.constraint,
     }, null, 2));
-    const message = err instanceof Error ? err.message : "Internal server error";
-    return Response.json({ error: message }, { status: 500 });
+    return internalError(request);
   }
 }
