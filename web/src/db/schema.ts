@@ -347,6 +347,62 @@ export const tlsTokenPurchases = pgTable(
   ],
 );
 
+// ─── Stellar Transaction Finality Record ─────────────────────────
+//
+// Tracks the settlement lifecycle of every Stellar transaction Talos submits
+// or monitors.  The reconciler polls Horizon and drives each row through the
+// finality state machine until it reaches a terminal state.
+//
+// States: PENDING → CONFIRMING → CONFIRMED | FAILED | EXPIRED | NOT_FOUND
+
+export const tlsStellarTxRecords = pgTable(
+  "tls_stellar_tx_records",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+
+    // The Stellar transaction hash being tracked (unique per record)
+    txHash: text("tx_hash").notNull(),
+
+    // Which subsystem originated the tx: "commerce_job" | "token_purchase" | "other"
+    sourceType: text("source_type").notNull().default("other"),
+
+    // Opaque reference back to the originating row (job id, txHash of token purchase, etc.)
+    sourceId: text("source_id"),
+
+    // Current state-machine position
+    finalityStatus: text("finality_status").notNull().default("PENDING"),
+
+    // Ledger sequence number when the tx was submitted (if known at submission time)
+    ledgerSubmitted: integer("ledger_submitted"),
+
+    // Most recent ledger number polled; the reconciler uses this to bound re-scan
+    lastLedgerChecked: integer("last_ledger_checked"),
+
+    // Ledger in which the tx was permanently included (set when CONFIRMED)
+    confirmedLedger: integer("confirmed_ledger"),
+
+    // Running count of poll attempts (for back-off and alerting)
+    pollCount: integer("poll_count").notNull().default(0),
+
+    // Last error message from Horizon — never contains secrets or user payloads
+    lastError: text("last_error"),
+
+    // True once the reconciler has applied the downstream repair for this tx
+    repairApplied: boolean("repair_applied").notNull().default(false),
+
+    // PENDING/CONFIRMING rows older than this become EXPIRED
+    expiresAt: timestamp("expires_at", { mode: "date", precision: 3 }),
+
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { mode: "date", precision: 3 }).notNull().defaultNow().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("tls_stellar_tx_records_tx_hash_unique").on(t.txHash),
+    index("tls_stellar_tx_records_status_updated_idx").on(t.finalityStatus, t.updatedAt),
+    index("tls_stellar_tx_records_source_idx").on(t.sourceType, t.sourceId),
+  ],
+);
+
 // ─── API Key Audit Log ────────────────────────────────────────────
 
 export const tlsApiAuditLogs = pgTable(
