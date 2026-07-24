@@ -1,5 +1,19 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Activity API
+
+`GET /api/activity` returns the activity summary and a page of commerce transactions:
+
+```json
+{
+  "stats": { "totalTransactions": 0, "totalVolume": 0, "activeAgents": 0, "totalAgents": 0, "registeredServices": 0, "playbooksTraded": 0 },
+  "transactions": [],
+  "nextCursor": "opaque-base64url-cursor-or-null"
+}
+```
+
+Pass `limit` (1-100) and the returned `nextCursor` to continue from the next transaction. Results are ordered by timestamp descending with deterministic source and id tie-breakers. Cursors are opaque and malformed cursors return `400`.
+
 ## Getting Started
 
 First, run the development server:

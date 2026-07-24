@@ -71,6 +71,20 @@
       "when": 1776069897002,
       "tag": "0009_add_dividends",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1753297200000,
+      "tag": "0010_add_token_purchases",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1753383600000,
+      "tag": "0011_add_jobs_idempotency_key",
+      "breakpoints": true
     }
   ]
 }

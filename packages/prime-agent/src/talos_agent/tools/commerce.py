@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING
 
@@ -243,14 +244,43 @@ async def apply_playbook(playbook_name: str) -> dict:
     }
 
 
-# ══════════════════════��════════════════════════════════════════════
+# ── Leased job ownership ──────────────────────────────────────────
+
+# In-memory store of claimed job fencing tokens, keyed by job_id.
+# Used by claim_job / fulfill_job and the background heartbeat task.
+_claimed_jobs: dict[str, int] = {}
+_claimed_jobs_lock: asyncio.Lock | None = None
+
+
+def _get_claimed_jobs_lock() -> asyncio.Lock:
+    global _claimed_jobs_lock
+    if _claimed_jobs_lock is None:
+        _claimed_jobs_lock = asyncio.Lock()
+    return _claimed_jobs_lock
+
+
+def get_claimed_jobs_copy() -> dict[str, int]:
+    return dict(_claimed_jobs)
+
+
+async def set_claimed_job(job_id: str, fencing_token: int) -> None:
+    async with _get_claimed_jobs_lock():
+        _claimed_jobs[job_id] = fencing_token
+
+
+async def remove_claimed_job(job_id: str) -> None:
+    async with _get_claimed_jobs_lock():
+        _claimed_jobs.pop(job_id, None)
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Provider-side tools — this Talos fulfills incoming x402 jobs
 # ═══════════════════════════════════════════════════════════════════
 
 
 @tool(
     "get_pending_jobs",
-    "Check for incoming x402 service requests that Other Taloses have purchased from us. Returns pending jobs to fulfill.",
+    "Check for incoming x402 service requests that Other Taloses have purchased from us. Returns pending jobs available to fulfill.",
 )
 async def get_pending_jobs() -> dict:
     jobs = await _api.get_pending_jobs()
@@ -262,6 +292,8 @@ async def get_pending_jobs() -> dict:
             "service": j.get("serviceName"),
             "requester": j.get("requesterTalosId"),
             "payload": j.get("payload"),
+            "leased_by": j.get("leasedBy"),
+            "lease_expires_at": j.get("leaseExpiresAt"),
         }
         for j in jobs
     ]
@@ -269,8 +301,31 @@ async def get_pending_jobs() -> dict:
 
 
 @tool(
+    "claim_job",
+    "Acquire an exclusive lease on a pending x402 job so no other agent can claim it. "
+    "Returns a fencing token that must be passed to fulfill_job. "
+    "Call this before working on a job, then call fulfill_job with the result.",
+)
+async def claim_job(job_id: str, ttl_seconds: int = 300) -> dict:
+    result = await _api.claim_job(job_id, ttl_seconds=ttl_seconds)
+    if not result:
+        return {"error": f"Failed to claim job {job_id} — it may be leased by another worker"}
+    fencing_token = result.get("fencingToken")
+    if fencing_token is not None:
+        await set_claimed_job(job_id, fencing_token)
+    return {
+        "status": "claimed",
+        "job_id": job_id,
+        "fencing_token": fencing_token,
+        "lease_expires_at": result.get("leaseExpiresAt"),
+    }
+
+
+@tool(
     "fulfill_job",
-    "Submit the result for an x402 service job we received. Call this after performing the requested service (e.g. generating an image, writing copy, producing a playbook).",
+    "Submit the result for an x402 service job we received. "
+    "We must have previously claimed this job via claim_job to obtain a fencing token. "
+    "Call this after performing the requested service (e.g. generating an image, writing copy, producing a playbook).",
 )
 async def fulfill_job(job_id: str, result: str = "{}") -> dict:
     try:
@@ -278,9 +333,10 @@ async def fulfill_job(job_id: str, result: str = "{}") -> dict:
     except json.JSONDecodeError:
         result_dict = {"text": result}
 
-    response = await _api.submit_job_result(job_id, result_dict)
+    fencing_token = _claimed_jobs.get(job_id, 0)
+    response = await _api.submit_job_result(job_id, result_dict, fencing_token=fencing_token)
     if response:
-        # Report revenue — we earned money from this service
+        await remove_claimed_job(job_id)
         _db.add_activity("commerce", f"Fulfilled job {job_id}", "x402")
         return {"status": "fulfilled", "job_id": job_id}
     return {"error": f"Failed to submit result for job {job_id}"}

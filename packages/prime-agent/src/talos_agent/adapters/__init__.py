@@ -2,6 +2,17 @@
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
 from talos_agent.adapters.discord import DiscordAdapter
+from talos_agent.adapters.health import (
+    AdapterHealthReporter,
+    AdapterProbe,
+    AdapterState,
+    BrowserSessionProbe,
+    DiscordProbe,
+    HealthReport,
+    ProbeResult,
+    TelegramProbe,
+    XProbe,
+)
 from talos_agent.adapters.registry import AdapterRegistry
 from talos_agent.adapters.telegram import TelegramAdapter  # noqa: F401
 
@@ -11,4 +22,14 @@ __all__ = [
     "PublishResult",
     "AdapterRegistry",
     "DiscordAdapter",
+    # Health probes
+    "AdapterState",
+    "ProbeResult",
+    "AdapterProbe",
+    "DiscordProbe",
+    "TelegramProbe",
+    "XProbe",
+    "BrowserSessionProbe",
+    "HealthReport",
+    "AdapterHealthReporter",
 ]
