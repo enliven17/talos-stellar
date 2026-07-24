@@ -5,40 +5,43 @@
 import { z } from "zod/v4";
 import { StrKey } from "@stellar/stellar-sdk";
 
-/**
- * Zod schema for a valid Stellar asset code (1-12 alphanumeric characters).
- */
-const stellarAssetCodeSchema = z.string().min(1).max(12).regex(/^[a-zA-Z0-9]+$/);
+export const stellarAssetCodeSchema = z
+  .string()
+  .min(1, "Asset code must be at least 1 character")
+  .max(12, "Asset code must be at most 12 characters")
+  .regex(
+    /^[A-Z0-9]+$/,
+    "Asset code must contain only uppercase letters and numbers",
+  );
 
-/**
- * Zod schema for a valid Stellar public key (G...) with StrKey checksum.
- */
-const stellarPublicKeySchema = z.string().refine((key) => StrKey.isValidEd25519PublicKey(key), {
-  message: "Invalid Stellar public key",
-});
+export const stellarPublicKeySchema = z
+  .string()
+  .startsWith("G", "Stellar public key must start with 'G'")
+  .length(56, "Stellar public key must be exactly 56 characters")
+  .refine(
+    (key) => {
+      try {
+        return StrKey.isValidEd25519PublicKey(key);
+      } catch {
+        return false;
+      }
+    },
+    { message: "Invalid Stellar Ed25519 public key" },
+  );
 
-/**
- * Zod schema for a native XLM asset.
- */
-const nativeAssetSchema = z.object({
+export const stellarNativeAssetSchema = z.object({
   type: z.literal("native"),
-});
+}).strict();
 
-/**
- * Zod schema for an issued Stellar asset.
- */
-const issuedAssetSchema = z.object({
+export const stellarIssuedAssetSchema = z.object({
   type: z.literal("issued"),
   code: stellarAssetCodeSchema,
   issuer: stellarPublicKeySchema,
-});
+}).strict();
 
-/**
- * Zod schema for a Stellar asset (native or issued).
- */
 export const stellarAssetSchema = z.discriminatedUnion("type", [
-  nativeAssetSchema,
-  issuedAssetSchema,
+  stellarNativeAssetSchema,
+  stellarIssuedAssetSchema,
 ]);
 
 export const VALID_CATEGORIES = [
@@ -67,17 +70,16 @@ export const createTalosSchema = z.object({
   toneVoice: z.string().max(500).nullable().optional(),
   approvalThreshold: z.number().nonnegative().optional().default(10),
   gtmBudget: z.number().nonnegative().optional().default(200),
-  creatorPublicKey: z.string().min(1),
+  creatorPublicKey: stellarPublicKeySchema,
   signature: z.string().min(1),
   message: z.string().min(1),
-  walletPublicKey: z.string().optional(),
+  walletPublicKey: stellarPublicKeySchema.optional(),
   onChainId: z.number().int().nullable().optional(),
   agentName: z.string().max(100).nullable().optional(),
   initialPrice: z.number().nonnegative().optional().default(0),
   minPatronPulse: z.number().int().nonnegative().nullable().optional(),
   stellarAssetCode: stellarAssetCodeSchema.nullable().optional(),
   tokenSymbol: z.string().max(20).nullable().optional(),
-  // Optional commerce service
   serviceName: z.string().min(1).max(200).optional(),
   serviceDescription: z.string().max(2000).optional(),
   servicePrice: z.number().positive().max(1_000_000).optional(),
@@ -222,10 +224,9 @@ export const regenerateKeySchema = z.object({
 // --- Sign Payment (Stellar x402) ---
 
 export const signPaymentSchema = z.object({
-  payee: stellarPublicKeySchema,          // Stellar public key of payee
+  payee: stellarPublicKeySchema,
   amount: z.union([z.string(), z.number()]),
   assetCode: stellarAssetCodeSchema.optional().default("USDC"),
-  assetIssuer: stellarPublicKeySchema.optional(),
 });
 
 // --- Buy Token ---
