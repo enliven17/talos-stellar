@@ -25,16 +25,38 @@ import type {
   PaginatedResponse,
 } from "./types.js";
 
+export interface RetryPolicyOptions {
+  maxAttempts?: number;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  retryMethods?: string[];
+  retryStatusCodes?: number[];
+  jitter?: boolean;
+  random?: () => number;
+}
+
 export interface TalosClientOptions {
   baseUrl?: string;
   apiKey?: string;
+  retryPolicy?: RetryPolicyOptions;
 }
 
 export class TalosClient {
   private baseUrl: string;
   private headers: Record<string, string>;
+  private readonly retryPolicy: Required<RetryPolicyOptions>;
 
   constructor(options: TalosClientOptions = {}) {
+    const normalizedRetryMethods = options.retryPolicy?.retryMethods?.map((method) => method.toUpperCase());
+    this.retryPolicy = {
+      maxAttempts: options.retryPolicy?.maxAttempts ?? 3,
+      baseDelayMs: options.retryPolicy?.baseDelayMs ?? 100,
+      maxDelayMs: options.retryPolicy?.maxDelayMs ?? 1000,
+      retryMethods: normalizedRetryMethods ?? ["GET", "HEAD", "PUT", "DELETE", "OPTIONS"],
+      retryStatusCodes: options.retryPolicy?.retryStatusCodes ?? [429, 500, 502, 503, 504],
+      jitter: options.retryPolicy?.jitter ?? true,
+      random: options.retryPolicy?.random ?? Math.random,
+    };
     this.baseUrl = (options.baseUrl ?? "https://talos-stellar.vercel.app").replace(/\/$/, "");
     this.headers = { "Content-Type": "application/json" };
     if (options.apiKey) {
@@ -44,27 +66,107 @@ export class TalosClient {
 
   // ── Internal fetch helper ──────────────────────────────────
 
+  private shouldRetry(method: string, status: number): boolean {
+    return (
+      this.retryPolicy.retryStatusCodes.includes(status) &&
+      this.retryPolicy.retryMethods.includes(method)
+    );
+  }
+
+  private getRetryDelay(attempt: number, retryAfterHeader: string | null): number {
+    if (retryAfterHeader) {
+      const headerDelay = this.parseRetryAfter(retryAfterHeader);
+      if (headerDelay !== null) {
+        return Math.min(headerDelay, this.retryPolicy.maxDelayMs);
+      }
+    }
+
+    const exponent = Math.pow(2, attempt - 1);
+    const delay = Math.min(this.retryPolicy.baseDelayMs * exponent, this.retryPolicy.maxDelayMs);
+    if (!this.retryPolicy.jitter) {
+      return delay;
+    }
+
+    return Math.floor(this.retryPolicy.random() * delay);
+  }
+
+  private parseRetryAfter(header: string | null): number | null {
+    if (!header) return null;
+    const trimmed = header.trim();
+    const seconds = Number(trimmed);
+    if (!Number.isNaN(seconds)) {
+      return Math.max(0, seconds * 1000);
+    }
+
+    const parsedDate = Date.parse(trimmed);
+    if (!Number.isNaN(parsedDate)) {
+      const delta = parsedDate - Date.now();
+      return delta > 0 ? delta : 0;
+    }
+
+    return null;
+  }
+
+  private wait(delayMs: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) {
+      return Promise.reject(new Error("Request aborted"));
+    }
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, delayMs);
+
+      const onAbort = () => {
+        clearTimeout(timeout);
+        signal?.removeEventListener("abort", onAbort);
+        reject(new Error("Request aborted"));
+      };
+
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
   private async request<T>(
     path: string,
     init?: RequestInit & { params?: Record<string, string | number | boolean> },
   ): Promise<T> {
     let url = `${this.baseUrl}${path}`;
-    if (init?.params) {
-      const filteredParams = Object.entries(init.params)
+    const { params, ...requestInit } = init ?? {};
+    if (params) {
+      const filteredParams = Object.entries(params)
         .filter(([_, value]) => value !== undefined)
         .reduce((acc, [key, value]) => ({ ...acc, [key]: String(value) }), {});
       const qs = new URLSearchParams(filteredParams).toString();
       if (qs) url += `?${qs}`;
     }
-    const res = await fetch(url, {
-      ...init,
-      headers: { ...this.headers, ...init?.headers },
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      throw new TalosAPIError(res.status, body, path);
+
+    const method = (requestInit.method?.toString().toUpperCase() ?? "GET");
+    const signal = requestInit.signal;
+
+    for (let attempt = 1; attempt <= this.retryPolicy.maxAttempts; attempt += 1) {
+      const res = await fetch(url, {
+        ...requestInit,
+        headers: { ...this.headers, ...requestInit.headers },
+      });
+
+      if (res.ok) {
+        return res.json() as Promise<T>;
+      }
+
+      const shouldRetry = this.shouldRetry(method, res.status);
+      if (!shouldRetry || attempt === this.retryPolicy.maxAttempts) {
+        const body = await res.text();
+        throw new TalosAPIError(res.status, body, path);
+      }
+
+      const retryAfterHeader = res.headers.get("Retry-After");
+      const delay = this.getRetryDelay(attempt, retryAfterHeader);
+      await this.wait(delay, signal);
     }
-    return res.json() as Promise<T>;
+
+    throw new Error("Unexpected retry failure");
   }
 
   // ── Talos CRUD ────────────────────────────────────────────
