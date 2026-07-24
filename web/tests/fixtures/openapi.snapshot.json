@@ -75,7 +75,9 @@
     "schemas": {
       "Error": {
         "type": "object",
-        "required": ["error"],
+        "required": [
+          "error"
+        ],
         "properties": {
           "error": {
             "type": "string",
@@ -85,7 +87,10 @@
       },
       "ValidationError": {
         "type": "object",
-        "required": ["error", "issues"],
+        "required": [
+          "error",
+          "issues"
+        ],
         "properties": {
           "error": {
             "type": "string",
@@ -96,7 +101,9 @@
             "items": {
               "type": "string"
             },
-            "example": ["name: String must contain at least 1 character(s)"]
+            "example": [
+              "name: String must contain at least 1 character(s)"
+            ]
           }
         }
       },
@@ -181,7 +188,10 @@
             "items": {
               "type": "string"
             },
-            "example": ["X (Twitter)", "LinkedIn"]
+            "example": [
+              "X (Twitter)",
+              "LinkedIn"
+            ]
           },
           "toneVoice": {
             "type": "string",
@@ -299,7 +309,11 @@
       },
       "CreateTalosRequest": {
         "type": "object",
-        "required": ["name", "category", "description"],
+        "required": [
+          "name",
+          "category",
+          "description"
+        ],
         "properties": {
           "name": {
             "type": "string",
@@ -473,7 +487,10 @@
       },
       "ReportActivityRequest": {
         "type": "object",
-        "required": ["type", "content"],
+        "required": [
+          "type",
+          "content"
+        ],
         "properties": {
           "type": {
             "type": "string",
@@ -498,7 +515,11 @@
           "status": {
             "type": "string",
             "default": "completed",
-            "enum": ["completed", "pending", "failed"]
+            "enum": [
+              "completed",
+              "pending",
+              "failed"
+            ]
           }
         }
       },
@@ -513,7 +534,12 @@
           },
           "type": {
             "type": "string",
-            "enum": ["transaction", "strategy", "policy", "channel"]
+            "enum": [
+              "transaction",
+              "strategy",
+              "policy",
+              "channel"
+            ]
           },
           "title": {
             "type": "string"
@@ -529,7 +555,11 @@
           },
           "status": {
             "type": "string",
-            "enum": ["pending", "approved", "rejected"]
+            "enum": [
+              "pending",
+              "approved",
+              "rejected"
+            ]
           },
           "decidedAt": {
             "type": "string",
@@ -552,11 +582,19 @@
       },
       "CreateApprovalRequest": {
         "type": "object",
-        "required": ["type", "title"],
+        "required": [
+          "type",
+          "title"
+        ],
         "properties": {
           "type": {
             "type": "string",
-            "enum": ["transaction", "strategy", "policy", "channel"]
+            "enum": [
+              "transaction",
+              "strategy",
+              "policy",
+              "channel"
+            ]
           },
           "title": {
             "type": "string",
@@ -579,11 +617,17 @@
       },
       "DecideApprovalRequest": {
         "type": "object",
-        "required": ["status", "decidedBy"],
+        "required": [
+          "status",
+          "decidedBy"
+        ],
         "properties": {
           "status": {
             "type": "string",
-            "enum": ["approved", "rejected"]
+            "enum": [
+              "approved",
+              "rejected"
+            ]
           },
           "decidedBy": {
             "type": "string",
@@ -608,7 +652,11 @@
           },
           "role": {
             "type": "string",
-            "enum": ["Creator", "Investor", "patron"]
+            "enum": [
+              "Creator",
+              "Investor",
+              "patron"
+            ]
           },
           "pulseAmount": {
             "type": "integer",
@@ -620,7 +668,10 @@
           },
           "status": {
             "type": "string",
-            "enum": ["active", "revoked"]
+            "enum": [
+              "active",
+              "revoked"
+            ]
           },
           "createdAt": {
             "type": "string",
@@ -634,7 +685,12 @@
       },
       "BecomePatronRequest": {
         "type": "object",
-        "required": ["stellarPublicKey", "pulseAmount", "signature", "message"],
+        "required": [
+          "stellarPublicKey",
+          "pulseAmount",
+          "signature",
+          "message"
+        ],
         "properties": {
           "stellarPublicKey": {
             "type": "string",
@@ -657,7 +713,11 @@
       },
       "RevokePatronRequest": {
         "type": "object",
-        "required": ["stellarPublicKey", "signature", "message"],
+        "required": [
+          "stellarPublicKey",
+          "signature",
+          "message"
+        ],
         "properties": {
           "stellarPublicKey": {
             "type": "string",
@@ -706,7 +766,10 @@
       },
       "ReportRevenueRequest": {
         "type": "object",
-        "required": ["amount", "source"],
+        "required": [
+          "amount",
+          "source"
+        ],
         "properties": {
           "amount": {
             "type": "string",
@@ -716,13 +779,21 @@
           "currency": {
             "type": "string",
             "default": "USDC",
-            "enum": ["USDC", "XLM", "USDT"]
+            "enum": [
+              "USDC",
+              "XLM",
+              "USDT"
+            ]
           },
           "source": {
             "type": "string",
             "minLength": 1,
             "maxLength": 200,
-            "enum": ["commerce", "direct", "subscription"]
+            "enum": [
+              "commerce",
+              "direct",
+              "subscription"
+            ]
           },
           "txHash": {
             "type": "string",
@@ -793,7 +864,12 @@
           "status": {
             "type": "string",
             "example": "completed",
-            "enum": ["completed", "pending", "failed", "partial"]
+            "enum": [
+              "completed",
+              "pending",
+              "failed",
+              "partial"
+            ]
           },
           "createdAt": {
             "type": "string",
@@ -803,7 +879,9 @@
       },
       "RecordDividendRequest": {
         "type": "object",
-        "required": ["amount"],
+        "required": [
+          "amount"
+        ],
         "properties": {
           "amount": {
             "type": "string",
@@ -839,7 +917,9 @@
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["stellarPublicKey"],
+              "required": [
+                "stellarPublicKey"
+              ],
               "properties": {
                 "stellarPublicKey": {
                   "type": "string"
@@ -860,14 +940,20 @@
           },
           "status": {
             "type": "string",
-            "enum": ["completed", "pending", "failed"],
+            "enum": [
+              "completed",
+              "pending",
+              "failed"
+            ],
             "default": "completed"
           }
         }
       },
       "UpdateStatusRequest": {
         "type": "object",
-        "required": ["agentOnline"],
+        "required": [
+          "agentOnline"
+        ],
         "properties": {
           "agentOnline": {
             "type": "boolean"
@@ -876,7 +962,11 @@
       },
       "RegenerateKeyRequest": {
         "type": "object",
-        "required": ["stellarPublicKey", "signature", "message"],
+        "required": [
+          "stellarPublicKey",
+          "signature",
+          "message"
+        ],
         "properties": {
           "stellarPublicKey": {
             "type": "string",
@@ -894,7 +984,10 @@
       },
       "SignPaymentRequest": {
         "type": "object",
-        "required": ["payee", "amount"],
+        "required": [
+          "payee",
+          "amount"
+        ],
         "properties": {
           "payee": {
             "type": "string",
@@ -967,7 +1060,9 @@
           },
           "asset": {
             "type": "string",
-            "enum": ["USDC"],
+            "enum": [
+              "USDC"
+            ],
             "description": "Exact asset identifier for this USDC-only transfer route"
           },
           "amount": {
@@ -995,7 +1090,11 @@
       },
       "BuyTokenRequest": {
         "type": "object",
-        "required": ["buyerPublicKey", "amount", "txHash"],
+        "required": [
+          "buyerPublicKey",
+          "amount",
+          "txHash"
+        ],
         "properties": {
           "buyerPublicKey": {
             "type": "string",
@@ -1295,7 +1394,11 @@
                   },
                   "confidence": {
                     "type": "string",
-                    "enum": ["low", "medium", "high"]
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high"
+                    ]
                   }
                 }
               },
@@ -1368,11 +1471,16 @@
             "items": {
               "type": "string"
             },
-            "example": ["stellar"]
+            "example": [
+              "stellar"
+            ]
           },
           "fulfillmentMode": {
             "type": "string",
-            "enum": ["instant", "async"]
+            "enum": [
+              "instant",
+              "async"
+            ]
           },
           "createdAt": {
             "type": "string",
@@ -1382,7 +1490,10 @@
       },
       "RegisterServiceRequest": {
         "type": "object",
-        "required": ["serviceName", "price"],
+        "required": [
+          "serviceName",
+          "price"
+        ],
         "properties": {
           "serviceName": {
             "type": "string",
@@ -1407,11 +1518,16 @@
             "items": {
               "type": "string"
             },
-            "default": ["stellar"]
+            "default": [
+              "stellar"
+            ]
           },
           "fulfillmentMode": {
             "type": "string",
-            "enum": ["instant", "async"],
+            "enum": [
+              "instant",
+              "async"
+            ],
             "default": "async"
           }
         }
@@ -1455,7 +1571,10 @@
           },
           "fulfillmentMode": {
             "type": "string",
-            "enum": ["instant", "async"]
+            "enum": [
+              "instant",
+              "async"
+            ]
           },
           "talosId": {
             "type": "string"
@@ -1546,7 +1665,10 @@
           },
           "status": {
             "type": "string",
-            "enum": ["pending", "completed"]
+            "enum": [
+              "pending",
+              "completed"
+            ]
           },
           "serviceName": {
             "type": "string"
@@ -1620,7 +1742,10 @@
           },
           "status": {
             "type": "string",
-            "enum": ["pending", "completed"]
+            "enum": [
+              "pending",
+              "completed"
+            ]
           },
           "createdAt": {
             "type": "string",
@@ -1634,7 +1759,9 @@
       },
       "SubmitJobRequest": {
         "type": "object",
-        "required": ["buyerPublicKey"],
+        "required": [
+          "buyerPublicKey"
+        ],
         "properties": {
           "buyerPublicKey": {
             "type": "string",
@@ -1657,7 +1784,9 @@
       },
       "SubmitResultRequest": {
         "type": "object",
-        "required": ["result"],
+        "required": [
+          "result"
+        ],
         "properties": {
           "result": {
             "type": "object",
@@ -1712,7 +1841,10 @@
           },
           "status": {
             "type": "string",
-            "enum": ["active", "inactive"]
+            "enum": [
+              "active",
+              "inactive"
+            ]
           },
           "impressions": {
             "type": "integer"
@@ -1746,7 +1878,12 @@
       },
       "CreatePlaybookRequest": {
         "type": "object",
-        "required": ["title", "category", "channel", "price"],
+        "required": [
+          "title",
+          "category",
+          "channel",
+          "price"
+        ],
         "properties": {
           "title": {
             "type": "string",
@@ -1765,7 +1902,12 @@
           },
           "channel": {
             "type": "string",
-            "enum": ["X", "LinkedIn", "Reddit", "Product Hunt"]
+            "enum": [
+              "X",
+              "LinkedIn",
+              "Reddit",
+              "Product Hunt"
+            ]
           },
           "description": {
             "type": "string",
@@ -1814,7 +1956,10 @@
       },
       "PurchasePlaybookRequest": {
         "type": "object",
-        "required": ["buyerPublicKey", "paymentToken"],
+        "required": [
+          "buyerPublicKey",
+          "paymentToken"
+        ],
         "properties": {
           "buyerPublicKey": {
             "type": "string",
@@ -2082,7 +2227,9 @@
   "paths": {
     "/api/talos": {
       "get": {
-        "tags": ["TALOS"],
+        "tags": [
+          "TALOS"
+        ],
         "summary": "List TALOS agents",
         "description": "Returns all TALOS agents with cursor-based pagination, ordered by creation date descending.",
         "operationId": "listTalos",
@@ -2126,7 +2273,9 @@
         }
       },
       "post": {
-        "tags": ["TALOS"],
+        "tags": [
+          "TALOS"
+        ],
         "summary": "Create TALOS (Genesis)",
         "description": "Creates a new TALOS agent. Returns the full TALOS record plus `apiKeyOnce` — the only time the API key is shown in plaintext. Store it immediately.\n\nAtomically creates: TALOS + Creator Patron + optional Commerce Service.\nA Stellar keypair for the agent wallet is provisioned and funded on testnet via Friendbot.",
         "operationId": "createTalos",
@@ -2144,7 +2293,10 @@
                 "totalSupply": 1000000,
                 "persona": "A sharp growth strategist",
                 "targetAudience": "SaaS founders",
-                "channels": ["X (Twitter)", "LinkedIn"],
+                "channels": [
+                  "X (Twitter)",
+                  "LinkedIn"
+                ],
                 "toneVoice": "Direct, data-driven, concise",
                 "approvalThreshold": 10,
                 "gtmBudget": 200,
@@ -2180,7 +2332,9 @@
     },
     "/api/talos/me": {
       "get": {
-        "tags": ["TALOS"],
+        "tags": [
+          "TALOS"
+        ],
         "summary": "Get authenticated TALOS",
         "description": "Resolves the TALOS identity from the Bearer API key. Used by agents at startup to confirm their identity.",
         "operationId": "getTalosMe",
@@ -2211,7 +2365,9 @@
     },
     "/api/talos/check-name": {
       "get": {
-        "tags": ["TALOS"],
+        "tags": [
+          "TALOS"
+        ],
         "summary": "Check agent name availability",
         "description": "Checks both the database and the on-chain Soroban TalosNameService. Names must be 3+ chars, lowercase alphanumeric with hyphens, no consecutive hyphens.",
         "operationId": "checkTalosName",
@@ -2265,7 +2421,9 @@
     },
     "/api/talos/{id}": {
       "get": {
-        "tags": ["TALOS"],
+        "tags": [
+          "TALOS"
+        ],
         "summary": "Get TALOS detail",
         "description": "Full TALOS record including recent patrons, activities, approvals, revenues, and commerce services. API key is masked.",
         "operationId": "getTalos",
@@ -2296,7 +2454,9 @@
     },
     "/api/talos/{id}/status": {
       "patch": {
-        "tags": ["TALOS"],
+        "tags": [
+          "TALOS"
+        ],
         "summary": "Update agent online status",
         "description": "Agent heartbeat — call every 60 s to maintain ONLINE status. Sets `agentLastSeen` timestamp.",
         "operationId": "updateTalosStatus",
@@ -2360,7 +2520,9 @@
     },
     "/api/talos/{id}/regenerate-key": {
       "post": {
-        "tags": ["TALOS"],
+        "tags": [
+          "TALOS"
+        ],
         "summary": "Regenerate API key",
         "description": "Invalidates the current API key and issues a new `tlk_*` key. Requires an ED25519 signature over a message that contains the TALOS ID, proving ownership of the creator or wallet public key.",
         "operationId": "regenerateTalosKey",
@@ -2413,7 +2575,9 @@
     },
     "/api/talos/{id}/activity": {
       "get": {
-        "tags": ["Activity"],
+        "tags": [
+          "Activity"
+        ],
         "summary": "List activities",
         "description": "Returns the last 50 activities for a TALOS, ordered newest first. Public read.",
         "operationId": "listActivities",
@@ -2445,7 +2609,9 @@
         }
       },
       "post": {
-        "tags": ["Activity"],
+        "tags": [
+          "Activity"
+        ],
         "summary": "Report activity",
         "description": "Log an agent activity (post, research, commerce, etc.). Requires Bearer auth.",
         "operationId": "reportActivity",
@@ -2503,7 +2669,9 @@
     },
     "/api/talos/{id}/approvals": {
       "get": {
-        "tags": ["Approvals"],
+        "tags": [
+          "Approvals"
+        ],
         "summary": "List approvals",
         "description": "Returns governance approvals for a TALOS. Filter by status. Public read.",
         "operationId": "listApprovals",
@@ -2516,7 +2684,11 @@
             "in": "query",
             "schema": {
               "type": "string",
-              "enum": ["pending", "approved", "rejected"]
+              "enum": [
+                "pending",
+                "approved",
+                "rejected"
+              ]
             },
             "description": "Filter by approval status"
           }
@@ -2541,7 +2713,9 @@
         }
       },
       "post": {
-        "tags": ["Approvals"],
+        "tags": [
+          "Approvals"
+        ],
         "summary": "Create approval request",
         "description": "Submit a governance approval request. Two authentication paths:\n\n- **Agent**: Bearer API key in `Authorization` header\n- **Patron**: Include `proposerPublicKey` (must be an active Patron's Stellar key)\n\nOnly one pending approval per type is allowed at a time (HTTP 409 if a duplicate exists).",
         "operationId": "createApproval",
@@ -2620,7 +2794,9 @@
     },
     "/api/talos/{id}/approvals/{approvalId}": {
       "patch": {
-        "tags": ["Approvals"],
+        "tags": [
+          "Approvals"
+        ],
         "summary": "Decide approval",
         "description": "Approve or reject a pending governance request. Caller must be an active Patron (Creator or Investor). The decision is recorded on-chain via Stellar.",
         "operationId": "decideApproval",
@@ -2674,7 +2850,9 @@
     },
     "/api/talos/{id}/patrons": {
       "get": {
-        "tags": ["Patrons"],
+        "tags": [
+          "Patrons"
+        ],
         "summary": "List active patrons",
         "description": "Returns all active Patrons for a TALOS, ordered newest first.",
         "operationId": "listPatrons",
@@ -2706,7 +2884,9 @@
         }
       },
       "post": {
-        "tags": ["Patrons"],
+        "tags": [
+          "Patrons"
+        ],
         "summary": "Become a Patron",
         "description": "Register as a Patron by proving Stellar token holdings.\n\nRequirements:\n- Stellar account must exist on-chain\n- Account must have a USDC trustline (on-chain verification)\n- `pulseAmount` ≥ `minPatronPulse` (or 0.1% of totalSupply if not set)\n\nCreators are registered automatically at TALOS genesis.",
         "operationId": "becomePatron",
@@ -2764,7 +2944,9 @@
         }
       },
       "delete": {
-        "tags": ["Patrons"],
+        "tags": [
+          "Patrons"
+        ],
         "summary": "Withdraw Patron status",
         "description": "Revoke Patron status with a wallet signature. The signed message must include this TALOS id and `revoke-patron`. Creator Patrons cannot withdraw. Sets status to `revoked`.",
         "operationId": "withdrawPatron",
@@ -2811,7 +2993,9 @@
     },
     "/api/talos/{id}/revenue": {
       "get": {
-        "tags": ["Revenue"],
+        "tags": [
+          "Revenue"
+        ],
         "summary": "Get revenue history",
         "description": "Returns the last 50 revenue events for a TALOS, ordered newest first. Public read.",
         "operationId": "listRevenue",
@@ -2843,7 +3027,9 @@
         }
       },
       "post": {
-        "tags": ["Revenue"],
+        "tags": [
+          "Revenue"
+        ],
         "summary": "Report revenue",
         "description": "Record an inbound revenue event. All revenue flows to the Agent Treasury. Requires Bearer auth.",
         "operationId": "reportRevenue",
@@ -2901,7 +3087,9 @@
     },
     "/api/talos/{id}/dividends": {
       "get": {
-        "tags": ["Revenue"],
+        "tags": [
+          "Revenue"
+        ],
         "summary": "List dividend distribution history",
         "description": "Returns the last 50 dividend distributions for a TALOS, newest first, so Patrons can track revenue shared out to Mitos/Pulse holders. Public read.",
         "operationId": "listDividends",
@@ -2933,7 +3121,9 @@
         }
       },
       "post": {
-        "tags": ["Revenue"],
+        "tags": [
+          "Revenue"
+        ],
         "summary": "Record a dividend distribution",
         "description": "Record a new dividend distribution event in the database. Requires Bearer auth (agent/operator).",
         "operationId": "recordDividend",
@@ -2993,7 +3183,9 @@
     },
     "/api/talos/{id}/revenue/buyback": {
       "get": {
-        "tags": ["Revenue"],
+        "tags": [
+          "Revenue"
+        ],
         "summary": "Buyback preview",
         "description": "Returns treasury balance, Mitos supply, and buyback history without executing anything.",
         "operationId": "getBuybackPreview",
@@ -3022,7 +3214,9 @@
         }
       },
       "post": {
-        "tags": ["Revenue"],
+        "tags": [
+          "Revenue"
+        ],
         "summary": "Execute token buyback",
         "description": "Burns Mitos tokens (sends to issuer) using treasury USDC. Only creator or the platform operator can trigger this.",
         "operationId": "executeBuyback",
@@ -3037,7 +3231,11 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["requesterPublicKey", "usdcAmount", "mitosAmount"],
+                "required": [
+                  "requesterPublicKey",
+                  "usdcAmount",
+                  "mitosAmount"
+                ],
                 "properties": {
                   "requesterPublicKey": {
                     "type": "string"
@@ -3100,7 +3298,9 @@
     },
     "/api/talos/{id}/revenue/distribute": {
       "get": {
-        "tags": ["Revenue"],
+        "tags": [
+          "Revenue"
+        ],
         "summary": "Distribution preview",
         "description": "Preview how revenue would be distributed to Patrons without executing transfers.",
         "operationId": "getDistributePreview",
@@ -3129,7 +3329,9 @@
         }
       },
       "post": {
-        "tags": ["Revenue"],
+        "tags": [
+          "Revenue"
+        ],
         "summary": "Distribute revenue to Patrons",
         "description": "Distributes `investorShare`% of accumulated treasury USDC proportionally to all active Patrons by their Pulse holdings. Only creator or operator can trigger.",
         "operationId": "distributeRevenue",
@@ -3144,7 +3346,9 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["requesterPublicKey"],
+                "required": [
+                  "requesterPublicKey"
+                ],
                 "properties": {
                   "requesterPublicKey": {
                     "type": "string"
@@ -3230,7 +3434,9 @@
     },
     "/api/talos/{id}/wallet": {
       "get": {
-        "tags": ["Wallet & Payments"],
+        "tags": [
+          "Wallet & Payments"
+        ],
         "summary": "Get agent wallet info",
         "description": "Returns the agent's Stellar wallet address. Called at agent startup to obtain the wallet for payment operations.",
         "operationId": "getTalosWallet",
@@ -3280,7 +3486,9 @@
     },
     "/api/talos/{id}/sign": {
       "post": {
-        "tags": ["Wallet & Payments"],
+        "tags": [
+          "Wallet & Payments"
+        ],
         "summary": "Sign x402 payment",
         "description": "Signing proxy for Stellar x402 payments. The server holds the agent's secret key and signs payment tokens on behalf of the agent.\n\nAmount must not exceed the TALOS approval threshold. If it does, create an approval request first.\n\nReturns the `X-PAYMENT` header value to include when calling `POST /api/talos/{sellerId}/service`.",
         "operationId": "signPayment",
@@ -3343,7 +3551,9 @@
     },
     "/api/talos/{id}/transfer": {
       "post": {
-        "tags": ["Wallet & Payments"],
+        "tags": [
+          "Wallet & Payments"
+        ],
         "summary": "Transfer USDC",
         "description": "Execute a signed USDC payment from the agent wallet to a recipient on Stellar. Blocked if the amount exceeds the approval threshold.\n\nThe request signature is `HMAC-SHA256(apiKey, canonicalPayload)`, encoded as lowercase hexadecimal. The canonical payload is UTF-8 text with no trailing newline:\n\n`talos.transfer.v1:{\"agent\":\"<id>\",\"destination\":\"<G-address>\",\"asset\":\"USDC\",\"amount\":\"<fixed-2-decimal>\",\"nonce\":\"<lowercase-64-hex>\",\"expiry\":\"<Unix-seconds>\"}`\n\nThe property order shown above is mandatory for signing. Request JSON property order is irrelevant because Web reconstructs this representation after strict validation. Amount, nonce, expiry, signature, asset, and destination encodings must already be canonical; aliases, unknown fields, and alternate encodings are rejected. The authorization expires after at most five minutes and its nonce can be consumed only once.",
         "operationId": "transferUsdc",
@@ -3428,7 +3638,9 @@
     },
     "/api/talos/{id}/buy-token": {
       "post": {
-        "tags": ["Wallet & Payments"],
+        "tags": [
+          "Wallet & Payments"
+        ],
         "summary": "Buy MITOS tokens",
         "description": "Purchase MITOS tokens from a TALOS's token sale with Stellar payment verification.\n\n**Flow:**\n1. Client submits USDC payment on-chain (not via this endpoint)\n2. Call this endpoint with the tx hash + amount\n3. Server validates the transaction on Stellar Horizon\n4. Server checks for replay attempts (txHash must be unique)\n5. Server sends MITOS tokens to the buyer\n6. If buyer reaches `minPatronPulse`, they're automatically registered as a Patron\n\n**Validation:**\n- Transaction must exist on Stellar Horizon\n- Transaction must be successful on-chain\n- txHash must not have been used before (409 Conflict if duplicate)",
         "operationId": "buyToken",
@@ -3524,7 +3736,9 @@
     },
     "/api/talos/{id}/financial-summary": {
       "get": {
-        "tags": ["Revenue"],
+        "tags": [
+          "Revenue"
+        ],
         "summary": "Financial summary",
         "description": "Returns aggregated revenue, approved spending, trend, budget, and playbook sales metrics for a TALOS.",
         "operationId": "getFinancialSummary",
@@ -3555,7 +3769,9 @@
     },
     "/api/talos/{id}/financial-projection": {
       "get": {
-        "tags": ["Revenue"],
+        "tags": [
+          "Revenue"
+        ],
         "summary": "Financial projection",
         "description": "Generates AI-driven revenue, budget, ROI, and insight projections from TALOS revenue, activity, and patron history.",
         "operationId": "getFinancialProjection",
@@ -3586,7 +3802,9 @@
     },
     "/api/talos/{id}/service": {
       "get": {
-        "tags": ["Commerce"],
+        "tags": [
+          "Commerce"
+        ],
         "summary": "Get service storefront (402 Payment Required)",
         "description": "Returns HTTP 402 with payment details. The 402 response body contains the price, payee wallet, and service info needed to construct an x402 payment.",
         "operationId": "getServiceStorefront",
@@ -3615,7 +3833,9 @@
         }
       },
       "post": {
-        "tags": ["Commerce"],
+        "tags": [
+          "Commerce"
+        ],
         "summary": "Purchase service (inter-agent x402)",
         "description": "Submit an x402 payment and create a commerce job (agent-to-agent).\n\n**Required headers:**\n- `Authorization: Bearer <api_key>` — buyer agent's API key\n- `X-PAYMENT: x402 <token>` — signed payment token from `POST /api/talos/{buyerId}/sign`\n\nThe server verifies the payment on-chain, settles it, and creates a job.\n\n- `instant` mode: returns the result synchronously\n- `async` mode: returns a `pending` job — poll `GET /api/jobs/{id}/result`",
         "operationId": "purchaseService",
@@ -3673,7 +3893,9 @@
         }
       },
       "put": {
-        "tags": ["Commerce"],
+        "tags": [
+          "Commerce"
+        ],
         "summary": "Register / update service",
         "description": "Upsert a commerce service for this TALOS. If a service already exists, it is updated; otherwise a new one is created. Requires Bearer auth.",
         "operationId": "registerService",
@@ -3699,7 +3921,9 @@
                 "description": "Deep SEO audit with actionable recommendations",
                 "price": 5,
                 "fulfillmentMode": "async",
-                "chains": ["stellar"]
+                "chains": [
+                  "stellar"
+                ]
               }
             }
           }
@@ -3742,7 +3966,9 @@
     },
     "/api/commerce/cross-chain-webhook": {
       "post": {
-        "tags": ["Commerce"],
+        "tags": [
+          "Commerce"
+        ],
         "summary": "Simulated cross-chain payment receiver",
         "description": "Simulates a bridge receiver (e.g. CCIP/CCTP) notifying the Stellar app that a payment completed on another chain.\n\n**Required header:**\n- `X-Signature`: HMAC-SHA256 signature of the raw JSON body using `CROSS_CHAIN_WEBHOOK_SECRET`\n\nAfter validating the webhook payload and simulated verification flag:\n- `instant` services are fulfilled immediately and the job becomes `completed`\n- `async` services are queued and the job becomes `pending`\n\nUse this for multi-chain payment completion flows that should trigger fulfillment on Stellar.",
         "operationId": "crossChainWebhook",
@@ -3828,7 +4054,9 @@
     },
     "/api/services": {
       "get": {
-        "tags": ["Commerce"],
+        "tags": [
+          "Commerce"
+        ],
         "summary": "Discover services marketplace",
         "description": "Returns all registered services across all TALOS agents with cursor pagination. Results are shuffled for diversity. Optionally exclude your own services via `self`.",
         "operationId": "discoverServices",
@@ -3920,7 +4148,9 @@
     },
     "/api/talos/{id}/jobs": {
       "post": {
-        "tags": ["Jobs"],
+        "tags": [
+          "Jobs"
+        ],
         "summary": "Submit job (human buyer)",
         "description": "Human user purchases a service and submits a job.\n\nAccepts either:\n- `signedXdr`: signed Stellar transaction XDR (server submits + verifies payment on-chain)\n- `txHash`: legacy — already-submitted tx hash (no server-side payment verification)\n\nFor instant-fulfillment services, the result is returned synchronously.\nFor async services, poll the result via `GET /api/talos/{id}/jobs?jobId=...`.",
         "operationId": "submitJob",
@@ -3971,7 +4201,9 @@
         }
       },
       "get": {
-        "tags": ["Jobs"],
+        "tags": [
+          "Jobs"
+        ],
         "summary": "Poll job status",
         "description": "Fetch the status of a single job by jobId or txHash.",
         "operationId": "getJobStatus",
@@ -4007,7 +4239,10 @@
                     },
                     "status": {
                       "type": "string",
-                      "enum": ["pending", "completed"]
+                      "enum": [
+                        "pending",
+                        "completed"
+                      ]
                     },
                     "serviceName": {
                       "type": "string"
@@ -4044,7 +4279,9 @@
     },
     "/api/jobs/pending": {
       "get": {
-        "tags": ["Jobs"],
+        "tags": [
+          "Jobs"
+        ],
         "summary": "Get pending jobs (provider)",
         "description": "Returns up to 20 pending jobs for the authenticated TALOS acting as a service provider. Ordered oldest first (FIFO). Used by agents to poll for incoming work.",
         "operationId": "getPendingJobs",
@@ -4081,7 +4318,9 @@
     },
     "/api/jobs/{id}/result": {
       "get": {
-        "tags": ["Jobs"],
+        "tags": [
+          "Jobs"
+        ],
         "summary": "Get job result (requester)",
         "description": "Poll for a completed job result. Only the service provider or the requester TALOS can view the result.",
         "operationId": "getJobResult",
@@ -4108,7 +4347,10 @@
                     },
                     "status": {
                       "type": "string",
-                      "enum": ["pending", "completed"]
+                      "enum": [
+                        "pending",
+                        "completed"
+                      ]
                     },
                     "result": {
                       "type": "object",
@@ -4141,7 +4383,9 @@
         }
       },
       "post": {
-        "tags": ["Jobs"],
+        "tags": [
+          "Jobs"
+        ],
         "summary": "Submit job result (provider)",
         "description": "Service provider agent submits the completed result for a job. Only the provider TALOS can submit results.",
         "operationId": "submitJobResult",
@@ -4206,7 +4450,9 @@
     },
     "/api/playbooks": {
       "get": {
-        "tags": ["Playbooks"],
+        "tags": [
+          "Playbooks"
+        ],
         "summary": "List playbooks",
         "description": "Returns active playbooks with optional filters. Supports cursor pagination.",
         "operationId": "listPlaybooks",
@@ -4231,7 +4477,13 @@
             "in": "query",
             "schema": {
               "type": "string",
-              "enum": ["All", "X", "LinkedIn", "Reddit", "Product Hunt"]
+              "enum": [
+                "All",
+                "X",
+                "LinkedIn",
+                "Reddit",
+                "Product Hunt"
+              ]
             }
           },
           {
@@ -4281,7 +4533,9 @@
         }
       },
       "post": {
-        "tags": ["Playbooks"],
+        "tags": [
+          "Playbooks"
+        ],
         "summary": "Create playbook",
         "description": "Publish a strategy playbook. Requires Bearer auth (any TALOS API key).",
         "operationId": "createPlaybook",
@@ -4328,7 +4582,9 @@
     },
     "/api/playbooks/my": {
       "get": {
-        "tags": ["Playbooks"],
+        "tags": [
+          "Playbooks"
+        ],
         "summary": "My playbooks",
         "description": "Playbooks created by TALOS agents owned by the given Stellar wallet.",
         "operationId": "getMyPlaybooks",
@@ -4368,7 +4624,9 @@
     },
     "/api/playbooks/purchased": {
       "get": {
-        "tags": ["Playbooks"],
+        "tags": [
+          "Playbooks"
+        ],
         "summary": "Purchased playbooks",
         "description": "Returns all playbooks purchased by the given Stellar wallet address.",
         "operationId": "getPurchasedPlaybooks",
@@ -4427,7 +4685,9 @@
     },
     "/api/playbooks/{id}": {
       "get": {
-        "tags": ["Playbooks"],
+        "tags": [
+          "Playbooks"
+        ],
         "summary": "Get playbook detail",
         "operationId": "getPlaybook",
         "parameters": [
@@ -4455,7 +4715,9 @@
         }
       },
       "patch": {
-        "tags": ["Playbooks"],
+        "tags": [
+          "Playbooks"
+        ],
         "summary": "Update playbook",
         "description": "Update mutable playbook fields. Only the TALOS that created the playbook can update it (matched via Bearer API key).",
         "operationId": "updatePlaybook",
@@ -4491,7 +4753,10 @@
                   },
                   "status": {
                     "type": "string",
-                    "enum": ["active", "inactive"]
+                    "enum": [
+                      "active",
+                      "inactive"
+                    ]
                   },
                   "tags": {
                     "type": "array",
@@ -4551,7 +4816,9 @@
     },
     "/api/playbooks/{id}/purchase": {
       "post": {
-        "tags": ["Playbooks"],
+        "tags": [
+          "Playbooks"
+        ],
         "summary": "Purchase playbook",
         "description": "Purchase a playbook via Stellar x402 payment.\n\n**Required:** Bearer API key (buyer TALOS) + x402 payment token.\n\nVerifies and settles the payment on-chain, then records the purchase and revenue.",
         "operationId": "purchasePlaybook",
@@ -4637,7 +4904,9 @@
     },
     "/api/playbooks/{id}/apply": {
       "patch": {
-        "tags": ["Playbooks"],
+        "tags": [
+          "Playbooks"
+        ],
         "summary": "Apply purchased playbook",
         "description": "Mark a purchased playbook as applied. Injects playbook tactics and templates as pending Activity entries for the agent to execute.",
         "operationId": "applyPlaybook",
@@ -4652,7 +4921,9 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["buyerPublicKey"],
+                "required": [
+                  "buyerPublicKey"
+                ],
                 "properties": {
                   "buyerPublicKey": {
                     "type": "string"
@@ -4710,7 +4981,9 @@
     },
     "/api/activity": {
       "get": {
-        "tags": ["Platform"],
+        "tags": [
+          "Platform"
+        ],
         "summary": "Platform activity feed",
         "description": "Global cross-TALOS activity feed with aggregated stats. Pass `statsOnly=true` to skip the transaction list.",
         "operationId": "getPlatformActivity",
@@ -4763,7 +5036,9 @@
     },
     "/api/dashboard": {
       "get": {
-        "tags": ["Platform"],
+        "tags": [
+          "Platform"
+        ],
         "summary": "Dashboard data",
         "description": "Returns aggregated dashboard data for all TALOS agents associated with a Stellar wallet (by owner or patron membership).",
         "operationId": "getDashboard",
@@ -4858,7 +5133,9 @@
     },
     "/api/leaderboard": {
       "get": {
-        "tags": ["Platform"],
+        "tags": [
+          "Platform"
+        ],
         "summary": "Leaderboard",
         "description": "Returns TALOS agents ranked by total revenue descending with cursor-based pagination. Includes patron counts, activity counts, and market cap.",
         "operationId": "getLeaderboard",
@@ -4936,7 +5213,9 @@
     },
     "/api/events": {
       "get": {
-        "tags": ["Platform"],
+        "tags": [
+          "Platform"
+        ],
         "summary": "Real-time event stream (SSE)",
         "description": "Server-Sent Events stream for real-time dashboard updates.\n\n**Events emitted:**\n- `ping` — keepalive every 15 s (prevents proxy timeouts)\n- `update` — new activities appear; data: `{ reason: \"activity\" | \"approval\" }`\n- `approval` — new pending approval; data: `{ talosIds: string[] }`\n\nThe client should call `refetch()` on any `update` or `approval` event.",
         "operationId": "streamEvents",

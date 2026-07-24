@@ -5,32 +5,16 @@
 import { z } from "zod/v4";
 
 export const VALID_CATEGORIES = [
-  "Marketing",
-  "Development",
-  "Research",
-  "Design",
-  "Finance",
-  "Analytics",
-  "Operations",
-  "Sales",
-  "Support",
-  "Education",
+  "Marketing", "Development", "Research", "Design", "Finance",
+  "Analytics", "Operations", "Sales", "Support", "Education",
 ] as const;
 
 const VALID_ACTIVITY_TYPES = [
-  "post",
-  "research",
-  "reply",
-  "engagement",
-  "commerce",
-  "approval",
+  "post", "research", "reply", "engagement", "commerce", "approval",
 ] as const;
 
 const VALID_APPROVAL_TYPES = [
-  "transaction",
-  "strategy",
-  "policy",
-  "channel",
+  "transaction", "strategy", "policy", "channel",
 ] as const;
 
 // --- TALOS ---
@@ -39,13 +23,7 @@ export const createTalosSchema = z.object({
   name: z.string().min(1).max(100),
   category: z.enum(VALID_CATEGORIES),
   description: z.string().min(1).max(2000),
-  totalSupply: z
-    .number()
-    .int()
-    .positive()
-    .max(100_000_000)
-    .optional()
-    .default(1_000_000),
+  totalSupply: z.number().int().positive().max(100_000_000).optional().default(1_000_000),
   persona: z.string().max(2000).optional(),
   targetAudience: z.string().max(2000).optional(),
   channels: z.array(z.string()).optional().default([]),
@@ -103,14 +81,17 @@ const canonicalTransferAmountSchema = z
     "amount must use canonical decimal notation with exactly two fractional digits",
   )
   .refine((amount) => amount !== "0.00", "amount must be greater than zero")
-  .refine((amount) => {
-    // Compare textually so validation never rounds a protocol amount through
-    // JavaScript's floating-point number representation.
-    const [whole, fraction] = amount.split(".");
-    if (whole.length < 12) return true;
-    if (whole < "922337203685") return true;
-    return whole === "922337203685" && fraction <= "47";
-  }, "amount exceeds the Stellar maximum");
+  .refine(
+    (amount) => {
+      // Compare textually so validation never rounds a protocol amount through
+      // JavaScript's floating-point number representation.
+      const [whole, fraction] = amount.split(".");
+      if (whole.length < 12) return true;
+      if (whole < "922337203685") return true;
+      return whole === "922337203685" && fraction <= "47";
+    },
+    "amount exceeds the Stellar maximum",
+  );
 
 export const transferSchema = z
   .object({
@@ -118,30 +99,18 @@ export const transferSchema = z
     agent: z.string().min(1).max(128),
     destination: z
       .string()
-      .regex(
-        /^G[A-Z2-7]{55}$/,
-        "destination must be a canonical Stellar G-address",
-      ),
+      .regex(/^G[A-Z2-7]{55}$/, "destination must be a canonical Stellar G-address"),
     asset: z.literal("USDC"),
     amount: canonicalTransferAmountSchema,
     nonce: z
       .string()
-      .regex(
-        /^[0-9a-f]{64}$/,
-        "nonce must be 32 bytes encoded as lowercase hexadecimal",
-      ),
+      .regex(/^[0-9a-f]{64}$/, "nonce must be 32 bytes encoded as lowercase hexadecimal"),
     expiry: z
       .string()
-      .regex(
-        /^[1-9][0-9]{9,12}$/,
-        "expiry must be Unix seconds in canonical decimal notation",
-      ),
+      .regex(/^[1-9][0-9]{9,12}$/, "expiry must be Unix seconds in canonical decimal notation"),
     signature: z
       .string()
-      .regex(
-        /^[0-9a-f]{64}$/,
-        "signature must be a lowercase hexadecimal HMAC-SHA256 digest",
-      ),
+      .regex(/^[0-9a-f]{64}$/, "signature must be a lowercase hexadecimal HMAC-SHA256 digest"),
   })
   .strict();
 
@@ -190,12 +159,7 @@ export const crossChainWebhookSchema = z.object({
 
 // Full set of statuses used internally / by the server
 export const VALID_BID_STATUSES = [
-  "pending",
-  "negotiating",
-  "accepted",
-  "counter_offer",
-  "rejected",
-  "completed",
+  "pending", "negotiating", "accepted", "counter_offer", "rejected", "completed",
 ] as const;
 
 // Only these statuses may be submitted by a client in a bid payload.
@@ -235,10 +199,7 @@ export const recordDividendSchema = z.object({
   source: z.string().max(50).optional().default("revenue-share"),
   txHash: z.string().nullable().optional(),
   breakdown: z.array(dividendBreakdownEntrySchema).optional(),
-  status: z
-    .enum(["completed", "pending", "failed"])
-    .optional()
-    .default("completed"),
+  status: z.enum(["completed", "pending", "failed"]).optional().default("completed"),
 });
 
 // --- Status ---
@@ -258,7 +219,7 @@ export const regenerateKeySchema = z.object({
 // --- Sign Payment (Stellar x402) ---
 
 export const signPaymentSchema = z.object({
-  payee: z.string().min(1), // Stellar public key of payee
+  payee: z.string().min(1),               // Stellar public key of payee
   amount: z.union([z.string(), z.number()]),
   assetCode: z.string().optional().default("USDC"),
 });
@@ -266,7 +227,7 @@ export const signPaymentSchema = z.object({
 // --- Buy Token ---
 
 export const buyTokenSchema = z.object({
-  buyerPublicKey: z.string().min(1), // Stellar public key
+  buyerPublicKey: z.string().min(1),     // Stellar public key
   amount: z.number().positive(),
 });
 
@@ -294,10 +255,7 @@ export const createPlaybookSchema = z.object({
 export async function parseBody<T extends z.ZodType>(
   request: Request,
   schema: T,
-): Promise<
-  | { data: z.infer<T>; error?: undefined }
-  | { data?: undefined; error: Response }
-> {
+): Promise<{ data: z.infer<T>; error?: undefined } | { data?: undefined; error: Response }> {
   let raw: unknown;
   try {
     raw = await request.json();
@@ -309,9 +267,7 @@ export async function parseBody<T extends z.ZodType>(
 
   const result = schema.safeParse(raw);
   if (!result.success) {
-    const issues = result.error.issues.map(
-      (i) => `${i.path.join(".")}: ${i.message}`,
-    );
+    const issues = result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
     return {
       error: Response.json(
         { error: "Validation failed", issues },

@@ -14,7 +14,7 @@ import {
 // POST /api/talos/:id/transfer — Execute a signed USDC transfer on Stellar
 export async function POST(
   request: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
+  { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
@@ -25,8 +25,15 @@ export async function POST(
     const parsed = await parseBody(request, transferSchema);
     if (parsed.error) return parsed.error;
 
-    const { agent, destination, asset, amount, nonce, expiry, signature } =
-      parsed.data;
+    const {
+      agent,
+      destination,
+      asset,
+      amount,
+      nonce,
+      expiry,
+      signature,
+    } = parsed.data;
 
     // The path is authoritative. Requiring the same agent in the signed body
     // prevents a valid authorization from crossing agent boundaries.
@@ -49,9 +56,7 @@ export async function POST(
     // Reconstruct and verify the exact canonical payload. No caller-supplied
     // message is accepted, so recipient/asset/amount substitutions invalidate
     // the signature before any transfer is created.
-    if (
-      !verifyTransferSignature(signedPayload, auth.talos.apiKey!, signature)
-    ) {
+    if (!verifyTransferSignature(signedPayload, auth.talos.apiKey!, signature)) {
       return Response.json(
         { error: "Invalid transfer signature" },
         { status: 403 },
@@ -79,8 +84,7 @@ export async function POST(
     if (talos && amountValue > Number(talos.approvalThreshold)) {
       return Response.json(
         {
-          error:
-            "Amount exceeds approval threshold. Create an approval request first.",
+          error: "Amount exceeds approval threshold. Create an approval request first.",
           amount,
           threshold: Number(talos.approvalThreshold),
         },
