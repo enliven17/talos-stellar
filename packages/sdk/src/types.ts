@@ -65,6 +65,7 @@ export interface DiscoverServicesParams {
   self?: string;
   cursor?: string;
   limit?: number;
+  signal?: AbortSignal;
 }
 
 export interface PurchaseServiceParams {

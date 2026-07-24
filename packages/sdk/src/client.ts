@@ -133,7 +133,8 @@ export class TalosClient {
     init?: RequestInit & { params?: Record<string, string | number | boolean> },
   ): Promise<T> {
     let url = `${this.baseUrl}${path}`;
-    const { params, ...requestInit } = init ?? {};
+    const { params, signal, ...requestInit } = init ?? {};
+    const normalizedSignal = signal ?? undefined;
     if (params) {
       const filteredParams = Object.entries(params)
         .filter(([_, value]) => value !== undefined)
@@ -143,11 +144,11 @@ export class TalosClient {
     }
 
     const method = (requestInit.method?.toString().toUpperCase() ?? "GET");
-    const signal = requestInit.signal;
 
     for (let attempt = 1; attempt <= this.retryPolicy.maxAttempts; attempt += 1) {
       const res = await fetch(url, {
         ...requestInit,
+        ...(normalizedSignal ? { signal: normalizedSignal } : {}),
         headers: { ...this.headers, ...requestInit.headers },
       });
 
@@ -163,7 +164,7 @@ export class TalosClient {
 
       const retryAfterHeader = res.headers.get("Retry-After");
       const delay = this.getRetryDelay(attempt, retryAfterHeader);
-      await this.wait(delay, signal);
+      await this.wait(delay, normalizedSignal);
     }
 
     throw new Error("Unexpected retry failure");
