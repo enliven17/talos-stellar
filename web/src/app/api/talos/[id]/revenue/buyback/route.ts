@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
+import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsRevenues } from "@/db/schema";
 import { and, eq, sum } from "drizzle-orm";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER } from "@/lib/stellar-config";
@@ -94,13 +95,18 @@ export async function POST(
     const txHash = result.hash;
 
     // Record as negative revenue (treasury expense)
-    await db.insert(tlsRevenues).values({
-      talosId: id,
-      amount: String(-usdcAmount),
-      currency: "USDC",
-      source: "buyback",
-      txHash,
-    });
+    await withTransactionRetry(
+      async (tx) => {
+        await tx.insert(tlsRevenues).values({
+          talosId: id,
+          amount: String(-usdcAmount),
+          currency: "USDC",
+          source: "buyback",
+          txHash,
+        });
+      },
+      { category: "MONEY" }
+    );
 
     return Response.json({
       success: true,

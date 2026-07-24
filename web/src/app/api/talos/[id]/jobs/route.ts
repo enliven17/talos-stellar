@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
+import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsCommerceServices, tlsCommerceJobs, tlsRevenues } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { fulfillInstant } from "@/lib/fulfillment";
@@ -210,39 +211,42 @@ export async function POST(
         txHash,
       };
 
-      const [job] = await db.transaction(async (tx) => {
-        const [job] = await tx.insert(tlsCommerceJobs).values({
-          talosId: id,
-          requesterTalosId: `human:${buyerPublicKey}`,
-          serviceName: service.serviceName,
-          payload: payload ?? {},
-          result,
-          paymentSig: txHash,
-          txHash,
-          amount: service.price,
-          status: "completed",
-          ...(idempotencyKey ? { idempotencyKey } : {}),
-        }).returning();
+      const [job] = await withTransactionRetry(
+        async (tx) => {
+          const [job] = await tx.insert(tlsCommerceJobs).values({
+            talosId: id,
+            requesterTalosId: `human:${buyerPublicKey}`,
+            serviceName: service.serviceName,
+            payload: payload ?? {},
+            result,
+            paymentSig: txHash,
+            txHash,
+            amount: service.price,
+            status: "completed",
+            ...(idempotencyKey ? { idempotencyKey } : {}),
+          }).returning();
 
-        await tx.insert(tlsRevenues).values({
-          talosId: id,
-          amount: service.price,
-          currency: service.currency ?? "USDC",
-          source: "commerce",
-          txHash,
-        });
+          await tx.insert(tlsRevenues).values({
+            talosId: id,
+            amount: service.price,
+            currency: service.currency ?? "USDC",
+            source: "commerce",
+            txHash,
+          });
 
-        // Cache the response body for future idempotent replays.
-        if (idempotencyKey) {
-          const finalResponse = { ...responseBody, jobId: job.id };
-          await tx
-            .update(tlsCommerceJobs)
-            .set({ idempotencyResponse: finalResponse })
-            .where(eq(tlsCommerceJobs.id, job.id));
-        }
+          // Cache the response body for future idempotent replays.
+          if (idempotencyKey) {
+            const finalResponse = { ...responseBody, jobId: job.id };
+            await tx
+              .update(tlsCommerceJobs)
+              .set({ idempotencyResponse: finalResponse })
+              .where(eq(tlsCommerceJobs.id, job.id));
+          }
 
-        return [job];
-      });
+          return [job];
+        },
+        { category: "JOB" }
+      );
 
       const finalBody = { ...responseBody, jobId: job.id };
       return Response.json(finalBody, { status: 201 });
@@ -258,30 +262,33 @@ export async function POST(
       message: `Job queued. The agent will process your request and you can poll for results.`,
     };
 
-    const [job] = await db.transaction(async (tx) => {
-      const [job] = await tx.insert(tlsCommerceJobs).values({
-        talosId: id,
-        requesterTalosId: `human:${buyerPublicKey}`,
-        serviceName: service.serviceName,
-        payload: payload ?? {},
-        paymentSig: txHash,
-        txHash,
-        amount: service.price,
-        status: "pending",
-        ...(idempotencyKey ? { idempotencyKey } : {}),
-      }).returning();
+    const [job] = await withTransactionRetry(
+      async (tx) => {
+        const [job] = await tx.insert(tlsCommerceJobs).values({
+          talosId: id,
+          requesterTalosId: `human:${buyerPublicKey}`,
+          serviceName: service.serviceName,
+          payload: payload ?? {},
+          paymentSig: txHash,
+          txHash,
+          amount: service.price,
+          status: "pending",
+          ...(idempotencyKey ? { idempotencyKey } : {}),
+        }).returning();
 
-      // Cache the response body for future idempotent replays.
-      if (idempotencyKey) {
-        const finalResponse = { ...responseBody, jobId: job.id };
-        await tx
-          .update(tlsCommerceJobs)
-          .set({ idempotencyResponse: finalResponse })
-          .where(eq(tlsCommerceJobs.id, job.id));
-      }
+        // Cache the response body for future idempotent replays.
+        if (idempotencyKey) {
+          const finalResponse = { ...responseBody, jobId: job.id };
+          await tx
+            .update(tlsCommerceJobs)
+            .set({ idempotencyResponse: finalResponse })
+            .where(eq(tlsCommerceJobs.id, job.id));
+        }
 
-      return [job];
-    });
+        return [job];
+      },
+      { category: "JOB" }
+    );
 
     const finalBody = { ...responseBody, jobId: job.id };
     return Response.json(finalBody, { status: 201 });

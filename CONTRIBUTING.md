@@ -180,6 +180,41 @@ cargo test --target wasm32-unknown-unknown
 - For Python, prefer explicit types and validate changes with `uv run pytest`
 - For Rust, keep formatting standard with `cargo fmt` and validate with `cargo test`
 
+## Database Transaction Retry & Serialization Hardening
+
+Critical database state transitions (money, token purchases, patron creation, job state transitions, agent genesis) use `withTransactionRetry` from `web/src/db/db-retry.ts` to automatically recover from PostgreSQL serialization conflicts (`40001`), deadlocks (`40P01`), lock timeouts (`55P03`), and transient connection failures.
+
+### Environment Configuration
+
+- `DB_TRANSACTION_RETRY_ENABLED`: Controls transaction retry behavior (default: `true`). Set to `false` to disable retries instantly.
+- `DB_TRANSACTION_RETRY_MAX_RETRIES`: Maximum number of retry attempts (default: `5`).
+- `DB_TRANSACTION_RETRY_INITIAL_DELAY_MS`: Initial exponential backoff delay in milliseconds (default: `50`).
+- `DB_TRANSACTION_RETRY_MAX_DELAY_MS`: Maximum exponential backoff cap in milliseconds (default: `1000`).
+
+### Operational Signals & Observability
+
+Retries emit structured Pino log events with domain categories (`MONEY`, `TOKEN`, `PATRON`, `JOB`, `GENESIS`):
+
+- `db_transaction_retry_attempt` (`logger.warn`): Logged when a retryable serialization/connection error triggers a retry attempt.
+- `db_transaction_retry_success` (`logger.info`): Logged when a transaction succeeds after prior failed attempts.
+- `db_transaction_retry_exhausted` (`logger.error`): Logged when maximum retry attempts are exceeded.
+
+Sensitive data (keys, passphrases, raw payloads) are excluded from log context.
+
+### Local Verification
+
+To run unit and concurrency contention tests:
+
+```bash
+pnpm --filter web exec vitest run tests/db-retry.unit.test.ts tests/db-retry.contention.test.ts
+```
+
+### Rollback Guidance
+
+If operational issues or database performance degradation occur:
+1. Set `DB_TRANSACTION_RETRY_ENABLED=false` in `web/.env.local` or application environment variables.
+2. Restart the web server. This immediately falls back to single-attempt database transactions without requiring application redeployments or code rollbacks.
+
 ## Pull Request Workflow
 
 1. Create a branch from the latest `main`
