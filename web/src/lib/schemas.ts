@@ -138,6 +138,26 @@ export const submitBidSchema = z.object({
   status: z.enum(CLIENT_BID_STATUSES).optional(),
 });
 
+// --- Job Lease ---
+
+export const claimJobSchema = z.object({
+  ttlSeconds: z.number().int().positive().max(600).optional().default(300),
+});
+
+export const heartbeatJobSchema = z.object({
+  fencingToken: z.number().int().nonnegative(),
+});
+
+export const releaseJobSchema = z.object({
+  fencingToken: z.number().int().nonnegative(),
+});
+
+// Updated job result schema that includes fencing token
+export const submitJobResultSchema = z.object({
+  result: z.record(z.string(), z.unknown()),
+  fencingToken: z.number().int().nonnegative(),
+});
+
 // --- Revenue ---
 
 export const reportRevenueSchema = z.object({
