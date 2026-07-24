@@ -259,8 +259,41 @@ class TalosAPIClient:
             return data if isinstance(data, list) else data.get("jobs", [])
         return []
 
-    async def submit_job_result(self, job_id: str, result: dict) -> dict | None:
-        r = await self._post(f"/api/jobs/{job_id}/result", json={"result": result})
+    async def claim_job(self, job_id: str, ttl_seconds: int = 300) -> dict | None:
+        """Acquire a lease on a pending job. Returns the fencing token on success."""
+        r = await self._post(
+            f"/api/jobs/{job_id}/claim",
+            json={"ttlSeconds": ttl_seconds},
+        )
+        if r.status_code == 200:
+            return r.json()
+        return None
+
+    async def heartbeat_job(self, job_id: str, fencing_token: int) -> dict | None:
+        """Extend the lease on a claimed job. Returns renewed expiry on success."""
+        r = await self._post(
+            f"/api/jobs/{job_id}/heartbeat",
+            json={"fencingToken": fencing_token},
+        )
+        if r.status_code == 200:
+            return r.json()
+        return None
+
+    async def release_job(self, job_id: str, fencing_token: int) -> dict | None:
+        """Release a lease on a claimed job."""
+        r = await self._post(
+            f"/api/jobs/{job_id}/release",
+            json={"fencingToken": fencing_token},
+        )
+        if r.status_code == 200:
+            return r.json()
+        return None
+
+    async def submit_job_result(self, job_id: str, result: dict, fencing_token: int = 0) -> dict | None:
+        r = await self._post(
+            f"/api/jobs/{job_id}/result",
+            json={"result": result, "fencingToken": fencing_token},
+        )
         if r.status_code in (200, 201):
             return r.json()
         return None

@@ -596,6 +596,28 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             except asyncio.TimeoutError:
                 pass
 
+    async def job_heartbeat_task():
+        """Extend leases on claimed jobs periodically."""
+        from talos_agent.tools.commerce import get_claimed_jobs_copy
+        backoff = DurableBackoff(task_name="job_heartbeat", db=db, base_delay=settings.job_heartbeat_interval)
+        while not shutdown_event.is_set():
+            try:
+                claimed = get_claimed_jobs_copy()
+                for job_id, fencing_token in claimed.items():
+                    result = await api.heartbeat_job(job_id, fencing_token)
+                    if not result:
+                        logger.warning("job_lease_heartbeat_failed", job_id=job_id)
+                backoff.success()
+            except Exception as e:
+                logger.debug(f"Job heartbeat error: {e}")
+                backoff.failure()
+
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=backoff.next_delay())
+                break
+            except asyncio.TimeoutError:
+                pass
+
     async def activity_flush_task():
         """Flush buffered activity logs to Web API."""
         backoff = DurableBackoff(task_name="activity_flush", db=db, base_delay=30)
@@ -768,6 +790,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         asyncio.create_task(agent_cycle_task(), name="agent_cycle"),
         asyncio.create_task(polling_task(), name="polling"),
         asyncio.create_task(heartbeat_task(), name="heartbeat"),
+        asyncio.create_task(job_heartbeat_task(), name="job_heartbeat"),
         asyncio.create_task(activity_flush_task(), name="activity_flush"),
         asyncio.create_task(learning_cycle_task(), name="learning_cycle"),
         asyncio.create_task(dividend_distribution_task(), name="dividend_distribution"),

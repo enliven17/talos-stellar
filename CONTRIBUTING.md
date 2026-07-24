@@ -148,6 +148,11 @@ pnpm test:unit
 pnpm test:e2e
 ```
 
+Any PR that changes `web/drizzle/**` or `web/src/db/**` is validated by the `Web Migrations CI`
+workflow, which applies your migrations to an ephemeral Postgres instance. See
+[`MIGRATIONS.md`](./MIGRATIONS.md) for what it checks, how to reproduce it locally, and rollback
+guidance.
+
 ### Prime Agent
 
 ```bash

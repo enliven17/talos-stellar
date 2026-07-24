@@ -23,6 +23,10 @@ import type {
   TransferParams,
   TransferResponse,
   PaginatedResponse,
+  CursorPage,
+  CursorRequestOptions,
+  ActivityPage,
+  ActivityPageOptions,
 } from "./types.js";
 
 export interface RetryPolicyOptions {
@@ -170,11 +174,18 @@ export class TalosClient {
     throw new Error("Unexpected retry failure");
   }
 
+  private async requestPage<T>(
+    path: string,
+    options?: CursorRequestOptions,
+  ): Promise<CursorPage<T>> {
+    const { signal, ...params } = options ?? {};
+    return this.request(path, { params, signal });
+  }
+
   // ── Talos CRUD ────────────────────────────────────────────
 
-  async listTaloses(params?: { cursor?: string; limit?: number; signal?: AbortSignal }): Promise<PaginatedResponse<Talos>> {
-    const { signal, ...query } = params ?? {};
-    return this.request("/api/talos", { params: query, signal });
+  async listTaloses(params?: CursorRequestOptions): Promise<CursorPage<Talos>> {
+    return this.requestPage("/api/talos", params);
   }
 
   async getTalos(id: string): Promise<TalosDetail> {
@@ -194,9 +205,9 @@ export class TalosClient {
 
   // ── Activity ───────────────────────────────────────────────
 
-  async listActivities(params?: { cursor?: string; limit?: number; statsOnly?: boolean; signal?: AbortSignal }): Promise<any> {
+  async listActivities(params?: ActivityPageOptions): Promise<ActivityPage> {
     const { signal, ...query } = params ?? {};
-    return this.request("/api/activity", { params: query, signal });
+    return this.request<ActivityPage>("/api/activity", { params: query, signal });
   }
 
   async reportActivity(talosId: string, params: ReportActivityParams): Promise<Activity> {
@@ -260,9 +271,9 @@ export class TalosClient {
     });
   }
 
-  async discoverServices(params?: DiscoverServicesParams): Promise<PaginatedResponse<CommerceService>> {
+  async discoverServices(params?: DiscoverServicesParams): Promise<CursorPage<CommerceService>> {
     const { signal, ...query } = params ?? {};
-    return this.request("/api/services", { params: query as any, signal });
+    return this.requestPage("/api/services", { ...query, signal });
   }
 
   async purchaseService(
@@ -379,8 +390,8 @@ export class TalosClient {
 
   // ── Leaderboard ────────────────────────────────────────────
 
-  async getLeaderboard(params?: { cursor?: string; limit?: number }): Promise<PaginatedResponse<LeaderboardEntry>> {
-    return this.request("/api/leaderboard", { params });
+  async getLeaderboard(params?: CursorRequestOptions): Promise<CursorPage<LeaderboardEntry>> {
+    return this.requestPage("/api/leaderboard", params);
   }
 
   // ── Playbooks ──────────────────────────────────────────────
@@ -389,10 +400,8 @@ export class TalosClient {
     category?: string;
     channel?: string;
     search?: string;
-    cursor?: string;
-    limit?: number;
-  }): Promise<PaginatedResponse<Playbook>> {
-    return this.request("/api/playbooks", { params });
+  } & CursorRequestOptions): Promise<CursorPage<Playbook>> {
+    return this.requestPage("/api/playbooks", params);
   }
 
   async createPlaybook(params: CreatePlaybookParams): Promise<Playbook> {

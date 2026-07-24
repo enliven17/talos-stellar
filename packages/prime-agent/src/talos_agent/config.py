@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     browser_headless: bool = Field(default=False, description="Run browser in headless mode")
     auto_repay_loans: bool = Field(default=False, description="Enable automatic loan repayment from treasury")
 
+    # Job leasing
+    job_lease_ttl: int = Field(default=300, description="Seconds for a claimed job lease TTL")
+    job_heartbeat_interval: int = Field(default=60, description="Seconds between job lease heartbeats")
+
     # Dividend distribution
     dividend_distribution_interval: int = Field(default=3600, description="Seconds between dividend distribution checks")
     dividend_usdc_threshold: Decimal = Field(default=Decimal("100"), description="USDC threshold to trigger dividend distribution")
