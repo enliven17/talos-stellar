@@ -240,6 +240,89 @@ describe("TalosClient - Request/Response Behavior", () => {
     });
   });
 
+it("should fetch one activity page with typed cursor response", async () => {
+    const mockPage = {
+      stats: {
+        totalTransactions: 1,
+        totalVolume: 100,
+        activeAgents: 2,
+        totalAgents: 5,
+        registeredServices: 3,
+        playbooksTraded: 0,
+      },
+      transactions: [
+        {
+          id: "txn-1",
+          type: "service",
+          sellerName: "Seller",
+          sellerAgent: "seller-agent",
+          buyerName: "Buyer",
+          buyerAgent: "buyer-agent",
+          itemName: "Service Pack",
+          amount: 100,
+          currency: "USDC",
+          status: "completed",
+          timestamp: "2026-07-24T12:00:00.000Z",
+          txHash: "ABC123",
+        },
+      ],
+      nextCursor: "2026-07-24T11:00:00.000Z",
+    };
+
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => mockPage,
+    } as Response);
+
+    const result = await client.listActivities({ limit: 5, cursor: "2026-07-24T13:00:00.000Z" });
+
+    const [[url]] = vi.mocked(fetch).mock.calls;
+    expect(url).toContain("http://localhost:3000/api/activity");
+    expect(url).toContain("cursor=2026-07-24T13%3A00%3A00.000Z");
+    expect(url).toContain("limit=5");
+    expect(result).toEqual(mockPage);
+  });
+
+  it("should pass abort signal through activity page requests", async () => {
+    const controller = new AbortController();
+    vi.mocked(fetch).mockRejectedValueOnce(new Error("Request aborted"));
+
+    await expect(client.listActivities({ signal: controller.signal })).rejects.toThrow("Request aborted");
+    expect(fetch).toHaveBeenCalledWith(
+      "http://localhost:3000/api/activity",
+      expect.objectContaining({ signal: controller.signal }),
+    );
+  });
+
+  it("should request activity pages with statsOnly and pagination params", async () => {
+    const mockPage = {
+      stats: {
+        totalTransactions: 0,
+        totalVolume: 0,
+        activeAgents: 0,
+        totalAgents: 0,
+        registeredServices: 0,
+        playbooksTraded: 0,
+      },
+      transactions: [],
+      nextCursor: null,
+    };
+
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => mockPage,
+    } as Response);
+
+    const result = await client.listActivities({ limit: 5, cursor: "2026-07-24T13:00:00.000Z", statsOnly: true });
+
+    const [[url]] = vi.mocked(fetch).mock.calls;
+    expect(url).toContain("http://localhost:3000/api/activity");
+    expect(url).toContain("cursor=2026-07-24T13%3A00%3A00.000Z");
+    expect(url).toContain("limit=5");
+    expect(url).toContain("statsOnly=true");
+    expect(result).toEqual(mockPage);
+  });
+
   describe("Malformed JSON Response", () => {
     it("should handle invalid JSON in response", async () => {
       vi.mocked(fetch).mockResolvedValue({
@@ -248,7 +331,7 @@ describe("TalosClient - Request/Response Behavior", () => {
           throw new SyntaxError("Unexpected token < in JSON");
         },
       } as unknown as Response);
-
+      
       await expect(client.getTalos("1")).rejects.toThrow(SyntaxError);
     });
 
