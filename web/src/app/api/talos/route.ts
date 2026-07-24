@@ -1,10 +1,11 @@
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPatrons, tlsCommerceServices } from "@/db/schema";
 import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { createAgentKeypair, fundTestnetAccount, verifyStellarSignature } from "@/lib/stellar";
 import { createTalosSchema, parseBody } from "@/lib/schemas";
+import { withTimeout, TimeoutError } from "@/lib/timeout";
 
 // GET /api/talos — List TALOS entries with cursor-based pagination
 export async function GET(request: NextRequest) {
@@ -13,7 +14,8 @@ export async function GET(request: NextRequest) {
     const cursor = searchParams.get("cursor");
     const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 1), 100);
 
-    const patronCount = db
+    // Add timeout for patron count query
+    const patronCountQuery = db
       .select({
         talosId: tlsPatrons.talosId,
         count: sql<number>`count(*)::int`.as("count"),
@@ -21,6 +23,23 @@ export async function GET(request: NextRequest) {
       .from(tlsPatrons)
       .groupBy(tlsPatrons.talosId)
       .as("patronCount");
+
+    let patronCount;
+    try {
+      patronCount = await withTimeout(patronCountQuery, {
+        timeoutMs: 10000,
+        errorMessage: "Talos list patron count query timeout",
+      });
+    } catch (error) {
+      if (error instanceof TimeoutError) {
+        return Response.json(
+          { error: "Query timeout. Please try again with a simpler query.", details: error.message },
+          { status: 408 },
+        );
+      }
+      console.error("Talos list query error:", error);
+      return Response.json({ error: "Internal server error" }, { status: 500 });
+    }
 
     const conditions = [];
     if (cursor) {
