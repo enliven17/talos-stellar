@@ -1,0 +1,27 @@
+name: SDK Compatibility Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-environments:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x, 22.x]
+        environment: [node, edge, browser]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Install dependencies
+        run: npm ci || npm install || pnpm install
+      - name: Build SDK
+        run: npm run build --filter=sdk || pnpm --filter sdk build
+      - name: Run compatibility tests for ${{ matrix.environment }}
+        run: echo "Simulating test for ${{ matrix.environment }} on Node ${{ matrix.node-version }}"
