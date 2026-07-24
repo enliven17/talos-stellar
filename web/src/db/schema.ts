@@ -12,6 +12,58 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
+// ─── Benchmark Runs ───────────────────────────────────────────────
+
+export const tlsBenchmarkRuns = pgTable(
+  "tls_benchmark_runs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    suite: text("suite").notNull(),
+    config: jsonb("config").notNull(),
+    summary: jsonb("summary").notNull(),
+    status: text("status").notNull().default("completed"),
+    ciRun: boolean("ci_run").notNull().default(false),
+    commitSha: text("commit_sha"),
+    branch: text("branch"),
+    startedAt: timestamp("started_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tls_benchmark_runs_suite_started_at_idx").on(t.suite, t.startedAt),
+    index("tls_benchmark_runs_commit_sha_idx").on(t.commitSha),
+  ],
+);
+
+export const tlsBenchmarkResults = pgTable(
+  "tls_benchmark_results",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    runId: text("run_id").notNull().references(() => tlsBenchmarkRuns.id, { onDelete: "cascade" }),
+    label: text("label").notNull(),
+    passed: boolean("passed").notNull(),
+    meanMs: numeric("mean_ms", { precision: 18, scale: 4 }).notNull(),
+    medianMs: numeric("median_ms", { precision: 18, scale: 4 }).notNull(),
+    stddevMs: numeric("stddev_ms", { precision: 18, scale: 4 }).notNull(),
+    minMs: numeric("min_ms", { precision: 18, scale: 4 }).notNull(),
+    maxMs: numeric("max_ms", { precision: 18, scale: 4 }).notNull(),
+    variance: numeric("variance", { precision: 10, scale: 6 }).notNull(),
+    percentiles: jsonb("percentiles").notNull(),
+    meanMemoryMb: numeric("mean_memory_mb", { precision: 10, scale: 2 }).notNull(),
+    peakMemoryMb: numeric("peak_memory_mb", { precision: 10, scale: 2 }).notNull(),
+    meanCpuPercent: numeric("mean_cpu_percent", { precision: 6, scale: 2 }).notNull(),
+    peakCpuPercent: numeric("peak_cpu_percent", { precision: 6, scale: 2 }).notNull(),
+    thresholdViolations: jsonb("threshold_violations"),
+    sampleCount: integer("sample_count").notNull().default(0),
+    durationMs: integer("duration_ms").notNull().default(0),
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tls_benchmark_results_run_id_idx").on(t.runId),
+    index("tls_benchmark_results_label_passed_idx").on(t.label, t.passed),
+  ],
+);
+
 // ─── TALOS (Agent Corporation) ────────────────────────────────────
 
 export const tlsTalos = pgTable(

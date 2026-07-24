@@ -146,7 +146,10 @@ pnpm build
 pnpm lint
 pnpm test:unit
 pnpm test:e2e
+pnpm test:bench       # Run performance benchmarks
 ```
+
+See [BENCHMARKS.md](./BENCHMARKS.md) for the benchmark system documentation.
 
 Any PR that changes `web/drizzle/**` or `web/src/db/**` is validated by the `Web Migrations CI`
 workflow, which applies your migrations to an ephemeral Postgres instance. See

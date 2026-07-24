@@ -11,6 +11,7 @@
     "test:unit": "vitest run tests/health.test.ts tests/*.unit.test.ts tests/sse.test.ts",
     "test:e2e": "vitest run tests/api-e2e.test.ts",
     "test:openapi": "vitest run tests/openapi-snapshot.test.ts",
+    "test:bench": "vitest run src/area/devx/__tests__/",
     "openapi:snapshot": "tsx scripts/write-openapi-snapshot.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",

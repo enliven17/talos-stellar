@@ -63,6 +63,20 @@ To cross-reference: filter both log streams by the same ID.
 | Web logs | Vercel dashboard → Functions tab → Log drain |
 | Agent errors | Sentry dashboard → `talos-stellar-agent` project |
 | Agent logs | Railway dashboard → Deployment logs |
+| Benchmark logs | `BENCHMARK_LOG_LEVEL`-controlled pino logger in `area/devx/logger.ts` |
+| Benchmark artifacts | JSON files in `.benchmarks/` directory (configurable via `BENCHMARK_ARTIFACT_DIR`) |
+
+## Benchmark Observability
+
+The benchmark system in `web/src/area/devx/` provides its own observability layer:
+
+- **Privacy-safe logging**: Sensitive fields (API keys, secrets, tokens) are automatically redacted in benchmark log output via pattern matching in `sanitizeForLogging()`.
+- **Structured benchmark events**: Every benchmark run, result, and threshold violation is logged as structured JSON via pino.
+- **Resource tracking**: Memory (heap used) and CPU usage are sampled per iteration via the `ResourceTracker` class, which wraps `process.memoryUsage()` and `process.cpuUsage()`.
+- **CI correlation**: When `CI=true`, benchmark logs include `commitSha` and `branch` from `GITHUB_SHA`/`GITHUB_REF_NAME`, linking performance data to specific commits.
+- **Artifact persistence**: Full benchmark results (including percentiles, sample data, and threshold results) are persisted as JSON files for trend analysis.
+
+See [BENCHMARKS.md](./BENCHMARKS.md) for complete documentation.
 
 ## Pagination
 
