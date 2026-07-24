@@ -22,11 +22,48 @@ use soroban_sdk::{
 // ── Data Types ──────────────────────────────────────────────────────
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AdminAction {
+    SetRegistryContract(Address),
+    SetAdmin(Address),
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProposalStatus {
+    Scheduled,
+    Executed,
+    Cancelled,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimelockProposal {
+    pub id: u64,
+    pub action: AdminAction,
+    pub eta: u64,
+    pub status: ProposalStatus,
+    pub scheduled_at: u64,
+    pub scheduled_by: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimelockConfig {
+    pub min_delay: u64,
+    pub grace_period: u64,
+}
+
+#[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     NameRecord(String), // name → talos_id
     TalosName(u32),     // talos_id → name
     RegistryContract,
+    Admin,
+    TimelockConfig,
+    TimelockProposal(u64),
+    NextTimelockId,
 }
 
 #[contracterror]
@@ -34,17 +71,73 @@ pub enum DataKey {
 pub enum ContractError {
     AlreadyInitialized = 1,
     UnauthorizedCaller = 2,
+    TimelockEnabled = 3,
 }
 
 // ── Events ──────────────────────────────────────────────────────────
 //
 // Event schema (topics → data):
 //   name_reg : (symbol, talos_id: u32) → (name: String, owner: Address)
+//   reg_upd  : (symbol,)               → (old_registry: Address, new_registry: Address)
+//   tl_sch   : (symbol, proposal_id: u64) → (action: AdminAction, eta: u64, proposer: Address)
+//   tl_exec  : (symbol, proposal_id: u64) → (action: AdminAction, executor: Address)
+//   tl_cnl   : (symbol, proposal_id: u64) → (action: AdminAction, canceller: Address)
+//   tl_cfg   : (symbol,)               → (old_min_delay: u64, new_min_delay: u64, grace_period: u64)
 
 fn emit_name_registered(env: &Env, talos_id: u32, name: String, owner: Address) {
     let topics = (symbol_short!("name_reg"), talos_id);
     env.events().publish(topics, (name, owner));
 }
+
+fn emit_registry_updated(env: &Env, old_registry: Address, new_registry: Address) {
+    let topics = (symbol_short!("reg_upd"),);
+    env.events().publish(topics, (old_registry, new_registry));
+}
+
+fn emit_timelock_scheduled(
+    env: &Env,
+    proposal_id: u64,
+    action: &AdminAction,
+    eta: u64,
+    proposer: Address,
+) {
+    let topics = (symbol_short!("tl_sch"), proposal_id);
+    env.events().publish(topics, (action.clone(), eta, proposer));
+}
+
+fn emit_timelock_executed(
+    env: &Env,
+    proposal_id: u64,
+    action: &AdminAction,
+    executor: Address,
+) {
+    let topics = (symbol_short!("tl_exec"), proposal_id);
+    env.events().publish(topics, (action.clone(), executor));
+}
+
+fn emit_timelock_cancelled(
+    env: &Env,
+    proposal_id: u64,
+    action: &AdminAction,
+    canceller: Address,
+) {
+    let topics = (symbol_short!("tl_cnl"), proposal_id);
+    env.events().publish(topics, (action.clone(), canceller));
+}
+
+fn emit_timelock_config_changed(
+    env: &Env,
+    old_min_delay: u64,
+    new_min_delay: u64,
+    grace_period: u64,
+) {
+    let topics = (symbol_short!("tl_cfg"),);
+    env.events()
+        .publish(topics, (old_min_delay, new_min_delay, grace_period));
+}
+
+const DEFAULT_GRACE_PERIOD: u64 = 604_800; // 7 days in seconds
+const MAX_MIN_DELAY: u64 = 2_592_000; // 30 days in seconds
 
 // ── Validation ──────────────────────────────────────────────────────
 fn validate_name(name: &String) -> bool {
@@ -92,7 +185,7 @@ fn validate_name(name: &String) -> bool {
 /// This constant is embedded in the WASM binary at compile time and is
 /// therefore immutable once deployed; it cannot be altered by any admin
 /// call, storage write, or cross-contract invocation.
-pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 0, 0);
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 1, 0);
 
 #[contract]
 pub struct TalosNameService;
@@ -189,6 +282,210 @@ impl TalosNameService {
         e.storage()
             .persistent()
             .set(&DataKey::RegistryContract, &registry_id);
+    }
+
+    fn set_registry_contract_internal(e: &Env, new_registry_id: Address) {
+        let old: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RegistryContract)
+            .expect("Registry contract not initialized");
+
+        e.storage()
+            .persistent()
+            .set(&DataKey::RegistryContract, &new_registry_id);
+
+        emit_registry_updated(e, old, new_registry_id);
+    }
+
+    /// Set or transfer admin role for TalosNameService.
+    pub fn set_admin(e: Env, new_admin: Address) {
+        if let Some(admin) = e.storage().persistent().get::<_, Address>(&DataKey::Admin) {
+            admin.require_auth();
+        }
+        e.storage().persistent().set(&DataKey::Admin, &new_admin);
+    }
+
+    /// Update the registered TalosRegistry contract address.
+    ///
+    /// Requires admin authorization. If timelock is enabled (`min_delay > 0`),
+    /// this action must be scheduled and executed via `execute_action`.
+    pub fn set_registry_contract(e: Env, new_registry_id: Address) {
+        let admin: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Admin not configured");
+        admin.require_auth();
+
+        let config = Self::get_timelock_config(e.clone());
+        if config.min_delay > 0 {
+            panic_with_error!(&e, ContractError::TimelockEnabled);
+        }
+
+        Self::set_registry_contract_internal(&e, new_registry_id);
+    }
+
+    // ── Timelock Administration ─────────────────────────────────────
+
+    /// Configure timelock parameter settings (`min_delay` and `grace_period`).
+    pub fn set_timelock_config(e: Env, min_delay: u64, grace_period: u64) {
+        let admin: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Admin not configured");
+        admin.require_auth();
+
+        if grace_period == 0 {
+            panic!("Grace period must be positive");
+        }
+        if min_delay > MAX_MIN_DELAY {
+            panic!("Min delay exceeds maximum limit");
+        }
+
+        let old_config = Self::get_timelock_config(e.clone());
+
+        let new_config = TimelockConfig {
+            min_delay,
+            grace_period,
+        };
+
+        e.storage()
+            .persistent()
+            .set(&DataKey::TimelockConfig, &new_config);
+
+        emit_timelock_config_changed(&e, old_config.min_delay, min_delay, grace_period);
+    }
+
+    /// Retrieve active timelock configuration.
+    pub fn get_timelock_config(e: Env) -> TimelockConfig {
+        e.storage()
+            .persistent()
+            .get(&DataKey::TimelockConfig)
+            .unwrap_or(TimelockConfig {
+                min_delay: 0,
+                grace_period: DEFAULT_GRACE_PERIOD,
+            })
+    }
+
+    /// Schedule an administrative action for future execution.
+    pub fn schedule_action(e: Env, action: AdminAction, delay: u64) -> u64 {
+        let admin: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Admin not configured");
+        admin.require_auth();
+
+        let config = Self::get_timelock_config(e.clone());
+        if delay < config.min_delay {
+            panic!("Delay less than minimum required delay");
+        }
+
+        let id: u64 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::NextTimelockId)
+            .unwrap_or(1);
+
+        let now = e.ledger().timestamp();
+        let eta = now.saturating_add(delay);
+
+        let proposal = TimelockProposal {
+            id,
+            action: action.clone(),
+            eta,
+            status: ProposalStatus::Scheduled,
+            scheduled_at: now,
+            scheduled_by: admin.clone(),
+        };
+
+        e.storage()
+            .persistent()
+            .set(&DataKey::TimelockProposal(id), &proposal);
+        e.storage()
+            .persistent()
+            .set(&DataKey::NextTimelockId, &(id + 1));
+
+        emit_timelock_scheduled(&e, id, &action, eta, admin);
+        id
+    }
+
+    /// Execute a scheduled action after its timelock ETA has matured.
+    pub fn execute_action(e: Env, proposal_id: u64) {
+        let mut proposal: TimelockProposal = e
+            .storage()
+            .persistent()
+            .get(&DataKey::TimelockProposal(proposal_id))
+            .expect("Timelock proposal not found");
+
+        if proposal.status != ProposalStatus::Scheduled {
+            panic!("Proposal not active");
+        }
+
+        let now = e.ledger().timestamp();
+        if now < proposal.eta {
+            panic!("Timelock delay not met");
+        }
+
+        let config = Self::get_timelock_config(e.clone());
+        if now > proposal.eta.saturating_add(config.grace_period) {
+            panic!("Proposal expired");
+        }
+
+        match &proposal.action {
+            AdminAction::SetRegistryContract(new_registry_id) => {
+                Self::set_registry_contract_internal(&e, new_registry_id.clone());
+            }
+            AdminAction::SetAdmin(new_admin) => {
+                e.storage()
+                    .persistent()
+                    .set(&DataKey::Admin, new_admin);
+            }
+        }
+
+        proposal.status = ProposalStatus::Executed;
+        e.storage()
+            .persistent()
+            .set(&DataKey::TimelockProposal(proposal_id), &proposal);
+
+        let executor = proposal.scheduled_by.clone();
+        emit_timelock_executed(&e, proposal_id, &proposal.action, executor);
+    }
+
+    /// Cancel a scheduled action.
+    pub fn cancel_action(e: Env, proposal_id: u64) {
+        let admin: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Admin not configured");
+        admin.require_auth();
+
+        let mut proposal: TimelockProposal = e
+            .storage()
+            .persistent()
+            .get(&DataKey::TimelockProposal(proposal_id))
+            .expect("Timelock proposal not found");
+
+        if proposal.status != ProposalStatus::Scheduled {
+            panic!("Proposal not active");
+        }
+
+        proposal.status = ProposalStatus::Cancelled;
+        e.storage()
+            .persistent()
+            .set(&DataKey::TimelockProposal(proposal_id), &proposal);
+
+        emit_timelock_cancelled(&e, proposal_id, &proposal.action, admin);
+    }
+
+    /// Retrieve a timelock proposal by ID.
+    pub fn get_timelock_proposal(e: Env, proposal_id: u64) -> Option<TimelockProposal> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::TimelockProposal(proposal_id))
     }
 
     /// Resolve a name to a Talos ID.
@@ -363,7 +660,7 @@ mod tests {
     #[test]
     fn version_returns_compile_time_constant() {
         let (_env, _registry_contract, _contract_id, _registry_client, client) = setup();
-        assert_eq!(client.version(), (1u32, 0u32, 0u32));
+        assert_eq!(client.version(), (1u32, 1u32, 0u32));
     }
 
     #[test]
@@ -736,8 +1033,133 @@ mod tests {
 
     #[test]
     fn name_of_returns_none_for_unknown_talos_id() {
-        let (env, _registry_contract, _contract_id, _registry_client, client) = setup();
+        let (_env, _registry_contract, _contract_id, _registry_client, client) = setup();
 
         assert!(client.name_of(&999).is_none());
+    }
+
+    // ── Name Service Timelock unit tests ──────────────────────────────
+
+    use soroban_sdk::testutils::Ledger as _;
+
+    #[test]
+    fn name_service_timelock_schedule_execute_registry_update() {
+        let (env, registry_contract, contract_id, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_timelock_config",
+                    args: (3600u64, 86400u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_timelock_config(&3600, &86400);
+
+        let new_registry = Address::generate(&env);
+        let action = AdminAction::SetRegistryContract(new_registry.clone());
+
+        let proposal_id = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "schedule_action",
+                    args: (action.clone(), 3600u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .schedule_action(&action, &3600);
+
+        assert_eq!(proposal_id, 1);
+
+        // Early execution must fail
+        assert!(client.try_execute_action(&proposal_id).is_err());
+
+        // Advance to ETA
+        env.ledger().with_mut(|li| {
+            li.timestamp += 3600;
+        });
+
+        client.execute_action(&proposal_id);
+
+        let prop = client.get_timelock_proposal(&proposal_id).unwrap();
+        assert_eq!(prop.status, ProposalStatus::Executed);
+    }
+
+    #[test]
+    fn name_service_timelock_direct_call_guarded() {
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_timelock_config",
+                    args: (3600u64, 86400u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_timelock_config(&3600, &86400);
+
+        let new_registry = Address::generate(&env);
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_registry_contract",
+                    args: (new_registry.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_set_registry_contract(&new_registry);
+
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn name_service_timelock_cancellation() {
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
+
+        let new_registry = Address::generate(&env);
+        let action = AdminAction::SetRegistryContract(new_registry);
+
+        let proposal_id = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "schedule_action",
+                    args: (action.clone(), 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .schedule_action(&action, &0);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "cancel_action",
+                    args: (proposal_id,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .cancel_action(&proposal_id);
+
+        let prop = client.get_timelock_proposal(&proposal_id).unwrap();
+        assert_eq!(prop.status, ProposalStatus::Cancelled);
+        assert!(client.try_execute_action(&proposal_id).is_err());
     }
 }
