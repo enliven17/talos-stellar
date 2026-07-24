@@ -189,6 +189,13 @@ cargo test --target wasm32-unknown-unknown
 5. Open a pull request using the template in [`.github/PULL_REQUEST_TEMPLATE.md`](./.github/PULL_REQUEST_TEMPLATE.md)
 6. Link the issue in your PR description, for example `Closes #39`
 
+## Releases
+
+Versioning, changelogs, and tagging for `web`, `sdk`, `agent`, and `contracts` are automated —
+see [`RELEASES.md`](./RELEASES.md). You don't need to do anything for this beyond writing
+[Conventional Commits](https://www.conventionalcommits.org/) subjects (`feat: ...`, `fix: ...`,
+etc.) in your PRs; version bumps are computed from those.
+
 ## Issue and PR Templates
 
 Use the templates already included in the repo when filing new work:
