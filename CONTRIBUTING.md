@@ -26,7 +26,7 @@ rustup target add wasm32-unknown-unknown
 
 - `web/` - Next.js application, API routes, and frontend
 - `packages/prime-agent/` - Python agent runtime
-- `contracts/` - Soroban smart contracts and deploy scripts
+- `contracts/` - Soroban smart contracts and deploy scripts (see `contracts/EVENTS.md` for the event schema)
 - `packages/openclaw/` - skill definitions and agent helper code
 
 ## Setup

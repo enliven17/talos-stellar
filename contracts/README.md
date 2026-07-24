@@ -2,6 +2,8 @@
 
 Stellar-based smart contracts for the Talos Protocol, built with Rust and the Soroban SDK.
 
+See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
+
 ## Contracts
 
 ### 1. TalosRegistry
