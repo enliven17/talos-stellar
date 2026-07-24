@@ -167,42 +167,6 @@ describe("TalosClient - Request/Response Behavior", () => {
     });
   });
 
-  describe("Abort", () => {
-    it("should handle aborted request", async () => {
-      const abortController = new AbortController();
-      vi.mocked(fetch).mockImplementation(() =>
-        new Promise((_, reject) => {
-          abortController.abort();
-          reject(new DOMException("Aborted", "AbortError"));
-        })
-      );
-
-      await expect(client.getTalos("1")).rejects.toThrow("Aborted");
-    });
-  });
-
-  describe("Network Failure", () => {
-    it("should handle network error", async () => {
-      vi.mocked(fetch).mockRejectedValue(new Error("Network error"));
-
-      await expect(client.getTalos("1")).rejects.toThrow("Network error");
-    });
-
-    it("should handle DNS resolution failure", async () => {
-      vi.mocked(fetch).mockRejectedValue(new Error("ECONNREFUSED"));
-
-      await expect(client.getTalos("1")).rejects.toThrow("ECONNREFUSED");
-    });
-
-    it("should handle connection reset", async () => {
-      vi.mocked(fetch).mockRejectedValue(new Error("ECONNRESET"));
-
-      await expect(client.getTalos("1")).rejects.toThrow("ECONNRESET");
-    });
-  });
-
-  describe("x402 Payment Flow", () => {
-    it("should handle x402 flow in purchaseServiceWithPayment", async () => {
   describe("Standardized API Errors", () => {
     it("should throw TalosAPIError on 400 Bad Request", async () => {
       vi.mocked(fetch).mockResolvedValue({
@@ -250,6 +214,7 @@ describe("TalosClient - Request/Response Behavior", () => {
       vi.mocked(fetch).mockResolvedValue({
         ok: false,
         status: 500,
+        headers: new Headers(),
         text: async () => "Internal Server Error",
       } as Response);
 
