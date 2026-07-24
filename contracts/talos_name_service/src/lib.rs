@@ -80,11 +80,42 @@ fn validate_name(name: &String) -> bool {
 
 // ── Contract ────────────────────────────────────────────────────────
 
+/// Compile-time interface version of TalosNameService.
+///
+/// Format: `(major, minor, patch)` following Semantic Versioning.
+///
+/// Bump rules:
+/// - **major** — incompatible ABI change (removed/renamed entry-points, changed argument types)
+/// - **minor** — backwards-compatible new entry-point or return-field added
+/// - **patch** — bug-fix with no observable ABI change
+///
+/// This constant is embedded in the WASM binary at compile time and is
+/// therefore immutable once deployed; it cannot be altered by any admin
+/// call, storage write, or cross-contract invocation.
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 0, 0);
+
 #[contract]
 pub struct TalosNameService;
 
 #[contractimpl]
 impl TalosNameService {
+    /// Return the contract's interface version as `(major, minor, patch)`.
+    ///
+    /// The value is a compile-time constant baked into the WASM binary.
+    /// It is **not** stored in ledger state and cannot be altered by any
+    /// administrator, upgrade, or cross-contract call after deployment.
+    ///
+    /// Clients should call this method to verify ABI compatibility before
+    /// invoking other entry-points. A change in `major` signals a breaking
+    /// change; a change in `minor` adds new entry-points while remaining
+    /// backwards compatible; `patch` carries bug-fixes only.
+    ///
+    /// # Returns
+    /// `(major: u32, minor: u32, patch: u32)` — currently `(1, 0, 0)`.
+    pub fn version(_e: Env) -> (u32, u32, u32) {
+        CONTRACT_VERSION
+    }
+
     /// Register a name for a Talos.
     ///
     /// # Arguments
@@ -325,6 +356,62 @@ mod tests {
                 },
             }])
             .register_name(owner, &talos_id, name);
+    }
+
+    // ── version() tests ──────────────────────────────────────────────
+
+    #[test]
+    fn version_returns_compile_time_constant() {
+        let (_env, _registry_contract, _contract_id, _registry_client, client) = setup();
+        assert_eq!(client.version(), (1u32, 0u32, 0u32));
+    }
+
+    #[test]
+    fn version_is_idempotent() {
+        let (_env, _registry_contract, _contract_id, _registry_client, client) = setup();
+        // Calling version() multiple times must always return the same value.
+        assert_eq!(client.version(), client.version());
+    }
+
+    #[test]
+    fn version_is_unaffected_by_state_changes() {
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name = s(&env, "vega");
+
+        let before = client.version();
+
+        // Register a name — a storage write must not affect the version constant.
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &name,
+        );
+
+        let after = client.version();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn version_matches_contract_version_constant() {
+        // Verify that the public CONTRACT_VERSION constant and the on-chain
+        // entry-point are in sync, so tooling that reads the constant directly
+        // agrees with what the deployed WASM reports.
+        let (_env, _registry_contract, _contract_id, _registry_client, client) = setup();
+        let (maj, min, patch) = client.version();
+        assert_eq!((maj, min, patch), CONTRACT_VERSION);
     }
 
     #[test]

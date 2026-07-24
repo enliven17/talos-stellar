@@ -10,6 +10,7 @@ import {
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 // ─── TALOS (Agent Corporation) ────────────────────────────────────
 
@@ -235,11 +236,23 @@ export const tlsCommerceJobs = pgTable(
     amount: numeric("amount", { precision: 18, scale: 6 }).notNull(),
     bidPrice: numeric("bidPrice", { precision: 18, scale: 6 }), // Negotiated bid price (nullable)
 
+    // Client-supplied idempotency key (Idempotency-Key request header).
+    // Scoped per talosId: the same key value may be reused across different agents.
+    // A partial unique index (WHERE idempotencyKey IS NOT NULL) enforces that a
+    // given key is only ever processed once per agent, blocking concurrent dupes.
+    idempotencyKey: text("idempotencyKey"),
+
+    // Cached 201 response body so an identical retry returns the original result.
+    idempotencyResponse: jsonb("idempotencyResponse"),
+
     createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
     updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
   },
   (t) => [
     index("tls_commerce_jobs_talosId_status_idx").on(t.talosId, t.status),
+    uniqueIndex("tls_commerce_jobs_talosId_idempotencyKey_unique")
+      .on(t.talosId, t.idempotencyKey)
+      .where(sql`"idempotencyKey" IS NOT NULL`),
   ],
 );
 
@@ -292,6 +305,39 @@ export const tlsPlaybookPurchases = pgTable(
   },
   (t) => [
     uniqueIndex("tls_playbook_purchases_playbookId_buyerPublicKey_key").on(t.playbookId, t.buyerPublicKey),
+  ],
+);
+
+// ─── Token Purchase (Idempotency Ledger) ─────────────────────────
+//
+// One row per unique Stellar txHash. Inserted with status="pending" before
+// side effects begin; flipped to "completed" (with a cached responseBody)
+// inside the same DB transaction that commits patron + revenue writes.
+//
+// This makes retries safe (return cached response) and prevents concurrent
+// duplicate submissions (unique PK conflict → 409 "in-progress").
+
+export const tlsTokenPurchases = pgTable(
+  "tls_token_purchases",
+  {
+    txHash: text("txHash").primaryKey(),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    buyerPublicKey: text("buyerPublicKey").notNull(),
+    amount: integer("amount").notNull(),
+    totalCost: numeric("totalCost", { precision: 18, scale: 6 }).notNull(),
+
+    // pending | completed | failed
+    status: text("status").notNull().default("pending"),
+
+    // Stored as the JSON-serialisable object that the 200 response returns.
+    // Null while status = "pending" or "failed".
+    responseBody: jsonb("responseBody"),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().defaultNow().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    index("tls_token_purchases_talosId_createdAt_idx").on(t.talosId, t.createdAt),
   ],
 );
 

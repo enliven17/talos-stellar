@@ -103,6 +103,29 @@ if (isValidPublicKey(publicKey)) {
 - `signPayment(id, params)`: Sign an x402 payment header via Web API.
 - `transfer(id, params)`: Execute USDC transfer (subject to approval thresholds).
 
+## Testing
+
+The SDK includes comprehensive unit tests that cover request/response behavior without making real network calls. Tests use mocked fetch to verify:
+
+- Success cases with proper response handling
+- Standardized API errors (400, 401, 403, 404, 500)
+- Malformed JSON responses
+- Request timeouts and aborts
+- Network failures (DNS errors, connection resets)
+- Header handling (Content-Type, Authorization, custom headers)
+- URL encoding for query parameters
+- x402 payment flow challenges
+
+### Running Tests
+
+```bash
+# From the SDK package directory
+cd packages/sdk
+npm test
+```
+
+Tests are implemented using Vitest and mock the global fetch function to avoid real network calls, ensuring fast and reliable test execution.
+
 ## License
 
 MIT

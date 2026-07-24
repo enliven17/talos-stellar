@@ -83,6 +83,22 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
       },
     },
     schemas: {
+      HealthStatus: {
+        type: "object",
+        required: ["ok", "checks", "ts"],
+        properties: {
+          ok: { type: "boolean", description: "True when all dependency checks pass", example: true },
+          checks: {
+            type: "object",
+            required: ["db", "stellar"],
+            properties: {
+              db: { type: "string", enum: ["ok", "error"], example: "ok" },
+              stellar: { type: "string", enum: ["ok", "error"], example: "ok" },
+            },
+          },
+          ts: { type: "string", format: "date-time", example: "2026-07-23T19:00:00.000Z" },
+        },
+      },
       Error: {
         type: "object",
         required: ["error"],
@@ -2853,6 +2869,112 @@ Verifies and settles the payment on-chain, then records the purchase and revenue
             },
           },
           "500": { $ref: "#/components/responses/InternalError" },
+        },
+      },
+    },
+    // ─── HEALTH ───────────────────────────────────────────────────────
+    "/api/health/live": {
+      get: {
+        tags: ["Platform"],
+        summary: "Liveness probe",
+        description: `Returns 200 immediately if the Node.js process is running.
+
+Performs **no external I/O** — no database query, no Stellar Horizon call.
+
+Use for:
+- Kubernetes \`livenessProbe\` — restart the container when this fails.
+- Docker \`HEALTHCHECK\` — cheap process-alive signal.
+
+A failure here means the process itself is broken; the orchestrator should restart it. Dependency failures belong in the readiness probe.`,
+        operationId: "getLiveness",
+        responses: {
+          "200": {
+            description: "Process is alive",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["status", "uptime", "ts"],
+                  properties: {
+                    status: { type: "string", enum: ["ok"], example: "ok" },
+                    uptime: { type: "integer", description: "Process uptime in seconds", example: 3600 },
+                    ts: { type: "string", format: "date-time", example: "2026-07-23T19:00:00.000Z" },
+                  },
+                },
+                example: { status: "ok", uptime: 3600, ts: "2026-07-23T19:00:00.000Z" },
+              },
+            },
+            headers: {
+              "Cache-Control": { schema: { type: "string", enum: ["no-store"] } },
+            },
+          },
+        },
+      },
+    },
+    "/api/health/ready": {
+      get: {
+        tags: ["Platform"],
+        summary: "Readiness probe",
+        description: `Returns 200 when all dependencies are reachable, 503 when any check fails.
+
+Checks run **in parallel** with bounded timeouts:
+- \`db\` — \`SELECT 1\` against Postgres (2 s timeout)
+- \`stellar\` — \`GET\` to Stellar Horizon (\`STELLAR_HORIZON_URL\` env var, or testnet fallback) (3 s timeout)
+
+Use for:
+- Kubernetes \`readinessProbe\` — remove the pod from the load-balancer when degraded.
+- UptimeRobot / Better Uptime monitoring on a 1-minute interval.
+
+The liveness probe (\`GET /api/health/live\`) is unaffected by dependency failures.`,
+        operationId: "getReadiness",
+        responses: {
+          "200": {
+            description: "All dependencies reachable",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/HealthStatus" },
+                example: { ok: true, checks: { db: "ok", stellar: "ok" }, ts: "2026-07-23T19:00:00.000Z" },
+              },
+            },
+            headers: {
+              "Cache-Control": { schema: { type: "string", enum: ["no-store"] } },
+            },
+          },
+          "503": {
+            description: "One or more dependencies unreachable",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/HealthStatus" },
+                example: { ok: false, checks: { db: "error", stellar: "ok" }, ts: "2026-07-23T19:00:00.000Z" },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/api/health": {
+      get: {
+        tags: ["Platform"],
+        summary: "Health check (legacy alias)",
+        description: "Backward-compatible alias for `GET /api/health/ready`. Existing monitors wired to this URL continue to work. Prefer the explicit sub-paths for new integrations.",
+        operationId: "getHealth",
+        responses: {
+          "200": {
+            description: "All dependencies reachable",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/HealthStatus" },
+              },
+            },
+          },
+          "503": {
+            description: "One or more dependencies unreachable",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/HealthStatus" },
+              },
+            },
+          },
         },
       },
     },

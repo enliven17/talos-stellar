@@ -12,7 +12,9 @@ Stellar-based smart contracts for the Talos Protocol, built with Rust and the So
   - Kernel policy management (approval thresholds, GTM budget)
   - Pulse token metadata storage
   - 3% protocol fee to protocol wallet on creation
-  - Events: `talos_created`, `patron_updated`
+  - **Two-step admin transfer** (`propose_admin` / `accept_admin` / `cancel_admin_transfer`)
+  - **Interface version query** (`version()` — immutable, compile-time constant)
+  - Events: `talos_created`, `patron_updated`, `adm_prp`, `adm_acc`, `adm_cnl`
 
 ### 2. TalosNameService
 - **Purpose**: Human-readable name registration for Talos IDs
@@ -20,6 +22,7 @@ Stellar-based smart contracts for the Talos Protocol, built with Rust and the So
   - Name → Talos ID mapping (e.g., "marketbot" → 42)
   - Validation: 3-32 chars, lowercase alphanumeric + hyphens
   - No consecutive hyphens allowed
+  - **Interface version query** (`version()` — immutable, compile-time constant)
   - Events: `name_registered`
 
 ### 3. TalosGovernance
@@ -284,6 +287,9 @@ Both contracts emit typed Soroban events on every meaningful state change. Off-c
 | `tls_crt` | `(symbol_short!("tls_crt"), creator: Address)` | `(talos_id: u32, name: String, category: String)` | `create_talos` success |
 | `pat_upd` | `(symbol_short!("pat_upd"), talos_id: u32)` | `(creator: Address, creator_share: u32, investor_share: u32)` | `update_patron` success |
 | `fee_chg` | `(symbol_short!("fee_chg"),)` | `(old_bps: u32, new_bps: u32)` | `set_protocol_fee` success |
+| `adm_prp` | `(symbol_short!("adm_prp"),)` | `(current: Address, proposed: Address)` | `propose_admin` success |
+| `adm_acc` | `(symbol_short!("adm_acc"),)` | `(new_admin: Address,)` | `accept_admin` success |
+| `adm_cnl` | `(symbol_short!("adm_cnl"),)` | `(cancelled: Address,)` | `cancel_admin_transfer` success |
 
 **Filtering examples**
 
@@ -316,6 +322,135 @@ Both contracts emit typed Soroban events on every meaningful state change. Off-c
 - The first topic is always the event-type symbol so generic listeners can dispatch on it.
 - Filterable entities (creator, talos_id) are placed in subsequent topic slots so Soroban's topic-indexed subscriptions can narrow results without fetching all events.
 - Event data carries the full context needed to act without a follow-up RPC call.
+
+## Two-step Admin Transfer
+
+The protocol wallet (admin) of `TalosRegistry` can only be changed through a two-step handover. A direct one-call replacement is intentionally impossible to prevent permanent loss of control due to a typo or a compromised key.
+
+### Flow
+
+```
+current admin                      new admin
+      │                                │
+      │── propose_admin(new_admin) ──► │  (PendingAdmin written; adm_prp emitted)
+      │                                │
+      │                 accept_admin() ◄─── │  (ProtocolWallet updated; PendingAdmin removed; adm_acc emitted)
+      │                                │
+```
+
+### Entry-points
+
+| Entry-point | Auth required | Effect |
+|-------------|--------------|--------|
+| `propose_admin(new_admin)` | Current admin | Writes `new_admin` to `PendingAdmin` storage. Replaces any existing pending nomination silently. |
+| `accept_admin()` | Pending admin | Moves `PendingAdmin` → `ProtocolWallet`; removes `PendingAdmin`. |
+| `cancel_admin_transfer()` | Current admin | Removes `PendingAdmin`; nomination is voided. |
+| `pending_admin()` | None (read-only) | Returns `Option<Address>` — `Some` if a transfer is in progress, `None` otherwise. |
+
+### Storage compatibility
+
+`PendingAdmin` is a new persistent storage key added to the `DataKey` enum. Existing deployed instances that have never called `propose_admin` will simply have no entry for this key — `pending_admin()` returns `None` and no behaviour changes. The key is written only by `propose_admin` and removed by `accept_admin` or `cancel_admin_transfer`. There are no migrations required.
+
+| Key | Type | Lifecycle |
+|-----|------|-----------|
+| `ProtocolWallet` | `Address` | Set by `initialize`; updated by `accept_admin`. Never removed. |
+| `PendingAdmin` *(new)* | `Address` | Written by `propose_admin`; removed by `accept_admin` or `cancel_admin_transfer`. Absent when no transfer is in progress. |
+
+### CLI example
+
+```bash
+# Step 1 — current admin nominates a new admin
+stellar contract invoke \
+  --id "$REGISTRY_CONTRACT" \
+  --source current-admin-key \
+  --network testnet \
+  -- \
+  propose_admin \
+  --new_admin GNEW...
+
+# Step 2 — new admin accepts (must be signed by the new key)
+stellar contract invoke \
+  --id "$REGISTRY_CONTRACT" \
+  --source new-admin-key \
+  --network testnet \
+  -- \
+  accept_admin
+
+# Optional — current admin cancels if the nomination was incorrect
+stellar contract invoke \
+  --id "$REGISTRY_CONTRACT" \
+  --source current-admin-key \
+  --network testnet \
+  -- \
+  cancel_admin_transfer
+```
+
+## Interface Versioning
+
+Both `TalosRegistry` and `TalosNameService` expose a `version()` entry-point that returns the contract's interface version as `(major: u32, minor: u32, patch: u32)`.
+
+```bash
+# Query TalosRegistry version
+stellar contract invoke \
+  --id "$REGISTRY_CONTRACT" \
+  --network testnet \
+  -- \
+  version
+# → [1, 0, 0]
+
+# Query TalosNameService version
+stellar contract invoke \
+  --id "$NAME_SERVICE_CONTRACT" \
+  --network testnet \
+  -- \
+  version
+# → [1, 0, 0]
+```
+
+### Design guarantees
+
+| Property | Behaviour |
+|----------|-----------|
+| **Compile-time constant** | The value is baked into the WASM binary as `pub const CONTRACT_VERSION: (u32, u32, u32)`. It is never read from nor written to ledger storage. |
+| **Immutable after deployment** | No admin call, `set_*` method, storage write, or cross-contract invocation can change the version of an already-deployed instance. |
+| **Spoofing impossible** | Because the value is a hardcoded constant (not a storage key), a compromised admin key cannot forge a version number. |
+| **Free to call** | `version()` consumes no meaningful ledger resources and does not require authorization. |
+
+### Semantic versioning bump rules
+
+| Version field | When to bump |
+|---------------|--------------|
+| `major` | Incompatible ABI change: an entry-point is removed, renamed, or its argument types change in a breaking way. Clients **must** re-validate before upgrading. |
+| `minor` | Backwards-compatible addition: a new entry-point is added or a new optional return field is appended. Existing clients continue to work without changes. |
+| `patch` | Bug-fix only, no observable ABI change. Safe to upgrade transparently. |
+
+### SDK / client compatibility check (JavaScript example)
+
+```typescript
+import { Contract, SorobanRpc } from "@stellar/stellar-sdk";
+
+const REQUIRED = { major: 1, minor: 0 };
+
+async function assertCompatible(contractId: string, server: SorobanRpc.Server) {
+  const contract = new Contract(contractId);
+  const result = await server.simulateTransaction(
+    // build a version() invocation …
+  );
+  const [major, minor] = parseVersionResult(result);
+  if (major !== REQUIRED.major) {
+    throw new Error(
+      `Breaking contract change: expected major=${REQUIRED.major}, got ${major}`
+    );
+  }
+  if (minor < REQUIRED.minor) {
+    throw new Error(
+      `Contract too old: need minor>=${REQUIRED.minor}, got ${minor}`
+    );
+  }
+}
+```
+
+> **Rule of thumb**: pin to `major` and enforce a minimum `minor`. Treat any `major` change as requiring an explicit SDK upgrade and re-audit.
 
 ## Testing
 

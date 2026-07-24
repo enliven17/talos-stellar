@@ -65,6 +65,9 @@ pub enum DataKey {
     CreatorOf(u32),
     ProtocolWallet,
     ProtocolFeeBps,
+    /// Holds the address nominated by the current admin but not yet accepted.
+    /// Presence of this key means a transfer is in progress; absence means none.
+    PendingAdmin,
 }
 
 // ── Events ──────────────────────────────────────────────────────────
@@ -73,6 +76,9 @@ pub enum DataKey {
 //   tls_crt : (symbol, creator: Address)   → (talos_id: u32, name: String, category: String)
 //   pat_upd : (symbol, talos_id: u32)      → (creator: Address, creator_share: u32, investor_share: u32)
 //   fee_chg : (symbol,)                    → (old_bps: u32, new_bps: u32)
+//   adm_prp : (symbol,)                    → (current: Address, proposed: Address)
+//   adm_acc : (symbol,)                    → (new_admin: Address)
+//   adm_cnl : (symbol,)                    → (cancelled: Address)
 
 fn emit_talos_created(env: &Env, talos_id: u32, creator: Address, name: String, category: String) {
     let topics = (symbol_short!("tls_crt"), creator);
@@ -96,6 +102,27 @@ fn emit_protocol_fee_changed(env: &Env, old_bps: u32, new_bps: u32) {
     env.events().publish(topics, (old_bps, new_bps));
 }
 
+/// Emitted when the current admin nominates a new admin.
+/// `proposed` is the address that must call `accept_admin` to complete the transfer.
+fn emit_admin_proposed(env: &Env, current: Address, proposed: Address) {
+    let topics = (symbol_short!("adm_prp"),);
+    env.events().publish(topics, (current, proposed));
+}
+
+/// Emitted when the pending admin accepts the transfer.
+/// `new_admin` is now the active protocol wallet / admin.
+fn emit_admin_accepted(env: &Env, new_admin: Address) {
+    let topics = (symbol_short!("adm_acc"),);
+    env.events().publish(topics, (new_admin,));
+}
+
+/// Emitted when the current admin cancels an in-progress transfer.
+/// `cancelled` is the address whose nomination was revoked.
+fn emit_admin_cancelled(env: &Env, cancelled: Address) {
+    let topics = (symbol_short!("adm_cnl"),);
+    env.events().publish(topics, (cancelled,));
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 fn validate_patron_shares(patron: &Patron) {
@@ -109,6 +136,20 @@ fn validate_patron_shares(patron: &Patron) {
 
 const PROTOCOL_FEE_BPS: u32 = 300; // 3%
 const MAX_PROTOCOL_FEE_BPS: u32 = 10_000; // 100%
+
+/// Compile-time interface version of TalosRegistry.
+///
+/// Format: `(major, minor, patch)` following Semantic Versioning.
+///
+/// Bump rules:
+/// - **major** — incompatible ABI change (removed/renamed entry-points, changed argument types)
+/// - **minor** — backwards-compatible new entry-point or return-field added
+/// - **patch** — bug-fix with no observable ABI change
+///
+/// This constant is embedded in the WASM binary at compile time and is
+/// therefore immutable once deployed; it cannot be altered by any admin
+/// call, storage write, or cross-contract invocation.
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 0, 0);
 
 // ── Contract ────────────────────────────────────────────────────────
 
@@ -363,6 +404,126 @@ impl TalosRegistry {
         emit_protocol_fee_changed(&e, old_bps, fee_bps);
     }
 
+    // ── Two-step admin transfer ──────────────────────────────────────
+
+    /// Nominate `new_admin` as the next protocol wallet (admin).
+    ///
+    /// The transfer is **not** immediate. The nominated address must call
+    /// `accept_admin` to confirm and complete the handover. Until then the
+    /// current admin retains all privileges.
+    ///
+    /// Calling `propose_admin` while a transfer is already pending silently
+    /// replaces the old nomination with the new one (no separate cancellation
+    /// step is required for the proposer). The replacement emits a fresh
+    /// `adm_prp` event without emitting `adm_cnl`.
+    ///
+    /// # Authorization
+    /// Requires the current admin (`ProtocolWallet`) to sign the transaction.
+    ///
+    /// # Panics
+    /// - `"Contract not initialized"` — if `initialize` has not been called.
+    pub fn propose_admin(e: Env, new_admin: Address) {
+        let current: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::ProtocolWallet)
+            .expect("Contract not initialized");
+
+        current.require_auth();
+
+        e.storage()
+            .persistent()
+            .set(&DataKey::PendingAdmin, &new_admin);
+
+        emit_admin_proposed(&e, current, new_admin);
+    }
+
+    /// Complete the pending admin transfer.
+    ///
+    /// The nominated address (stored under `PendingAdmin`) must call this
+    /// method and authorize it. On success:
+    ///   1. `ProtocolWallet` is updated to the caller's address.
+    ///   2. The `PendingAdmin` storage entry is removed.
+    ///   3. An `adm_acc` event is emitted.
+    ///
+    /// # Authorization
+    /// Requires the pending admin to sign the transaction.
+    ///
+    /// # Panics
+    /// - `"No pending admin transfer"` — if `propose_admin` has not been called.
+    pub fn accept_admin(e: Env) {
+        let pending: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdmin)
+            .expect("No pending admin transfer");
+
+        pending.require_auth();
+
+        // Promote pending → active admin.
+        e.storage()
+            .persistent()
+            .set(&DataKey::ProtocolWallet, &pending);
+
+        // Clear the pending slot.
+        e.storage().persistent().remove(&DataKey::PendingAdmin);
+
+        emit_admin_accepted(&e, pending);
+    }
+
+    /// Cancel an in-progress admin transfer.
+    ///
+    /// Removes the `PendingAdmin` entry and revokes the nomination without
+    /// changing the current admin.
+    ///
+    /// # Authorization
+    /// Requires the current admin (`ProtocolWallet`) to sign the transaction.
+    ///
+    /// # Panics
+    /// - `"Contract not initialized"` — if `initialize` has not been called.
+    /// - `"No pending admin transfer"` — if there is nothing to cancel.
+    pub fn cancel_admin_transfer(e: Env) {
+        let current: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::ProtocolWallet)
+            .expect("Contract not initialized");
+
+        current.require_auth();
+
+        let pending: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdmin)
+            .expect("No pending admin transfer");
+
+        e.storage().persistent().remove(&DataKey::PendingAdmin);
+
+        emit_admin_cancelled(&e, pending);
+    }
+
+    /// Return the pending admin address, if any.
+    pub fn pending_admin(e: Env) -> Option<Address> {
+        e.storage().persistent().get(&DataKey::PendingAdmin)
+    }
+
+    /// Return the contract's interface version as `(major, minor, patch)`.
+    ///
+    /// The value is a compile-time constant baked into the WASM binary.
+    /// It is **not** stored in ledger state and cannot be altered by any
+    /// administrator, upgrade, or cross-contract call after deployment.
+    ///
+    /// Clients should call this method to verify ABI compatibility before
+    /// invoking other entry-points. A change in `major` signals a breaking
+    /// change; a change in `minor` adds new entry-points while remaining
+    /// backwards compatible; `patch` carries bug-fixes only.
+    ///
+    /// # Returns
+    /// `(major: u32, minor: u32, patch: u32)` — currently `(1, 0, 0)`.
+    pub fn version(_e: Env) -> (u32, u32, u32) {
+        CONTRACT_VERSION
+    }
+
     /// Calculate the protocol fee for an amount using the configured fee bps.
     pub fn calculate_protocol_fee(e: Env, amount: i128) -> i128 {
         if amount < 0 {
@@ -467,6 +628,61 @@ mod tests {
                 &pulse,
                 protocol_wallet,
             )
+    }
+
+    // ── version() tests ──────────────────────────────────────────────
+
+    #[test]
+    fn version_returns_compile_time_constant() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        assert_eq!(client.version(), (1u32, 0u32, 0u32));
+    }
+
+    #[test]
+    fn version_is_idempotent() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        // Calling version() multiple times must always return the same value.
+        assert_eq!(client.version(), client.version());
+    }
+
+    #[test]
+    fn version_is_unaffected_by_state_changes() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let protocol_wallet = Address::generate(&env);
+
+        let before = client.version();
+
+        // Initialize the contract and change the fee — state writes must not
+        // affect the version constant.
+        client.initialize(&protocol_wallet);
+        client
+            .mock_auths(&[MockAuth {
+                address: &protocol_wallet,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_protocol_fee",
+                    args: (500u32,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_protocol_fee(&500);
+
+        let after = client.version();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn version_matches_contract_version_constant() {
+        // Verify that the public CONTRACT_VERSION constant and the on-chain
+        // entry-point are in sync, so tooling that reads the constant directly
+        // agrees with what the deployed WASM reports.
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let (maj, min, patch) = client.version();
+        assert_eq!((maj, min, patch), CONTRACT_VERSION);
     }
 
     #[test]
@@ -863,5 +1079,411 @@ mod tests {
             .try_update_patron(&id, &bad_patron);
 
         assert!(result.is_err());
+    }
+
+    // ── Two-step admin transfer tests ────────────────────────────────
+
+    fn mock_propose(
+        env: &Env,
+        client: &TalosRegistryClient,
+        contract_id: &Address,
+        admin: &Address,
+        new_admin: &Address,
+    ) {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "propose_admin",
+                    args: (new_admin.clone(),).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .propose_admin(new_admin);
+    }
+
+    fn mock_accept(
+        env: &Env,
+        client: &TalosRegistryClient,
+        contract_id: &Address,
+        pending: &Address,
+    ) {
+        client
+            .mock_auths(&[MockAuth {
+                address: pending,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .accept_admin();
+    }
+
+    fn mock_cancel(
+        env: &Env,
+        client: &TalosRegistryClient,
+        contract_id: &Address,
+        admin: &Address,
+    ) {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "cancel_admin_transfer",
+                    args: ().into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .cancel_admin_transfer();
+    }
+
+    /// Happy path: propose → accept transfers admin and clears pending slot.
+    #[test]
+    fn propose_then_accept_transfers_admin() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        client.initialize(&admin);
+        assert_eq!(client.protocol_wallet(), Some(admin.clone()));
+        assert_eq!(client.pending_admin(), None);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        assert_eq!(client.pending_admin(), Some(new_admin.clone()));
+
+        mock_accept(&env, &client, &contract_id, &new_admin);
+
+        // Admin is now new_admin; pending slot is cleared.
+        assert_eq!(client.protocol_wallet(), Some(new_admin.clone()));
+        assert_eq!(client.pending_admin(), None);
+    }
+
+    /// After transfer the new admin can use admin-only entry-points.
+    #[test]
+    fn new_admin_can_set_protocol_fee_after_transfer() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        client.initialize(&admin);
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        mock_accept(&env, &client, &contract_id, &new_admin);
+
+        // New admin can update fee; old admin cannot.
+        client
+            .mock_auths(&[MockAuth {
+                address: &new_admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_protocol_fee",
+                    args: (400u32,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_protocol_fee(&400);
+
+        assert_eq!(client.protocol_fee_bps(), Some(400));
+    }
+
+    /// propose_admin without admin auth must fail.
+    #[test]
+    fn propose_admin_requires_current_admin_auth() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // No mock_auths → auth check fails.
+        assert!(client.try_propose_admin(&new_admin).is_err());
+
+        // Impostor auth → still fails.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &impostor,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "propose_admin",
+                    args: (new_admin.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_propose_admin(&new_admin);
+        assert!(result.is_err());
+    }
+
+    /// accept_admin without pending admin auth must fail.
+    #[test]
+    fn accept_admin_requires_pending_admin_auth() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+
+        client.initialize(&admin);
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+
+        // Impostor pretending to be pending admin.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &impostor,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_accept_admin();
+        assert!(result.is_err());
+
+        // Original admin trying to accept — must also fail (only pending may accept).
+        let result2 = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_accept_admin();
+        assert!(result2.is_err());
+    }
+
+    /// accept_admin with no pending nomination must panic.
+    #[test]
+    fn accept_admin_without_pending_panics() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // No propose was called; any auth attempt should fail.
+        assert!(client.try_accept_admin().is_err());
+    }
+
+    /// cancel_admin_transfer removes pending and emits adm_cnl.
+    #[test]
+    fn cancel_admin_transfer_clears_pending() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        client.initialize(&admin);
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        assert_eq!(client.pending_admin(), Some(new_admin.clone()));
+
+        mock_cancel(&env, &client, &contract_id, &admin);
+
+        assert_eq!(client.pending_admin(), None);
+        // Admin is unchanged.
+        assert_eq!(client.protocol_wallet(), Some(admin.clone()));
+    }
+
+    /// After cancellation the pending admin can no longer accept.
+    #[test]
+    fn cancelled_pending_cannot_accept() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        client.initialize(&admin);
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        mock_cancel(&env, &client, &contract_id, &admin);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &new_admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_accept_admin();
+        assert!(result.is_err());
+    }
+
+    /// cancel_admin_transfer without pending nomination must panic.
+    #[test]
+    fn cancel_without_pending_panics() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // No nomination exists.
+        assert!(client.try_cancel_admin_transfer().is_err());
+    }
+
+    /// cancel_admin_transfer requires current admin auth.
+    #[test]
+    fn cancel_admin_transfer_requires_admin_auth() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+
+        client.initialize(&admin);
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &impostor,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "cancel_admin_transfer",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_cancel_admin_transfer();
+        assert!(result.is_err());
+    }
+
+    /// propose_admin replaces an existing pending nomination (no cancel needed).
+    #[test]
+    fn propose_admin_replaces_existing_pending() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let first = Address::generate(&env);
+        let second = Address::generate(&env);
+
+        client.initialize(&admin);
+        mock_propose(&env, &client, &contract_id, &admin, &first);
+        assert_eq!(client.pending_admin(), Some(first.clone()));
+
+        // Replace with a different nominee.
+        mock_propose(&env, &client, &contract_id, &admin, &second);
+        assert_eq!(client.pending_admin(), Some(second.clone()));
+
+        // First nominee can no longer accept.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &first,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_accept_admin();
+        assert!(result.is_err());
+    }
+
+    // ── Admin transfer event tests ───────────────────────────────────
+
+    #[test]
+    fn propose_admin_emits_adm_prp_event() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        client.initialize(&admin);
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (addr, topics, data) = events.get(0).unwrap();
+
+        assert_eq!(addr, contract_id);
+        assert_eq!(topics.len(), 1);
+        assert_topic_symbol(&env, &topics, 0, symbol_short!("adm_prp"));
+
+        let (got_current, got_proposed): (Address, Address) =
+            TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(got_current, admin);
+        assert_eq!(got_proposed, new_admin);
+    }
+
+    #[test]
+    fn accept_admin_emits_adm_acc_event() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        client.initialize(&admin);
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+
+        // Clear events accumulated by propose.
+        let _ = env.events().all();
+
+        mock_accept(&env, &client, &contract_id, &new_admin);
+
+        let events = env.events().all();
+        // The accept call is the only event since the last snapshot.
+        let accept_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(a, t, _)| {
+                if *a != contract_id {
+                    return false;
+                }
+                if t.len() == 0 {
+                    return false;
+                }
+                let sym: Result<Symbol, _> =
+                    TryFromVal::try_from_val(&env, &t.get(0).unwrap());
+                sym.map(|s| s == symbol_short!("adm_acc")).unwrap_or(false)
+            })
+            .collect();
+
+        assert_eq!(accept_events.len(), 1);
+        let (_, _, data) = accept_events[0].clone();
+        let (got_new,): (Address,) = TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(got_new, new_admin);
+    }
+
+    #[test]
+    fn cancel_admin_transfer_emits_adm_cnl_event() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        client.initialize(&admin);
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        mock_cancel(&env, &client, &contract_id, &admin);
+
+        let events = env.events().all();
+        let cancel_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(a, t, _)| {
+                if *a != contract_id {
+                    return false;
+                }
+                if t.len() == 0 {
+                    return false;
+                }
+                let sym: Result<Symbol, _> =
+                    TryFromVal::try_from_val(&env, &t.get(0).unwrap());
+                sym.map(|s| s == symbol_short!("adm_cnl")).unwrap_or(false)
+            })
+            .collect();
+
+        assert_eq!(cancel_events.len(), 1);
+        let (_, _, data) = cancel_events[0].clone();
+        let (got_cancelled,): (Address,) = TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(got_cancelled, new_admin);
     }
 }
