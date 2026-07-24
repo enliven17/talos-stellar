@@ -3,6 +3,46 @@
  * Shared across all POST endpoints to ensure consistent validation.
  */
 import { z } from "zod/v4";
+import { StrKey } from "@stellar/stellar-sdk";
+
+export const stellarAssetCodeSchema = z
+  .string()
+  .min(1, "Asset code must be at least 1 character")
+  .max(12, "Asset code must be at most 12 characters")
+  .regex(
+    /^[A-Z0-9]+$/,
+    "Asset code must contain only uppercase letters and numbers",
+  );
+
+export const stellarPublicKeySchema = z
+  .string()
+  .startsWith("G", "Stellar public key must start with 'G'")
+  .length(56, "Stellar public key must be exactly 56 characters")
+  .refine(
+    (key) => {
+      try {
+        return StrKey.isValidEd25519PublicKey(key);
+      } catch {
+        return false;
+      }
+    },
+    { message: "Invalid Stellar Ed25519 public key" },
+  );
+
+export const stellarNativeAssetSchema = z.object({
+  type: z.literal("native"),
+}).strict();
+
+export const stellarIssuedAssetSchema = z.object({
+  type: z.literal("issued"),
+  code: stellarAssetCodeSchema,
+  issuer: stellarPublicKeySchema,
+}).strict();
+
+export const stellarAssetSchema = z.discriminatedUnion("type", [
+  stellarNativeAssetSchema,
+  stellarIssuedAssetSchema,
+]);
 
 export const VALID_CATEGORIES = [
   "Marketing", "Development", "Research", "Design", "Finance",
@@ -30,17 +70,16 @@ export const createTalosSchema = z.object({
   toneVoice: z.string().max(500).nullable().optional(),
   approvalThreshold: z.number().nonnegative().optional().default(10),
   gtmBudget: z.number().nonnegative().optional().default(200),
-  creatorPublicKey: z.string().min(1),
+  creatorPublicKey: stellarPublicKeySchema,
   signature: z.string().min(1),
   message: z.string().min(1),
-  walletPublicKey: z.string().optional(),
+  walletPublicKey: stellarPublicKeySchema.optional(),
   onChainId: z.number().int().nullable().optional(),
   agentName: z.string().max(100).nullable().optional(),
   initialPrice: z.number().nonnegative().optional().default(0),
   minPatronPulse: z.number().int().nonnegative().nullable().optional(),
   stellarAssetCode: z.string().nullable().optional(),
   tokenSymbol: z.string().max(20).nullable().optional(),
-  // Optional commerce service
   serviceName: z.string().min(1).max(200).optional(),
   serviceDescription: z.string().max(2000).optional(),
   servicePrice: z.number().positive().max(1_000_000).optional(),
@@ -185,9 +224,9 @@ export const regenerateKeySchema = z.object({
 // --- Sign Payment (Stellar x402) ---
 
 export const signPaymentSchema = z.object({
-  payee: z.string().min(1),               // Stellar public key of payee
+  payee: stellarPublicKeySchema,
   amount: z.union([z.string(), z.number()]),
-  assetCode: z.string().optional().default("USDC"),
+  assetCode: stellarAssetCodeSchema.optional().default("USDC"),
 });
 
 // --- Buy Token ---
