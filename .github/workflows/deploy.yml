@@ -12,6 +12,9 @@ on:
       - 'web/**'
       - 'packages/sdk/**'
 
+permissions:
+  contents: read
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
@@ -55,7 +58,7 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.0.0
           run_install: false
 
       - name: Get pnpm store directory
@@ -77,8 +80,8 @@ jobs:
       - name: Lint
         run: pnpm lint
 
-      - name: Push database schema
-        run: pnpm db:push
+      - name: Run database migrations
+        run: pnpm db:migrate
 
       - name: Start Next.js development server
         run: pnpm dev > next-dev.log 2>&1 &
