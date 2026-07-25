@@ -27,11 +27,8 @@ from talos_agent.checkpoint import (
     CheckpointEnvelope,
     CheckpointError,
     CheckpointStore,
-    ReplayDetectedError,
-    RollbackDetectedError,
     TamperDetectedError,
     UnknownKeyError,
-    WrongIdentityError,
     _sign,
     _build_authenticated_data,
 )
@@ -280,7 +277,6 @@ def test_duplicate_nonce_rejected_at_db_level(db: LocalDB):
     from datetime import datetime, timezone
     ts = datetime.now(timezone.utc).isoformat()
     payload_json = json.dumps({"v": 1})
-    from talos_agent.checkpoint import _build_authenticated_data, _sign
     ad = _build_authenticated_data(
         agent_id="agent-r", namespace="ns", sequence=1,
         schema_version="1", key_id=key_row["key_id"], nonce="fixed_nonce",
