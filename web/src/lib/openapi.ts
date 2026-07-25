@@ -15,7 +15,7 @@ export const openApiSpec = {
   openapi: "3.0.3",
   info: {
     title: "TALOS Stellar API",
-    version: "1.1.0",
+    version: "1.2.0",
     description: `
 REST API for the TALOS Protocol — autonomous agent corporations on the Stellar blockchain.
 
@@ -437,11 +437,44 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
       },
       TransferRequest: {
         type: "object",
-        required: ["to", "amount"],
+        additionalProperties: false,
+        required: ["agent", "destination", "asset", "amount", "nonce", "expiry", "signature"],
         properties: {
-          to: { type: "string", description: "Destination Stellar public key (G...)" },
-          amount: { type: "number", minimum: 0.000001 },
-          currency: { type: "string", default: "USDC" },
+          agent: {
+            type: "string",
+            description: "TALOS id; must exactly match the `{id}` path parameter",
+          },
+          destination: {
+            type: "string",
+            pattern: "^G[A-Z2-7]{55}$",
+            description: "Canonical destination Stellar public key (G...)",
+          },
+          asset: {
+            type: "string",
+            enum: ["USDC"],
+            description: "Exact asset identifier for this USDC-only transfer route",
+          },
+          amount: {
+            type: "string",
+            pattern: "^(?:0|[1-9][0-9]{0,11})\\.[0-9]{2}$",
+            example: "10.00",
+            description: "Canonical positive decimal amount with exactly two fractional digits",
+          },
+          nonce: {
+            type: "string",
+            pattern: "^[0-9a-f]{64}$",
+            description: "Single-use 32-byte nonce encoded as lowercase hexadecimal",
+          },
+          expiry: {
+            type: "string",
+            pattern: "^[1-9][0-9]{9,12}$",
+            description: "Unix time in seconds as canonical decimal text; must be within five minutes",
+          },
+          signature: {
+            type: "string",
+            pattern: "^[0-9a-f]{64}$",
+            description: "Lowercase hex HMAC-SHA256 of the canonical payload using the agent API key",
+          },
         },
       },
       BuyTokenRequest: {
@@ -1860,7 +1893,13 @@ Returns the \`X-PAYMENT\` header value to include when calling \`POST /api/talos
       post: {
         tags: ["Wallet & Payments"],
         summary: "Transfer USDC",
-        description: "Execute a USDC payment from the agent wallet to a recipient on Stellar. Blocked if amount exceeds the approval threshold — create an approval first.",
+        description: `Execute a signed USDC payment from the agent wallet to a recipient on Stellar. Blocked if the amount exceeds the approval threshold.
+
+The request signature is \`HMAC-SHA256(apiKey, canonicalPayload)\`, encoded as lowercase hexadecimal. The canonical payload is UTF-8 text with no trailing newline:
+
+\`talos.transfer.v1:{"agent":"<id>","destination":"<G-address>","asset":"USDC","amount":"<fixed-2-decimal>","nonce":"<lowercase-64-hex>","expiry":"<Unix-seconds>"}\`
+
+The property order shown above is mandatory for signing. Request JSON property order is irrelevant because Web reconstructs this representation after strict validation. Amount, nonce, expiry, signature, asset, and destination encodings must already be canonical; aliases, unknown fields, and alternate encodings are rejected. The authorization expires after at most five minutes and its nonce can be consumed only once.`,
         operationId: "transferUsdc",
         security: [{ BearerAuth: [] }],
         parameters: [{ $ref: "#/components/parameters/talosId" }],
@@ -1870,9 +1909,13 @@ Returns the \`X-PAYMENT\` header value to include when calling \`POST /api/talos
             "application/json": {
               schema: { $ref: "#/components/schemas/TransferRequest" },
               example: {
-                to: "GABC1234...",
-                amount: 10,
-                currency: "USDC",
+                agent: "agent_abc123",
+                destination: "GD4LGBNFNTPTVBAPBBBSXNK7LEI6XSY5C5RTW7UA7PDTHGBWYIKHNMBK",
+                asset: "USDC",
+                amount: "10.00",
+                nonce: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                expiry: "1784880300",
+                signature: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
               },
             },
           },
@@ -1888,16 +1931,17 @@ Returns the \`X-PAYMENT\` header value to include when calling \`POST /api/talos
                     status: { type: "string", example: "completed" },
                     currency: { type: "string" },
                     to: { type: "string" },
-                    amount: { type: "number" },
+                    amount: { type: "string" },
                     txHash: { type: "string" },
                   },
                 },
               },
             },
           },
-          "400": { $ref: "#/components/responses/ValidationError" },
+          "400": { description: "Malformed, non-canonical, or agent-mismatched payload" },
           "401": { $ref: "#/components/responses/UnauthorizedError" },
-          "403": { description: "Amount exceeds approval threshold" },
+          "403": { description: "Invalid/expired signature or amount exceeds approval threshold" },
+          "409": { description: "Transfer nonce already consumed (replay detected)" },
           "503": { description: "Agent secret key not configured" },
           "500": { $ref: "#/components/responses/InternalError" },
         },

@@ -1,0 +1,128 @@
+name: Web Migrations CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'web/drizzle/**'
+      - 'web/src/db/**'
+      - 'web/drizzle.config.ts'
+      - 'web/package.json'
+      - 'web/pnpm-lock.yaml'
+      - '.github/workflows/web-migrations-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'web/drizzle/**'
+      - 'web/src/db/**'
+      - 'web/drizzle.config.ts'
+      - 'web/package.json'
+      - 'web/pnpm-lock.yaml'
+      - '.github/workflows/web-migrations-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  migrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: talos_migrations_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/talos_migrations_ci
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/talos_migrations_ci
+      PGPASSWORD: postgres
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Bootstrap roles required by RLS migrations
+        run: psql -h localhost -U postgres -d talos_migrations_ci -f drizzle/bootstrap-roles.sql
+
+      - name: Apply migrations to empty schema (fresh install)
+        id: fresh_migrate
+        run: timeout 120 pnpm db:migrate 2>&1 | tee /tmp/migrate-fresh.log
+
+      - name: Check for schema drift between schema.ts and committed migrations
+        run: |
+          pnpm db:generate
+          if ! git diff --quiet --exit-code -- drizzle; then
+            echo "::error::schema.ts is out of sync with committed migration files. Run 'pnpm db:generate' and commit the result."
+            git diff -- drizzle
+            exit 1
+          fi
+
+      - name: Seed data fixture
+        run: pnpm db:seed
+
+      - name: Snapshot row counts before replay
+        run: |
+          psql -h localhost -U postgres -d talos_migrations_ci -t -c \
+            "SELECT count(*) FROM tls_talos;" | tr -d ' ' > /tmp/count-before.txt
+          cat /tmp/count-before.txt
+
+      - name: Re-apply migrations against previous/seeded schema (idempotency + data preservation)
+        id: replay_migrate
+        run: timeout 120 pnpm db:migrate 2>&1 | tee /tmp/migrate-replay.log
+
+      - name: Verify data survived replay
+        run: |
+          psql -h localhost -U postgres -d talos_migrations_ci -t -c \
+            "SELECT count(*) FROM tls_talos;" | tr -d ' ' > /tmp/count-after.txt
+          diff /tmp/count-before.txt /tmp/count-after.txt || \
+            (echo "::error::row count changed after re-applying migrations, data was not preserved" && exit 1)
+
+      - name: Check for orphaned migration lock
+        if: always()
+        run: |
+          psql -h localhost -U postgres -d talos_migrations_ci -t -c \
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory';" | tr -d ' ' > /tmp/lock-count.txt
+          if [ "$(cat /tmp/lock-count.txt)" != "0" ]; then
+            echo "::error::advisory lock left held after migration run, migrator did not release its lock"
+            exit 1
+          fi
+
+      - name: Upload migration logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-logs
+          path: |
+            /tmp/migrate-fresh.log
+            /tmp/migrate-replay.log
+          retention-days: 14
+          if-no-files-found: ignore

@@ -211,6 +211,49 @@ CREATE TABLE IF NOT EXISTS retry_state (
 );
         """,
     ),
+    (
+        7,
+        # checkpoint_keys: stores ENC::-wrapped HMAC and AES-GCM key material.
+        # key_hmac / key_enc are NEVER plaintext — always 'ENC::...' blobs.
+        """
+CREATE TABLE IF NOT EXISTS checkpoint_keys (
+    key_id       TEXT PRIMARY KEY,
+    agent_id     TEXT NOT NULL,
+    namespace    TEXT NOT NULL DEFAULT '',
+    key_hmac     TEXT NOT NULL,
+    key_enc      TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'active'
+                     CHECK(status IN ('active', 'retired')),
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    retired_at   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoint_keys_agent_status
+    ON checkpoint_keys(agent_id, status);
+        """,
+    ),
+    (
+        8,
+        # checkpoint_envelopes: persists authenticated envelope payloads.
+        # nonce has a UNIQUE constraint to prevent replay attacks.
+        """
+CREATE TABLE IF NOT EXISTS checkpoint_envelopes (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_id       TEXT NOT NULL REFERENCES checkpoint_keys(key_id),
+    agent_id     TEXT NOT NULL,
+    namespace    TEXT NOT NULL DEFAULT '',
+    schema_ver   INTEGER NOT NULL DEFAULT 1,
+    seq          INTEGER NOT NULL,
+    ts           TEXT NOT NULL,
+    nonce        TEXT NOT NULL UNIQUE,
+    payload      TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoint_envelopes_agent_ns_seq
+    ON checkpoint_envelopes(agent_id, namespace, seq);
+        """,
+    ),
 ]
 
 

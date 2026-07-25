@@ -596,6 +596,28 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             except asyncio.TimeoutError:
                 pass
 
+    async def job_heartbeat_task():
+        """Extend leases on claimed jobs periodically."""
+        from talos_agent.tools.commerce import get_claimed_jobs_copy
+        backoff = DurableBackoff(task_name="job_heartbeat", db=db, base_delay=settings.job_heartbeat_interval)
+        while not shutdown_event.is_set():
+            try:
+                claimed = get_claimed_jobs_copy()
+                for job_id, fencing_token in claimed.items():
+                    result = await api.heartbeat_job(job_id, fencing_token)
+                    if not result:
+                        logger.warning("job_lease_heartbeat_failed", job_id=job_id)
+                backoff.success()
+            except Exception as e:
+                logger.debug(f"Job heartbeat error: {e}")
+                backoff.failure()
+
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=backoff.next_delay())
+                break
+            except asyncio.TimeoutError:
+                pass
+
     async def activity_flush_task():
         """Flush buffered activity logs to Web API."""
         backoff = DurableBackoff(task_name="activity_flush", db=db, base_delay=30)
@@ -768,6 +790,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         asyncio.create_task(agent_cycle_task(), name="agent_cycle"),
         asyncio.create_task(polling_task(), name="polling"),
         asyncio.create_task(heartbeat_task(), name="heartbeat"),
+        asyncio.create_task(job_heartbeat_task(), name="job_heartbeat"),
         asyncio.create_task(activity_flush_task(), name="activity_flush"),
         asyncio.create_task(learning_cycle_task(), name="learning_cycle"),
         asyncio.create_task(dividend_distribution_task(), name="dividend_distribution"),
@@ -777,9 +800,49 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
     try:
         await shutdown_event.wait()
 
-        for t in tasks:
-            t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # ── Graceful shutdown (#182) ──────────────────────────────────────
+        # Stop polling: shutdown_event is already set so each task's inner
+        # wait() will break on the next iteration without starting new work.
+        #
+        # Wait up to shutdown_deadline seconds for running tasks to finish
+        # naturally before we force-cancel them.
+        deadline = settings.shutdown_deadline
+        if deadline > 0:
+            console.print(
+                f"[yellow]Waiting up to {deadline:.0f}s for in-flight tasks to finish...[/yellow]"
+            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(asyncio.gather(*tasks, return_exceptions=True)),
+                    timeout=deadline,
+                )
+                console.print("[green]All tasks finished within deadline.[/green]")
+            except asyncio.TimeoutError:
+                still_running = [t for t in tasks if not t.done()]
+                console.print(
+                    f"[red]Deadline exceeded — cancelling {len(still_running)} task(s): "
+                    + ", ".join(t.get_name() for t in still_running)
+                    + "[/red]"
+                )
+                # Record each cancelled task so operators can inspect what was cut short.
+                for t in still_running:
+                    try:
+                        db.add_activity(
+                            "shutdown_cancelled",
+                            f"Task '{t.get_name()}' was cancelled at shutdown (deadline={deadline:.0f}s)",
+                            "system",
+                        )
+                    except Exception:
+                        pass
+                for t in still_running:
+                    t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            # Immediate cancel when deadline == 0.
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        # ─────────────────────────────────────────────────────────────────
     finally:
         console.print("[yellow]Cleaning up...[/yellow]")
         try:

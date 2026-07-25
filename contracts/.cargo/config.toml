@@ -1,2 +1,9 @@
 [target.wasm32-unknown-unknown]
 runner = "true"
+
+# On Windows with the GNU toolchain the default linker (x86_64-w64-mingw32-gcc
+# via clang-22/lld) is missing libgcc_eh, which breaks host-native test builds.
+# Route native Windows-GNU test binaries through lld directly to work around this.
+[target.x86_64-pc-windows-gnu]
+linker = "lld-link"
+rustflags = ["-C", "linker-flavor=ld.lld"]
