@@ -15,6 +15,16 @@ from talos_agent.adapters.health import (
 )
 from talos_agent.adapters.registry import AdapterRegistry
 from talos_agent.adapters.telegram import TelegramAdapter  # noqa: F401
+from talos_agent.adapters.storage import (
+    BaseStorageAdapter,
+    LocalStorageAdapter,
+    MemoryStorageAdapter,
+    VerifiedCheckpointStorage,
+    StorageError,
+    StorageValidationError,
+    StorageVerificationError,
+    StorageProviderError,
+)
 
 __all__ = [
     "BaseSocialAdapter",
@@ -32,4 +42,14 @@ __all__ = [
     "BrowserSessionProbe",
     "HealthReport",
     "AdapterHealthReporter",
+    # Storage adapters and coordinator
+    "BaseStorageAdapter",
+    "LocalStorageAdapter",
+    "MemoryStorageAdapter",
+    "VerifiedCheckpointStorage",
+    "StorageError",
+    "StorageValidationError",
+    "StorageVerificationError",
+    "StorageProviderError",
 ]
+
