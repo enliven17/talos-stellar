@@ -14,13 +14,11 @@ AdapterState:   _worst() ordering
 from __future__ import annotations
 
 import asyncio
-import datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from talos_agent.adapters.health import (
-    PROBE_TIMEOUT_SECONDS,
     AdapterHealthReporter,
     AdapterState,
     BrowserSessionProbe,
