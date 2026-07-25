@@ -411,8 +411,51 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
     browser = await BrowserSession.start(model_api_key=settings.llm_api_key)
     console.print("[green]Browser ready.[/green]")
 
-    # Build tools
-    tools = build_all_tools(api=api, db=db, browser=browser, settings=settings)
+    # ── Policy engine (disabled by default — opt-in via config) ─────
+    from talos_agent.policy import PolicyEngine, PolicyLoader, PolicyMiddleware
+
+    policy_engine = PolicyEngine()
+    policy_loader = PolicyLoader(db=db)
+    policy_enabled = os.environ.get(
+        "POLICY_ENGINE_ENABLED",
+        str(talos_config.get("policyEngineEnabled", False)),
+    ).lower() in ("true", "1", "yes")
+    policy_engine.enabled = policy_enabled
+    if policy_enabled:
+        policy_engine.load(policy_loader.load())
+
+    # Budget getter for policy middleware context
+    def _get_budget_context() -> dict[str, float]:
+        cfg = db.get_talos_config()
+        gtm_budget = float((cfg or {}).get("gtmBudget", 200))
+        spent = float(db.get_spending_period(30))
+        return {
+            "gtm_budget": gtm_budget,
+            "spent_this_period": spent,
+            "budget_remaining": max(0.0, gtm_budget - spent),
+        }
+
+    def _get_config_context() -> dict[str, float]:
+        return {
+            "approval_threshold": float(settings.approval_threshold),
+        }
+
+    policy_middleware = PolicyMiddleware(
+        policy_engine,
+        policy_loader,
+        budget_getter=_get_budget_context,
+        config_getter=_get_config_context,
+    )
+
+    if policy_enabled:
+        console.print("[bold cyan]Policy engine ENABLED — actions will be gated.[/bold cyan]")
+    else:
+        console.print("[dim]Policy engine disabled (set POLICY_ENGINE_ENABLED=true to enable).[/dim]")
+    # ──────────────────────────────────────────────────────────────
+
+    # Build tools — pass policy middleware for pre-execution policy checks
+    tools = build_all_tools(api=api, db=db, browser=browser, settings=settings,
+                            policy_middleware=policy_middleware)
     console.print(f"[green]Registered {len(tools)} tools.[/green]")
 
     # Initialize StellarKit for balance checks
@@ -506,6 +549,11 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                 structlog.contextvars.bind_contextvars(cycle_id=cycle_id)
                 api.set_request_id(cycle_id)
                 try:
+                    # Hot-reload policies if the file changed
+                    if policy_engine.enabled:
+                        if policy_middleware.hot_reload():
+                            console.print("[cyan]Policy engine: policies reloaded (file change detected).[/cyan]")
+
                     if not await ensure_browser_healthy():
                         console.print(
                             "[red]Skipping agent cycle: browser session is down and unrecoverable.[/red]"

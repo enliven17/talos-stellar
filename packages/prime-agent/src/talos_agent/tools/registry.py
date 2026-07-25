@@ -30,9 +30,14 @@ class Tool:
 @dataclass
 class ToolRegistry:
     _tools: dict[str, Tool] = field(default_factory=dict)
+    _middleware: Any = None  # PolicyMiddleware, injected by build_all_tools
 
     def __len__(self) -> int:
         return len(self._tools)
+
+    def set_middleware(self, middleware: Any) -> None:
+        """Inject the policy middleware for pre-execution policy checks."""
+        self._middleware = middleware
 
     def register(self, name: str, description: str, fn: Callable, parameters: dict[str, Any]) -> None:
         self._tools[name] = Tool(name=name, description=description, fn=fn, parameters=parameters)
@@ -50,6 +55,38 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if not tool:
             return {"error": f"Unknown tool: {name}"}
+
+        # ── Policy engine pre-check (when enabled) ──────────────────
+        if self._middleware is not None:
+            try:
+                from talos_agent.policy.middleware import (
+                    _BYPASS_ACTIONS,
+                    _GATED_ACTIONS,
+                )
+                if name in _GATED_ACTIONS:
+                    result = self._middleware.evaluate_action(name, arguments)
+                    if result.decision.value == "deny":
+                        return {
+                            "error": "Policy denied this action",
+                            "policy_decision": "deny",
+                            "evidence": list(result.evidence),
+                            "result_digest": result.result_digest,
+                        }
+                    if result.decision.value == "escalate":
+                        return {
+                            "status": "policy_escalation_required",
+                            "policy_decision": "escalate",
+                            "evidence": list(result.evidence),
+                            "result_digest": result.result_digest,
+                            "message": (
+                                "This action requires approval. "
+                                "Use request_approval to escalate to a human operator."
+                            ),
+                        }
+            except Exception:
+                pass  # policy check failure must not block tool execution
+        # ─────────────────────────────────────────────────────────────
+
         try:
             result = tool.fn(**arguments)
             if inspect.isawaitable(result):
@@ -133,6 +170,7 @@ def build_all_tools(
     db: Any,
     browser: Any,
     settings: Settings,
+    policy_middleware: Any = None,
 ) -> ToolRegistry:
     """Import all tool modules to trigger @tool registrations, then return registry."""
     # Import modules so decorators execute
@@ -177,5 +215,9 @@ def build_all_tools(
     _planning_mod._api = api
     _planning_mod._db = db
     _planning_mod._settings = settings
+
+    # Inject policy middleware into the registry for pre-execution checks
+    if policy_middleware is not None:
+        registry.set_middleware(policy_middleware)
 
     return registry
