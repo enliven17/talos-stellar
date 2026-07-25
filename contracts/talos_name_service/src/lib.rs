@@ -628,6 +628,182 @@ impl TalosNameService {
 
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
+mod property_tests {
+    use super::*;
+    use proptest::{prelude::*, test_runner::TestRunner};
+    use soroban_sdk::{
+        testutils::{Address as _, MockAuth, MockAuthInvoke},
+        Address, Env, IntoVal,
+    };
+    use std::string::String as StdString;
+
+    fn setup() -> (
+        Env,
+        Address,
+        Address,
+        talos_registry::TalosRegistryClient<'static>,
+        TalosNameServiceClient<'static>,
+    ) {
+        let env = Env::default();
+        let registry_contract = env.register_contract(None, talos_registry::TalosRegistry);
+        let name_service_contract = env.register_contract(None, TalosNameService);
+        let name_service_client = TalosNameServiceClient::new(&env, &name_service_contract);
+        name_service_client.initialize(&registry_contract);
+        let registry_client = talos_registry::TalosRegistryClient::new(&env, &registry_contract);
+        (
+            env,
+            registry_contract,
+            name_service_contract,
+            registry_client,
+            name_service_client,
+        )
+    }
+
+    fn soroban_string(env: &Env, value: &str) -> String {
+        String::from_str(env, value)
+    }
+
+    fn valid_name_strategy() -> impl Strategy<Value = StdString> {
+        prop::collection::vec(
+            any::<u8>().prop_filter("ascii lower/digit/hyphen", |b| {
+                let byte = *b;
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+            }),
+            3..=32,
+        )
+        .prop_filter("must not start or end with hyphen", |chars| {
+            !chars.is_empty() && chars[0] != b'-' && chars[chars.len() - 1] != b'-'
+        })
+        .prop_filter("must not contain consecutive hyphens", |chars| {
+            chars.iter().zip(chars.iter().skip(1)).all(|(a, b)| !(a == &b'-' && b == &b'-'))
+        })
+        .prop_map(|chars| StdString::from_utf8(chars).unwrap())
+    }
+
+    fn create_talos_with_auth(
+        env: &Env,
+        client: &talos_registry::TalosRegistryClient,
+        contract_id: &Address,
+        creator: &Address,
+        protocol_wallet: &Address,
+    ) -> u32 {
+        let name = soroban_string(env, "Genesis");
+        let category = soroban_string(env, "Marketing");
+        let description = soroban_string(env, "Autonomous marketing agent");
+        let patron = talos_registry::Patron {
+            creator_share: 60,
+            investor_share: 25,
+            treasury_share: 15,
+            creator_addr: creator.clone(),
+            investor_addr: Address::generate(env),
+            treasury_addr: Address::generate(env),
+        };
+        let kernel = talos_registry::Kernel {
+            approval_threshold: 10,
+            gtm_budget: 1_000,
+            min_patron_pulse: 100,
+        };
+        let pulse = talos_registry::Pulse {
+            total_supply: 1_000_000,
+            price_usd_cents: 100,
+            token_symbol: soroban_string(env, "TLOS"),
+        };
+
+        client
+            .mock_auths(&[MockAuth {
+                address: creator,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "create_talos",
+                    args: (
+                        name.clone(),
+                        category.clone(),
+                        description.clone(),
+                        patron.clone(),
+                        kernel.clone(),
+                        pulse.clone(),
+                        protocol_wallet.clone(),
+                    )
+                        .into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .create_talos(
+                &name,
+                &category,
+                &description,
+                &patron,
+                &kernel,
+                &pulse,
+                protocol_wallet,
+            )
+    }
+
+    #[test]
+    fn state_machine_register_name_preserves_invariants() {
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &protocol_wallet);
+
+        let mut runner = TestRunner::new(ProptestConfig::with_cases(8));
+        let strategy = prop::collection::vec(valid_name_strategy(), 1..=3);
+        runner.run(&strategy, |names| {
+            let mut model = std::collections::BTreeMap::<StdString, u32>::new();
+            let mut talos_to_name = std::collections::BTreeMap::<u32, StdString>::new();
+
+            for name in names.iter() {
+                let soroban_name = soroban_string(&env, name.as_str());
+
+                let result = client
+                    .mock_auths(&[MockAuth {
+                        address: &owner,
+                        invoke: &MockAuthInvoke {
+                            contract: &contract_id,
+                            fn_name: "register_name",
+                            args: (owner.clone(), talos_id, soroban_name.clone()).into_val(&env),
+                            sub_invokes: &[MockAuthInvoke {
+                                contract: &registry_contract,
+                                fn_name: "creator_of",
+                                args: (talos_id,).into_val(&env),
+                                sub_invokes: &[],
+                            }],
+                        },
+                    }])
+                    .try_register_name(&owner, &talos_id, &soroban_name);
+
+                let expected_success = !model.contains_key(name) && !name.contains("--") && !name.starts_with('-') && !name.ends_with('-');
+                assert_eq!(result.is_ok(), expected_success, "name={name:?}, talos_id={talos_id}");
+
+                if result.is_ok() {
+                    if let Some(old_name) = talos_to_name.remove(&talos_id) {
+                        model.remove(&old_name);
+                    }
+                    model.insert(name.clone(), talos_id);
+                    talos_to_name.insert(talos_id, name.clone());
+                }
+
+                let resolved = client.resolve_name(&soroban_name);
+                let expected_resolved = model.get(name).copied();
+                assert_eq!(resolved, expected_resolved, "name={name:?}, talos_id={talos_id}");
+                assert_eq!(client.is_name_available(&soroban_name), expected_resolved.is_none());
+
+                let expected_name_for_talos = talos_to_name.get(&talos_id).cloned();
+                let actual_name_for_talos = client.name_of(&talos_id);
+                assert_eq!(
+                    actual_name_for_talos,
+                    expected_name_for_talos.as_ref().map(|value| soroban_string(&env, value.as_str()))
+                );
+            }
+
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
     use soroban_sdk::{
