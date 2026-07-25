@@ -381,3 +381,28 @@ export const tlsApiAuditLogs = pgTable(
     index("tls_api_audit_logs_talosId_createdAt_idx").on(t.talosId, t.createdAt),
   ],
 );
+
+// ─── Reputation Cache ─────────────────────────────────────────────
+
+export const tlsReputations = pgTable(
+  "tls_reputations",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    serviceName: text("serviceName").notNull(),
+    score: numeric("score", { precision: 5, scale: 2 }).notNull().default("0"),
+    confidence: numeric("confidence", { precision: 5, scale: 2 }).notNull().default("0"),
+    samples: integer("samples").notNull().default(0),
+    freshness: timestamp("freshness", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    version: text("version").notNull().default("1.0.0"),
+    safeReason: jsonb("safeReason"),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("tls_reputations_talosId_serviceName_key").on(t.talosId, t.serviceName),
+    index("tls_reputations_talosId_idx").on(t.talosId),
+    index("tls_reputations_serviceName_idx").on(t.serviceName),
+  ],
+);

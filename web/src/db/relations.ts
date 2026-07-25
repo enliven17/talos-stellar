@@ -12,6 +12,7 @@ import {
   tlsPlaybookPurchases,
   tlsApiAuditLogs,
   tlsTokenPurchases,
+  tlsReputations,
 } from "./schema";
 
 export const talosRelations = relations(tlsTalos, ({ many, one }) => ({
@@ -25,6 +26,7 @@ export const talosRelations = relations(tlsTalos, ({ many, one }) => ({
   playbooks: many(tlsPlaybooks),
   auditLogs: many(tlsApiAuditLogs),
   tokenPurchases: many(tlsTokenPurchases),
+  reputations: many(tlsReputations),
 }));
 
 export const patronRelations = relations(tlsPatrons, ({ one }) => ({
@@ -70,4 +72,8 @@ export const apiAuditLogRelations = relations(tlsApiAuditLogs, ({ one }) => ({
 
 export const tokenPurchaseRelations = relations(tlsTokenPurchases, ({ one }) => ({
   talos: one(tlsTalos, { fields: [tlsTokenPurchases.talosId], references: [tlsTalos.id] }),
+}));
+
+export const reputationRelations = relations(tlsReputations, ({ one }) => ({
+  talos: one(tlsTalos, { fields: [tlsReputations.talosId], references: [tlsTalos.id] }),
 }));

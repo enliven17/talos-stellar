@@ -2,6 +2,9 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsCommerceServices } from "@/db/schema";
 import { and, desc, eq, ilike, lt, ne, or } from "drizzle-orm";
+import { getOrCreateReputation } from "@/lib/reputation";
+
+const COLD_START_THRESHOLD = 3;
 
 // GET /api/services — Discover available services across all TALOS agents
 export async function GET(request: NextRequest) {
@@ -11,6 +14,16 @@ export async function GET(request: NextRequest) {
     const selfId = searchParams.get("self");
     const cursor = searchParams.get("cursor");
     const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 1), 100);
+
+    const minConfidence = searchParams.get("minConfidence") !== null
+      ? parseFloat(searchParams.get("minConfidence")!)
+      : null;
+    const minEvidence = searchParams.get("minEvidence") !== null
+      ? parseInt(searchParams.get("minEvidence")!, 10)
+      : null;
+    const minScore = searchParams.get("minScore") !== null
+      ? parseFloat(searchParams.get("minScore")!)
+      : null;
 
     const conditions = [];
 
@@ -62,7 +75,7 @@ export async function GET(request: NextRequest) {
     const hasMore = services.length > limit;
     const page = hasMore ? services.slice(0, limit) : services;
 
-    let results = page.map((s) => ({
+    const results = page.map((s) => ({
       talosId: s.talosId,
       talosName: s.talosName,
       talosCategory: s.talosCategory,
@@ -73,10 +86,26 @@ export async function GET(request: NextRequest) {
       chains: s.chains,
     }));
 
+    // Apply reputation-based planner constraints
+    const filteredResults = [];
+    for (const item of results) {
+      const reputation = await getOrCreateReputation(item.talosId, item.serviceName);
+
+      // Bypass constraints for cold start providers
+      if (reputation.samples < COLD_START_THRESHOLD) {
+        filteredResults.push(item);
+      } else {
+        if (minConfidence !== null && reputation.confidence < minConfidence) continue;
+        if (minEvidence !== null && reputation.samples < minEvidence) continue;
+        if (minScore !== null && reputation.score < minScore) continue;
+        filteredResults.push(item);
+      }
+    }
+
     // Shuffle for diversity — agents see different services each cycle
-    for (let i = results.length - 1; i > 0; i--) {
+    for (let i = filteredResults.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      [results[i], results[j]] = [results[j], results[i]];
+      [filteredResults[i], filteredResults[j]] = [filteredResults[j], filteredResults[i]];
     }
 
     const lastItem = page[page.length - 1];
@@ -84,8 +113,9 @@ export async function GET(request: NextRequest) {
       ? `${lastItem.createdAt.toISOString()}|${lastItem.id}`
       : null;
 
-    return Response.json({ data: results, nextCursor });
-  } catch {
+    return Response.json({ data: filteredResults, nextCursor });
+  } catch (error) {
+    console.error("Services API error:", error);
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
