@@ -4,6 +4,7 @@ import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsCommerceJobs, tlsRevenues, tlsCommerceServices } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { logger } from "@/lib/logger";
+import { ingestReputationEvent } from "@/lib/reputation";
 
 async function resolveCallerTalos(request: NextRequest): Promise<string | null> {
   const authHeader = request.headers.get("authorization");
@@ -121,6 +122,18 @@ export async function POST(
         detail: "The job may have been re-assigned to another worker. Re-acquire a lease via POST /api/jobs/:id/claim",
       }, { status: 409 });
     }
+
+    // Ingest reputation delivery event
+    await ingestReputationEvent({
+      talosId: job.talosId,
+      serviceName: job.serviceName,
+      jobId: job.id,
+      eventType: "delivery",
+      amount: job.amount,
+      counterparty: job.requesterTalosId,
+      txHash: job.txHash,
+      paymentSig: job.paymentSig,
+    });
 
     logger.info(
       { jobId: id, talosId: callerTalosId, fencingToken: effectiveFencingToken },

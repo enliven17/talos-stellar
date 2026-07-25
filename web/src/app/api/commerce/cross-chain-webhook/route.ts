@@ -1,11 +1,12 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { NextRequest } from "next/server";
-import { and, eq } from "drizzle-orm";
+import { and, eq, or } from "drizzle-orm";
 import { db } from "@/db";
 import { withTransactionRetry } from "@/db/db-retry";
 import { tlsCommerceJobs, tlsCommerceServices, tlsRevenues, tlsTalos } from "@/db/schema";
 import { fulfillInstant } from "@/lib/fulfillment";
 import { crossChainWebhookSchema } from "@/lib/schemas";
+import { ingestReputationEvent } from "@/lib/reputation";
 
 function normalizeChain(chain: string) {
   return chain.trim().toLowerCase();
@@ -177,7 +178,7 @@ export async function POST(request: NextRequest) {
 
     const paymentSig = buildPaymentSignature(normalizedSourceChain, paymentReference);
 
-    const [jobById, jobByPaymentSig] = await Promise.all([
+    const [jobById, jobsForRequesterAndSig] = await Promise.all([
       jobId
         ? db
             .select()
@@ -189,10 +190,20 @@ export async function POST(request: NextRequest) {
       db
         .select()
         .from(tlsCommerceJobs)
-        .where(eq(tlsCommerceJobs.paymentSig, paymentSig))
-        .limit(1)
-        .then((rows) => rows[0] ?? null),
+        .where(
+          or(
+            eq(tlsCommerceJobs.paymentSig, paymentSig),
+            and(
+              eq(tlsCommerceJobs.talosId, talosId),
+              eq(tlsCommerceJobs.requesterTalosId, requesterTalosId)
+            )
+          )
+        )
+        .limit(2),
     ]);
+
+    const jobByPaymentSig = jobsForRequesterAndSig.find(j => j.paymentSig === paymentSig) ?? null;
+    const isRepeat = jobsForRequesterAndSig.length > 0 && (!jobByPaymentSig || jobsForRequesterAndSig.length > 1 || jobsForRequesterAndSig.some(j => j.id !== jobByPaymentSig.id));
 
     if (jobId && !jobById) {
       return Response.json({ error: "Job not found" }, { status: 404 });
@@ -301,6 +312,57 @@ export async function POST(request: NextRequest) {
       },
       { category: "JOB" }
     );
+
+    // Ingest reputation events
+    if (!existingJob) {
+      await ingestReputationEvent({
+        talosId,
+        serviceName: service.serviceName,
+        jobId: job.id,
+        eventType: "settled",
+        amount: service.price,
+        counterparty: requesterTalosId,
+        txHash: sourceTxHash,
+        paymentSig,
+      });
+
+      await ingestReputationEvent({
+        talosId,
+        serviceName: service.serviceName,
+        jobId: job.id,
+        eventType: "counterparty",
+        amount: 0,
+        counterparty: requesterTalosId,
+        txHash: sourceTxHash,
+        paymentSig,
+      });
+
+      if (isRepeat) {
+        await ingestReputationEvent({
+          talosId,
+          serviceName: service.serviceName,
+          jobId: job.id,
+          eventType: "repeat",
+          amount: 0,
+          counterparty: requesterTalosId,
+          txHash: sourceTxHash,
+          paymentSig,
+        });
+      }
+    }
+
+    if (job.status === "completed" && (!existingJob || existingJob.status !== "completed")) {
+      await ingestReputationEvent({
+        talosId,
+        serviceName: service.serviceName,
+        jobId: job.id,
+        eventType: "delivery",
+        amount: service.price,
+        counterparty: requesterTalosId,
+        txHash: sourceTxHash,
+        paymentSig,
+      });
+    }
 
     return Response.json(
       {

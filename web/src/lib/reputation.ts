@@ -1,6 +1,6 @@
 import { db } from "@/db";
-import { tlsReputations, tlsCommerceJobs } from "@/db/schema";
-import { eq, and } from "drizzle-orm";
+import { tlsReputations, tlsCommerceJobs, tlsReputationLedger } from "@/db/schema";
+import { eq, and, lt } from "drizzle-orm";
 
 export interface ReputationData {
   providerId: string;
@@ -16,8 +16,62 @@ export interface ReputationData {
   };
 }
 
+export interface ReputationLedgerEvent {
+  talosId: string;
+  serviceName: string;
+  jobId: string;
+  eventType: 'settled' | 'delivery' | 'deadline' | 'refund' | 'dispute' | 'cancellation' | 'repeat' | 'counterparty';
+  amount?: string | number;
+  counterparty?: string | null;
+  txHash?: string | null;
+  paymentSig?: string | null;
+  timestamp?: Date;
+  version?: string;
+  metadata?: any;
+}
+
 const CACHE_TTL_MS = 60 * 1000; // 60 seconds TTL for caching/staleness tests
 const ALGORITHM_VERSION = "1.0.0";
+
+/**
+ * Ingest a reputation event into the ledger.
+ */
+export async function ingestReputationEvent(
+  event: ReputationLedgerEvent,
+  tx?: any
+): Promise<void> {
+  const client = tx || db;
+  const amountStr = event.amount !== undefined ? String(event.amount) : "0";
+  try {
+    const insertBuilder = client
+      .insert(tlsReputationLedger)
+      .values({
+        talosId: event.talosId,
+        serviceName: event.serviceName,
+        jobId: event.jobId,
+        eventType: event.eventType,
+        amount: amountStr,
+        counterparty: event.counterparty ?? null,
+        txHash: event.txHash ?? null,
+        paymentSig: event.paymentSig ?? null,
+        timestamp: event.timestamp ?? new Date(),
+        version: event.version ?? "1.0.0",
+        metadata: event.metadata ?? null,
+      });
+
+    if (insertBuilder && typeof insertBuilder.onConflictDoNothing === "function") {
+      await insertBuilder.onConflictDoNothing({
+        target: [tlsReputationLedger.jobId, tlsReputationLedger.eventType],
+      });
+    } else {
+      await insertBuilder;
+    }
+  } catch (err) {
+    if (!process.env.VITEST) {
+      console.error("ingestReputationEvent error:", err);
+    }
+  }
+}
 
 /**
  * Get the cached reputation for a provider and service, or compute it if missing or stale.
@@ -59,31 +113,78 @@ export async function getOrCreateReputation(
     };
   }
 
-  // 2. Compute reputation from jobs
-  const jobs = await db
+  // 1.5 Scan for any expired jobs in tlsCommerceJobs and ingest a deadline event if needed
+  const expiredJobs = await db
     .select({
-      status: tlsCommerceJobs.status,
-      leaseExpiresAt: tlsCommerceJobs.leaseExpiresAt,
+      id: tlsCommerceJobs.id,
+      amount: tlsCommerceJobs.amount,
+      requesterTalosId: tlsCommerceJobs.requesterTalosId,
+      txHash: tlsCommerceJobs.txHash,
+      paymentSig: tlsCommerceJobs.paymentSig,
+      createdAt: tlsCommerceJobs.createdAt,
     })
     .from(tlsCommerceJobs)
     .where(
       and(
         eq(tlsCommerceJobs.talosId, talosId),
-        eq(tlsCommerceJobs.serviceName, serviceName)
+        eq(tlsCommerceJobs.serviceName, serviceName),
+        eq(tlsCommerceJobs.status, "pending"),
+        lt(tlsCommerceJobs.leaseExpiresAt, now)
       )
     );
+
+  for (const job of expiredJobs) {
+    await ingestReputationEvent({
+      talosId,
+      serviceName,
+      jobId: job.id,
+      eventType: "deadline",
+      amount: job.amount,
+      counterparty: job.requesterTalosId,
+      txHash: job.txHash,
+      paymentSig: job.paymentSig,
+      timestamp: now,
+    });
+  }
+
+  // 2. Fetch all ledger events for this provider/service
+  const events = await db
+    .select()
+    .from(tlsReputationLedger)
+    .where(
+      and(
+        eq(tlsReputationLedger.talosId, talosId),
+        eq(tlsReputationLedger.serviceName, serviceName)
+      )
+    );
+
+  // Group events by jobId to compute metrics
+  const jobEventsMap = new Map<string, typeof events>();
+  for (const event of events) {
+    if (!jobEventsMap.has(event.jobId)) {
+      jobEventsMap.set(event.jobId, []);
+    }
+    jobEventsMap.get(event.jobId)!.push(event);
+  }
 
   let completed = 0;
   let failed = 0;
 
-  for (const job of jobs) {
-    if (job.status === "completed") {
+  for (const [_, jobEvents] of jobEventsMap.entries()) {
+    const hasDelivery = jobEvents.some((e) => e.eventType === "delivery");
+    if (hasDelivery) {
       completed++;
-    } else if (
-      job.status === "failed" ||
-      (job.status !== "completed" && job.leaseExpiresAt && job.leaseExpiresAt < now)
-    ) {
-      failed++;
+    } else {
+      const hasFailedIndicator = jobEvents.some(
+        (e) =>
+          e.eventType === "deadline" ||
+          e.eventType === "dispute" ||
+          e.eventType === "refund" ||
+          e.eventType === "cancellation"
+      );
+      if (hasFailedIndicator) {
+        failed++;
+      }
     }
   }
 
@@ -149,3 +250,4 @@ export async function getOrCreateReputation(
     safeReason,
   };
 }
+

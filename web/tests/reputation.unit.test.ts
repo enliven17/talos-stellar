@@ -16,10 +16,12 @@ vi.mock("@/lib/rate-limit", () => {
 vi.mock("@/db", () => {
   const mockCacheQueue: any[][] = [];
   const mockJobsQueue: any[][] = [];
+  const mockLedgerQueue: any[][] = [];
   const mockServicesResults = { value: [] as any[] };
   const mockInsertedValues: any[] = [];
   const mockUpdatedValues: any[] = [];
   const mockFindFirstResult = { value: null as any };
+  const mockFindJobResult = { value: null as any };
 
   let lastTableQueried: any = null;
 
@@ -43,6 +45,9 @@ vi.mock("@/db", () => {
         result = mockCacheQueue.shift() || [];
       } else if (tableName === "tls_commerce_jobs") {
         result = mockJobsQueue.shift() || [];
+      } else if (tableName === "tls_reputation_ledger") {
+        const queued = mockLedgerQueue.shift() || [];
+        result = [...queued, ...mockInsertedValues];
       }
       return Promise.resolve(resolve(result));
     }),
@@ -53,6 +58,7 @@ vi.mock("@/db", () => {
       mockInsertedValues.push(val);
       return mockInsertBuilder;
     }),
+    onConflictDoNothing: vi.fn().mockImplementation(() => mockInsertBuilder),
     then: vi.fn().mockImplementation((resolve) => {
       return Promise.resolve(resolve(mockInsertedValues));
     }),
@@ -78,14 +84,19 @@ vi.mock("@/db", () => {
         tlsTalos: {
           findFirst: vi.fn().mockImplementation(async () => mockFindFirstResult.value),
         },
+        tlsCommerceJobs: {
+          findFirst: vi.fn().mockImplementation(async () => mockFindJobResult.value),
+        },
       },
       // Expose variables for test configurations
       __cacheQueue: mockCacheQueue,
       __jobsQueue: mockJobsQueue,
+      __ledgerQueue: mockLedgerQueue,
       __servicesResults: mockServicesResults,
       __insertedValues: mockInsertedValues,
       __updatedValues: mockUpdatedValues,
       __findFirstResult: mockFindFirstResult,
+      __findJobResult: mockFindJobResult,
     },
   };
 });
@@ -93,7 +104,7 @@ vi.mock("@/db", () => {
 // Import route handlers, db and helpers AFTER mocks are defined
 import { rateLimit, rateLimitResponse, applyRateLimitHeaders } from "@/lib/rate-limit";
 import { db } from "@/db";
-import { GET as getReputation } from "@/app/api/reputation/route";
+import { GET as getReputation, POST as postReputation } from "@/app/api/reputation/route";
 import { GET as getServices } from "@/app/api/services/route";
 import { getOrCreateReputation } from "@/lib/reputation";
 
@@ -103,10 +114,12 @@ describe("Reputation APIs and Planner Constraints", () => {
   beforeEach(() => {
     mockDb.__cacheQueue.length = 0;
     mockDb.__jobsQueue.length = 0;
+    mockDb.__ledgerQueue.length = 0;
     mockDb.__servicesResults.value = [];
     mockDb.__insertedValues.length = 0;
     mockDb.__updatedValues.length = 0;
     mockDb.__findFirstResult.value = null;
+    mockDb.__findJobResult.value = null;
 
     vi.mocked(rateLimit).mockReset();
     vi.mocked(rateLimit).mockReturnValue({ ok: true, limit: 100, remaining: 99, resetAt: Date.now() + 60000 });
@@ -201,11 +214,12 @@ describe("Reputation APIs and Planner Constraints", () => {
 
     it("calculates score and confidence correctly from completed and failed jobs", async () => {
       mockDb.__cacheQueue.push([]); // Cache check: empty
-      mockDb.__jobsQueue.push([
-        { status: "completed", leaseExpiresAt: null },
-        { status: "completed", leaseExpiresAt: null },
-        { status: "completed", leaseExpiresAt: null },
-        { status: "failed", leaseExpiresAt: null },
+      mockDb.__jobsQueue.push([]);  // Expired jobs scan check: empty
+      mockDb.__ledgerQueue.push([
+        { jobId: "j1", eventType: "delivery" },
+        { jobId: "j2", eventType: "delivery" },
+        { jobId: "j3", eventType: "delivery" },
+        { jobId: "j4", eventType: "deadline" },
       ]);
 
       const rep = await getOrCreateReputation("agent-1", "Translation");
@@ -222,8 +236,11 @@ describe("Reputation APIs and Planner Constraints", () => {
       
       mockDb.__cacheQueue.push([]); // Cache check: empty
       mockDb.__jobsQueue.push([
-        { status: "completed", leaseExpiresAt: null },
-        { status: "pending", leaseExpiresAt: new Date("2026-07-25T07:59:00.000Z") },
+        { id: "j1", status: "completed", leaseExpiresAt: null },
+        { id: "j2", status: "pending", leaseExpiresAt: new Date("2026-07-25T07:59:00.000Z") },
+      ]);
+      mockDb.__ledgerQueue.push([
+        { jobId: "j1", eventType: "delivery" }
       ]);
 
       const rep = await getOrCreateReputation("agent-1", "Translation");
@@ -273,7 +290,8 @@ describe("Reputation APIs and Planner Constraints", () => {
       };
 
       mockDb.__cacheQueue.push([cachedRow]);
-      mockDb.__jobsQueue.push([{ status: "completed", leaseExpiresAt: null }]);
+      mockDb.__jobsQueue.push([]);
+      mockDb.__ledgerQueue.push([{ jobId: "j1", eventType: "delivery" }]);
 
       const rep = await getOrCreateReputation("agent-1", "Translation");
       expect(rep.samples).toBe(1);
@@ -295,11 +313,13 @@ describe("Reputation APIs and Planner Constraints", () => {
 
       // ServiceA: Cache miss, then 10 completed jobs (samples = 10, confidence = 10/13 = ~0.77)
       mockDb.__cacheQueue.push([]);
-      mockDb.__jobsQueue.push(Array(10).fill({ status: "completed", leaseExpiresAt: null }));
+      mockDb.__jobsQueue.push([]);
+      mockDb.__ledgerQueue.push(Array(10).fill(null).map((_, i) => ({ jobId: `j-${i}`, eventType: "delivery" })));
 
       // ServiceB: Cache miss, then 0 jobs (cold-start)
       mockDb.__cacheQueue.push([]);
       mockDb.__jobsQueue.push([]);
+      mockDb.__ledgerQueue.push([]);
 
       const req = new NextRequest("http://localhost:3000/api/reputation?minConfidence=0.5&minEvidence=5", {
         headers: { Authorization: "Bearer valid-key" },
@@ -373,6 +393,191 @@ describe("Reputation APIs and Planner Constraints", () => {
       expect(serviceNames).toContain("S1");
       expect(serviceNames).toContain("S3");
       expect(serviceNames).not.toContain("S2");
+    });
+  });
+
+  // ─── 5. Reputation Input Ledger - New Features ─────────────────────────────
+
+  describe("Reputation Input Ledger - New Features", () => {
+    it("POST /api/reputation - Ingest event successfully (success path)", async () => {
+      mockDb.__findFirstResult.value = { id: "agent-1", apiKey: "valid-key" };
+      mockDb.__findJobResult.value = { id: "job-123" }; // server-observed
+
+      const payload = {
+        talosId: "agent-1",
+        serviceName: "Translation",
+        jobId: "job-123",
+        eventType: "settled",
+        amount: 10.5,
+        counterparty: "buyer-abc",
+      };
+
+      const req = new NextRequest("http://localhost:3000/api/reputation", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer valid-key",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const res = await postReputation(req);
+      expect(res.status).toBe(201);
+      const body = await res.json();
+      expect(body.success).toBe(true);
+
+      // Verify it was inserted into database mock
+      expect(mockDb.__insertedValues.some((v: any) => v.eventType === "settled" && v.jobId === "job-123")).toBe(true);
+    });
+
+    it("POST /api/reputation - Ingest event with cryptographic link", async () => {
+      mockDb.__findFirstResult.value = { id: "agent-1", apiKey: "valid-key" };
+      mockDb.__findJobResult.value = null; // not server-observed
+
+      const payload = {
+        talosId: "agent-1",
+        serviceName: "Translation",
+        jobId: "job-456",
+        eventType: "delivery",
+        amount: 5,
+        txHash: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+      };
+
+      const req = new NextRequest("http://localhost:3000/api/reputation", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer valid-key",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const res = await postReputation(req);
+      expect(res.status).toBe(201);
+      const body = await res.json();
+      expect(body.success).toBe(true);
+
+      expect(mockDb.__insertedValues.some((v: any) => v.eventType === "delivery" && v.txHash?.startsWith("0x"))).toBe(true);
+    });
+
+    it("POST /api/reputation - Block event that is neither server-observed nor cryptographically linked", async () => {
+      mockDb.__findFirstResult.value = { id: "agent-1", apiKey: "valid-key" };
+      mockDb.__findJobResult.value = null; // not server-observed
+
+      const payload = {
+        talosId: "agent-1",
+        serviceName: "Translation",
+        jobId: "job-789",
+        eventType: "dispute",
+        amount: 0,
+      };
+
+      const req = new NextRequest("http://localhost:3000/api/reputation", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer valid-key",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const res = await postReputation(req);
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toContain("Outcome must be either server-observed");
+    });
+
+    it("POST /api/reputation - Reject unauthorized requests", async () => {
+      const req = new NextRequest("http://localhost:3000/api/reputation", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer bad-key",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      });
+
+      const res = await postReputation(req);
+      expect(res.status).toBe(401);
+    });
+
+    it("POST /api/reputation - Reject missing required fields", async () => {
+      mockDb.__findFirstResult.value = { id: "agent-1", apiKey: "valid-key" };
+      const req = new NextRequest("http://localhost:3000/api/reputation", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer valid-key",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ talosId: "agent-1" }),
+      });
+
+      const res = await postReputation(req);
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toContain("required");
+    });
+
+    it("POST /api/reputation - Reject invalid eventType and negative amount", async () => {
+      mockDb.__findFirstResult.value = { id: "agent-1", apiKey: "valid-key" };
+      const payload = {
+        talosId: "agent-1",
+        serviceName: "Translation",
+        jobId: "job-1",
+        eventType: "invalid-type",
+      };
+
+      const req = new NextRequest("http://localhost:3000/api/reputation", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer valid-key",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const res1 = await postReputation(req);
+      expect(res1.status).toBe(400);
+      expect((await res1.json()).error).toContain("Invalid eventType");
+
+      const payload2 = {
+        talosId: "agent-1",
+        serviceName: "Translation",
+        jobId: "job-1",
+        eventType: "delivery",
+        amount: -10,
+        txHash: "hash-123",
+      };
+
+      const req2 = new NextRequest("http://localhost:3000/api/reputation", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer valid-key",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload2),
+      });
+
+      const res2 = await postReputation(req2);
+      expect(res2.status).toBe(400);
+      expect((await res2.json()).error).toContain("amount must be a non-negative number");
+    });
+
+    it("Rebuilds metrics correctly for disputes, refunds, and cancellations", async () => {
+      mockDb.__cacheQueue.push([]);
+      mockDb.__jobsQueue.push([]);
+      mockDb.__ledgerQueue.push([
+        { jobId: "j1", eventType: "delivery" },
+        { jobId: "j2", eventType: "dispute" },
+        { jobId: "j3", eventType: "refund" },
+        { jobId: "j4", eventType: "cancellation" },
+        { jobId: "j5", eventType: "settled" }, // pending, ignored
+      ]);
+
+      const rep = await getOrCreateReputation("agent-1", "Translation");
+
+      expect(rep.samples).toBe(4);
+      expect(rep.score).toBe(0.25); // 1 completed (j1), 3 failed (j2, j3, j4)
     });
   });
 });

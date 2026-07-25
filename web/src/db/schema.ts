@@ -406,3 +406,31 @@ export const tlsReputations = pgTable(
     index("tls_reputations_serviceName_idx").on(t.serviceName),
   ],
 );
+
+// ─── Reputation Input Ledger ──────────────────────────────────────
+
+export const tlsReputationLedger = pgTable(
+  "tls_reputation_ledger",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    serviceName: text("serviceName").notNull(),
+    jobId: text("jobId").notNull(),
+    eventType: text("eventType").notNull(), // settled | delivery | deadline | refund | dispute | cancellation | repeat | counterparty
+    amount: numeric("amount", { precision: 18, scale: 6 }).notNull().default("0"),
+    counterparty: text("counterparty"), // e.g. buyerPublicKey or requesterTalosId
+    txHash: text("txHash"),
+    paymentSig: text("paymentSig"),
+    timestamp: timestamp("timestamp", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    version: text("version").notNull().default("1.0.0"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tls_reputation_ledger_talosId_idx").on(t.talosId),
+    index("tls_reputation_ledger_jobId_idx").on(t.jobId),
+    // Enforce idempotency: cannot ingest the same eventType for the same jobId twice
+    uniqueIndex("tls_reputation_ledger_jobId_eventType_unique").on(t.jobId, t.eventType),
+  ],
+);
+

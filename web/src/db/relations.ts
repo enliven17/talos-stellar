@@ -13,6 +13,7 @@ import {
   tlsApiAuditLogs,
   tlsTokenPurchases,
   tlsReputations,
+  tlsReputationLedger,
 } from "./schema";
 
 export const talosRelations = relations(tlsTalos, ({ many, one }) => ({
@@ -27,6 +28,7 @@ export const talosRelations = relations(tlsTalos, ({ many, one }) => ({
   auditLogs: many(tlsApiAuditLogs),
   tokenPurchases: many(tlsTokenPurchases),
   reputations: many(tlsReputations),
+  reputationLedger: many(tlsReputationLedger),
 }));
 
 export const patronRelations = relations(tlsPatrons, ({ one }) => ({
@@ -77,3 +79,8 @@ export const tokenPurchaseRelations = relations(tlsTokenPurchases, ({ one }) => 
 export const reputationRelations = relations(tlsReputations, ({ one }) => ({
   talos: one(tlsTalos, { fields: [tlsReputations.talosId], references: [tlsTalos.id] }),
 }));
+
+export const reputationLedgerRelations = relations(tlsReputationLedger, ({ one }) => ({
+  talos: one(tlsTalos, { fields: [tlsReputationLedger.talosId], references: [tlsTalos.id] }),
+}));
+
