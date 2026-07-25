@@ -221,7 +221,6 @@ async def test_zero_deadline_cancels_immediately():
 
 def test_settings_shutdown_deadline_default():
     """Settings.shutdown_deadline should default to 30.0 seconds."""
-    s = _make_settings()
     # Override is 5.0 in helper; test the actual class default
     s2 = Settings(
         talos_api_url="http://test.local",
