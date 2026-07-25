@@ -12,6 +12,7 @@
 extern crate std;
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String};
+use storage_migration;
 use ttl_manager;
 
 // ── Data Types ──────────────────────────────────────────────────────
@@ -222,6 +223,17 @@ const PROTOCOL_FEE_BPS: u32 = 300; // 3%
 const MAX_PROTOCOL_FEE_BPS: u32 = 10_000; // 100%
 const DEFAULT_GRACE_PERIOD: u64 = 604_800; // 7 days in seconds
 const MAX_MIN_DELAY: u64 = 2_592_000; // 30 days in seconds
+
+// ── Storage schema migrations (see `storage_migration` crate) ────────
+
+/// Pre-migration-system baseline. Every TalosRegistry instance, including
+/// ones deployed before this framework existed, is treated as starting here.
+const SCHEMA_GENESIS: u32 = 1;
+/// v1 -> v2: persist an explicit `TimelockConfig` default so future reads
+/// no longer depend on `get_timelock_config`'s implicit `unwrap_or` fallback.
+const SCHEMA_TIMELOCK_DEFAULTS: u32 = 2;
+/// `rollback_schema` may only move the version pointer back this many steps.
+const MAX_ROLLBACK_DEPTH: u32 = 1;
 
 /// Compile-time interface version of TalosRegistry.
 ///
@@ -449,6 +461,7 @@ impl TalosRegistry {
             .persistent()
             .set(&DataKey::ProtocolFeeBps, &PROTOCOL_FEE_BPS);
         e.storage().persistent().set(&DataKey::NextTalosId, &1u32);
+        storage_migration::initialize_schema(&e, SCHEMA_GENESIS);
     }
 
     /// Get the protocol wallet address.
@@ -931,6 +944,89 @@ impl TalosRegistry {
         } else {
             (health.min_age, health.max_age, health.keys_below_warn, health.keys_below_crit, health.total_keys)
         }
+    }
+
+    // ── Storage Schema Migrations ─────────────────────────────────
+
+    /// Current on-chain storage schema version. Defaults to
+    /// [`SCHEMA_GENESIS`] for any instance that has never run
+    /// `initialize` or `run_migrations` under this framework.
+    pub fn schema_version(e: Env) -> u32 {
+        storage_migration::schema_version(&e).unwrap_or(SCHEMA_GENESIS)
+    }
+
+    /// Apply any pending storage migrations, one ordered step at a time.
+    /// Safe to call repeatedly: once the contract is at the latest known
+    /// version this is a no-op. Returns the resulting schema version.
+    ///
+    /// # Authorization
+    /// Requires the protocol wallet (admin) to sign.
+    pub fn run_migrations(e: Env) -> u32 {
+        let admin: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::ProtocolWallet)
+            .expect("Contract not initialized");
+        admin.require_auth();
+
+        let mut current = storage_migration::schema_version(&e).unwrap_or(SCHEMA_GENESIS);
+
+        // v1 -> v2: backfill an explicit TimelockConfig default for
+        // instances that never called `set_timelock_config`.
+        if current == SCHEMA_GENESIS {
+            storage_migration::begin_migration(
+                &e,
+                current,
+                SCHEMA_GENESIS,
+                SCHEMA_TIMELOCK_DEFAULTS,
+            )
+            .unwrap_or_else(|_| panic!("Migration out of order or already in progress"));
+
+            if !e.storage().persistent().has(&DataKey::TimelockConfig) {
+                e.storage().persistent().set(
+                    &DataKey::TimelockConfig,
+                    &TimelockConfig {
+                        min_delay: 0,
+                        grace_period: DEFAULT_GRACE_PERIOD,
+                    },
+                );
+            }
+
+            storage_migration::complete_migration(&e, SCHEMA_GENESIS, SCHEMA_TIMELOCK_DEFAULTS);
+            current = SCHEMA_TIMELOCK_DEFAULTS;
+        }
+
+        current
+    }
+
+    /// Roll the schema version pointer back to `target_version`, bounded by
+    /// [`MAX_ROLLBACK_DEPTH`] steps. Does **not** undo data written by
+    /// forward migrations — see `storage_migration`'s README before relying
+    /// on old entry-points again after a rollback.
+    ///
+    /// # Authorization
+    /// Requires the protocol wallet (admin) to sign.
+    pub fn rollback_schema(e: Env, target_version: u32) {
+        let admin: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::ProtocolWallet)
+            .expect("Contract not initialized");
+        admin.require_auth();
+
+        let current = storage_migration::schema_version(&e).unwrap_or(SCHEMA_GENESIS);
+        storage_migration::rollback(&e, current, target_version, MAX_ROLLBACK_DEPTH)
+            .unwrap_or_else(|_| panic!("Rollback rejected: out of range or migration in progress"));
+    }
+
+    /// Number of entries in the migration/rollback history log.
+    pub fn migration_history_len(e: Env) -> u32 {
+        storage_migration::migration_history_len(&e)
+    }
+
+    /// Fetch a single migration/rollback history entry, oldest first.
+    pub fn migration_record_at(e: Env, index: u32) -> Option<storage_migration::MigrationRecord> {
+        storage_migration::migration_record_at(&e, index)
     }
 }
 
@@ -2174,5 +2270,157 @@ mod tests {
             }])
             .try_propose_admin(&new_admin);
         assert!(res_prop.is_err());
+    }
+
+    // ── Storage schema migration tests ───────────────────────────────
+
+    fn run_migrations_with_auth(
+        env: &Env,
+        client: &TalosRegistryClient,
+        contract_id: &Address,
+        admin: &Address,
+    ) -> u32 {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "run_migrations",
+                    args: ().into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .run_migrations()
+    }
+
+    fn rollback_schema_with_auth(
+        env: &Env,
+        client: &TalosRegistryClient,
+        contract_id: &Address,
+        admin: &Address,
+        target_version: u32,
+    ) {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "rollback_schema",
+                    args: (target_version,).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .rollback_schema(&target_version);
+    }
+
+    #[test]
+    fn schema_version_starts_at_genesis_after_initialize() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        client.initialize(&Address::generate(&env));
+
+        assert_eq!(client.schema_version(), SCHEMA_GENESIS);
+        assert_eq!(client.migration_history_len(), 1);
+    }
+
+    #[test]
+    fn run_migrations_applies_v1_to_v2_and_backfills_timelock_config() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let result = run_migrations_with_auth(&env, &client, &contract_id, &admin);
+
+        assert_eq!(result, SCHEMA_TIMELOCK_DEFAULTS);
+        assert_eq!(client.schema_version(), SCHEMA_TIMELOCK_DEFAULTS);
+
+        // TimelockConfig is now explicitly persisted, matching the same
+        // defaults get_timelock_config previously only returned implicitly.
+        let cfg = client.get_timelock_config();
+        assert_eq!(cfg.min_delay, 0);
+        assert_eq!(cfg.grace_period, DEFAULT_GRACE_PERIOD);
+
+        assert_eq!(client.migration_history_len(), 2);
+        let record = client.migration_record_at(&1).expect("migration record");
+        assert_eq!(record.from_version, SCHEMA_GENESIS);
+        assert_eq!(record.to_version, SCHEMA_TIMELOCK_DEFAULTS);
+        assert!(!record.rolled_back);
+    }
+
+    #[test]
+    fn run_migrations_is_idempotent_on_repeat_call() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        run_migrations_with_auth(&env, &client, &contract_id, &admin);
+        assert_eq!(client.migration_history_len(), 2);
+
+        // Calling again once fully migrated must not reapply the step or
+        // append a duplicate history entry.
+        let result = run_migrations_with_auth(&env, &client, &contract_id, &admin);
+        assert_eq!(result, SCHEMA_TIMELOCK_DEFAULTS);
+        assert_eq!(client.schema_version(), SCHEMA_TIMELOCK_DEFAULTS);
+        assert_eq!(client.migration_history_len(), 2);
+    }
+
+    #[test]
+    #[should_panic]
+    fn run_migrations_requires_admin_auth() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // No auth mocked for this call: the admin's require_auth() must reject it.
+        client.run_migrations();
+    }
+
+    #[test]
+    fn rollback_schema_within_depth_succeeds() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        run_migrations_with_auth(&env, &client, &contract_id, &admin);
+        assert_eq!(client.schema_version(), SCHEMA_TIMELOCK_DEFAULTS);
+
+        rollback_schema_with_auth(&env, &client, &contract_id, &admin, SCHEMA_GENESIS);
+
+        assert_eq!(client.schema_version(), SCHEMA_GENESIS);
+        let record = client.migration_record_at(&2).expect("rollback record");
+        assert_eq!(record.from_version, SCHEMA_TIMELOCK_DEFAULTS);
+        assert_eq!(record.to_version, SCHEMA_GENESIS);
+        assert!(record.rolled_back);
+
+        // The version pointer moved back, but the migration is re-appliable.
+        let result = run_migrations_with_auth(&env, &client, &contract_id, &admin);
+        assert_eq!(result, SCHEMA_TIMELOCK_DEFAULTS);
+    }
+
+    #[test]
+    fn rollback_schema_rejects_target_beyond_max_depth() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        run_migrations_with_auth(&env, &client, &contract_id, &admin);
+
+        // Current version is 2; MAX_ROLLBACK_DEPTH is 1, so target 0 is out of range.
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "rollback_schema",
+                    args: (0u32,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_rollback_schema(&0u32);
+        assert!(res.is_err());
+        assert_eq!(client.schema_version(), SCHEMA_TIMELOCK_DEFAULTS);
     }
 }
