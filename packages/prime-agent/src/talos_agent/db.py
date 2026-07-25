@@ -211,6 +211,46 @@ CREATE TABLE IF NOT EXISTS retry_state (
 );
         """,
     ),
+    (
+        7,
+        """
+-- Authenticated checkpoint envelopes (#293)
+--
+-- checkpoint_keys: registry of HMAC-SHA256 signing keys.
+--   active=1 marks the current write key; multiple keys may be active=0 for
+--   rotation read-back (accepting previous keys while writing with the new one).
+--
+-- checkpoints: one row per saved checkpoint envelope.
+--   nonce is unique per key_id to prevent replay.
+--   sequence is per-(agent_id, namespace) and monotonically increasing to
+--   prevent rollback attacks.
+CREATE TABLE IF NOT EXISTS checkpoint_keys (
+    key_id      TEXT PRIMARY KEY,
+    key_hmac    TEXT NOT NULL,
+    active      INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    rotated_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS checkpoints (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id        TEXT NOT NULL,
+    namespace       TEXT NOT NULL,
+    sequence        INTEGER NOT NULL,
+    schema_version  TEXT NOT NULL DEFAULT '1',
+    key_id          TEXT NOT NULL REFERENCES checkpoint_keys(key_id),
+    nonce           TEXT NOT NULL,
+    tag             TEXT NOT NULL,
+    payload         TEXT NOT NULL,
+    timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(agent_id, namespace, sequence),
+    UNIQUE(key_id, nonce)
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoints_agent_ns
+    ON checkpoints(agent_id, namespace, sequence DESC);
+        """,
+    ),
 ]
 
 
@@ -805,6 +845,122 @@ class LocalDB:
             (task_name,),
         )
         self._conn.commit()
+
+    # ── Checkpoint Keys (#293) ─────────────────────────────
+
+    def add_checkpoint_key(self, key_id: str, key_hmac: str, *, active: bool = True) -> None:
+        """Insert a new checkpoint signing key.
+
+        When *active* is True the new key becomes the current write key; all
+        previously active keys are demoted so writes always use exactly one key.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        if active:
+            self._conn.execute(
+                "UPDATE checkpoint_keys SET active = 0, rotated_at = ? WHERE active = 1",
+                (now,),
+            )
+        self._conn.execute(
+            """INSERT INTO checkpoint_keys (key_id, key_hmac, active, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (key_id, key_hmac, int(active), now),
+        )
+        self._conn.commit()
+
+    def get_active_checkpoint_key(self) -> dict | None:
+        """Return the single active (write) key row, or None."""
+        row = self._conn.execute(
+            "SELECT key_id, key_hmac FROM checkpoint_keys WHERE active = 1 LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_checkpoint_key(self, key_id: str) -> dict | None:
+        """Return a specific key row by key_id (used for read-back during rotation)."""
+        row = self._conn.execute(
+            "SELECT key_id, key_hmac, active FROM checkpoint_keys WHERE key_id = ?",
+            (key_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_checkpoint_keys(self) -> list[dict]:
+        """Return all key rows (active and rotated), ordered by creation date."""
+        rows = self._conn.execute(
+            "SELECT key_id, key_hmac, active, created_at, rotated_at "
+            "FROM checkpoint_keys ORDER BY created_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Checkpoints (#293) ─────────────────────────────────
+
+    def save_checkpoint(
+        self,
+        *,
+        agent_id: str,
+        namespace: str,
+        sequence: int,
+        schema_version: str,
+        key_id: str,
+        nonce: str,
+        tag: str,
+        payload: str,
+        timestamp: str,
+    ) -> int:
+        """Persist an authenticated checkpoint envelope and return its row ID.
+
+        Raises sqlite3.IntegrityError on duplicate (agent_id, namespace, sequence)
+        or duplicate (key_id, nonce) — callers must generate a fresh nonce per write.
+        """
+        cursor = self._conn.execute(
+            """INSERT INTO checkpoints
+               (agent_id, namespace, sequence, schema_version, key_id, nonce, tag, payload, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (agent_id, namespace, sequence, schema_version, key_id, nonce, tag, payload, timestamp),
+        )
+        self._conn.commit()
+        return cursor.lastrowid
+
+    def get_latest_checkpoint(self, agent_id: str, namespace: str) -> dict | None:
+        """Return the highest-sequence checkpoint for (agent_id, namespace), or None."""
+        row = self._conn.execute(
+            """SELECT id, agent_id, namespace, sequence, schema_version,
+                      key_id, nonce, tag, payload, timestamp
+               FROM checkpoints
+               WHERE agent_id = ? AND namespace = ?
+               ORDER BY sequence DESC
+               LIMIT 1""",
+            (agent_id, namespace),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_checkpoint_by_sequence(
+        self, agent_id: str, namespace: str, sequence: int
+    ) -> dict | None:
+        """Return the checkpoint with the exact sequence number, or None."""
+        row = self._conn.execute(
+            """SELECT id, agent_id, namespace, sequence, schema_version,
+                      key_id, nonce, tag, payload, timestamp
+               FROM checkpoints
+               WHERE agent_id = ? AND namespace = ? AND sequence = ?""",
+            (agent_id, namespace, sequence),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_max_sequence(self, agent_id: str, namespace: str) -> int:
+        """Return the highest sequence seen for (agent_id, namespace), or 0."""
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(sequence), 0) AS max_seq FROM checkpoints "
+            "WHERE agent_id = ? AND namespace = ?",
+            (agent_id, namespace),
+        ).fetchone()
+        return int(row["max_seq"]) if row else 0
+
+    def nonce_exists(self, key_id: str, nonce: str) -> bool:
+        """Return True if this (key_id, nonce) pair has already been used (replay guard)."""
+        row = self._conn.execute(
+            "SELECT 1 FROM checkpoints WHERE key_id = ? AND nonce = ? LIMIT 1",
+            (key_id, nonce),
+        ).fetchone()
+        return row is not None
 
     # ── Cleanup ────────────────────────────────────────────
 
