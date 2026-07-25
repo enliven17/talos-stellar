@@ -60,6 +60,10 @@
       "description": "Strategy playbooks marketplace"
     },
     {
+      "name": "Reputation",
+      "description": "Provider reputation scoring with confidence, decay, and bounded counterparty influence"
+    },
+    {
       "name": "Platform",
       "description": "Global platform data — activity feed, leaderboard, events"
     }
@@ -2089,6 +2093,180 @@
                 }
               }
             }
+          }
+        }
+      },
+      "ReputationScore": {
+        "type": "object",
+        "description": "Versioned provider reputation score with confidence, decay, and bounded counterparty influence. `scoreVersion` is pinned so consumers can detect formula breaks.",
+        "required": [
+          "providerId",
+          "scoreVersion",
+          "score",
+          "confidence",
+          "confidenceTier",
+          "evidence",
+          "inputs",
+          "inputsTrace",
+          "summary",
+          "generatedAt"
+        ],
+        "properties": {
+          "providerId": {
+            "type": "string",
+            "description": "TALOS id of the provider being scored"
+          },
+          "scoreVersion": {
+            "type": "string",
+            "enum": [
+              "1.0.0"
+            ],
+            "description": "Schema/formula version of the scoring module. Pin consumers against this."
+          },
+          "score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Headline 0–100 score"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "0–1 evidence-quality gate. <0.34 low, 0.34–<0.67 medium, ≥0.67 high."
+          },
+          "confidenceTier": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "evidence": {
+            "type": "string",
+            "enum": [
+              "insufficient",
+              "ok"
+            ],
+            "description": "`insufficient` when cold-start thresholds fail (jobs, counterparties, time span)"
+          },
+          "inputs": {
+            "type": "object",
+            "description": "Sub-signals in [0,1] that contributed to the score. Each is auditable independently.",
+            "properties": {
+              "completionRate": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "onTimeRate": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "disputeRateInverse": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "concentrationInverse": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "recencyWeightedVolume": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          },
+          "inputsTrace": {
+            "type": "object",
+            "description": "Audit trail of inputs that fed the score — replay/debug visibility.",
+            "properties": {
+              "jobCount": {
+                "type": "integer"
+              },
+              "completedJobCount": {
+                "type": "integer"
+              },
+              "failedJobCount": {
+                "type": "integer"
+              },
+              "onTimeJobCount": {
+                "type": "integer"
+              },
+              "disputedJobCount": {
+                "type": "integer"
+              },
+              "distinctCounterparties": {
+                "type": "integer"
+              },
+              "timeSpanDays": {
+                "type": "number"
+              },
+              "halfLifeDays": {
+                "type": "number"
+              },
+              "onTimeBudgetHours": {
+                "type": "number"
+              },
+              "maxSingleBuyerShare": {
+                "type": "number"
+              },
+              "topBuyerShare": {
+                "type": "number",
+                "description": "Share of weighted job volume from the top counterparty"
+              },
+              "weights": {
+                "type": "object",
+                "properties": {
+                  "completion": {
+                    "type": "number"
+                  },
+                  "onTime": {
+                    "type": "number"
+                  },
+                  "disputeInverse": {
+                    "type": "number"
+                  },
+                  "concentration": {
+                    "type": "number"
+                  },
+                  "recencyVolume": {
+                    "type": "number"
+                  }
+                }
+              },
+              "concentrationDamping": {
+                "type": "number",
+                "description": "Multiplier applied to bound sybil/dominant-buyer influence (0.25–1.0)"
+              }
+            }
+          },
+          "summary": {
+            "type": "string",
+            "description": "Human-readable explanation including evidence state and any concentration warnings"
+          },
+          "generatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "requestedNow": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Echo of the `?now=` parameter if provided, otherwise null"
+          },
+          "requestedJobLimit": {
+            "type": "integer",
+            "description": "Effective job cap used when materialising inputs"
+          },
+          "windowDays": {
+            "type": "integer",
+            "description": "Look-back window applied at the DB layer"
           }
         }
       }
