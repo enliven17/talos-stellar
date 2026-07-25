@@ -169,6 +169,63 @@ class TestRequestWithRetry:
 
     @pytest.mark.asyncio
     @respx.mock
+    async def test_logs_strip_control_characters_non_json_body(self, caplog):
+        """Non-JSON bodies with CR/LF and control chars can't inject fake log lines."""
+        malicious_body = (
+            "plain text error\r\n"
+            "2024-01-01 12:00:00 WARNING fake log line injected by attacker\r\n"
+            "\x1b[31mFAKE ANSI ESCAPE\x1b[0m"
+        )
+        respx.get("https://api.example.com/broken").mock(
+            return_value=Response(
+                503,
+                text=malicious_body,
+                headers={"Content-Type": "text/plain"},
+            )
+        )
+
+        async with httpx.AsyncClient() as client:
+            with caplog.at_level(logging.WARNING, logger="talos_agent.http"):
+                with pytest.raises(RetryableHTTPError):
+                    await request_with_retry(
+                        lambda: client.get("https://api.example.com/broken")
+                    )
+
+        retry_logs = [r.getMessage() for r in caplog.records if "HTTP retry" in r.getMessage()]
+        assert retry_logs
+        # No raw CR/LF should survive into any log record.
+        assert all("\r" not in msg for msg in retry_logs)
+        assert all("\n" not in msg for msg in retry_logs)
+        # Each retry produces exactly one log record — no injected extra lines.
+        for msg in retry_logs:
+            assert msg.count("HTTP retry") == 1
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_logs_strip_control_characters_json_body(self, caplog):
+        """Control characters embedded inside JSON string values are also neutralized."""
+        respx.get("https://api.example.com/broken").mock(
+            return_value=Response(
+                503,
+                json={"error": "bad\r\nrequest\x00here", "token": "abc123"},
+            )
+        )
+
+        async with httpx.AsyncClient() as client:
+            with caplog.at_level(logging.WARNING, logger="talos_agent.http"):
+                with pytest.raises(RetryableHTTPError):
+                    await request_with_retry(
+                        lambda: client.get("https://api.example.com/broken")
+                    )
+
+        retry_logs = [r.getMessage() for r in caplog.records if "HTTP retry" in r.getMessage()]
+        assert retry_logs
+        assert all("\r" not in msg for msg in retry_logs)
+        assert all("\n" not in msg for msg in retry_logs)
+        assert all("abc123" not in msg for msg in retry_logs)
+
+    @pytest.mark.asyncio
+    @respx.mock
     async def test_500_not_retried(self):
         """500 is not in the retryable set — returned to caller as-is."""
         route = respx.get("https://api.example.com/oops").mock(

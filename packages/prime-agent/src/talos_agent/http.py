@@ -70,9 +70,15 @@ def _sanitize_json_value(value: object) -> object:
         return [_sanitize_json_value(item) for item in value]
     return value
 
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _strip_control_chars(text: str) -> str:
+    """Neutralize CR/LF and other control chars to prevent log injection."""
+    return _CONTROL_CHAR_RE.sub(" ", text)
 
 def _sanitize_response_text(text: str) -> str:
-    normalized = unicodedata.normalize("NFC", text)
+    normalized = _strip_control_chars(unicodedata.normalize("NFC", text))
     try:
         payload = json.loads(normalized)
     except Exception:
