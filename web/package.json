@@ -12,6 +12,7 @@
     "test:e2e": "vitest run tests/api-e2e.test.ts",
     "test:openapi": "vitest run tests/openapi-snapshot.test.ts",
     "test:bench": "vitest run src/area/devx/__tests__/",
+    "bench:suite": "tsx src/area/devx/run-benchmarks.ts",
     "openapi:snapshot": "tsx scripts/write-openapi-snapshot.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",

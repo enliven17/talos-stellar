@@ -20,15 +20,74 @@ The benchmark system lives in `web/src/area/devx/` and provides:
 ## Quick Start
 
 ```bash
-# Run all benchmark tests
+# Run all benchmark unit tests
 pnpm test:bench
 
-# Run a specific benchmark suite
-pnpm test:bench -- --suite api-routes
+# Run benchmark suites against simulated workloads
+pnpm bench:suite            # Run all suites
+pnpm bench:suite api        # API route benchmarks
+pnpm bench:suite scheduler  # Scheduler loop benchmarks
+pnpm bench:suite sdk        # SDK call benchmarks
+pnpm bench:suite contract   # Contract-adjacent workflow benchmarks
 
 # Set environment overrides
-BENCHMARK_RUNS=50 BENCHMARK_VARIANCE_THRESHOLD=0.2 pnpm test:bench
+BENCHMARK_RUNS=50 BENCHMARK_VARIANCE_THRESHOLD=0.2 pnpm bench:suite api
 ```
+
+## Benchmark Suites
+
+The framework includes four runnable benchmark suites that exercise real code paths:
+
+### API Routes (`api-routes`)
+
+Exercises the hot API request/response cycle — health probes, talos list serialization, activity validation, transfer payload validation, and percentile computation:
+
+- `health-liveness` — calls GET /api/health/live handler (no I/O, pure response)
+- `health-liveness-json` — handler + JSON serialization
+- `talos-list-serialize-1000` — serializes 1000-entry talos list with cursor pagination
+- `talos-list-response-json` — constructs 50-item paginated JSON response
+- `activity-validate-500` — validates 500 activity entries against allowed types/channels
+- `activity-batch-response` — batches 100 activities into a JSON response
+- `transfer-validate-200` — validates 200 Stellar transfer payloads (address regex, nonce hex, asset)
+- `transfer-json-serialization` — serializes 200 transfer payloads
+- `percentile-10000-values` — computes p50/p75/p90/p95/p99 on 10,000 values
+- `summarize-stats-10000` — full stats (mean, median, stddev, variance) on 10,000 values
+
+### Scheduler Loops (`scheduler-loops`)
+
+Simulates the prime-agent scheduler decision loop — cycle iteration, job queue management, agent decision-making, and dividend preview computation:
+
+- `scheduler-simulate-cycles` — 100 full scheduler cycles (state transitions)
+- `scheduler-pending-jobs-check` — filters and sorts 100 pending jobs by amount
+- `scheduler-agent-decision` — 50 rounds of agent action decision logic
+- `scheduler-state-transitions` — 200 state transitions with periodic snapshot serialization
+- `scheduler-dividend-preview` — computes dividend breakdown for 50 patrons from a pool
+
+### SDK Calls (`sdk-client`)
+
+Exercises the TypeScript SDK `TalosClient` serialization and deserialization paths — request building, URL construction, payload serialization, response parsing:
+
+- `sdk-create-talos-serialize` — serializes a createTalos POST request with auth headers
+- `sdk-list-talos-url-build` — constructs a paginated list URL with query parameters
+- `sdk-report-activity-serialize` — serializes a reportActivity POST request
+- `sdk-transfer-serialize` — serializes a signed transfer POST request
+- `sdk-paginated-response-parse` — builds, serializes, and parses a 50-item paginated response
+- `sdk-large-batch-deserialize` — serializes and parses a 200-item batch response
+- `sdk-error-response-parse` — parses an error response body
+
+### Contract-Adjacent Workflows (`contract-workflows`)
+
+Simulates Stellar Soroban contract interaction patterns — address validation, keypair generation, transfer signing, contract call encoding/decoding, dividend math:
+
+- `contract-stellar-address-validate-1000` — validates 1000 Stellar G addresses via regex
+- `contract-keypair-gen-100` — generates 100 simulated Stellar keypairs
+- `contract-transfer-sign-200` — generates 200 HMAC-style hex signatures
+- `contract-call-encode` — encodes a Soroban contract call payload
+- `contract-call-decode` — decodes a Soroban contract response
+- `contract-register-name` — simulates a TalosNameService name registration
+- `contract-balance-query` — simulates a Stellar balance query
+- `contract-dividend-calc-100-patrons` — computes dividend shares for 100 patrons
+- `contract-name-resolve-simulation` — batch resolves 100 .talos names
 
 ## Architecture
 
@@ -175,15 +234,18 @@ No benchmark data is transmitted externally. Artifacts are local files only.
 
 ## CI Integration
 
-Benchmarks can run in CI via:
+A dedicated CI workflow (`.github/workflows/benchmark-ci.yml`) runs on every push/PR to `main` that touches `web/src/` or `packages/sdk/src/`:
 
 ```yaml
-- name: Run benchmarks
-  run: pnpm test:bench
-  env:
-    BENCHMARK_RUNS: 20
-    BENCHMARK_VARIANCE_THRESHOLD: 0.2
-    CI: true
+# Runs: unit tests, API route suite, scheduler suite, SDK suite, contract suite
+# Artifacts: benchmark JSON files archived for 30 days
+# Failure: any benchmark that exceeds fail thresholds causes the workflow to fail
+```
+
+To run benchmarks locally as CI does:
+
+```bash
+CI=true BENCHMARK_RUNS=20 BENCHMARK_WARMUP_RUNS=3 pnpm bench:suite api
 ```
 
 When `CI=true`:
