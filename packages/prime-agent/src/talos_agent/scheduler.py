@@ -419,6 +419,43 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
     stellar = StellarKit(api)
     await stellar.initialize()
 
+    # ── Post-restore reconciliation (#296) ──────────────────────────────────
+    # Reconcile backoff state, schedule timestamps, fencing tokens, and
+    # completion markers before starting any tasks.  This ensures stale state
+    # from a previous run (crashed or checkpointed) does not cause duplicate
+    # work, stale heartbeats, or frozen backoff waits.
+    from talos_agent.restore import ReconcileConfig, reconcile_after_restore
+
+    _reconcile_config = ReconcileConfig(
+        max_backoff_future_secs=3_600.0,
+        backoff_cap_secs=60.0,
+        max_clock_skew_secs=300.0,
+        api_verify_leases=True,
+        api_timeout_secs=10.0,
+    )
+    try:
+        reconcile_result = await reconcile_after_restore(db, api, config=_reconcile_config)
+        console.print(
+            f"[dim cyan]Restore reconciliation: "
+            f"backoff_capped={reconcile_result.backoff_rows_capped}, "
+            f"schedules_reset={reconcile_result.schedules_reset}, "
+            f"jobs_restored={reconcile_result.claimed_jobs_restored}, "
+            f"jobs_dropped={reconcile_result.claimed_jobs_dropped}, "
+            f"markers_pruned={reconcile_result.markers_pruned}"
+            f"[/dim cyan]"
+        )
+        if reconcile_result.errors:
+            console.print(
+                f"[yellow]Restore reconciliation warnings ({len(reconcile_result.errors)}): "
+                + "; ".join(reconcile_result.errors[:3])
+                + ("[...]" if len(reconcile_result.errors) > 3 else "")
+                + "[/yellow]"
+            )
+    except Exception as _rec_exc:
+        console.print(f"[yellow]Restore reconciliation failed (non-fatal): {_rec_exc}[/yellow]")
+        logger.warning("reconcile_after_restore failed: %s", _rec_exc)
+    # ────────────────────────────────────────────────────────────────────────
+
     # Tracking restart parameters
     browser_restart_attempts = 0
     max_restart_attempts = 3
