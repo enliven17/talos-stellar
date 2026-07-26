@@ -4,6 +4,7 @@ import {
   text,
   integer,
   boolean,
+  bigint,
   numeric,
   timestamp,
   jsonb,
@@ -357,8 +358,127 @@ export const tlsTokenPurchases = pgTable(
   ],
 );
 
-// ─── API Key Audit Log ────────────────────────────────────────────
+// ─── A2A Budget Reservation & Usage Accounting ────────────────────
+//
+// Three tables in concert provide durable, atomic financial state for
+// autonomous commerce:
+//
+//   tls_budgets                — config / limits (per scope, per agent)
+//   tls_budget_reservations    — durable state ledger of every reservation
+//                                and its lifecycle transitions
+//   tls_budget_usage_events    — immutable event journal driving
+//                                reconciliation; amount is a signed minor-
+//                                unit delta
+//
+// Amounts are tracked strictly in **minor units** (PostgreSQL `bigint`,
+// mapped to JS `BigInt`) to avoid floating-point drift across cumulative
+// accounting.  Reserved/committed/settled/refunded/expired/released states
+// follow the contract documented in BUDGETS.md.
+//
+// Migration: web/drizzle/0014_add_budget_reservations.sql
+// Service module: web/src/lib/budgets/budget-services.ts
+// Pure reconciler: web/src/lib/budgets/reconciliation.ts
 
+export const tlsBudgets = pgTable(
+  "tls_budgets",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    // 'global' | 'rolling' | 'category' | 'asset' | 'transaction' | 'counterparty'
+    scopeKind: text("scopeKind").notNull(),
+    // Disambiguator: NULL for the global budget of an agent, 'daily'|'hourly'
+    // for rolling buckets, category/asset/counterparty label otherwise.
+    scopeValue: text("scopeValue"),
+    // NULL unless scopeKind === 'rolling' (covers daily/hourly trade windows)
+    windowSeconds: integer("windowSeconds"),
+    // Budget cap in minor units. For non-rolling scopes, also the highest
+    // amount `availableAmount` may ever reach.
+    limitAmount: bigint("limitAmount", { mode: "bigint" }).notNull(),
+    // Mirror of the computed available amount for non-rolling scopes so
+    // reads can be served without re-aggregating events+reservations.
+    // For rolling scopes the field may be stale; trust computeBudgetAvailability.
+    availableAmount: bigint("availableAmount", { mode: "bigint" }).notNull(),
+    currency: text("currency").notNull().default("USDC"),
+    enabled: boolean("enabled").notNull().default(true),
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("tls_budgets_talosId_scopeKind_scopeValue_unique")
+      .on(t.talosId, t.scopeKind, t.scopeValue),
+    index("tls_budgets_talosId_enabled_idx").on(t.talosId, t.enabled),
+  ],
+);
+
+export const tlsBudgetReservations = pgTable(
+  "tls_budget_reservations",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    budgetId: text("budgetId").notNull().references(() => tlsBudgets.id, { onDelete: "cascade" }),
+    // Positive minor units.
+    amount: bigint("amount", { mode: "bigint" }).notNull(),
+    // reserved | committed | settled | released | expired | refunded
+    status: text("status").notNull().default("reserved"),
+    // Scoped per talosId; enforced via partial unique index below.
+    idempotencyKey: text("idempotencyKey"),
+    // Optional scope refs for category / asset / counterparty accounting.
+    counterpartyId: text("counterpartyId"),
+    category: text("category"),
+    assetCode: text("assetCode"),
+    // Optional link to a Stellar tx or commerce job.
+    txHash: text("txHash"),
+    jobId: text("jobId"),
+    // Lazy expiry — past this timestamp, the reservation is treated as expired.
+    expiresAt: timestamp("expiresAt", { mode: "date", precision: 3 }),
+    // Monotonic counter incremented at every transition. The transition
+    // caller must supply the matching current token to defend against
+    // stale-worker writes.
+    fencingToken: integer("fencingToken").notNull().default(0),
+    // For refunds that are issued against a previously-settled reservation.
+    parentReservationId: text("parentReservationId"),
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    index("tls_budget_reservations_talosId_status_idx").on(t.talosId, t.status),
+    index("tls_budget_reservations_budgetId_status_idx").on(t.budgetId, t.status),
+    index("tls_budget_reservations_expiresAt_idx")
+      .on(t.expiresAt)
+      .where(sql`"status" = 'reserved'`),
+    uniqueIndex("tls_budget_reservations_talosId_idempotencyKey_unique")
+      .on(t.talosId, t.idempotencyKey)
+      .where(sql`"idempotencyKey" IS NOT NULL`),
+  ],
+);
+
+export const tlsBudgetUsageEvents = pgTable(
+  "tls_budget_usage_events",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    budgetId: text("budgetId").notNull().references(() => tlsBudgets.id, { onDelete: "cascade" }),
+    // ON DELETE SET NULL: keeping historical events even if a reservation
+    // row is removed preserves the audit trail.
+    reservationId: text("reservationId"),
+    // reserve | commit | settle | refund | expire | release | reject
+    kind: text("kind").notNull(),
+    // Signed delta in minor units: positive for in-flows, negative for
+    // releases / refunds. Always non-zero.
+    amount: bigint("amount", { mode: "bigint" }).notNull(),
+    reason: text("reason"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tls_budget_usage_events_budgetId_createdAt_idx").on(t.budgetId, t.createdAt),
+    index("tls_budget_usage_events_reservationId_idx")
+      .on(t.reservationId)
+      .where(sql`"reservationId" IS NOT NULL`),
+  ],
+);
+
+// ─── API Key Audit Log ────────────────────────────────────────────
 export const tlsApiAuditLogs = pgTable(
   "tls_api_audit_logs",
   {

@@ -253,6 +253,85 @@ export const buyTokenSchema = z.object({
 
 // --- Playbooks ---
 
+// --- Budget Reservation / Accounting ---
+
+export const VALID_BUDGET_SCOPE_KINDS = [
+  "global",
+  "rolling",
+  "category",
+  "asset",
+  "transaction",
+  "counterparty",
+] as const;
+
+export const VALID_RESERVATION_STATES = [
+  "reserved",
+  "committed",
+  "settled",
+  "released",
+  "expired",
+  "refunded",
+] as const;
+
+const budgetAmountMinorSchema = z
+  .string()
+  .regex(
+    /^(?:0|[1-9][0-9]{0,18})$/,
+    "amount must be a non-negative integer minor-unit value (≤ 9.2e18)",
+  )
+  .refine((s) => s !== "0", "amount must be greater than zero");
+
+export const reserveBudgetSchema = z
+  .object({
+    scopeKind: z.enum(VALID_BUDGET_SCOPE_KINDS),
+    scopeValue: z.string().max(200).nullable().optional(),
+    amountMinor: budgetAmountMinorSchema,
+    currency: z.string().max(20).optional().default("USDC"),
+    counterpartyId: z.string().max(200).optional(),
+    category: z.string().max(100).optional(),
+    assetCode: z.string().max(20).optional(),
+    txHash: z.string().max(200).optional(),
+    jobId: z.string().max(100).optional(),
+    expiresInSeconds: z
+      .number()
+      .int()
+      .positive()
+      .max(60 * 60 * 24 * 30) // cap at 30 days
+      .optional()
+      .default(3600),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+  })
+  .strict();
+
+export const transitionReservationSchema = z
+  .object({
+    reservationId: z.string().min(1).max(100),
+    toStatus: z.enum(VALID_RESERVATION_STATES),
+    fencingToken: z.number().int().nonnegative(),
+    reason: z.string().max(500).optional(),
+    txHash: z.string().max(200).optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+  })
+  .strict();
+
+export const reconcileBudgetSchema = z
+  .object({
+    budgetId: z.string().min(1).max(100),
+    dryRun: z.boolean().optional().default(false),
+  })
+  .strict();
+
+export const createBudgetSchema = z
+  .object({
+    scopeKind: z.enum(VALID_BUDGET_SCOPE_KINDS),
+    scopeValue: z.string().max(200).nullable().optional(),
+    windowSeconds: z.number().int().positive().max(60 * 60 * 24 * 365).optional(),
+    limitAmountMinor: budgetAmountMinorSchema,
+    currency: z.string().max(20).optional().default("USDC"),
+    enabled: z.boolean().optional().default(true),
+  })
+  .strict();
+
 export const createPlaybookSchema = z.object({
   title: z.string().min(1).max(200),
   category: z.string().min(1).max(100),
