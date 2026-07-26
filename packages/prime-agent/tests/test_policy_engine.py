@@ -6,10 +6,7 @@ Covers: schema, engine evaluation, loader, middleware, and simulator.
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
-from decimal import Decimal
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -404,30 +401,12 @@ class TestPolicyLoader:
             assert len(p.rules) > 0, f"Policy {p.name} has no rules"
 
     def test_loader_merge_by_name(self):
-        """Later sources override earlier ones by name."""
+        """Default policy loading de-duplicates policies by name."""
         loader = PolicyLoader(db=None)
-        # Create a file override that replaces budget-guard
-        custom = [
-            Policy(
-                name="budget-guard",
-                priority=200,
-                description="Custom budget policy",
-                rules=(
-                    PolicyRule(
-                        rule_id="custom-rule",
-                        description="Custom",
-                        conditions=(),
-                        decision=PolicyDecision.DENY,
-                        severity=Severity.BLOCKER,
-                        reason="Custom block",
-                    ),
-                ),
-            ),
-        ]
-        # We can't easily mock the file, but we can test the merge logic
         all_policies = loader.load()
-        names = {p.name for p in all_policies}
+        names = [p.name for p in all_policies]
         assert "budget-guard" in names
+        assert len(names) == len(set(names))
 
     def test_needs_reload_returns_false_initially(self):
         loader = PolicyLoader(db=None)

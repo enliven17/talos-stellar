@@ -60,7 +60,6 @@ class ToolRegistry:
         if self._middleware is not None:
             try:
                 from talos_agent.policy.middleware import (
-                    _BYPASS_ACTIONS,
                     _GATED_ACTIONS,
                 )
                 if name in _GATED_ACTIONS:
