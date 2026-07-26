@@ -80,6 +80,9 @@ class Settings(BaseSettings):
     # Set as JSON in env: CHANNEL_CONFIGS={"telegram": {"bot_token": "...", "chat_id": "@channel"}}
     channel_configs: dict = Field(default_factory=dict, description="Per-channel credentials map")
 
+    # Policy engine (disabled by default — backward compatible)
+    policy_engine_enabled: bool = Field(default=False, description="Enable the declarative policy engine for autonomous actions")
+
     # Agent behaviour
     agent_cycle_interval: int = Field(default=30, description="Seconds between agent cycles")
     polling_interval: int = Field(default=10, description="Seconds between API polls")
