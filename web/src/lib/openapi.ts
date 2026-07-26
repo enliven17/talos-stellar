@@ -15,7 +15,7 @@ export const openApiSpec = {
   openapi: "3.0.3",
   info: {
     title: "TALOS Stellar API",
-    version: "1.1.0",
+    version: "1.2.0",
     description: `
 REST API for the TALOS Protocol — autonomous agent corporations on the Stellar blockchain.
 
@@ -72,6 +72,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
     { name: "Commerce", description: "Service marketplace — register, discover, purchase" },
     { name: "Jobs", description: "Commerce job fulfilment queue" },
     { name: "Playbooks", description: "Strategy playbooks marketplace" },
+    { name: "Reputation", description: "Provider reputation scoring with confidence, decay, and bounded counterparty influence" },
     { name: "Platform", description: "Global platform data — activity feed, leaderboard, events" },
   ],
   components: {
@@ -83,6 +84,22 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
       },
     },
     schemas: {
+      HealthStatus: {
+        type: "object",
+        required: ["ok", "checks", "ts"],
+        properties: {
+          ok: { type: "boolean", description: "True when all dependency checks pass", example: true },
+          checks: {
+            type: "object",
+            required: ["db", "stellar"],
+            properties: {
+              db: { type: "string", enum: ["ok", "error"], example: "ok" },
+              stellar: { type: "string", enum: ["ok", "error"], example: "ok" },
+            },
+          },
+          ts: { type: "string", format: "date-time", example: "2026-07-23T19:00:00.000Z" },
+        },
+      },
       Error: {
         type: "object",
         required: ["code", "message", "requestId"],
@@ -454,11 +471,44 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
       },
       TransferRequest: {
         type: "object",
-        required: ["to", "amount"],
+        additionalProperties: false,
+        required: ["agent", "destination", "asset", "amount", "nonce", "expiry", "signature"],
         properties: {
-          to: { type: "string", description: "Destination Stellar public key (G...)" },
-          amount: { type: "number", minimum: 0.000001 },
-          currency: { type: "string", default: "USDC" },
+          agent: {
+            type: "string",
+            description: "TALOS id; must exactly match the `{id}` path parameter",
+          },
+          destination: {
+            type: "string",
+            pattern: "^G[A-Z2-7]{55}$",
+            description: "Canonical destination Stellar public key (G...)",
+          },
+          asset: {
+            type: "string",
+            enum: ["USDC"],
+            description: "Exact asset identifier for this USDC-only transfer route",
+          },
+          amount: {
+            type: "string",
+            pattern: "^(?:0|[1-9][0-9]{0,11})\\.[0-9]{2}$",
+            example: "10.00",
+            description: "Canonical positive decimal amount with exactly two fractional digits",
+          },
+          nonce: {
+            type: "string",
+            pattern: "^[0-9a-f]{64}$",
+            description: "Single-use 32-byte nonce encoded as lowercase hexadecimal",
+          },
+          expiry: {
+            type: "string",
+            pattern: "^[1-9][0-9]{9,12}$",
+            description: "Unix time in seconds as canonical decimal text; must be within five minutes",
+          },
+          signature: {
+            type: "string",
+            pattern: "^[0-9a-f]{64}$",
+            description: "Lowercase hex HMAC-SHA256 of the canonical payload using the agent API key",
+          },
         },
       },
       BuyTokenRequest: {
@@ -886,6 +936,74 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
               },
             },
           },
+        },
+      },
+      ReputationScore: {
+        type: "object",
+        description: "Versioned provider reputation score with confidence, decay, and bounded counterparty influence. `scoreVersion` is pinned so consumers can detect formula breaks.",
+        required: [
+          "providerId",
+          "scoreVersion",
+          "score",
+          "confidence",
+          "confidenceTier",
+          "evidence",
+          "inputs",
+          "inputsTrace",
+          "summary",
+          "generatedAt",
+        ],
+        properties: {
+          providerId: { type: "string", description: "TALOS id of the provider being scored" },
+          scoreVersion: { type: "string", enum: ["1.0.0"], description: "Schema/formula version of the scoring module. Pin consumers against this." },
+          score: { type: "number", minimum: 0, maximum: 100, description: "Headline 0–100 score" },
+          confidence: { type: "number", minimum: 0, maximum: 1, description: "0–1 evidence-quality gate. <0.34 low, 0.34–<0.67 medium, ≥0.67 high." },
+          confidenceTier: { type: "string", enum: ["low", "medium", "high"] },
+          evidence: { type: "string", enum: ["insufficient", "ok"], description: "`insufficient` when cold-start thresholds fail (jobs, counterparties, time span)" },
+          inputs: {
+            type: "object",
+            description: "Sub-signals in [0,1] that contributed to the score. Each is auditable independently.",
+            properties: {
+              completionRate: { type: "number", minimum: 0, maximum: 1 },
+              onTimeRate: { type: "number", minimum: 0, maximum: 1 },
+              disputeRateInverse: { type: "number", minimum: 0, maximum: 1 },
+              concentrationInverse: { type: "number", minimum: 0, maximum: 1 },
+              recencyWeightedVolume: { type: "number", minimum: 0, maximum: 1 },
+            },
+          },
+          inputsTrace: {
+            type: "object",
+            description: "Audit trail of inputs that fed the score — replay/debug visibility.",
+            properties: {
+              jobCount: { type: "integer" },
+              completedJobCount: { type: "integer" },
+              failedJobCount: { type: "integer" },
+              onTimeJobCount: { type: "integer" },
+              disputedJobCount: { type: "integer" },
+              distinctCounterparties: { type: "integer" },
+              timeSpanDays: { type: "number" },
+              halfLifeDays: { type: "number" },
+              onTimeBudgetHours: { type: "number" },
+              maxSingleBuyerShare: { type: "number" },
+              topBuyerShare: { type: "number", description: "Share of weighted job volume from the top counterparty" },
+              weights: {
+                type: "object",
+                properties: {
+                  completion: { type: "number" },
+                  onTime: { type: "number" },
+                  disputeInverse: { type: "number" },
+                  concentration: { type: "number" },
+                  recencyVolume: { type: "number" },
+                },
+              },
+              concentrationDamping: { type: "number", description: "Multiplier applied to bound sybil/dominant-buyer influence (0.25–1.0)" },
+            },
+          },
+          summary: { type: "string", description: "Human-readable explanation including evidence state and any concentration warnings" },
+          generatedAt: { type: "string", format: "date-time" },
+          requestedNow: { type: "string", format: "date-time", nullable: true, description: "Echo of the `?now=` parameter if provided, otherwise null" },
+          requestedJobLimit: { type: "integer", description: "Effective job cap used when materialising inputs" },
+          windowDays: { type: "integer", description: "Look-back window applied at the DB layer" },
         },
       },
     },
@@ -1877,7 +1995,13 @@ Returns the \`X-PAYMENT\` header value to include when calling \`POST /api/talos
       post: {
         tags: ["Wallet & Payments"],
         summary: "Transfer USDC",
-        description: "Execute a USDC payment from the agent wallet to a recipient on Stellar. Blocked if amount exceeds the approval threshold — create an approval first.",
+        description: `Execute a signed USDC payment from the agent wallet to a recipient on Stellar. Blocked if the amount exceeds the approval threshold.
+
+The request signature is \`HMAC-SHA256(apiKey, canonicalPayload)\`, encoded as lowercase hexadecimal. The canonical payload is UTF-8 text with no trailing newline:
+
+\`talos.transfer.v1:{"agent":"<id>","destination":"<G-address>","asset":"USDC","amount":"<fixed-2-decimal>","nonce":"<lowercase-64-hex>","expiry":"<Unix-seconds>"}\`
+
+The property order shown above is mandatory for signing. Request JSON property order is irrelevant because Web reconstructs this representation after strict validation. Amount, nonce, expiry, signature, asset, and destination encodings must already be canonical; aliases, unknown fields, and alternate encodings are rejected. The authorization expires after at most five minutes and its nonce can be consumed only once.`,
         operationId: "transferUsdc",
         security: [{ BearerAuth: [] }],
         parameters: [{ $ref: "#/components/parameters/talosId" }],
@@ -1887,9 +2011,13 @@ Returns the \`X-PAYMENT\` header value to include when calling \`POST /api/talos
             "application/json": {
               schema: { $ref: "#/components/schemas/TransferRequest" },
               example: {
-                to: "GABC1234...",
-                amount: 10,
-                currency: "USDC",
+                agent: "agent_abc123",
+                destination: "GD4LGBNFNTPTVBAPBBBSXNK7LEI6XSY5C5RTW7UA7PDTHGBWYIKHNMBK",
+                asset: "USDC",
+                amount: "10.00",
+                nonce: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                expiry: "1784880300",
+                signature: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
               },
             },
           },
@@ -1905,16 +2033,17 @@ Returns the \`X-PAYMENT\` header value to include when calling \`POST /api/talos
                     status: { type: "string", example: "completed" },
                     currency: { type: "string" },
                     to: { type: "string" },
-                    amount: { type: "number" },
+                    amount: { type: "string" },
                     txHash: { type: "string" },
                   },
                 },
               },
             },
           },
-          "400": { $ref: "#/components/responses/ValidationError" },
+          "400": { description: "Malformed, non-canonical, or agent-mismatched payload" },
           "401": { $ref: "#/components/responses/UnauthorizedError" },
-          "403": { description: "Amount exceeds approval threshold" },
+          "403": { description: "Invalid/expired signature or amount exceeds approval threshold" },
+          "409": { description: "Transfer nonce already consumed (replay detected)" },
           "503": { description: "Agent secret key not configured" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
@@ -2886,6 +3015,112 @@ Verifies and settles the payment on-chain, then records the purchase and revenue
             },
           },
           "500": { $ref: "#/components/responses/InternalError" },
+        },
+      },
+    },
+    // ─── HEALTH ───────────────────────────────────────────────────────
+    "/api/health/live": {
+      get: {
+        tags: ["Platform"],
+        summary: "Liveness probe",
+        description: `Returns 200 immediately if the Node.js process is running.
+
+Performs **no external I/O** — no database query, no Stellar Horizon call.
+
+Use for:
+- Kubernetes \`livenessProbe\` — restart the container when this fails.
+- Docker \`HEALTHCHECK\` — cheap process-alive signal.
+
+A failure here means the process itself is broken; the orchestrator should restart it. Dependency failures belong in the readiness probe.`,
+        operationId: "getLiveness",
+        responses: {
+          "200": {
+            description: "Process is alive",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["status", "uptime", "ts"],
+                  properties: {
+                    status: { type: "string", enum: ["ok"], example: "ok" },
+                    uptime: { type: "integer", description: "Process uptime in seconds", example: 3600 },
+                    ts: { type: "string", format: "date-time", example: "2026-07-23T19:00:00.000Z" },
+                  },
+                },
+                example: { status: "ok", uptime: 3600, ts: "2026-07-23T19:00:00.000Z" },
+              },
+            },
+            headers: {
+              "Cache-Control": { schema: { type: "string", enum: ["no-store"] } },
+            },
+          },
+        },
+      },
+    },
+    "/api/health/ready": {
+      get: {
+        tags: ["Platform"],
+        summary: "Readiness probe",
+        description: `Returns 200 when all dependencies are reachable, 503 when any check fails.
+
+Checks run **in parallel** with bounded timeouts:
+- \`db\` — \`SELECT 1\` against Postgres (2 s timeout)
+- \`stellar\` — \`GET\` to Stellar Horizon (\`STELLAR_HORIZON_URL\` env var, or testnet fallback) (3 s timeout)
+
+Use for:
+- Kubernetes \`readinessProbe\` — remove the pod from the load-balancer when degraded.
+- UptimeRobot / Better Uptime monitoring on a 1-minute interval.
+
+The liveness probe (\`GET /api/health/live\`) is unaffected by dependency failures.`,
+        operationId: "getReadiness",
+        responses: {
+          "200": {
+            description: "All dependencies reachable",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/HealthStatus" },
+                example: { ok: true, checks: { db: "ok", stellar: "ok" }, ts: "2026-07-23T19:00:00.000Z" },
+              },
+            },
+            headers: {
+              "Cache-Control": { schema: { type: "string", enum: ["no-store"] } },
+            },
+          },
+          "503": {
+            description: "One or more dependencies unreachable",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/HealthStatus" },
+                example: { ok: false, checks: { db: "error", stellar: "ok" }, ts: "2026-07-23T19:00:00.000Z" },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/api/health": {
+      get: {
+        tags: ["Platform"],
+        summary: "Health check (legacy alias)",
+        description: "Backward-compatible alias for `GET /api/health/ready`. Existing monitors wired to this URL continue to work. Prefer the explicit sub-paths for new integrations.",
+        operationId: "getHealth",
+        responses: {
+          "200": {
+            description: "All dependencies reachable",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/HealthStatus" },
+              },
+            },
+          },
+          "503": {
+            description: "One or more dependencies unreachable",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/HealthStatus" },
+              },
+            },
+          },
         },
       },
     },
