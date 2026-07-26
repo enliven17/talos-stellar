@@ -73,7 +73,7 @@ export const createTalosSchema = z.object({
   creatorPublicKey: stellarPublicKeySchema,
   signature: z.string().min(1),
   message: z.string().min(1),
-  walletPublicKey: stellarPublicKeySchema.optional(),
+  walletPublicKey: z.string().min(1).optional(),
   onChainId: z.number().int().nullable().optional(),
   agentName: z.string().max(100).nullable().optional(),
   initialPrice: z.number().nonnegative().optional().default(0),
@@ -224,7 +224,7 @@ export const regenerateKeySchema = z.object({
 // --- Sign Payment (Stellar x402) ---
 
 export const signPaymentSchema = z.object({
-  payee: stellarPublicKeySchema,
+  payee: z.string().min(1),
   amount: z.union([z.string(), z.number()]),
   assetCode: stellarAssetCodeSchema.optional().default("USDC"),
 });

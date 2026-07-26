@@ -199,6 +199,18 @@ CREATE INDEX IF NOT EXISTS idx_dividends_log_status ON dividends_log(status);
 CREATE INDEX IF NOT EXISTS idx_dividends_log_recipient ON dividends_log(recipient_address);
         """,
     ),
+    (
+        6,
+        """
+CREATE TABLE IF NOT EXISTS retry_state (
+    task_name       TEXT PRIMARY KEY,
+    attempt_count   INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL,
+    terminal        INTEGER NOT NULL DEFAULT 0,
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+        """,
+    ),
 ]
 
 
@@ -737,6 +749,62 @@ class LocalDB:
             (f"+{days} days",),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── Retry State ────────────────────────────────────────
+
+    def upsert_retry_state(
+        self,
+        task_name: str,
+        attempt_count: int,
+        next_attempt_at: datetime,
+        terminal: bool = False,
+    ) -> None:
+        """Persist (or update) the retry state for a named scheduler task."""
+        self._conn.execute(
+            """INSERT INTO retry_state (task_name, attempt_count, next_attempt_at, terminal, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(task_name) DO UPDATE SET
+                   attempt_count   = excluded.attempt_count,
+                   next_attempt_at = excluded.next_attempt_at,
+                   terminal        = excluded.terminal,
+                   updated_at      = excluded.updated_at""",
+            (
+                task_name,
+                attempt_count,
+                next_attempt_at.isoformat(),
+                int(terminal),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self._conn.commit()
+
+    def get_retry_state(self, task_name: str) -> dict | None:
+        """Return the persisted retry state for a task, or None if absent.
+
+        Returned dict keys: task_name, attempt_count (int), next_attempt_at
+        (datetime, UTC), terminal (bool).
+        """
+        row = self._conn.execute(
+            "SELECT task_name, attempt_count, next_attempt_at, terminal "
+            "FROM retry_state WHERE task_name = ?",
+            (task_name,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "task_name": row["task_name"],
+            "attempt_count": int(row["attempt_count"]),
+            "next_attempt_at": datetime.fromisoformat(row["next_attempt_at"]),
+            "terminal": bool(row["terminal"]),
+        }
+
+    def clear_retry_state(self, task_name: str) -> None:
+        """Delete the persisted retry state for a task (used after a clean success)."""
+        self._conn.execute(
+            "DELETE FROM retry_state WHERE task_name = ?",
+            (task_name,),
+        )
+        self._conn.commit()
 
     # ── Cleanup ────────────────────────────────────────────
 
