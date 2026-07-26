@@ -8,7 +8,7 @@ import os
 import random
 import signal
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import structlog
@@ -233,31 +233,20 @@ class Backoff:
 
 
 class DurableBackoff:
-    """Exponential backoff whose state is persisted to SQLite.
+    """Backoff that persists state to SQLite so restarts resume where they left off.
 
-    On construction the last persisted ``attempt_count`` is restored from the
-    database so that a process restart resumes the correct backoff position
-    rather than starting from zero.
+    On construction the persisted state (if any) is loaded immediately so the
+    first ``next_delay()`` call after a restart returns the *remaining* wait
+    time rather than the base delay.  A successful run clears the persisted
+    state; a failed run writes the updated attempt count and the wall-clock
+    time at which the next attempt is allowed.
 
-    Parameters
-    ----------
-    task_name:
-        Stable identifier stored as the primary key in ``retry_state``.
-    db:
-        Open :class:`~talos_agent.db.LocalDB` instance.
-    base_delay:
-        Normal inter-task interval when there are no failures.
-    initial_backoff:
-        First backoff delay after the first failure (seconds).
-    max_backoff:
-        Upper cap on computed delay (seconds).
-    jitter:
-        Fraction of the computed delay to add/subtract as random noise
-        (default 0.2 = ±20 %).
-    max_attempts:
-        When ``> 0``, mark the task as *terminal* after this many consecutive
-        failures and stop retrying.  ``0`` means unlimited.
+    ``max_attempts`` is enforced: once exceeded the task is marked *terminal*
+    and ``is_terminal`` returns ``True`` so callers can stop scheduling it.
+    Pass ``max_attempts=0`` (the default) to disable the cap entirely.
     """
+
+    MAX_ATTEMPTS_DEFAULT = 0  # 0 = unlimited
 
     def __init__(
         self,
@@ -267,7 +256,7 @@ class DurableBackoff:
         initial_backoff: float = 2.0,
         max_backoff: float = 300.0,
         jitter: float = 0.2,
-        max_attempts: int = 0,
+        max_attempts: int = MAX_ATTEMPTS_DEFAULT,
     ):
         self.task_name = task_name
         self._db = db
@@ -277,26 +266,64 @@ class DurableBackoff:
         self.jitter = jitter
         self.max_attempts = max_attempts
 
-        # Restore persisted state
+        # In-memory state — restored from DB on construction
         self.fail_count: int = 0
-        self.terminal: bool = False
+        self._next_attempt_at: datetime | None = None
+        self._terminal: bool = False
+
         self._restore()
 
+    # ── Persistence helpers ────────────────────────────────
+
     def _restore(self) -> None:
-        """Load attempt_count and terminal flag from the database."""
-        state = self._db.get_retry_state(self.task_name)
-        if state:
-            self.fail_count = state["attempt_count"]
-            self.terminal = state["terminal"]
-            logger.debug(
-                "DurableBackoff restored: task=%s fail_count=%d terminal=%s",
+        """Load persisted state from the DB (no-op if no row exists)."""
+        try:
+            state = self._db.get_retry_state(self.task_name)
+        except Exception:
+            # DB unavailable — start fresh rather than crash
+            return
+        if state is None:
+            return
+
+        self.fail_count = state["attempt_count"]
+        self._next_attempt_at = state["next_attempt_at"]
+        self._terminal = state["terminal"]
+        logger.debug(
+            "DurableBackoff restored: task=%s fail_count=%d terminal=%s",
+            self.task_name,
+            self.fail_count,
+            self._terminal,
+        )
+
+    def _persist(self) -> None:
+        """Write current in-memory state to the DB."""
+        next_at = self._next_attempt_at or datetime.now(timezone.utc)
+        try:
+            self._db.upsert_retry_state(
                 self.task_name,
-                self.fail_count,
-                self.terminal,
+                attempt_count=self.fail_count,
+                next_attempt_at=next_at,
+                terminal=self._terminal,
             )
+        except Exception as exc:
+            logger.warning("DurableBackoff: failed to persist state for %s: %s", self.task_name, exc)
+
+    # ── Public API ─────────────────────────────────────────
+
+    @property
+    def is_terminal(self) -> bool:
+        """True when max_attempts is set and has been exceeded."""
+        return self._terminal
+
+    def wait_remaining(self) -> float:
+        """Seconds until the next attempt is allowed (0 if overdue or no state)."""
+        if self._next_attempt_at is None:
+            return 0.0
+        remaining = (self._next_attempt_at - datetime.now(timezone.utc)).total_seconds()
+        return max(remaining, 0.0)
 
     def next_delay(self) -> float:
-        """Return the next sleep duration without advancing state."""
+        """Compute the next sleep duration (same semantics as ``Backoff.next_delay``)."""
         if self.fail_count == 0:
             return self.base_delay
 
@@ -317,33 +344,32 @@ class DurableBackoff:
         return actual_delay
 
     def success(self) -> None:
-        """Record a successful attempt: reset counter and remove persisted state."""
+        """Record a successful attempt: reset counters and remove persisted state."""
         if self.fail_count > 0:
             logger.debug("DurableBackoff reset on success: task=%s", self.task_name)
         self.fail_count = 0
-        self.terminal = False
-        self._db.clear_retry_state(self.task_name)
+        self._next_attempt_at = None
+        self._terminal = False
+        try:
+            self._db.clear_retry_state(self.task_name)
+        except Exception as exc:
+            logger.warning("DurableBackoff: failed to clear state for %s: %s", self.task_name, exc)
 
     def failure(self) -> None:
-        """Record a failed attempt, persist the new state, and check max_attempts."""
+        """Record a failed attempt, advance counters, and persist state."""
         self.fail_count += 1
 
         if self.max_attempts > 0 and self.fail_count >= self.max_attempts:
-            self.terminal = True
+            self._terminal = True
             logger.warning(
-                "DurableBackoff terminal: task=%s reached max_attempts=%d",
+                "DurableBackoff: task %s reached max_attempts=%d — marking terminal",
                 self.task_name,
                 self.max_attempts,
             )
 
-        from datetime import datetime, timezone, timedelta
-        next_at = datetime.now(timezone.utc) + timedelta(seconds=self.next_delay())
-        self._db.save_retry_state(
-            self.task_name,
-            attempt_count=self.fail_count,
-            next_attempt_at=next_at,
-            terminal=self.terminal,
-        )
+        delay = self.next_delay()
+        self._next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        self._persist()
 
 async def run(settings: Settings, agent_slot: int = 0) -> None:
     """Entry point called by `talos-agent start`. agent_slot used for log prefixes in multi mode."""
@@ -385,13 +411,93 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
     browser = await BrowserSession.start(model_api_key=settings.llm_api_key)
     console.print("[green]Browser ready.[/green]")
 
-    # Build tools
-    tools = build_all_tools(api=api, db=db, browser=browser, settings=settings)
+    # ── Policy engine (disabled by default — opt-in via config) ─────
+    from talos_agent.policy import PolicyEngine, PolicyLoader, PolicyMiddleware
+
+    policy_engine = PolicyEngine()
+    policy_loader = PolicyLoader(db=db)
+    policy_enabled = os.environ.get(
+        "POLICY_ENGINE_ENABLED",
+        str(talos_config.get("policyEngineEnabled", False)),
+    ).lower() in ("true", "1", "yes")
+    policy_engine.enabled = policy_enabled
+    if policy_enabled:
+        policy_engine.load(policy_loader.load())
+
+    # Budget getter for policy middleware context
+    def _get_budget_context() -> dict[str, float]:
+        cfg = db.get_talos_config()
+        gtm_budget = float((cfg or {}).get("gtmBudget", 200))
+        spent = float(db.get_spending_period(30))
+        return {
+            "gtm_budget": gtm_budget,
+            "spent_this_period": spent,
+            "budget_remaining": max(0.0, gtm_budget - spent),
+        }
+
+    def _get_config_context() -> dict[str, float]:
+        return {
+            "approval_threshold": float(settings.approval_threshold),
+        }
+
+    policy_middleware = PolicyMiddleware(
+        policy_engine,
+        policy_loader,
+        budget_getter=_get_budget_context,
+        config_getter=_get_config_context,
+    )
+
+    if policy_enabled:
+        console.print("[bold cyan]Policy engine ENABLED — actions will be gated.[/bold cyan]")
+    else:
+        console.print("[dim]Policy engine disabled (set POLICY_ENGINE_ENABLED=true to enable).[/dim]")
+    # ──────────────────────────────────────────────────────────────
+
+    # Build tools — pass policy middleware for pre-execution policy checks
+    tools = build_all_tools(api=api, db=db, browser=browser, settings=settings,
+                            policy_middleware=policy_middleware)
     console.print(f"[green]Registered {len(tools)} tools.[/green]")
 
     # Initialize StellarKit for balance checks
     stellar = StellarKit(api)
     await stellar.initialize()
+
+    # ── Post-restore reconciliation (#296) ──────────────────────────────────
+    # Reconcile backoff state, schedule timestamps, fencing tokens, and
+    # completion markers before starting any tasks.  This ensures stale state
+    # from a previous run (crashed or checkpointed) does not cause duplicate
+    # work, stale heartbeats, or frozen backoff waits.
+    from talos_agent.restore import ReconcileConfig, reconcile_after_restore
+
+    _reconcile_config = ReconcileConfig(
+        max_backoff_future_secs=3_600.0,
+        backoff_cap_secs=60.0,
+        max_clock_skew_secs=300.0,
+        api_verify_leases=True,
+        api_timeout_secs=10.0,
+    )
+    try:
+        reconcile_result = await reconcile_after_restore(db, api, config=_reconcile_config)
+        console.print(
+            f"[dim cyan]Restore reconciliation: "
+            f"backoff_capped={reconcile_result.backoff_rows_capped}, "
+            f"schedules_reset={reconcile_result.schedules_reset}, "
+            f"jobs_restored={reconcile_result.claimed_jobs_restored}, "
+            f"jobs_dropped={reconcile_result.claimed_jobs_dropped}, "
+            f"markers_pruned={reconcile_result.markers_pruned}"
+            f"[/dim cyan]"
+        )
+        if reconcile_result.errors:
+            console.print(
+                f"[yellow]Restore reconciliation warnings ({len(reconcile_result.errors)}): "
+                + "; ".join(reconcile_result.errors[:3])
+                + ("[...]" if len(reconcile_result.errors) > 3 else "")
+                + "[/yellow]"
+            )
+    except Exception as _rec_exc:
+        console.print(f"[yellow]Restore reconciliation failed (non-fatal): {_rec_exc}[/yellow]")
+        logger.warning("reconcile_after_restore failed: %s", _rec_exc)
+    # ────────────────────────────────────────────────────────────────────────
 
     # Tracking restart parameters
     browser_restart_attempts = 0
@@ -480,6 +586,11 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                 structlog.contextvars.bind_contextvars(cycle_id=cycle_id)
                 api.set_request_id(cycle_id)
                 try:
+                    # Hot-reload policies if the file changed
+                    if policy_engine.enabled:
+                        if policy_middleware.hot_reload():
+                            console.print("[cyan]Policy engine: policies reloaded (file change detected).[/cyan]")
+
                     if not await ensure_browser_healthy():
                         console.print(
                             "[red]Skipping agent cycle: browser session is down and unrecoverable.[/red]"
@@ -520,10 +631,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
 
     async def polling_task():
         """Poll Web API for approvals and commerce jobs."""
-        backoff = DurableBackoff("polling", db, base_delay=settings.polling_interval)
-        if backoff.terminal:
-            logger.warning("polling_task: restored as terminal — skipping until manual clear")
-            return
+        backoff = DurableBackoff(task_name="polling", db=db, base_delay=settings.polling_interval)
         while not shutdown_event.is_set():
             try:
                 approvals = await api.get_approvals(settings.talos_id, status="pending")
@@ -561,10 +669,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
 
     async def heartbeat_task():
         """Report online status periodically."""
-        backoff = DurableBackoff("heartbeat", db, base_delay=settings.heartbeat_interval)
-        if backoff.terminal:
-            logger.warning("heartbeat_task: restored as terminal — skipping until manual clear")
-            return
+        backoff = DurableBackoff(task_name="heartbeat", db=db, base_delay=settings.heartbeat_interval)
         while not shutdown_event.is_set():
             try:
                 await api.update_status(settings.talos_id, online=True)
@@ -582,12 +687,31 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             except asyncio.TimeoutError:
                 pass
 
+    async def job_heartbeat_task():
+        """Extend leases on claimed jobs periodically."""
+        from talos_agent.tools.commerce import get_claimed_jobs_copy
+        backoff = DurableBackoff(task_name="job_heartbeat", db=db, base_delay=settings.job_heartbeat_interval)
+        while not shutdown_event.is_set():
+            try:
+                claimed = get_claimed_jobs_copy()
+                for job_id, fencing_token in claimed.items():
+                    result = await api.heartbeat_job(job_id, fencing_token)
+                    if not result:
+                        logger.warning("job_lease_heartbeat_failed", job_id=job_id)
+                backoff.success()
+            except Exception as e:
+                logger.debug(f"Job heartbeat error: {e}")
+                backoff.failure()
+
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=backoff.next_delay())
+                break
+            except asyncio.TimeoutError:
+                pass
+
     async def activity_flush_task():
         """Flush buffered activity logs to Web API."""
-        backoff = DurableBackoff("activity_flush", db, base_delay=30)
-        if backoff.terminal:
-            logger.warning("activity_flush_task: restored as terminal — skipping until manual clear")
-            return
+        backoff = DurableBackoff(task_name="activity_flush", db=db, base_delay=30)
         while not shutdown_event.is_set():
             try:
                 pending = db.get_pending_activities()
@@ -760,6 +884,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         asyncio.create_task(agent_cycle_task(), name="agent_cycle"),
         asyncio.create_task(polling_task(), name="polling"),
         asyncio.create_task(heartbeat_task(), name="heartbeat"),
+        asyncio.create_task(job_heartbeat_task(), name="job_heartbeat"),
         asyncio.create_task(activity_flush_task(), name="activity_flush"),
         asyncio.create_task(learning_cycle_task(), name="learning_cycle"),
         asyncio.create_task(dividend_distribution_task(), name="dividend_distribution"),
@@ -769,9 +894,49 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
     try:
         await shutdown_event.wait()
 
-        for t in tasks:
-            t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # ── Graceful shutdown (#182) ──────────────────────────────────────
+        # Stop polling: shutdown_event is already set so each task's inner
+        # wait() will break on the next iteration without starting new work.
+        #
+        # Wait up to shutdown_deadline seconds for running tasks to finish
+        # naturally before we force-cancel them.
+        deadline = settings.shutdown_deadline
+        if deadline > 0:
+            console.print(
+                f"[yellow]Waiting up to {deadline:.0f}s for in-flight tasks to finish...[/yellow]"
+            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(asyncio.gather(*tasks, return_exceptions=True)),
+                    timeout=deadline,
+                )
+                console.print("[green]All tasks finished within deadline.[/green]")
+            except asyncio.TimeoutError:
+                still_running = [t for t in tasks if not t.done()]
+                console.print(
+                    f"[red]Deadline exceeded — cancelling {len(still_running)} task(s): "
+                    + ", ".join(t.get_name() for t in still_running)
+                    + "[/red]"
+                )
+                # Record each cancelled task so operators can inspect what was cut short.
+                for t in still_running:
+                    try:
+                        db.add_activity(
+                            "shutdown_cancelled",
+                            f"Task '{t.get_name()}' was cancelled at shutdown (deadline={deadline:.0f}s)",
+                            "system",
+                        )
+                    except Exception:
+                        pass
+                for t in still_running:
+                    t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            # Immediate cancel when deadline == 0.
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        # ─────────────────────────────────────────────────────────────────
     finally:
         console.print("[yellow]Cleaning up...[/yellow]")
         try:

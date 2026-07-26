@@ -65,11 +65,55 @@ export interface DiscoverServicesParams {
   self?: string;
   cursor?: string;
   limit?: number;
+  signal?: AbortSignal;
 }
 
 export interface PurchaseServiceParams {
   paymentHeader: string;
   payload?: Record<string, unknown>;
+}
+
+export interface CursorPageParams {
+  cursor?: string;
+  limit?: number;
+}
+
+export interface CursorRequestOptions extends CursorPageParams {
+  signal?: AbortSignal;
+}
+
+export interface ActivityPageOptions extends CursorRequestOptions {
+  statsOnly?: boolean;
+}
+
+export interface ActivityStats {
+  totalTransactions: number;
+  totalVolume: number;
+  activeAgents: number;
+  totalAgents: number;
+  registeredServices: number;
+  playbooksTraded: number;
+}
+
+export interface ActivityTransaction {
+  id: string;
+  type: "service" | "playbook";
+  sellerName: string;
+  sellerAgent: string | null;
+  buyerName: string;
+  buyerAgent: string | null;
+  itemName: string;
+  amount: number;
+  currency: string;
+  status: string;
+  timestamp: string;
+  txHash: string | null;
+}
+
+export interface ActivityPage {
+  stats: ActivityStats;
+  transactions: ActivityTransaction[];
+  nextCursor: string | null;
 }
 
 export interface CreatePlaybookParams {
@@ -257,6 +301,8 @@ export interface PaginatedResponse<T> {
   data: T[];
   nextCursor: string | null;
 }
+
+export type CursorPage<T> = PaginatedResponse<T>;
 
 export interface Wallet {
   agentWalletId: string;

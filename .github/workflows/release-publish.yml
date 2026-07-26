@@ -1,0 +1,156 @@
+name: Release Publish
+
+# Runs after a "chore(release)" version-bump commit (opened by release-plan.yml
+# and approved/merged by a maintainer) lands on main. Tags each component
+# whose manifest version isn't tagged yet, builds its release artifact, and
+# publishes a GitHub Release with the changelog section as notes. Tag
+# creation is idempotent (existing tags are skipped), so a failed or
+# re-triggered run only ever creates what's still missing.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-publish
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: ${{ contains(github.event.head_commit.message, 'chore(release)') }}
+    runs-on: ubuntu-latest
+    outputs:
+      has_releases: ${{ steps.tag.outputs.has_releases }}
+      releases: ${{ steps.tag.outputs.releases }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Create tags for released components
+        id: tag
+        run: |
+          node scripts/release/cli.mjs tag --create --notes-dir=/tmp/release-notes > /tmp/releasable.json
+          cat /tmp/releasable.json
+
+          if [ "$(jq 'length' /tmp/releasable.json)" = "0" ]; then
+            echo "has_releases=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_releases=true" >> "$GITHUB_OUTPUT"
+            echo "releases=$(jq -c . /tmp/releasable.json)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push new tags
+        if: steps.tag.outputs.has_releases == 'true'
+        run: git push origin --tags
+
+      - name: Upload release notes
+        if: steps.tag.outputs.has_releases == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: /tmp/release-notes
+
+  build-and-release:
+    needs: prepare
+    if: needs.prepare.outputs.has_releases == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ${{ fromJson(needs.prepare.outputs.releases) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.release.tag }}
+
+      - name: Download release notes
+        uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes
+
+      # --- sdk ---
+      - name: Setup pnpm
+        if: matrix.release.name == 'sdk'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+
+      - name: Setup Node.js
+        if: matrix.release.name == 'sdk'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Build sdk artifact
+        if: matrix.release.name == 'sdk'
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --dir packages/sdk build
+          cd packages/sdk && npm pack
+
+      # --- agent ---
+      - name: Setup Python
+        if: matrix.release.name == 'agent'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup uv
+        if: matrix.release.name == 'agent'
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build agent artifact
+        if: matrix.release.name == 'agent'
+        working-directory: packages/prime-agent
+        run: |
+          uv sync --frozen --all-extras --all-groups
+          uv build
+
+      # --- contracts ---
+      - name: Install Rust toolchain
+        if: matrix.release.name == 'contracts'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Build contracts artifact
+        if: matrix.release.name == 'contracts'
+        working-directory: contracts
+        run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Collect artifact paths
+        id: artifacts
+        run: |
+          case "${{ matrix.release.name }}" in
+            sdk) echo "paths=packages/sdk/*.tgz" >> "$GITHUB_OUTPUT" ;;
+            agent) echo "paths=packages/prime-agent/dist/*" >> "$GITHUB_OUTPUT" ;;
+            contracts) echo "paths=contracts/target/wasm32-unknown-unknown/release/*.wasm" >> "$GITHUB_OUTPUT" ;;
+            web) echo "paths=" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          FLAGS=()
+          if [ "${{ matrix.release.prerelease }}" = "true" ]; then
+            FLAGS+=(--prerelease)
+          fi
+          gh release create "${{ matrix.release.tag }}" \
+            --title "${{ matrix.release.name }} v${{ matrix.release.version }}" \
+            --notes-file "release-notes/${{ matrix.release.name }}.md" \
+            "${FLAGS[@]}" \
+            ${{ steps.artifacts.outputs.paths }}

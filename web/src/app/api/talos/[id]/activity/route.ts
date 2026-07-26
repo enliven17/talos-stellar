@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { tlsTalos, tlsActivities } from "@/db/schema";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
+import { parseLimit } from "@/lib/parse-limit";
 
 // GET /api/talos/:id/activity — Get activities
 export async function GET(
@@ -12,7 +13,9 @@ export async function GET(
   const { id } = await params;
   const { searchParams } = new URL(request.url);
   const cursor = searchParams.get("cursor");
-  const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 1), 200);
+  const parsedLimit = parseLimit(searchParams.get("limit"), 50, 200);
+  if (!parsedLimit.ok) return parsedLimit.response;
+  const limit = parsedLimit.limit;
 
   try {
     const talos = await db
