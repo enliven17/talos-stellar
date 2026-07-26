@@ -254,10 +254,10 @@ describe("Async Jobs Revenue Recording Unit Tests", () => {
         params: Promise.resolve({ id: "job_1" }),
       });
 
-      expect(response.status).toBe(200);
-
-      // Verify that tx.insert was NOT called since the job status was already "completed"
-      expect(mockTxInsert).not.toHaveBeenCalled();
+      // The pre-guard catches completed status before the transaction
+      expect(response.status).toBe(409);
+      // Verify that the transaction was never entered
+      expect(mockDb.transaction).not.toHaveBeenCalled();
     });
   });
 });

@@ -11,6 +11,9 @@ import logging
 from typing import Awaitable, Callable, TypeVar
 
 import httpx
+import json
+import re
+import unicodedata
 from tenacity import (
     AsyncRetrying,
     RetryCallState,
@@ -25,6 +28,21 @@ RETRYABLE_STATUSES: frozenset[int] = frozenset({429, 502, 503, 504})
 MAX_ATTEMPTS = 3
 WAIT_INITIAL = 1.0
 WAIT_MAX = 10.0
+LOG_RESPONSE_SUMMARY_MAX_CHARS = 1024
+SECRET_FIELD_NAMES = {
+    "access_token",
+    "refresh_token",
+    "api_key",
+    "apikey",
+    "apiKey",
+    "authorization",
+    "auth",
+    "token",
+    "secret",
+    "password",
+    "private_key",
+    "privateKey",
+}
 
 T = TypeVar("T")
 
@@ -40,6 +58,68 @@ class RetryableHTTPError(Exception):
         except RuntimeError:
             url = str(response.url)
         super().__init__(f"HTTP {response.status_code} from {url}")
+
+
+def _sanitize_json_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: ("[REDACTED]" if key.lower() in SECRET_FIELD_NAMES else _sanitize_json_value(val))
+            for key, val in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_json_value(item) for item in value]
+    return value
+
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _strip_control_chars(text: str) -> str:
+    """Neutralize CR/LF and other control chars to prevent log injection."""
+    return _CONTROL_CHAR_RE.sub(" ", text)
+
+def _sanitize_response_text(text: str) -> str:
+    normalized = _strip_control_chars(unicodedata.normalize("NFC", text))
+    try:
+        payload = json.loads(normalized)
+    except Exception:
+        sanitized = normalized
+    else:
+        sanitized = json.dumps(_sanitize_json_value(payload), ensure_ascii=False)
+
+    sanitized = re.sub(
+        r"(?i)(Bearer|Token)\s+[A-Za-z0-9\-\._~\+/]+=*",
+        "[REDACTED]",
+        sanitized,
+    )
+    sanitized = re.sub(r"S[A-Z2-7]{55}", "[REDACTED]", sanitized)
+    sanitized = re.sub(
+        r"""(?i)(?:api[_-]?key|token|secret|authorization|password|private[_-]?key)["'`]?\s*[:=]\s*["'`]([^"'`\s]+)["'`]?""",
+        lambda m: f"{m.group(0).split(m.group(1))[0]}[REDACTED]",
+        sanitized,
+    )
+    if len(sanitized) > LOG_RESPONSE_SUMMARY_MAX_CHARS:
+        return sanitized[: LOG_RESPONSE_SUMMARY_MAX_CHARS - 1] + "…"
+    return sanitized
+
+
+def _extract_safe_response_summary(response: httpx.Response) -> str | None:
+    try:
+        body = response.text
+    except Exception:
+        return None
+    if not body:
+        return None
+    return _sanitize_response_text(body)
+
+
+def _extract_safe_exception_summary(exc: BaseException) -> str | None:
+    response = getattr(exc, "response", None)
+    if isinstance(response, httpx.Response):
+        return _extract_safe_response_summary(response)
+    body = getattr(exc, "body", None)
+    if isinstance(body, str) and body:
+        return _sanitize_response_text(body)
+    return None
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -62,14 +142,25 @@ def _log_before_sleep(retry_state: RetryCallState) -> None:
     exc = retry_state.outcome.exception() if retry_state.outcome else None
     status = getattr(exc, "status_code", None)
     detail = f"status={status}" if status is not None else type(exc).__name__
+    body_summary = _extract_safe_exception_summary(exc)
     next_wait = getattr(retry_state.next_action, "sleep", 0.0) or 0.0
-    logger.warning(
-        "HTTP retry %d/%d (%s) — sleeping %.2fs",
-        retry_state.attempt_number,
-        MAX_ATTEMPTS,
-        detail,
-        next_wait,
-    )
+    if body_summary is not None:
+        logger.warning(
+            "HTTP retry %d/%d (%s) — sleeping %.2fs — response=%s",
+            retry_state.attempt_number,
+            MAX_ATTEMPTS,
+            detail,
+            next_wait,
+            body_summary,
+        )
+    else:
+        logger.warning(
+            "HTTP retry %d/%d (%s) — sleeping %.2fs",
+            retry_state.attempt_number,
+            MAX_ATTEMPTS,
+            detail,
+            next_wait,
+        )
 
 
 def _retry_policy() -> AsyncRetrying:
