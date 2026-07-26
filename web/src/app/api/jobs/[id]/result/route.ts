@@ -58,6 +58,17 @@ export async function POST(
       return Response.json({ error: "Not authorized to fulfill this job" }, { status: 403 });
     }
 
+    const talos = await db
+      .select({ id: tlsTalos.id, status: tlsTalos.status })
+      .from(tlsTalos)
+      .where(eq(tlsTalos.id, callerTalosId))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    if (!talos || talos.status !== "Active") {
+      return Response.json({ error: "This agent is not accepting new work" }, { status: 409 });
+    }
+
     if (job.status === "completed") {
       return Response.json({ error: "Job already completed" }, { status: 409 });
     }

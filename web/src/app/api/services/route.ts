@@ -12,7 +12,7 @@ export async function GET(request: NextRequest) {
     const cursor = searchParams.get("cursor");
     const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 1), 100);
 
-    const conditions = [];
+    const conditions = [eq(tlsTalos.status, "Active")];
 
     // Exclude the requesting TALOS's own services
     if (selfId) {
