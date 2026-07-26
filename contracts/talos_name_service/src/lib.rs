@@ -11,13 +11,11 @@
 #[cfg(all(test, not(target_arch = "wasm32")))]
 extern crate std;
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
-use std::string::ToString;
-
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     Env, IntoVal, String, Symbol,
 };
+use ttl_manager;
 
 // ── Data Types ──────────────────────────────────────────────────────
 
@@ -64,6 +62,7 @@ pub enum DataKey {
     TimelockConfig,
     TimelockProposal(u64),
     NextTimelockId,
+    LastTouched(u32),
 }
 
 #[contracterror]
@@ -146,26 +145,27 @@ fn validate_name(name: &String) -> bool {
         return false;
     }
 
-    let name_string = name.to_string();
-    let bytes = name_string.as_bytes();
-    if bytes.first().is_none() || bytes.last().is_none() {
+    // Stack-allocate a buffer since max length is 32 (no_std safe)
+    let mut buf = [0u8; 32];
+    name.copy_into_slice(&mut buf[..len as usize]);
+
+    if buf[0] == b'-' || buf[(len - 1) as usize] == b'-' {
         return false;
     }
 
     let mut prev_hyphen = false;
-    for &b in bytes {
-        if (b'a'..=b'z').contains(&b) || (b'0'..=b'9').contains(&b) {
+    for i in 0..len as usize {
+        let b = buf[i];
+        if b.is_ascii_lowercase() || b.is_ascii_digit() {
             prev_hyphen = false;
-            continue;
-        }
-        if b == b'-' {
-            if prev_hyphen || bytes.first() == Some(&b) || bytes.last() == Some(&b) {
+        } else if b == b'-' {
+            if prev_hyphen {
                 return false;
             }
             prev_hyphen = true;
-            continue;
+        } else {
+            return false;
         }
-        return false;
     }
 
     true
@@ -185,7 +185,7 @@ fn validate_name(name: &String) -> bool {
 /// This constant is embedded in the WASM binary at compile time and is
 /// therefore immutable once deployed; it cannot be altered by any admin
 /// call, storage write, or cross-contract invocation.
-pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 1, 0);
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 2, 0);
 
 #[contract]
 pub struct TalosNameService;
@@ -518,6 +518,288 @@ impl TalosNameService {
             .get::<_, String>(&DataKey::TalosName(talos_id))
             .is_some()
     }
+
+    // ── Storage TTL Management ───────────────────────────────────
+
+    /// Touch a name record and its reverse mapping to reset Soroban TTL.
+    pub fn touch_name(e: Env, name: String) -> bool {
+        let key = DataKey::NameRecord(name.clone());
+        let talos_id: u32 = e.storage().persistent().get(&key).expect("Name not found");
+        let current_ledger = e.ledger().sequence();
+        let last_touched: u32 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::LastTouched(talos_id))
+            .unwrap_or(0);
+
+        if ttl_manager::needs_touch(last_touched, current_ledger) {
+            e.storage().persistent().set(&key, &talos_id);
+            // Touch reverse mapping too
+            let rev_key = DataKey::TalosName(talos_id);
+            if let Some(n) = e.storage().persistent().get::<_, String>(&rev_key) {
+                e.storage().persistent().set(&rev_key, &n);
+            }
+            e.storage()
+                .persistent()
+                .set(&DataKey::LastTouched(talos_id), &current_ledger);
+            ttl_manager::emit_ttl_touched(&e, "name_record", 2);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Batch-touch admin keys plus name records for talos IDs (admin only).
+    pub fn touch_all_ttl(e: Env, max_talos_id: u32) -> u32 {
+        let admin: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Admin not configured");
+        admin.require_auth();
+
+        let current_ledger = e.ledger().sequence();
+        let mut touched = 0u32;
+
+        if let Some(addr) = e.storage().persistent().get::<_, Address>(&DataKey::Admin) {
+            e.storage().persistent().set(&DataKey::Admin, &addr);
+            touched += 1;
+        }
+        if let Some(reg) = e.storage().persistent().get::<_, Address>(&DataKey::RegistryContract) {
+            e.storage().persistent().set(&DataKey::RegistryContract, &reg);
+            touched += 1;
+        }
+
+        for tid in 1..=max_talos_id {
+            if let Some(name) = e.storage().persistent().get::<_, String>(&DataKey::TalosName(tid)) {
+                let last_touched: u32 = e
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::LastTouched(tid))
+                    .unwrap_or(0);
+                if ttl_manager::needs_touch(last_touched, current_ledger) {
+                    let name_key = DataKey::NameRecord(name.clone());
+                    if let Some(rec_id) = e.storage().persistent().get::<_, u32>(&name_key) {
+                        e.storage().persistent().set(&name_key, &rec_id);
+                    }
+                    e.storage().persistent().set(&DataKey::TalosName(tid), &name);
+                    e.storage()
+                        .persistent()
+                        .set(&DataKey::LastTouched(tid), &current_ledger);
+                    touched += 1;
+                }
+            }
+        }
+
+        ttl_manager::emit_ttl_batch(&e, touched, touched, 0);
+        touched
+    }
+
+    /// Query storage health by scanning name records for tracked talos IDs.
+    ///
+    /// `max_talos_id` is the upper bound of talos IDs to scan (e.g. from the
+    /// registry's `next_talos_id`). Returns `(min_age, max_age, keys_below_warn,
+    /// keys_below_crit, total)`. Emits `ttl_warn` if any entry is at risk.
+    pub fn get_storage_health(e: Env, max_talos_id: u32) -> (u32, u32, u32, u32, u32) {
+        let mut health = ttl_manager::KeyHealth::empty();
+        let current_ledger = e.ledger().sequence();
+
+        for tid in 1..=max_talos_id {
+            if e.storage().persistent().has(&DataKey::TalosName(tid)) {
+                let last_touched: u32 = e
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::LastTouched(tid))
+                    .unwrap_or(0);
+                health.observe(ttl_manager::age_ledgers(last_touched, current_ledger));
+            }
+        }
+
+        if health.needs_immediate_attention() {
+            ttl_manager::emit_ttl_warning(&e, "name_record", health.keys_below_crit, health.max_age);
+        }
+        if health.is_empty() {
+            (0, 0, 0, 0, 0)
+        } else {
+            (health.min_age, health.max_age, health.keys_below_warn, health.keys_below_crit, health.total_keys)
+        }
+    }
+}
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod property_tests {
+    use super::*;
+    use proptest::{prelude::*, test_runner::TestRunner};
+    use soroban_sdk::{
+        testutils::{Address as _, MockAuth, MockAuthInvoke},
+        Address, Env, IntoVal,
+    };
+    use std::string::String as StdString;
+
+    fn setup() -> (
+        Env,
+        Address,
+        Address,
+        talos_registry::TalosRegistryClient<'static>,
+        TalosNameServiceClient<'static>,
+    ) {
+        let env = Env::default();
+        let registry_contract = env.register_contract(None, talos_registry::TalosRegistry);
+        let name_service_contract = env.register_contract(None, TalosNameService);
+        let name_service_client = TalosNameServiceClient::new(&env, &name_service_contract);
+        name_service_client.initialize(&registry_contract);
+        let registry_client = talos_registry::TalosRegistryClient::new(&env, &registry_contract);
+        (
+            env,
+            registry_contract,
+            name_service_contract,
+            registry_client,
+            name_service_client,
+        )
+    }
+
+    fn soroban_string(env: &Env, value: &str) -> String {
+        String::from_str(env, value)
+    }
+
+    fn valid_name_strategy() -> impl Strategy<Value = StdString> {
+        prop::collection::vec(
+            any::<u8>().prop_filter("ascii lower/digit/hyphen", |b| {
+                let byte = *b;
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+            }),
+            3..=32,
+        )
+        .prop_filter("must not start or end with hyphen", |chars| {
+            !chars.is_empty() && chars[0] != b'-' && chars[chars.len() - 1] != b'-'
+        })
+        .prop_filter("must not contain consecutive hyphens", |chars| {
+            chars.iter().zip(chars.iter().skip(1)).all(|(a, b)| !(a == &b'-' && b == &b'-'))
+        })
+        .prop_map(|chars| StdString::from_utf8(chars).unwrap())
+    }
+
+    fn create_talos_with_auth(
+        env: &Env,
+        client: &talos_registry::TalosRegistryClient,
+        contract_id: &Address,
+        creator: &Address,
+        protocol_wallet: &Address,
+    ) -> u32 {
+        let name = soroban_string(env, "Genesis");
+        let category = soroban_string(env, "Marketing");
+        let description = soroban_string(env, "Autonomous marketing agent");
+        let patron = talos_registry::Patron {
+            creator_share: 60,
+            investor_share: 25,
+            treasury_share: 15,
+            creator_addr: creator.clone(),
+            investor_addr: Address::generate(env),
+            treasury_addr: Address::generate(env),
+        };
+        let kernel = talos_registry::Kernel {
+            approval_threshold: 10,
+            gtm_budget: 1_000,
+            min_patron_pulse: 100,
+        };
+        let pulse = talos_registry::Pulse {
+            total_supply: 1_000_000,
+            price_usd_cents: 100,
+            token_symbol: soroban_string(env, "TLOS"),
+        };
+
+        client
+            .mock_auths(&[MockAuth {
+                address: creator,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "create_talos",
+                    args: (
+                        name.clone(),
+                        category.clone(),
+                        description.clone(),
+                        patron.clone(),
+                        kernel.clone(),
+                        pulse.clone(),
+                        protocol_wallet.clone(),
+                    )
+                        .into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .create_talos(
+                &name,
+                &category,
+                &description,
+                &patron,
+                &kernel,
+                &pulse,
+                protocol_wallet,
+            )
+    }
+
+    #[test]
+    fn state_machine_register_name_preserves_invariants() {
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &protocol_wallet);
+
+        let mut runner = TestRunner::new(ProptestConfig::with_cases(8));
+        let strategy = prop::collection::vec(valid_name_strategy(), 1..=3);
+        runner.run(&strategy, |names| {
+            let mut model = std::collections::BTreeMap::<StdString, u32>::new();
+            let mut talos_to_name = std::collections::BTreeMap::<u32, StdString>::new();
+
+            for name in names.iter() {
+                let soroban_name = soroban_string(&env, name.as_str());
+
+                let result = client
+                    .mock_auths(&[MockAuth {
+                        address: &owner,
+                        invoke: &MockAuthInvoke {
+                            contract: &contract_id,
+                            fn_name: "register_name",
+                            args: (owner.clone(), talos_id, soroban_name.clone()).into_val(&env),
+                            sub_invokes: &[MockAuthInvoke {
+                                contract: &registry_contract,
+                                fn_name: "creator_of",
+                                args: (talos_id,).into_val(&env),
+                                sub_invokes: &[],
+                            }],
+                        },
+                    }])
+                    .try_register_name(&owner, &talos_id, &soroban_name);
+
+                let expected_success = !model.contains_key(name) && !name.contains("--") && !name.starts_with('-') && !name.ends_with('-');
+                assert_eq!(result.is_ok(), expected_success, "name={name:?}, talos_id={talos_id}");
+
+                if result.is_ok() {
+                    if let Some(old_name) = talos_to_name.remove(&talos_id) {
+                        model.remove(&old_name);
+                    }
+                    model.insert(name.clone(), talos_id);
+                    talos_to_name.insert(talos_id, name.clone());
+                }
+
+                let resolved = client.resolve_name(&soroban_name);
+                let expected_resolved = model.get(name).copied();
+                assert_eq!(resolved, expected_resolved, "name={name:?}, talos_id={talos_id}");
+                assert_eq!(client.is_name_available(&soroban_name), expected_resolved.is_none());
+
+                let expected_name_for_talos = talos_to_name.get(&talos_id).cloned();
+                let actual_name_for_talos = client.name_of(&talos_id);
+                assert_eq!(
+                    actual_name_for_talos,
+                    expected_name_for_talos.as_ref().map(|value| soroban_string(&env, value.as_str()))
+                );
+            }
+
+            Ok(())
+        })
+        .unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -660,7 +942,7 @@ mod tests {
     #[test]
     fn version_returns_compile_time_constant() {
         let (_env, _registry_contract, _contract_id, _registry_client, client) = setup();
-        assert_eq!(client.version(), (1u32, 1u32, 0u32));
+        assert_eq!(client.version(), (1u32, 2u32, 0u32));
     }
 
     #[test]
@@ -931,8 +1213,7 @@ mod tests {
 
             assert!(
                 result.is_err(),
-                "expected invalid name {:?} to be rejected",
-                invalid_name.to_string()
+                "expected invalid name to be rejected"
             );
         }
     }
@@ -972,6 +1253,8 @@ mod tests {
         assert_eq!(topics.len() as u32, 2);
         let t0: Symbol = TryFromVal::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
         let t1: u32 = TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+        assert_eq!(t0, symbol_short!("name_reg"));
+        assert_eq!(t1, talos_id);
         let (got_name, got_owner): (String, Address) =
             TryFromVal::try_from_val(&env, data).unwrap();
         assert_eq!(got_name, name);
@@ -1025,7 +1308,7 @@ mod tests {
     }
     #[test]
     fn has_name_returns_false_for_unknown_talos_id() {
-        let (env, registry_contract, contract_id, _registry_client, client) = setup();
+        let (_env, _registry_contract, _contract_id, _registry_client, client) = setup();
 
         // talos_id = 999 does not exist
         assert!(!client.has_name(&999));
@@ -1044,7 +1327,7 @@ mod tests {
 
     #[test]
     fn name_service_timelock_schedule_execute_registry_update() {
-        let (env, registry_contract, contract_id, _registry_client, client) = setup();
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
         let admin = Address::generate(&env);
         client.set_admin(&admin);
 

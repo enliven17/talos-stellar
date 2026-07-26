@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
+import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsPatrons, tlsCommerceServices } from "@/db/schema";
 import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 import { randomBytes } from "crypto";
@@ -159,65 +160,68 @@ export async function POST(request: NextRequest) {
     }
 
     // Atomic genesis: TALOS + Patron + Service created together or not at all
-    const { talos, generatedKey } = await db.transaction(async (tx) => {
-      const [talos] = await tx
-        .insert(tlsTalos)
-        .values({
-          name,
-          category,
-          description,
-          apiKey,
-          totalSupply: supply,
-          creatorShare: 0,
-          investorShare: 0,
-          treasuryShare: 100,
-          persona,
-          targetAudience,
-          channels: channels ?? [],
-          toneVoice: toneVoice ?? null,
-          approvalThreshold: String(approvalThreshold ?? 10),
-          gtmBudget: String(gtmBudget ?? 200),
-          pulsePrice: String(initialPrice ?? 0),
-          minPatronPulse: minPatronPulse ?? null,
-          creatorPublicKey,
-          walletPublicKey,
-          onChainId: onChainId ?? null,
-          agentName: agentName ?? null,
-          stellarAssetCode: stellarAssetCode ?? null,
-          tokenSymbol: tokenSymbol ?? null,
-          agentWalletId,
-          agentWalletAddress,
-        })
-        .returning();
+    const { talos, generatedKey } = await withTransactionRetry(
+      async (tx) => {
+        const [talos] = await tx
+          .insert(tlsTalos)
+          .values({
+            name,
+            category,
+            description,
+            apiKey,
+            totalSupply: supply,
+            creatorShare: 0,
+            investorShare: 0,
+            treasuryShare: 100,
+            persona,
+            targetAudience,
+            channels: channels ?? [],
+            toneVoice: toneVoice ?? null,
+            approvalThreshold: String(approvalThreshold ?? 10),
+            gtmBudget: String(gtmBudget ?? 200),
+            pulsePrice: String(initialPrice ?? 0),
+            minPatronPulse: minPatronPulse ?? null,
+            creatorPublicKey,
+            walletPublicKey,
+            onChainId: onChainId ?? null,
+            agentName: agentName ?? null,
+            stellarAssetCode: stellarAssetCode ?? null,
+            tokenSymbol: tokenSymbol ?? null,
+            agentWalletId,
+            agentWalletAddress,
+          })
+          .returning();
 
-      // Create initial Patron (Creator)
-      const CREATOR_GOVERNANCE_FRACTION = 0.6;
-      if (creatorPublicKey) {
-        await tx.insert(tlsPatrons).values({
-          talosId: talos.id,
-          stellarPublicKey: creatorPublicKey,
-          role: "Creator",
-          pulseAmount: Math.floor(supply * CREATOR_GOVERNANCE_FRACTION),
-          share: "0",
-        });
-      }
-
-      // Create Commerce Service if provided
-      if (serviceName && servicePrice) {
-        const serviceWallet = agentWalletAddress || creatorPublicKey || walletPublicKey;
-        if (serviceWallet) {
-          await tx.insert(tlsCommerceServices).values({
+        // Create initial Patron (Creator)
+        const CREATOR_GOVERNANCE_FRACTION = 0.6;
+        if (creatorPublicKey) {
+          await tx.insert(tlsPatrons).values({
             talosId: talos.id,
-            serviceName,
-            description: serviceDescription ?? description,
-            price: String(servicePrice),
-            stellarPublicKey: serviceWallet,
+            stellarPublicKey: creatorPublicKey,
+            role: "Creator",
+            pulseAmount: Math.floor(supply * CREATOR_GOVERNANCE_FRACTION),
+            share: "0",
           });
         }
-      }
 
-      return { talos, generatedKey: apiKey };
-    });
+        // Create Commerce Service if provided
+        if (serviceName && servicePrice) {
+          const serviceWallet = agentWalletAddress || creatorPublicKey || walletPublicKey;
+          if (serviceWallet) {
+            await tx.insert(tlsCommerceServices).values({
+              talosId: talos.id,
+              serviceName,
+              description: serviceDescription ?? description,
+              price: String(servicePrice),
+              stellarPublicKey: serviceWallet,
+            });
+          }
+        }
+
+        return { talos, generatedKey: apiKey };
+      },
+      { category: "GENESIS" }
+    );
 
     // DB transaction succeeded — now fund the testnet wallet (best-effort, non-blocking).
     // Kept outside the transaction deliberately: Friendbot is an external call and

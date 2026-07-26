@@ -124,6 +124,71 @@ describe("PUT /api/talos/:id/service — Register service", () => {
     });
     expect(res.status).toBe(400);
   });
+
+  it("updates seller's existing service with valid auth", async () => {
+    const res = await api(`/api/talos/${sellerTalosId}/service`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${sellerApiKey}` },
+      body: JSON.stringify({
+        serviceName: "premium_trend_research",
+        description: "Premium market trend research with deeper insights",
+        price: 5.0,
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.serviceName).toBe("premium_trend_research");
+    expect(body.description).toBe("Premium market trend research with deeper insights");
+    expect(body.price).toBe("5.0");
+    expect(body.talosId).toBe(sellerTalosId);
+  });
+
+  it("rejects cross-agent update (buyer's API key on seller's service)", async () => {
+    const res = await api(`/api/talos/${sellerTalosId}/service`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${buyerApiKey}` },
+      body: JSON.stringify({
+        serviceName: "malicious_update",
+        price: 999,
+      }),
+    });
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error).toBe("Invalid API key");
+  });
+
+  it("creates service for buyer with valid auth", async () => {
+    const res = await api(`/api/talos/${buyerTalosId}/service`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${buyerApiKey}` },
+      body: JSON.stringify({
+        serviceName: "buyer_service",
+        description: "Service created by buyer",
+        price: 2.5,
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.serviceName).toBe("buyer_service");
+    expect(body.price).toBe("2.5");
+    expect(body.talosId).toBe(buyerTalosId);
+  });
+
+  it("rejects cross-agent creation (seller's API key on buyer's service — but buyer already has one)", async () => {
+    // Even though both agents have API keys, seller's key should not grant
+    // access to buyer's service endpoint
+    const res = await api(`/api/talos/${buyerTalosId}/service`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${sellerApiKey}` },
+      body: JSON.stringify({
+        serviceName: "cross_agent_takeover",
+        price: 100,
+      }),
+    });
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error).toBe("Invalid API key");
+  });
 });
 
 // ────────────────────────────────────────────

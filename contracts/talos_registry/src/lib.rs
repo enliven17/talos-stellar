@@ -12,6 +12,7 @@
 extern crate std;
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String};
+use ttl_manager;
 
 // ── Data Types ──────────────────────────────────────────────────────
 
@@ -104,6 +105,7 @@ pub enum DataKey {
     TimelockConfig,
     TimelockProposal(u64),
     NextTimelockId,
+    LastTouched(u32),
 }
 
 // ── Events ──────────────────────────────────────────────────────────
@@ -233,7 +235,7 @@ const MAX_MIN_DELAY: u64 = 2_592_000; // 30 days in seconds
 /// This constant is embedded in the WASM binary at compile time and is
 /// therefore immutable once deployed; it cannot be altered by any admin
 /// call, storage write, or cross-contract invocation.
-pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 1, 0);
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 2, 0);
 
 // ── Contract ────────────────────────────────────────────────────────
 
@@ -818,6 +820,118 @@ impl TalosRegistry {
 
         amount * fee_bps as i128 / MAX_PROTOCOL_FEE_BPS as i128
     }
+
+    // ── Storage TTL Management ───────────────────────────────────
+
+    /// Touch a Talos record to reset its Soroban storage TTL.
+    ///
+    /// Since every `set()` call on persistent storage auto-bumps the TTL,
+    /// this function re-reads the Talos struct and writes it back unchanged.
+    /// It only writes when the entry has not been touched recently (within
+    /// the renewal threshold) to save gas.
+    ///
+    /// Returns `true` if a touch was performed, `false` if skipped.
+    pub fn touch_talos(e: Env, talos_id: u32) -> bool {
+        let key = DataKey::Talos(talos_id);
+        let talos: Talos = e.storage().persistent().get(&key).expect("Talos not found");
+
+        let current_ledger = e.ledger().sequence();
+        let last_touched: u32 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::LastTouched(talos_id))
+            .unwrap_or(0);
+
+        if ttl_manager::needs_touch(last_touched, current_ledger) {
+            e.storage().persistent().set(&key, &talos);
+            e.storage()
+                .persistent()
+                .set(&DataKey::LastTouched(talos_id), &current_ledger);
+            ttl_manager::emit_ttl_touched(&e, "talos", 1);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Batch-touch all Talos records up to a limit (paginated).
+    ///
+    /// # Authorization
+    /// Requires the protocol wallet (admin) to sign.
+    pub fn touch_batch(e: Env, start_id: u32, limit: u32) -> (u32, u32) {
+        let admin: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::ProtocolWallet)
+            .expect("Contract not initialized");
+        admin.require_auth();
+
+        let next_id: u32 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::NextTalosId)
+            .unwrap_or(1);
+        let current_ledger = e.ledger().sequence();
+        let mut touched = 0u32;
+        let mut skipped = 0u32;
+
+        for id in start_id..next_id.min(start_id.saturating_add(limit)) {
+            let key = DataKey::Talos(id);
+            if let Some(talos) = e.storage().persistent().get::<_, Talos>(&key) {
+                let last_touched: u32 = e
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::LastTouched(id))
+                    .unwrap_or(0);
+                if ttl_manager::needs_touch(last_touched, current_ledger) {
+                    e.storage().persistent().set(&key, &talos);
+                    e.storage()
+                        .persistent()
+                        .set(&DataKey::LastTouched(id), &current_ledger);
+                    touched += 1;
+                } else {
+                    skipped += 1;
+                }
+            }
+        }
+
+        ttl_manager::emit_ttl_batch(&e, touched + skipped, touched, skipped);
+        (touched, skipped)
+    }
+
+    /// Query storage health by comparing entry ages against thresholds.
+    ///
+    /// Returns `(min_age, max_age, keys_below_warn, keys_below_crit, total)`.
+    /// Emits `ttl_warn` if any entry is at risk.
+    pub fn get_storage_health(e: Env) -> (u32, u32, u32, u32, u32) {
+        let mut health = ttl_manager::KeyHealth::empty();
+        let current_ledger = e.ledger().sequence();
+        let next_id: u32 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::NextTalosId)
+            .unwrap_or(1);
+
+        for id in 1..next_id {
+            if e.storage().persistent().has(&DataKey::Talos(id)) {
+                let last_touched: u32 = e
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::LastTouched(id))
+                    .unwrap_or(0);
+                health.observe(ttl_manager::age_ledgers(last_touched, current_ledger));
+            }
+        }
+
+        if health.needs_immediate_attention() {
+            ttl_manager::emit_ttl_warning(&e, "talos", health.keys_below_crit, health.max_age);
+        }
+        if health.is_empty() {
+            (0, 0, 0, 0, 0)
+        } else {
+            (health.min_age, health.max_age, health.keys_below_warn, health.keys_below_crit, health.total_keys)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -916,7 +1030,7 @@ mod tests {
     fn version_returns_compile_time_constant() {
         let (env, contract_id) = setup();
         let client = TalosRegistryClient::new(&env, &contract_id);
-        assert_eq!(client.version(), (1u32, 1u32, 0u32));
+        assert_eq!(client.version(), (1u32, 2u32, 0u32));
     }
 
     #[test]
@@ -1214,7 +1328,7 @@ mod tests {
         };
 
         // Non-creator must not be able to update kernel
-        let imposter = Address::generate(&env);
+        let _imposter = Address::generate(&env);
         assert!(client.try_update_kernel(&id, &new_kernel).is_err());
     }
 
@@ -1262,7 +1376,7 @@ mod tests {
         assert!(client.is_active(&id));
 
         // Non-creator can't deactivate
-        let imposter = Address::generate(&env);
+        let _imposter = Address::generate(&env);
         assert!(client.try_deactivate_talos(&id).is_err());
 
         // Creator can deactivate

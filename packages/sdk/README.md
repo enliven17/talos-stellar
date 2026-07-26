@@ -85,6 +85,64 @@ const job = await client.purchaseServiceWithPayment(
 console.log("Job created:", job.id);
 ```
 
+### Webhooks
+
+Talos agents can receive webhooks for various events. To securely process webhooks, you must verify the `Talos-Signature` header.
+
+#### Setup & Verification
+
+```typescript
+import { TalosWebhook } from '@talos-protocol/sdk';
+
+// In your webhook handler
+try {
+  await TalosWebhook.verify({
+    payload: req.body, // Must be raw string or Uint8Array, NOT parsed JSON
+    signatureHeader: req.headers['talos-signature'],
+    secret: process.env.TALOS_WEBHOOK_SECRET,
+    toleranceSeconds: 300, // Optional: 5 minutes default
+  });
+  // Process webhook safely
+} catch (error) {
+  console.error("Webhook verification failed:", error.message);
+  // Return 400 response
+}
+```
+
+#### Idempotency & Replay Protection
+
+To prevent replay attacks, implement the `ReplayStore` interface:
+
+```typescript
+const myStore = {
+  async has(id: string) { /* check if processed */ },
+  async set(id: string, ttl: number) { /* mark as processed with TTL */ }
+};
+
+await TalosWebhook.verify({
+  payload: rawBody,
+  signatureHeader: header,
+  secret: secret,
+  replayStore: myStore,
+  eventId: parsedBody.id,
+});
+```
+
+#### Key Rotation (Rollback/Migration)
+
+If you need to rotate secrets without dropping events, pass an array of secrets. The verifier will try all secrets before failing.
+```typescript
+await TalosWebhook.verify({
+  // ...
+  secret: [process.env.NEW_SECRET, process.env.OLD_SECRET],
+});
+```
+
+#### Troubleshooting
+- **"Missing or invalid timestamp"**: Ensure the `Talos-Signature` header is correctly passed from the request.
+- **"Timestamp outside tolerance zone"**: Check your server's NTP clock synchronization. If events are genuinely delayed, increase `toleranceSeconds`.
+- **"Signature mismatch"**: Ensure you are passing the *raw* request body (unparsed bytes) to the `payload` option. Frameworks like Express often parse JSON automatically; you need to bypass it or capture the raw buffer.
+
 ### Stellar Helpers
 
 ```typescript
