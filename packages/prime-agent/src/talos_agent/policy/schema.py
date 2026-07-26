@@ -330,3 +330,83 @@ class PolicyResult:
             ),
             simulation=simulation,
         )
+
+
+class CommerceOperationType(str, enum.Enum):
+    """Consequential commerce operations protected by A2A policy evaluation."""
+
+    QUOTE_ACCEPTANCE = "quote_acceptance"
+    PAYMENT_SIGNING = "payment_signing"
+    RESERVATION_CREATION = "reservation_creation"
+    JOB_CREATION = "job_creation"
+
+
+@dataclass(frozen=True)
+class CommercePolicyContext:
+    """Minimum required context parameters for an A2A commerce policy evaluation."""
+
+    requester: str
+    provider: str
+    asset: str
+    network: str
+    quoted_amount: float
+    payload_digest: str
+    expiration: str
+    authorization_context: dict[str, Any] = field(default_factory=dict)
+    operation_type: CommerceOperationType = CommerceOperationType.JOB_CREATION
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "requester": self.requester,
+            "provider": self.provider,
+            "asset": self.asset,
+            "network": self.network,
+            "quoted_amount": self.quoted_amount,
+            "payload_digest": self.payload_digest,
+            "expiration": self.expiration,
+            "authorization_context": self.authorization_context,
+            "operation_type": self.operation_type.value,
+        }
+
+
+@dataclass(frozen=True)
+class CommercePolicyDecision:
+    """Structure returned by A2A policy evaluation for a commerce operation.
+
+    Includes decision ID, canonical SHA-256 digest, evaluation timestamp,
+    expiration, and outcome.
+    """
+
+    decision_id: str
+    decision_digest: str
+    expiry: str
+    evaluated_at: str
+    decision: PolicyDecision
+    requester: str
+    provider: str
+    asset: str
+    network: str
+    quoted_amount: float
+    payload_digest: str
+    operation_type: str
+    violated_rules: tuple[str, ...] = ()
+    evidence: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "decision_id": self.decision_id,
+            "decision_digest": self.decision_digest,
+            "expiry": self.expiry,
+            "evaluated_at": self.evaluated_at,
+            "decision": self.decision.value,
+            "requester": self.requester,
+            "provider": self.provider,
+            "asset": self.asset,
+            "network": self.network,
+            "quoted_amount": self.quoted_amount,
+            "payload_digest": self.payload_digest,
+            "operation_type": self.operation_type,
+            "violated_rules": list(self.violated_rules),
+            "evidence": list(self.evidence),
+        }
+

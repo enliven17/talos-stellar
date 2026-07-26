@@ -4,6 +4,7 @@ import { tlsTalos, tlsCommerceJobs } from "@/db/schema";
 import { eq, and, lt, or, sql } from "drizzle-orm";
 import { logger } from "@/lib/logger";
 import { parseBody, claimJobSchema } from "@/lib/schemas";
+import { evaluateCommercePolicy, computePayloadDigest, CommercePolicyContext } from "@/lib/commerce-policy";
 
 const DEFAULT_LEASE_TTL_SECONDS = 300;
 
@@ -52,6 +53,35 @@ export async function POST(
     const ttlSeconds = data.ttlSeconds ?? DEFAULT_LEASE_TTL_SECONDS;
     const now = new Date();
     const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
+
+    // A2A Commerce Policy Evaluation (Reservation Creation)
+    const policyContext: CommercePolicyContext = {
+      requester: callerTalosId,
+      provider: "system",
+      asset: "USDC",
+      network: process.env.STELLAR_NETWORK ?? "testnet",
+      quotedAmount: 0,
+      payloadDigest: computePayloadDigest(id),
+      expiration: expiresAt.toISOString(),
+      authorizationContext: { jobId: id },
+      operationType: "reservation_creation",
+    };
+
+    const policyDecision = await evaluateCommercePolicy(policyContext);
+
+    if (policyDecision.decision !== "approve") {
+      return Response.json(
+        {
+          error: "A2A commerce policy evaluation denied job reservation",
+          policyDecision: policyDecision.decision,
+          evidence: policyDecision.evidence,
+          decisionId: policyDecision.decisionId,
+          decisionDigest: policyDecision.decisionDigest,
+        },
+        { status: 403 }
+      );
+    }
+
 
     // Atomic lease acquisition: only succeeds if the job is pending and
     // either unleased or the previous lease has expired.

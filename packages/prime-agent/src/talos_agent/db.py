@@ -287,7 +287,32 @@ CREATE INDEX IF NOT EXISTS idx_completion_markers_expires_at
     ON completion_markers(expires_at);
         """,
     ),
+    (
+        10,
+        """
+CREATE TABLE IF NOT EXISTS commerce_audit_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_id     TEXT NOT NULL,
+    decision_digest TEXT NOT NULL,
+    operation       TEXT NOT NULL,
+    requester       TEXT NOT NULL,
+    outcome         TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_commerce_audit_decision_digest
+    ON commerce_audit_log(decision_digest);
+        """,
+    ),
+    (
+        11,
+        """
+ALTER TABLE completion_markers ADD COLUMN policy_decision_digest TEXT;
+        """,
+    ),
 ]
+
+
 
 
 class LocalDB:
@@ -398,7 +423,33 @@ class LocalDB:
         ).fetchone()
         return row["cnt"] if row else 0
 
+    def add_commerce_audit_log(
+        self,
+        decision_id: str,
+        decision_digest: str,
+        operation: str,
+        requester: str,
+        outcome: str,
+    ) -> None:
+        """Bind a policy decision digest into an audit record."""
+        self._conn.execute(
+            "INSERT INTO commerce_audit_log (decision_id, decision_digest, operation, requester, outcome) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (decision_id, decision_digest, operation, requester, outcome),
+        )
+        self._conn.commit()
+
+    def get_commerce_audit_logs(self, limit: int = 50) -> list[dict]:
+        """Fetch audit log entries for verification."""
+        rows = self._conn.execute(
+            "SELECT id, decision_id, decision_digest, operation, requester, outcome, created_at "
+            "FROM commerce_audit_log ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # ── Content History ────────────────────────────────────
+
 
     def add_content(self, content: str, channel: str) -> None:
         self._conn.execute(
@@ -976,6 +1027,7 @@ class LocalDB:
         job_id: str,
         idempotency_key: str,
         retain_days: int = 7,
+        policy_decision_digest: str | None = None,
     ) -> None:
         """Write a completion marker for *job_id* / *idempotency_key*.
 
@@ -992,6 +1044,8 @@ class LocalDB:
         retain_days:
             How many days the marker is kept before expiry.  Expired markers
             are pruned by :meth:`prune_expired_completion_markers`.
+        policy_decision_digest:
+            Optional bound policy decision digest for idempotency verification.
         """
         if not job_id or not isinstance(job_id, str):
             raise ValueError("job_id must be a non-empty string")
@@ -1004,9 +1058,9 @@ class LocalDB:
             datetime.now(timezone.utc) + timedelta(days=retain_days)
         ).isoformat()
         self._conn.execute(
-            "INSERT INTO completion_markers (job_id, idempotency_key, expires_at) "
-            "VALUES (?, ?, ?)",
-            (job_id, idempotency_key, expires_at),
+            "INSERT INTO completion_markers (job_id, idempotency_key, expires_at, policy_decision_digest) "
+            "VALUES (?, ?, ?, ?)",
+            (job_id, idempotency_key, expires_at, policy_decision_digest),
         )
         self._conn.commit()
 
@@ -1019,16 +1073,27 @@ class LocalDB:
         ).fetchone()
         return row is not None
 
+    def get_completion_marker_by_key(self, idempotency_key: str) -> dict | None:
+        """Fetch a non-expired completion marker by idempotency key."""
+        row = self._conn.execute(
+            "SELECT id, job_id, idempotency_key, completed_at, expires_at, policy_decision_digest "
+            "FROM completion_markers "
+            "WHERE idempotency_key = ? AND expires_at > datetime('now')",
+            (idempotency_key,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def get_completion_markers_for_job(self, job_id: str) -> list[dict]:
         """Return all non-expired completion markers for a job (used in duplicate detection)."""
         rows = self._conn.execute(
-            "SELECT id, job_id, idempotency_key, completed_at, expires_at "
+            "SELECT id, job_id, idempotency_key, completed_at, expires_at, policy_decision_digest "
             "FROM completion_markers "
             "WHERE job_id = ? AND expires_at > datetime('now') "
             "ORDER BY completed_at DESC",
             (job_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
 
     def prune_expired_completion_markers(self) -> int:
         """Delete expired completion markers. Returns the number of rows removed."""

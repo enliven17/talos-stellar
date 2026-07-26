@@ -15,9 +15,12 @@ from talos_agent.policy.engine import PolicyEngine
 from talos_agent.policy.loader import PolicyLoader
 from talos_agent.policy.schema import ActionSpec, PolicyDecision, PolicyResult
 
+from talos_agent.policy.commerce_policy import CommercePolicyEvaluator
+
 logger = logging.getLogger(__name__)
 
 # ── Action categories that the middleware intercepts ──────────────────────────
+
 
 # These are tool names whose execution should be gated by the policy engine.
 _GATED_ACTIONS: frozenset[str] = frozenset(
@@ -106,10 +109,16 @@ class PolicyMiddleware:
         self._loader = loader
         self._budget_getter = budget_getter or (lambda: {})
         self._config_getter = config_getter or (lambda: {})
+        self._commerce_evaluator = CommercePolicyEvaluator(engine)
 
     @property
     def engine(self) -> PolicyEngine:
         return self._engine
+
+    @property
+    def commerce_evaluator(self) -> CommercePolicyEvaluator:
+        return self._commerce_evaluator
+
 
     def evaluate_action(
         self,
@@ -288,3 +297,10 @@ def init_policy_middleware(
     global _middleware
     _middleware = PolicyMiddleware(engine, loader, **kwargs)
     return _middleware
+
+
+def get_commerce_policy_evaluator() -> CommercePolicyEvaluator:
+    """Return the CommercePolicyEvaluator instance from global middleware."""
+    mw = get_policy_middleware()
+    return mw.commerce_evaluator
+

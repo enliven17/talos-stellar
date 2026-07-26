@@ -22,11 +22,20 @@ PolicyDecision.APPROVE
 
 from __future__ import annotations
 
+from talos_agent.policy.commerce_policy import (
+    CommercePolicyEvaluationTimeoutError,
+    CommercePolicyEvaluator,
+    CommercePolicyInvalidationError,
+    compute_payload_digest,
+)
 from talos_agent.policy.engine import PolicyEngine
 from talos_agent.policy.loader import PolicyLoader
 from talos_agent.policy.middleware import PolicyMiddleware
 from talos_agent.policy.schema import (
     ActionSpec,
+    CommerceOperationType,
+    CommercePolicyContext,
+    CommercePolicyDecision,
     Policy,
     PolicyDecision,
     PolicyResult,
@@ -37,6 +46,12 @@ from talos_agent.policy.simulator import PolicySimulator
 
 __all__ = [
     "ActionSpec",
+    "CommerceOperationType",
+    "CommercePolicyContext",
+    "CommercePolicyDecision",
+    "CommercePolicyEvaluationTimeoutError",
+    "CommercePolicyEvaluator",
+    "CommercePolicyInvalidationError",
     "Policy",
     "PolicyDecision",
     "PolicyEngine",
@@ -46,4 +61,6 @@ __all__ = [
     "PolicyRule",
     "PolicySimulator",
     "Severity",
+    "compute_payload_digest",
 ]
+

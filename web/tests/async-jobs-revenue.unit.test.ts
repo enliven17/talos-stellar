@@ -149,11 +149,15 @@ describe("Async Jobs Revenue Recording Unit Tests", () => {
     };
 
     it("records revenue on completing a previously pending job", async () => {
+      const mockActiveTalos = { id: "agent_1", status: "Active" };
+
       // 1. authenticate (returns talos with callerTalosId)
       // 2. fetch job (returns pending job)
+      // 3. fetch talos status (returns active status)
       mockDb.select
         .mockReturnValueOnce(mockSelectChain([{ id: "agent_1" }]))
-        .mockReturnValueOnce(mockSelectChain([mockJob]));
+        .mockReturnValueOnce(mockSelectChain([mockJob]))
+        .mockReturnValueOnce(mockSelectChain([mockActiveTalos]));
 
       const mockTxUpdate = vi.fn().mockReturnValue({
         set: vi.fn().mockReturnValue({
@@ -218,9 +222,13 @@ describe("Async Jobs Revenue Recording Unit Tests", () => {
         status: "completed",
       };
 
+      const mockActiveTalos = { id: "agent_1", status: "Active" };
+
       mockDb.select
         .mockReturnValueOnce(mockSelectChain([{ id: "agent_1" }]))
-        .mockReturnValueOnce(mockSelectChain([mockAlreadyCompletedJob]));
+        .mockReturnValueOnce(mockSelectChain([mockAlreadyCompletedJob]))
+        .mockReturnValueOnce(mockSelectChain([mockActiveTalos]));
+
 
       const mockTxUpdate = vi.fn().mockReturnValue({
         set: vi.fn().mockReturnValue({
