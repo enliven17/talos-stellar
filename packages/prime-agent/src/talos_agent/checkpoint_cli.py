@@ -477,3 +477,130 @@ def ensure_distinct_paths(source_path: Path, output_path: Path) -> None:
 
     if Path(source_path).resolve() == Path(output_path).resolve():
         raise ValueError("Checkpoint output must not overwrite the agent database.")
+
+
+@checkpoint.command("restore")
+@click.option(
+    "--input",
+    "input_path",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+    help="Checkpoint file to restore.",
+)
+@click.option(
+    "--agent",
+    "agent_id",
+    required=True,
+    help="Agent ID to restore into.",
+)
+@click.option(
+    "--schema-version",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Expected checkpoint schema version.",
+)
+@click.option(
+    "--max-size",
+    type=int,
+    default=DEFAULT_MAX_SIZE,
+    show_default=True,
+    help="Maximum checkpoint size in bytes.",
+)
+@click.option(
+    "--no-verify-invariants",
+    is_flag=True,
+    help="Skip invariant checks.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Output the restore summary as JSON.",
+)
+def restore_checkpoint(
+    input_path: Path,
+    agent_id: str,
+    schema_version: int,
+    max_size: int,
+    no_verify_invariants: bool,
+    as_json: bool,
+) -> None:
+    """Restore agent state through transactional staging, validation, and rollback safety."""
+
+    from talos_agent.db import get_db_path
+    from talos_agent.restore import (
+        InvariantError,
+        PreflightError,
+        RollbackError,
+        StagedRestoreConfig,
+        StagingError,
+        perform_staged_restore_sync,
+    )
+
+    try:
+        validated_agent_id = validate_agent_id(agent_id)
+        validated_schema_version = ensure_compatible_schema_version(
+            schema_version,
+            SUPPORTED_SCHEMA_VERSIONS,
+        )
+        validate_size_limit(max_size)
+
+        database_path = get_db_path(validated_agent_id)
+        ensure_distinct_paths(input_path, database_path)
+
+        cfg = StagedRestoreConfig(
+            max_size_bytes=max_size,
+            allowed_schema_versions={validated_schema_version},
+            require_agent_match=True,
+            verify_invariants=not no_verify_invariants,
+        )
+
+        res = perform_staged_restore_sync(
+            target_db_path=database_path,
+            checkpoint_input=input_path,
+            agent_id=validated_agent_id,
+            config=cfg,
+        )
+
+        if as_json:
+            output_dict = {
+                "agent_id": res.agent_id,
+                "schema_version": res.schema_version,
+                "tables_restored": res.tables_restored,
+                "committed": res.committed,
+                "preflight_passed": res.preflight_passed,
+                "invariants_passed": res.invariants_passed,
+                "duration_ms": res.duration_ms,
+            }
+            click.echo(json.dumps(output_dict, indent=2))
+        else:
+            click.echo(f"Successfully restored checkpoint for agent '{validated_agent_id}' in {res.duration_ms}ms")
+            click.echo("Tables restored:")
+            if res.tables_restored:
+                for tbl, cnt in res.tables_restored.items():
+                    click.echo(f"  {tbl}: {cnt}")
+            else:
+                click.echo("  none")
+
+    except CheckpointCompatibilityError as exc:
+        raise CheckpointCLIError(
+            str(exc),
+            CheckpointExitCode.COMPATIBILITY_ERROR,
+        ) from exc
+    except PreflightError as exc:
+        raise CheckpointCLIError(
+            str(exc),
+            CheckpointExitCode.VALIDATION_ERROR,
+        ) from exc
+    except (StagingError, InvariantError, RollbackError, PermissionError, OSError, sqlite3.Error) as exc:
+        raise CheckpointCLIError(
+            f"Restore failed: {exc}",
+            CheckpointExitCode.IO_ERROR,
+        ) from exc
+    except ValueError as exc:
+        raise CheckpointCLIError(
+            str(exc),
+            CheckpointExitCode.VALIDATION_ERROR,
+        ) from exc
+
