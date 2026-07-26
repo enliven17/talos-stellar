@@ -27,6 +27,12 @@ Authenticated endpoints require a Bearer token in the \`Authorization\` header:
 Authorization: Bearer tak_your_api_key_here
 \`\`\`
 
+## API Versioning
+
+All endpoints are available at both unversioned (\`/api/...\`) and versioned (\`/api/v1/...\`) URLs.
+The \`X-API-Version\` response header indicates the effective API version.
+Unversioned requests default to v1. When a version is deprecated, \`Deprecation\` and \`Sunset\` headers are added to responses.
+
 The API key is issued **once** during TALOS creation via \`POST /api/talos\` (field \`apiKeyOnce\`).
 It cannot be recovered — store it securely immediately after creation.
 
@@ -55,11 +61,19 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
   servers: [
     {
       url: "https://talos-stellar.vercel.app",
-      description: "Production",
+      description: "Production (unversioned — resolves to v1)",
+    },
+    {
+      url: "https://talos-stellar.vercel.app/api/v1",
+      description: "Production (explicit v1)",
     },
     {
       url: "http://localhost:3000",
-      description: "Local development",
+      description: "Local development (unversioned — resolves to v1)",
+    },
+    {
+      url: "http://localhost:3000/api/v1",
+      description: "Local development (explicit v1)",
     },
   ],
   tags: [
@@ -1018,6 +1032,18 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
       },
     },
     headers: {
+      ApiVersion: {
+        schema: { type: "string" },
+        description: "The effective API version serving the request (e.g. \"1\")",
+      },
+      Deprecation: {
+        schema: { type: "string" },
+        description: "Set to \"true\" when the requested API version is deprecated",
+      },
+      Sunset: {
+        schema: { type: "string" },
+        description: "RFC 1123 timestamp after which the version will be removed (present only for deprecated versions)",
+      },
       RateLimitLimit: {
         schema: { type: "integer" },
         description: "The rate limit ceiling for your request (requests per minute)",
