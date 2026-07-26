@@ -8,6 +8,7 @@ import {
   negotiateApiVersion,
   parseVersionFromPath,
   stripVersionPrefix,
+  SUPPORTED_VERSIONS,
 } from "../src/lib/api-versioning";
 
 describe("parseVersionFromPath", () => {
@@ -156,7 +157,6 @@ describe("constants", () => {
   });
 
   it("SUPPORTED_VERSIONS includes v1", () => {
-    const { SUPPORTED_VERSIONS } = require("../src/lib/api-versioning");
     expect(SUPPORTED_VERSIONS["1"]).toBeDefined();
   });
 });
