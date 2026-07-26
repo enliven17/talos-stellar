@@ -88,9 +88,12 @@ export const tlsCommerceJobs = pgTable("tls_commerce_jobs", {
 	createdAt: timestamp({ precision: 3, mode: 'string' }).default(sql`CURRENT_TIMESTAMP`).notNull(),
 	updatedAt: timestamp({ precision: 3, mode: 'string' }).notNull(),
 	txHash: text(),
+	idempotencyKey: text(),
+	idempotencyResponse: jsonb(),
 }, (table) => [
 	index("tls_commerce_jobs_talosId_status_idx").using("btree", table.talosId.asc().nullsLast().op("text_ops"), table.status.asc().nullsLast().op("text_ops")),
 	uniqueIndex("tls_commerce_jobs_paymentSig_unique").using("btree", table.paymentSig.asc().nullsLast().op("text_ops")).where(sql`"paymentSig" IS NOT NULL`),
+	uniqueIndex("tls_commerce_jobs_talosId_idempotencyKey_unique").using("btree", table.talosId.asc().nullsLast().op("text_ops"), table.idempotencyKey.asc().nullsLast().op("text_ops")).where(sql`"idempotencyKey" IS NOT NULL`),
 	foreignKey({
 			columns: [table.talosId],
 			foreignColumns: [tlsTalos.id],

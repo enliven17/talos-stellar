@@ -20,18 +20,22 @@ if TYPE_CHECKING:
 
 console = Console()
 
-# Module-level singleton — reused across all agent cycles
-_openai_client: AsyncOpenAI | None = None
+# Cache clients by credential scope so concurrent agents in the same process do
+# not share the first agent's API key.
+_openai_clients: dict[tuple[str, str | None], AsyncOpenAI] = {}
 
 
 def get_openai_client(api_key: str, base_url: str | None = None) -> AsyncOpenAI:
-    global _openai_client
-    if _openai_client is None:
+    normalized_base_url = base_url or None
+    cache_key = (api_key, normalized_base_url)
+    client = _openai_clients.get(cache_key)
+    if client is None:
         kwargs: dict = {"api_key": api_key}
-        if base_url:
-            kwargs["base_url"] = base_url
-        _openai_client = AsyncOpenAI(**kwargs)
-    return _openai_client
+        if normalized_base_url:
+            kwargs["base_url"] = normalized_base_url
+        client = AsyncOpenAI(**kwargs)
+        _openai_clients[cache_key] = client
+    return client
 
 
 async def agent_loop(

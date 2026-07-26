@@ -10,6 +10,7 @@ import {
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 // ─── TALOS (Agent Corporation) ────────────────────────────────────
 
@@ -189,10 +190,20 @@ export const tlsDividends = pgTable(
 
     status: text("status").notNull().default("completed"),
 
+    // Idempotency key to prevent duplicate distributions
+    distributionId: text("distributionId").unique(),
+
+    // Retry metadata for failed distributions
+    retryCount: integer("retryCount").notNull().default(0),
+    lastError: text("lastError"),
+    retryable: boolean("retryable").notNull().default(true),
+
     createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
   },
   (t) => [
     index("tls_dividends_talosId_createdAt_idx").on(t.talosId, t.createdAt),
+    uniqueIndex("tls_dividends_talosId_distributionId_key").on(t.talosId, t.distributionId),
   ],
 );
 
@@ -235,11 +246,29 @@ export const tlsCommerceJobs = pgTable(
     amount: numeric("amount", { precision: 18, scale: 6 }).notNull(),
     bidPrice: numeric("bidPrice", { precision: 18, scale: 6 }), // Negotiated bid price (nullable)
 
+    // Client-supplied idempotency key (Idempotency-Key request header).
+    // Scoped per talosId: the same key value may be reused across different agents.
+    // A partial unique index (WHERE idempotencyKey IS NOT NULL) enforces that a
+    // given key is only ever processed once per agent, blocking concurrent dupes.
+    idempotencyKey: text("idempotencyKey"),
+
+    // Cached 201 response body so an identical retry returns the original result.
+    idempotencyResponse: jsonb("idempotencyResponse"),
+
+    // Leased-job ownership — prevents duplicate execution by concurrent agents
+    leasedBy: text("leasedBy"),                              // talosId of lease holder (NULL = available)
+    leasedAt: timestamp("leasedAt", { mode: "date", precision: 3 }), // when lease was acquired
+    leaseExpiresAt: timestamp("leaseExpiresAt", { mode: "date", precision: 3 }), // lease TTL
+    fencingToken: integer("fencingToken").notNull().default(0), // monotonic counter for stale-worker fencing
+
     createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
     updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
   },
   (t) => [
     index("tls_commerce_jobs_talosId_status_idx").on(t.talosId, t.status),
+    uniqueIndex("tls_commerce_jobs_talosId_idempotencyKey_unique")
+      .on(t.talosId, t.idempotencyKey)
+      .where(sql`"idempotencyKey" IS NOT NULL`),
   ],
 );
 

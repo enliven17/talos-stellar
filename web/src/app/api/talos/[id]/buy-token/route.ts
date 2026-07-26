@@ -1,4 +1,5 @@
 import { db } from "@/db";
+import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsPatrons, tlsRevenues, tlsTokenPurchases } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { NextResponse } from "next/server";
@@ -321,50 +322,53 @@ export async function POST(
   // flip to "completed" — are committed in one transaction. A crash before
   // commit rolls back every write; the purchase row stays "pending" and the
   // next retry can proceed safely.
-  await db.transaction(async (tx) => {
-    // 1. Patron upsert
-    if (becomesPatron) {
-      if (existingPatron) {
+  await withTransactionRetry(
+    async (tx) => {
+      // 1. Patron upsert
+      if (becomesPatron) {
+        if (existingPatron) {
+          await tx
+            .update(tlsPatrons)
+            .set({ pulseAmount: newPulseAmount, updatedAt: new Date() })
+            .where(eq(tlsPatrons.id, existingPatron.id));
+        } else {
+          await tx.insert(tlsPatrons).values({
+            talosId: id,
+            stellarPublicKey: buyerPublicKey,
+            role: "patron",
+            share: "0",
+            pulseAmount: newPulseAmount,
+            status: "active",
+          });
+        }
+      } else if (existingPatron) {
         await tx
           .update(tlsPatrons)
           .set({ pulseAmount: newPulseAmount, updatedAt: new Date() })
           .where(eq(tlsPatrons.id, existingPatron.id));
-      } else {
-        await tx.insert(tlsPatrons).values({
-          talosId: id,
-          stellarPublicKey: buyerPublicKey,
-          role: "patron",
-          share: "0",
-          pulseAmount: newPulseAmount,
-          status: "active",
-        });
       }
-    } else if (existingPatron) {
+
+      // 2. Revenue record
+      await tx.insert(tlsRevenues).values({
+        talosId: id,
+        amount: String(totalCost),
+        currency: "USDC",
+        source: "token_sale",
+        txHash,
+      });
+
+      // 3. Flip idempotency row to completed with cached response
       await tx
-        .update(tlsPatrons)
-        .set({ pulseAmount: newPulseAmount, updatedAt: new Date() })
-        .where(eq(tlsPatrons.id, existingPatron.id));
-    }
-
-    // 2. Revenue record
-    await tx.insert(tlsRevenues).values({
-      talosId: id,
-      amount: String(totalCost),
-      currency: "USDC",
-      source: "token_sale",
-      txHash,
-    });
-
-    // 3. Flip idempotency row to completed with cached response
-    await tx
-      .update(tlsTokenPurchases)
-      .set({
-        status: "completed",
-        responseBody,
-        updatedAt: new Date(),
-      })
-      .where(eq(tlsTokenPurchases.txHash, txHash));
-  });
+        .update(tlsTokenPurchases)
+        .set({
+          status: "completed",
+          responseBody,
+          updatedAt: new Date(),
+        })
+        .where(eq(tlsTokenPurchases.txHash, txHash));
+    },
+    { category: "TOKEN" }
+  );
 
   return NextResponse.json(responseBody);
 }
