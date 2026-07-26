@@ -20,16 +20,14 @@ import pytest
 from click.testing import CliRunner
 
 from talos_agent.checkpoint_cli import checkpoint, CheckpointExitCode
-from talos_agent.db import LocalDB, get_db_path
+from talos_agent.db import LocalDB
 from talos_agent.restore import (
     InvariantError,
     PreflightError,
     RollbackError,
     StagedRestoreConfig,
     StagedRestoreManager,
-    StagingError,
     perform_staged_restore,
-    perform_staged_restore_sync,
     recover_interrupted_restore,
 )
 
