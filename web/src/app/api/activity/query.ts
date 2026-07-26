@@ -9,6 +9,45 @@ import {
 import { desc, eq, sql, count } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 
+const ACTIVITY_TYPES = ["service", "playbook"] as const;
+type ActivityType = (typeof ACTIVITY_TYPES)[number];
+
+type ActivityCursor = {
+  createdAt: string;
+  type: ActivityType;
+  id: string;
+};
+
+export class InvalidActivityCursorError extends Error {
+  constructor() {
+    super("Invalid activity cursor");
+    this.name = "InvalidActivityCursorError";
+  }
+}
+
+export function decodeActivityCursor(cursor: string): ActivityCursor {
+  try {
+    const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Partial<ActivityCursor>;
+    const createdAt = decoded.createdAt ? new Date(decoded.createdAt) : null;
+    if (
+      !createdAt ||
+      Number.isNaN(createdAt.getTime()) ||
+      !ACTIVITY_TYPES.includes(decoded.type as ActivityType) ||
+      typeof decoded.id !== "string" ||
+      decoded.id.length === 0
+    ) {
+      throw new Error("invalid cursor fields");
+    }
+    return { createdAt: createdAt.toISOString(), type: decoded.type as ActivityType, id: decoded.id };
+  } catch {
+    throw new InvalidActivityCursorError();
+  }
+}
+
+export function encodeActivityCursor(cursor: ActivityCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
 export type Transaction = {
   id: string;
   type: "service" | "playbook";
@@ -67,18 +106,18 @@ export async function fetchActivityTransactions(
   const buyerTalos = alias(tlsTalos, "buyerTalos");
   const pbBuyerTalos = alias(tlsTalos, "pbBuyerTalos");
 
-  let cursorDate: Date | null = null;
-  if (cursor) {
-    const dateStr = cursor.split("|")[0];
-    if (dateStr) cursorDate = new Date(dateStr);
-  }
-
-  const jobCursorCond = cursorDate
-    ? [sql`${tlsCommerceJobs.createdAt} < ${cursorDate}`]
-    : [];
-  const pbCursorCond = cursorDate
-    ? [sql`${tlsPlaybookPurchases.createdAt} < ${cursorDate}`]
-    : [];
+  const decodedCursor = cursor ? decodeActivityCursor(cursor) : null;
+  const cursorDate = decodedCursor ? new Date(decodedCursor.createdAt) : null;
+  const jobCursorCond = decodedCursor
+    ? decodedCursor.type === "service"
+      ? sql`(${tlsCommerceJobs.createdAt} < ${cursorDate} OR (${tlsCommerceJobs.createdAt} = ${cursorDate} AND ${tlsCommerceJobs.id} < ${decodedCursor.id}))`
+      : sql`${tlsCommerceJobs.createdAt} < ${cursorDate}`
+    : undefined;
+  const pbCursorCond = decodedCursor
+    ? decodedCursor.type === "playbook"
+      ? sql`(${tlsPlaybookPurchases.createdAt} < ${cursorDate} OR (${tlsPlaybookPurchases.createdAt} = ${cursorDate} AND ${tlsPlaybookPurchases.id} < ${decodedCursor.id}))`
+      : sql`${tlsPlaybookPurchases.createdAt} <= ${cursorDate}`
+    : undefined;
 
   const [jobs, playbookTrades] = await Promise.all([
     db
@@ -97,8 +136,8 @@ export async function fetchActivityTransactions(
       .from(tlsCommerceJobs)
       .leftJoin(tlsTalos, eq(tlsCommerceJobs.talosId, tlsTalos.id))
       .leftJoin(buyerTalos, eq(tlsCommerceJobs.requesterTalosId, buyerTalos.id))
-      .where(jobCursorCond.length ? jobCursorCond[0] : undefined)
-      .orderBy(desc(tlsCommerceJobs.createdAt))
+      .where(jobCursorCond)
+      .orderBy(desc(tlsCommerceJobs.createdAt), desc(tlsCommerceJobs.id))
       .limit(limit + 1),
 
     db
@@ -122,8 +161,8 @@ export async function fetchActivityTransactions(
         pbBuyerTalos,
         sql`${pbBuyerTalos.id} = ${tlsPlaybookPurchases.buyerPublicKey} OR ${pbBuyerTalos.agentName} = ${tlsPlaybookPurchases.buyerPublicKey}`,
       )
-      .where(pbCursorCond.length ? pbCursorCond[0] : undefined)
-      .orderBy(desc(tlsPlaybookPurchases.createdAt))
+      .where(pbCursorCond)
+      .orderBy(desc(tlsPlaybookPurchases.createdAt), desc(tlsPlaybookPurchases.id))
       .limit(limit + 1),
   ]);
 
@@ -163,15 +202,20 @@ export async function fetchActivityTransactions(
     });
   }
 
-  transactions.sort(
-    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-  );
+  transactions.sort((a, b) => {
+    const timestampDifference = new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+    if (timestampDifference !== 0) return timestampDifference;
+    if (a.type !== b.type) return a.type === "service" ? -1 : 1;
+    return b.id.localeCompare(a.id);
+  });
 
   const hasMore = transactions.length > limit;
   const page = hasMore ? transactions.slice(0, limit) : transactions;
 
   const lastItem = page[page.length - 1];
-  const nextCursor = hasMore && lastItem ? lastItem.timestamp : null;
+  const nextCursor = hasMore && lastItem
+    ? encodeActivityCursor({ createdAt: lastItem.timestamp, type: lastItem.type, id: lastItem.id })
+    : null;
 
   return { transactions: page, nextCursor };
 }

@@ -199,6 +199,61 @@ CREATE INDEX IF NOT EXISTS idx_dividends_log_status ON dividends_log(status);
 CREATE INDEX IF NOT EXISTS idx_dividends_log_recipient ON dividends_log(recipient_address);
         """,
     ),
+    (
+        6,
+        """
+CREATE TABLE IF NOT EXISTS retry_state (
+    task_name       TEXT PRIMARY KEY,
+    attempt_count   INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL,
+    terminal        INTEGER NOT NULL DEFAULT 0,
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+        """,
+    ),
+    (
+        7,
+        # checkpoint_keys: stores ENC::-wrapped HMAC and AES-GCM key material.
+        # key_hmac / key_enc are NEVER plaintext — always 'ENC::...' blobs.
+        """
+CREATE TABLE IF NOT EXISTS checkpoint_keys (
+    key_id       TEXT PRIMARY KEY,
+    agent_id     TEXT NOT NULL,
+    namespace    TEXT NOT NULL DEFAULT '',
+    key_hmac     TEXT NOT NULL,
+    key_enc      TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'active'
+                     CHECK(status IN ('active', 'retired')),
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    retired_at   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoint_keys_agent_status
+    ON checkpoint_keys(agent_id, status);
+        """,
+    ),
+    (
+        8,
+        # checkpoint_envelopes: persists authenticated envelope payloads.
+        # nonce has a UNIQUE constraint to prevent replay attacks.
+        """
+CREATE TABLE IF NOT EXISTS checkpoint_envelopes (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_id       TEXT NOT NULL REFERENCES checkpoint_keys(key_id),
+    agent_id     TEXT NOT NULL,
+    namespace    TEXT NOT NULL DEFAULT '',
+    schema_ver   INTEGER NOT NULL DEFAULT 1,
+    seq          INTEGER NOT NULL,
+    ts           TEXT NOT NULL,
+    nonce        TEXT NOT NULL UNIQUE,
+    payload      TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoint_envelopes_agent_ns_seq
+    ON checkpoint_envelopes(agent_id, namespace, seq);
+        """,
+    ),
 ]
 
 
@@ -737,6 +792,62 @@ class LocalDB:
             (f"+{days} days",),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── Retry State ────────────────────────────────────────
+
+    def upsert_retry_state(
+        self,
+        task_name: str,
+        attempt_count: int,
+        next_attempt_at: datetime,
+        terminal: bool = False,
+    ) -> None:
+        """Persist (or update) the retry state for a named scheduler task."""
+        self._conn.execute(
+            """INSERT INTO retry_state (task_name, attempt_count, next_attempt_at, terminal, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(task_name) DO UPDATE SET
+                   attempt_count   = excluded.attempt_count,
+                   next_attempt_at = excluded.next_attempt_at,
+                   terminal        = excluded.terminal,
+                   updated_at      = excluded.updated_at""",
+            (
+                task_name,
+                attempt_count,
+                next_attempt_at.isoformat(),
+                int(terminal),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self._conn.commit()
+
+    def get_retry_state(self, task_name: str) -> dict | None:
+        """Return the persisted retry state for a task, or None if absent.
+
+        Returned dict keys: task_name, attempt_count (int), next_attempt_at
+        (datetime, UTC), terminal (bool).
+        """
+        row = self._conn.execute(
+            "SELECT task_name, attempt_count, next_attempt_at, terminal "
+            "FROM retry_state WHERE task_name = ?",
+            (task_name,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "task_name": row["task_name"],
+            "attempt_count": int(row["attempt_count"]),
+            "next_attempt_at": datetime.fromisoformat(row["next_attempt_at"]),
+            "terminal": bool(row["terminal"]),
+        }
+
+    def clear_retry_state(self, task_name: str) -> None:
+        """Delete the persisted retry state for a task (used after a clean success)."""
+        self._conn.execute(
+            "DELETE FROM retry_state WHERE task_name = ?",
+            (task_name,),
+        )
+        self._conn.commit()
 
     # ── Cleanup ────────────────────────────────────────────
 

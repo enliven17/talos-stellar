@@ -1,0 +1,71 @@
+name: Release Plan
+
+# Opens/updates a "chore(release)" pull request with component-aware version
+# bumps and changelog entries for web, sdk, agent, and contracts, computed
+# from Conventional Commits since each component's last release tag. Nothing
+# is tagged or published here — see release-publish.yml for that. Merging
+# this PR is the human approval gate for cutting a release.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: 'Prerelease channel (leave blank for a stable release)'
+        required: false
+        type: choice
+        default: ''
+        options: ['', 'beta', 'rc']
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-plan
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    # The release commit created by this workflow (or merged from its PR)
+    # must not re-trigger itself. github.event.head_commit only exists on
+    # push events, so workflow_dispatch runs always pass this check.
+    if: ${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore(release)') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Compute release plan
+        id: plan
+        run: |
+          PRERELEASE_FLAG=""
+          if [ -n "${{ inputs.prerelease }}" ]; then
+            PRERELEASE_FLAG="--prerelease=${{ inputs.prerelease }}"
+          fi
+          node scripts/release/cli.mjs plan $PRERELEASE_FLAG --summary-out=/tmp/release-summary.md
+
+          if git diff --quiet; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open or update release PR
+        if: steps.plan.outputs.has_changes == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore(release): version bump"
+          branch: release/please
+          title: "chore(release): version bump"
+          body-path: /tmp/release-summary.md
+          labels: release
+          delete-branch: true

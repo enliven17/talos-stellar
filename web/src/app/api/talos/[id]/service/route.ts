@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
+import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsCommerceServices, tlsCommerceJobs, tlsRevenues } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
@@ -205,33 +206,36 @@ export async function POST(
 
       // Atomic: job + revenue recorded together — if either fails, both roll back.
       // Payment (on-chain) already happened; DB must not partially record it.
-      const [job] = await db.transaction(async (tx) => {
-        const [job] = await tx
-          .insert(tlsCommerceJobs)
-          .values({
+      const [job] = await withTransactionRetry(
+        async (tx) => {
+          const [job] = await tx
+            .insert(tlsCommerceJobs)
+            .values({
+              talosId: id,
+              requesterTalosId: requester.id,
+              serviceName: service.serviceName,
+              payload: payload ?? undefined,
+              result,
+              paymentSig: paymentToken,
+              txHash,
+              amount: service.price,
+              bidPrice: bidData.bidPrice ? String(bidData.bidPrice) : undefined,
+              status: bidData.status ?? "completed",
+            })
+            .returning();
+
+          await tx.insert(tlsRevenues).values({
             talosId: id,
-            requesterTalosId: requester.id,
-            serviceName: service.serviceName,
-            payload: payload ?? undefined,
-            result,
-            paymentSig: paymentToken,
-            txHash,
             amount: service.price,
-            bidPrice: bidData.bidPrice ? String(bidData.bidPrice) : undefined,
-            status: bidData.status ?? "completed",
-          })
-          .returning();
+            currency: service.currency ?? "USDC",
+            source: "commerce",
+            txHash,
+          });
 
-        await tx.insert(tlsRevenues).values({
-          talosId: id,
-          amount: service.price,
-          currency: service.currency ?? "USDC",
-          source: "commerce",
-          txHash,
-        });
-
-        return [job];
-      });
+          return [job];
+        },
+        { category: "JOB" }
+      );
 
       return Response.json(
         { id: job.id, jobId: job.id, status: "completed", result, txHash },
