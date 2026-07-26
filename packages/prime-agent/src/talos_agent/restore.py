@@ -82,6 +82,8 @@ Limitations
   by less than ``MAX_CLOCK_SKEW_SECS``.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
