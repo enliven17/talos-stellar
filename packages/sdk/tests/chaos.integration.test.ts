@@ -63,9 +63,11 @@ describe("Chaos Integration - TalosClient Production Request Paths", () => {
         retryPolicy: { maxAttempts: 1 },
       });
 
-      const promise = client.getTalos("talos-1");
+      const rejection = expect(client.getTalos("talos-1")).rejects.toThrow(
+        ChaosInjectedError,
+      );
       await vi.advanceTimersByTimeAsync(100);
-      await expect(promise).rejects.toThrow(ChaosInjectedError);
+      await rejection;
       expect((chaos.injectionHistory[0].config as any).durationMs).toBe(100);
       vi.useRealTimers();
     });
@@ -154,7 +156,7 @@ describe("Chaos Integration - TalosClient Production Request Paths", () => {
 
     it("should work through the createTalos POST path", async () => {
       const chaos = makeDeterministicInjector([
-        { type: FaultType.DB_CONNECTION_FAIL, probability: 1.0 },
+        { type: FaultType.NETWORK_DROP, probability: 1.0 },
       ]);
       const client = new TalosClient({
         baseUrl: "http://localhost:3000",
