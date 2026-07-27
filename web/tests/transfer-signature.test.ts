@@ -218,7 +218,7 @@ describe("canonical transfer signatures", () => {
           return Promise.resolve([{ id: "nonce-1" }]);
         }
         const err = new Error('duplicate key value violates unique constraint "tls_consumed_nonces_talosId_nonce_key"');
-        (err as Record<string, unknown>).code = "23505";
+        (err as unknown as Record<string, unknown>).code = "23505";
         return Promise.reject(err);
       }),
     });
@@ -336,7 +336,7 @@ describe("canonical transfer signatures", () => {
             return Promise.resolve([{ id: "nonce-1" }]);
           }
           const err = new Error('duplicate key value violates unique constraint "tls_consumed_nonces_talosId_nonce_key"');
-          (err as Record<string, unknown>).code = "23505";
+          (err as unknown as Record<string, unknown>).code = "23505";
           return Promise.reject(err);
         }),
       });
