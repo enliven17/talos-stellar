@@ -3,27 +3,38 @@
   "version": "0.1.0",
   "description": "TypeScript SDK for the TALOS Protocol API on Stellar",
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "dist/esm/index.js",
+  "types": "dist/esm/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.cjs",
+      "types": "./dist/esm/index.d.ts",
+      "browser": "./dist/browser/sdk.bundle.js"
     }
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "npm run build:esm && npm run build:cjs && npm run build:browser",
+    "build:esm": "tsc -p tsconfig.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json && node scripts/rename-cjs.mjs",
+    "build:browser": "node scripts/bundle-browser.mjs",
     "dev": "tsc --watch",
-    "test": "vitest run"
+    "test": "vitest run",
+    "generate:types": "openapi-typescript \"../../web/tests/fixtures/openapi.snapshot.json\" -o \"src/generated-types.ts\"",
+    "compat:node-esm": "node --experimental-vm-modules scripts/smoke-node-esm.mjs",
+    "compat:node-cjs": "node scripts/smoke-node-cjs.cjs",
+    "compat:browser-bundle": "node scripts/smoke-browser-bundle.mjs",
+    "compat:edge": "node --experimental-vm-modules scripts/smoke-edge.mjs"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.2.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "openapi-typescript": "^7.4.3",
     "typescript": "^5.7.0",
     "vitest": "^4.1.2"
   },
