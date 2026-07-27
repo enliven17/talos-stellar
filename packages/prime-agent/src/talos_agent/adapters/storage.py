@@ -376,7 +376,7 @@ class VerifiedCheckpointStorage:
                 f"Verification failed for '{key}': decryption failed (corrupted data): {e}"
             ) from e
 
-        if decrypted_data != data:
+        if decrypted_data.decode("utf-8") != data:
             raise StorageVerificationError(
                 f"Verification failed for '{key}': decrypted data does not match original data"
             )
@@ -443,7 +443,7 @@ class VerifiedCheckpointStorage:
                 f"Failed to decrypt latest checkpoint '{latest_key}' (corrupted): {e}"
             ) from e
 
-        return latest_key, decrypted
+        return latest_key, decrypted.decode("utf-8")
 
     async def _enforce_retention(self, current_latest_key: str) -> None:
         """Enforce count-based retention. Delete older checkpoints, preserving the current active one."""

@@ -62,6 +62,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
+
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 _ENVELOPE_VERSION = 1

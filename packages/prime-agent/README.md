@@ -203,3 +203,14 @@ docker build -t prime-agent .
 docker run --rm prime-agent
 ```
 
+## Durable provider-job effects
+
+The opt-in durable inbox/outbox prevents provider job results from being lost
+or executed twice across crashes. It is disabled by default with
+`TALOS_DURABLE_JOB_EFFECTS_ENABLED=false`.
+
+Before enabling it, read the
+[durable job effects runbook](../../docs/prime-agent-durable-job-effects.md).
+The runbook documents the exact external idempotency boundary, configuration,
+migration, structured operational events, metadata-only replay inspection,
+recovery procedure, known limitations, and rollback steps.

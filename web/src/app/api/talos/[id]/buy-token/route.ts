@@ -5,6 +5,7 @@ import { eq, and } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { getAccountInfo, getNetworkPassphrase, getUSDCIssuer } from "@/lib/stellar";
 import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
+import { logger } from "@/lib/logger";
 
 /**
  * Buy Mitos tokens from a Talos.
@@ -80,16 +81,36 @@ export async function POST(
 
   if (existing) {
     if (existing.status === "completed" && existing.responseBody) {
-      // Idempotent replay — return original response
-      return NextResponse.json(existing.responseBody, { status: 200 });
+      // Idempotent replay — return original response with echo headers
+      logger.info({
+        event: "idempotency_hit",
+        idempotencyKey: txHash,
+        talosId: id,
+        replayed: true,
+      }, "buy-token idempotent replay — returning cached response");
+      const replayRes = NextResponse.json(existing.responseBody, { status: 200 });
+      replayRes.headers.set("Idempotency-Key", txHash);
+      replayRes.headers.set("X-Idempotent-Replayed", "true");
+      return replayRes;
     }
     if (existing.status === "pending") {
+      logger.info({
+        event: "idempotency_inflight",
+        idempotencyKey: txHash,
+        talosId: id,
+      }, "buy-token purchase in progress");
       return NextResponse.json(
         { error: "Purchase is already in progress for this transaction" },
         { status: 409 },
       );
     }
     // "failed" — fall through and retry (row will be updated below)
+    logger.info({
+      event: "idempotency_miss",
+      idempotencyKey: txHash,
+      talosId: id,
+      retryOfFailed: true,
+    }, "buy-token retrying failed purchase");
   }
 
   // Claim the idempotency slot. For a brand-new request we insert a pending
@@ -111,11 +132,12 @@ export async function POST(
         .set({ status: "pending", responseBody: null, updatedAt: new Date() })
         .where(eq(tlsTokenPurchases.txHash, txHash));
     }
-  } catch (err: any) {
+  } catch (err: unknown) {
     // Unique constraint violation → another concurrent request already claimed
     // this txHash (race condition: two requests arrived simultaneously before
     // either read the existing row).
-    if (err?.code === "23505") {
+    const e = err as { code?: string };
+    if (e.code === "23505") {
       return NextResponse.json(
         { error: "Purchase is already in progress for this transaction" },
         { status: 409 },
@@ -130,8 +152,8 @@ export async function POST(
     const { Horizon } = await import("@stellar/stellar-sdk");
     const server = new Horizon.Server(process.env.STELLAR_HORIZON_URL ?? "https://horizon-testnet.stellar.org");
     txResult = await server.transactions().transaction(txHash).call();
-  } catch (err: any) {
-    console.error("[buy-token] Transaction fetch failed:", err?.message ?? err);
+  } catch (err: unknown) {
+    console.error("[buy-token] Transaction fetch failed:", err);
     // Mark failed so a later retry (with a corrected txHash) can proceed
     await db
       .update(tlsTokenPurchases)
@@ -202,8 +224,8 @@ export async function POST(
         { status: 400 },
       );
     }
-  } catch (err: any) {
-    console.error("[buy-token] Transaction verification failed:", err?.message ?? err);
+  } catch (err: unknown) {
+    console.error("[buy-token] Transaction verification failed:", err);
     await db
       .update(tlsTokenPurchases)
       .set({ status: "failed", updatedAt: new Date() })
@@ -267,8 +289,9 @@ export async function POST(
         const mitosTxResult = await server.submitTransaction(mitosTx);
         mitosTxHash = mitosTxResult.hash;
       }
-    } catch (err: any) {
-      console.error("[buy-token] Mitos transfer failed:", err?.response?.data ?? err?.message ?? err);
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: unknown }; message?: string };
+      console.error("[buy-token] Mitos transfer failed:", e.response?.data ?? e.message ?? err);
       await db
         .update(tlsTokenPurchases)
         .set({ status: "failed", updatedAt: new Date() })
@@ -370,5 +393,15 @@ export async function POST(
     { category: "TOKEN" }
   );
 
-  return NextResponse.json(responseBody);
+  logger.info({
+    event: "idempotency_commit",
+    idempotencyKey: txHash,
+    talosId: id,
+    replayed: false,
+  }, "buy-token purchase committed");
+
+  const successRes = NextResponse.json(responseBody);
+  successRes.headers.set("Idempotency-Key", txHash);
+  successRes.headers.set("X-Idempotent-Replayed", "false");
+  return successRes;
 }

@@ -4,11 +4,12 @@ import { tlsTalos, tlsApprovals, tlsPatrons } from "@/db/schema";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
 import { parseLimit } from "@/lib/parse-limit";
+import { withTraceContext } from "@/lib/tracing";
 
 // GET /api/talos/:id/approvals — Pending approval list
 // Public read (no auth) — patrons need to see approvals to vote
 // Agent-authenticated write is handled in POST
-export async function GET(
+async function handleGet(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -44,7 +45,7 @@ export async function GET(
 
 // POST /api/talos/:id/approvals — Create approval request
 // Can be called by: local agent (Bearer api_key) OR active patron (proposerPublicKey)
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -69,7 +70,10 @@ export async function POST(
     const authHeader = request.headers.get("authorization");
     const isAgentAuth = authHeader?.startsWith("Bearer ");
 
-    if (!isAgentAuth) {
+    if (isAgentAuth) {
+      const auth = await verifyAgentApiKey(request, id, ["admin"]);
+      if (!auth.ok) return auth.response;
+    } else {
       if (!proposerPublicKey) {
         return Response.json({ error: "proposerPublicKey required for patron proposals" }, { status: 401 });
       }
@@ -148,3 +152,6 @@ export async function POST(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withTraceContext(handleGet);
+export const POST = withTraceContext(handlePost);

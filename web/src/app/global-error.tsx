@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import Link from "next/link";
 import { Ruthie } from "next/font/google";
 import "./globals.css";
 
@@ -30,19 +31,19 @@ export default function GlobalError({ error, reset }: GlobalErrorProps) {
         className="min-h-full flex flex-col items-center justify-center font-mono px-6"
         style={{ backgroundColor: "#FCF8F8", color: "#2D2D2D" }}
       >
-        <a
+        <Link
           href="/"
           className="font-ruthie text-4xl mb-10"
           style={{ color: "#F5AFAF" }}
         >
           Talos
-        </a>
+        </Link>
 
         <div
           className="text-xs mb-4 tracking-wide"
           style={{ color: "#8E8383" }}
         >
-          // CRITICAL ERROR
+          {/* CRITICAL ERROR */}
         </div>
 
         <h1 className="text-2xl font-bold mb-3" style={{ color: "#F5AFAF" }}>
@@ -69,13 +70,13 @@ export default function GlobalError({ error, reset }: GlobalErrorProps) {
           >
             Try again
           </button>
-          <a
+          <Link
             href="/"
             className="px-6 py-2.5 text-sm font-medium transition-colors"
             style={{ backgroundColor: "#F5AFAF", color: "#FCF8F8" }}
           >
             Go home
-          </a>
+          </Link>
         </div>
       </body>
     </html>

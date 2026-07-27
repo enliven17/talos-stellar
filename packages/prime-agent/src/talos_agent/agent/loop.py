@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING
 
 from openai import AsyncOpenAI
+from opentelemetry.trace import SpanKind
 from rich.console import Console
 
+from talos_agent import metrics
 from talos_agent.agent.context import AgentContext
 from talos_agent.agent.prompt import build_system_prompt
 from talos_agent.http import call_with_retry
+from talos_agent.tracing import traced_span
 
 if TYPE_CHECKING:
     from talos_agent.config import Settings
@@ -65,13 +67,15 @@ async def agent_loop(
 
         console.print(f"[dim]Agent iteration {iteration + 1}...[/dim]")
 
+        _llm_provider = "groq" if settings.groq_api_key else "openai"
         response = await call_with_retry(
             lambda: client.chat.completions.create(
                 model=settings.llm_model,
                 messages=messages,
                 tools=tool_schemas if tool_schemas else None,
                 tool_choice="auto" if tool_schemas else None,
-            )
+            ),
+            provider=_llm_provider,
         )
 
         msg = response.choices[0].message

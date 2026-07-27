@@ -26,6 +26,13 @@ const eslintConfig = defineConfig([
       "no-undef": "error",
     },
   },
+  {
+    files: ["**/*.test.ts", "**/*.test.tsx", "**/__tests__/**", "scripts/**"],
+    rules: {
+      "@typescript-eslint/no-explicit-any": "off",
+      "@typescript-eslint/no-unsafe-function-type": "off",
+    },
+  },
 ]);
 
 export default eslintConfig;

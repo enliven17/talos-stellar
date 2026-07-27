@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,10 +14,14 @@ DB_PATH = APP_DIR / "talos-agent.db"
 
 
 def get_db_path(agent_id: str | None = None) -> Path:
-    """Return per-agent DB path when running multi-agent, else default."""
+    """Return per-agent DB path when running multi-agent, else default.
+
+    Resolved lazily so tests (and ops tooling) can monkeypatch ``APP_DIR``
+    to redirect `get_db_path()` without rewriting module-level constants.
+    """
     if agent_id:
         return APP_DIR / f"agent-{agent_id}.db"
-    return DB_PATH
+    return APP_DIR / "talos-agent.db"
 
 
 def normalize_playbook_name(name: str) -> str:
@@ -291,13 +296,24 @@ CREATE INDEX IF NOT EXISTS idx_completion_markers_expires_at
 
 
 class LocalDB:
-    def __init__(self, path: Path = DB_PATH):
+    def __init__(self, path: Path = DB_PATH, *, timeout_ms: int = 5000):
         self._path = path
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(path))
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            # Some platforms/filesystems do not implement POSIX modes.
+            pass
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute(f"PRAGMA busy_timeout = {max(timeout_ms, 1)}")
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._run_migrations()
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            # Some platforms/filesystems do not expose POSIX permissions.
+            pass
 
     def _run_migrations(self) -> None:
         """Run all pending migrations in a single transaction."""
@@ -757,8 +773,6 @@ class LocalDB:
         repayment_address: str | None = None,
     ) -> int:
         """Create a new loan record and return its ID."""
-        from datetime import datetime, timedelta, timezone
-
         created_at = datetime.now(timezone.utc)
         due_date = created_at + timedelta(days=duration_days)
 
@@ -1042,3 +1056,81 @@ class LocalDB:
 
     def close(self) -> None:
         self._conn.close()
+
+    # ── Replay Sessions ────────────────────────────────────
+
+    def create_replay_session(
+        self,
+        session_id: str,
+        talos_id: str,
+        agent_version: str,
+        started_at: str,
+    ) -> None:
+        """Create a new replay session record."""
+        self._conn.execute(
+            """INSERT OR IGNORE INTO replay_sessions
+               (session_id, talos_id, agent_version, started_at, status)
+               VALUES (?, ?, ?, ?, 'recording')""",
+            (session_id, talos_id, agent_version, started_at),
+        )
+        self._conn.commit()
+
+    def finish_replay_session(self, session_id: str, status: str = "completed") -> None:
+        """Mark a replay session as finished."""
+        ended_at = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            """UPDATE replay_sessions
+               SET status = ?, ended_at = ?
+               WHERE session_id = ?""",
+            (status, ended_at, session_id),
+        )
+        self._conn.commit()
+
+    def insert_replay_event(
+        self,
+        session_id: str,
+        event_id: str,
+        event_type: str,
+        payload_json: str,
+        redacted: bool = False,
+    ) -> None:
+        """Insert a single replay event."""
+        self._conn.execute(
+            """INSERT INTO replay_events
+               (session_id, event_id, event_type, payload, redacted)
+               VALUES (?, ?, ?, ?, ?)""",
+            (session_id, event_id, event_type, payload_json, int(redacted)),
+        )
+        self._conn.commit()
+
+    def get_replay_events(self, session_id: str) -> list[sqlite3.Row]:
+        """Return all replay events for a session ordered by insertion."""
+        rows = self._conn.execute(
+            """SELECT event_id, event_type, payload, redacted, recorded_at
+               FROM replay_events WHERE session_id = ?
+               ORDER BY id ASC""",
+            (session_id,),
+        ).fetchall()
+        return list(rows)
+
+    def list_replay_sessions(
+        self,
+        talos_id: str | None = None,
+        limit: int = 20,
+    ) -> list[sqlite3.Row]:
+        """List recent replay sessions, optionally filtered by talos_id."""
+        if talos_id:
+            rows = self._conn.execute(
+                """SELECT session_id, talos_id, agent_version, started_at, ended_at, status
+                   FROM replay_sessions WHERE talos_id = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (talos_id, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT session_id, talos_id, agent_version, started_at, ended_at, status
+                   FROM replay_sessions
+                   ORDER BY created_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return list(rows)

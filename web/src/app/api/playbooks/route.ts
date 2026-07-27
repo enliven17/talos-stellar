@@ -4,6 +4,7 @@ import { tlsTalos, tlsPlaybooks, tlsPlaybookPurchases } from "@/db/schema";
 import { and, arrayContains, desc, eq, ilike, lt, or, sql } from "drizzle-orm";
 import { createPlaybookSchema, parseBody } from "@/lib/schemas";
 import { parseLimit } from "@/lib/parse-limit";
+import { withTraceContext } from "@/lib/tracing";
 
 
 // GET /api/playbooks — List playbooks (with optional filters and cursor pagination)
@@ -112,7 +113,7 @@ export async function GET(request: NextRequest) {
 }
 
 // POST /api/playbooks — Create a playbook (requires TALOS apiKey)
-export async function POST(request: NextRequest) {
+async function handlePost(request: NextRequest) {
   try {
     const authHeader = request.headers.get("authorization");
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -173,3 +174,5 @@ const {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withTraceContext(handlePost);

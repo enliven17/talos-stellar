@@ -1,4 +1,4 @@
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsPatrons, tlsCommerceServices } from "@/db/schema";
@@ -7,17 +7,19 @@ import { randomBytes } from "crypto";
 import { createAgentKeypair, fundTestnetAccount, verifyStellarSignature } from "@/lib/stellar";
 import { createTalosSchema, parseBody } from "@/lib/schemas";
 import { parseLimit } from "@/lib/parse-limit";
+import { TimeoutError, withTimeout } from "@/lib/timeout";
 
 // GET /api/talos — List TALOS entries with cursor-based pagination
 export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = request.nextUrl;
+    const { searchParams } = new URL(request.url);
     const cursor = searchParams.get("cursor");
     const parsedLimit = parseLimit(searchParams.get("limit"), 50, 100);
     if (!parsedLimit.ok) return parsedLimit.response;
     const limit = parsedLimit.limit;
 
-    const patronCount = db
+    // Add timeout for patron count query
+    const patronCountQuery = db
       .select({
         talosId: tlsPatrons.talosId,
         count: sql<number>`count(*)::int`.as("count"),
@@ -25,6 +27,8 @@ export async function GET(request: NextRequest) {
       .from(tlsPatrons)
       .groupBy(tlsPatrons.talosId)
       .as("patronCount");
+
+    const patronCount = patronCountQuery;
 
     const conditions = [];
     if (cursor) {
@@ -42,8 +46,10 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const entries = await db
-      .select({
+    let entries;
+    try {
+      entries = await withTimeout(
+        db.select({
         id: tlsTalos.id,
         onChainId: tlsTalos.onChainId,
         agentName: tlsTalos.agentName,
@@ -78,7 +84,20 @@ export async function GET(request: NextRequest) {
       .leftJoin(patronCount, eq(tlsTalos.id, patronCount.talosId))
       .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(tlsTalos.createdAt), desc(tlsTalos.id))
-      .limit(limit + 1);
+          .limit(limit + 1),
+        10_000,
+        "Talos list query timeout",
+      );
+    } catch (error) {
+      if (error instanceof TimeoutError) {
+        return Response.json(
+          { error: "Query timeout. Please try again with a simpler query.", details: error.message },
+          { status: 408 },
+        );
+      }
+      console.error("Talos list query error:", error);
+      return Response.json({ error: "Internal server error" }, { status: 500 });
+    }
 
     const hasMore = entries.length > limit;
     const page = hasMore ? entries.slice(0, limit) : entries;
@@ -91,12 +110,12 @@ export async function GET(request: NextRequest) {
 
     return Response.json({ data, nextCursor });
   } catch {
-    return Response.json({ error: "Internal server error" }, { status: 500 });
+    return internalError(request);
   }
 }
 
 // POST /api/talos — Create a new TALOS (Genesis)
-export async function POST(request: NextRequest) {
+async function _POST(request: NextRequest) {
   try {
     const parsed = await parseBody(request, createTalosSchema);
     if (parsed.error) return parsed.error;
@@ -131,15 +150,15 @@ export async function POST(request: NextRequest) {
     // Message includes core immutable fields to prevent parameter tampering.
     const expectedMessage = `talos-genesis:${name}:${onChainId ?? "null"}:${supply}`;
     if (message !== expectedMessage) {
-      return Response.json(
-        { error: `Signature message must be exactly '${expectedMessage}'` },
-        { status: 400 },
+      return badRequest(
+        request,
+        `Signature message must be exactly '${expectedMessage}'`,
       );
     }
 
     const sigOk = await verifyStellarSignature(creatorPublicKey, message, signature);
     if (!sigOk) {
-      return Response.json({ error: "Invalid signature for creatorPublicKey" }, { status: 403 });
+      return forbidden(request, "Invalid signature for creatorPublicKey");
     }
 
     // Generate API key (tak_ prefix = TALOS API Key)
@@ -246,7 +265,10 @@ export async function POST(request: NextRequest) {
       detail: e?.detail,
       constraint: e?.constraint,
     }, null, 2));
-    const message = err instanceof Error ? err.message : "Internal server error";
-    return Response.json({ error: message }, { status: 500 });
+    return internalError(request);
   }
 }
+
+// Re-export POST wrapped with drift detection.
+// The original async function above is kept intact so it can be tested directly.
+export const POST = withDriftDetection("POST /api/talos", _POST);

@@ -84,18 +84,50 @@ Limitations
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import os
+import secrets
+import shutil
+import sqlite3
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from talos_agent.observability import log
+from talos_agent.state_classify import (
+    StateCategory,
+    registered_classification,
+    require_classification,
+)
 
 if TYPE_CHECKING:
     from talos_agent.api_client import TalosAPIClient
     from talos_agent.db import LocalDB
 
 logger = logging.getLogger(__name__)
+
+_CHECKPOINT_TABLES = (
+    "schedules",
+    "activity_log",
+    "content_history",
+    "commerce_queue",
+    "approval_cache",
+    "spending_log",
+    "talos_config",
+    "playbooks",
+    "content_performance",
+    "strategy_learnings",
+    "audience_insights",
+    "loans",
+    "loan_repayments",
+    "dividends_log",
+    "retry_state",
+)
+
 
 
 # ── Configuration ──────────────────────────────────────────────────────────────
@@ -569,8 +601,532 @@ async def reconcile_after_restore(
     return result
 
 
+# ── Transactional Staged Checkpoint Restore ────────────────────────────────────
+
+class StagedRestoreError(Exception):
+    """Base class for transactional staged restore errors."""
+
+
+class PreflightError(StagedRestoreError):
+    """Raised when preflight validation or authorization fails before staging."""
+
+
+class StagingError(StagedRestoreError):
+    """Raised when staging or applying migrations against staged state fails."""
+
+
+class InvariantError(StagedRestoreError):
+    """Raised when staged database invariant checks fail."""
+
+
+class RollbackError(StagedRestoreError):
+    """Raised when commit fails and active state was rolled back to prior backup."""
+
+
+@dataclass
+class StagedRestoreConfig:
+    """Configuration options for transactional staged restore.
+
+    Attributes
+    ----------
+    max_size_bytes:
+        Maximum allowed size for checkpoint files in bytes. Default: 10MB.
+    allowed_schema_versions:
+        Set of supported schema versions. Default: {1}.
+    require_agent_match:
+        If True, requires checkpoint payload agent_id to match expected agent_id.
+    backup_retain_count:
+        Number of historical active database backups to retain. Default: 3.
+    run_migrations:
+        If True, runs database migrations against staged state. Default: True.
+    verify_invariants:
+        If True, runs structural & data invariant checks on staged state. Default: True.
+    master_password:
+        Optional master password for unwrap operation if checkpoint is encrypted envelope.
+    api_verify_leases:
+        Whether post-restore lease verification calls live API. Default: False.
+    staging_dir:
+        Directory for temporary staged database files. Default: target database directory.
+    """
+
+    max_size_bytes: int = 10 * 1024 * 1024
+    allowed_schema_versions: set[int] = field(default_factory=lambda: {1})
+    require_agent_match: bool = True
+    backup_retain_count: int = 3
+    run_migrations: bool = True
+    verify_invariants: bool = True
+    master_password: str | None = None
+    api_verify_leases: bool = False
+    staging_dir: Path | str | None = None
+
+
+@dataclass
+class StagedRestoreResult:
+    """Summary of transactional staged restore execution.
+
+    Attributes
+    ----------
+    agent_id:
+        The target agent identifier.
+    schema_version:
+        The schema version of the restored checkpoint.
+    tables_restored:
+        Dictionary mapping table names to restored row counts.
+    staged_path:
+        Path to the temporary staged database file used during restore.
+    backup_path:
+        Path to the backup created before atomic commit, if any.
+    preflight_passed:
+        True if preflight checks passed cleanly.
+    invariants_passed:
+        True if staged invariant verification passed.
+    committed:
+        True if atomic commit replaced active state successfully.
+    rolled_back:
+        True if a failure during commit triggered an automatic rollback.
+    reconciliation_result:
+        Optional summary of post-restore state reconciliation.
+    duration_ms:
+        Total duration of the restore operation in milliseconds.
+    errors:
+        List of non-fatal warnings or error messages collected.
+    """
+
+    agent_id: str
+    schema_version: int = 1
+    tables_restored: dict[str, int] = field(default_factory=dict)
+    staged_path: str = ""
+    backup_path: str | None = None
+    preflight_passed: bool = False
+    invariants_passed: bool = False
+    committed: bool = False
+    rolled_back: bool = False
+    reconciliation_result: ReconcileResult | None = None
+    duration_ms: float = 0.0
+    errors: list[str] = field(default_factory=list)
+
+
+class StagedRestoreManager:
+    """Manages transactional staged restores through preflight, staging, invariants, atomic commit, and rollback."""
+
+    def __init__(self, config: StagedRestoreConfig | None = None) -> None:
+        self.config = config or StagedRestoreConfig()
+
+    async def perform_staged_restore(
+        self,
+        target_db_path: Path | str,
+        checkpoint_input: dict[str, Any] | Path | str,
+        agent_id: str,
+        *,
+        api: TalosAPIClient | None = None,
+    ) -> StagedRestoreResult:
+        """Perform transactional staged restore end-to-end.
+
+        Steps:
+        1. Preflight validation (active state remains unchanged).
+        2. Staging & migrations (runs against staged state only).
+        3. Invariants verification (checks staged database integrity).
+        4. Atomic commit & bounded rollback (preserves prior state, atomic swap, post-restore reconciliation).
+        """
+        start_time = time.monotonic()
+        target_path = Path(target_db_path).resolve()
+        result = StagedRestoreResult(
+            agent_id=agent_id,
+            schema_version=1,
+            tables_restored={},
+            staged_path="",
+        )
+
+        log.info(
+            "restore_staged_start",
+            agent_id=agent_id,
+            target_db=str(target_path),
+        )
+
+        # Step 1: Preflight Check
+        payload = self._preflight_check(checkpoint_input, agent_id, result)
+        result.preflight_passed = True
+        log.info("restore_staged_preflight_passed", agent_id=agent_id)
+
+        # Step 2: Staging & Migrations
+        staged_path = self._stage_checkpoint(target_path, payload, agent_id, result)
+        result.staged_path = str(staged_path)
+
+        # Step 3: Invariants Verification
+        if self.config.verify_invariants:
+            self._verify_invariants(staged_path, agent_id, result)
+            result.invariants_passed = True
+            log.info("restore_staged_invariants_passed", agent_id=agent_id)
+
+        # Step 4: Atomic Commit & Bounded Rollback
+        await self._commit_and_reconcile(
+            target_path=target_path,
+            staged_path=staged_path,
+            agent_id=agent_id,
+            api=api,
+            result=result,
+        )
+
+        result.duration_ms = round((time.monotonic() - start_time) * 1000, 2)
+        log.info(
+            "restore_staged_complete",
+            agent_id=agent_id,
+            duration_ms=result.duration_ms,
+            committed=result.committed,
+        )
+        return result
+
+    def _preflight_check(
+        self,
+        checkpoint_input: dict[str, Any] | Path | str,
+        expected_agent_id: str,
+        result: StagedRestoreResult,
+    ) -> dict[str, Any]:
+        """Validate checkpoint format, bounds, schema compatibility, and identity before touching state."""
+        if not expected_agent_id or not isinstance(expected_agent_id, str):
+            raise PreflightError("Agent ID must be a non-empty string")
+
+        payload: dict[str, Any] | None = None
+
+        if isinstance(checkpoint_input, (str, Path)):
+            input_path = Path(checkpoint_input)
+            if not input_path.exists():
+                raise PreflightError(f"Checkpoint file not found: {input_path}")
+
+            size = input_path.stat().st_size
+            if size > self.config.max_size_bytes:
+                raise PreflightError(
+                    f"Checkpoint size ({size} bytes) exceeds limit ({self.config.max_size_bytes} bytes)"
+                )
+
+            try:
+                raw_data = input_path.read_bytes()
+                payload = json.loads(raw_data.decode("utf-8"))
+            except Exception as exc:
+                raise PreflightError(f"Failed to parse checkpoint JSON: {exc}") from exc
+        elif isinstance(checkpoint_input, dict):
+            payload = checkpoint_input
+        else:
+            raise PreflightError("Invalid checkpoint input type")
+
+        if not isinstance(payload, dict):
+            raise PreflightError("Checkpoint payload must be a JSON object")
+
+        schema_ver = payload.get("schema_version", payload.get("schema", 1))
+        if isinstance(schema_ver, bool) or not isinstance(schema_ver, int):
+            raise PreflightError("Checkpoint schema_version must be an integer")
+
+        if schema_ver not in self.config.allowed_schema_versions:
+            raise PreflightError(
+                f"Unsupported checkpoint schema version: {schema_ver}. Allowed: {self.config.allowed_schema_versions}"
+            )
+        result.schema_version = schema_ver
+
+        payload_agent_id = payload.get("agent_id")
+        if payload_agent_id is not None:
+            if not isinstance(payload_agent_id, str):
+                raise PreflightError("Checkpoint agent_id must be a string")
+            if self.config.require_agent_match and payload_agent_id != expected_agent_id:
+                raise PreflightError(
+                    f"Checkpoint agent_id ({payload_agent_id!r}) does not match expected ({expected_agent_id!r})"
+                )
+
+        tables = payload.get("tables")
+        if tables is not None:
+            if not isinstance(tables, dict):
+                raise PreflightError("Checkpoint tables must be an object")
+            for table_name, count in tables.items():
+                if not isinstance(table_name, str):
+                    raise PreflightError("Table names must be strings")
+                if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                    raise PreflightError(f"Row count for table {table_name!r} must be a non-negative integer")
+                result.tables_restored[table_name] = count
+
+        return payload
+
+    def _stage_checkpoint(
+        self,
+        target_path: Path,
+        payload: dict[str, Any],
+        agent_id: str,
+        result: StagedRestoreResult,
+    ) -> Path:
+        """Create staged database and apply migrations against staged state only."""
+        target_dir = target_path.parent
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        staging_dir = Path(self.config.staging_dir) if self.config.staging_dir else target_dir
+        staged_path = staging_dir / f"{target_path.name}.staged.{secrets.token_hex(8)}.db"
+
+        try:
+            from talos_agent.db import LocalDB
+
+            # LocalDB init automatically runs migrations against the staged database
+            staged_db = LocalDB(path=staged_path)
+
+            tables_data = payload.get("tables_data", {})
+            if isinstance(tables_data, dict) and tables_data:
+                for table_name, rows in tables_data.items():
+                    # ── Classification guard ──────────────────────────────
+                    # Every table in a checkpoint must be registered.
+                    require_classification(table_name)
+                    cls_ = registered_classification(table_name)
+                    if cls_ is not None and cls_.category is StateCategory.FORBIDDEN:
+                        raise StagingError(
+                            f"Table {table_name!r} is classified as FORBIDDEN "
+                            f"and must not appear in checkpoint payloads."
+                        )
+                    if isinstance(rows, list):
+                        for row in rows:
+                            if isinstance(row, dict):
+                                cols = list(row.keys())
+                                placeholders = ", ".join(["?"] * len(cols))
+                                col_names = ", ".join([f'"{c}"' for c in cols])
+                                sql = f'INSERT OR REPLACE INTO "{table_name}" ({col_names}) VALUES ({placeholders})'
+                                staged_db._conn.execute(sql, list(row.values()))
+                        staged_db._conn.commit()
+
+            staged_db._conn.execute(
+                "INSERT OR REPLACE INTO talos_config (key, value) VALUES ('agent_id', ?)",
+                (agent_id,),
+            )
+            staged_db._conn.commit()
+
+            staged_counts: dict[str, int] = {}
+            for table_name in _CHECKPOINT_TABLES:
+                try:
+                    cnt = staged_db._conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+                    staged_counts[table_name] = cnt
+                except sqlite3.OperationalError:
+                    pass
+
+            if staged_counts:
+                result.tables_restored.update(staged_counts)
+
+            staged_db.close()
+            log.info("restore_staged_staging_completed", staged_path=str(staged_path))
+            return staged_path
+        except Exception as exc:
+            try:
+                staged_db.close()
+            except Exception:
+                pass
+            if staged_path.exists():
+                try:
+                    staged_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            raise StagingError(f"Failed to create staged database: {exc}") from exc
+
+    def _verify_invariants(
+        self,
+        staged_path: Path,
+        expected_agent_id: str,
+        result: StagedRestoreResult,
+    ) -> None:
+        """Verify database structural and data invariants on staged state."""
+        try:
+            conn = sqlite3.connect(str(staged_path))
+            conn.row_factory = sqlite3.Row
+
+            check = conn.execute("PRAGMA quick_check").fetchone()
+            if not check or check[0] != "ok":
+                raise InvariantError(f"SQLite integrity check failed: {check[0] if check else 'empty'}")
+
+            existing_tables = {
+                r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            }
+            required_tables = {"schedules", "talos_config", "activity_log"}
+            missing = required_tables - existing_tables
+            if missing:
+                raise InvariantError(f"Staged database missing required tables: {missing}")
+
+            for tbl in existing_tables:
+                if not tbl.startswith("sqlite_"):
+                    cnt = conn.execute(f'SELECT COUNT(*) FROM "{tbl}"').fetchone()[0]
+                    if cnt < 0:
+                        raise InvariantError(f"Negative row count in table {tbl}")
+
+            cfg_row = conn.execute("SELECT value FROM talos_config WHERE key='agent_id'").fetchone()
+            if cfg_row and cfg_row["value"] != expected_agent_id:
+                raise InvariantError(
+                    f"In-database agent_id ({cfg_row['value']!r}) does not match expected ({expected_agent_id!r})"
+                )
+
+            conn.close()
+        except Exception as exc:
+            if staged_path.exists():
+                staged_path.unlink(missing_ok=True)
+            if isinstance(exc, InvariantError):
+                raise
+            raise InvariantError(f"Staged database invariant verification failed: {exc}") from exc
+
+    async def _commit_and_reconcile(
+        self,
+        target_path: Path,
+        staged_path: Path,
+        agent_id: str,
+        api: TalosAPIClient | None,
+        result: StagedRestoreResult,
+    ) -> None:
+        """Perform atomic commit, bounded backup, reconciliation, and rollback if commit fails."""
+        journal_path = target_path.parent / f"{target_path.name}.restore_journal.json"
+        backup_path: Path | None = None
+
+        try:
+            journal_payload = {
+                "status": "staging_completed",
+                "agent_id": agent_id,
+                "staged_path": str(staged_path),
+                "target_path": str(target_path),
+                "timestamp": _now_utc().isoformat(),
+            }
+            journal_path.write_text(json.dumps(journal_payload, indent=2))
+
+            if target_path.exists():
+                timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+                backup_path = target_path.parent / f"{target_path.name}.backup.{timestamp_str}"
+                shutil.copy2(target_path, backup_path)
+                result.backup_path = str(backup_path)
+                journal_payload["backup_path"] = str(backup_path)
+                log.info("restore_staged_backup_created", backup_path=str(backup_path))
+
+                self._prune_old_backups(target_path)
+
+            journal_payload["status"] = "committing"
+            journal_path.write_text(json.dumps(journal_payload, indent=2))
+
+            os.replace(staged_path, target_path)
+
+            for ext in ("-wal", "-shm"):
+                aux_file = Path(str(target_path) + ext)
+                aux_file.unlink(missing_ok=True)
+
+            journal_payload["status"] = "committed"
+            journal_path.write_text(json.dumps(journal_payload, indent=2))
+            result.committed = True
+            log.info("restore_staged_committed", target_path=str(target_path))
+
+            from talos_agent.db import LocalDB
+
+            active_db = LocalDB(path=target_path)
+            try:
+                reconcile_cfg = ReconcileConfig(api_verify_leases=self.config.api_verify_leases)
+                reconcile_res = await reconcile_after_restore(active_db, api=api, config=reconcile_cfg)
+                result.reconciliation_result = reconcile_res
+                log.info("restore_staged_reconciliation_completed")
+            finally:
+                active_db.close()
+
+            journal_path.unlink(missing_ok=True)
+
+        except Exception as exc:
+            if backup_path and backup_path.exists():
+                try:
+                    os.replace(backup_path, target_path)
+                    result.rolled_back = True
+                    journal_payload["status"] = "rolled_back"
+                    journal_path.write_text(json.dumps(journal_payload, indent=2))
+                    log.warning("restore_staged_rollback_executed", target_path=str(target_path))
+                except Exception as rollback_exc:
+                    logger.error(f"Failed to rollback active DB: {rollback_exc}")
+
+            if staged_path.exists():
+                staged_path.unlink(missing_ok=True)
+
+            raise RollbackError(f"Restore commit failed and active state was rolled back: {exc}") from exc
+
+    def _prune_old_backups(self, target_path: Path) -> None:
+        """Prune old database backups beyond backup_retain_count."""
+        pattern = f"{target_path.name}.backup.*"
+        backups = sorted(target_path.parent.glob(pattern), key=lambda p: p.stat().st_mtime)
+        while len(backups) > self.config.backup_retain_count:
+            oldest = backups.pop(0)
+            oldest.unlink(missing_ok=True)
+
+
+async def perform_staged_restore(
+    target_db_path: Path | str,
+    checkpoint_input: dict[str, Any] | Path | str,
+    agent_id: str,
+    *,
+    config: StagedRestoreConfig | None = None,
+    api: TalosAPIClient | None = None,
+) -> StagedRestoreResult:
+    """Async entry point for transactional staged restore."""
+    manager = StagedRestoreManager(config=config)
+    return await manager.perform_staged_restore(
+        target_db_path=target_db_path,
+        checkpoint_input=checkpoint_input,
+        agent_id=agent_id,
+        api=api,
+    )
+
+
+def perform_staged_restore_sync(
+    target_db_path: Path | str,
+    checkpoint_input: dict[str, Any] | Path | str,
+    agent_id: str,
+    *,
+    config: StagedRestoreConfig | None = None,
+    api: TalosAPIClient | None = None,
+) -> StagedRestoreResult:
+    """Synchronous entry point for transactional staged restore (used by CLI)."""
+    return asyncio.run(
+        perform_staged_restore(
+            target_db_path=target_db_path,
+            checkpoint_input=checkpoint_input,
+            agent_id=agent_id,
+            config=config,
+            api=api,
+        )
+    )
+
+
+def recover_interrupted_restore(target_db_path: Path | str) -> bool:
+    """Recover from an interrupted restore process by inspecting the restore journal."""
+    target_path = Path(target_db_path).resolve()
+    journal_path = target_path.parent / f"{target_path.name}.restore_journal.json"
+
+    if not journal_path.exists():
+        return False
+
+    try:
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        status = journal.get("status")
+        backup_path_str = journal.get("backup_path")
+        staged_path_str = journal.get("staged_path")
+
+        if staged_path_str:
+            Path(staged_path_str).unlink(missing_ok=True)
+
+        if status in ("committing", "staging_completed") and backup_path_str:
+            backup_path = Path(backup_path_str)
+            if backup_path.exists():
+                os.replace(backup_path, target_path)
+                log.warning("restore_interrupted_recovered", target_path=str(target_path))
+
+        journal_path.unlink(missing_ok=True)
+        return True
+    except Exception as exc:
+        logger.error(f"Error during interrupted restore recovery: {exc}")
+        return False
+
+
 __all__ = [
+    "InvariantError",
+    "PreflightError",
     "ReconcileConfig",
     "ReconcileResult",
+    "RollbackError",
+    "StagedRestoreConfig",
+    "StagedRestoreError",
+    "StagedRestoreManager",
+    "StagedRestoreResult",
+    "StagingError",
+    "perform_staged_restore",
+    "perform_staged_restore_sync",
     "reconcile_after_restore",
+    "recover_interrupted_restore",
 ]
+

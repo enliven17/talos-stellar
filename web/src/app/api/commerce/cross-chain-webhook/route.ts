@@ -6,6 +6,7 @@ import { withTransactionRetry } from "@/db/db-retry";
 import { tlsCommerceJobs, tlsCommerceServices, tlsRevenues, tlsTalos } from "@/db/schema";
 import { fulfillInstant } from "@/lib/fulfillment";
 import { crossChainWebhookSchema } from "@/lib/schemas";
+import { ingestJobToLedger } from "@/lib/reputation-ledger";
 
 function normalizeChain(chain: string) {
   return chain.trim().toLowerCase();
@@ -296,6 +297,9 @@ export async function POST(request: NextRequest) {
             txHash: sourceTxHash,
           });
         }
+
+        // Record terminal status to the reputation input ledger idempotently
+        await ingestJobToLedger(savedJob.id, tx);
 
         return [savedJob];
       },

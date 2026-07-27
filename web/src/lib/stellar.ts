@@ -6,6 +6,7 @@
  * They are held server-side in environment variables or a secret manager.
  */
 
+import { Networks } from "@stellar/stellar-sdk";
 import { USDC_ISSUER } from "./stellar-config";
 
 const STELLAR_NETWORK = process.env.STELLAR_NETWORK ?? "testnet";
@@ -21,7 +22,6 @@ export function getUSDCIssuer(): string {
 }
 
 export function getNetworkPassphrase(): string {
-  const { Networks } = require("@stellar/stellar-sdk") as typeof import("@stellar/stellar-sdk");
   return STELLAR_NETWORK === "mainnet" ? Networks.PUBLIC : Networks.TESTNET;
 }
 

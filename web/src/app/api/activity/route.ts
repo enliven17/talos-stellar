@@ -4,6 +4,7 @@ import {
   fetchActivityTransactions,
   InvalidActivityCursorError,
 } from "./query";
+import { parseLimit } from "@/lib/parse-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -31,10 +32,13 @@ export async function GET(request: Request) {
     return Response.json({ stats });
   }
 
-  const [stats, { transactions, nextCursor }] = await Promise.all([
-    fetchActivityStats(),
-    fetchActivityTransactions(limit, cursor),
-  ]);
+    const [stats, { transactions, nextCursor }] = await Promise.all([
+      fetchActivityStats(),
+      fetchActivityTransactions(limit, cursor),
+    ]);
 
-  return Response.json({ stats, transactions, nextCursor });
+    return Response.json({ stats, transactions, nextCursor });
+  } catch {
+    return internalError(request);
+  }
 }

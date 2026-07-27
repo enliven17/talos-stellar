@@ -113,24 +113,14 @@ pub fn emit_ttl_touched(env: &Env, class_name: &str, keys_touched: u32) {
 }
 
 /// Emit `ttl_warn` when entries are at risk.
-pub fn emit_ttl_warning(
-    env: &Env,
-    class_name: &str,
-    keys_below: u32,
-    max_age: u32,
-) {
+pub fn emit_ttl_warning(env: &Env, class_name: &str, keys_below: u32, max_age: u32) {
     let topics = (symbol_short!("ttl_warn"),);
     let name = soroban_sdk::String::from_str(env, class_name);
     env.events().publish(topics, (name, keys_below, max_age));
 }
 
 /// Emit `ttl_batch` after batch maintenance.
-pub fn emit_ttl_batch(
-    env: &Env,
-    total: u32,
-    touched: u32,
-    skipped: u32,
-) {
+pub fn emit_ttl_batch(env: &Env, total: u32, touched: u32, skipped: u32) {
     let topics = (symbol_short!("ttl_batch"),);
     env.events().publish(topics, (total, touched, skipped));
 }
@@ -195,5 +185,132 @@ mod tests {
     fn age_ledgers_computes_correctly() {
         assert_eq!(age_ledgers(100, 200), 100);
         assert_eq!(age_ledgers(200, 100), 0); // saturating
+    }
+
+    // ── Ledger-boundary & resource-exhaustion tests ────────────────
+
+    #[test]
+    fn key_health_single_key_at_extremes() {
+        let mut h = KeyHealth::empty();
+
+        // Age 0 should update bounds correctly
+        h.observe(0);
+        assert_eq!(h.min_age, 0);
+        assert_eq!(h.max_age, 0);
+        assert_eq!(h.total_keys, 1);
+        assert_eq!(h.keys_below_warn, 0);
+        assert_eq!(h.keys_below_crit, 0);
+        assert!(!h.needs_immediate_attention());
+    }
+
+    #[test]
+    fn key_health_max_age() {
+        let mut h = KeyHealth::empty();
+        h.observe(u32::MAX);
+        assert_eq!(h.min_age, u32::MAX);
+        assert_eq!(h.max_age, u32::MAX);
+        assert_eq!(h.keys_below_warn, 1);
+        assert_eq!(h.keys_below_crit, 1);
+    }
+
+    #[test]
+    fn key_health_multiple_keys_mixed_ages() {
+        let mut h = KeyHealth::empty();
+
+        // Below all thresholds
+        h.observe(1_000_000);
+        // At WARN but below CRITICAL
+        h.observe(2_000_000);
+        // Above CRITICAL
+        h.observe(3_500_000);
+
+        assert_eq!(h.min_age, 1_000_000);
+        assert_eq!(h.max_age, 3_500_000);
+        assert_eq!(h.total_keys, 3);
+        assert_eq!(h.keys_below_warn, 2); // 2_000_000 and 3_500_000
+        assert_eq!(h.keys_below_crit, 1); // only 3_500_000
+        assert!(h.needs_immediate_attention());
+    }
+
+    #[test]
+    fn needs_touch_exactly_at_threshold() {
+        // age = 2_000_000 exactly (last_touched=0, current=2_000_000)
+        assert!(needs_touch(0, 2_000_000));
+    }
+
+    #[test]
+    fn needs_touch_just_below_threshold() {
+        // age = 1_999_999 (last_touched=0, current=1_999_999)
+        assert!(!needs_touch(0, 1_999_999));
+    }
+
+    #[test]
+    fn needs_touch_just_above_threshold() {
+        // age = 2_000_001
+        assert!(needs_touch(0, 2_000_001));
+    }
+
+    #[test]
+    fn needs_touch_last_touched_zero() {
+        // last_touched=0 means entry has never been touched
+        assert!(needs_touch(0, 2_000_000));
+        assert!(!needs_touch(0, 1_000_000));
+    }
+
+    #[test]
+    fn age_ledgers_saturating_when_last_greater_than_current() {
+        // last_touched > current_ledger should saturate to 0
+        assert_eq!(age_ledgers(1_000_000, 500_000), 0);
+        assert_eq!(age_ledgers(u32::MAX, 0), 0);
+    }
+
+    #[test]
+    fn age_ledgers_max_delta() {
+        // Maximum possible age: current=u32::MAX, last_touched=0
+        assert_eq!(age_ledgers(0, u32::MAX), u32::MAX);
+    }
+
+    #[test]
+    fn key_health_no_critical_when_below_threshold() {
+        let mut h = KeyHealth::empty();
+
+        // All keys just below CRITICAL
+        h.observe(3_499_999);
+        h.observe(3_499_999);
+
+        assert_eq!(h.keys_below_warn, 2);
+        assert_eq!(h.keys_below_crit, 0);
+        assert!(!h.needs_immediate_attention());
+    }
+
+    #[test]
+    fn key_health_exactly_at_critical() {
+        let mut h = KeyHealth::empty();
+        h.observe(3_500_000);
+
+        assert_eq!(h.keys_below_crit, 1);
+        assert!(h.needs_immediate_attention());
+    }
+
+    #[test]
+    fn key_health_large_observation_count() {
+        // Verify accumulator handles many observations without overflow
+        let mut h = KeyHealth::empty();
+        for _ in 0..10_000 {
+            h.observe(500_000);
+        }
+        assert_eq!(h.total_keys, 10_000);
+        assert_eq!(h.min_age, 500_000);
+        assert_eq!(h.max_age, 500_000);
+        assert_eq!(h.keys_below_warn, 0);
+        assert_eq!(h.keys_below_crit, 0);
+    }
+
+    #[test]
+    fn threshold_constants_are_ordered_correctly() {
+        // RENEWAL_THRESHOLD must equal WARN_THRESHOLD by design
+        assert_eq!(RENEWAL_THRESHOLD, WARN_THRESHOLD);
+        // CRITICAL must be greater than WARN
+        assert!(CRITICAL_THRESHOLD > WARN_THRESHOLD);
     }
 }

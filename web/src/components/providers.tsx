@@ -45,6 +45,8 @@ interface WalletContextValue {
   connect: () => Promise<void>;
   disconnect: () => void;
   signTransaction: (xdr: string) => Promise<string>;
+  /** Sign an arbitrary UTF-8 message; returns a base64 ED25519 signature. */
+  signMessage: (message: string) => Promise<string>;
   showWalletModal: boolean;
   setShowWalletModal: (v: boolean) => void;
   selectWallet: (id: string) => Promise<void>;
@@ -57,6 +59,7 @@ const WalletContext = createContext<WalletContextValue>({
   connect: async () => {},
   disconnect: () => {},
   signTransaction: async () => "",
+  signMessage: async () => "",
   showWalletModal: false,
   setShowWalletModal: () => {},
   selectWallet: async () => {},
@@ -105,6 +108,20 @@ export function Providers({ children }: { children: ReactNode }) {
     return signedTxXdr;
   }, []);
 
+  // Wallets return the signature either base64-encoded or as raw bytes
+  // depending on the adapter; normalise to base64 so the server has one shape
+  // to verify against.
+  const signMessage = useCallback(async (message: string): Promise<string> => {
+    const { signedMessage } = await StellarWalletsKit.signMessage(message);
+    if (typeof signedMessage === "string") return signedMessage;
+
+    // Browser-safe base64 — `Buffer` is not available in the client bundle.
+    const bytes = signedMessage as unknown as Uint8Array;
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary);
+  }, []);
+
   return (
     <WalletContext.Provider
       value={{
@@ -114,6 +131,7 @@ export function Providers({ children }: { children: ReactNode }) {
         connect,
         disconnect,
         signTransaction,
+        signMessage,
         showWalletModal,
         setShowWalletModal,
         selectWallet,

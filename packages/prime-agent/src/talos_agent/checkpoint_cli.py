@@ -13,6 +13,10 @@ from threading import Lock
 
 import click
 
+from talos_agent.state_classify import (
+    StateCategory,
+    registered_classification,
+)
 
 DEFAULT_MAX_SIZE = 10 * 1024 * 1024
 SUPPORTED_SCHEMA_VERSIONS = {1}
@@ -242,12 +246,29 @@ def create_checkpoint_from_database(
     agent_id: str,
     schema_version: int,
 ) -> dict[str, object]:
-    """Create a safe checkpoint payload from an existing database."""
+    """Create a safe checkpoint payload from an existing database.
+
+    Validates that every table in the checkpoint has a registered
+    classification and that no FORBIDDEN tables are included.
+    """
 
     connection = open_readonly_database(database_path)
     try:
         connection.execute("BEGIN")
         table_counts = summarize_database(connection)
+        # ── Classification guard ──────────────────────────────────────────
+        for table_name in table_counts:
+            cls_ = registered_classification(table_name)
+            if cls_ is None:
+                raise ValueError(
+                    f"Table {table_name!r} has no registered state classification. "
+                    f"Register it via state_classifications.py before exporting."
+                )
+            if cls_.category is StateCategory.FORBIDDEN:
+                raise ValueError(
+                    f"Table {table_name!r} is classified as FORBIDDEN "
+                    f"and must not be included in checkpoints."
+                )
         connection.rollback()
     finally:
         connection.close()
@@ -477,3 +498,273 @@ def ensure_distinct_paths(source_path: Path, output_path: Path) -> None:
 
     if Path(source_path).resolve() == Path(output_path).resolve():
         raise ValueError("Checkpoint output must not overwrite the agent database.")
+
+
+@checkpoint.command("restore")
+@click.option(
+    "--input",
+    "input_path",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+    help="Checkpoint file to restore.",
+)
+@click.option(
+    "--agent",
+    "agent_id",
+    required=True,
+    help="Agent ID to restore into.",
+)
+@click.option(
+    "--schema-version",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Expected checkpoint schema version.",
+)
+@click.option(
+    "--max-size",
+    type=int,
+    default=DEFAULT_MAX_SIZE,
+    show_default=True,
+    help="Maximum checkpoint size in bytes.",
+)
+@click.option(
+    "--no-verify-invariants",
+    is_flag=True,
+    help="Skip invariant checks.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Output the restore summary as JSON.",
+)
+def restore_checkpoint(
+    input_path: Path,
+    agent_id: str,
+    schema_version: int,
+    max_size: int,
+    no_verify_invariants: bool,
+    as_json: bool,
+) -> None:
+    """Restore agent state through transactional staging, validation, and rollback safety."""
+
+    from talos_agent.db import get_db_path
+    from talos_agent.restore import (
+        InvariantError,
+        PreflightError,
+        RollbackError,
+        StagedRestoreConfig,
+        StagingError,
+        perform_staged_restore_sync,
+    )
+
+    try:
+        validated_agent_id = validate_agent_id(agent_id)
+        validated_schema_version = ensure_compatible_schema_version(
+            schema_version,
+            SUPPORTED_SCHEMA_VERSIONS,
+        )
+        validate_size_limit(max_size)
+
+        database_path = get_db_path(validated_agent_id)
+        ensure_distinct_paths(input_path, database_path)
+
+        cfg = StagedRestoreConfig(
+            max_size_bytes=max_size,
+            allowed_schema_versions={validated_schema_version},
+            require_agent_match=True,
+            verify_invariants=not no_verify_invariants,
+        )
+
+        res = perform_staged_restore_sync(
+            target_db_path=database_path,
+            checkpoint_input=input_path,
+            agent_id=validated_agent_id,
+            config=cfg,
+        )
+
+        if as_json:
+            output_dict = {
+                "agent_id": res.agent_id,
+                "schema_version": res.schema_version,
+                "tables_restored": res.tables_restored,
+                "committed": res.committed,
+                "preflight_passed": res.preflight_passed,
+                "invariants_passed": res.invariants_passed,
+                "duration_ms": res.duration_ms,
+            }
+            click.echo(json.dumps(output_dict, indent=2))
+        else:
+            click.echo(f"Successfully restored checkpoint for agent '{validated_agent_id}' in {res.duration_ms}ms")
+            click.echo("Tables restored:")
+            if res.tables_restored:
+                for tbl, cnt in res.tables_restored.items():
+                    click.echo(f"  {tbl}: {cnt}")
+            else:
+                click.echo("  none")
+
+    except CheckpointCompatibilityError as exc:
+        raise CheckpointCLIError(
+            str(exc),
+            CheckpointExitCode.COMPATIBILITY_ERROR,
+        ) from exc
+    except PreflightError as exc:
+        raise CheckpointCLIError(
+            str(exc),
+            CheckpointExitCode.VALIDATION_ERROR,
+        ) from exc
+    except (StagingError, InvariantError, RollbackError, PermissionError, OSError, sqlite3.Error) as exc:
+        raise CheckpointCLIError(
+            f"Restore failed: {exc}",
+            CheckpointExitCode.IO_ERROR,
+        ) from exc
+    except ValueError as exc:
+        raise CheckpointCLIError(
+            str(exc),
+            CheckpointExitCode.VALIDATION_ERROR,
+        ) from exc
+
+
+@checkpoint.command("drill")
+@click.option(
+    "--scenarios",
+    "scenarios",
+    default="all",
+    show_default=True,
+    help="Comma-separated list of scenarios to run, or 'all'.",
+)
+@click.option(
+    "--schema-versions",
+    "schema_versions_str",
+    default="1",
+    show_default=True,
+    help="Comma-separated list of schema versions to test for migration compatibility.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=None,
+    help="Directory for drill reports. Default: ~/.talos-agent/drill_reports.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Output the full drill report as JSON to stdout.",
+)
+def drill_checkpoint(
+    scenarios: str,
+    schema_versions_str: str,
+    output_dir: Path | None,
+    as_json: bool,
+) -> None:
+    """Run automated restore drills and publish a bounded report.
+
+    Exercises the full checkpoint/restore pipeline with synthetic state and
+    ephemeral keys.  Safe to run at any time — it never touches real data.
+
+    Available scenarios:
+
+    \b
+    - normal_roundtrip       Seal & open with correct identity
+    - key_rotation           Old envelopes readable after key rotation
+    - migration              Cross-schema-version compatibility
+    - corruption             Tampered ciphertext/HMAC/AAD detection
+    - wrong_identity         Rejection of mismatched agent_id
+    - rollback               Stale sequence rejection (open_latest)
+    - scheduler_no_duplicate_effects   Scheduler idempotency after restore
+    """
+    from talos_agent.restore_drill import (
+        _DEFAULT_DRILL_DIR,
+        ALL_SCENARIOS,
+        DrillConfig,
+        run_restore_drill_sync,
+        write_drill_report,
+    )
+
+    try:
+        # Parse scenarios
+        if scenarios.strip().lower() == "all":
+            selected = set(ALL_SCENARIOS)
+        else:
+            selected = {s.strip() for s in scenarios.split(",") if s.strip()}
+            unknown = selected - ALL_SCENARIOS
+            if unknown:
+                raise CheckpointCLIError(
+                    f"Unknown scenario(s): {', '.join(sorted(unknown))}. "
+                    f"Available: {', '.join(sorted(ALL_SCENARIOS))}",
+                    CheckpointExitCode.VALIDATION_ERROR,
+                )
+
+        # Parse schema versions
+        schema_versions: set[int] = set()
+        for sv in schema_versions_str.split(","):
+            sv_clean = sv.strip()
+            if not sv_clean:
+                continue
+            try:
+                schema_versions.add(int(sv_clean))
+            except ValueError:
+                raise CheckpointCLIError(
+                    f"Invalid schema version: {sv_clean!r}",
+                    CheckpointExitCode.VALIDATION_ERROR,
+                )
+
+        config = DrillConfig(
+            scenarios=selected,
+            schema_versions=schema_versions,
+            report_dir=output_dir if output_dir else _DEFAULT_DRILL_DIR,
+        )
+
+        report = run_restore_drill_sync(config=config)
+
+        # Always persist to disk
+        report_path = write_drill_report(report, report_dir=config.report_dir)
+
+        if as_json:
+            import json
+            click.echo(json.dumps({
+                "timestamp": report.timestamp,
+                "total": report.total,
+                "passed": report.passed,
+                "failed": report.failed,
+                "duration_ms": report.duration_ms,
+                "report_path": str(report_path),
+                "scenarios": [
+                    {
+                        "scenario": s.scenario,
+                        "passed": s.passed,
+                        "duration_ms": s.duration_ms,
+                        "detail": s.detail,
+                        "error": s.error,
+                    }
+                    for s in report.scenarios
+                ],
+            }, indent=2))
+        else:
+            click.echo(f"Restore drill complete: {report.passed}/{report.total} passed in {report.duration_ms}ms")
+            click.echo(f"Report saved to {report_path}")
+            if report.failed > 0:
+                click.echo()
+                click.echo("Failures:")
+                for s in report.scenarios:
+                    if not s.passed:
+                        click.echo(f"  [FAIL] {s.scenario}: {s.error or s.detail}")
+
+        if report.failed > 0:
+            raise SystemExit(1)
+
+    except CheckpointCLIError:
+        raise
+    except ValueError as exc:
+        raise CheckpointCLIError(
+            str(exc),
+            CheckpointExitCode.VALIDATION_ERROR,
+        ) from exc
+    except (OSError, sqlite3.Error) as exc:
+        raise CheckpointCLIError(
+            f"Drill failed: {exc}",
+            CheckpointExitCode.IO_ERROR,
+        ) from exc
+

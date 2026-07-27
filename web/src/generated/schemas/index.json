@@ -1,0 +1,152 @@
+{
+  "generated": "2026-07-24T17:47:18.187Z",
+  "schemas": [
+    {
+      "name": "createTalos",
+      "file": "createTalos.json",
+      "routes": [
+        "POST /api/talos"
+      ]
+    },
+    {
+      "name": "reportActivity",
+      "file": "reportActivity.json",
+      "routes": [
+        "POST /api/talos/:id/activity"
+      ]
+    },
+    {
+      "name": "createApproval",
+      "file": "createApproval.json",
+      "routes": [
+        "POST /api/talos/:id/approvals"
+      ]
+    },
+    {
+      "name": "decideApproval",
+      "file": "decideApproval.json",
+      "routes": [
+        "POST /api/talos/:id/approvals/:approvalId/decide"
+      ]
+    },
+    {
+      "name": "transfer",
+      "file": "transfer.json",
+      "routes": [
+        "POST /api/talos/:id/transfer"
+      ]
+    },
+    {
+      "name": "becomePatron",
+      "file": "becomePatron.json",
+      "routes": [
+        "POST /api/talos/:id/patron"
+      ]
+    },
+    {
+      "name": "revokePatron",
+      "file": "revokePatron.json",
+      "routes": [
+        "DELETE /api/talos/:id/patron"
+      ]
+    },
+    {
+      "name": "registerService",
+      "file": "registerService.json",
+      "routes": [
+        "PUT /api/talos/:id/service"
+      ]
+    },
+    {
+      "name": "crossChainWebhook",
+      "file": "crossChainWebhook.json",
+      "routes": [
+        "POST /api/talos/:id/cross-chain-webhook"
+      ]
+    },
+    {
+      "name": "submitBid",
+      "file": "submitBid.json",
+      "routes": [
+        "POST /api/jobs/:id/bid"
+      ]
+    },
+    {
+      "name": "claimJob",
+      "file": "claimJob.json",
+      "routes": [
+        "POST /api/jobs/:id/claim"
+      ]
+    },
+    {
+      "name": "heartbeatJob",
+      "file": "heartbeatJob.json",
+      "routes": [
+        "POST /api/jobs/:id/heartbeat"
+      ]
+    },
+    {
+      "name": "releaseJob",
+      "file": "releaseJob.json",
+      "routes": [
+        "POST /api/jobs/:id/release"
+      ]
+    },
+    {
+      "name": "submitJobResult",
+      "file": "submitJobResult.json",
+      "routes": [
+        "POST /api/jobs/:id/result"
+      ]
+    },
+    {
+      "name": "reportRevenue",
+      "file": "reportRevenue.json",
+      "routes": [
+        "POST /api/talos/:id/revenue"
+      ]
+    },
+    {
+      "name": "recordDividend",
+      "file": "recordDividend.json",
+      "routes": [
+        "POST /api/talos/:id/dividends"
+      ]
+    },
+    {
+      "name": "updateStatus",
+      "file": "updateStatus.json",
+      "routes": [
+        "PATCH /api/talos/:id/status"
+      ]
+    },
+    {
+      "name": "regenerateKey",
+      "file": "regenerateKey.json",
+      "routes": [
+        "POST /api/talos/:id/regenerate-key"
+      ]
+    },
+    {
+      "name": "signPayment",
+      "file": "signPayment.json",
+      "routes": [
+        "POST /api/talos/:id/sign"
+      ]
+    },
+    {
+      "name": "buyToken",
+      "file": "buyToken.json",
+      "routes": [
+        "POST /api/talos/:id/buy-token"
+      ]
+    },
+    {
+      "name": "createPlaybook",
+      "file": "createPlaybook.json",
+      "routes": [
+        "POST /api/playbooks"
+      ]
+    }
+  ]
+}

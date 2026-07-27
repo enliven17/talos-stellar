@@ -6,7 +6,7 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, PrivateAttr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 APP_DIR = Path.home() / ".talos-agent"
@@ -20,10 +20,13 @@ def _json_config_source() -> dict:
 
 
 class Settings(BaseSettings):
+    _secret_store: object | None = PrivateAttr(default=None)
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     # Talos Web API
@@ -53,15 +56,16 @@ class Settings(BaseSettings):
 
     @property
     def llm_api_key(self) -> str:
-        return self.groq_api_key or self.openai_api_key
+        groq_key = self.secret_value("groq_api_key")
+        return groq_key or self.secret_value("openai_api_key")
 
     @property
     def llm_model(self) -> str:
-        return self.groq_model if self.groq_api_key else self.openai_model
+        return self.groq_model if self.secret_value("groq_api_key") else self.openai_model
 
     @property
     def llm_base_url(self) -> str | None:
-        return "https://api.groq.com/openai/v1" if self.groq_api_key else None
+        return "https://api.groq.com/openai/v1" if self.secret_value("groq_api_key") else None
 
     # X (Twitter)
     x_username: str = ""
@@ -79,9 +83,98 @@ class Settings(BaseSettings):
     # Per-channel credential configs for additional adapters.
     # Set as JSON in env: CHANNEL_CONFIGS={"telegram": {"bot_token": "...", "chat_id": "@channel"}}
     channel_configs: dict = Field(default_factory=dict, description="Per-channel credentials map")
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
+    # Versioned encrypted secret rotation (opt-in for backward compatibility).
+    secret_rotation_enabled: bool = Field(
+        default=False, validation_alias="TALOS_SECRET_ROTATION_ENABLED"
+    )
+    secret_keyring: str = Field(default="", validation_alias="TALOS_SECRET_KEYRING")
+    secret_active_key_id: str = Field(
+        default="", validation_alias="TALOS_SECRET_ACTIVE_KEY_ID"
+    )
+    secret_scope: str = Field(default="default", validation_alias="TALOS_SECRET_SCOPE")
+    secret_dual_read: bool = Field(
+        default=True, validation_alias="TALOS_SECRET_DUAL_READ"
+    )
+    secret_legacy_fallback: bool = Field(
+        default=True, validation_alias="TALOS_SECRET_LEGACY_FALLBACK"
+    )
+    secret_max_bytes: int = Field(
+        default=65536,
+        ge=1,
+        le=1048576,
+        validation_alias="TALOS_SECRET_MAX_BYTES",
+    )
+    secret_db_timeout_ms: int = Field(
+        default=5000,
+        ge=1,
+        le=60000,
+        validation_alias="TALOS_SECRET_DB_TIMEOUT_MS",
+    )
+
+    # Third-party adapter capability sandbox (opt-in rollout).
+    adapter_sandbox_enabled: bool = Field(
+        default=False, validation_alias="TALOS_ADAPTER_SANDBOX_ENABLED"
+    )
+    adapter_capability_manifests: str = Field(
+        default="", validation_alias="TALOS_ADAPTER_CAPABILITY_MANIFESTS"
+    )
+    adapter_timeout_seconds: int = Field(
+        default=30,
+        ge=1,
+        le=120,
+        validation_alias="TALOS_ADAPTER_TIMEOUT_SECONDS",
+    )
+    adapter_max_concurrency: int = Field(
+        default=2,
+        ge=1,
+        le=16,
+        validation_alias="TALOS_ADAPTER_MAX_CONCURRENCY",
+    )
+    adapter_max_input_bytes: int = Field(
+        default=16384,
+        ge=1,
+        le=1048576,
+        validation_alias="TALOS_ADAPTER_MAX_INPUT_BYTES",
+    )
+    adapter_max_output_bytes: int = Field(
+        default=262144,
+        ge=1,
+        le=2097152,
+        validation_alias="TALOS_ADAPTER_MAX_OUTPUT_BYTES",
+    )
+    adapter_max_network_requests: int = Field(
+        default=8,
+        ge=1,
+        le=32,
+        validation_alias="TALOS_ADAPTER_MAX_NETWORK_REQUESTS",
+    )
+    adapter_invocation_lease_seconds: int = Field(
+        default=120,
+        ge=5,
+        le=900,
+        validation_alias="TALOS_ADAPTER_INVOCATION_LEASE_SECONDS",
+    )
+    adapter_max_invocation_records: int = Field(
+        default=100000,
+        ge=100,
+        le=1000000,
+        validation_alias="TALOS_ADAPTER_MAX_INVOCATION_RECORDS",
+    )
 
     # Policy engine (disabled by default — backward compatible)
     policy_engine_enabled: bool = Field(default=False, description="Enable the declarative policy engine for autonomous actions")
+
+    # Tool permission manifests (audit-only by default — backward compatible).
+    # "off" disables the check entirely, "audit" evaluates and logs without
+    # blocking, "enforce" denies calls that exceed their manifest or grants.
+    tool_permission_mode: str = Field(default="audit", description="Tool permission enforcement: off | audit | enforce")
+    # Operator grants as JSON, e.g.
+    # TOOL_PERMISSION_GRANTS={"capabilities":["network.http","wallet.read"],"hosts":["*.stellar.org"],"max_spend_usd":"50"}
+    # Empty means "use the legacy grant set", which matches pre-manifest behaviour.
+    tool_permission_grants: dict = Field(default_factory=dict, description="Operator-approved capability grants for tools")
 
     # Agent behaviour
     agent_cycle_interval: int = Field(default=30, description="Seconds between agent cycles")
@@ -93,8 +186,43 @@ class Settings(BaseSettings):
     auto_repay_loans: bool = Field(default=False, description="Enable automatic loan repayment from treasury")
 
     # Job leasing
-    job_lease_ttl: int = Field(default=300, description="Seconds for a claimed job lease TTL")
-    job_heartbeat_interval: int = Field(default=60, description="Seconds between job lease heartbeats")
+    job_lease_ttl: int = Field(
+        default=300,
+        ge=1,
+        le=600,
+        description="Seconds for a claimed job lease TTL",
+    )
+    job_heartbeat_interval: int = Field(
+        default=60,
+        ge=1,
+        le=300,
+        description="Seconds between job lease heartbeats",
+    )
+
+    # Durable provider-job inbox/outbox (opt-in)
+    talos_durable_job_effects_enabled: bool = Field(
+        default=False,
+        description="Persist provider jobs and completion effects before external delivery",
+    )
+    talos_job_effect_dispatch_interval: int = Field(default=2, ge=1, le=300)
+    talos_job_effect_lease_seconds: int = Field(default=30, ge=5, le=900)
+    talos_job_effect_max_attempts: int = Field(default=8, ge=1, le=100)
+    talos_job_effect_retry_base_seconds: int = Field(default=2, ge=1, le=300)
+    talos_job_effect_batch_size: int = Field(default=20, ge=1, le=200)
+    talos_job_effect_max_inbox_records: int = Field(
+        default=100_000, ge=100, le=1_000_000
+    )
+    talos_job_effect_max_outbox_records: int = Field(
+        default=100_000, ge=100, le=1_000_000
+    )
+    talos_job_effect_max_payload_bytes: int = Field(
+        default=65_536, ge=1_024, le=1_048_576
+    )
+    talos_job_effect_max_result_bytes: int = Field(
+        default=262_144, ge=1_024, le=2_097_152
+    )
+    talos_job_effect_dispatch_timeout_seconds: int = Field(default=20, ge=1, le=120)
+    talos_job_effect_db_timeout_ms: int = Field(default=5_000, ge=1, le=30_000)
 
     # Graceful shutdown (#182)
     shutdown_deadline: float = Field(
@@ -109,13 +237,43 @@ class Settings(BaseSettings):
     dividend_distribution_interval: int = Field(default=3600, description="Seconds between dividend distribution checks")
     dividend_usdc_threshold: Decimal = Field(default=Decimal("100"), description="USDC threshold to trigger dividend distribution")
 
+    # Execution replay (Issue #235) — disabled by default
+    replay_enabled: bool = Field(default=False, description="Enable execution replay recording for incident analysis")
+    replay_redact_payloads: bool = Field(default=True, description="Redact sensitive values in replay event payloads")
+
     def __init__(self, **kwargs):
         overrides = _json_config_source()
         overrides.update(kwargs)
         super().__init__(**overrides)
+
+    def bind_secret_store(self, store: object) -> None:
+        """Attach the runtime resolver after the local database is available."""
+        self._secret_store = store
+
+    def secret_value(self, name: str, legacy_value: str | None = None) -> str:
+        """Resolve a credential at point of use, preserving legacy defaults."""
+        legacy = legacy_value
+        if legacy is None:
+            value = getattr(self, name, "")
+            legacy = value if isinstance(value, str) else ""
+        if not self.secret_rotation_enabled or self._secret_store is None:
+            return legacy or ""
+        resolution = self._secret_store.resolve(name, legacy or "")
+        return resolution.value
 
 
 def ensure_app_dir() -> Path:
     APP_DIR.mkdir(parents=True, exist_ok=True)
     (APP_DIR / "logs").mkdir(exist_ok=True)
     return APP_DIR
+
+
+def resolve_setting_secret(settings: object, name: str, legacy_value: str | None = None) -> str:
+    """Resolve secrets on real Settings while remaining friendly to test doubles."""
+    resolver = getattr(type(settings), "secret_value", None)
+    if callable(resolver):
+        return resolver(settings, name, legacy_value)
+    if legacy_value is not None:
+        return legacy_value
+    value = getattr(settings, name, "")
+    return value if isinstance(value, str) else ""

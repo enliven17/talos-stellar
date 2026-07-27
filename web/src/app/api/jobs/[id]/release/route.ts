@@ -4,6 +4,7 @@ import { tlsTalos, tlsCommerceJobs } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { logger } from "@/lib/logger";
 import { parseBody, releaseJobSchema } from "@/lib/schemas";
+import { withTraceContext } from "@/lib/tracing";
 
 async function resolveCallerTalos(request: NextRequest): Promise<string | null> {
   const authHeader = request.headers.get("authorization");
@@ -18,7 +19,7 @@ async function resolveCallerTalos(request: NextRequest): Promise<string | null> 
   return talos?.id ?? null;
 }
 
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -77,3 +78,5 @@ export async function POST(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withTraceContext(handlePost);
