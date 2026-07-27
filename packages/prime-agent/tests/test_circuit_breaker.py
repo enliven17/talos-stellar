@@ -14,26 +14,24 @@ CircuitBreakerOpen: exception structure.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
 import httpx
 import pytest
 import respx
-
 from talos_agent.circuit_breaker import (
     CircuitBreakerConfig,
     CircuitBreakerError,
-    CircuitBreakerMetrics,
     CircuitBreakerOpen,
     CircuitBreakerRegistry,
     CircuitState,
     ProviderCircuitBreaker,
-    cb_registry,
     _resolve_provider_from_url,
+    cb_registry,
 )
-from talos_agent.http import request_with_retry, call_with_retry
-
+from talos_agent.http import RetryableHTTPError, call_with_retry, request_with_retry
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Helpers (async versions to work inside pytest-asyncio)
@@ -226,7 +224,7 @@ class TestProviderCircuitBreakerHalfOpenTransition:
         await breaker.record_failure()
         assert breaker.state == CircuitState.OPEN
 
-        time.sleep(0.06)
+        await asyncio.sleep(0.06)
         allowed = await breaker.allow_request()
         assert allowed is True
         assert breaker.state == CircuitState.HALF_OPEN
@@ -330,7 +328,7 @@ class TestProviderCircuitBreakerWindowPruning:
         await breaker.record_failure()
         assert breaker.failures_in_window() == 1
 
-        time.sleep(0.06)
+        await asyncio.sleep(0.06)
         assert breaker.failures_in_window() == 0
 
     async def test_consecutive_successes_reset_on_reopen(self):
@@ -506,7 +504,7 @@ class TestRequestWithRetryWithCircuitBreaker:
         )
 
         async with httpx.AsyncClient() as client:
-            with pytest.raises(Exception):
+            with pytest.raises(RetryableHTTPError):
                 await request_with_retry(
                     lambda: client.get("https://api.example.com/always-503"),
                     provider=provider_name,
@@ -640,7 +638,7 @@ class TestEdgeCases:
         await breaker.record_failure()
         await breaker.record_failure()
         assert breaker.failures_in_window() == 2
-        time.sleep(0.03)
+        await asyncio.sleep(0.03)
         assert breaker.failures_in_window() == 0
 
     async def test_full_lifecycle(self):
@@ -656,7 +654,7 @@ class TestEdgeCases:
         await breaker.record_failure()
         assert breaker.state == CircuitState.OPEN
 
-        time.sleep(0.06)
+        await asyncio.sleep(0.06)
         assert await breaker.allow_request() is True
         assert breaker.state == CircuitState.HALF_OPEN
 

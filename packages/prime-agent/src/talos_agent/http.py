@@ -21,13 +21,14 @@ breaker that stops cascading failures when a provider is degraded.
 
 from __future__ import annotations
 
-import logging
-from typing import Awaitable, Callable, Optional, TypeVar
-
-import httpx
 import json
+import logging
 import re
 import unicodedata
+from collections.abc import Awaitable, Callable
+from typing import TypeVar
+
+import httpx
 from tenacity import (
     AsyncRetrying,
     RetryCallState,

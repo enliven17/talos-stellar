@@ -44,7 +44,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import ClassVar
 
@@ -110,10 +110,10 @@ class CircuitBreakerConfig:
 
     # ── Pre-built defaults for known providers ────────────────────────────
 
-    PROVIDER_DEFAULTS: ClassVar[dict[str, "CircuitBreakerConfig"]] = {}
+    PROVIDER_DEFAULTS: ClassVar[dict[str, CircuitBreakerConfig]] = {}
 
     @classmethod
-    def for_provider(cls, provider: str) -> "CircuitBreakerConfig":
+    def for_provider(cls, provider: str) -> CircuitBreakerConfig:
         """Return the configuration for *provider*, or the default."""
         return cls.PROVIDER_DEFAULTS.get(provider, cls())
 
@@ -393,10 +393,7 @@ class ProviderCircuitBreaker:
             # When transitioning to OPEN from HALF_OPEN, reset consecutive
             # successes so the next half-open cycle starts fresh.
             self._consecutive_successes = 0
-        elif new_state == CircuitState.HALF_OPEN:
-            self._half_open_probes_used = 0
-            self._consecutive_successes = 0
-        elif new_state == CircuitState.CLOSED:
+        elif new_state == CircuitState.HALF_OPEN or new_state == CircuitState.CLOSED:
             self._half_open_probes_used = 0
             self._consecutive_successes = 0
 
@@ -469,6 +466,6 @@ __all__ = [
     "CircuitBreakerRegistry",
     "CircuitState",
     "ProviderCircuitBreaker",
-    "cb_registry",
     "_resolve_provider_from_url",
+    "cb_registry",
 ]
