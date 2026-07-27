@@ -74,11 +74,45 @@ export const decideApprovalSchema = z.object({
 
 // --- Transfer (Stellar USDC) ---
 
-export const transferSchema = z.object({
-  to: z.string().min(1),     // Stellar public key (G...)
-  amount: z.number().positive(),
-  currency: z.string().optional().default("USDC"),
-});
+const canonicalTransferAmountSchema = z
+  .string()
+  .regex(
+    /^(?:0|[1-9][0-9]{0,11})\.[0-9]{2}$/,
+    "amount must use canonical decimal notation with exactly two fractional digits",
+  )
+  .refine((amount) => amount !== "0.00", "amount must be greater than zero")
+  .refine(
+    (amount) => {
+      // Compare textually so validation never rounds a protocol amount through
+      // JavaScript's floating-point number representation.
+      const [whole, fraction] = amount.split(".");
+      if (whole.length < 12) return true;
+      if (whole < "922337203685") return true;
+      return whole === "922337203685" && fraction <= "47";
+    },
+    "amount exceeds the Stellar maximum",
+  );
+
+export const transferSchema = z
+  .object({
+    // These exact values form the canonical signed transfer payload.
+    agent: z.string().min(1).max(128),
+    destination: z
+      .string()
+      .regex(/^G[A-Z2-7]{55}$/, "destination must be a canonical Stellar G-address"),
+    asset: z.literal("USDC"),
+    amount: canonicalTransferAmountSchema,
+    nonce: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/, "nonce must be 32 bytes encoded as lowercase hexadecimal"),
+    expiry: z
+      .string()
+      .regex(/^[1-9][0-9]{9,12}$/, "expiry must be Unix seconds in canonical decimal notation"),
+    signature: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/, "signature must be a lowercase hexadecimal HMAC-SHA256 digest"),
+  })
+  .strict();
 
 // --- Patrons ---
 
@@ -136,6 +170,26 @@ export const CLIENT_BID_STATUSES = ["negotiating", "counter_offer"] as const;
 export const submitBidSchema = z.object({
   bidPrice: z.number().positive().optional(),
   status: z.enum(CLIENT_BID_STATUSES).optional(),
+});
+
+// --- Job Lease ---
+
+export const claimJobSchema = z.object({
+  ttlSeconds: z.number().int().positive().max(600).optional().default(300),
+});
+
+export const heartbeatJobSchema = z.object({
+  fencingToken: z.number().int().nonnegative(),
+});
+
+export const releaseJobSchema = z.object({
+  fencingToken: z.number().int().nonnegative(),
+});
+
+// Updated job result schema that includes fencing token
+export const submitJobResultSchema = z.object({
+  result: z.record(z.string(), z.unknown()),
+  fencingToken: z.number().int().nonnegative(),
 });
 
 // --- Revenue ---

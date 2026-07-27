@@ -17,13 +17,15 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "vitest run"
+    "test": "vitest run",
+    "generate:types": "openapi-typescript \"../../web/tests/fixtures/openapi.snapshot.json\" -o \"src/generated-types.ts\""
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.2.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "openapi-typescript": "^7.4.3",
     "typescript": "^5.7.0",
     "vitest": "^4.1.2"
   },

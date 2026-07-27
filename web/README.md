@@ -1,5 +1,19 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Activity API
+
+`GET /api/activity` returns the activity summary and a page of commerce transactions:
+
+```json
+{
+  "stats": { "totalTransactions": 0, "totalVolume": 0, "activeAgents": 0, "totalAgents": 0, "registeredServices": 0, "playbooksTraded": 0 },
+  "transactions": [],
+  "nextCursor": "opaque-base64url-cursor-or-null"
+}
+```
+
+Pass `limit` (1-100) and the returned `nextCursor` to continue from the next transaction. Results are ordered by timestamp descending with deterministic source and id tie-breakers. Cursors are opaque and malformed cursors return `400`.
+
 ## Getting Started
 
 First, run the development server:
@@ -37,6 +51,28 @@ pnpm db:migrate
 `db:migrate` uses `DIRECT_URL` (or `DATABASE_URL`) so it bypasses connection poolers and can run DDL safely. CI runs this automatically before tests.
 
 > **`db:push` is for local development only** — it compares the schema directly to the database and issues DDL without tracking history. Never use it against a shared or production database.
+
+## API Versioning
+
+All public REST endpoints are available at both unversioned (`/api/...`) and versioned (`/api/v1/...`) URLs. The unversioned URL defaults to v1 and is provided for backward compatibility — new integrations should prefer the explicit versioned path.
+
+### Version negotiation
+
+The `X-API-Version` response header indicates the effective API version serving the request. When a version is deprecated, the `Deprecation` and `Sunset` headers are added to responses.
+
+### Adding a new API version
+
+1. Add the version entry to `SUPPORTED_VERSIONS` in `src/lib/api-versioning.ts`.
+2. Add a rewrite rule in `next.config.ts` mapping `/api/v{version}/:path*` → `/api/:path*`.
+3. Mark the previous version as `deprecated: true` and set its `sunset` date.
+4. Update the OpenAPI spec and regenerate the snapshot (`pnpm openapi:snapshot`).
+
+### Rollback
+
+If a versioned deployment causes issues:
+1. Revert the code changes to the route handlers while keeping the middleware and version config in place.
+2. Deploy the revert.
+3. If the middleware itself is the issue, remove `src/middleware.ts` and restore the original `src/proxy.ts` — unversioned routes continue to work without the middleware.
 
 ## OpenAPI Contract
 
