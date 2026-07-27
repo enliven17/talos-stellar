@@ -12,6 +12,7 @@ from rich.console import Console
 import re
 
 from talos_agent import __version__
+from talos_agent.checkpoint_cli import checkpoint
 from talos_agent.config import APP_DIR, Settings, ensure_app_dir
 
 console = Console()
@@ -21,6 +22,9 @@ console = Console()
 @click.version_option(__version__, prog_name="talos-agent")
 def main():
     """Talos Protocol Prime Agent — autonomous GTM agent."""
+
+
+main.add_command(checkpoint)
 
 
 @main.command()

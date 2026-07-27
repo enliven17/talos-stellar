@@ -26,7 +26,7 @@ rustup target add wasm32-unknown-unknown
 
 - `web/` - Next.js application, API routes, and frontend
 - `packages/prime-agent/` - Python agent runtime
-- `contracts/` - Soroban smart contracts and deploy scripts
+- `contracts/` - Soroban smart contracts and deploy scripts (see `contracts/EVENTS.md` for the event schema)
 - `packages/openclaw/` - skill definitions and agent helper code
 
 ## Setup
@@ -217,8 +217,104 @@ pnpm --filter web exec vitest run tests/db-retry.unit.test.ts tests/db-retry.con
 ### Rollback Guidance
 
 If operational issues or database performance degradation occur:
+
 1. Set `DB_TRANSACTION_RETRY_ENABLED=false` in `web/.env.local` or application environment variables.
 2. Restart the web server. This immediately falls back to single-attempt database transactions without requiring application redeployments or code rollbacks.
+
+## SDK Event Stream (`TalosEventStream`)
+
+The `packages/sdk` package exports a browser and Node-compatible SSE client for the Talos platform event stream.
+
+### Quick start
+
+```ts
+import { TalosEventStream, InMemorySeenStore } from "@talos-protocol/sdk";
+
+const stream = new TalosEventStream("https://talos-stellar.vercel.app", {
+  authHeader: "Bearer <api-key>",
+  seenStore: new InMemorySeenStore(), // optional, suppresses duplicates on reconnect
+});
+
+stream.on("event", (evt) => console.log(evt.type, evt.data));
+stream.on("error", (err, attempt) => console.error("attempt", attempt, err));
+stream.on("close", () => console.log("stream closed"));
+
+stream.connect();
+
+// To stop:
+stream.close();
+```
+
+### Configuration reference
+
+| Option                 | Default       | Notes                                                     |
+| ---------------------- | ------------- | --------------------------------------------------------- |
+| `path`                 | `/api/events` | Stream endpoint path                                      |
+| `authHeader`           | —             | Sent as `Authorization` header. Never logged.             |
+| `maxReconnectAttempts` | `10`          | Total attempts before permanent close                     |
+| `baseReconnectDelayMs` | `1000`        | Base delay; doubles per attempt                           |
+| `maxReconnectDelayMs`  | `30000`       | Backoff ceiling                                           |
+| `jitter`               | `true`        | Full-jitter on reconnect delay                            |
+| `maxHeartbeatMisses`   | `3`           | Consecutive missed heartbeat ticks before stall reconnect |
+| `heartbeatIntervalMs`  | `30000`       | Heartbeat watchdog interval                               |
+| `seenStore`            | —             | `SeenStore` implementation for duplicate suppression      |
+| `signal`               | —             | External `AbortSignal` to close the stream                |
+
+### Operational signals
+
+The optional `logger` receives structured, privacy-safe events (no payloads, no credentials):
+
+| Event                      | Level | Meaning                                         |
+| -------------------------- | ----- | ----------------------------------------------- |
+| `sse:connecting`           | info  | Initial connect or reconnect                    |
+| `sse:reconnect_scheduled`  | info  | Reconnect delay queued with `delayMs`           |
+| `sse:duplicate_suppressed` | info  | An event ID was already in `seenStore`          |
+| `sse:error`                | warn  | Connection error, `attempt` included            |
+| `sse:heartbeat_miss`       | warn  | No server activity during watchdog interval     |
+| `sse:stall_detected`       | warn  | `maxHeartbeatMisses` reached; forcing reconnect |
+| `sse:budget_exhausted`     | warn  | All reconnect attempts used                     |
+| `sse:handler_error`        | error | An `on("event")` handler threw                  |
+
+Pass any `{ info, warn, error }` compatible logger (e.g. `pino`, `console`):
+
+```ts
+import pino from "pino";
+const stream = new TalosEventStream(url, { logger: pino(), authHeader });
+```
+
+### Duplicate suppression
+
+`InMemorySeenStore` (capacity 10 000, LRU eviction) covers process-lifetime dedup.
+For cross-restart guarantees supply a persistent implementation:
+
+```ts
+class RedisSeenStore implements SeenStore {
+  async has(id: string) {
+    return Boolean(await redis.exists(`seen:${id}`));
+  }
+  async add(id: string) {
+    await redis.set(`seen:${id}`, 1, "EX", 86400);
+  }
+}
+```
+
+### Rollback
+
+`TalosEventStream` is additive — no existing API surface changed. To disable the feature: simply don't call `connect()`, or `close()` the stream immediately.
+
+### Compatibility notes
+
+- Requires `fetch` and `ReadableStream` (native in browsers and Node ≥ 18).
+- In Node 18 you may need `--experimental-fetch` if not enabled by default; Node 20+ needs nothing.
+- The `fetch` option in `TalosEventStreamOptions` lets you inject a polyfill or mock for older runtimes and tests.
+
+### Local verification
+
+```bash
+cd packages/sdk
+npm test        # runs vitest — all 93 tests should pass
+npm run build   # tsc compile check
+```
 
 ## Pull Request Workflow
 

@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsCommerceServices } from "@/db/schema";
 import { and, desc, eq, ilike, lt, ne, or } from "drizzle-orm";
+import { parseLimit } from "@/lib/parse-limit";
 
 // GET /api/services — Discover available services across all TALOS agents
 export async function GET(request: NextRequest) {
@@ -10,9 +11,11 @@ export async function GET(request: NextRequest) {
     const category = searchParams.get("category");
     const selfId = searchParams.get("self");
     const cursor = searchParams.get("cursor");
-    const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 1), 100);
+    const parsedLimit = parseLimit(searchParams.get("limit"), 50, 100);
+    if (!parsedLimit.ok) return parsedLimit.response;
+    const limit = parsedLimit.limit;
 
-    const conditions = [];
+    const conditions = [eq(tlsTalos.status, "Active")];
 
     // Exclude the requesting TALOS's own services
     if (selfId) {

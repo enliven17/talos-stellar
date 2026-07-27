@@ -109,12 +109,18 @@ export async function POST(
 
     const [service, talos] = await Promise.all([
       db.select().from(tlsCommerceServices).where(eq(tlsCommerceServices.talosId, id)).limit(1).then(r => r[0] ?? null),
-      db.select({ id: tlsTalos.id, agentOnline: tlsTalos.agentOnline, name: tlsTalos.name, agentWalletAddress: tlsTalos.agentWalletAddress })
+      db.select({ id: tlsTalos.id, agentOnline: tlsTalos.agentOnline, status: tlsTalos.status, name: tlsTalos.name, agentWalletAddress: tlsTalos.agentWalletAddress })
         .from(tlsTalos).where(eq(tlsTalos.id, id)).limit(1).then(r => r[0] ?? null),
     ]);
 
     if (!talos) return Response.json({ error: "TALOS not found" }, { status: 404 });
     if (!service) return Response.json({ error: "This agent offers no services" }, { status: 404 });
+    if (talos.status === "Paused") {
+      return Response.json({ error: "This agent is paused and cannot accept new work" }, { status: 409 });
+    }
+    if (talos.status === "Retired") {
+      return Response.json({ error: "This agent is retired and cannot accept new work" }, { status: 409 });
+    }
 
     // ── Idempotency check ─────────────────────────────────────────────
     // If the caller supplied a key, look it up before doing any payment work.

@@ -6,6 +6,14 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: path.resolve(__dirname, ".."),
   },
+  async rewrites() {
+    return [
+      {
+        source: "/api/v1/:path*",
+        destination: "/api/:path*",
+      },
+    ];
+  },
 };
 
 export default withSentryConfig(nextConfig, {

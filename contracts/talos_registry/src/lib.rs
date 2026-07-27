@@ -1930,6 +1930,39 @@ mod tests {
     }
 
     #[test]
+    fn set_timelock_config_emits_tl_cfg_event() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_timelock_config",
+                    args: (3600u64, 86400u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_timelock_config(&3600, &86400);
+
+        let events = env.events().all();
+        let (addr, topics, data) = events.get(events.len() - 1).unwrap();
+
+        assert_eq!(addr, contract_id);
+        assert_eq!(topics.len(), 1);
+        assert_topic_symbol(&env, &topics, 0, symbol_short!("tl_cfg"));
+
+        let (old_delay, new_delay, grace): (u64, u64, u64) =
+            TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(old_delay, 0);
+        assert_eq!(new_delay, 3600);
+        assert_eq!(grace, 86400);
+    }
+
+    #[test]
     fn timelock_schedule_execute_happy_path() {
         let (env, contract_id) = setup();
         let client = TalosRegistryClient::new(&env, &contract_id);

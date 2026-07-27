@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { tlsTalos, tlsPlaybooks, tlsPlaybookPurchases } from "@/db/schema";
 import { and, arrayContains, desc, eq, ilike, lt, or, sql } from "drizzle-orm";
 import { createPlaybookSchema, parseBody } from "@/lib/schemas";
+import { parseLimit } from "@/lib/parse-limit";
 
 
 // GET /api/playbooks — List playbooks (with optional filters and cursor pagination)
@@ -13,7 +14,9 @@ export async function GET(request: NextRequest) {
     const channel = searchParams.get("channel");
     const search = searchParams.get("search");
     const cursor = searchParams.get("cursor");
-    const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 1), 100);
+    const parsedLimit = parseLimit(searchParams.get("limit"), 50, 100);
+    if (!parsedLimit.ok) return parsedLimit.response;
+    const limit = parsedLimit.limit;
 
     const conditions = [eq(tlsPlaybooks.status, "active")];
 

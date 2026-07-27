@@ -5,6 +5,12 @@ import {
   rateLimitResponse,
   RateLimitResult,
 } from "@/lib/rate-limit";
+import {
+  addVersionHeaders,
+  isVersionedPath,
+  negotiateApiVersion,
+  stripVersionPrefix,
+} from "@/lib/api-versioning";
 
 function getClientIp(request: NextRequest): string {
   return (
@@ -16,7 +22,7 @@ function getClientIp(request: NextRequest): string {
 
 function getApiKey(request: NextRequest): string | null {
   const authHeader = request.headers.get("authorization");
-  if (authHeader && authHeader.startsWith("Bearer ")) {
+  if (authHeader?.startsWith("Bearer ")) {
     return authHeader.substring(7).trim();
   }
   return null;
@@ -25,7 +31,6 @@ function getApiKey(request: NextRequest): string | null {
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Only rate-limit API routes
   if (!pathname.startsWith("/api/")) {
     return NextResponse.next();
   }
@@ -33,36 +38,38 @@ export function proxy(request: NextRequest) {
   const ip = getClientIp(request);
   const apiKey = getApiKey(request);
   const method = request.method.toUpperCase();
-
-  // Strict tier: auth-sensitive endpoints
   const isAuthRoute =
     pathname.endsWith("/me") ||
     pathname.includes("check-name") ||
     pathname.includes("regenerate-key");
 
   let result: RateLimitResult;
-
   if (isAuthRoute) {
     result = rateLimit(`auth:${ip}`, { limit: 20, windowMs: 60_000 });
   } else if (method === "GET") {
     result = rateLimit(`read:${ip}`, { limit: 100, windowMs: 60_000 });
   } else if (method === "POST" && apiKey) {
-    result = rateLimit(`write_key:${apiKey}`, {
-      limit: 30,
-      windowMs: 60_000,
-    });
+    result = rateLimit(`write_key:${apiKey}`, { limit: 30, windowMs: 60_000 });
   } else {
-    result = rateLimit(`write_ip:${ip}`, {
-      limit: 30,
-      windowMs: 60_000,
-    });
+    result = rateLimit(`write_ip:${ip}`, { limit: 30, windowMs: 60_000 });
   }
 
   if (!result.ok) {
     return rateLimitResponse(result);
   }
 
-  return applyRateLimitHeaders(NextResponse.next(), result);
+  const versionInfo = negotiateApiVersion(pathname);
+  if (isVersionedPath(pathname)) {
+    const url = request.nextUrl.clone();
+    url.pathname = stripVersionPrefix(pathname);
+    const response = NextResponse.rewrite(url);
+    addVersionHeaders(response.headers, versionInfo);
+    return applyRateLimitHeaders(response, result);
+  }
+
+  const response = NextResponse.next();
+  addVersionHeaders(response.headers, versionInfo);
+  return applyRateLimitHeaders(response, result);
 }
 
 export const config = {

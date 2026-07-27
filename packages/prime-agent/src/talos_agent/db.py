@@ -211,6 +211,82 @@ CREATE TABLE IF NOT EXISTS retry_state (
 );
         """,
     ),
+    (
+        7,
+        # checkpoint_keys: stores ENC::-wrapped HMAC and AES-GCM key material.
+        # key_hmac / key_enc are NEVER plaintext — always 'ENC::...' blobs.
+        """
+CREATE TABLE IF NOT EXISTS checkpoint_keys (
+    key_id       TEXT PRIMARY KEY,
+    agent_id     TEXT NOT NULL,
+    namespace    TEXT NOT NULL DEFAULT '',
+    key_hmac     TEXT NOT NULL,
+    key_enc      TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'active'
+                     CHECK(status IN ('active', 'retired')),
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    retired_at   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoint_keys_agent_status
+    ON checkpoint_keys(agent_id, status);
+        """,
+    ),
+    (
+        8,
+        # checkpoint_envelopes: persists authenticated envelope payloads.
+        # nonce has a UNIQUE constraint to prevent replay attacks.
+        """
+CREATE TABLE IF NOT EXISTS checkpoint_envelopes (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_id       TEXT NOT NULL REFERENCES checkpoint_keys(key_id),
+    agent_id     TEXT NOT NULL,
+    namespace    TEXT NOT NULL DEFAULT '',
+    schema_ver   INTEGER NOT NULL DEFAULT 1,
+    seq          INTEGER NOT NULL,
+    ts           TEXT NOT NULL,
+    nonce        TEXT NOT NULL UNIQUE,
+    payload      TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoint_envelopes_agent_ns_seq
+    ON checkpoint_envelopes(agent_id, namespace, seq);
+        """,
+    ),
+    (
+        9,
+        # claimed_jobs: durable fencing-token store so job leases survive restarts.
+        # A row exists as long as the agent holds the lease; it is deleted on
+        # fulfill / abandon.  reconcile_after_restore() re-validates rows against
+        # the authoritative API and prunes any whose lease is no longer ours.
+        #
+        # completion_markers: idempotency log.  Before completing any job the
+        # agent writes a marker; on restore, duplicate markers are detected and
+        # the work is skipped.  Rows are retained for 7 days (pruned at startup).
+        """
+CREATE TABLE IF NOT EXISTS claimed_jobs (
+    job_id          TEXT PRIMARY KEY,
+    fencing_token   INTEGER NOT NULL,
+    claimed_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    lease_expires_at TEXT,
+    ttl_seconds     INTEGER NOT NULL DEFAULT 300
+);
+
+CREATE TABLE IF NOT EXISTS completion_markers (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id          TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    completed_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_completion_markers_job_id
+    ON completion_markers(job_id);
+CREATE INDEX IF NOT EXISTS idx_completion_markers_expires_at
+    ON completion_markers(expires_at);
+        """,
+    ),
 ]
 
 
@@ -805,6 +881,162 @@ class LocalDB:
             (task_name,),
         )
         self._conn.commit()
+
+    # ── Claimed Jobs (fencing-token persistence) ───────────
+
+    def upsert_claimed_job(
+        self,
+        job_id: str,
+        fencing_token: int,
+        ttl_seconds: int = 300,
+        lease_expires_at: datetime | None = None,
+    ) -> None:
+        """Persist a claimed job's fencing token so it survives restarts.
+
+        ``lease_expires_at`` is the server-reported wall-clock time at which
+        the lease expires.  When ``None`` it is approximated from
+        ``claimed_at + ttl_seconds``.
+        """
+        if not job_id or not isinstance(job_id, str):
+            raise ValueError("job_id must be a non-empty string")
+        if not isinstance(fencing_token, int) or fencing_token < 0:
+            raise ValueError("fencing_token must be a non-negative integer")
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+
+        expires_iso = (
+            lease_expires_at.isoformat()
+            if lease_expires_at is not None
+            else (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
+        )
+        self._conn.execute(
+            """INSERT INTO claimed_jobs (job_id, fencing_token, lease_expires_at, ttl_seconds)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(job_id) DO UPDATE SET
+                   fencing_token   = excluded.fencing_token,
+                   lease_expires_at = excluded.lease_expires_at,
+                   ttl_seconds     = excluded.ttl_seconds""",
+            (job_id, fencing_token, expires_iso, ttl_seconds),
+        )
+        self._conn.commit()
+
+    def get_claimed_job(self, job_id: str) -> dict | None:
+        """Return the persisted claim for *job_id*, or ``None`` if not found."""
+        row = self._conn.execute(
+            "SELECT job_id, fencing_token, claimed_at, lease_expires_at, ttl_seconds "
+            "FROM claimed_jobs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "job_id": row["job_id"],
+            "fencing_token": int(row["fencing_token"]),
+            "claimed_at": datetime.fromisoformat(row["claimed_at"]),
+            "lease_expires_at": (
+                datetime.fromisoformat(row["lease_expires_at"])
+                if row["lease_expires_at"]
+                else None
+            ),
+            "ttl_seconds": int(row["ttl_seconds"]),
+        }
+
+    def get_all_claimed_jobs(self) -> list[dict]:
+        """Return all persisted claimed jobs (used during restore reconciliation)."""
+        rows = self._conn.execute(
+            "SELECT job_id, fencing_token, claimed_at, lease_expires_at, ttl_seconds "
+            "FROM claimed_jobs"
+        ).fetchall()
+        result = []
+        for row in rows:
+            result.append(
+                {
+                    "job_id": row["job_id"],
+                    "fencing_token": int(row["fencing_token"]),
+                    "claimed_at": datetime.fromisoformat(row["claimed_at"]),
+                    "lease_expires_at": (
+                        datetime.fromisoformat(row["lease_expires_at"])
+                        if row["lease_expires_at"]
+                        else None
+                    ),
+                    "ttl_seconds": int(row["ttl_seconds"]),
+                }
+            )
+        return result
+
+    def delete_claimed_job(self, job_id: str) -> None:
+        """Remove a claimed-job record (after fulfillment or abandon)."""
+        self._conn.execute("DELETE FROM claimed_jobs WHERE job_id = ?", (job_id,))
+        self._conn.commit()
+
+    # ── Completion Markers (idempotency log) ───────────────
+
+    def add_completion_marker(
+        self,
+        job_id: str,
+        idempotency_key: str,
+        retain_days: int = 7,
+    ) -> None:
+        """Write a completion marker for *job_id* / *idempotency_key*.
+
+        Raises ``sqlite3.IntegrityError`` if the ``idempotency_key`` is already
+        present — the caller should catch this and skip re-doing the work.
+
+        Parameters
+        ----------
+        job_id:
+            The job being completed.
+        idempotency_key:
+            A unique key for this completion attempt, e.g.
+            ``f"{job_id}:{result_hash}"``.  Must be unique across all jobs.
+        retain_days:
+            How many days the marker is kept before expiry.  Expired markers
+            are pruned by :meth:`prune_expired_completion_markers`.
+        """
+        if not job_id or not isinstance(job_id, str):
+            raise ValueError("job_id must be a non-empty string")
+        if not idempotency_key or not isinstance(idempotency_key, str):
+            raise ValueError("idempotency_key must be a non-empty string")
+        if retain_days <= 0:
+            raise ValueError("retain_days must be positive")
+
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(days=retain_days)
+        ).isoformat()
+        self._conn.execute(
+            "INSERT INTO completion_markers (job_id, idempotency_key, expires_at) "
+            "VALUES (?, ?, ?)",
+            (job_id, idempotency_key, expires_at),
+        )
+        self._conn.commit()
+
+    def has_completion_marker(self, idempotency_key: str) -> bool:
+        """Return ``True`` if a non-expired marker with this key exists."""
+        row = self._conn.execute(
+            "SELECT 1 FROM completion_markers "
+            "WHERE idempotency_key = ? AND expires_at > datetime('now')",
+            (idempotency_key,),
+        ).fetchone()
+        return row is not None
+
+    def get_completion_markers_for_job(self, job_id: str) -> list[dict]:
+        """Return all non-expired completion markers for a job (used in duplicate detection)."""
+        rows = self._conn.execute(
+            "SELECT id, job_id, idempotency_key, completed_at, expires_at "
+            "FROM completion_markers "
+            "WHERE job_id = ? AND expires_at > datetime('now') "
+            "ORDER BY completed_at DESC",
+            (job_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def prune_expired_completion_markers(self) -> int:
+        """Delete expired completion markers. Returns the number of rows removed."""
+        cursor = self._conn.execute(
+            "DELETE FROM completion_markers WHERE expires_at <= datetime('now')"
+        )
+        self._conn.commit()
+        return cursor.rowcount
 
     # ── Cleanup ────────────────────────────────────────────
 

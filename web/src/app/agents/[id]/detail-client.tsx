@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useWallet } from "@/components/wallet-gate";
 import { AgentAvatar } from "@/components/agent-avatar";
+import { AgentLifecyclePanel } from "@/components/agent-lifecycle-panel";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER as STELLAR_USDC_ISSUER } from "@/lib/stellar-config";
 
 
@@ -1105,6 +1106,9 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       {/* ─── Governance Tab ─────────────────────────────── */}
       {tab === "Governance" && (
         <div className="space-y-6">
+          {/* Lifecycle state, durable job progress, and transition history */}
+          <AgentLifecyclePanel talosId={talos.id} />
+
           {/* Propose + Approve section */}
           <div className="flex items-center justify-between">
             <div className="text-xs text-muted">{approvals.length} proposals total</div>

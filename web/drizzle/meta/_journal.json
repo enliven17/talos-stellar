@@ -99,6 +99,13 @@
                         "when":  1753556400000,
                         "tag":  "0013_add_dividend_idempotency",
                         "breakpoints":  true
+                    },
+                    {
+                        "idx":  14,
+                        "version":  "7",
+                        "when":  1753642800000,
+                        "tag":  "0014_add_agent_lifecycle",
+                        "breakpoints":  true
                     }
                 ]
 }
