@@ -4,6 +4,7 @@ import {
   text,
   integer,
   boolean,
+  bigint,
   numeric,
   bigint,
   timestamp,
@@ -512,6 +513,33 @@ export const tlsStellarTxRecords = pgTable(
 
 // ─── API Key Audit Log ────────────────────────────────────────────
 
+export const tlsBudgetUsageEvents = pgTable(
+  "tls_budget_usage_events",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    budgetId: text("budgetId").notNull().references(() => tlsBudgets.id, { onDelete: "cascade" }),
+    // ON DELETE SET NULL: keeping historical events even if a reservation
+    // row is removed preserves the audit trail.
+    reservationId: text("reservationId"),
+    // reserve | commit | settle | refund | expire | release | reject
+    kind: text("kind").notNull(),
+    // Signed delta in minor units: positive for in-flows, negative for
+    // releases / refunds. Always non-zero.
+    amount: bigint("amount", { mode: "bigint" }).notNull(),
+    reason: text("reason"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tls_budget_usage_events_budgetId_createdAt_idx").on(t.budgetId, t.createdAt),
+    index("tls_budget_usage_events_reservationId_idx")
+      .on(t.reservationId)
+      .where(sql`"reservationId" IS NOT NULL`),
+  ],
+);
+
+// ─── API Key Audit Log ────────────────────────────────────────────
 export const tlsApiAuditLogs = pgTable(
   "tls_api_audit_logs",
   {
