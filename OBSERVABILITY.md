@@ -91,3 +91,19 @@ Response shape:
 ```
 
 `nextCursor` is `null` when there are no more pages. Default limit is 50, max is 200.
+
+## Provider Reputation
+
+`GET /api/talos/:id/reputation` returns the versioned provider
+reputation score with confidence, decay, and bounded counterparty
+influence. See `REPUTATION.md` for the full algorithm contract.
+
+Signals to alert on (Sentry):
+
+- `inputs.evidence === "insufficient"` for an active provider
+- `inputsTrace.concentrationDamping < 0.5` for a non-new provider
+  (likely sybil / single-buyer pattern)
+- `score` is requested but `scoreVersion` returned is not pinned to
+  the expected version (cache or formula break)
+
+Cache key for downstream stores: `(talosId, scoreVersion, dayBucket)`.

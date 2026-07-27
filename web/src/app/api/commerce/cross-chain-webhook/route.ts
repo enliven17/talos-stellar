@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { NextRequest } from "next/server";
 import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
+import { withTransactionRetry } from "@/db/db-retry";
 import { tlsCommerceJobs, tlsCommerceServices, tlsRevenues, tlsTalos } from "@/db/schema";
 import { fulfillInstant } from "@/lib/fulfillment";
 import { crossChainWebhookSchema } from "@/lib/schemas";
@@ -264,39 +265,42 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const [job] = await db.transaction(async (tx) => {
-      const values = {
-        talosId,
-        requesterTalosId,
-        serviceName: service.serviceName,
-        payload: payload ?? {},
-        result: fulfillmentResult,
-        paymentSig,
-        txHash: sourceTxHash,
-        amount: String(service.price),
-        status: nextStatus,
-      };
-
-      const [savedJob] = existingJob
-        ? await tx
-            .update(tlsCommerceJobs)
-            .set(values)
-            .where(eq(tlsCommerceJobs.id, existingJob.id))
-            .returning()
-        : await tx.insert(tlsCommerceJobs).values(values).returning();
-
-      if (nextStatus === "completed" && existingJob?.status !== "completed") {
-        await tx.insert(tlsRevenues).values({
+    const [job] = await withTransactionRetry(
+      async (tx) => {
+        const values = {
           talosId,
-          amount: String(service.price),
-          currency: service.currency ?? "USDC",
-          source: "commerce",
+          requesterTalosId,
+          serviceName: service.serviceName,
+          payload: payload ?? {},
+          result: fulfillmentResult,
+          paymentSig,
           txHash: sourceTxHash,
-        });
-      }
+          amount: String(service.price),
+          status: nextStatus,
+        };
 
-      return [savedJob];
-    });
+        const [savedJob] = existingJob
+          ? await tx
+              .update(tlsCommerceJobs)
+              .set(values)
+              .where(eq(tlsCommerceJobs.id, existingJob.id))
+              .returning()
+          : await tx.insert(tlsCommerceJobs).values(values).returning();
+
+        if (nextStatus === "completed" && existingJob?.status !== "completed") {
+          await tx.insert(tlsRevenues).values({
+            talosId,
+            amount: String(service.price),
+            currency: service.currency ?? "USDC",
+            source: "commerce",
+            txHash: sourceTxHash,
+          });
+        }
+
+        return [savedJob];
+      },
+      { category: "JOB" }
+    );
 
     return Response.json(
       {

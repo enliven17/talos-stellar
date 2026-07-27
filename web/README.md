@@ -52,6 +52,28 @@ pnpm db:migrate
 
 > **`db:push` is for local development only** — it compares the schema directly to the database and issues DDL without tracking history. Never use it against a shared or production database.
 
+## API Versioning
+
+All public REST endpoints are available at both unversioned (`/api/...`) and versioned (`/api/v1/...`) URLs. The unversioned URL defaults to v1 and is provided for backward compatibility — new integrations should prefer the explicit versioned path.
+
+### Version negotiation
+
+The `X-API-Version` response header indicates the effective API version serving the request. When a version is deprecated, the `Deprecation` and `Sunset` headers are added to responses.
+
+### Adding a new API version
+
+1. Add the version entry to `SUPPORTED_VERSIONS` in `src/lib/api-versioning.ts`.
+2. Add a rewrite rule in `next.config.ts` mapping `/api/v{version}/:path*` → `/api/:path*`.
+3. Mark the previous version as `deprecated: true` and set its `sunset` date.
+4. Update the OpenAPI spec and regenerate the snapshot (`pnpm openapi:snapshot`).
+
+### Rollback
+
+If a versioned deployment causes issues:
+1. Revert the code changes to the route handlers while keeping the middleware and version config in place.
+2. Deploy the revert.
+3. If the middleware itself is the issue, remove `src/middleware.ts` and restore the original `src/proxy.ts` — unversioned routes continue to work without the middleware.
+
 ## OpenAPI Contract
 
 The public API spec lives in `src/lib/openapi.ts` and is served at `/api/docs/openapi.json`.

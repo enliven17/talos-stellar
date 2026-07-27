@@ -1,0 +1,59 @@
+name: SDK Types CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'web/src/lib/openapi.ts'
+      - 'web/tests/fixtures/openapi.snapshot.json'
+      - 'packages/sdk/src/generated-types.ts'
+      - 'packages/sdk/package.json'
+      - '.github/workflows/sdk-types-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'web/src/lib/openapi.ts'
+      - 'web/tests/fixtures/openapi.snapshot.json'
+      - 'packages/sdk/src/generated-types.ts'
+      - 'packages/sdk/package.json'
+      - '.github/workflows/sdk-types-ci.yml'
+
+jobs:
+  sdk-types-drift:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/sdk
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate types from OpenAPI spec
+        run: pnpm generate:types
+
+      - name: Check for drift
+        run: |
+          if git diff --exit-code src/generated-types.ts; then
+            echo "✓ Generated types match committed version"
+          else
+            echo "✗ Generated types differ from committed version"
+            echo "Run 'cd packages/sdk && pnpm generate:types' and commit the changes"
+            git diff src/generated-types.ts
+            exit 1
+          fi
