@@ -1,4 +1,4 @@
-export { loadConfig } from "./config";
+export { loadConfig, loadSbomConfig } from "./config";
 export {
   computePercentiles,
   computeMean,
@@ -27,7 +27,35 @@ export {
 export type { ThresholdRule } from "./thresholds";
 export { writeArtifact, loadArtifact, listArtifacts } from "./artifacts";
 export { buildTrendReport, formatTrendReport } from "./trend";
-export { logger, sanitizeForLogging, logBenchmarkRun, logBenchmarkResult, logFailure } from "./logger";
+export {
+  logger,
+  sanitizeForLogging,
+  logBenchmarkRun,
+  logBenchmarkResult,
+  logFailure,
+  logSbomState,
+  logSbomFailure,
+  logSbomAudit,
+  logSbomMetricsSummary,
+  logSbomMetricSample,
+} from "./logger";
+export {
+  sha256Buffer,
+  sha256File,
+  computeSbomDigests,
+  validateCycloneDxJson,
+  validateSpdxText,
+  loadSbomDocument,
+  writeSbomAuditArtifact,
+  logSbomAuditResult,
+  logSbomStateTransition,
+  recordSbomMetric,
+  summarizeSbomMetrics,
+  validateSbomThresholds,
+  validateIntotoStatement,
+  auditArtifactsAgainstProvenance,
+  validateSignatureIdentity,
+} from "./sbom";
 export type {
   BenchmarkConfig,
   MetricSample,
@@ -41,4 +69,20 @@ export type {
   TrendReport,
   BenchmarkStatus,
   BenchmarkEvent,
+  SbomFormat,
+  SbomSpecVersion,
+  ProvenanceSlsaLevel,
+  SigningProvider,
+  ComponentName,
+  SbomComponent,
+  SbomDocument,
+  ArtifactSignature,
+  IntotoSubject,
+  BuildProvenance,
+  SbomAuditResult,
+  SbomFailureMode,
+  SbomMetricsSample,
+  SbomThresholdRule,
+  SbomConfig,
+  SbomStateTransition,
 } from "./types";
