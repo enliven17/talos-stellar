@@ -83,6 +83,15 @@ class Settings(BaseSettings):
     # Policy engine (disabled by default — backward compatible)
     policy_engine_enabled: bool = Field(default=False, description="Enable the declarative policy engine for autonomous actions")
 
+    # Tool permission manifests (audit-only by default — backward compatible).
+    # "off" disables the check entirely, "audit" evaluates and logs without
+    # blocking, "enforce" denies calls that exceed their manifest or grants.
+    tool_permission_mode: str = Field(default="audit", description="Tool permission enforcement: off | audit | enforce")
+    # Operator grants as JSON, e.g.
+    # TOOL_PERMISSION_GRANTS={"capabilities":["network.http","wallet.read"],"hosts":["*.stellar.org"],"max_spend_usd":"50"}
+    # Empty means "use the legacy grant set", which matches pre-manifest behaviour.
+    tool_permission_grants: dict = Field(default_factory=dict, description="Operator-approved capability grants for tools")
+
     # Agent behaviour
     agent_cycle_interval: int = Field(default=30, description="Seconds between agent cycles")
     polling_interval: int = Field(default=10, description="Seconds between API polls")

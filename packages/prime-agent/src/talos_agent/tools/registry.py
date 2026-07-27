@@ -7,6 +7,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, get_type_hints
 
 from talos_agent.config import Settings
+from talos_agent.tools.permissions import (
+    EnforcementMode,
+    PermissionEnforcer,
+    PermissionGrants,
+    ToolPermissions,
+)
 
 
 @dataclass
@@ -15,6 +21,9 @@ class Tool:
     description: str
     fn: Callable
     parameters: dict[str, Any]
+    #: Declared permission surface. `None` means the tool did not declare one
+    #: and the enforcer resolved it from the legacy table (or denied it).
+    permissions: ToolPermissions | None = None
 
     def to_openai_schema(self) -> dict:
         return {
@@ -31,6 +40,11 @@ class Tool:
 class ToolRegistry:
     _tools: dict[str, Tool] = field(default_factory=dict)
     _middleware: Any = None  # PolicyMiddleware, injected by build_all_tools
+    # Permission manifests are validated here at registration and enforced in
+    # execute(). Defaults to AUDIT with no grants: every call is evaluated and
+    # recorded, none are blocked, so enabling this module changes no behaviour
+    # until an operator opts into ENFORCE.
+    _enforcer: PermissionEnforcer = field(default_factory=PermissionEnforcer)
 
     def __len__(self) -> int:
         return len(self._tools)
@@ -39,8 +53,39 @@ class ToolRegistry:
         """Inject the policy middleware for pre-execution policy checks."""
         self._middleware = middleware
 
-    def register(self, name: str, description: str, fn: Callable, parameters: dict[str, Any]) -> None:
-        self._tools[name] = Tool(name=name, description=description, fn=fn, parameters=parameters)
+    def set_permission_enforcer(self, enforcer: PermissionEnforcer) -> None:
+        """Replace the enforcer, re-validating every already-registered tool.
+
+        Re-registration is what makes ordering irrelevant: tools import (and
+        register) at module import time, before settings are known, so the
+        manifests are re-resolved once the real grants arrive.
+        """
+        for tool in self._tools.values():
+            enforcer.register(tool.name, tool.permissions)
+        self._enforcer = enforcer
+
+    @property
+    def permissions(self) -> PermissionEnforcer:
+        return self._enforcer
+
+    def register(
+        self,
+        name: str,
+        description: str,
+        fn: Callable,
+        parameters: dict[str, Any],
+        permissions: ToolPermissions | None = None,
+    ) -> None:
+        # Raises ManifestValidationError for a declared-but-unenforceable
+        # manifest, so the problem surfaces at import rather than first call.
+        self._enforcer.register(name, permissions)
+        self._tools[name] = Tool(
+            name=name,
+            description=description,
+            fn=fn,
+            parameters=parameters,
+            permissions=permissions,
+        )
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
@@ -51,10 +96,31 @@ class ToolRegistry:
     def openai_schemas(self) -> list[dict]:
         return [t.to_openai_schema() for t in self._tools.values()]
 
-    async def execute(self, name: str, arguments: dict[str, Any]) -> Any:
+    async def execute(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        approved: bool = False,
+    ) -> Any:
         tool = self._tools.get(name)
         if not tool:
             return {"error": f"Unknown tool: {name}"}
+
+        # ── Permission manifest check ───────────────────────────────
+        # Runs before the policy engine: a tool that is not permitted to touch
+        # a resource should never reach the rules that reason about how it
+        # touches it. Unlike the policy check below, a failure here is not
+        # swallowed — an enforcer that cannot decide must not default to allow.
+        decision = self._enforcer.check(name, arguments, approved=approved)
+        if not decision.allowed:
+            return {
+                "error": decision.reason,
+                "code": decision.code,
+                "tool": name,
+                "capability": decision.capability,
+                "requires_approval": decision.requires_approval,
+            }
 
         # ── Policy engine pre-check (when enabled) ──────────────────
         if self._middleware is not None:
@@ -99,17 +165,28 @@ class ToolRegistry:
 registry = ToolRegistry()
 
 
-def tool(name: str, description: str):
+def tool(name: str, description: str, permissions: ToolPermissions | None = None):
     """Decorator to register a function as an agent tool.
 
     Usage:
-        @tool("search_web", "Search Google and return top results")
+        @tool(
+            "search_web",
+            "Search Google and return top results",
+            permissions=ToolPermissions(
+                network=(NetworkScope.BROWSER,),
+                hosts=("*.google.com",),
+            ),
+        )
         async def search_web(query: str) -> dict:
             ...
+
+    Omitting ``permissions`` falls back to the legacy manifest table keyed by
+    tool name. New tools must declare theirs — an undeclared tool with no
+    legacy entry is denied once enforcement is switched on.
     """
     def decorator(fn: Callable) -> Callable:
         params = _fn_to_json_schema(fn)
-        registry.register(name, description, fn, params)
+        registry.register(name, description, fn, params, permissions)
         return fn
     return decorator
 
@@ -219,4 +296,35 @@ def build_all_tools(
     if policy_middleware is not None:
         registry.set_middleware(policy_middleware)
 
+    # Resolve permission manifests against the operator's grants. Every tool
+    # has already registered by this point, so this re-validates the full set.
+    registry.set_permission_enforcer(build_enforcer(settings))
+
     return registry
+
+
+def build_enforcer(settings: Settings) -> PermissionEnforcer:
+    """Construct the permission enforcer from settings.
+
+    Backward compatible by default: an unconfigured deployment runs in AUDIT
+    mode with the legacy grant set, which allows exactly what it allowed before
+    manifests existed while recording every decision.
+    """
+    try:
+        mode = EnforcementMode(settings.tool_permission_mode)
+    except ValueError:
+        mode = EnforcementMode.AUDIT
+
+    grants = (
+        PermissionGrants.from_mapping(settings.tool_permission_grants)
+        if settings.tool_permission_grants
+        else _legacy_grants()
+    )
+
+    return PermissionEnforcer(grants=grants, mode=mode)
+
+
+def _legacy_grants() -> PermissionGrants:
+    from talos_agent.tools.permissions import LEGACY_GRANTS
+
+    return LEGACY_GRANTS
