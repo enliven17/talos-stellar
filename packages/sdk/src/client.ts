@@ -28,6 +28,8 @@ import type {
   ActivityPage,
   ActivityPageOptions,
 } from "./types.js";
+import type { ChaosInjector } from "./chaos.js";
+import { FaultType } from "./chaos.js";
 
 export interface RetryPolicyOptions {
   maxAttempts?: number;
@@ -43,29 +45,44 @@ export interface TalosClientOptions {
   baseUrl?: string;
   apiKey?: string;
   retryPolicy?: RetryPolicyOptions;
+  chaosInjector?: ChaosInjector;
 }
 
 export class TalosClient {
   private baseUrl: string;
   private headers: Record<string, string>;
   private readonly retryPolicy: Required<RetryPolicyOptions>;
+  private readonly chaosInjector?: ChaosInjector;
 
   constructor(options: TalosClientOptions = {}) {
-    const normalizedRetryMethods = options.retryPolicy?.retryMethods?.map((method) => method.toUpperCase());
+    const normalizedRetryMethods = options.retryPolicy?.retryMethods?.map(
+      (method) => method.toUpperCase(),
+    );
     this.retryPolicy = {
       maxAttempts: options.retryPolicy?.maxAttempts ?? 3,
       baseDelayMs: options.retryPolicy?.baseDelayMs ?? 100,
       maxDelayMs: options.retryPolicy?.maxDelayMs ?? 1000,
-      retryMethods: normalizedRetryMethods ?? ["GET", "HEAD", "PUT", "DELETE", "OPTIONS"],
-      retryStatusCodes: options.retryPolicy?.retryStatusCodes ?? [429, 500, 502, 503, 504],
+      retryMethods: normalizedRetryMethods ?? [
+        "GET",
+        "HEAD",
+        "PUT",
+        "DELETE",
+        "OPTIONS",
+      ],
+      retryStatusCodes: options.retryPolicy?.retryStatusCodes ?? [
+        429, 500, 502, 503, 504,
+      ],
       jitter: options.retryPolicy?.jitter ?? true,
       random: options.retryPolicy?.random ?? Math.random,
     };
-    this.baseUrl = (options.baseUrl ?? "https://talos-stellar.vercel.app").replace(/\/$/, "");
+    this.baseUrl = (
+      options.baseUrl ?? "https://talos-stellar.vercel.app"
+    ).replace(/\/$/, "");
     this.headers = { "Content-Type": "application/json" };
     if (options.apiKey) {
       this.headers["Authorization"] = `Bearer ${options.apiKey}`;
     }
+    this.chaosInjector = options.chaosInjector;
   }
 
   // ── Internal fetch helper ──────────────────────────────────
@@ -77,7 +94,10 @@ export class TalosClient {
     );
   }
 
-  private getRetryDelay(attempt: number, retryAfterHeader: string | null): number {
+  private getRetryDelay(
+    attempt: number,
+    retryAfterHeader: string | null,
+  ): number {
     if (retryAfterHeader) {
       const headerDelay = this.parseRetryAfter(retryAfterHeader);
       if (headerDelay !== null) {
@@ -86,7 +106,10 @@ export class TalosClient {
     }
 
     const exponent = Math.pow(2, attempt - 1);
-    const delay = Math.min(this.retryPolicy.baseDelayMs * exponent, this.retryPolicy.maxDelayMs);
+    const delay = Math.min(
+      this.retryPolicy.baseDelayMs * exponent,
+      this.retryPolicy.maxDelayMs,
+    );
     if (!this.retryPolicy.jitter) {
       return delay;
     }
@@ -147,9 +170,19 @@ export class TalosClient {
       if (qs) url += `?${qs}`;
     }
 
-    const method = (requestInit.method?.toString().toUpperCase() ?? "GET");
+    const method = requestInit.method?.toString().toUpperCase() ?? "GET";
 
-    for (let attempt = 1; attempt <= this.retryPolicy.maxAttempts; attempt += 1) {
+    for (
+      let attempt = 1;
+      attempt <= this.retryPolicy.maxAttempts;
+      attempt += 1
+    ) {
+      if (this.chaosInjector) {
+        await this.chaosInjector.maybeInjectFault(FaultType.NETWORK_DELAY);
+        await this.chaosInjector.maybeInjectFault(FaultType.NETWORK_DROP);
+        await this.chaosInjector.maybeInjectFault(FaultType.API_TIMEOUT);
+      }
+
       const res = await fetch(url, {
         ...requestInit,
         ...(normalizedSignal ? { signal: normalizedSignal } : {}),
@@ -207,10 +240,16 @@ export class TalosClient {
 
   async listActivities(params?: ActivityPageOptions): Promise<ActivityPage> {
     const { signal, ...query } = params ?? {};
-    return this.request<ActivityPage>("/api/activity", { params: query, signal });
+    return this.request<ActivityPage>("/api/activity", {
+      params: query,
+      signal,
+    });
   }
 
-  async reportActivity(talosId: string, params: ReportActivityParams): Promise<Activity> {
+  async reportActivity(
+    talosId: string,
+    params: ReportActivityParams,
+  ): Promise<Activity> {
     return this.request(`/api/talos/${talosId}/activity`, {
       method: "POST",
       body: JSON.stringify(params),
@@ -223,7 +262,10 @@ export class TalosClient {
 
   // ── Revenue ────────────────────────────────────────────────
 
-  async reportRevenue(talosId: string, params: ReportRevenueParams): Promise<Revenue> {
+  async reportRevenue(
+    talosId: string,
+    params: ReportRevenueParams,
+  ): Promise<Revenue> {
     return this.request(`/api/talos/${talosId}/revenue`, {
       method: "POST",
       body: JSON.stringify(params),
@@ -236,7 +278,10 @@ export class TalosClient {
 
   // ── Approvals ──────────────────────────────────────────────
 
-  async createApproval(talosId: string, params: CreateApprovalParams): Promise<Approval> {
+  async createApproval(
+    talosId: string,
+    params: CreateApprovalParams,
+  ): Promise<Approval> {
     return this.request(`/api/talos/${talosId}/approvals`, {
       method: "POST",
       body: JSON.stringify(params),
@@ -264,14 +309,19 @@ export class TalosClient {
 
   // ── Commerce / x402 ────────────────────────────────────────
 
-  async registerService(talosId: string, params: RegisterServiceParams): Promise<CommerceService> {
+  async registerService(
+    talosId: string,
+    params: RegisterServiceParams,
+  ): Promise<CommerceService> {
     return this.request(`/api/talos/${talosId}/service`, {
       method: "PUT",
       body: JSON.stringify(params),
     });
   }
 
-  async discoverServices(params?: DiscoverServicesParams): Promise<CursorPage<CommerceService>> {
+  async discoverServices(
+    params?: DiscoverServicesParams,
+  ): Promise<CursorPage<CommerceService>> {
     const { signal, ...query } = params ?? {};
     return this.requestPage("/api/services", { ...query, signal });
   }
@@ -301,6 +351,12 @@ export class TalosClient {
   ): Promise<CommerceJob> {
     let res: Response;
     const url = `${this.baseUrl}/api/talos/${talosId}/service`;
+
+    if (this.chaosInjector) {
+      await this.chaosInjector.maybeInjectFault(FaultType.NETWORK_DELAY);
+      await this.chaosInjector.maybeInjectFault(FaultType.NETWORK_DROP);
+      await this.chaosInjector.maybeInjectFault(FaultType.API_TIMEOUT);
+    }
 
     // 1. Try initial request
     res = await fetch(url, {
@@ -335,7 +391,11 @@ export class TalosClient {
 
     if (!res.ok) {
       const body = await res.text();
-      throw new TalosAPIError(res.status, body, `/api/talos/${talosId}/service`);
+      throw new TalosAPIError(
+        res.status,
+        body,
+        `/api/talos/${talosId}/service`,
+      );
     }
 
     return res.json() as Promise<CommerceJob>;
@@ -357,14 +417,20 @@ export class TalosClient {
     return this.request(`/api/talos/${talosId}/wallet`);
   }
 
-  async signPayment(talosId: string, params: SignPaymentParams): Promise<SignedPayment> {
+  async signPayment(
+    talosId: string,
+    params: SignPaymentParams,
+  ): Promise<SignedPayment> {
     return this.request(`/api/talos/${talosId}/sign`, {
       method: "POST",
       body: JSON.stringify(params),
     });
   }
 
-  async transfer(talosId: string, params: TransferParams): Promise<TransferResponse> {
+  async transfer(
+    talosId: string,
+    params: TransferParams,
+  ): Promise<TransferResponse> {
     return this.request(`/api/talos/${talosId}/transfer`, {
       method: "POST",
       body: JSON.stringify(params),
@@ -390,17 +456,21 @@ export class TalosClient {
 
   // ── Leaderboard ────────────────────────────────────────────
 
-  async getLeaderboard(params?: CursorRequestOptions): Promise<CursorPage<LeaderboardEntry>> {
+  async getLeaderboard(
+    params?: CursorRequestOptions,
+  ): Promise<CursorPage<LeaderboardEntry>> {
     return this.requestPage("/api/leaderboard", params);
   }
 
   // ── Playbooks ──────────────────────────────────────────────
 
-  async listPlaybooks(params?: {
-    category?: string;
-    channel?: string;
-    search?: string;
-  } & CursorRequestOptions): Promise<CursorPage<Playbook>> {
+  async listPlaybooks(
+    params?: {
+      category?: string;
+      channel?: string;
+      search?: string;
+    } & CursorRequestOptions,
+  ): Promise<CursorPage<Playbook>> {
     return this.requestPage("/api/playbooks", params);
   }
 

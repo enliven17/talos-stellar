@@ -14,6 +14,8 @@
  */
 
 import type { Logger } from "./webhooks.js";
+import type { ChaosInjector } from "./chaos.js";
+import { FaultType } from "./chaos.js";
 
 // ── Public event types ─────────────────────────────────────────────────────────
 
@@ -136,6 +138,9 @@ export interface TalosEventStreamOptions {
 
   /** Fetch implementation override (for testing). @default globalThis.fetch */
   fetch?: typeof globalThis.fetch;
+
+  /** Optional chaos injector for fault injection during SSE connections. */
+  chaosInjector?: ChaosInjector;
 }
 
 // ── Internal state ─────────────────────────────────────────────────────────────
@@ -170,12 +175,22 @@ export class TalosEventStream {
   private readonly opts: Required<
     Omit<
       TalosEventStreamOptions,
-      "authHeader" | "seenStore" | "logger" | "signal" | "fetch"
+      | "authHeader"
+      | "seenStore"
+      | "logger"
+      | "signal"
+      | "fetch"
+      | "chaosInjector"
     >
   > &
     Pick<
       TalosEventStreamOptions,
-      "authHeader" | "seenStore" | "logger" | "signal" | "fetch"
+      | "authHeader"
+      | "seenStore"
+      | "logger"
+      | "signal"
+      | "fetch"
+      | "chaosInjector"
     >;
 
   private state: StreamState = StreamState.Idle;
@@ -210,6 +225,7 @@ export class TalosEventStream {
       logger: opts.logger,
       signal: opts.signal,
       fetch: opts.fetch,
+      chaosInjector: opts.chaosInjector,
     };
 
     // Forward external abort
@@ -350,6 +366,12 @@ export class TalosEventStream {
     }
     if (this.lastEventId !== undefined) {
       headers["Last-Event-ID"] = this.lastEventId;
+    }
+
+    if (this.opts.chaosInjector) {
+      await this.opts.chaosInjector.maybeInjectFault(FaultType.NETWORK_DELAY);
+      await this.opts.chaosInjector.maybeInjectFault(FaultType.NETWORK_DROP);
+      await this.opts.chaosInjector.maybeInjectFault(FaultType.API_TIMEOUT);
     }
 
     const fetchFn = this.opts.fetch ?? globalThis.fetch;
