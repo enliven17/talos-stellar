@@ -32,6 +32,9 @@ export const REPUTATION_SCORE_VERSION = "1.0.0" as const;
 /** Half-life for the exponential decay weighting of past jobs (days). */
 export const REPUTATION_HALF_LIFE_DAYS = 30;
 
+/** Maximum age of a job (days) that will be considered for scoring. */
+export const MAX_JOB_AGE_DAYS = 365;
+
 /** Latency budget considered "on-time" for fulfillment latency signal. */
 export const ON_TIME_BUDGET_HOURS = 24;
 

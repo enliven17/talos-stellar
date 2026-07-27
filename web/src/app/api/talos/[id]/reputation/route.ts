@@ -8,6 +8,7 @@ import {
   REPUTATION_SCORE_VERSION,
   reputationInputsSchema,
   ReputationJobInput,
+  MAX_JOB_AGE_DAYS,
 } from "@/lib/reputation";
 
 export const dynamic = "force-dynamic";
@@ -39,12 +40,6 @@ const querySchema = z.object({
   jobLimit: z.coerce.number().int().positive().max(10_000).optional(),
 });
 
-/**
- * Maximum age of a job (days) that will be considered for scoring.
- * Prevents ancient activity from skewing the score and bounds query
- * cost at the DB layer (one indexed scan filtered by `createdAt`).
- */
-const MAX_JOB_AGE_DAYS = 365;
 
 /**
  * GET /api/talos/:id/reputation

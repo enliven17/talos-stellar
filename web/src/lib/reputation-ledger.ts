@@ -1,6 +1,7 @@
 import { db } from "@/db";
 import { tlsCommerceJobs, tlsReputationInputs } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, inArray, and, sql } from "drizzle-orm";
+import { computeReputation, MAX_JOB_AGE_DAYS, ReputationJobInput, ReputationScore, reputationInputsSchema } from "./reputation";
 import type { PgTransaction } from "drizzle-orm/pg-core";
 import type { ExtractTablesWithRelations } from "drizzle-orm";
 import type { PostgresJsQueryResultHKT } from "drizzle-orm/postgres-js";
@@ -125,4 +126,63 @@ export async function rebuildReputationLedger(providerId?: string) {
   }
 
   return { ingestedCount };
+}
+
+/**
+ * Bulk fetch and compute reputations for a list of providers.
+ */
+export async function fetchReputations(
+  talosIds: string[],
+  now: Date
+): Promise<Map<string, ReputationScore>> {
+  const result = new Map<string, ReputationScore>();
+  if (talosIds.length === 0) return result;
+
+  const cutoff = new Date(
+    now.getTime() - MAX_JOB_AGE_DAYS * 24 * 60 * 60 * 1000
+  );
+
+  const jobRows = await db
+    .select({
+      talosId: tlsReputationInputs.talosId,
+      id: tlsReputationInputs.jobId,
+      status: tlsReputationInputs.status,
+      requesterTalosId: tlsReputationInputs.requesterTalosId,
+      createdAt: tlsReputationInputs.jobCreatedAt,
+      updatedAt: tlsReputationInputs.jobUpdatedAt,
+      hasResult: tlsReputationInputs.hasResult,
+    })
+    .from(tlsReputationInputs)
+    .where(
+      and(
+        inArray(tlsReputationInputs.talosId, talosIds),
+        sql`${tlsReputationInputs.jobCreatedAt} >= ${cutoff}`
+      )
+    );
+
+  const grouped = new Map<string, ReputationJobInput[]>();
+  for (const row of jobRows) {
+    if (!grouped.has(row.talosId)) {
+      grouped.set(row.talosId, []);
+    }
+    grouped.get(row.talosId)!.push({
+      id: row.id,
+      status: row.status ?? "unknown",
+      requesterTalosId: row.requesterTalosId,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      hasResult: row.hasResult,
+    });
+  }
+
+  for (const providerId of talosIds) {
+    const jobs = grouped.get(providerId) ?? [];
+    const inputs = reputationInputsSchema.parse({
+      providerId,
+      jobs,
+    });
+    result.set(providerId, computeReputation(inputs, { now }));
+  }
+
+  return result;
 }

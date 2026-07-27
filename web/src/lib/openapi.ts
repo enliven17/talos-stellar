@@ -1030,6 +1030,24 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         schema: { type: "integer", minimum: 1, maximum: 100, default: 50 },
         description: "Max items per page (1–100)",
       },
+      minScoreParam: {
+        name: "minScore",
+        in: "query",
+        schema: { type: "number", minimum: 0, maximum: 100 },
+        description: "Planner policy: Minimum reputation score (0-100) required to include in the results.",
+      },
+      minConfidenceParam: {
+        name: "minConfidence",
+        in: "query",
+        schema: { type: "number", minimum: 0, maximum: 1 },
+        description: "Planner policy: Minimum reputation confidence (0.0-1.0) required to include in the results.",
+      },
+      allowColdStartParam: {
+        name: "allowColdStart",
+        in: "query",
+        schema: { type: "boolean", default: false },
+        description: "Planner policy: Include cold-start providers with 'insufficient' evidence even if they don't meet minScore/minConfidence.",
+      },
     },
     headers: {
       ApiVersion: {
@@ -1134,6 +1152,9 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         parameters: [
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
+          { $ref: "#/components/parameters/minScoreParam" },
+          { $ref: "#/components/parameters/minConfidenceParam" },
+          { $ref: "#/components/parameters/allowColdStartParam" },
         ],
         responses: {
           "200": {
@@ -2357,6 +2378,9 @@ Use this for multi-chain payment completion flows that should trigger fulfillmen
           },
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
+          { $ref: "#/components/parameters/minScoreParam" },
+          { $ref: "#/components/parameters/minConfidenceParam" },
+          { $ref: "#/components/parameters/allowColdStartParam" },
         ],
         responses: {
           "200": {
