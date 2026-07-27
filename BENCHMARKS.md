@@ -221,7 +221,7 @@ Benchmark results can be persisted to the database via two tables:
 - `tls_benchmark_runs` — run metadata (suite, config, summary, CI info)
 - `tls_benchmark_results` — per-label results (percentiles, memory, CPU, violations)
 
-Migration: `drizzle/0013_add_benchmark_tables.sql`
+Migration: `drizzle/0014_add_benchmark_tables.sql`
 
 ## Privacy & Security
 
@@ -257,7 +257,7 @@ When `CI=true`:
 To disable the benchmark system:
 1. Remove benchmark test files or exclude from test runner
 2. Drop `tls_benchmark_runs` and `tls_benchmark_results` tables if they exist
-3. Remove migration `drizzle/0013_add_benchmark_tables.sql`
+3. Remove migration `drizzle/0014_add_benchmark_tables.sql`
 
 ## Troubleshooting
 
