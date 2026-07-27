@@ -8,7 +8,4 @@ export default defineConfig({
   dbCredentials: {
     url: process.env.DIRECT_URL || process.env.DATABASE_URL!,
   },
-  migrations: {
-    timeout: 60000,
-  },
 });

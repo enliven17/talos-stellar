@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPatrons } from "@/db/schema";
-import { eq, or, sql, inArray } from "drizzle-orm";
+import { eq, or, inArray } from "drizzle-orm";
 import { withTimeout, TimeoutError } from "@/lib/timeout";
 
 export async function GET(req: NextRequest) {
