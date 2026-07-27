@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 SHUTDOWN_GRACE_PERIOD = 10  # seconds before force-exit on second signal
 
+
 async def run_dividend_distribution(
     *,
     talos_id: str,

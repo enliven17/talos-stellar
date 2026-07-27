@@ -638,8 +638,6 @@ class LocalDB:
         repayment_address: str | None = None,
     ) -> int:
         """Create a new loan record and return its ID."""
-        from datetime import datetime, timedelta, timezone
-
         created_at = datetime.now(timezone.utc)
         due_date = created_at + timedelta(days=duration_days)
 
