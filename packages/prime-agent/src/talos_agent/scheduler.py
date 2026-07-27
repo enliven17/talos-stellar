@@ -17,6 +17,7 @@ from rich.console import Console
 if TYPE_CHECKING:
     from talos_agent.config import Settings
 
+from talos_agent.circuit_breaker import cb_registry
 from talos_agent.observability import log, setup as setup_observability
 
 console = Console()
@@ -871,6 +872,63 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             except asyncio.TimeoutError:
                 pass
 
+    async def telemetry_log_task():
+        """Periodically log runtime telemetry for operator observability.
+
+        Privacy-safe: no prompts, API keys, signatures, or wallet secrets
+        are included in the output.
+
+        Runs once every 30 minutes (or immediately after the first cycle
+        completes so startup state is captured).
+        """
+        from talos_agent.telemetry import TelemetryCollector
+
+        telemetry_interval = 30 * 60  # 30 minutes
+
+        # Wait for initial startup to settle
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=telemetry_interval)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+        while not shutdown_event.is_set():
+            try:
+                collector = TelemetryCollector(
+                    db=db,
+                    agent_name=talos_config.get("name", settings.talos_id),
+                )
+                report = collector.collect(
+                    cb_registry=cb_registry,
+                    policy_engine=policy_engine if policy_engine.enabled else None,
+                )
+                log.info(
+                    "telemetry_snapshot",
+                    tasks=[
+                        {"name": t.name, "last_run": t.last_run_at, "retries": t.retry_attempts}
+                        for t in report.tasks
+                    ],
+                    queues=[
+                        {"name": q.name, "pending": q.pending_count, "total": q.total_count}
+                        for q in report.queues
+                    ],
+                    posts_7d=report.total_posts_7d,
+                    impressions_7d=report.total_impressions_7d,
+                    circuit_breakers=[
+                        {"provider": c.get("provider"), "state": c.get("state")}
+                        for c in report.circuit_breakers
+                    ],
+                    policy_evaluations=report.policy_evaluation_count,
+                )
+            except Exception as _tel_exc:
+                logger.debug("Telemetry snapshot failed: %s", _tel_exc)
+
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=telemetry_interval)
+                break
+            except asyncio.TimeoutError:
+                pass
+
     tasks = [
         asyncio.create_task(agent_cycle_task(), name="agent_cycle"),
         asyncio.create_task(polling_task(), name="polling"),
@@ -880,6 +938,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         asyncio.create_task(learning_cycle_task(), name="learning_cycle"),
         asyncio.create_task(dividend_distribution_task(), name="dividend_distribution"),
         asyncio.create_task(loan_repayment_task(), name="loan_repayment"),
+        asyncio.create_task(telemetry_log_task(), name="telemetry_log"),
     ]
 
     try:

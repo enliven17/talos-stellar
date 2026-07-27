@@ -201,3 +201,85 @@ def status():
     console.print(f"[bold]Pending approvals:[/bold] {len(pending)}")
 
     db.close()
+
+
+@main.command()
+@click.option("--json", "json_output", is_flag=True, help="Output raw JSON instead of a formatted summary.")
+def telemetry(json_output: bool):
+    """Show privacy-safe runtime telemetry for the agent.
+
+    Aggregates task counts, retries, queue depth, and circuit-breaker
+    metrics.  The output is safe to log or forward to a dashboard — no
+    prompts, API keys, signatures, or wallet secrets are exposed.
+    """
+    from talos_agent.db import LocalDB
+    from talos_agent.telemetry import TelemetryCollector
+    from talos_agent.circuit_breaker import cb_registry
+
+    ensure_app_dir()
+    db = LocalDB()
+
+    talos_cfg = db.get_talos_config()
+    agent_name = talos_cfg.get("name", "unknown") if talos_cfg else "unknown"
+
+    collector = TelemetryCollector(db=db, agent_name=agent_name)
+    report = collector.collect(cb_registry=cb_registry)
+
+    if json_output:
+        console.print(report.to_json())
+        return
+
+    # ── Formatted summary ─────────────────────────────────────
+    console.print(f"[bold]Runtime Telemetry:[/bold] {agent_name}")
+    console.print(f"  Collected at: {report.collected_at}")
+    console.print()
+
+    console.print("[bold]Scheduler Tasks[/bold]")
+    for task in report.tasks:
+        if task.last_run_at or task.retry_attempts > 0:
+            retry_info = ""
+            if task.retry_attempts > 0:
+                retry_info = f" [yellow]retries={task.retry_attempts}[/yellow]"
+                if task.retry_remaining_seconds > 0:
+                    retry_info += f" [dim](next in {task.retry_remaining_seconds:.0f}s)[/dim]"
+                if task.is_terminal:
+                    retry_info += " [red]TERMINAL[/red]"
+            console.print(f"  {task.name}: last_run={task.last_run_at or 'never'}{retry_info}")
+    console.print()
+
+    console.print("[bold]Queue Depth[/bold]")
+    for q in report.queues:
+        console.print(f"  {q.name}: {q.pending_count} pending / {q.total_count} total")
+    console.print()
+
+    if report.circuit_breakers:
+        console.print("[bold]Circuit Breakers[/bold]")
+        for cb in report.circuit_breakers:
+            state = cb.get("state", "unknown")
+            color = {"closed": "green", "half_open": "yellow", "open": "red"}.get(state, "dim")
+            console.print(
+                f"  {cb.get('provider', '?')}: [{color}]{state}[/{color}] "
+                f"(failures={cb.get('failures_in_window', 0)}, "
+                f"successes={cb.get('total_successes', 0)})"
+            )
+        console.print()
+
+    if report.adapters:
+        console.print("[bold]Adapter Health[/bold]")
+        for a in report.adapters:
+            color = {"healthy": "green", "disabled": "dim", "degraded": "yellow", "timeout": "red"}.get(a.state, "dim")
+            console.print(f"  {a.name}: [{color}]{a.state}[/{color}] — {a.detail}")
+        console.print()
+
+    console.print("[bold]Content Performance (7d)[/bold]")
+    console.print(f"  Posts: {report.total_posts_7d}")
+    console.print(f"  Impressions: {report.total_impressions_7d}")
+    console.print(f"  Avg engagement: {report.avg_engagement_7d:.1f}")
+    console.print()
+
+    console.print("[bold]Policy Engine[/bold]")
+    console.print(f"  Evaluations: {report.policy_evaluation_count}")
+    console.print(f"  Denies: {report.policy_deny_count}")
+    console.print(f"  Escalations: {report.policy_escalate_count}")
+
+    db.close()
