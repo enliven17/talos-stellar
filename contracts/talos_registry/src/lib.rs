@@ -705,7 +705,7 @@ mod tests {
         };
 
         // Non-creator must not be able to update kernel
-        let imposter = Address::generate(&env);
+        let _imposter = Address::generate(&env);
         assert!(client.try_update_kernel(&id, &new_kernel).is_err());
     }
 
@@ -753,7 +753,7 @@ mod tests {
         assert!(client.is_active(&id));
 
         // Non-creator can't deactivate
-        let imposter = Address::generate(&env);
+        let _imposter = Address::generate(&env);
         assert!(client.try_deactivate_talos(&id).is_err());
 
         // Creator can deactivate
