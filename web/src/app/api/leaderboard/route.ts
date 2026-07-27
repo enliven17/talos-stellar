@@ -2,13 +2,16 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPatrons, tlsActivities, tlsRevenues } from "@/db/schema";
 import { and, desc, eq, sql } from "drizzle-orm";
+import { parseLimit } from "@/lib/parse-limit";
 
 // GET /api/leaderboard — Ranking data with cursor-based pagination
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = request.nextUrl;
     const cursor = searchParams.get("cursor");
-    const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 1), 100);
+    const parsedLimit = parseLimit(searchParams.get("limit"), 50, 100);
+    if (!parsedLimit.ok) return parsedLimit.response;
+    const limit = parsedLimit.limit;
 
     const patronCount = db
       .select({

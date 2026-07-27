@@ -1,19 +1,25 @@
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
+import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsPatrons, tlsCommerceServices } from "@/db/schema";
 import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { createAgentKeypair, fundTestnetAccount, verifyStellarSignature } from "@/lib/stellar";
 import { createTalosSchema, parseBody } from "@/lib/schemas";
+import { parseLimit } from "@/lib/parse-limit";
+import { TimeoutError, withTimeout } from "@/lib/timeout";
 
 // GET /api/talos — List TALOS entries with cursor-based pagination
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = request.nextUrl;
     const cursor = searchParams.get("cursor");
-    const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 1), 100);
+    const parsedLimit = parseLimit(searchParams.get("limit"), 50, 100);
+    if (!parsedLimit.ok) return parsedLimit.response;
+    const limit = parsedLimit.limit;
 
-    const patronCount = db
+    // Add timeout for patron count query
+    const patronCountQuery = db
       .select({
         talosId: tlsPatrons.talosId,
         count: sql<number>`count(*)::int`.as("count"),
@@ -21,6 +27,8 @@ export async function GET(request: NextRequest) {
       .from(tlsPatrons)
       .groupBy(tlsPatrons.talosId)
       .as("patronCount");
+
+    const patronCount = patronCountQuery;
 
     const conditions = [];
     if (cursor) {
@@ -38,8 +46,10 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const entries = await db
-      .select({
+    let entries;
+    try {
+      entries = await withTimeout(
+        db.select({
         id: tlsTalos.id,
         onChainId: tlsTalos.onChainId,
         agentName: tlsTalos.agentName,
@@ -74,7 +84,20 @@ export async function GET(request: NextRequest) {
       .leftJoin(patronCount, eq(tlsTalos.id, patronCount.talosId))
       .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(tlsTalos.createdAt), desc(tlsTalos.id))
-      .limit(limit + 1);
+          .limit(limit + 1),
+        10_000,
+        "Talos list query timeout",
+      );
+    } catch (error) {
+      if (error instanceof TimeoutError) {
+        return Response.json(
+          { error: "Query timeout. Please try again with a simpler query.", details: error.message },
+          { status: 408 },
+        );
+      }
+      console.error("Talos list query error:", error);
+      return Response.json({ error: "Internal server error" }, { status: 500 });
+    }
 
     const hasMore = entries.length > limit;
     const page = hasMore ? entries.slice(0, limit) : entries;
@@ -159,65 +182,68 @@ export async function POST(request: NextRequest) {
     }
 
     // Atomic genesis: TALOS + Patron + Service created together or not at all
-    const { talos, generatedKey } = await db.transaction(async (tx) => {
-      const [talos] = await tx
-        .insert(tlsTalos)
-        .values({
-          name,
-          category,
-          description,
-          apiKey,
-          totalSupply: supply,
-          creatorShare: 0,
-          investorShare: 0,
-          treasuryShare: 100,
-          persona,
-          targetAudience,
-          channels: channels ?? [],
-          toneVoice: toneVoice ?? null,
-          approvalThreshold: String(approvalThreshold ?? 10),
-          gtmBudget: String(gtmBudget ?? 200),
-          pulsePrice: String(initialPrice ?? 0),
-          minPatronPulse: minPatronPulse ?? null,
-          creatorPublicKey,
-          walletPublicKey,
-          onChainId: onChainId ?? null,
-          agentName: agentName ?? null,
-          stellarAssetCode: stellarAssetCode ?? null,
-          tokenSymbol: tokenSymbol ?? null,
-          agentWalletId,
-          agentWalletAddress,
-        })
-        .returning();
+    const { talos, generatedKey } = await withTransactionRetry(
+      async (tx) => {
+        const [talos] = await tx
+          .insert(tlsTalos)
+          .values({
+            name,
+            category,
+            description,
+            apiKey,
+            totalSupply: supply,
+            creatorShare: 0,
+            investorShare: 0,
+            treasuryShare: 100,
+            persona,
+            targetAudience,
+            channels: channels ?? [],
+            toneVoice: toneVoice ?? null,
+            approvalThreshold: String(approvalThreshold ?? 10),
+            gtmBudget: String(gtmBudget ?? 200),
+            pulsePrice: String(initialPrice ?? 0),
+            minPatronPulse: minPatronPulse ?? null,
+            creatorPublicKey,
+            walletPublicKey,
+            onChainId: onChainId ?? null,
+            agentName: agentName ?? null,
+            stellarAssetCode: stellarAssetCode ?? null,
+            tokenSymbol: tokenSymbol ?? null,
+            agentWalletId,
+            agentWalletAddress,
+          })
+          .returning();
 
-      // Create initial Patron (Creator)
-      const CREATOR_GOVERNANCE_FRACTION = 0.6;
-      if (creatorPublicKey) {
-        await tx.insert(tlsPatrons).values({
-          talosId: talos.id,
-          stellarPublicKey: creatorPublicKey,
-          role: "Creator",
-          pulseAmount: Math.floor(supply * CREATOR_GOVERNANCE_FRACTION),
-          share: "0",
-        });
-      }
-
-      // Create Commerce Service if provided
-      if (serviceName && servicePrice) {
-        const serviceWallet = agentWalletAddress || creatorPublicKey || walletPublicKey;
-        if (serviceWallet) {
-          await tx.insert(tlsCommerceServices).values({
+        // Create initial Patron (Creator)
+        const CREATOR_GOVERNANCE_FRACTION = 0.6;
+        if (creatorPublicKey) {
+          await tx.insert(tlsPatrons).values({
             talosId: talos.id,
-            serviceName,
-            description: serviceDescription ?? description,
-            price: String(servicePrice),
-            stellarPublicKey: serviceWallet,
+            stellarPublicKey: creatorPublicKey,
+            role: "Creator",
+            pulseAmount: Math.floor(supply * CREATOR_GOVERNANCE_FRACTION),
+            share: "0",
           });
         }
-      }
 
-      return { talos, generatedKey: apiKey };
-    });
+        // Create Commerce Service if provided
+        if (serviceName && servicePrice) {
+          const serviceWallet = agentWalletAddress || creatorPublicKey || walletPublicKey;
+          if (serviceWallet) {
+            await tx.insert(tlsCommerceServices).values({
+              talosId: talos.id,
+              serviceName,
+              description: serviceDescription ?? description,
+              price: String(servicePrice),
+              stellarPublicKey: serviceWallet,
+            });
+          }
+        }
+
+        return { talos, generatedKey: apiKey };
+      },
+      { category: "GENESIS" }
+    );
 
     // DB transaction succeeded — now fund the testnet wallet (best-effort, non-blocking).
     // Kept outside the transaction deliberately: Friendbot is an external call and

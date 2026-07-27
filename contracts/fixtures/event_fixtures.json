@@ -1,0 +1,37 @@
+{
+  "spec_version": "1.0.0",
+  "examples": [
+    {
+      "contract": "talos_registry",
+      "event": "tls_crt",
+      "topics": ["tls_crt", "<creator: Address>"],
+      "data": {
+        "talos_id": 1,
+        "name": "Genesis",
+        "category": "Marketing"
+      }
+    },
+    {
+      "contract": "talos_registry",
+      "event": "pat_upd",
+      "topics": ["pat_upd", "<talos_id: u32>"],
+      "data": {
+        "creator_addr": "<Address>",
+        "creator_share": 7000,
+        "investor_share": 3000
+      }
+    },
+    {
+      "contract": "talos_registry",
+      "event": "fee_chg",
+      "topics": ["fee_chg"],
+      "data": { "old_bps": 300, "new_bps": 250 }
+    },
+    {
+      "contract": "talos_registry",
+      "event": "tl_cfg",
+      "topics": ["tl_cfg"],
+      "data": { "old_min_delay": 0, "new_min_delay": 3600, "grace_period": 86400 }
+    }
+  ]
+}

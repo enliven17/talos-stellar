@@ -26,16 +26,16 @@ class TalosAPIClient:
     # ── Retry-wrapped HTTP verbs ──────────────────────────
 
     async def _get(self, url: str, **kwargs: Any) -> httpx.Response:
-        return await request_with_retry(lambda: self._client.get(url, **kwargs))
+        return await request_with_retry(lambda: self._client.get(url, **kwargs), provider="talos_web_api")
 
     async def _post(self, url: str, **kwargs: Any) -> httpx.Response:
-        return await request_with_retry(lambda: self._client.post(url, **kwargs))
+        return await request_with_retry(lambda: self._client.post(url, **kwargs), provider="talos_web_api")
 
     async def _put(self, url: str, **kwargs: Any) -> httpx.Response:
-        return await request_with_retry(lambda: self._client.put(url, **kwargs))
+        return await request_with_retry(lambda: self._client.put(url, **kwargs), provider="talos_web_api")
 
     async def _patch(self, url: str, **kwargs: Any) -> httpx.Response:
-        return await request_with_retry(lambda: self._client.patch(url, **kwargs))
+        return await request_with_retry(lambda: self._client.patch(url, **kwargs), provider="talos_web_api")
 
     # ── Talos Config ──────────────────────────────────────
 
@@ -259,8 +259,41 @@ class TalosAPIClient:
             return data if isinstance(data, list) else data.get("jobs", [])
         return []
 
-    async def submit_job_result(self, job_id: str, result: dict) -> dict | None:
-        r = await self._post(f"/api/jobs/{job_id}/result", json={"result": result})
+    async def claim_job(self, job_id: str, ttl_seconds: int = 300) -> dict | None:
+        """Acquire a lease on a pending job. Returns the fencing token on success."""
+        r = await self._post(
+            f"/api/jobs/{job_id}/claim",
+            json={"ttlSeconds": ttl_seconds},
+        )
+        if r.status_code == 200:
+            return r.json()
+        return None
+
+    async def heartbeat_job(self, job_id: str, fencing_token: int) -> dict | None:
+        """Extend the lease on a claimed job. Returns renewed expiry on success."""
+        r = await self._post(
+            f"/api/jobs/{job_id}/heartbeat",
+            json={"fencingToken": fencing_token},
+        )
+        if r.status_code == 200:
+            return r.json()
+        return None
+
+    async def release_job(self, job_id: str, fencing_token: int) -> dict | None:
+        """Release a lease on a claimed job."""
+        r = await self._post(
+            f"/api/jobs/{job_id}/release",
+            json={"fencingToken": fencing_token},
+        )
+        if r.status_code == 200:
+            return r.json()
+        return None
+
+    async def submit_job_result(self, job_id: str, result: dict, fencing_token: int = 0) -> dict | None:
+        r = await self._post(
+            f"/api/jobs/{job_id}/result",
+            json={"result": result, "fencingToken": fencing_token},
+        )
         if r.status_code in (200, 201):
             return r.json()
         return None

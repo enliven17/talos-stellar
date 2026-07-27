@@ -2,6 +2,8 @@
 
 Stellar-based smart contracts for the Talos Protocol, built with Rust and the Soroban SDK.
 
+See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
+
 ## Contracts
 
 ### 1. TalosRegistry
@@ -13,17 +15,19 @@ Stellar-based smart contracts for the Talos Protocol, built with Rust and the So
   - Pulse token metadata storage
   - 3% protocol fee to protocol wallet on creation
   - **Two-step admin transfer** (`propose_admin` / `accept_admin` / `cancel_admin_transfer`)
-  - **Interface version query** (`version()` — immutable, compile-time constant)
-  - Events: `talos_created`, `patron_updated`, `adm_prp`, `adm_acc`, `adm_cnl`
+  - **Admin timelocks** (`schedule_action` / `execute_action` / `cancel_action` / `set_timelock_config`)
+  - **Interface version query** (`version()` — immutable, compile-time constant `(1, 1, 0)`)
+  - Events: `tls_crt`, `pat_upd`, `fee_chg`, `adm_prp`, `adm_acc`, `adm_cnl`, `tl_sch`, `tl_exec`, `tl_cnl`, `tl_cfg`
 
 ### 2. TalosNameService
 - **Purpose**: Human-readable name registration for Talos IDs
 - **Features**:
   - Name → Talos ID mapping (e.g., "marketbot" → 42)
-  - Validation: 3-32 chars, lowercase alphanumeric + hyphens
-  - No consecutive hyphens allowed
-  - **Interface version query** (`version()` — immutable, compile-time constant)
-  - Events: `name_registered`
+  - Validation: 3-32 chars, lowercase alphanumeric + hyphens, no consecutive hyphens
+  - Admin-controlled registry contract pointer (`set_registry_contract`)
+  - **Admin timelocks** (`schedule_action` / `execute_action` / `cancel_action` / `set_timelock_config`)
+  - **Interface version query** (`version()` — immutable, compile-time constant `(1, 1, 0)`)
+  - Events: `name_reg`, `tl_sch`, `tl_exec`, `tl_cnl`, `tl_cfg`
 
 ### 3. TalosGovernance
 - **Purpose**: Token-weighted governance for Talos Protocol
@@ -118,7 +122,7 @@ REGISTRY_CONTRACT=$(stellar contract deploy \
   --source deployer)
 echo "TalosRegistry: $REGISTRY_CONTRACT"
 
-# Deploy TalosNameService  
+# Deploy TalosNameService
 NAME_SERVICE_CONTRACT=$(stellar contract deploy \
   --wasm target/wasm32-unknown-unknown/release/talos_name_service.wasm \
   --network testnet \
@@ -168,14 +172,19 @@ TALOS_PROTOCOL_WALLET=G...  # Receives protocol fees
 Confirm contracts are deployed and initialized:
 
 ```bash
+# Check TalosRegistry version (should return [1, 1, 0])
+stellar contract invoke \
+  --id "$REGISTRY_CONTRACT" \
+  --network testnet \
+  -- \
+  version
+
 # Check TalosRegistry exists and returns next ID
 stellar contract invoke \
   --id "$REGISTRY_CONTRACT" \
   --network testnet \
   -- \
   next_talos_id
-
-# Expected output: 0 (no Talos created yet)
 
 # Check TalosNameService is initialized
 stellar contract invoke \
@@ -188,10 +197,45 @@ stellar contract invoke \
 # Expected output: true (no names registered yet)
 ```
 
+### Step 6: (Optional) Enable Admin Timelocks
+
+Both contracts ship with timelocks **disabled by default** (`min_delay = 0`). To enable them after deployment:
+
+```bash
+# TalosRegistry — set a 24-hour min delay with a 7-day grace window
+stellar contract invoke \
+  --id "$REGISTRY_CONTRACT" \
+  --source admin-key \
+  --network testnet \
+  -- \
+  set_timelock_config \
+  --min_delay 86400 \
+  --grace_period 604800
+
+# TalosNameService — set the admin first (open bootstrap on first call)
+stellar contract invoke \
+  --id "$NAME_SERVICE_CONTRACT" \
+  --source deployer \
+  --network testnet \
+  -- \
+  set_admin \
+  --new_admin GADMIN...
+
+# Then configure timelocks
+stellar contract invoke \
+  --id "$NAME_SERVICE_CONTRACT" \
+  --source admin-key \
+  --network testnet \
+  -- \
+  set_timelock_config \
+  --min_delay 86400 \
+  --grace_period 604800
+```
+
 ### Environment Variables Reference
 
 | Variable | Format | Purpose | Example |
-|----------|--------|---------|---------|
+|----------|--------|---------|---------| 
 | `STELLAR_ACCOUNT_ID` | G-address | Deployer public key | `GBZLPFCWX4QIZTJQ6QXRZ...` |
 | `STELLAR_SECRET_KEY` | S-key | Deployer secret key (deploy only, never commit) | `SBZVYK6IXGLZ...` |
 | `TALOS_PROTOCOL_WALLET` | G-address | Receives 3% protocol fee on Talos creation | `GA3HQZTKR4U...` |
@@ -207,9 +251,10 @@ stellar contract invoke \
 - [ ] Deployer account has XLM: `stellar account info --source deployer --network testnet`
 - [ ] Contracts build successfully: `cargo build --target wasm32-unknown-unknown --release`
 - [ ] WASM files exist: `ls target/wasm32-unknown-unknown/release/*.wasm`
-- [ ] TalosRegistry deployed: `stellar contract info --id <REGISTRY_ID> --network testnet`
-- [ ] TalosNameService initialized: `stellar contract invoke --id <NAME_SERVICE_ID> -- next_talos_id`
+- [ ] TalosRegistry deployed and `version()` returns `[1, 1, 0]`
+- [ ] TalosNameService initialized: `stellar contract invoke --id <NAME_SERVICE_ID> -- is_name_available --name test`
 - [ ] Contract IDs added to `.env.local`
+- [ ] Timelock config set on both contracts (if desired)
 
 ### Troubleshooting
 
@@ -220,6 +265,9 @@ stellar contract invoke \
 | "Build failed" | Missing WASM target | Run `rustup target add wasm32-unknown-unknown` |
 | "Contract not initialized" | TalosNameService init skipped | Run initialize command with registry_id |
 | "WASM too large" | Optimization issue | Run release build only: `--release` flag |
+| "Timelock enabled: action must be scheduled" | min_delay > 0 | Use `schedule_action` then `execute_action` |
+| "Timelock delay not met" | Executed before ETA | Wait for `eta` ledger timestamp |
+| "Proposal expired" | Executed after grace window | Re-schedule; old proposal is permanently expired |
 
 ## Invoke Examples
 
@@ -283,13 +331,17 @@ Both contracts emit typed Soroban events on every meaningful state change. Off-c
 ### TalosRegistry
 
 | Event | Topics | Data | Emitted on |
-|-------|--------|------|-----------|
+|-------|--------|------|-----------| 
 | `tls_crt` | `(symbol_short!("tls_crt"), creator: Address)` | `(talos_id: u32, name: String, category: String)` | `create_talos` success |
 | `pat_upd` | `(symbol_short!("pat_upd"), talos_id: u32)` | `(creator: Address, creator_share: u32, investor_share: u32)` | `update_patron` success |
-| `fee_chg` | `(symbol_short!("fee_chg"),)` | `(old_bps: u32, new_bps: u32)` | `set_protocol_fee` success |
-| `adm_prp` | `(symbol_short!("adm_prp"),)` | `(current: Address, proposed: Address)` | `propose_admin` success |
+| `fee_chg` | `(symbol_short!("fee_chg"),)` | `(old_bps: u32, new_bps: u32)` | `set_protocol_fee` or timelock execution |
+| `adm_prp` | `(symbol_short!("adm_prp"),)` | `(current: Address, proposed: Address)` | `propose_admin` or timelock execution |
 | `adm_acc` | `(symbol_short!("adm_acc"),)` | `(new_admin: Address,)` | `accept_admin` success |
 | `adm_cnl` | `(symbol_short!("adm_cnl"),)` | `(cancelled: Address,)` | `cancel_admin_transfer` success |
+| `tl_sch`  | `(symbol_short!("tl_sch"), proposal_id: u64)` | `(action: AdminAction, eta: u64, proposer: Address)` | `schedule_action` success |
+| `tl_exec` | `(symbol_short!("tl_exec"), proposal_id: u64)` | `(action: AdminAction, executor: Address)` | `execute_action` success |
+| `tl_cnl`  | `(symbol_short!("tl_cnl"), proposal_id: u64)` | `(action: AdminAction, canceller: Address)` | `cancel_action` success |
+| `tl_cfg`  | `(symbol_short!("tl_cfg"),)` | `(old_min_delay: u64, new_min_delay: u64, grace_period: u64)` | `set_timelock_config` success |
 
 **Filtering examples**
 
@@ -302,25 +354,39 @@ Both contracts emit typed Soroban events on every meaningful state change. Off-c
 
 // Any protocol fee change — filter on topics[0] == "fee_chg"
 (symbol_short!("fee_chg"),)
+
+// Any timelock scheduled — filter on topics[0] == "tl_sch"
+(symbol_short!("tl_sch"),)
+
+// A specific proposal executed — filter on topics == ("tl_exec", proposal_id)
+(symbol_short!("tl_exec"), 3u64)
 ```
 
 ### TalosNameService
 
 | Event | Topics | Data | Emitted on |
-|-------|--------|------|-----------|
+|-------|--------|------|-----------| 
 | `name_reg` | `(symbol_short!("name_reg"), talos_id: u32)` | `(name: String, owner: Address)` | `register_name` success |
+| `reg_upd`  | `(symbol_short!("reg_upd"),)` | `(old_registry: Address, new_registry: Address)` | registry pointer update |
+| `tl_sch`   | `(symbol_short!("tl_sch"), proposal_id: u64)` | `(action: AdminAction, eta: u64, proposer: Address)` | `schedule_action` success |
+| `tl_exec`  | `(symbol_short!("tl_exec"), proposal_id: u64)` | `(action: AdminAction, executor: Address)` | `execute_action` success |
+| `tl_cnl`   | `(symbol_short!("tl_cnl"), proposal_id: u64)` | `(action: AdminAction, canceller: Address)` | `cancel_action` success |
+| `tl_cfg`   | `(symbol_short!("tl_cfg"),)` | `(old_min_delay: u64, new_min_delay: u64, grace_period: u64)` | `set_timelock_config` success |
 
 **Filtering examples**
 
 ```rust
 // Name registration for a specific Talos — filter on topics[1] == talos_id
 (symbol_short!("name_reg"), 42u32)
+
+// Any timelock scheduled on name service
+(symbol_short!("tl_sch"),)
 ```
 
 ### Design rationale
 
 - The first topic is always the event-type symbol so generic listeners can dispatch on it.
-- Filterable entities (creator, talos_id) are placed in subsequent topic slots so Soroban's topic-indexed subscriptions can narrow results without fetching all events.
+- Filterable entities (creator, talos_id, proposal_id) are placed in subsequent topic slots so Soroban's topic-indexed subscriptions can narrow results without fetching all events.
 - Event data carries the full context needed to act without a follow-up RPC call.
 
 ## Two-step Admin Transfer
@@ -342,7 +408,7 @@ current admin                      new admin
 
 | Entry-point | Auth required | Effect |
 |-------------|--------------|--------|
-| `propose_admin(new_admin)` | Current admin | Writes `new_admin` to `PendingAdmin` storage. Replaces any existing pending nomination silently. |
+| `propose_admin(new_admin)` | Current admin | Writes `new_admin` to `PendingAdmin` storage. Replaces any existing pending nomination silently. Blocked when `min_delay > 0` — use `schedule_action(ProposeAdmin(...))` instead. |
 | `accept_admin()` | Pending admin | Moves `PendingAdmin` → `ProtocolWallet`; removes `PendingAdmin`. |
 | `cancel_admin_transfer()` | Current admin | Removes `PendingAdmin`; nomination is voided. |
 | `pending_admin()` | None (read-only) | Returns `Option<Address>` — `Some` if a transfer is in progress, `None` otherwise. |
@@ -385,9 +451,212 @@ stellar contract invoke \
   cancel_admin_transfer
 ```
 
+## Admin Timelocks
+
+Both `TalosRegistry` and `TalosNameService` implement a proposal-based timelock for high-impact administrative actions. Timelocks are **disabled by default** (`min_delay = 0`) and must be explicitly activated via `set_timelock_config`.
+
+### Design goals
+
+| Goal | How it is met |
+|------|--------------|
+| Visibility before change | Every admin action passes through a public `schedule_action` call that emits `tl_sch` with the full action payload and ETA |
+| Enforced delay | `execute_action` panics if `now < eta` |
+| Bounded execution window | `execute_action` panics if `now > eta + grace_period`; expired proposals can never be revived |
+| Reversible before execution | `cancel_action` marks a proposal `Cancelled`; cancelled proposals cannot be re-executed |
+| Backward-compatible default | `min_delay = 0` means no timelock enforcement; existing callers are unaffected |
+| Emergency escape | Set `min_delay = 0` via `set_timelock_config` to disable enforcement; `schedule_action` with `delay = 0` can execute immediately when min_delay is 0 |
+
+### State machine
+
+```
+                ┌──────────┐
+  schedule ───► │ Scheduled │──── execute (after ETA, within grace) ───► Executed
+                │          │
+                │          │──── cancel ───► Cancelled
+                └──────────┘
+```
+
+A proposal in `Executed` or `Cancelled` state is permanently terminal — no re-execution.
+
+### Property-based fuzzing
+
+The contract test suite includes a deterministic property-based state-machine test for the name service. It exercises randomized name-registration sequences against an in-memory model to verify invariants around availability, resolution, and ownership updates. Run it with:
+
+```bash
+cargo test -p talos-name-service
+```
+
+### Entry-points
+
+#### TalosRegistry
+
+| Entry-point | Auth | Description |
+|-------------|------|-------------|
+| `schedule_action(action, delay)` | Admin (`ProtocolWallet`) | Queues an `AdminAction` with `eta = now + delay`. `delay` must be ≥ `min_delay`. Returns `proposal_id`. |
+| `execute_action(proposal_id)` | None (permissionless) | Executes a `Scheduled` proposal once `now ≥ eta` and `now ≤ eta + grace_period`. |
+| `cancel_action(proposal_id)` | Admin (`ProtocolWallet`) | Marks a `Scheduled` proposal as `Cancelled`. |
+| `set_timelock_config(min_delay, grace_period)` | Admin (`ProtocolWallet`) | Updates timelock parameters. `min_delay` ≤ 30 days; `grace_period` > 0. |
+| `get_timelock_config()` | None | Returns current `TimelockConfig`. |
+| `get_timelock_proposal(proposal_id)` | None | Returns `Option<TimelockProposal>` by ID. |
+
+**`AdminAction` variants** (Registry):
+
+| Variant | Effect on execution |
+|---------|---------------------|
+| `SetProtocolFee(bps: u32)` | Calls internal fee setter, emits `fee_chg` |
+| `ProposeAdmin(new_admin: Address)` | Writes `PendingAdmin`, emits `adm_prp` (new admin must still call `accept_admin`) |
+
+#### TalosNameService
+
+| Entry-point | Auth | Description |
+|-------------|------|-------------|
+| `schedule_action(action, delay)` | Admin | Queues an `AdminAction`. Returns `proposal_id`. |
+| `execute_action(proposal_id)` | None (permissionless) | Executes after ETA, within grace window. |
+| `cancel_action(proposal_id)` | Admin | Cancels a pending proposal. |
+| `set_timelock_config(min_delay, grace_period)` | Admin | Updates timelock parameters. |
+| `get_timelock_config()` | None | Returns current `TimelockConfig`. |
+| `get_timelock_proposal(proposal_id)` | None | Returns `Option<TimelockProposal>` by ID. |
+| `set_admin(new_admin)` | Admin (or open on first call) | Sets/transfers the admin role. Blocked when `min_delay > 0` — use `schedule_action(SetAdmin(...))`. |
+| `set_registry_contract(new_registry)` | Admin | Updates the registry pointer. Blocked when `min_delay > 0`. |
+
+**`AdminAction` variants** (Name Service):
+
+| Variant | Effect on execution |
+|---------|---------------------|
+| `SetRegistryContract(addr: Address)` | Updates the registry pointer, emits `reg_upd` |
+| `SetAdmin(addr: Address)` | Directly writes the new admin address |
+
+### Timelock configuration
+
+| Parameter | Default | Maximum | Notes |
+|-----------|---------|---------|-------|
+| `min_delay` | `0` (disabled) | `2,592,000` (30 days) | Minimum number of seconds between scheduling and execution |
+| `grace_period` | `604,800` (7 days) | None | Window after ETA during which execution is valid. Must be > 0. |
+
+### Proposal storage
+
+| Key | Type | Lifecycle |
+|-----|------|-----------|
+| `TimelockConfig` | `TimelockConfig` | Set by `set_timelock_config`. Defaults applied if absent. |
+| `TimelockProposal(id)` | `TimelockProposal` | Written by `schedule_action`. Status updated by `execute_action` / `cancel_action`. Never removed. |
+| `NextTimelockId` | `u64` | Auto-incremented counter. Starts at 1. |
+
+### Operational runbook
+
+#### Scheduling and executing a fee change (Registry)
+
+```bash
+# 1. Schedule the action (requires admin signature)
+stellar contract invoke \
+  --id "$REGISTRY_CONTRACT" \
+  --source admin-key \
+  --network testnet \
+  -- \
+  schedule_action \
+  --action '{"SetProtocolFee": 500}' \
+  --delay 86400   # 24 hours
+
+# Returns: proposal_id (e.g., 1)
+# Emits: tl_sch with eta = now + 86400
+
+# 2. Wait for ETA to pass, then execute (anyone can call)
+stellar contract invoke \
+  --id "$REGISTRY_CONTRACT" \
+  --network testnet \
+  -- \
+  execute_action \
+  --proposal_id 1
+
+# Emits: tl_exec and fee_chg
+```
+
+#### Querying a proposal
+
+```bash
+stellar contract invoke \
+  --id "$REGISTRY_CONTRACT" \
+  --network testnet \
+  -- \
+  get_timelock_proposal \
+  --proposal_id 1
+
+# Returns: { id, action, eta, status, scheduled_at, scheduled_by }
+```
+
+#### Cancelling a proposal
+
+```bash
+stellar contract invoke \
+  --id "$REGISTRY_CONTRACT" \
+  --source admin-key \
+  --network testnet \
+  -- \
+  cancel_action \
+  --proposal_id 1
+
+# Emits: tl_cnl; proposal.status = Cancelled
+```
+
+#### Scheduling an admin transfer via timelock (Registry)
+
+```bash
+# Schedule: ProposeAdmin queues a pending nomination
+stellar contract invoke \
+  --id "$REGISTRY_CONTRACT" \
+  --source admin-key \
+  --network testnet \
+  -- \
+  schedule_action \
+  --action '{"ProposeAdmin": "GNEW..."}' \
+  --delay 86400
+
+# After ETA: execute_action writes PendingAdmin and emits adm_prp
+stellar contract invoke \
+  --id "$REGISTRY_CONTRACT" \
+  --network testnet \
+  -- \
+  execute_action \
+  --proposal_id 2
+
+# New admin must still call accept_admin to complete the handover
+stellar contract invoke \
+  --id "$REGISTRY_CONTRACT" \
+  --source new-admin-key \
+  --network testnet \
+  -- \
+  accept_admin
+```
+
+#### Disabling timelocks (emergency rollback)
+
+```bash
+# Set min_delay back to 0; direct admin calls are unblocked immediately.
+# Note: this itself is an unrestricted admin call — no timelock applies to
+# set_timelock_config itself by design.
+stellar contract invoke \
+  --id "$REGISTRY_CONTRACT" \
+  --source admin-key \
+  --network testnet \
+  -- \
+  set_timelock_config \
+  --min_delay 0 \
+  --grace_period 604800
+```
+
+### Known limitations
+
+1. **No duplicate-action detection**: Two identical proposals can be scheduled concurrently. Executing one does not automatically cancel the other — the admin must cancel the redundant proposal explicitly.
+2. **`set_admin` is open on first call** (Name Service): The very first call to `TalosNameService::set_admin` after deployment requires no authorization. Whoever calls it first becomes admin. Operators must call `set_admin` as part of the deployment sequence before enabling timelocks.
+3. **`set_timelock_config` is not itself timelocked**: The admin can change `min_delay` at any time (including setting it to 0). This is intentional for emergency recovery but means the timelock is not a strict governance primitive — it relies on admin key security.
+4. **Timelocks are per-contract, not cross-contract**: A Registry timelock and a Name Service timelock are fully independent. There is no coordinated multi-contract proposal mechanism.
+5. **Proposal IDs are sequential per contract**: IDs are 1-indexed u64 counters. They are never reused or removed from storage.
+
 ## Interface Versioning
 
 Both `TalosRegistry` and `TalosNameService` expose a `version()` entry-point that returns the contract's interface version as `(major: u32, minor: u32, patch: u32)`.
+
+Current version: **`(1, 1, 0)`**  
+_(minor bumped from `1.0.0` when timelock entry-points were added in this release)_
 
 ```bash
 # Query TalosRegistry version
@@ -396,7 +665,7 @@ stellar contract invoke \
   --network testnet \
   -- \
   version
-# → [1, 0, 0]
+# → [1, 1, 0]
 
 # Query TalosNameService version
 stellar contract invoke \
@@ -404,7 +673,7 @@ stellar contract invoke \
   --network testnet \
   -- \
   version
-# → [1, 0, 0]
+# → [1, 1, 0]
 ```
 
 ### Design guarantees
@@ -429,7 +698,7 @@ stellar contract invoke \
 ```typescript
 import { Contract, SorobanRpc } from "@stellar/stellar-sdk";
 
-const REQUIRED = { major: 1, minor: 0 };
+const REQUIRED = { major: 1, minor: 1 };
 
 async function assertCompatible(contractId: string, server: SorobanRpc.Server) {
   const contract = new Contract(contractId);
@@ -463,17 +732,27 @@ rustup target add wasm32-unknown-unknown
 # Run all contract unit tests on the host test runtime
 cargo test
 
-# CI also checks the wasm target requested by the contracts workflow
-cargo test --target wasm32-unknown-unknown
-
 # Build optimized WASM artifacts for deployment
 cargo build --target wasm32-unknown-unknown --release
 
 # Run with output when debugging
 cargo test -- --nocapture
+
+# Run a specific test module
+cargo test -p talos_registry
+cargo test -p talos_name_service
 ```
 
-The test suites live in each contract's `#[cfg(test)] mod tests` block and cover happy paths, duplicate/error cases, authorization requirements, and registry fee calculation.
+The test suites live in each contract's `#[cfg(test)] mod tests` block and cover:
+
+- Happy paths for all entry-points
+- Authorization checks (impostor attempts, missing auth)
+- Patron/share validation
+- Timelock scheduling, early execution, expiry, cancellation
+- Direct-call guard when `min_delay > 0`
+- Two-step admin transfer (propose → accept → cancel paths)
+- Event emission for every state transition
+- Interface version consistency
 
 ## License
 
