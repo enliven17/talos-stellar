@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 
 import click
 from rich.console import Console
-import re
 
 from talos_agent import __version__
 from talos_agent.config import APP_DIR, Settings, ensure_app_dir
