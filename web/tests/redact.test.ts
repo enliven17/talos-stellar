@@ -1,5 +1,4 @@
 import { describe, it, expect } from "vitest";
-import { logger } from "../src/lib/logger";
 import pino from "pino";
 import { redactPayload } from "../src/lib/redact";
 
@@ -54,7 +53,7 @@ describe("redactPayload", () => {
   });
 
   it("handles circular references safely", () => {
-    const payload: any = {
+    const payload: { safe: string; self?: unknown } = {
       safe: "data"
     };
     payload.self = payload;
@@ -67,7 +66,7 @@ describe("redactPayload", () => {
 
 describe("logger output", () => {
   it("proves raw fixture secrets are absent from stored logs", () => {
-    const logs: any[] = [];
+    const logs: unknown[] = [];
     // Create a new logger with the same formatters as the main logger but writing to an array
     const testLogger = pino(
       {

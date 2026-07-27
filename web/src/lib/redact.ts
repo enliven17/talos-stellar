@@ -20,15 +20,15 @@ export function redactPayload<T>(payload: T, seen = new WeakSet()): T {
 
   // Handle circular references
   if (seen.has(payload)) {
-    return "[CIRCULAR]" as any;
+    return "[CIRCULAR]" as T;
   }
   seen.add(payload);
 
   if (Array.isArray(payload)) {
-    return payload.map((item) => redactPayload(item, seen)) as any;
+    return payload.map((item) => redactPayload(item, seen)) as T;
   }
 
-  const redactedObj: Record<string, any> = {};
+  const redactedObj: Record<string, unknown> = {};
 
   for (const [key, value] of Object.entries(payload)) {
     if (SENSITIVE_KEYS.has(key.toLowerCase())) {
