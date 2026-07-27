@@ -102,9 +102,10 @@ export async function POST(
     }
 
     // Consume immediately before the first money-moving side effect. The
-    // synchronous guard prevents two requests in this process from using the
-    // same signed nonce concurrently.
-    const nonceResult = consumeTransferNonce(signedPayload, nowSeconds);
+    // database UNIQUE constraint on (talosId, nonce) prevents two concurrent
+    // requests from using the same signed nonce — exactly one INSERT succeeds
+    // and the other fails with a unique-violation error.
+    const nonceResult = await consumeTransferNonce(signedPayload, nowSeconds);
     if (!nonceResult.ok) {
       if (nonceResult.reason === "replayed") {
         return Response.json(

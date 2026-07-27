@@ -423,6 +423,37 @@ export const tlsLifecycleEvents = pgTable(
   ],
 );
 
+// ─── Consumed Nonces (replay protection) ────────────────────────────
+//
+// Every signed transfer nonce is persisted here with a UNIQUE constraint on
+// (talosId, nonce) so the database enforces single-use semantics across
+// process restarts and concurrent requests.  Rows are retained for a short
+// window after the nonce expires so delayed replays are still caught, then
+// pruned by a periodic vacuum.
+//
+// expiry — the original transfer-authorization expiry (Unix seconds).
+//          Used by the vacuum to safely remove expired rows without
+//          consulting external state.
+// consumedAt — wall-clock time when the nonce was first consumed.
+//              Present for audit and to bound the vacuum window.
+
+export const tlsConsumedNonces = pgTable(
+  "tls_consumed_nonces",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull(),
+    nonce: text("nonce").notNull(),
+    expiry: integer("expiry").notNull(),             // original auth expiry (Unix seconds)
+    consumedAt: timestamp("consumedAt", { mode: "date", precision: 3 })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tls_consumed_nonces_talosId_nonce_key").on(t.talosId, t.nonce),
+    index("tls_consumed_nonces_expiry_idx").on(t.expiry),
+  ],
+);
+
 // ─── Provisioning Job (durable, compensated workflow) ─────────────
 //
 // One row per durable lifecycle run (activate / retire / recover). Step state
