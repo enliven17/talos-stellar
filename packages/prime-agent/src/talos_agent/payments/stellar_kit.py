@@ -51,7 +51,8 @@ class StellarKit:
             # Horizon is public — no auth needed
             async with httpx.AsyncClient(timeout=30.0) as client:
                 r = await request_with_retry(
-                    lambda: client.get(f"{_HORIZON_URL}/accounts/{acct}")
+                    lambda: client.get(f"{_HORIZON_URL}/accounts/{acct}"),
+                    provider="talos_web_api",
                 )
                 if r.status_code == 200:
                     data = r.json()
@@ -69,7 +70,8 @@ class StellarKit:
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 r = await request_with_retry(
-                    lambda: client.get(f"{_HORIZON_URL}/accounts/{account_id}")
+                    lambda: client.get(f"{_HORIZON_URL}/accounts/{account_id}"),
+                    provider="talos_web_api",
                 )
                 if r.status_code == 200:
                     data = r.json()

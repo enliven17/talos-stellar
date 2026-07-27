@@ -26,16 +26,16 @@ class TalosAPIClient:
     # ── Retry-wrapped HTTP verbs ──────────────────────────
 
     async def _get(self, url: str, **kwargs: Any) -> httpx.Response:
-        return await request_with_retry(lambda: self._client.get(url, **kwargs))
+        return await request_with_retry(lambda: self._client.get(url, **kwargs), provider="talos_web_api")
 
     async def _post(self, url: str, **kwargs: Any) -> httpx.Response:
-        return await request_with_retry(lambda: self._client.post(url, **kwargs))
+        return await request_with_retry(lambda: self._client.post(url, **kwargs), provider="talos_web_api")
 
     async def _put(self, url: str, **kwargs: Any) -> httpx.Response:
-        return await request_with_retry(lambda: self._client.put(url, **kwargs))
+        return await request_with_retry(lambda: self._client.put(url, **kwargs), provider="talos_web_api")
 
     async def _patch(self, url: str, **kwargs: Any) -> httpx.Response:
-        return await request_with_retry(lambda: self._client.patch(url, **kwargs))
+        return await request_with_retry(lambda: self._client.patch(url, **kwargs), provider="talos_web_api")
 
     # ── Talos Config ──────────────────────────────────────
 

@@ -65,13 +65,15 @@ async def agent_loop(
 
         console.print(f"[dim]Agent iteration {iteration + 1}...[/dim]")
 
+        _llm_provider = "groq" if settings.groq_api_key else "openai"
         response = await call_with_retry(
             lambda: client.chat.completions.create(
                 model=settings.llm_model,
                 messages=messages,
                 tools=tool_schemas if tool_schemas else None,
                 tool_choice="auto" if tool_schemas else None,
-            )
+            ),
+            provider=_llm_provider,
         )
 
         msg = response.choices[0].message
