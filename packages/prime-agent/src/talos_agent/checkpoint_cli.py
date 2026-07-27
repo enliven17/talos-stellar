@@ -13,6 +13,11 @@ from threading import Lock
 
 import click
 
+from talos_agent.state_classify import (
+    StateCategory,
+    registered_classification,
+    validate_checkpoint_payload as classify_validate_payload,
+)
 
 DEFAULT_MAX_SIZE = 10 * 1024 * 1024
 SUPPORTED_SCHEMA_VERSIONS = {1}
@@ -242,12 +247,29 @@ def create_checkpoint_from_database(
     agent_id: str,
     schema_version: int,
 ) -> dict[str, object]:
-    """Create a safe checkpoint payload from an existing database."""
+    """Create a safe checkpoint payload from an existing database.
+
+    Validates that every table in the checkpoint has a registered
+    classification and that no FORBIDDEN tables are included.
+    """
 
     connection = open_readonly_database(database_path)
     try:
         connection.execute("BEGIN")
         table_counts = summarize_database(connection)
+        # ── Classification guard ──────────────────────────────────────────
+        for table_name in table_counts:
+            cls_ = registered_classification(table_name)
+            if cls_ is None:
+                raise ValueError(
+                    f"Table {table_name!r} has no registered state classification. "
+                    f"Register it via state_classifications.py before exporting."
+                )
+            if cls_.category is StateCategory.FORBIDDEN:
+                raise ValueError(
+                    f"Table {table_name!r} is classified as FORBIDDEN "
+                    f"and must not be included in checkpoints."
+                )
         connection.rollback()
     finally:
         connection.close()
