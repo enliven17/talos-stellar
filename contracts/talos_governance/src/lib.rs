@@ -6,6 +6,7 @@
 extern crate std;
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String};
+use ttl_manager;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -68,6 +69,7 @@ pub enum DataKey {
     Proposal(u32),
     Vote(u32, Address),
     TokenBalanceSnapshot(u32, Address),
+    LastTouched(u32),
 }
 
 fn emit_proposal_created(env: &Env, proposal_id: u32, talos_id: u32, proposer: Address) {
@@ -323,6 +325,113 @@ impl TalosGovernance {
             .persistent()
             .get(&DataKey::NextProposalId)
             .unwrap_or(1)
+    }
+
+    // ── Storage TTL Management ───────────────────────────────────
+
+    /// Touch a governance proposal to reset its Soroban TTL.
+    pub fn touch_proposal(e: Env, proposal_id: u32) -> bool {
+        let key = DataKey::Proposal(proposal_id);
+        let proposal: Proposal = e.storage().persistent().get(&key).expect("Proposal not found");
+        let current_ledger = e.ledger().sequence();
+        let last_touched: u32 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::LastTouched(proposal_id))
+            .unwrap_or(0);
+
+        if ttl_manager::needs_touch(last_touched, current_ledger) {
+            e.storage().persistent().set(&key, &proposal);
+            e.storage()
+                .persistent()
+                .set(&DataKey::LastTouched(proposal_id), &current_ledger);
+            ttl_manager::emit_ttl_touched(&e, "proposal", 1);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Batch-touch all governance proposals + admin keys (admin only).
+    pub fn touch_all_ttl(e: Env) -> (u32, u32) {
+        let admin: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
+        admin.require_auth();
+
+        let current_ledger = e.ledger().sequence();
+        let mut touched = 0u32;
+        let mut skipped = 0u32;
+
+        if let Some(a) = e.storage().persistent().get::<_, Address>(&DataKey::Admin) {
+            let last: u32 = e.storage().persistent().get(&DataKey::LastTouched(0)).unwrap_or(0);
+            if ttl_manager::needs_touch(last, current_ledger) {
+                e.storage().persistent().set(&DataKey::Admin, &a);
+                e.storage().persistent().set(&DataKey::LastTouched(0), &current_ledger);
+                touched += 1;
+            } else {
+                skipped += 1;
+            }
+        }
+
+        let next_id: u32 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(1);
+        for pid in 1..next_id {
+            let key = DataKey::Proposal(pid);
+            if let Some(proposal) = e.storage().persistent().get::<_, Proposal>(&key) {
+                let last_touched: u32 = e
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::LastTouched(pid))
+                    .unwrap_or(0);
+                if ttl_manager::needs_touch(last_touched, current_ledger) {
+                    e.storage().persistent().set(&key, &proposal);
+                    e.storage()
+                        .persistent()
+                        .set(&DataKey::LastTouched(pid), &current_ledger);
+                    touched += 1;
+                } else {
+                    skipped += 1;
+                }
+            }
+        }
+
+        ttl_manager::emit_ttl_batch(&e, touched + skipped, touched, skipped);
+        (touched, skipped)
+    }
+
+    /// Query storage health for tracked proposal entries.
+    pub fn get_storage_health(e: Env) -> (u32, u32, u32, u32, u32) {
+        let mut health = ttl_manager::KeyHealth::empty();
+        let current_ledger = e.ledger().sequence();
+
+        let next_id: u32 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(1);
+        for pid in 1..next_id {
+            let last_touched: u32 = e
+                .storage()
+                .persistent()
+                .get(&DataKey::LastTouched(pid))
+                .unwrap_or(0);
+            health.observe(ttl_manager::age_ledgers(last_touched, current_ledger));
+        }
+
+        if health.needs_immediate_attention() {
+            ttl_manager::emit_ttl_warning(&e, "governance", health.keys_below_crit, health.max_age);
+        }
+        if health.is_empty() {
+            (0, 0, 0, 0, 0)
+        } else {
+            (health.min_age, health.max_age, health.keys_below_warn, health.keys_below_crit, health.total_keys)
+        }
     }
 
     fn require_config(env: &Env) -> GovernanceConfig {

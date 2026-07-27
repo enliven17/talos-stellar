@@ -9,7 +9,9 @@ export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "25", 10) || 25, 1), 100);
+  const parsedLimit = parseLimit(searchParams.get("limit"), 25, 100);
+  if (!parsedLimit.ok) return parsedLimit.response;
+  const limit = parsedLimit.limit;
   const cursor = searchParams.get("cursor");
   const statsOnly = searchParams.get("statsOnly") === "true";
 

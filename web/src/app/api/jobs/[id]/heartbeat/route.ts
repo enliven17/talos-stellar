@@ -35,6 +35,17 @@ export async function POST(
     const { data, error } = await parseBody(request, heartbeatJobSchema);
     if (error) return error;
 
+    const talos = await db
+      .select({ id: tlsTalos.id, status: tlsTalos.status })
+      .from(tlsTalos)
+      .where(eq(tlsTalos.id, callerTalosId))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    if (!talos || talos.status !== "Active") {
+      return Response.json({ error: "This agent is not accepting new work" }, { status: 409 });
+    }
+
     const now = new Date();
     const newExpiry = new Date(now.getTime() + HEARTBEAT_EXTEND_SECONDS * 1000);
 

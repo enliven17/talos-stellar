@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
+import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsCommerceJobs, tlsRevenues, tlsCommerceServices } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { logger } from "@/lib/logger";
@@ -57,6 +58,17 @@ export async function POST(
       return Response.json({ error: "Not authorized to fulfill this job" }, { status: 403 });
     }
 
+    const talos = await db
+      .select({ id: tlsTalos.id, status: tlsTalos.status })
+      .from(tlsTalos)
+      .where(eq(tlsTalos.id, callerTalosId))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    if (!talos || talos.status !== "Active") {
+      return Response.json({ error: "This agent is not accepting new work" }, { status: 409 });
+    }
+
     if (job.status === "completed") {
       return Response.json({ error: "Job already completed" }, { status: 409 });
     }
@@ -73,43 +85,46 @@ export async function POST(
       }, { status: 409 });
     }
 
-    const updated = await db.transaction(async (tx) => {
-      // Use a WHERE with fencing token to prevent stale-worker completion
-      const [updatedJob] = await tx
-        .update(tlsCommerceJobs)
-        .set({
-          result,
-          status: "completed",
-        })
-        .where(
-          and(
-            eq(tlsCommerceJobs.id, id),
-            eq(tlsCommerceJobs.fencingToken, effectiveFencingToken),
-          ),
-        )
-        .returning();
+    const updated = await withTransactionRetry(
+      async (tx) => {
+        // Use a WHERE with fencing token to prevent stale-worker completion
+        const [updatedJob] = await tx
+          .update(tlsCommerceJobs)
+          .set({
+            result,
+            status: "completed",
+          })
+          .where(
+            and(
+              eq(tlsCommerceJobs.id, id),
+              eq(tlsCommerceJobs.fencingToken, effectiveFencingToken),
+            ),
+          )
+          .returning();
 
-      if (!updatedJob) {
-        return null;
-      }
+        if (!updatedJob) {
+          return null;
+        }
 
-      const service = await tx
-        .select({ currency: tlsCommerceServices.currency })
-        .from(tlsCommerceServices)
-        .where(eq(tlsCommerceServices.talosId, job.talosId))
-        .limit(1)
-        .then((r) => r[0] ?? null);
+        const service = await tx
+          .select({ currency: tlsCommerceServices.currency })
+          .from(tlsCommerceServices)
+          .where(eq(tlsCommerceServices.talosId, job.talosId))
+          .limit(1)
+          .then((r: { currency: string }[]) => r[0] ?? null);
 
-      await tx.insert(tlsRevenues).values({
-        talosId: job.talosId,
-        amount: job.amount,
-        currency: service?.currency ?? "USDC",
-        source: "commerce",
-        txHash: job.txHash,
-      });
+        await tx.insert(tlsRevenues).values({
+          talosId: job.talosId,
+          amount: job.amount,
+          currency: service?.currency ?? "USDC",
+          source: "commerce",
+          txHash: job.txHash,
+        });
 
-      return updatedJob;
-    });
+        return updatedJob;
+      },
+      { category: "JOB" }
+    );
 
     if (!updated) {
       return Response.json({

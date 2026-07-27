@@ -80,6 +80,9 @@ class Settings(BaseSettings):
     # Set as JSON in env: CHANNEL_CONFIGS={"telegram": {"bot_token": "...", "chat_id": "@channel"}}
     channel_configs: dict = Field(default_factory=dict, description="Per-channel credentials map")
 
+    # Policy engine (disabled by default — backward compatible)
+    policy_engine_enabled: bool = Field(default=False, description="Enable the declarative policy engine for autonomous actions")
+
     # Agent behaviour
     agent_cycle_interval: int = Field(default=30, description="Seconds between agent cycles")
     polling_interval: int = Field(default=10, description="Seconds between API polls")
@@ -92,6 +95,15 @@ class Settings(BaseSettings):
     # Job leasing
     job_lease_ttl: int = Field(default=300, description="Seconds for a claimed job lease TTL")
     job_heartbeat_interval: int = Field(default=60, description="Seconds between job lease heartbeats")
+
+    # Graceful shutdown (#182)
+    shutdown_deadline: float = Field(
+        default=30.0,
+        description=(
+            "Seconds to wait for in-flight tasks to finish after shutdown is requested "
+            "before they are forcibly cancelled. Set to 0 to cancel immediately."
+        ),
+    )
 
     # Dividend distribution
     dividend_distribution_interval: int = Field(default=3600, description="Seconds between dividend distribution checks")

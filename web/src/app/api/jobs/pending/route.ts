@@ -38,6 +38,7 @@ export async function GET(request: NextRequest) {
     const conditions = [
       eq(tlsCommerceJobs.talosId, callerTalosId),
       eq(tlsCommerceJobs.status, "pending"),
+      eq(tlsTalos.status, "Active"),
       or(
         eq(tlsCommerceJobs.leasedBy, null as unknown as string),
         eq(tlsCommerceJobs.leasedBy, callerTalosId),
@@ -47,8 +48,29 @@ export async function GET(request: NextRequest) {
     if (cursor) conditions.push(sql`${tlsCommerceJobs.createdAt} > ${new Date(cursor)}`);
 
     const rows = await db
-      .select()
+      .select({
+        id: tlsCommerceJobs.id,
+        talosId: tlsCommerceJobs.talosId,
+        requesterTalosId: tlsCommerceJobs.requesterTalosId,
+        serviceName: tlsCommerceJobs.serviceName,
+        payload: tlsCommerceJobs.payload,
+        result: tlsCommerceJobs.result,
+        status: tlsCommerceJobs.status,
+        paymentSig: tlsCommerceJobs.paymentSig,
+        txHash: tlsCommerceJobs.txHash,
+        amount: tlsCommerceJobs.amount,
+        bidPrice: tlsCommerceJobs.bidPrice,
+        idempotencyKey: tlsCommerceJobs.idempotencyKey,
+        idempotencyResponse: tlsCommerceJobs.idempotencyResponse,
+        leasedBy: tlsCommerceJobs.leasedBy,
+        leasedAt: tlsCommerceJobs.leasedAt,
+        leaseExpiresAt: tlsCommerceJobs.leaseExpiresAt,
+        fencingToken: tlsCommerceJobs.fencingToken,
+        createdAt: tlsCommerceJobs.createdAt,
+        updatedAt: tlsCommerceJobs.updatedAt,
+      })
       .from(tlsCommerceJobs)
+      .innerJoin(tlsTalos, eq(tlsCommerceJobs.talosId, tlsTalos.id))
       .where(and(...conditions))
       .orderBy(asc(tlsCommerceJobs.createdAt))
       .limit(limit + 1);
