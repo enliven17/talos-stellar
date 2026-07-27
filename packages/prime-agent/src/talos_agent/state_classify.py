@@ -28,8 +28,7 @@ if any unclassified field is about to be checkpointed.
 from __future__ import annotations
 
 import enum
-import functools
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
 Sensitivity = Literal["none", "low", "medium", "high", "critical"]

@@ -20,7 +20,7 @@ async function resolveCallerTalos(request: NextRequest): Promise<string | null> 
 }
 
 // POST /api/jobs/:id/result — Submit job result (from service provider agent)
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -99,6 +99,7 @@ export async function POST(
             and(
               eq(tlsCommerceJobs.id, id),
               eq(tlsCommerceJobs.fencingToken, effectiveFencingToken),
+              eq(tlsCommerceJobs.status, "pending"),
             ),
           )
           .returning();
@@ -150,7 +151,7 @@ export async function POST(
 }
 
 // GET /api/jobs/:id/result — Poll for job result (from requester agent)
-export async function GET(
+async function handleGet(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -188,3 +189,6 @@ export async function GET(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withTraceContext(handlePost);
+export const GET = withTraceContext(handleGet);

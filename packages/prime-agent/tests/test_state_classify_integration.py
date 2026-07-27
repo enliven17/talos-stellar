@@ -10,9 +10,6 @@ Covers
 
 from __future__ import annotations
 
-import json
-import sqlite3
-from pathlib import Path
 
 import pytest
 
@@ -22,7 +19,6 @@ from talos_agent.state_classify import (
     StateCategory,
     register_field,
     registered_classification,
-    require_classification,
 )
 from talos_agent.restore import (
     StagedRestoreConfig,
@@ -31,10 +27,8 @@ from talos_agent.restore import (
 )
 from talos_agent.checkpoint_cli import (
     _CHECKPOINT_TABLES as CLI_CHECKPOINT_TABLES,
-    create_checkpoint_from_database,
     build_checkpoint_payload,
 )
-from talos_agent.db import _MIGRATIONS, LocalDB
 
 
 class TestCheckpointCliClassification:

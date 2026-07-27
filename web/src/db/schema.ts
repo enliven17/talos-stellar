@@ -5,12 +5,65 @@ import {
   integer,
   boolean,
   numeric,
+  bigint,
   timestamp,
   jsonb,
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+
+// ─── Benchmark Runs ───────────────────────────────────────────────
+
+export const tlsBenchmarkRuns = pgTable(
+  "tls_benchmark_runs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    suite: text("suite").notNull(),
+    config: jsonb("config").notNull(),
+    summary: jsonb("summary").notNull(),
+    status: text("status").notNull().default("completed"),
+    ciRun: boolean("ci_run").notNull().default(false),
+    commitSha: text("commit_sha"),
+    branch: text("branch"),
+    startedAt: timestamp("started_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tls_benchmark_runs_suite_started_at_idx").on(t.suite, t.startedAt),
+    index("tls_benchmark_runs_commit_sha_idx").on(t.commitSha),
+  ],
+);
+
+export const tlsBenchmarkResults = pgTable(
+  "tls_benchmark_results",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    runId: text("run_id").notNull().references(() => tlsBenchmarkRuns.id, { onDelete: "cascade" }),
+    label: text("label").notNull(),
+    passed: boolean("passed").notNull(),
+    meanMs: numeric("mean_ms", { precision: 18, scale: 4 }).notNull(),
+    medianMs: numeric("median_ms", { precision: 18, scale: 4 }).notNull(),
+    stddevMs: numeric("stddev_ms", { precision: 18, scale: 4 }).notNull(),
+    minMs: numeric("min_ms", { precision: 18, scale: 4 }).notNull(),
+    maxMs: numeric("max_ms", { precision: 18, scale: 4 }).notNull(),
+    variance: numeric("variance", { precision: 10, scale: 6 }).notNull(),
+    percentiles: jsonb("percentiles").notNull(),
+    meanMemoryMb: numeric("mean_memory_mb", { precision: 10, scale: 2 }).notNull(),
+    peakMemoryMb: numeric("peak_memory_mb", { precision: 10, scale: 2 }).notNull(),
+    meanCpuPercent: numeric("mean_cpu_percent", { precision: 6, scale: 2 }).notNull(),
+    peakCpuPercent: numeric("peak_cpu_percent", { precision: 6, scale: 2 }).notNull(),
+    thresholdViolations: jsonb("threshold_violations"),
+    sampleCount: integer("sample_count").notNull().default(0),
+    durationMs: integer("duration_ms").notNull().default(0),
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tls_benchmark_results_run_id_idx").on(t.runId),
+    index("tls_benchmark_results_label_passed_idx").on(t.label, t.passed),
+  ],
+);
 
 // ─── TALOS (Agent Corporation) ────────────────────────────────────
 
@@ -64,9 +117,25 @@ export const tlsTalos = pgTable(
     agentWalletId: text("agentWalletId"),             // Stellar public key (G...) — wallet identifier
     agentWalletAddress: text("agentWalletAddress"),   // Stellar public key (G...) — for display/payment routing
 
+    // Retirement tracking - preserves historical identity while preventing reuse
+    retiredAt: timestamp("retiredAt", { mode: "date", precision: 3 }),
+    retiredReason: text("retiredReason"),
+    supersededBy: text("supersededBy"),               // References tlsTalos.id of replacement agent
+
+    // Soft deletion - separates identity retirement from privacy deletion
+    deletedAt: timestamp("deletedAt", { mode: "date", precision: 3 }),
+    deletedReason: text("deletedReason"),
+
     createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
     updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
   },
+  (t) => [
+    // Partial unique index: agentName must be unique among non-retired agents
+    // This prevents name reuse while allowing retired agents to keep their names
+    uniqueIndex("tls_talos_agentName_active_key")
+      .on(t.agentName)
+      .where(sql`"retiredAt" IS NULL`),
+  ],
 );
 
 // ─── Patron (Shareholder) ─────────────────────────────────────────
@@ -75,7 +144,7 @@ export const tlsPatrons = pgTable(
   "tls_patrons",
   {
     id: text("id").primaryKey().$defaultFn(() => createId()),
-    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "restrict" }),
     stellarPublicKey: text("stellarPublicKey").notNull(),
     role: text("role").notNull(),
     pulseAmount: integer("pulseAmount").notNull().default(0),
@@ -96,7 +165,7 @@ export const tlsActivities = pgTable(
   "tls_activities",
   {
     id: text("id").primaryKey().$defaultFn(() => createId()),
-    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "restrict" }),
     type: text("type").notNull(),
     content: text("content").notNull(),
     channel: text("channel").notNull(),
@@ -143,7 +212,7 @@ export const tlsApprovals = pgTable(
   "tls_approvals",
   {
     id: text("id").primaryKey().$defaultFn(() => createId()),
-    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "restrict" }),
     type: text("type").notNull(),
     title: text("title").notNull(),
     description: text("description"),
@@ -168,7 +237,7 @@ export const tlsRevenues = pgTable(
   "tls_revenues",
   {
     id: text("id").primaryKey().$defaultFn(() => createId()),
-    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "restrict" }),
     amount: numeric("amount", { precision: 18, scale: 6 }).notNull(),
     currency: text("currency").notNull().default("USDC"),
     source: text("source").notNull(),
@@ -192,7 +261,7 @@ export const tlsDividends = pgTable(
   "tls_dividends",
   {
     id: text("id").primaryKey().$defaultFn(() => createId()),
-    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "restrict" }),
 
     // Total USDC (or other currency) distributed to patrons in this event
     amount: numeric("amount", { precision: 18, scale: 6 }).notNull(),
@@ -263,7 +332,7 @@ export const tlsCommerceJobs = pgTable(
   "tls_commerce_jobs",
   {
     id: text("id").primaryKey().$defaultFn(() => createId()),
-    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "restrict" }),
     requesterTalosId: text("requesterTalosId").notNull(),
     serviceName: text("serviceName").notNull(),
     payload: jsonb("payload"),
@@ -306,7 +375,7 @@ export const tlsPlaybooks = pgTable(
   "tls_playbooks",
   {
     id: text("id").primaryKey().$defaultFn(() => createId()),
-    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "restrict" }),
     title: text("title").notNull(),
     category: text("category").notNull(),
     channel: text("channel").notNull(),
@@ -385,13 +454,69 @@ export const tlsTokenPurchases = pgTable(
   ],
 );
 
+// ─── Stellar Transaction Finality Record ─────────────────────────
+//
+// Tracks the settlement lifecycle of every Stellar transaction Talos submits
+// or monitors.  The reconciler polls Horizon and drives each row through the
+// finality state machine until it reaches a terminal state.
+//
+// States: PENDING → CONFIRMING → CONFIRMED | FAILED | EXPIRED | NOT_FOUND
+
+export const tlsStellarTxRecords = pgTable(
+  "tls_stellar_tx_records",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+
+    // The Stellar transaction hash being tracked (unique per record)
+    txHash: text("tx_hash").notNull(),
+
+    // Which subsystem originated the tx: "commerce_job" | "token_purchase" | "other"
+    sourceType: text("source_type").notNull().default("other"),
+
+    // Opaque reference back to the originating row (job id, txHash of token purchase, etc.)
+    sourceId: text("source_id"),
+
+    // Current state-machine position
+    finalityStatus: text("finality_status").notNull().default("PENDING"),
+
+    // Ledger sequence number when the tx was submitted (if known at submission time)
+    ledgerSubmitted: integer("ledger_submitted"),
+
+    // Most recent ledger number polled; the reconciler uses this to bound re-scan
+    lastLedgerChecked: integer("last_ledger_checked"),
+
+    // Ledger in which the tx was permanently included (set when CONFIRMED)
+    confirmedLedger: integer("confirmed_ledger"),
+
+    // Running count of poll attempts (for back-off and alerting)
+    pollCount: integer("poll_count").notNull().default(0),
+
+    // Last error message from Horizon — never contains secrets or user payloads
+    lastError: text("last_error"),
+
+    // True once the reconciler has applied the downstream repair for this tx
+    repairApplied: boolean("repair_applied").notNull().default(false),
+
+    // PENDING/CONFIRMING rows older than this become EXPIRED
+    expiresAt: timestamp("expires_at", { mode: "date", precision: 3 }),
+
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { mode: "date", precision: 3 }).notNull().defaultNow().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("tls_stellar_tx_records_tx_hash_unique").on(t.txHash),
+    index("tls_stellar_tx_records_status_updated_idx").on(t.finalityStatus, t.updatedAt),
+    index("tls_stellar_tx_records_source_idx").on(t.sourceType, t.sourceId),
+  ],
+);
+
 // ─── API Key Audit Log ────────────────────────────────────────────
 
 export const tlsApiAuditLogs = pgTable(
   "tls_api_audit_logs",
   {
     id: text("id").primaryKey().$defaultFn(() => createId()),
-    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "restrict" }),
 
     // Which endpoint was called
     method: text("method").notNull(),   // GET | POST | PATCH | PUT | DELETE
@@ -402,6 +527,12 @@ export const tlsApiAuditLogs = pgTable(
 
     // Caller info
     ipAddress: text("ipAddress"),
+
+    // ── Hash chain columns (tamper-evidence) ──
+    sequenceNumber: integer("sequenceNumber"),          // Monotonic per-agent (0, 1, 2, ...)
+    previousHash: text("previousHash"),                 // SHA-256 hex of prior entry ("GENESIS" for first)
+    entryHash: text("entryHash"),                       // SHA-256 hex of this entry (canonical encoding)
+    chainVersion: text("chainVersion"),                 // Schema version ("1" for current)
 
     createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
   },
@@ -449,6 +580,37 @@ export const tlsLifecycleEvents = pgTable(
     uniqueIndex("tls_lifecycle_events_talosId_idempotencyKey_unique")
       .on(t.talosId, t.idempotencyKey)
       .where(sql`"idempotencyKey" IS NOT NULL`),
+  ],
+);
+
+// ─── Consumed Nonces (replay protection) ────────────────────────────
+//
+// Every signed transfer nonce is persisted here with a UNIQUE constraint on
+// (talosId, nonce) so the database enforces single-use semantics across
+// process restarts and concurrent requests.  Rows are retained for a short
+// window after the nonce expires so delayed replays are still caught, then
+// pruned by a periodic vacuum.
+//
+// expiry — the original transfer-authorization expiry (Unix seconds).
+//          Used by the vacuum to safely remove expired rows without
+//          consulting external state.
+// consumedAt — wall-clock time when the nonce was first consumed.
+//              Present for audit and to bound the vacuum window.
+
+export const tlsConsumedNonces = pgTable(
+  "tls_consumed_nonces",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull(),
+    nonce: text("nonce").notNull(),
+    expiry: integer("expiry").notNull(),             // original auth expiry (Unix seconds)
+    consumedAt: timestamp("consumedAt", { mode: "date", precision: 3 })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tls_consumed_nonces_talosId_nonce_key").on(t.talosId, t.nonce),
+    index("tls_consumed_nonces_expiry_idx").on(t.expiry),
   ],
 );
 

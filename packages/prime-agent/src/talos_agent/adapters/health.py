@@ -124,9 +124,24 @@ class DiscordProbe:
 
     async def probe(self) -> ProbeResult:
         a = self._adapter
-        has_webhook = bool(getattr(a, "_webhook_url", ""))
-        has_token = bool(getattr(a, "_bot_token", ""))
-        has_channel = bool(getattr(a, "_channel_id", ""))
+        snapshot_fn = getattr(a, "health_snapshot", None)
+        snapshot = snapshot_fn() if callable(snapshot_fn) else {}
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        has_webhook = bool(
+            snapshot["has_webhook"]
+            if "has_webhook" in snapshot
+            else getattr(a, "_webhook_url", "")
+        )
+        has_token = bool(
+            snapshot["has_token"]
+            if "has_token" in snapshot
+            else getattr(a, "_bot_token", "")
+        )
+        has_channel = bool(
+            snapshot["has_channel"]
+            if "has_channel" in snapshot
+            else getattr(a, "_channel_id", "")
+        )
 
         if has_webhook or (has_token and has_channel):
             return ProbeResult(
@@ -179,8 +194,19 @@ class TelegramProbe:
 
     async def probe(self) -> ProbeResult:
         a = self._adapter
-        has_token = bool(getattr(a, "_bot_token", ""))
-        has_chat = bool(getattr(a, "_chat_id", ""))
+        snapshot_fn = getattr(a, "health_snapshot", None)
+        snapshot = snapshot_fn() if callable(snapshot_fn) else {}
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        has_token = bool(
+            snapshot["has_token"]
+            if "has_token" in snapshot
+            else getattr(a, "_bot_token", "")
+        )
+        has_chat = bool(
+            snapshot["has_chat"]
+            if "has_chat" in snapshot
+            else getattr(a, "_chat_id", "")
+        )
 
         if has_token and has_chat:
             return ProbeResult(
@@ -229,13 +255,30 @@ class XProbe:
 
     async def probe(self) -> ProbeResult:
         a = self._adapter
+        snapshot_fn = getattr(a, "health_snapshot", None)
+        snapshot = snapshot_fn() if callable(snapshot_fn) else {}
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
         settings = getattr(a, "_settings", None)
-        has_username = bool(getattr(settings, "x_username", ""))
-        has_password = bool(getattr(settings, "x_password", ""))
+        has_username = bool(
+            snapshot["has_username"]
+            if "has_username" in snapshot
+            else getattr(settings, "x_username", "")
+        )
+        from talos_agent.config import resolve_setting_secret
+
+        has_password = bool(
+            snapshot["has_password"]
+            if "has_password" in snapshot
+            else resolve_setting_secret(settings, "x_password")
+        )
         has_creds = has_username and has_password
 
         browser: object | None = getattr(a, "_browser", None)
-        browser_live = _browser_is_live(browser)
+        browser_live = bool(
+            snapshot["browser_live"]
+            if "browser_live" in snapshot
+            else _browser_is_live(browser)
+        )
 
         if not has_creds:
             return ProbeResult(

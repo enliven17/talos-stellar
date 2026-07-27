@@ -65,10 +65,22 @@ later migration once the application no longer reads the old shape.
   databases already have these roles.
 - **Schema drift failure in CI** — you changed `web/src/db/schema.ts` without committing a
   matching migration. Run `pnpm db:generate` inside `web/` and commit the generated file(s) in
-  `web/drizzle/`.
-- **Migration times out** — check the `migration-logs` artifact from the failed run; a hang
-  usually means a lock is held by a concurrent migration or long-running transaction against the
-  same database.
+  `web/drizzle/`.- **Migration times out** — check the `migration-logs` artifact from the failed run; a hang
+  usually means a lock is held by a concurrent migration or long-running transaction against
+  the same database.
+
+## Backup / DR
+
+Migration `0013_add_backup_runs.sql` is **purely additive** — it adds the
+`tls_backup_runs` table that records every backup, restore, and verify
+operation. The migration does not alter any existing table and is forward
+compatible with prior backups. Restore flows skip unknown tables in the
+artifact and accept partial overlap with the live DB schema, so a backup
+made against migration N+5 can be restored on a database that has already
+been migrated to N+8 (one-way upgrade only).
+
+See [`docs/DR_RUNBOOK.md`](docs/DR_RUNBOOK.md) for the related restore
+endpoints, RPO/RTO targets, and the manifest format.
 - **Advisory lock check fails** — a previous migrator run crashed mid-migration and left its lock
   held. On a real database, restart the connection pool holding the lock, or open a new session
   and run `SELECT pg_advisory_unlock_all();` after confirming no migration is genuinely in

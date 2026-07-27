@@ -41,13 +41,20 @@ export async function GET() {
   };
 
   await Promise.allSettled([
-    withTimeout(db.execute(sql`SELECT 1`), DB_TIMEOUT_MS).then(() => {
+    withTimeout(
+      (signal) => {
+        void signal;
+        return db.execute(sql`SELECT 1`);
+      },
+      DB_TIMEOUT_MS,
+    ).then(() => {
       checks.db = "ok";
     }),
     withTimeout(
-      fetch(process.env.STELLAR_HORIZON_URL ?? DEFAULT_HORIZON).then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      }),
+      (signal) =>
+        fetch(process.env.STELLAR_HORIZON_URL ?? DEFAULT_HORIZON, { signal }).then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        }),
       STELLAR_TIMEOUT_MS,
     ).then(() => {
       checks.stellar = "ok";

@@ -7,11 +7,12 @@ import { verifyAgentApiKey } from "@/lib/auth";
 import { verifyX402Payment, settleX402Payment } from "@/lib/stellar-x402";
 import { fulfillInstant } from "@/lib/fulfillment";
 import { registerServiceSchema, submitBidSchema, parseBody } from "@/lib/schemas";
+import { withTraceContext } from "@/lib/tracing";
 
 const STELLAR_NETWORK = process.env.STELLAR_NETWORK ?? "testnet";
 
 // GET /api/talos/:id/service — Returns 402 with payment details (x402 storefront)
-export async function GET(
+async function handleGet(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -65,7 +66,7 @@ export async function GET(
 }
 
 // POST /api/talos/:id/service — Submit x402 payment + create commerce job
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -276,14 +277,14 @@ export async function POST(
 }
 
 // PUT /api/talos/:id/service — Register or update commerce service (upsert)
-export async function PUT(
+async function handlePut(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   try {
-    const auth = await verifyAgentApiKey(request, id);
+    const auth = await verifyAgentApiKey(request, id, ["commerce:write"]);
     if (!auth.ok) return auth.response;
 
     const parsed = await parseBody(request, registerServiceSchema);
@@ -351,3 +352,7 @@ export async function PUT(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withTraceContext(handleGet);
+export const POST = withTraceContext(handlePost);
+export const PUT = withTraceContext(handlePut);

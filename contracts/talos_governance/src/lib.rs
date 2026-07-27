@@ -5,8 +5,11 @@
 #[cfg(all(test, not(target_arch = "wasm32")))]
 extern crate std;
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec,
+};
 use ttl_manager;
+use pause_control;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -72,6 +75,15 @@ pub enum DataKey {
     LastTouched(u32),
 }
 
+// ── Pause Domains ───────────────────────────────────────────────────
+
+/// Pause domain for proposal creation.
+pub const PAUSE_PROPOSAL_CREATION: u32 = 7;
+/// Pause domain for governance voting.
+pub const PAUSE_GOVERNANCE_VOTING: u32 = 8;
+/// Pause domain for governance configuration.
+pub const PAUSE_GOVERNANCE_CONFIG: u32 = 9;
+
 fn emit_proposal_created(env: &Env, proposal_id: u32, talos_id: u32, proposer: Address) {
     env.events().publish(
         (symbol_short!("prop_crt"), proposal_id),
@@ -89,6 +101,57 @@ fn emit_vote_cast(env: &Env, proposal_id: u32, voter: Address, choice: VoteChoic
 fn emit_proposal_status_changed(env: &Env, proposal_id: u32, status: ProposalStatus) {
     env.events()
         .publish((symbol_short!("prop_stat"), proposal_id), status);
+}
+
+// ── Stable interface (v1.0.0) ───────────────────────────────────────
+//
+// Also fixes a pre-existing omission: Governance did not previously
+// expose `version()` or `interface_id()`. Cross-contract callers and
+// tooling (e.g. an indexer reconciling the protocol's contract families)
+// now read these bytes via the standard interface queries exposed on
+// every Talos contract. The version starts at `(1, 0, 0)` to align
+// with the rest of the v1 protocol generation; the namespace and
+// golden-vector derivation follow the same algorithm as the Registry
+// and Name Service (see `INTERFACE_ID` tests below).
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 0, 0);
+
+pub const INTERFACE_NAMESPACE: &str = "TalosGovernance";
+
+pub const INTERFACE_ID: [u8; 32] = [
+    0x54, 0x61, 0x6C, 0x6F, 0x73, 0x47, 0x6F, 0x76, // "TalosGov"
+    0x65, 0x72, 0x6E, 0x61, 0x6E, 0x63, 0x65, 0x00, // "ernance" + zero pad
+    // (major, minor, patch) big-endian u32s
+    0x00, 0x00, 0x00, 0x01, // major = 1
+    0x00, 0x00, 0x00, 0x00, // minor = 0
+    0x00, 0x00, 0x00, 0x00, // patch = 0
+    // reserved
+    0x00, 0x00, 0x00, 0x00,
+];
+
+/// Capability symbols returned by `interface_features()`. Capability
+/// IDs are stable: appending to this list bumps `minor`; renaming or
+/// removing bumps `major`.
+pub fn features_list() -> &'static [&'static str] {
+    &[
+        "proposal_lifecycle", // create_proposal / vote / finalize / execute
+        "vote_weighting",     // snapshot-based token-weighted voting
+        "config_admin",       // update_config / cache_token_balance requires admin
+        "interface_query",    // version / interface_id / supports_version
+    ]
+}
+
+/// SemVer compatibility helper used by `supports_version`.
+pub fn version_supports(actual: (u32, u32, u32), required: (u32, u32, u32)) -> bool {
+    if actual.0 != required.0 {
+        return false;
+    }
+    if actual.1 > required.1 {
+        return true;
+    }
+    if actual.1 < required.1 {
+        return false;
+    }
+    actual.2 >= required.2
 }
 
 #[contract]
@@ -140,6 +203,8 @@ impl TalosGovernance {
         title: String,
         description: String,
     ) -> u32 {
+        pause_control::check_not_paused(&env, PAUSE_PROPOSAL_CREATION);
+
         proposer.require_auth();
 
         if title.len() == 0 {
@@ -182,6 +247,8 @@ impl TalosGovernance {
     }
 
     pub fn vote(env: Env, voter: Address, proposal_id: u32, choice: VoteChoice) {
+        pause_control::check_not_paused(&env, PAUSE_GOVERNANCE_VOTING);
+
         voter.require_auth();
 
         let mut proposal: Proposal = env
@@ -277,6 +344,7 @@ impl TalosGovernance {
         address: Address,
         balance: i128,
     ) {
+        pause_control::check_not_paused(&env, PAUSE_GOVERNANCE_CONFIG);
         Self::require_admin(&env, &admin);
         if balance < 0 {
             panic!("Balance cannot be negative");
@@ -287,6 +355,7 @@ impl TalosGovernance {
     }
 
     pub fn update_config(env: Env, admin: Address, config: GovernanceConfig) {
+        pause_control::check_not_paused(&env, PAUSE_GOVERNANCE_CONFIG);
         Self::require_admin(&env, &admin);
         if config.quorum_threshold <= 0 {
             panic!("Quorum must be positive");
@@ -320,6 +389,39 @@ impl TalosGovernance {
         env.storage().persistent().get(&DataKey::Admin)
     }
 
+    // ── Stable interface (v1.0.0) ───────────────────────────────────
+
+    /// Return `(major, minor, patch)` for this contract. Fixes a
+    /// pre-existing omission; the value is compile-time and immutable
+    /// past deployment.
+    pub fn version(_e: Env) -> (u32, u32, u32) {
+        CONTRACT_VERSION
+    }
+
+    /// Return the 32-byte stable interface identifier for
+    /// TalosGovernance v1. See the golden-vector test for the
+    /// independent reproduction of the byte layout.
+    pub fn interface_id(e: Env) -> BytesN<32> {
+        BytesN::from_array(&e, &INTERFACE_ID)
+    }
+
+    /// Return `true` when the deployed semver supports the requested
+    /// `(major, minor, patch)` floor — see `version_supports`.
+    pub fn supports_version(e: Env, major: u32, minor: u32, patch: u32) -> bool {
+        let _ = e;
+        version_supports(CONTRACT_VERSION, (major, minor, patch))
+    }
+
+    /// Return the list of capability symbols offered by this contract.
+    pub fn interface_features(e: Env) -> Vec<Symbol> {
+        let caps = features_list();
+        let mut out = Vec::new(&e);
+        for cap in caps {
+            out.push_back(Symbol::new(&e, cap));
+        }
+        out
+    }
+
     pub fn next_proposal_id(env: Env) -> u32 {
         env.storage()
             .persistent()
@@ -332,7 +434,11 @@ impl TalosGovernance {
     /// Touch a governance proposal to reset its Soroban TTL.
     pub fn touch_proposal(e: Env, proposal_id: u32) -> bool {
         let key = DataKey::Proposal(proposal_id);
-        let proposal: Proposal = e.storage().persistent().get(&key).expect("Proposal not found");
+        let proposal: Proposal = e
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("Proposal not found");
         let current_ledger = e.ledger().sequence();
         let last_touched: u32 = e
             .storage()
@@ -354,6 +460,8 @@ impl TalosGovernance {
 
     /// Batch-touch all governance proposals + admin keys (admin only).
     pub fn touch_all_ttl(e: Env) -> (u32, u32) {
+        pause_control::check_not_paused(&e, PAUSE_GOVERNANCE_CONFIG);
+
         let admin: Address = e
             .storage()
             .persistent()
@@ -366,10 +474,16 @@ impl TalosGovernance {
         let mut skipped = 0u32;
 
         if let Some(a) = e.storage().persistent().get::<_, Address>(&DataKey::Admin) {
-            let last: u32 = e.storage().persistent().get(&DataKey::LastTouched(0)).unwrap_or(0);
+            let last: u32 = e
+                .storage()
+                .persistent()
+                .get(&DataKey::LastTouched(0))
+                .unwrap_or(0);
             if ttl_manager::needs_touch(last, current_ledger) {
                 e.storage().persistent().set(&DataKey::Admin, &a);
-                e.storage().persistent().set(&DataKey::LastTouched(0), &current_ledger);
+                e.storage()
+                    .persistent()
+                    .set(&DataKey::LastTouched(0), &current_ledger);
                 touched += 1;
             } else {
                 skipped += 1;
@@ -430,7 +544,13 @@ impl TalosGovernance {
         if health.is_empty() {
             (0, 0, 0, 0, 0)
         } else {
-            (health.min_age, health.max_age, health.keys_below_warn, health.keys_below_crit, health.total_keys)
+            (
+                health.min_age,
+                health.max_age,
+                health.keys_below_warn,
+                health.keys_below_crit,
+                health.total_keys,
+            )
         }
     }
 
@@ -484,6 +604,39 @@ impl TalosGovernance {
             ProposalStatus::Rejected
         };
     }
+
+    // ── Scoped Emergency Pause Controls ──────────────────────────────
+
+    /// Pause a domain. Only the admin can pause.
+    pub fn pause_domain(e: Env, domain_id: u32, duration: u64) {
+        let admin: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
+        pause_control::pause_domain(&e, domain_id, &admin, duration);
+    }
+
+    /// Unpause a domain. Only the admin can unpause.
+    pub fn unpause_domain(e: Env, domain_id: u32) {
+        let admin: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
+        pause_control::unpause_domain(&e, domain_id, &admin);
+    }
+
+    /// Check whether a domain is paused (expires elapsed pauses first).
+    pub fn is_domain_paused(e: Env, domain_id: u32) -> bool {
+        pause_control::check_not_paused(&e, domain_id);
+        pause_control::is_paused(&e, domain_id)
+    }
+
+    /// Get the pause status for a domain.
+    pub fn get_domain_pause_status(e: Env, domain_id: u32) -> Option<pause_control::PauseStatus> {
+        pause_control::get_pause_status(&e, domain_id)
+    }
 }
 
 #[cfg(test)]
@@ -494,6 +647,7 @@ mod tests {
         testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
         IntoVal,
     };
+    use std::string::ToString;
 
     fn setup() -> (
         Env,
@@ -700,5 +854,159 @@ mod tests {
                 },
             }])
             .update_config(&attacker, &config);
+    }
+
+    // ── Pause Control Integration Tests ─────────────────────────
+
+    #[test]
+    fn pause_proposal_creation_blocks_create_proposal() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause_domain",
+                    args: (PAUSE_PROPOSAL_CREATION, 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .pause_domain(&PAUSE_PROPOSAL_CREATION, &0);
+
+        let title = s(&env, "Test");
+        let description = s(&env, "Test");
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &proposer,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_proposal",
+                    args: (proposer.clone(), 1u32, title.clone(), description.clone())
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_proposal(&proposer, &1, &title, &description);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn pause_voting_blocks_vote() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+        let proposal_id =
+            create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        cache_balance_with_auth(&env, &contract_id, &client, &admin, 90, &voter, 200);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause_domain",
+                    args: (PAUSE_GOVERNANCE_VOTING, 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .pause_domain(&PAUSE_GOVERNANCE_VOTING, &0);
+
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &voter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "vote",
+                    args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_vote(&voter, &proposal_id, &VoteChoice::Approve);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn pause_governance_config_blocks_update_config() {
+        let (env, contract_id, admin, pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause_domain",
+                    args: (PAUSE_GOVERNANCE_CONFIG, 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .pause_domain(&PAUSE_GOVERNANCE_CONFIG, &0);
+
+        let config = GovernanceConfig {
+            quorum_threshold: 200,
+            consensus_threshold: 6_000,
+            voting_period_ledgers: 30,
+            pulse_token_address: pulse,
+        };
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &new_admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_config",
+                    args: (new_admin.clone(), config.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_config(&new_admin, &config);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn unpause_governance_restores_voting() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+        let proposal_id =
+            create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        cache_balance_with_auth(&env, &contract_id, &client, &admin, 90, &voter, 200);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause_domain",
+                    args: (PAUSE_GOVERNANCE_VOTING, 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .pause_domain(&PAUSE_GOVERNANCE_VOTING, &0);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "unpause_domain",
+                    args: (PAUSE_GOVERNANCE_VOTING,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .unpause_domain(&PAUSE_GOVERNANCE_VOTING);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &voter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "vote",
+                    args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .vote(&voter, &proposal_id, &VoteChoice::Approve);
     }
 }

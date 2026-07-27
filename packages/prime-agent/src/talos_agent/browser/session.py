@@ -45,6 +45,8 @@ CHROME_ARGS = [
 ]
 
 # Suppress Stagehand SEA server logs by redirecting stdout/stderr
+
+
 def _quiet_sea_server():
     try:
         import subprocess as _sp

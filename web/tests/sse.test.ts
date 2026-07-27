@@ -25,15 +25,27 @@ const mocks = vi.hoisted(() => {
 
   const dbSelect = vi.fn(() => {
     const n = _selectCallCount++;
-    // Call 0 → patrons query  → no patron memberships
-    // Call 1 → owners query   → one owned TALOS so poll() actually runs
-    // Call 2+ → poll queries  → no new approvals / activities
+    // Call 0 → patrons query     → no patron memberships
+    // Call 1 → owners query      → one owned TALOS so poll() actually runs
+    // Call 2 → quota config      → empty → disabled safe fallback (no insert)
+    // Call 3+ → poll queries     → no new approvals / activities
     const result = n === 1 ? [{ id: "talos-abc" }] : [];
     return makeSelectChain(result);
   });
 
+  // Quota upsert insert — returns a row with count=1 (only called when quota enabled)
+  const makeInsertChain = () => {
+    const chain: Record<string, unknown> = {};
+    chain.values = vi.fn(() => chain);
+    chain.onConflictDoUpdate = vi.fn(() => chain);
+    chain.returning = vi.fn(() => Promise.resolve([{ count: 1 }]));
+    return chain;
+  };
+  const dbInsert = vi.fn(() => makeInsertChain());
+
   return {
     dbSelect,
+    dbInsert,
     makeSelectChain,
     getSelectCallCount: () => _selectCallCount,
     resetSelectCallCount: () => { _selectCallCount = 0; },
@@ -43,7 +55,7 @@ const mocks = vi.hoisted(() => {
 // ── Module mocks ─────────────────────────────────────────────────────────────
 
 vi.mock("@/db", () => ({
-  db: { select: mocks.dbSelect },
+  db: { select: mocks.dbSelect, insert: mocks.dbInsert },
 }));
 
 vi.mock("@/db/schema", () => ({
@@ -155,17 +167,17 @@ describe("GET /api/events", () => {
       await flushMicrotasks();
 
       const callsAfterInit = mocks.getSelectCallCount();
-      // Exactly 2 DB queries: one for patrons, one for owners.
-      expect(callsAfterInit).toBe(2);
+      // 3 DB queries on init: one for patrons, one for owners, one for quota config.
+      expect(callsAfterInit).toBe(3);
 
       // Advance time to fire 3 poll cycles.
       await vi.advanceTimersByTimeAsync(3 * 8_000);
 
       const callsAfter3Polls = mocks.getSelectCallCount();
       // Each poll issues 2 queries (approvals + activities).
-      // Total with cached talosIds: 2 (init) + 3×2 (polls) = 8.
+      // Total with cached talosIds: 3 (init) + 3×2 (polls) = 9.
       // Original uncached code would have been: 3×2 (talosIds) + 3×2 (polls) = 12.
-      expect(callsAfter3Polls).toBe(2 + 3 * 2);
+      expect(callsAfter3Polls).toBe(3 + 3 * 2);
 
       controller.abort();
     });

@@ -7,7 +7,7 @@ import { parseLimit } from "@/lib/parse-limit";
 // GET /api/leaderboard — Ranking data with cursor-based pagination
 export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = request.nextUrl;
+    const { searchParams } = new URL(request.url);
     const cursor = searchParams.get("cursor");
     const parsedLimit = parseLimit(searchParams.get("limit"), 50, 100);
     if (!parsedLimit.ok) return parsedLimit.response;
@@ -53,10 +53,10 @@ export async function GET(request: NextRequest) {
         ) {
           parsedCursor = decoded as [number, string];
         } else {
-          return Response.json({ error: "Invalid cursor format" }, { status: 400 });
+          return badRequest(request, "Invalid cursor format");
         }
       } catch {
-        return Response.json({ error: "Invalid cursor" }, { status: 400 });
+        return badRequest(request, "Invalid cursor");
       }
     }
 
@@ -115,6 +115,6 @@ export async function GET(request: NextRequest) {
 
     return Response.json({ data, nextCursor });
   } catch {
-    return Response.json({ error: "Internal server error" }, { status: 500 });
+    return internalError(request);
   }
 }

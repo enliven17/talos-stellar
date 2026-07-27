@@ -824,6 +824,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
+name = "pause-control"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "pkcs8"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1494,6 +1501,7 @@ dependencies = [
 name = "talos-governance"
 version = "0.1.0"
 dependencies = [
+ "pause-control",
  "soroban-sdk",
  "ttl-manager",
 ]
@@ -1502,6 +1510,7 @@ dependencies = [
 name = "talos-name-service"
 version = "0.1.0"
 dependencies = [
+ "pause-control",
  "proptest",
  "soroban-sdk",
  "talos-registry",
@@ -1512,6 +1521,7 @@ dependencies = [
 name = "talos-registry"
 version = "0.1.0"
 dependencies = [
+ "pause-control",
  "soroban-sdk",
  "ttl-manager",
 ]

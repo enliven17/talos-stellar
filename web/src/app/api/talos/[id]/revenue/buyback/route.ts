@@ -115,10 +115,11 @@ export async function POST(
       usdcSpent: usdcAmount,
       message: `Buyback: burned ${mitosAmount.toLocaleString()} ${mitosCode} tokens. tx: ${txHash.slice(0, 12)}...`,
     });
-  } catch (err: any) {
-    console.error("[buyback]", err?.response?.data ?? err?.message ?? err);
+  } catch (err: unknown) {
+    const e = err as { response?: { data?: { extras?: { result_codes?: { operations?: string[] } } } }; message?: string };
+    console.error("[buyback]", e.response?.data ?? e.message ?? err);
     return Response.json(
-      { error: err?.response?.data?.extras?.result_codes?.operations?.[0] ?? err?.message ?? "Buyback failed" },
+      { error: e.response?.data?.extras?.result_codes?.operations?.[0] ?? e.message ?? "Buyback failed" },
       { status: 500 },
     );
   }
@@ -160,7 +161,7 @@ export async function GET(
         const server = new Horizon.Server("https://horizon-testnet.stellar.org");
         const OPERATOR = OPERATOR_PUBLIC_KEY;
         const account = await server.loadAccount(OPERATOR);
-        const balance = (account.balances as any[]).find(
+        const balance = (account.balances as Array<{ asset_code?: string; asset_issuer?: string; balance?: string }>).find(
           b => b.asset_code === mitosCode && b.asset_issuer === mitosIssuer,
         );
         operatorMitosBalance = parseFloat(balance?.balance ?? "0");

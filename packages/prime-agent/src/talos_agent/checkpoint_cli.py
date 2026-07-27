@@ -16,7 +16,6 @@ import click
 from talos_agent.state_classify import (
     StateCategory,
     registered_classification,
-    validate_checkpoint_payload as classify_validate_payload,
 )
 
 DEFAULT_MAX_SIZE = 10 * 1024 * 1024

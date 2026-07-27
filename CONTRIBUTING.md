@@ -113,6 +113,7 @@ If you deploy new contracts, update the contract IDs in `web/.env.local` with th
 - `X_USERNAME`, `X_PASSWORD`, and `X_EMAIL`
 - `BROWSER_HEADLESS`
 - agent timing and approval settings such as `AGENT_CYCLE_INTERVAL`, `POLLING_INTERVAL`, and `APPROVAL_THRESHOLD`
+- opt-in durable job inbox/outbox settings under `TALOS_DURABLE_JOB_EFFECTS_*` and `TALOS_JOB_EFFECT_*`
 
 ### Contracts env
 
@@ -123,6 +124,30 @@ If you deploy new contracts, update the contract IDs in `web/.env.local` with th
 - commented placeholders for the post-deployment contract IDs used by the web app
 
 ## Running the Project
+
+### One-command local integration stack
+
+A reproducible local integration stack is available for contributors:
+
+```bash
+pnpm stack:up
+```
+
+This starts PostgreSQL, a mock Stellar provider, the web app, and seeds the local database. The web service exposes health and readiness endpoints at `/api/health` and `/api/health/ready`.
+
+Use these commands to manage the environment:
+
+```bash
+pnpm stack:logs
+pnpm stack:down
+pnpm stack:reset
+```
+
+The stack defaults to the web service and a mock Stellar provider. Add the optional prime-agent service with:
+
+```bash
+docker compose --profile agent up -d prime-agent
+```
 
 ### Web
 
@@ -146,7 +171,10 @@ pnpm build
 pnpm lint
 pnpm test:unit
 pnpm test:e2e
+pnpm test:bench       # Run performance benchmarks
 ```
+
+See [BENCHMARKS.md](./BENCHMARKS.md) for the benchmark system documentation.
 
 Any PR that changes `web/drizzle/**` or `web/src/db/**` is validated by the `Web Migrations CI`
 workflow, which applies your migrations to an ephemeral Postgres instance. See
@@ -183,6 +211,9 @@ cargo test --target wasm32-unknown-unknown
 - Do not commit secrets, keys, or generated `.env` files
 - For TypeScript and React, run `pnpm lint` and the relevant `pnpm test:*` command before opening a PR
 - For Python, prefer explicit types and validate changes with `uv run pytest`
+- For provider job-effect changes, also run
+  `uv run pytest tests/test_durable_job_effects.py` and follow the
+  [durable job effects runbook](./docs/prime-agent-durable-job-effects.md).
 - For Rust, keep formatting standard with `cargo fmt` and validate with `cargo test`
 
 ## Database Transaction Retry & Serialization Hardening

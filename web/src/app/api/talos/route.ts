@@ -13,7 +13,7 @@ import { fetchReputations } from "@/lib/reputation-ledger";
 // GET /api/talos — List TALOS entries with cursor-based pagination
 export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = request.nextUrl;
+    const { searchParams } = new URL(request.url);
     const cursor = searchParams.get("cursor");
     const parsedLimit = parseLimit(searchParams.get("limit"), 50, 100);
     if (!parsedLimit.ok) return parsedLimit.response;
@@ -154,12 +154,12 @@ export async function GET(request: NextRequest) {
 
     return Response.json({ data: accumulated, nextCursor });
   } catch {
-    return Response.json({ error: "Internal server error" }, { status: 500 });
+    return internalError(request);
   }
 }
 
 // POST /api/talos — Create a new TALOS (Genesis)
-export async function POST(request: NextRequest) {
+async function _POST(request: NextRequest) {
   try {
     const parsed = await parseBody(request, createTalosSchema);
     if (parsed.error) return parsed.error;
@@ -194,15 +194,15 @@ export async function POST(request: NextRequest) {
     // Message includes core immutable fields to prevent parameter tampering.
     const expectedMessage = `talos-genesis:${name}:${onChainId ?? "null"}:${supply}`;
     if (message !== expectedMessage) {
-      return Response.json(
-        { error: `Signature message must be exactly '${expectedMessage}'` },
-        { status: 400 },
+      return badRequest(
+        request,
+        `Signature message must be exactly '${expectedMessage}'`,
       );
     }
 
     const sigOk = await verifyStellarSignature(creatorPublicKey, message, signature);
     if (!sigOk) {
-      return Response.json({ error: "Invalid signature for creatorPublicKey" }, { status: 403 });
+      return forbidden(request, "Invalid signature for creatorPublicKey");
     }
 
     // Generate API key (tak_ prefix = TALOS API Key)
@@ -309,7 +309,10 @@ export async function POST(request: NextRequest) {
       detail: e?.detail,
       constraint: e?.constraint,
     }, null, 2));
-    const message = err instanceof Error ? err.message : "Internal server error";
-    return Response.json({ error: message }, { status: 500 });
+    return internalError(request);
   }
 }
+
+// Re-export POST wrapped with drift detection.
+// The original async function above is kept intact so it can be tested directly.
+export const POST = withDriftDetection("POST /api/talos", _POST);
