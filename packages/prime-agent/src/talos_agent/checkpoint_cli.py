@@ -604,3 +604,146 @@ def restore_checkpoint(
             CheckpointExitCode.VALIDATION_ERROR,
         ) from exc
 
+
+@checkpoint.command("drill")
+@click.option(
+    "--scenarios",
+    "scenarios",
+    default="all",
+    show_default=True,
+    help="Comma-separated list of scenarios to run, or 'all'.",
+)
+@click.option(
+    "--schema-versions",
+    "schema_versions_str",
+    default="1",
+    show_default=True,
+    help="Comma-separated list of schema versions to test for migration compatibility.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=None,
+    help="Directory for drill reports. Default: ~/.talos-agent/drill_reports.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Output the full drill report as JSON to stdout.",
+)
+def drill_checkpoint(
+    scenarios: str,
+    schema_versions_str: str,
+    output_dir: Path | None,
+    as_json: bool,
+) -> None:
+    """Run automated restore drills and publish a bounded report.
+
+    Exercises the full checkpoint/restore pipeline with synthetic state and
+    ephemeral keys.  Safe to run at any time — it never touches real data.
+
+    Available scenarios:
+
+    \b
+    - normal_roundtrip       Seal & open with correct identity
+    - key_rotation           Old envelopes readable after key rotation
+    - migration              Cross-schema-version compatibility
+    - corruption             Tampered ciphertext/HMAC/AAD detection
+    - wrong_identity         Rejection of mismatched agent_id
+    - rollback               Stale sequence rejection (open_latest)
+    - scheduler_no_duplicate_effects   Scheduler idempotency after restore
+    """
+    from talos_agent.restore_drill import (
+        _DEFAULT_DRILL_DIR,
+        ALL_SCENARIOS,
+        DrillConfig,
+        run_restore_drill_sync,
+        write_drill_report,
+    )
+
+    try:
+        # Parse scenarios
+        if scenarios.strip().lower() == "all":
+            selected = set(ALL_SCENARIOS)
+        else:
+            selected = {s.strip() for s in scenarios.split(",") if s.strip()}
+            unknown = selected - ALL_SCENARIOS
+            if unknown:
+                raise CheckpointCLIError(
+                    f"Unknown scenario(s): {', '.join(sorted(unknown))}. "
+                    f"Available: {', '.join(sorted(ALL_SCENARIOS))}",
+                    CheckpointExitCode.VALIDATION_ERROR,
+                )
+
+        # Parse schema versions
+        schema_versions: set[int] = set()
+        for sv in schema_versions_str.split(","):
+            sv_clean = sv.strip()
+            if not sv_clean:
+                continue
+            try:
+                schema_versions.add(int(sv_clean))
+            except ValueError:
+                raise CheckpointCLIError(
+                    f"Invalid schema version: {sv_clean!r}",
+                    CheckpointExitCode.VALIDATION_ERROR,
+                )
+
+        config = DrillConfig(
+            scenarios=selected,
+            schema_versions=schema_versions,
+            report_dir=output_dir if output_dir else _DEFAULT_DRILL_DIR,
+        )
+
+        report = run_restore_drill_sync(config=config)
+
+        # Always persist to disk
+        report_path = write_drill_report(report, report_dir=config.report_dir)
+
+        if as_json:
+            import json
+            click.echo(json.dumps({
+                "timestamp": report.timestamp,
+                "total": report.total,
+                "passed": report.passed,
+                "failed": report.failed,
+                "duration_ms": report.duration_ms,
+                "report_path": str(report_path),
+                "scenarios": [
+                    {
+                        "scenario": s.scenario,
+                        "passed": s.passed,
+                        "duration_ms": s.duration_ms,
+                        "detail": s.detail,
+                        "error": s.error,
+                    }
+                    for s in report.scenarios
+                ],
+            }, indent=2))
+        else:
+            click.echo(f"Restore drill complete: {report.passed}/{report.total} passed in {report.duration_ms}ms")
+            click.echo(f"Report saved to {report_path}")
+            if report.failed > 0:
+                click.echo()
+                click.echo("Failures:")
+                for s in report.scenarios:
+                    if not s.passed:
+                        click.echo(f"  [FAIL] {s.scenario}: {s.error or s.detail}")
+
+        if report.failed > 0:
+            raise SystemExit(1)
+
+    except CheckpointCLIError:
+        raise
+    except ValueError as exc:
+        raise CheckpointCLIError(
+            str(exc),
+            CheckpointExitCode.VALIDATION_ERROR,
+        ) from exc
+    except (OSError, sqlite3.Error) as exc:
+        raise CheckpointCLIError(
+            f"Drill failed: {exc}",
+            CheckpointExitCode.IO_ERROR,
+        ) from exc
+
