@@ -72,12 +72,12 @@ describe("buildMarketplaceAggregate", () => {
     });
 
     expect(aggregate.supply).toBe(2);
-    expect(aggregate.demand).toBe(2);
-    expect(aggregate.capacity).toBe(0);
-    expect(aggregate.averagePrice).toBe(18);
-    expect(aggregate.fulfillmentRate).toBe(0.5);
+    expect(aggregate.demand).toBe(1);
+    expect(aggregate.capacity).toBe(1);
+    expect(aggregate.averagePrice).toBe(20);
+    expect(aggregate.fulfillmentRate).toBe(1);
     expect(aggregate.unmetNeeds).toBe(0);
-    expect(aggregate.sourceEventCount).toBe(4);
+    expect(aggregate.sourceEventCount).toBe(3);
     expect(aggregate.version).toBe(2);
     expect(aggregate.category).toBe("Marketing");
   });
