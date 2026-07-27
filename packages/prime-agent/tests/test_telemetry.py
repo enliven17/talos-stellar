@@ -29,12 +29,10 @@ class TestSensitiveKeyDetection:
             ("state", False),  # allowed
             ("total_successes", False),  # allowed
             ("pending_count", False),  # allowed
-            (),  # We'll skip tuple
         ],
     )
-    def test_sensitive_key_detection(self, key: str | tuple, expected: bool) -> None:
-        if isinstance(key, str):
-            assert _is_sensitive_key(key) == expected
+    def test_sensitive_key_detection(self, key: str, expected: bool) -> None:
+        assert _is_sensitive_key(key) == expected
 
     def test_redact_if_sensitive_redacts_matching_keys(self) -> None:
         assert _redact_if_sensitive("api_key", "sk-1234") == "[REDACTED]"
