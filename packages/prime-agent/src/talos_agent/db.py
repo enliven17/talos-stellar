@@ -211,6 +211,23 @@ CREATE TABLE IF NOT EXISTS retry_state (
 );
         """,
     ),
+    (
+        7,
+        """
+CREATE TABLE IF NOT EXISTS checkpoints (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id        TEXT NOT NULL,
+    schema_version  INTEGER NOT NULL DEFAULT 1,
+    envelope_hash   TEXT NOT NULL UNIQUE,
+    payload         TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    stored_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoints_agent_id ON checkpoints(agent_id);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_stored_at ON checkpoints(stored_at);
+        """,
+    ),
 ]
 
 
@@ -805,6 +822,74 @@ class LocalDB:
             (task_name,),
         )
         self._conn.commit()
+
+    # ── Checkpoints ───────────────────────────────────────────────────────────
+
+    def save_checkpoint(
+        self,
+        agent_id: str,
+        schema_version: int,
+        envelope_hash: str,
+        payload: str,
+        created_at: str,
+    ) -> int:
+        """Persist an encoded checkpoint envelope and return its row ID.
+
+        The ``envelope_hash`` column has a UNIQUE constraint so that
+        duplicate checkpoints are silently ignored (idempotent upsert).
+        Returns the row ID of the newly inserted row, or the existing row
+        ID on a conflict.
+        """
+        cursor = self._conn.execute(
+            """INSERT INTO checkpoints (agent_id, schema_version, envelope_hash, payload, created_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(envelope_hash) DO NOTHING""",
+            (agent_id, schema_version, envelope_hash, payload, created_at),
+        )
+        self._conn.commit()
+        if cursor.lastrowid:
+            return cursor.lastrowid
+        # Conflict — return existing row ID.
+        row = self._conn.execute(
+            "SELECT id FROM checkpoints WHERE envelope_hash = ?", (envelope_hash,)
+        ).fetchone()
+        return row["id"] if row else 0
+
+    def get_latest_checkpoint(self, agent_id: str) -> dict | None:
+        """Return the most recently stored checkpoint for *agent_id*, or None."""
+        row = self._conn.execute(
+            """SELECT id, agent_id, schema_version, envelope_hash, payload, created_at, stored_at
+               FROM checkpoints
+               WHERE agent_id = ?
+               ORDER BY stored_at DESC
+               LIMIT 1""",
+            (agent_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_checkpoints(self, agent_id: str, limit: int = 20) -> list[dict]:
+        """Return up to *limit* checkpoints for *agent_id*, newest first."""
+        rows = self._conn.execute(
+            """SELECT id, agent_id, schema_version, envelope_hash, created_at, stored_at
+               FROM checkpoints
+               WHERE agent_id = ?
+               ORDER BY stored_at DESC
+               LIMIT ?""",
+            (agent_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_checkpoints_before(self, agent_id: str, before_stored_at: str) -> int:
+        """Delete checkpoints for *agent_id* stored before *before_stored_at* (ISO-8601).
+
+        Returns the number of rows deleted.  Useful for rolling retention.
+        """
+        cursor = self._conn.execute(
+            "DELETE FROM checkpoints WHERE agent_id = ? AND stored_at < ?",
+            (agent_id, before_stored_at),
+        )
+        self._conn.commit()
+        return cursor.rowcount
 
     # ── Cleanup ────────────────────────────────────────────
 
