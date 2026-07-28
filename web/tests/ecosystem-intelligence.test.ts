@@ -88,7 +88,7 @@ describe("GET /api/ecosystem-intelligence", () => {
       { id: "pb-1", talosId: "talos-1", status: "active" },
     ]);
     mockPatronsFindMany.mockResolvedValue([
-      { stellarPublicKey: "G123", role: "Creator", pulseAmount: 1000, status: "active" },
+      { id: "patron-1", stellarPublicKey: "G123", role: "Creator", pulseAmount: 1000, status: "active" },
     ]);
     mockActivitiesFindMany.mockResolvedValue([]);
     mockRevenuesFindMany.mockResolvedValue([]);
@@ -150,6 +150,11 @@ describe("GET /api/ecosystem-intelligence", () => {
     expect(body.metadata).toHaveProperty("version");
     expect(body.metadata).toHaveProperty("generatedAt");
     expect(body.metadata).toHaveProperty("suppression");
+    expect(body.metadata.privacy).toEqual({
+      minimumCohortSize: 5,
+      maximumInputRows: 10_000,
+      deduplicatedRows: 0,
+    });
 
     expect(typeof body.metadata.sampleSize).toBe("number");
     expect(["high", "medium", "low"]).toContain(body.metadata.confidence);
@@ -283,10 +288,7 @@ describe("GET /api/ecosystem-intelligence", () => {
     expect(body.supply.activeAgents).toBe(2);
     expect(body.supply.totalServices).toBe(2);
     expect(body.supply.totalPlaybooks).toBe(1);
-    expect(body.supply.byCategory).toEqual({
-      marketing: 1,
-      research: 1,
-    });
+    expect(body.supply.byCategory).toEqual({});
     expect(["increasing", "stable", "decreasing"]).toContain(body.supply.trend);
   });
 
@@ -324,9 +326,7 @@ describe("GET /api/ecosystem-intelligence", () => {
     expect(body.demand.pendingJobs).toBe(1);
     expect(body.demand.completedJobs24h).toBe(1);
     expect(body.demand.playbookPurchases7d).toBe(1);
-    expect(body.demand.byCategory).toEqual({
-      marketing: 2,
-    });
+    expect(body.demand.byCategory).toEqual({});
   });
 
   // ── Capacity metrics validation ───────────────────────────────────────────
@@ -413,8 +413,7 @@ describe("GET /api/ecosystem-intelligence", () => {
     expect(body.price.avgServicePrice).toBe(15.00);
     expect(body.price.avgTokenPrice).toBe(2.00);
     expect(typeof body.price.priceChange24h).toBe("number");
-    expect(body.price.priceByCategory).toHaveProperty("marketing");
-    expect(body.price.priceByCategory).toHaveProperty("research");
+    expect(body.price.priceByCategory).toEqual({});
   });
 
   // ── Fulfillment metrics validation ─────────────────────────────────────────
@@ -449,9 +448,10 @@ describe("GET /api/ecosystem-intelligence", () => {
 
     expect(body.fulfillment.completionRate).toBeCloseTo(66.67, 1);
     expect(body.fulfillment.successRate).toBeCloseTo(66.67, 1);
-    expect(body.fulfillment.byAgent).toHaveLength(1);
-    expect(body.fulfillment.byAgent[0].agentName).toBe("Vega");
-    expect(body.fulfillment.byAgent[0].totalJobs).toBe(3);
+    expect(body.fulfillment.byAgent).toHaveLength(0);
+    expect(body.metadata.suppression).toContain(
+      "fulfillment.byAgent: 1 sparse cohort suppressed",
+    );
   });
 
   // ── Empty data scenarios ───────────────────────────────────────────────────
@@ -583,8 +583,8 @@ describe("GET /api/ecosystem-intelligence", () => {
     mockPatronsFindMany.mockResolvedValue([]);
     mockActivitiesFindMany.mockResolvedValue([]);
     mockRevenuesFindMany.mockResolvedValue([
-      { talosId: "talos-1", amount: "100.00", createdAt: new Date() },
-      { talosId: "talos-2", amount: "50.00", createdAt: new Date() },
+      { id: "revenue-1", talosId: "talos-1", amount: "100.00", createdAt: new Date() },
+      { id: "revenue-2", talosId: "talos-2", amount: "50.00", createdAt: new Date() },
     ]);
     mockJobsFindMany.mockResolvedValue([
       { id: "job-1", talosId: "talos-1", status: "completed", createdAt: new Date() },
@@ -630,6 +630,10 @@ describe("GET /api/ecosystem-intelligence", () => {
     expect(body.price.dataSource).toBe("observed");
     expect(body.fulfillment.dataSource).toBe("observed");
     expect(body.opportunity.dataSource).toBe("inferred");
+    expect(body.opportunity.methodology).toEqual({
+      version: "demand-supply-ratio-v1",
+      inputs: ["observed-demand", "observed-supply", "observed-revenue"],
+    });
   });
 
   // ── Data type validation ───────────────────────────────────────────────────
@@ -666,5 +670,92 @@ describe("GET /api/ecosystem-intelligence", () => {
     expect(typeof body.price.avgServicePrice).toBe("number");
     expect(typeof body.price.avgTokenPrice).toBe("number");
     expect(typeof body.fulfillment.completionRate).toBe("number");
+  });
+
+  it("publishes category and agent slices at the exact privacy boundary", async () => {
+    const agents = Array.from({ length: 5 }, (_, index) => ({
+      id: `talos-${index + 1}`,
+      name: `Agent ${index + 1}`,
+      category: "marketing",
+      status: "Active",
+      agentOnline: true,
+      pulsePrice: "2.00",
+      patrons: [],
+      revenues:
+        index === 0
+          ? [{ amount: "50.00", createdAt: new Date() }]
+          : [],
+    }));
+    const jobs = Array.from({ length: 5 }, (_, index) => ({
+      id: `job-${index + 1}`,
+      talosId: "talos-1",
+      status: "completed",
+      createdAt: new Date(),
+    }));
+    const revenues = Array.from({ length: 5 }, (_, index) => ({
+      id: `revenue-${index + 1}`,
+      talosId: "talos-1",
+      amount: "10.00",
+      createdAt: new Date(),
+    }));
+
+    mockTalosFindMany.mockResolvedValue(agents);
+    mockServicesFindMany.mockResolvedValue(
+      agents.map((agent, index) => ({
+        id: `service-${index + 1}`,
+        talosId: agent.id,
+        price: "10.00",
+      })),
+    );
+    mockPlaybooksFindMany.mockResolvedValue([]);
+    mockPatronsFindMany.mockResolvedValue([]);
+    mockActivitiesFindMany.mockResolvedValue([]);
+    mockRevenuesFindMany.mockResolvedValue(revenues);
+    mockJobsFindMany.mockResolvedValue(jobs);
+    mockPurchasesFindMany.mockResolvedValue([]);
+
+    const res = await GET(new Request("http://localhost/api/ecosystem-intelligence"));
+    const body = await res.json();
+
+    expect(body.supply.byCategory).toEqual({ marketing: 5 });
+    expect(body.demand.byCategory).toEqual({ marketing: 5 });
+    expect(body.price.priceByCategory).toEqual({ marketing: 10 });
+    expect(body.fulfillment.byAgent).toHaveLength(1);
+    expect(body.opportunity.trendingAgents).toHaveLength(1);
+  });
+
+  it("deduplicates replay storms before calculating public metrics", async () => {
+    const agents = Array.from({ length: 5 }, (_, index) => ({
+      id: `talos-${index + 1}`,
+      name: `Agent ${index + 1}`,
+      category: "marketing",
+      status: "Active",
+      agentOnline: true,
+      pulsePrice: "2.00",
+      patrons: [],
+      revenues: [],
+    }));
+    const replayedJob = {
+      id: "job-replayed",
+      talosId: "talos-1",
+      status: "pending",
+      createdAt: new Date(),
+    };
+
+    mockTalosFindMany.mockResolvedValue(agents);
+    mockServicesFindMany.mockResolvedValue([]);
+    mockPlaybooksFindMany.mockResolvedValue([]);
+    mockPatronsFindMany.mockResolvedValue([]);
+    mockActivitiesFindMany.mockResolvedValue([]);
+    mockRevenuesFindMany.mockResolvedValue([]);
+    mockJobsFindMany.mockResolvedValue(Array(50).fill(replayedJob));
+    mockPurchasesFindMany.mockResolvedValue([]);
+
+    const res = await GET(new Request("http://localhost/api/ecosystem-intelligence"));
+    const body = await res.json();
+
+    expect(body.demand.pendingJobs).toBe(1);
+    expect(body.demand.byCategory).toEqual({ marketing: 1 });
+    expect(body.metadata.privacy.deduplicatedRows).toBe(49);
   });
 });

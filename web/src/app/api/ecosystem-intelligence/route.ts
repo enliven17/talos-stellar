@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { 
   tlsTalos, 
@@ -10,6 +10,14 @@ import {
 } from "@/db/schema";
 import { and, gte, eq } from "drizzle-orm";
 import { isRetryableDbError } from "@/db/db-retry";
+import {
+  AnalyticsInputValidationError,
+  DEFAULT_ANALYTICS_PRIVACY_POLICY,
+  deduplicateAnalyticsRows,
+  describeSuppression,
+  suppressSparseRecord,
+  suppressSparseRows,
+} from "@/lib/analytics-privacy";
 
 export const dynamic = 'force-dynamic';
 
@@ -24,6 +32,11 @@ interface EcosystemMetrics {
     suppression: string[];
     version: string;
     generatedAt: string;
+    privacy: {
+      minimumCohortSize: number;
+      maximumInputRows: number;
+      deduplicatedRows: number;
+    };
   };
   supply: {
     activeAgents: number;
@@ -82,10 +95,14 @@ interface EcosystemMetrics {
       revenue7d: number;
     }>;
     dataSource: 'inferred'; // Calculated from observed data
+    methodology: {
+      version: string;
+      inputs: readonly ['observed-demand', 'observed-supply', 'observed-revenue'];
+    };
   };
 }
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   // For now, this is a public endpoint for ecosystem-wide metrics.
   // If authorization is needed, uncomment the following:
   // const wallet = req.nextUrl.searchParams.get("wallet");
@@ -108,58 +125,94 @@ export async function GET(req: NextRequest) {
 
     // Fetch all relevant data in parallel with retry logic for transient failures
     const [
-      allAgents,
-      allServices,
-      allPlaybooks,
-      recentRevenues,
-      recentJobs,
-      recentPurchases,
-      recentPatronGrowth
+      rawAgents,
+      rawServices,
+      rawPlaybooks,
+      rawRevenues,
+      rawJobs,
+      rawPurchases,
+      rawPatronGrowth
     ] = await Promise.all([
       db.query.tlsTalos.findMany({
         where: eq(tlsTalos.status, 'Active'),
+        limit: DEFAULT_ANALYTICS_PRIVACY_POLICY.maximumInputRows + 1,
         with: {
           patrons: true,
           revenues: true,
         }
       }),
-      db.query.tlsCommerceServices.findMany(),
+      db.query.tlsCommerceServices.findMany({
+        limit: DEFAULT_ANALYTICS_PRIVACY_POLICY.maximumInputRows + 1,
+      }),
       db.query.tlsPlaybooks.findMany({
-        where: eq(tlsPlaybooks.status, 'active')
+        where: eq(tlsPlaybooks.status, 'active'),
+        limit: DEFAULT_ANALYTICS_PRIVACY_POLICY.maximumInputRows + 1,
       }),
       db.query.tlsRevenues.findMany({
-        where: gte(tlsRevenues.createdAt, sevenDaysAgo)
+        where: gte(tlsRevenues.createdAt, sevenDaysAgo),
+        limit: DEFAULT_ANALYTICS_PRIVACY_POLICY.maximumInputRows + 1,
       }),
       db.query.tlsCommerceJobs.findMany({
-        where: gte(tlsCommerceJobs.createdAt, sevenDaysAgo)
+        where: gte(tlsCommerceJobs.createdAt, sevenDaysAgo),
+        limit: DEFAULT_ANALYTICS_PRIVACY_POLICY.maximumInputRows + 1,
       }),
       db.query.tlsPlaybookPurchases.findMany({
-        where: gte(tlsPlaybookPurchases.createdAt, sevenDaysAgo)
+        where: gte(tlsPlaybookPurchases.createdAt, sevenDaysAgo),
+        limit: DEFAULT_ANALYTICS_PRIVACY_POLICY.maximumInputRows + 1,
       }),
       db.query.tlsPatrons.findMany({
         where: and(
           eq(tlsPatrons.status, 'active'),
           gte(tlsPatrons.createdAt, sevenDaysAgo)
-        )
+        ),
+        limit: DEFAULT_ANALYTICS_PRIVACY_POLICY.maximumInputRows + 1,
       })
     ]);
+
+    const deduplicated = [
+      deduplicateAnalyticsRows(rawAgents, 'agents', row => row.id),
+      deduplicateAnalyticsRows(rawServices, 'services', row => row.id),
+      deduplicateAnalyticsRows(rawPlaybooks, 'playbooks', row => row.id),
+      deduplicateAnalyticsRows(rawRevenues, 'revenues', row => row.id),
+      deduplicateAnalyticsRows(rawJobs, 'jobs', row => row.id),
+      deduplicateAnalyticsRows(rawPurchases, 'purchases', row => row.id),
+      deduplicateAnalyticsRows(rawPatronGrowth, 'patrons', row => row.id),
+    ] as const;
+    const [
+      { rows: allAgents },
+      { rows: allServices },
+      { rows: allPlaybooks },
+      { rows: recentRevenues },
+      { rows: recentJobs },
+      { rows: recentPurchases },
+      { rows: recentPatronGrowth },
+    ] = deduplicated;
+    const deduplicatedRows = deduplicated.reduce(
+      (total, result) => total + result.duplicateCount,
+      0,
+    );
 
     // Calculate metadata
     const sampleSize = allAgents.length;
     const confidence = sampleSize >= 10 ? 'high' : sampleSize >= 5 ? 'medium' : 'low';
     const freshness = 'real-time';
     const suppression: string[] = [];
-    const version = '1.0.0';
+    const version = '1.1.0';
 
     // Supply metrics
     const activeAgents = allAgents.length;
     const totalServices = allServices.length;
     const totalPlaybooks = allPlaybooks.length;
     
-    const byCategory: Record<string, number> = {};
+    const categoryCohortSizes: Record<string, number> = {};
     allAgents.forEach(agent => {
-      byCategory[agent.category] = (byCategory[agent.category] || 0) + 1;
+      categoryCohortSizes[agent.category] =
+        (categoryCohortSizes[agent.category] || 0) + 1;
     });
+    const supplyByCategory = suppressSparseRecord(
+      categoryCohortSizes,
+      categoryCohortSizes,
+    );
 
     // Calculate trend (compare with previous period - simplified for now)
     const supplyTrend: 'increasing' | 'stable' | 'decreasing' = 'stable';
@@ -179,6 +232,10 @@ export async function GET(req: NextRequest) {
         demandByCategory[agent.category] = (demandByCategory[agent.category] || 0) + 1;
       }
     });
+    const visibleDemandByCategory = suppressSparseRecord(
+      demandByCategory,
+      categoryCohortSizes,
+    );
 
     const demandTrend: 'increasing' | 'stable' | 'decreasing' = 'stable';
 
@@ -216,6 +273,10 @@ export async function GET(req: NextRequest) {
       const prices = priceByCategory[category];
       avgPriceByCategory[category] = prices.reduce((sum, p) => sum + p, 0) / prices.length;
     });
+    const visiblePriceByCategory = suppressSparseRecord(
+      avgPriceByCategory,
+      categoryCohortSizes,
+    );
 
     // Fulfillment metrics
     const totalJobs = recentJobs.length;
@@ -233,7 +294,7 @@ export async function GET(req: NextRequest) {
       jobsByAgent.set(job.talosId, existing);
     });
 
-    const byAgent = Array.from(jobsByAgent.entries()).map(([agentId, stats]) => {
+    const byAgentCandidates = Array.from(jobsByAgent.entries()).map(([agentId, stats]) => {
       const agent = allAgents.find(a => a.id === agentId);
       return {
         agentId,
@@ -241,7 +302,14 @@ export async function GET(req: NextRequest) {
         completionRate: stats.total > 0 ? (stats.completed / stats.total) * 100 : 0,
         totalJobs: stats.total,
       };
-    }).sort((a, b) => b.completionRate - a.completionRate).slice(0, 10);
+    });
+    const visibleByAgent = suppressSparseRows(
+      byAgentCandidates,
+      row => row.totalJobs,
+    );
+    const byAgent = visibleByAgent.rows
+      .sort((a, b) => b.completionRate - a.completionRate)
+      .slice(0, 10);
 
     // Opportunity metrics
     // Calculate demand vs supply by category
@@ -264,7 +332,7 @@ export async function GET(req: NextRequest) {
       }
     });
 
-    const underservedCategories = Array.from(categoryScores.entries())
+    const underservedCandidates = Array.from(categoryScores.entries())
       .map(([category, scores]) => {
         const demandScore = scores.demand / (scores.supply || 1);
         const supplyScore = scores.supply / allAgents.length;
@@ -277,31 +345,68 @@ export async function GET(req: NextRequest) {
         };
       })
       .filter(c => c.opportunityScore > 0)
-      .sort((a, b) => b.opportunityScore - a.opportunityScore)
+      .sort((a, b) => b.opportunityScore - a.opportunityScore);
+    const visibleUnderservedCategories = suppressSparseRows(
+      underservedCandidates,
+      row => categoryCohortSizes[row.category] ?? 0,
+    );
+    const underservedCategories = visibleUnderservedCategories.rows
       .slice(0, 5);
 
     // Trending agents (by revenue growth)
-    const agentRevenue7d = new Map<string, number>();
+    const agentRevenue7d = new Map<string, { total: number; events: number }>();
     recentRevenues.forEach(revenue => {
-      const existing = agentRevenue7d.get(revenue.talosId) || 0;
-      agentRevenue7d.set(revenue.talosId, existing + Number(revenue.amount));
+      const existing = agentRevenue7d.get(revenue.talosId) || { total: 0, events: 0 };
+      agentRevenue7d.set(revenue.talosId, {
+        total: existing.total + Number(revenue.amount),
+        events: existing.events + 1,
+      });
     });
 
-    const trendingAgents = Array.from(agentRevenue7d.entries())
-      .map(([agentId, revenue7d]) => {
+    const trendingCandidates = Array.from(agentRevenue7d.entries())
+      .map(([agentId, revenue]) => {
         const agent = allAgents.find(a => a.id === agentId);
         const totalRevenue = agent?.revenues.reduce((sum, r) => sum + Number(r.amount), 0) || 0;
-        const growthScore = totalRevenue > 0 ? (revenue7d / totalRevenue) * 100 : 0;
+        const growthScore = totalRevenue > 0 ? (revenue.total / totalRevenue) * 100 : 0;
         return {
           agentId,
           agentName: agent?.name || 'Unknown',
           growthScore,
-          revenue7d,
+          revenue7d: revenue.total,
+          cohortSize: revenue.events,
         };
       })
       .filter(a => a.revenue7d > 0)
-      .sort((a, b) => b.growthScore - a.growthScore)
-      .slice(0, 5);
+      .sort((a, b) => b.growthScore - a.growthScore);
+    const visibleTrendingAgents = suppressSparseRows(
+      trendingCandidates,
+      row => row.cohortSize,
+    );
+    const trendingAgents = visibleTrendingAgents.rows
+      .slice(0, 5)
+      .map(agent => ({
+        agentId: agent.agentId,
+        agentName: agent.agentName,
+        growthScore: agent.growthScore,
+        revenue7d: agent.revenue7d,
+      }));
+
+    [
+      describeSuppression('supply.byCategory', supplyByCategory.suppressedCount),
+      describeSuppression('demand.byCategory', visibleDemandByCategory.suppressedCount),
+      describeSuppression('price.priceByCategory', visiblePriceByCategory.suppressedCount),
+      describeSuppression('fulfillment.byAgent', visibleByAgent.suppressedCount),
+      describeSuppression(
+        'opportunity.underservedCategories',
+        visibleUnderservedCategories.suppressedCount,
+      ),
+      describeSuppression(
+        'opportunity.trendingAgents',
+        visibleTrendingAgents.suppressedCount,
+      ),
+    ].forEach(entry => {
+      if (entry) suppression.push(entry);
+    });
 
     const metrics: EcosystemMetrics = {
       metadata: {
@@ -311,12 +416,19 @@ export async function GET(req: NextRequest) {
         suppression,
         version,
         generatedAt: now.toISOString(),
+        privacy: {
+          minimumCohortSize:
+            DEFAULT_ANALYTICS_PRIVACY_POLICY.minimumCohortSize,
+          maximumInputRows:
+            DEFAULT_ANALYTICS_PRIVACY_POLICY.maximumInputRows,
+          deduplicatedRows,
+        },
       },
       supply: {
         activeAgents,
         totalServices,
         totalPlaybooks,
-        byCategory,
+        byCategory: supplyByCategory.values,
         trend: supplyTrend,
         dataSource: 'observed',
       },
@@ -325,7 +437,7 @@ export async function GET(req: NextRequest) {
         completedJobs24h,
         playbookPurchases7d,
         patronGrowth7d,
-        byCategory: demandByCategory,
+        byCategory: visibleDemandByCategory.values,
         trend: demandTrend,
         dataSource: 'observed',
       },
@@ -340,7 +452,7 @@ export async function GET(req: NextRequest) {
         avgServicePrice,
         avgTokenPrice,
         priceChange24h,
-        priceByCategory: avgPriceByCategory,
+        priceByCategory: visiblePriceByCategory.values,
         dataSource: 'observed',
       },
       fulfillment: {
@@ -354,6 +466,10 @@ export async function GET(req: NextRequest) {
         underservedCategories,
         trendingAgents,
         dataSource: 'inferred',
+        methodology: {
+          version: 'demand-supply-ratio-v1',
+          inputs: ['observed-demand', 'observed-supply', 'observed-revenue'],
+        },
       },
     };
 
@@ -366,6 +482,13 @@ export async function GET(req: NextRequest) {
     return response;
   } catch (error) {
     console.error('Error fetching ecosystem intelligence:', error);
+
+    if (error instanceof AnalyticsInputValidationError) {
+      return NextResponse.json(
+        { error: 'Analytics input failed validation', retryable: false },
+        { status: 422 },
+      );
+    }
     
     // Check if error is retryable
     if (isRetryableDbError(error)) {

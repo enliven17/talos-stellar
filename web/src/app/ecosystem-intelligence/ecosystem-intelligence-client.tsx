@@ -20,6 +20,11 @@ interface EcosystemMetrics {
     suppression: string[];
     version: string;
     generatedAt: string;
+    privacy: {
+      minimumCohortSize: number;
+      maximumInputRows: number;
+      deduplicatedRows: number;
+    };
   };
   supply: {
     activeAgents: number;
@@ -63,6 +68,10 @@ interface EcosystemMetrics {
       totalJobs: number;
     }>;
     dataSource: 'observed' | 'inferred' | 'mixed';
+    methodology: {
+      version: string;
+      inputs: string[];
+    };
   };
   opportunity: {
     underservedCategories: Array<{
@@ -679,6 +688,18 @@ export function EcosystemIntelligenceClient() {
                 {data.metadata.suppression.length > 0 
                   ? data.metadata.suppression.join(', ') 
                   : 'None'}
+              </p>
+            </div>
+            <div>
+              <span className="text-muted">Privacy Boundary</span>
+              <p className="text-foreground mt-0.5">
+                {data.metadata.privacy.minimumCohortSize}+ records per slice
+              </p>
+            </div>
+            <div>
+              <span className="text-muted">Replays Removed</span>
+              <p className="text-foreground mt-0.5">
+                {data.metadata.privacy.deduplicatedRows}
               </p>
             </div>
           </div>

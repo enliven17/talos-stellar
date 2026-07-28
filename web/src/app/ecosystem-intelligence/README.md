@@ -39,7 +39,7 @@ The Ecosystem Intelligence Dashboard provides privacy-safe supply, demand, capac
 ### Fulfillment Analytics
 - Completion and success rates
 - Average fulfillment time
-- Per-agent performance ranking
+- Per-agent performance ranking when at least five jobs support the slice
 
 ### Opportunity Detection
 - **Underserved Categories**: Categories with high demand but low supply
@@ -50,8 +50,16 @@ The Ecosystem Intelligence Dashboard provides privacy-safe supply, demand, capac
 The dashboard is designed with privacy in mind:
 - **Sample Size**: Always displayed to indicate statistical significance
 - **Confidence Levels**: High (≥10 agents), Medium (≥5 agents), Low (<5 agents)
-- **Suppression**: Sensitive data points can be suppressed via configuration
+- **Suppression**: Category and per-agent slices with fewer than five supporting records are omitted
+- **Safe Metadata**: Suppression metadata reports only the number of hidden cohorts, never their names
+- **Replay Protection**: Immutable row IDs are deduplicated before metrics are calculated
+- **Input Bounds**: Each source query is capped and oversized results fail closed
 - **No PII**: No personally identifiable information is exposed
+
+Global totals remain available because they describe the whole ecosystem rather
+than a narrow cohort. Category price, supply, demand, and opportunity slices use
+the number of active agents in that category as their privacy cohort. Per-agent
+fulfillment uses job count, while trending-agent revenue uses revenue-event count.
 
 ## API Endpoint
 
@@ -69,6 +77,11 @@ Returns comprehensive ecosystem metrics.
     suppression: string[];
     version: string;
     generatedAt: string;
+    privacy: {
+      minimumCohortSize: number;
+      maximumInputRows: number;
+      deduplicatedRows: number;
+    };
   };
   supply: {
     activeAgents: number;
@@ -121,6 +134,11 @@ Returns comprehensive ecosystem metrics.
       growthScore: number;
       revenue7d: number;
     }>;
+    dataSource: 'inferred';
+    methodology: {
+      version: string;
+      inputs: ['observed-demand', 'observed-supply', 'observed-revenue'];
+    };
   };
 }
 ```
@@ -180,9 +198,9 @@ The dashboard aggregates data from multiple database tables:
 No specific environment variables required. Uses existing database configuration.
 
 ### Customization
-To adjust refresh intervals or add suppression rules, modify:
+To adjust refresh intervals or the centrally defined suppression policy, modify:
 - `ecosystem-intelligence-client.tsx` - Refresh interval (default: 60s)
-- `route.ts` - Suppression logic and confidence thresholds
+- `src/lib/analytics-privacy.ts` - Cohort and input limits
 
 ## Testing
 
@@ -193,6 +211,13 @@ Unit tests are provided in `tests/ecosystem-intelligence.test.ts`:
 - Metric calculation accuracy
 - Metadata validation
 - Data type validation
+- Exact suppression-boundary behavior
+- Duplicate-storm handling
+
+`tests/marketplace-aggregates.unit.test.ts` also proves that a complete backfill
+and an incremental replay produce identical checkpoints. Checkpoints store only
+SHA-256 event fingerprints; raw deduplication keys and source payloads are not
+materialized or exposed by public aggregate views.
 
 Run tests:
 ```bash
@@ -200,10 +225,19 @@ cd web
 pnpm test ecosystem-intelligence.test.ts
 ```
 
+Run the complete focused suite with:
+
+```bash
+cd web
+pnpm test tests/analytics-privacy.unit.test.ts \
+  tests/marketplace-aggregates.unit.test.ts \
+  tests/ecosystem-intelligence.test.ts
+```
+
 ## Performance Considerations
 
 - **Parallel Queries**: All database queries run in parallel
-- **Efficient Aggregations**: Uses database-level aggregations where possible
+- **Bounded Aggregations**: Every source is limited to 10,000 rows and duplicate IDs are removed in-memory
 - **Caching**: No server-side caching (real-time data)
 - **Client-side**: Auto-refresh with 60s interval to balance freshness and load
 
@@ -213,6 +247,23 @@ pnpm test ecosystem-intelligence.test.ts
 - **Response Time**: Actual response time tracking requires agent-side instrumentation
 - **Price Trends**: 24h price change simplified (would need historical price table)
 - **Capacity Model**: Simplified capacity estimation (100 units per online agent)
+
+## Migration and Rollback
+
+The API change is additive, except that sparse slices are now intentionally
+empty. Consumers should already tolerate empty category maps and ranking arrays.
+No database migration is required.
+
+Materialized aggregate checkpoints use `checkpointVersion: 1`. Changing the
+metric version, time window, category, or checkpoint format deliberately rejects
+incremental updates; rebuild from authoritative source events instead. This
+prevents mixed-version state from silently drifting. A restart can safely resume
+from the last checkpoint, and replayed events are ignored by their one-way
+fingerprints.
+
+To roll back, revert the application release. Existing database data is
+unchanged. Discard version-incompatible checkpoints and run a complete backfill
+before re-enabling incremental processing.
 
 ## Future Enhancements
 
