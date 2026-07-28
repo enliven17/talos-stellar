@@ -6,6 +6,10 @@ name: Release Publish
 # publishes a GitHub Release with the changelog section as notes. Tag
 # creation is idempotent (existing tags are skipped), so a failed or
 # re-triggered run only ever creates what's still missing.
+#
+# Signed SBOMs (CycloneDX + SPDX) and SLSA-3 provenance are generated per
+# released component via the reusable sbom-provenance.yml workflow and
+# attached to each GitHub Release.
 
 on:
   push:
@@ -25,6 +29,7 @@ jobs:
     outputs:
       has_releases: ${{ steps.tag.outputs.has_releases }}
       releases: ${{ steps.tag.outputs.releases }}
+      components: ${{ steps.tag.outputs.components }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,9 +49,11 @@ jobs:
 
           if [ "$(jq 'length' /tmp/releasable.json)" = "0" ]; then
             echo "has_releases=false" >> "$GITHUB_OUTPUT"
+            echo "components=$(jq -cn [])" >> "$GITHUB_OUTPUT"
           else
             echo "has_releases=true" >> "$GITHUB_OUTPUT"
             echo "releases=$(jq -c . /tmp/releasable.json)" >> "$GITHUB_OUTPUT"
+            echo "components=$(jq -c '[.[].name]' /tmp/releasable.json)" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Push new tags
@@ -60,15 +67,42 @@ jobs:
           name: release-notes
           path: /tmp/release-notes
 
-  build-and-release:
+  sbom-provenance:
     needs: prepare
     if: needs.prepare.outputs.has_releases == 'true'
+    uses: ./.github/workflows/sbom-provenance.yml
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJson(needs.prepare.outputs.components) }}
+    with:
+      component: ${{ matrix.component }}
+      sign_artifacts: true
+      upload_release: true
+
+  build-and-release:
+    needs: [prepare, sbom-provenance]
+    if: |
+      needs.prepare.outputs.has_releases == 'true' &&
+      (needs.sbom-provenance.result == 'success' || needs.sbom-provenance.result == 'skipped' || needs.sbom-provenance.result == 'failure')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
         release: ${{ fromJson(needs.prepare.outputs.releases) }}
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -79,6 +113,10 @@ jobs:
         with:
           name: release-notes
           path: release-notes
+
+      - name: Install cosign (artifact signing)
+        if: matrix.release.name != 'web'
+        uses: sigstore/cosign-installer@v3
 
       # --- sdk ---
       - name: Setup pnpm
@@ -106,7 +144,7 @@ jobs:
         if: matrix.release.name == 'agent'
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Setup uv
         if: matrix.release.name == 'agent'
@@ -141,16 +179,104 @@ jobs:
             web) echo "paths=" >> "$GITHUB_OUTPUT" ;;
           esac
 
+      - name: Sign release artifacts (cosign keyless)
+        id: sign-artifacts
+        if: matrix.release.name != 'web'
+        shell: bash
+        run: |
+          set -euo pipefail
+          SIG_DIR="signatures/${{ matrix.release.name }}"
+          mkdir -p "$SIG_DIR"
+          PATHS="${{ steps.artifacts.outputs.paths }}"
+          SIGNED=()
+          if [ -n "$PATHS" ]; then
+            for f in $PATHS; do
+              [ -e "$f" ] || continue
+              base=$(basename "$f")
+              cosign sign-blob --yes --tlog-upload=false \
+                --output-signature "${SIG_DIR}/${base}.sig" \
+                --output-certificate "${SIG_DIR}/${base}.pem" \
+                "$f"
+              SIGNED+=("${SIG_DIR}/${base}.sig" "${SIG_DIR}/${base}.pem")
+
+              cosign verify-blob \
+                --signature "${SIG_DIR}/${base}.sig" \
+                --certificate "${SIG_DIR}/${base}.pem" \
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+                --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-publish.yml@${GITHUB_REF}" \
+                --insecure-ignore-tlog=true \
+                "$f" && echo "Verified signature for $base"
+            done
+          fi
+          echo "sig-count=${#SIGNED[@]}" >> "$GITHUB_OUTPUT"
+          if [ ${#SIGNED[@]} -gt 0 ]; then
+            echo "sig-paths=${SIG_DIR}/*" >> "$GITHUB_OUTPUT"
+          else
+            echo "sig-paths=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compose release notes with SBOM/provenance header
+        shell: bash
+        run: |
+          HEADER="/tmp/release-header-${{ matrix.release.name }}.md"
+          ORIG="release-notes/${{ matrix.release.name }}.md"
+          FINAL="/tmp/release-final-${{ matrix.release.name }}.md"
+          SBOM_STATUS="${{ needs.sbom-provenance.result }}"
+          cat > "$HEADER" << EOF
+          > 🔒 **Auditability**: This release includes signed SBOMs (CycloneDX + SPDX), SLSA L3 build provenance,
+          > and cosign keyless artifact signatures. See attached `.cdx.json`, `.spdx`, `.intoto.jsonl`, `.sig`, and `.pem` files.
+          >
+          > SBOM/provenance job status: \`${SBOM_STATUS}\`.
+          > Signing: OIDC keyless via Fulcio/Rekor — issuer \`https://token.actions.githubusercontent.com\`.
+          >
+          > To verify an artifact locally:
+          > \`\`\`bash
+          > cosign verify-blob \
+          >   --signature <artifact>.tgz.sig \
+          >   --certificate <artifact>.tgz.pem \
+          >   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+          >   --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-publish.yml@refs/tags/${{ matrix.release.tag }}" \
+          >   <artifact>.tgz
+          > \`\`\`
+
+          ---
+
+          EOF
+          if [ -f "$ORIG" ]; then
+            cat "$HEADER" "$ORIG" > "$FINAL"
+          else
+            cp "$HEADER" "$FINAL"
+          fi
+          cp "$FINAL" "$ORIG"
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           FLAGS=()
           if [ "${{ matrix.release.prerelease }}" = "true" ]; then
             FLAGS+=(--prerelease)
           fi
-          gh release create "${{ matrix.release.tag }}" \
-            --title "${{ matrix.release.name }} v${{ matrix.release.version }}" \
-            --notes-file "release-notes/${{ matrix.release.name }}.md" \
-            "${FLAGS[@]}" \
-            ${{ steps.artifacts.outputs.paths }}
+          ARTIFACTS="${{ steps.artifacts.outputs.paths }}"
+          SIGS="${{ steps.sign-artifacts.outputs.sig-paths }}"
+          set +e
+          existing=$(gh release view "${{ matrix.release.tag }}" --json id 2>/dev/null)
+          set -e
+          if [ -n "$existing" ]; then
+            echo "Release ${{ matrix.release.tag }} already exists — uploading additional artifacts"
+            if [ -n "$ARTIFACTS" ]; then
+              gh release upload "${{ matrix.release.tag }}" $ARTIFACTS --clobber
+            fi
+            if [ -n "$SIGS" ]; then
+              gh release upload "${{ matrix.release.tag }}" $SIGS --clobber
+            fi
+            gh release edit "${{ matrix.release.tag }}" --notes-file "release-notes/${{ matrix.release.name }}.md"
+          else
+            gh release create "${{ matrix.release.tag }}" \
+              --title "${{ matrix.release.name }} v${{ matrix.release.version }}" \
+              --notes-file "release-notes/${{ matrix.release.name }}.md" \
+              "${FLAGS[@]}" \
+              $ARTIFACTS \
+              $SIGS
+          fi

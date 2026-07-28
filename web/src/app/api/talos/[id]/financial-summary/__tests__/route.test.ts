@@ -195,6 +195,7 @@ describe("GET /api/talos/:id/financial-summary — auth", () => {
     expect(mocks.mockVerifyAgentApiKey).toHaveBeenCalledWith(
       expect.any(NextRequest),
       "agent-1",
+      ["revenue:read"],
     );
   });
 });

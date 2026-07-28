@@ -207,6 +207,7 @@ describe("GET /api/talos/:id/financial-projection — auth", () => {
     expect(mocks.mockVerifyAgentApiKey).toHaveBeenCalledWith(
       expect.any(NextRequest),
       "agent-1",
+      ["revenue:read"],
     );
   });
 });

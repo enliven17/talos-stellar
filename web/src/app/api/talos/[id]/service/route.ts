@@ -3,15 +3,16 @@ import { db } from "@/db";
 import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsCommerceServices, tlsCommerceJobs, tlsRevenues } from "@/db/schema";
 import { eq } from "drizzle-orm";
-import { verifyAgentApiKey } from "@/lib/auth";
+import { resolveTalosFromRequest, verifyAgentApiKey } from "@/lib/auth";
 import { verifyX402Payment, settleX402Payment } from "@/lib/stellar-x402";
 import { fulfillInstant } from "@/lib/fulfillment";
 import { registerServiceSchema, submitBidSchema, parseBody } from "@/lib/schemas";
+import { withTraceContext } from "@/lib/tracing";
 
 const STELLAR_NETWORK = process.env.STELLAR_NETWORK ?? "testnet";
 
 // GET /api/talos/:id/service — Returns 402 with payment details (x402 storefront)
-export async function GET(
+async function handleGet(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -65,32 +66,20 @@ export async function GET(
 }
 
 // POST /api/talos/:id/service — Submit x402 payment + create commerce job
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   try {
-    // 1. Authenticate requester TALOS via API key (check early)
-    const authHeader = request.headers.get("authorization");
-    if (!authHeader?.startsWith("Bearer ")) {
-      return Response.json(
-        { error: "Missing Authorization header. Use: Bearer <api_key>" },
-        { status: 401 }
-      );
-    }
-    const apiKeyToken = authHeader.slice(7);
-    const requester = await db
-      .select({ id: tlsTalos.id })
-      .from(tlsTalos)
-      .where(eq(tlsTalos.apiKey, apiKeyToken))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    if (!requester) {
-      return Response.json({ error: "Invalid API key" }, { status: 403 });
-    }
+    // 1. Authenticate requester TALOS via API key (scoped or legacy)
+    // The URL param `id` identifies the service *provider*; the Bearer token
+    // identifies the *requester* (buyer). resolveTalosFromRequest resolves the
+    // caller from their key without requiring a known talosId.
+    const auth = await resolveTalosFromRequest(request, ["commerce:read"]);
+    if (!auth.ok) return auth.response;
+    const requester = { id: auth.talos.id };
 
     // 1b. Read body once (request body can only be consumed once)
     const requestBody = await request.json().catch(() => ({})) as Record<string, unknown>;
@@ -276,14 +265,14 @@ export async function POST(
 }
 
 // PUT /api/talos/:id/service — Register or update commerce service (upsert)
-export async function PUT(
+async function handlePut(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   try {
-    const auth = await verifyAgentApiKey(request, id);
+    const auth = await verifyAgentApiKey(request, id, ["commerce:write"]);
     if (!auth.ok) return auth.response;
 
     const parsed = await parseBody(request, registerServiceSchema);
@@ -351,3 +340,7 @@ export async function PUT(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withTraceContext(handleGet);
+export const POST = withTraceContext(handlePost);
+export const PUT = withTraceContext(handlePut);

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,10 +14,14 @@ DB_PATH = APP_DIR / "talos-agent.db"
 
 
 def get_db_path(agent_id: str | None = None) -> Path:
-    """Return per-agent DB path when running multi-agent, else default."""
+    """Return per-agent DB path when running multi-agent, else default.
+
+    Resolved lazily so tests (and ops tooling) can monkeypatch ``APP_DIR``
+    to redirect `get_db_path()` without rewriting module-level constants.
+    """
     if agent_id:
         return APP_DIR / f"agent-{agent_id}.db"
-    return DB_PATH
+    return APP_DIR / "talos-agent.db"
 
 
 def normalize_playbook_name(name: str) -> str:
@@ -213,32 +218,102 @@ CREATE TABLE IF NOT EXISTS retry_state (
     ),
     (
         7,
+        # checkpoint_keys: stores ENC::-wrapped HMAC and AES-GCM key material.
+        # key_hmac / key_enc are NEVER plaintext — always 'ENC::...' blobs.
         """
-CREATE TABLE IF NOT EXISTS checkpoints (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_id        TEXT NOT NULL,
-    schema_version  INTEGER NOT NULL DEFAULT 1,
-    envelope_hash   TEXT NOT NULL UNIQUE,
-    payload         TEXT NOT NULL,
-    created_at      TEXT NOT NULL,
-    stored_at       TEXT NOT NULL DEFAULT (datetime('now'))
+CREATE TABLE IF NOT EXISTS checkpoint_keys (
+    key_id       TEXT PRIMARY KEY,
+    agent_id     TEXT NOT NULL,
+    namespace    TEXT NOT NULL DEFAULT '',
+    key_hmac     TEXT NOT NULL,
+    key_enc      TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'active'
+                     CHECK(status IN ('active', 'retired')),
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    retired_at   TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_checkpoints_agent_id ON checkpoints(agent_id);
-CREATE INDEX IF NOT EXISTS idx_checkpoints_stored_at ON checkpoints(stored_at);
+CREATE INDEX IF NOT EXISTS idx_checkpoint_keys_agent_status
+    ON checkpoint_keys(agent_id, status);
+        """,
+    ),
+    (
+        8,
+        # checkpoint_envelopes: persists authenticated envelope payloads.
+        # nonce has a UNIQUE constraint to prevent replay attacks.
+        """
+CREATE TABLE IF NOT EXISTS checkpoint_envelopes (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_id       TEXT NOT NULL REFERENCES checkpoint_keys(key_id),
+    agent_id     TEXT NOT NULL,
+    namespace    TEXT NOT NULL DEFAULT '',
+    schema_ver   INTEGER NOT NULL DEFAULT 1,
+    seq          INTEGER NOT NULL,
+    ts           TEXT NOT NULL,
+    nonce        TEXT NOT NULL UNIQUE,
+    payload      TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoint_envelopes_agent_ns_seq
+    ON checkpoint_envelopes(agent_id, namespace, seq);
+        """,
+    ),
+    (
+        9,
+        # claimed_jobs: durable fencing-token store so job leases survive restarts.
+        # A row exists as long as the agent holds the lease; it is deleted on
+        # fulfill / abandon.  reconcile_after_restore() re-validates rows against
+        # the authoritative API and prunes any whose lease is no longer ours.
+        #
+        # completion_markers: idempotency log.  Before completing any job the
+        # agent writes a marker; on restore, duplicate markers are detected and
+        # the work is skipped.  Rows are retained for 7 days (pruned at startup).
+        """
+CREATE TABLE IF NOT EXISTS claimed_jobs (
+    job_id          TEXT PRIMARY KEY,
+    fencing_token   INTEGER NOT NULL,
+    claimed_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    lease_expires_at TEXT,
+    ttl_seconds     INTEGER NOT NULL DEFAULT 300
+);
+
+CREATE TABLE IF NOT EXISTS completion_markers (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id          TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    completed_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_completion_markers_job_id
+    ON completion_markers(job_id);
+CREATE INDEX IF NOT EXISTS idx_completion_markers_expires_at
+    ON completion_markers(expires_at);
         """,
     ),
 ]
 
 
 class LocalDB:
-    def __init__(self, path: Path = DB_PATH):
+    def __init__(self, path: Path = DB_PATH, *, timeout_ms: int = 5000):
         self._path = path
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(path))
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            # Some platforms/filesystems do not implement POSIX modes.
+            pass
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute(f"PRAGMA busy_timeout = {max(timeout_ms, 1)}")
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._run_migrations()
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            # Some platforms/filesystems do not expose POSIX permissions.
+            pass
 
     def _run_migrations(self) -> None:
         """Run all pending migrations in a single transaction."""
@@ -698,8 +773,6 @@ class LocalDB:
         repayment_address: str | None = None,
     ) -> int:
         """Create a new loan record and return its ID."""
-        from datetime import datetime, timedelta, timezone
-
         created_at = datetime.now(timezone.utc)
         due_date = created_at + timedelta(days=duration_days)
 
@@ -823,70 +896,158 @@ class LocalDB:
         )
         self._conn.commit()
 
-    # ── Checkpoints ───────────────────────────────────────────────────────────
+    # ── Claimed Jobs (fencing-token persistence) ───────────
 
-    def save_checkpoint(
+    def upsert_claimed_job(
         self,
-        agent_id: str,
-        schema_version: int,
-        envelope_hash: str,
-        payload: str,
-        created_at: str,
-    ) -> int:
-        """Persist an encoded checkpoint envelope and return its row ID.
+        job_id: str,
+        fencing_token: int,
+        ttl_seconds: int = 300,
+        lease_expires_at: datetime | None = None,
+    ) -> None:
+        """Persist a claimed job's fencing token so it survives restarts.
 
-        The ``envelope_hash`` column has a UNIQUE constraint so that
-        duplicate checkpoints are silently ignored (idempotent upsert).
-        Returns the row ID of the newly inserted row, or the existing row
-        ID on a conflict.
+        ``lease_expires_at`` is the server-reported wall-clock time at which
+        the lease expires.  When ``None`` it is approximated from
+        ``claimed_at + ttl_seconds``.
         """
-        cursor = self._conn.execute(
-            """INSERT INTO checkpoints (agent_id, schema_version, envelope_hash, payload, created_at)
-               VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(envelope_hash) DO NOTHING""",
-            (agent_id, schema_version, envelope_hash, payload, created_at),
+        if not job_id or not isinstance(job_id, str):
+            raise ValueError("job_id must be a non-empty string")
+        if not isinstance(fencing_token, int) or fencing_token < 0:
+            raise ValueError("fencing_token must be a non-negative integer")
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+
+        expires_iso = (
+            lease_expires_at.isoformat()
+            if lease_expires_at is not None
+            else (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
+        )
+        self._conn.execute(
+            """INSERT INTO claimed_jobs (job_id, fencing_token, lease_expires_at, ttl_seconds)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(job_id) DO UPDATE SET
+                   fencing_token   = excluded.fencing_token,
+                   lease_expires_at = excluded.lease_expires_at,
+                   ttl_seconds     = excluded.ttl_seconds""",
+            (job_id, fencing_token, expires_iso, ttl_seconds),
         )
         self._conn.commit()
-        if cursor.lastrowid:
-            return cursor.lastrowid
-        # Conflict — return existing row ID.
-        row = self._conn.execute(
-            "SELECT id FROM checkpoints WHERE envelope_hash = ?", (envelope_hash,)
-        ).fetchone()
-        return row["id"] if row else 0
 
-    def get_latest_checkpoint(self, agent_id: str) -> dict | None:
-        """Return the most recently stored checkpoint for *agent_id*, or None."""
+    def get_claimed_job(self, job_id: str) -> dict | None:
+        """Return the persisted claim for *job_id*, or ``None`` if not found."""
         row = self._conn.execute(
-            """SELECT id, agent_id, schema_version, envelope_hash, payload, created_at, stored_at
-               FROM checkpoints
-               WHERE agent_id = ?
-               ORDER BY stored_at DESC
-               LIMIT 1""",
-            (agent_id,),
+            "SELECT job_id, fencing_token, claimed_at, lease_expires_at, ttl_seconds "
+            "FROM claimed_jobs WHERE job_id = ?",
+            (job_id,),
         ).fetchone()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        return {
+            "job_id": row["job_id"],
+            "fencing_token": int(row["fencing_token"]),
+            "claimed_at": datetime.fromisoformat(row["claimed_at"]),
+            "lease_expires_at": (
+                datetime.fromisoformat(row["lease_expires_at"])
+                if row["lease_expires_at"]
+                else None
+            ),
+            "ttl_seconds": int(row["ttl_seconds"]),
+        }
 
-    def list_checkpoints(self, agent_id: str, limit: int = 20) -> list[dict]:
-        """Return up to *limit* checkpoints for *agent_id*, newest first."""
+    def get_all_claimed_jobs(self) -> list[dict]:
+        """Return all persisted claimed jobs (used during restore reconciliation)."""
         rows = self._conn.execute(
-            """SELECT id, agent_id, schema_version, envelope_hash, created_at, stored_at
-               FROM checkpoints
-               WHERE agent_id = ?
-               ORDER BY stored_at DESC
-               LIMIT ?""",
-            (agent_id, limit),
+            "SELECT job_id, fencing_token, claimed_at, lease_expires_at, ttl_seconds "
+            "FROM claimed_jobs"
+        ).fetchall()
+        result = []
+        for row in rows:
+            result.append(
+                {
+                    "job_id": row["job_id"],
+                    "fencing_token": int(row["fencing_token"]),
+                    "claimed_at": datetime.fromisoformat(row["claimed_at"]),
+                    "lease_expires_at": (
+                        datetime.fromisoformat(row["lease_expires_at"])
+                        if row["lease_expires_at"]
+                        else None
+                    ),
+                    "ttl_seconds": int(row["ttl_seconds"]),
+                }
+            )
+        return result
+
+    def delete_claimed_job(self, job_id: str) -> None:
+        """Remove a claimed-job record (after fulfillment or abandon)."""
+        self._conn.execute("DELETE FROM claimed_jobs WHERE job_id = ?", (job_id,))
+        self._conn.commit()
+
+    # ── Completion Markers (idempotency log) ───────────────
+
+    def add_completion_marker(
+        self,
+        job_id: str,
+        idempotency_key: str,
+        retain_days: int = 7,
+    ) -> None:
+        """Write a completion marker for *job_id* / *idempotency_key*.
+
+        Raises ``sqlite3.IntegrityError`` if the ``idempotency_key`` is already
+        present — the caller should catch this and skip re-doing the work.
+
+        Parameters
+        ----------
+        job_id:
+            The job being completed.
+        idempotency_key:
+            A unique key for this completion attempt, e.g.
+            ``f"{job_id}:{result_hash}"``.  Must be unique across all jobs.
+        retain_days:
+            How many days the marker is kept before expiry.  Expired markers
+            are pruned by :meth:`prune_expired_completion_markers`.
+        """
+        if not job_id or not isinstance(job_id, str):
+            raise ValueError("job_id must be a non-empty string")
+        if not idempotency_key or not isinstance(idempotency_key, str):
+            raise ValueError("idempotency_key must be a non-empty string")
+        if retain_days <= 0:
+            raise ValueError("retain_days must be positive")
+
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(days=retain_days)
+        ).isoformat()
+        self._conn.execute(
+            "INSERT INTO completion_markers (job_id, idempotency_key, expires_at) "
+            "VALUES (?, ?, ?)",
+            (job_id, idempotency_key, expires_at),
+        )
+        self._conn.commit()
+
+    def has_completion_marker(self, idempotency_key: str) -> bool:
+        """Return ``True`` if a non-expired marker with this key exists."""
+        row = self._conn.execute(
+            "SELECT 1 FROM completion_markers "
+            "WHERE idempotency_key = ? AND expires_at > datetime('now')",
+            (idempotency_key,),
+        ).fetchone()
+        return row is not None
+
+    def get_completion_markers_for_job(self, job_id: str) -> list[dict]:
+        """Return all non-expired completion markers for a job (used in duplicate detection)."""
+        rows = self._conn.execute(
+            "SELECT id, job_id, idempotency_key, completed_at, expires_at "
+            "FROM completion_markers "
+            "WHERE job_id = ? AND expires_at > datetime('now') "
+            "ORDER BY completed_at DESC",
+            (job_id,),
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def delete_checkpoints_before(self, agent_id: str, before_stored_at: str) -> int:
-        """Delete checkpoints for *agent_id* stored before *before_stored_at* (ISO-8601).
-
-        Returns the number of rows deleted.  Useful for rolling retention.
-        """
+    def prune_expired_completion_markers(self) -> int:
+        """Delete expired completion markers. Returns the number of rows removed."""
         cursor = self._conn.execute(
-            "DELETE FROM checkpoints WHERE agent_id = ? AND stored_at < ?",
-            (agent_id, before_stored_at),
+            "DELETE FROM completion_markers WHERE expires_at <= datetime('now')"
         )
         self._conn.commit()
         return cursor.rowcount
@@ -895,3 +1056,81 @@ class LocalDB:
 
     def close(self) -> None:
         self._conn.close()
+
+    # ── Replay Sessions ────────────────────────────────────
+
+    def create_replay_session(
+        self,
+        session_id: str,
+        talos_id: str,
+        agent_version: str,
+        started_at: str,
+    ) -> None:
+        """Create a new replay session record."""
+        self._conn.execute(
+            """INSERT OR IGNORE INTO replay_sessions
+               (session_id, talos_id, agent_version, started_at, status)
+               VALUES (?, ?, ?, ?, 'recording')""",
+            (session_id, talos_id, agent_version, started_at),
+        )
+        self._conn.commit()
+
+    def finish_replay_session(self, session_id: str, status: str = "completed") -> None:
+        """Mark a replay session as finished."""
+        ended_at = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            """UPDATE replay_sessions
+               SET status = ?, ended_at = ?
+               WHERE session_id = ?""",
+            (status, ended_at, session_id),
+        )
+        self._conn.commit()
+
+    def insert_replay_event(
+        self,
+        session_id: str,
+        event_id: str,
+        event_type: str,
+        payload_json: str,
+        redacted: bool = False,
+    ) -> None:
+        """Insert a single replay event."""
+        self._conn.execute(
+            """INSERT INTO replay_events
+               (session_id, event_id, event_type, payload, redacted)
+               VALUES (?, ?, ?, ?, ?)""",
+            (session_id, event_id, event_type, payload_json, int(redacted)),
+        )
+        self._conn.commit()
+
+    def get_replay_events(self, session_id: str) -> list[sqlite3.Row]:
+        """Return all replay events for a session ordered by insertion."""
+        rows = self._conn.execute(
+            """SELECT event_id, event_type, payload, redacted, recorded_at
+               FROM replay_events WHERE session_id = ?
+               ORDER BY id ASC""",
+            (session_id,),
+        ).fetchall()
+        return list(rows)
+
+    def list_replay_sessions(
+        self,
+        talos_id: str | None = None,
+        limit: int = 20,
+    ) -> list[sqlite3.Row]:
+        """List recent replay sessions, optionally filtered by talos_id."""
+        if talos_id:
+            rows = self._conn.execute(
+                """SELECT session_id, talos_id, agent_version, started_at, ended_at, status
+                   FROM replay_sessions WHERE talos_id = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (talos_id, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT session_id, talos_id, agent_version, started_at, ended_at, status
+                   FROM replay_sessions
+                   ORDER BY created_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return list(rows)

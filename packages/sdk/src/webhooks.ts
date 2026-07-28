@@ -1,3 +1,6 @@
+import type { ChaosInjector } from "./chaos.js";
+import { FaultType } from "./chaos.js";
+
 export class TalosWebhookError extends Error {
   constructor(public message: string) {
     super(message);
@@ -33,6 +36,8 @@ export interface VerifyWebhookOptions {
   eventId?: string;
   /** Optional logger for observability (privacy-safe: does not log payloads or secrets). */
   logger?: Logger;
+  /** Optional chaos injector for fault injection during verification. */
+  chaosInjector?: ChaosInjector;
 }
 
 export interface ParsedSignature {
@@ -91,7 +96,9 @@ export class TalosWebhook {
     }
 
     if (timestamp === -1) {
-      throw new TalosWebhookError("Missing or invalid timestamp in signature header");
+      throw new TalosWebhookError(
+        "Missing or invalid timestamp in signature header",
+      );
     }
     if (signatures.length === 0) {
       throw new TalosWebhookError("No v1 signatures found in header");
@@ -112,10 +119,13 @@ export class TalosWebhook {
       replayStore,
       eventId,
       logger,
+      chaosInjector,
     } = options;
 
     if (!signatureHeader) {
-      logger?.warn("Webhook verification failed: Missing signature header", { eventId });
+      logger?.warn("Webhook verification failed: Missing signature header", {
+        eventId,
+      });
       throw new TalosWebhookError("Missing signature header");
     }
 
@@ -123,7 +133,10 @@ export class TalosWebhook {
     try {
       parsed = this.parseSignatureHeader(signatureHeader);
     } catch (err: any) {
-      logger?.warn("Webhook verification failed: Invalid header format", { eventId, error: err.message });
+      logger?.warn("Webhook verification failed: Invalid header format", {
+        eventId,
+        error: err.message,
+      });
       throw err;
     }
 
@@ -133,12 +146,22 @@ export class TalosWebhook {
     const now = Math.floor(Date.now() / 1000);
     if (toleranceSeconds > 0) {
       if (now - timestamp > toleranceSeconds) {
-        logger?.warn("Webhook verification failed: Timestamp outside tolerance (too old)", { eventId, timestamp, now, toleranceSeconds });
-        throw new TalosWebhookError("Timestamp outside tolerance zone (too old)");
+        logger?.warn(
+          "Webhook verification failed: Timestamp outside tolerance (too old)",
+          { eventId, timestamp, now, toleranceSeconds },
+        );
+        throw new TalosWebhookError(
+          "Timestamp outside tolerance zone (too old)",
+        );
       }
       if (timestamp - now > toleranceSeconds) {
-        logger?.warn("Webhook verification failed: Timestamp outside tolerance (too far in future)", { eventId, timestamp, now, toleranceSeconds });
-        throw new TalosWebhookError("Timestamp outside tolerance zone (too far in future)");
+        logger?.warn(
+          "Webhook verification failed: Timestamp outside tolerance (too far in future)",
+          { eventId, timestamp, now, toleranceSeconds },
+        );
+        throw new TalosWebhookError(
+          "Timestamp outside tolerance zone (too far in future)",
+        );
       }
     }
 
@@ -160,8 +183,18 @@ export class TalosWebhook {
     // We use Web Crypto API (globalThis.crypto.subtle) which is supported in Node 18+, Edge, and Browsers.
     const cryptoSubtle = globalThis.crypto?.subtle;
     if (!cryptoSubtle) {
-      logger?.error("Web Crypto API is not available in this environment", { eventId });
-      throw new Error("Web Crypto API is not available. Please use an environment that supports it.");
+      logger?.error("Web Crypto API is not available in this environment", {
+        eventId,
+      });
+      throw new Error(
+        "Web Crypto API is not available. Please use an environment that supports it.",
+      );
+    }
+
+    if (chaosInjector) {
+      await chaosInjector.maybeInjectFault(
+        FaultType.SIGNATURE_VERIFICATION_SLOW,
+      );
     }
 
     for (const sig of signatures) {
@@ -175,10 +208,12 @@ export class TalosWebhook {
             textEncoder.encode(s),
             { name: "HMAC", hash: "SHA-256" },
             false,
-            ["sign"]
+            ["sign"],
           );
-          const expectedSigBuf = new Uint8Array(await cryptoSubtle.sign("HMAC", key, encodedContent));
-          
+          const expectedSigBuf = new Uint8Array(
+            await cryptoSubtle.sign("HMAC", key, encodedContent),
+          );
+
           if (this.timingSafeEqual(sigBuf, expectedSigBuf)) {
             isValid = true;
             break;
@@ -191,29 +226,50 @@ export class TalosWebhook {
     }
 
     if (!isValid) {
-      logger?.warn("Webhook verification failed: Signature mismatch", { eventId, timestamp });
+      logger?.warn("Webhook verification failed: Signature mismatch", {
+        eventId,
+        timestamp,
+      });
       throw new TalosWebhookError("No valid signatures found");
     }
 
     // Replay protection
     if (replayStore) {
       if (!eventId) {
-        logger?.error("Webhook verification misconfigured: replayStore provided but eventId missing", {});
-        throw new TalosWebhookError("eventId is required when using replayStore");
+        logger?.error(
+          "Webhook verification misconfigured: replayStore provided but eventId missing",
+          {},
+        );
+        throw new TalosWebhookError(
+          "eventId is required when using replayStore",
+        );
       }
 
       try {
+        if (chaosInjector) {
+          await chaosInjector.maybeInjectFault(FaultType.REPLAY_STORE_ERROR);
+        }
         const isReplay = await replayStore.has(eventId);
         if (isReplay) {
-          logger?.warn("Webhook verification failed: Replay detected", { eventId });
-          throw new TalosWebhookError("Event has already been processed (replay detected)");
+          logger?.warn("Webhook verification failed: Replay detected", {
+            eventId,
+          });
+          throw new TalosWebhookError(
+            "Event has already been processed (replay detected)",
+          );
         }
 
         // Store with TTL (tolerance + buffer) or default to 24 hours if no tolerance
         const ttl = toleranceSeconds > 0 ? toleranceSeconds + 60 : 86400;
+        if (chaosInjector) {
+          await chaosInjector.maybeInjectFault(FaultType.REPLAY_STORE_ERROR);
+        }
         await replayStore.set(eventId, ttl);
       } catch (err: any) {
-        logger?.error("Webhook verification: replayStore error", { eventId, error: err.message });
+        logger?.error("Webhook verification: replayStore error", {
+          eventId,
+          error: err.message,
+        });
         throw new TalosWebhookError(`Replay store error: ${err.message}`);
       }
     }

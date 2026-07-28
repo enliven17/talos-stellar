@@ -48,6 +48,12 @@ jobs:
       STELLAR_OPERATOR_SECRET_KEY: SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
       NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT: CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
       NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT: CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+      # Transactional outbox (web/OUTBOX.md) — enabled in CI so
+      # tests/outbox-e2e.test.ts exercises the real write -> lease ->
+      # dispatch round trip, not just the disabled-by-default no-op path.
+      OUTBOX_ENABLED: "true"
+      ADMIN_API_KEY: ci-test-admin-key
+      OUTBOX_DISPATCH_SECRET: ci-test-outbox-dispatch-secret
 
     steps:
       - uses: actions/checkout@v4
@@ -101,8 +107,12 @@ jobs:
           exit 1
         shell: bash
 
-      - name: Run E2E and Unit Tests
-        run: pnpm test
+      - name: Test
+        working-directory: web
+        run: pnpm test --run
+
+      - name: Coverage check
+        run: pnpm test --coverage --run
 
       # Deploy to Vercel (main branch only, using Vercel CLI)
       - name: Install Vercel CLI

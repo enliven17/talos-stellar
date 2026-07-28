@@ -12,6 +12,8 @@ import {
   tlsPlaybookPurchases,
   tlsApiAuditLogs,
   tlsTokenPurchases,
+  tlsBenchmarkRuns,
+  tlsBenchmarkResults,
 } from "./schema";
 
 export const talosRelations = relations(tlsTalos, ({ many, one }) => ({
@@ -25,6 +27,8 @@ export const talosRelations = relations(tlsTalos, ({ many, one }) => ({
   playbooks: many(tlsPlaybooks),
   auditLogs: many(tlsApiAuditLogs),
   tokenPurchases: many(tlsTokenPurchases),
+  webhookSubscriptions: many(tlsWebhookSubscriptions),
+  webhookDeliveries: many(tlsWebhookDeliveries),
 }));
 
 export const patronRelations = relations(tlsPatrons, ({ one }) => ({
@@ -70,4 +74,12 @@ export const apiAuditLogRelations = relations(tlsApiAuditLogs, ({ one }) => ({
 
 export const tokenPurchaseRelations = relations(tlsTokenPurchases, ({ one }) => ({
   talos: one(tlsTalos, { fields: [tlsTokenPurchases.talosId], references: [tlsTalos.id] }),
+}));
+
+export const benchmarkRunRelations = relations(tlsBenchmarkRuns, ({ many }) => ({
+  results: many(tlsBenchmarkResults),
+}));
+
+export const benchmarkResultRelations = relations(tlsBenchmarkResults, ({ one }) => ({
+  run: one(tlsBenchmarkRuns, { fields: [tlsBenchmarkResults.runId], references: [tlsBenchmarkRuns.id] }),
 }));

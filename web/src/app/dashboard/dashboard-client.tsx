@@ -297,7 +297,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
         <>
           {/* Portfolio Overview */}
           <section className="mb-10">
-            <h2 className="text-sm text-muted mb-4 tracking-wide">// PORTFOLIO OVERVIEW</h2>
+            <h2 className="text-sm text-muted mb-4 tracking-wide">{/* PORTFOLIO OVERVIEW */}</h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               {PORTFOLIO_STATS.map((stat) => {
                 const testId = `portfolio-stat-${stat.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
@@ -319,13 +319,13 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
                   onClick={() => setApprovalTab("pending")}
                   className={`text-sm tracking-wide transition-colors ${approvalTab === "pending" ? "text-accent" : "text-muted hover:text-foreground"}`}
                 >
-                  // PENDING ({approvals.length})
+                  {/* PENDING ({approvals.length}) */}
                 </button>
                 <button
                   onClick={() => setApprovalTab("history")}
                   className={`text-sm tracking-wide transition-colors ${approvalTab === "history" ? "text-accent" : "text-muted hover:text-foreground"}`}
                 >
-                  // HISTORY ({approvalHistory.length})
+                  {/* HISTORY ({approvalHistory.length}) */}
                 </button>
               </div>
 
@@ -432,7 +432,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
 
             {/* Agent Status */}
             <section>
-              <h2 className="text-sm text-muted mb-4 tracking-wide">// AGENT STATUS</h2>
+              <h2 className="text-sm text-muted mb-4 tracking-wide">{/* AGENT STATUS */}</h2>
               <div className="bg-surface border border-border divide-y divide-border">
                 {agents.length === 0 && (
                   <div className="p-6 text-muted text-sm text-center">No agents.</div>
@@ -455,7 +455,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
 
           {/* Financial Projection Charts */}
           <section className="mb-10">
-            <h2 className="text-sm text-muted mb-4 tracking-wide">// FINANCIAL PROJECTION</h2>
+            <h2 className="text-sm text-muted mb-4 tracking-wide">{/* FINANCIAL PROJECTION */}</h2>
             {talosManagement.length === 0 ? (
               <div className="bg-surface border border-border p-6 text-muted text-sm text-center">No TALOS agents available for projection.</div>
             ) : (
@@ -469,7 +469,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
 
           {/* Revenue Stream */}
           <section className="mb-10">
-            <h2 className="text-sm text-muted mb-4 tracking-wide">// REVENUE STREAM</h2>
+            <h2 className="text-sm text-muted mb-4 tracking-wide">{/* REVENUE STREAM */}</h2>
             {revenueStreams.length === 0 ? (
               <div className="bg-surface border border-border p-6 text-muted text-sm text-center">No revenue data yet.</div>
             ) : (
@@ -514,7 +514,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
 
           {/* On-chain Status */}
           <section className="mb-10">
-            <h2 className="text-sm text-muted mb-4 tracking-wide">// ON-CHAIN STATUS</h2>
+            <h2 className="text-sm text-muted mb-4 tracking-wide">{/* ON-CHAIN STATUS */}</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {talosManagement.map((c) => (
                 <div key={c.id} className="bg-surface border border-border p-5">
@@ -565,7 +565,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
 
           {/* TALOS Management */}
           <section className="mb-10">
-            <h2 className="text-sm text-muted mb-4 tracking-wide">// TALOS MANAGEMENT</h2>
+            <h2 className="text-sm text-muted mb-4 tracking-wide">{/* TALOS MANAGEMENT */}</h2>
             <div className="bg-surface border border-border divide-y divide-border">
               {talosManagement.map((c) => (
                 <div key={c.id} className="p-5 hover:bg-surface-hover transition-colors">
@@ -617,7 +617,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
 
           {/* Activity Feed */}
           <section className="mb-10">
-            <h2 className="text-sm text-muted mb-4 tracking-wide">// ACTIVITY FEED</h2>
+            <h2 className="text-sm text-muted mb-4 tracking-wide">{/* ACTIVITY FEED */}</h2>
             <div className="bg-surface border border-border">
               {activities.length === 0 && (
                 <div className="p-6 text-muted text-sm text-center">No activity yet.</div>

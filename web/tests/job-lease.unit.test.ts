@@ -49,6 +49,7 @@ function selectChain(result: any) {
     where: vi.fn().mockReturnThis(),
     limit: vi.fn().mockReturnThis(),
     orderBy: vi.fn().mockReturnThis(),
+    innerJoin: vi.fn().mockReturnThis(),
     then: vi.fn().mockImplementation((cb: (r: any) => any) => Promise.resolve(cb(result))),
   };
   return chain;
@@ -83,7 +84,9 @@ describe("Job Lease System", () => {
         status: "pending",
       };
 
-      mockDb.select.mockReturnValueOnce(selectChain([{ id: "agent_1" }]));
+      mockDb.select
+        .mockReturnValueOnce(selectChain([{ id: "agent_1" }]))
+        .mockReturnValueOnce(selectChain([{ id: "agent_1", status: "Active" }]));
       mockDb.update.mockReturnValue(updateChain([claimedResult]));
 
       const request = new NextRequest("http://localhost:3000/api/jobs/job_1/claim", {
@@ -106,6 +109,7 @@ describe("Job Lease System", () => {
 
       mockDb.select
         .mockReturnValueOnce(selectChain([{ id: "agent_2" }]))
+        .mockReturnValueOnce(selectChain([{ id: "agent_2", status: "Active" }]))
         .mockReturnValueOnce(selectChain([{ id: "job_1", status: "pending" }]));
 
       mockDb.update.mockReturnValue(updateChain([]));
@@ -127,6 +131,7 @@ describe("Job Lease System", () => {
 
       mockDb.select
         .mockReturnValueOnce(selectChain([{ id: "agent_1" }]))
+        .mockReturnValueOnce(selectChain([{ id: "agent_1", status: "Active" }]))
         .mockReturnValueOnce(selectChain([]));
 
       mockDb.update.mockReturnValue(updateChain([]));
@@ -153,7 +158,9 @@ describe("Job Lease System", () => {
         status: "pending",
       };
 
-      mockDb.select.mockReturnValueOnce(selectChain([{ id: "agent_2" }]));
+      mockDb.select
+        .mockReturnValueOnce(selectChain([{ id: "agent_2" }]))
+        .mockReturnValueOnce(selectChain([{ id: "agent_2", status: "Active" }]));
       mockDb.update.mockReturnValue(updateChain([claimedResult]));
 
       const request = new NextRequest("http://localhost:3000/api/jobs/job_1/claim", {
@@ -178,7 +185,9 @@ describe("Job Lease System", () => {
         leaseExpiresAt: new Date(Date.now() + 300000).toISOString(),
       };
 
-      mockDb.select.mockReturnValueOnce(selectChain([{ id: "agent_1" }]));
+      mockDb.select
+        .mockReturnValueOnce(selectChain([{ id: "agent_1" }]))
+        .mockReturnValueOnce(selectChain([{ id: "agent_1", status: "Active" }]));
       mockDb.update.mockReturnValue(updateChain([renewedResult]));
 
       const request = new NextRequest("http://localhost:3000/api/jobs/job_1/heartbeat", {
@@ -197,7 +206,9 @@ describe("Job Lease System", () => {
     it("rejects heartbeat with mismatched fencing token", async () => {
       const { POST } = await import("../src/app/api/jobs/[id]/heartbeat/route");
 
-      mockDb.select.mockReturnValueOnce(selectChain([{ id: "agent_1" }]));
+      mockDb.select
+        .mockReturnValueOnce(selectChain([{ id: "agent_1" }]))
+        .mockReturnValueOnce(selectChain([{ id: "agent_1", status: "Active" }]));
       mockDb.update.mockReturnValue(updateChain([]));
 
       const request = new NextRequest("http://localhost:3000/api/jobs/job_1/heartbeat", {
@@ -213,7 +224,9 @@ describe("Job Lease System", () => {
     it("rejects heartbeat from non-holder", async () => {
       const { POST } = await import("../src/app/api/jobs/[id]/heartbeat/route");
 
-      mockDb.select.mockReturnValueOnce(selectChain([{ id: "agent_2" }]));
+      mockDb.select
+        .mockReturnValueOnce(selectChain([{ id: "agent_2" }]))
+        .mockReturnValueOnce(selectChain([{ id: "agent_2", status: "Active" }]));
       mockDb.update.mockReturnValue(updateChain([]));
 
       const request = new NextRequest("http://localhost:3000/api/jobs/job_1/heartbeat", {
@@ -232,7 +245,9 @@ describe("Job Lease System", () => {
     it("releases lease for current holder", async () => {
       const { POST } = await import("../src/app/api/jobs/[id]/release/route");
 
-      mockDb.select.mockReturnValueOnce(selectChain([{ id: "agent_1" }]));
+      mockDb.select
+        .mockReturnValueOnce(selectChain([{ id: "agent_1" }]))
+        .mockReturnValueOnce(selectChain([{ id: "agent_1", status: "Active" }]));
       mockDb.update.mockReturnValue(updateChain([{ id: "job_1", status: "pending" }]));
 
       const request = new NextRequest("http://localhost:3000/api/jobs/job_1/release", {
@@ -250,7 +265,9 @@ describe("Job Lease System", () => {
     it("rejects release with wrong fencing token", async () => {
       const { POST } = await import("../src/app/api/jobs/[id]/release/route");
 
-      mockDb.select.mockReturnValueOnce(selectChain([{ id: "agent_1" }]));
+      mockDb.select
+        .mockReturnValueOnce(selectChain([{ id: "agent_1" }]))
+        .mockReturnValueOnce(selectChain([{ id: "agent_1", status: "Active" }]));
       mockDb.update.mockReturnValue(updateChain([]));
 
       const request = new NextRequest("http://localhost:3000/api/jobs/job_1/release", {
@@ -290,7 +307,8 @@ describe("Job Lease System", () => {
 
       mockDb.select
         .mockReturnValueOnce(selectChain([{ id: "agent_1" }]))
-        .mockReturnValueOnce(selectChain([mockJob]));
+        .mockReturnValueOnce(selectChain([mockJob]))
+        .mockReturnValueOnce(selectChain([{ id: "agent_1", status: "Active" }]));
 
       mockDb.transaction.mockImplementation(async (cb: (tx: any) => Promise<any>) => {
         const mockService = { currency: "USDC" };
@@ -343,7 +361,8 @@ describe("Job Lease System", () => {
 
       mockDb.select
         .mockReturnValueOnce(selectChain([{ id: "agent_1" }]))
-        .mockReturnValueOnce(selectChain([mockJob]));
+        .mockReturnValueOnce(selectChain([mockJob]))
+        .mockReturnValueOnce(selectChain([{ id: "agent_1", status: "Active" }]));
 
       const request = new NextRequest("http://localhost:3000/api/jobs/job_1/result", {
         method: "POST",
@@ -379,7 +398,8 @@ describe("Job Lease System", () => {
 
       mockDb.select
         .mockReturnValueOnce(selectChain([{ id: "agent_1" }]))
-        .mockReturnValueOnce(selectChain([mockJob]));
+        .mockReturnValueOnce(selectChain([mockJob]))
+        .mockReturnValueOnce(selectChain([{ id: "agent_1", status: "Active" }]));
 
       mockDb.transaction.mockImplementation(async (cb: (tx: any) => Promise<any>) => {
         const mockService = { currency: "USDC" };
@@ -447,6 +467,7 @@ describe("Job Lease System", () => {
         where: vi.fn().mockReturnThis(),
         orderBy: vi.fn().mockReturnThis(),
         limit: vi.fn().mockReturnThis(),
+        innerJoin: vi.fn().mockReturnThis(),
         then: vi.fn().mockImplementation((cb: (r: any) => any) =>
           Promise.resolve(cb([unleasedJob, selfLeasedJob])),
         ),

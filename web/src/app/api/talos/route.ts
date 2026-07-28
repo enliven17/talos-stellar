@@ -1,4 +1,4 @@
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsPatrons, tlsCommerceServices } from "@/db/schema";
@@ -6,15 +6,25 @@ import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { createAgentKeypair, fundTestnetAccount, verifyStellarSignature } from "@/lib/stellar";
 import { createTalosSchema, parseBody } from "@/lib/schemas";
+import { parseLimit } from "@/lib/parse-limit";
+import { TimeoutError, withTimeout } from "@/lib/timeout";
+import { fetchReputations } from "@/lib/reputation-ledger";
 
 // GET /api/talos — List TALOS entries with cursor-based pagination
 export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = request.nextUrl;
+    const { searchParams } = new URL(request.url);
     const cursor = searchParams.get("cursor");
-    const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 1), 100);
+    const parsedLimit = parseLimit(searchParams.get("limit"), 50, 100);
+    if (!parsedLimit.ok) return parsedLimit.response;
+    const limit = parsedLimit.limit;
 
-    const patronCount = db
+    const minScore = searchParams.has("minScore") ? Number(searchParams.get("minScore")) : undefined;
+    const minConfidence = searchParams.has("minConfidence") ? Number(searchParams.get("minConfidence")) : undefined;
+    const allowColdStart = searchParams.get("allowColdStart") === "true";
+
+    // Add timeout for patron count query
+    const patronCountQuery = db
       .select({
         talosId: tlsPatrons.talosId,
         count: sql<number>`count(*)::int`.as("count"),
@@ -23,77 +33,133 @@ export async function GET(request: NextRequest) {
       .groupBy(tlsPatrons.talosId)
       .as("patronCount");
 
-    const conditions = [];
-    if (cursor) {
-      const [cursorDate, cursorId] = cursor.split("|");
-      if (cursorDate && cursorId) {
-        conditions.push(
-          or(
-            lt(tlsTalos.createdAt, new Date(cursorDate)),
-            and(
-              eq(tlsTalos.createdAt, new Date(cursorDate)),
-              lt(tlsTalos.id, cursorId),
-            ),
-          )!,
+    const patronCount = patronCountQuery;
+    let currentCursor = cursor;
+    const accumulated: any[] = [];
+    let exhausted = false;
+
+    // Loop until we fulfill the limit or exhaust the DB
+    while (accumulated.length < limit && !exhausted) {
+      const conditions = [];
+      if (currentCursor) {
+        const [cursorDate, cursorId] = currentCursor.split("|");
+        if (cursorDate && cursorId) {
+          conditions.push(
+            or(
+              lt(tlsTalos.createdAt, new Date(cursorDate)),
+              and(
+                eq(tlsTalos.createdAt, new Date(cursorDate)),
+                lt(tlsTalos.id, cursorId),
+              ),
+            )!,
+          );
+        }
+      }
+
+      let entries;
+      try {
+        entries = await withTimeout(
+          db.select({
+            id: tlsTalos.id,
+            onChainId: tlsTalos.onChainId,
+            agentName: tlsTalos.agentName,
+            name: tlsTalos.name,
+            category: tlsTalos.category,
+            description: tlsTalos.description,
+            status: tlsTalos.status,
+            stellarAssetCode: tlsTalos.stellarAssetCode,
+            pulsePrice: tlsTalos.pulsePrice,
+            totalSupply: tlsTalos.totalSupply,
+            creatorShare: tlsTalos.creatorShare,
+            investorShare: tlsTalos.investorShare,
+            treasuryShare: tlsTalos.treasuryShare,
+            persona: tlsTalos.persona,
+            targetAudience: tlsTalos.targetAudience,
+            channels: tlsTalos.channels,
+            toneVoice: tlsTalos.toneVoice,
+            approvalThreshold: tlsTalos.approvalThreshold,
+            gtmBudget: tlsTalos.gtmBudget,
+            minPatronPulse: tlsTalos.minPatronPulse,
+            agentOnline: tlsTalos.agentOnline,
+            agentLastSeen: tlsTalos.agentLastSeen,
+            walletPublicKey: tlsTalos.walletPublicKey,
+            creatorPublicKey: tlsTalos.creatorPublicKey,
+            investorPublicKey: tlsTalos.investorPublicKey,
+            treasuryPublicKey: tlsTalos.treasuryPublicKey,
+            createdAt: tlsTalos.createdAt,
+            updatedAt: tlsTalos.updatedAt,
+            patrons: patronCount.count,
+          })
+          .from(tlsTalos)
+          .leftJoin(patronCount, eq(tlsTalos.id, patronCount.talosId))
+          .where(conditions.length > 0 ? and(...conditions) : undefined)
+          .orderBy(desc(tlsTalos.createdAt), desc(tlsTalos.id))
+          .limit(limit * 2), // fetch chunk
+          10_000,
+          "Talos list query timeout",
         );
+      } catch (error) {
+        if (error instanceof TimeoutError) {
+          return Response.json(
+            { error: "Query timeout. Please try again with a simpler query.", details: error.message },
+            { status: 408 },
+          );
+        }
+        console.error("Talos list query error:", error);
+        return Response.json({ error: "Internal server error" }, { status: 500 });
+      }
+
+      if (entries.length === 0) {
+        exhausted = true;
+        break;
+      }
+
+      if (entries.length < limit * 2) {
+        exhausted = true;
+      }
+
+      const talosIds = entries.map((e) => e.id);
+      const reputations = await fetchReputations(talosIds, new Date());
+
+      for (const entry of entries) {
+        let valid = true;
+        
+        if (minScore !== undefined || minConfidence !== undefined || allowColdStart) {
+          const rep = reputations.get(entry.id);
+          if (rep) {
+            if (rep.evidence === "insufficient") {
+              if (!allowColdStart) valid = false;
+            } else {
+              if (minScore !== undefined && rep.score < minScore) valid = false;
+              if (minConfidence !== undefined && rep.confidence < minConfidence) valid = false;
+            }
+          } else {
+            // Cold start
+            if (!allowColdStart) valid = false;
+          }
+        }
+
+        if (valid) {
+          accumulated.push({ ...entry, patrons: entry.patrons ?? 0 });
+          if (accumulated.length === limit) {
+            currentCursor = `${entry.createdAt.toISOString()}|${entry.id}`;
+            break;
+          }
+        }
+        currentCursor = `${entry.createdAt.toISOString()}|${entry.id}`;
       }
     }
 
-    const entries = await db
-      .select({
-        id: tlsTalos.id,
-        onChainId: tlsTalos.onChainId,
-        agentName: tlsTalos.agentName,
-        name: tlsTalos.name,
-        category: tlsTalos.category,
-        description: tlsTalos.description,
-        status: tlsTalos.status,
-        stellarAssetCode: tlsTalos.stellarAssetCode,
-        pulsePrice: tlsTalos.pulsePrice,
-        totalSupply: tlsTalos.totalSupply,
-        creatorShare: tlsTalos.creatorShare,
-        investorShare: tlsTalos.investorShare,
-        treasuryShare: tlsTalos.treasuryShare,
-        persona: tlsTalos.persona,
-        targetAudience: tlsTalos.targetAudience,
-        channels: tlsTalos.channels,
-        toneVoice: tlsTalos.toneVoice,
-        approvalThreshold: tlsTalos.approvalThreshold,
-        gtmBudget: tlsTalos.gtmBudget,
-        minPatronPulse: tlsTalos.minPatronPulse,
-        agentOnline: tlsTalos.agentOnline,
-        agentLastSeen: tlsTalos.agentLastSeen,
-        walletPublicKey: tlsTalos.walletPublicKey,
-        creatorPublicKey: tlsTalos.creatorPublicKey,
-        investorPublicKey: tlsTalos.investorPublicKey,
-        treasuryPublicKey: tlsTalos.treasuryPublicKey,
-        createdAt: tlsTalos.createdAt,
-        updatedAt: tlsTalos.updatedAt,
-        patrons: patronCount.count,
-      })
-      .from(tlsTalos)
-      .leftJoin(patronCount, eq(tlsTalos.id, patronCount.talosId))
-      .where(conditions.length > 0 ? and(...conditions) : undefined)
-      .orderBy(desc(tlsTalos.createdAt), desc(tlsTalos.id))
-      .limit(limit + 1);
+    const nextCursor = (exhausted && accumulated.length < limit) ? null : currentCursor;
 
-    const hasMore = entries.length > limit;
-    const page = hasMore ? entries.slice(0, limit) : entries;
-    const data = page.map((c) => ({ ...c, patrons: c.patrons ?? 0 }));
-
-    const lastItem = page[page.length - 1];
-    const nextCursor = hasMore && lastItem
-      ? `${lastItem.createdAt.toISOString()}|${lastItem.id}`
-      : null;
-
-    return Response.json({ data, nextCursor });
+    return Response.json({ data: accumulated, nextCursor });
   } catch {
-    return Response.json({ error: "Internal server error" }, { status: 500 });
+    return internalError(request);
   }
 }
 
 // POST /api/talos — Create a new TALOS (Genesis)
-export async function POST(request: NextRequest) {
+async function _POST(request: NextRequest) {
   try {
     const parsed = await parseBody(request, createTalosSchema);
     if (parsed.error) return parsed.error;
@@ -128,15 +194,15 @@ export async function POST(request: NextRequest) {
     // Message includes core immutable fields to prevent parameter tampering.
     const expectedMessage = `talos-genesis:${name}:${onChainId ?? "null"}:${supply}`;
     if (message !== expectedMessage) {
-      return Response.json(
-        { error: `Signature message must be exactly '${expectedMessage}'` },
-        { status: 400 },
+      return badRequest(
+        request,
+        `Signature message must be exactly '${expectedMessage}'`,
       );
     }
 
     const sigOk = await verifyStellarSignature(creatorPublicKey, message, signature);
     if (!sigOk) {
-      return Response.json({ error: "Invalid signature for creatorPublicKey" }, { status: 403 });
+      return forbidden(request, "Invalid signature for creatorPublicKey");
     }
 
     // Generate API key (tak_ prefix = TALOS API Key)
@@ -243,7 +309,10 @@ export async function POST(request: NextRequest) {
       detail: e?.detail,
       constraint: e?.constraint,
     }, null, 2));
-    const message = err instanceof Error ? err.message : "Internal server error";
-    return Response.json({ error: message }, { status: 500 });
+    return internalError(request);
   }
 }
+
+// Re-export POST wrapped with drift detection.
+// The original async function above is kept intact so it can be tested directly.
+export const POST = withDriftDetection("POST /api/talos", _POST);
