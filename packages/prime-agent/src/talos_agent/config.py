@@ -67,6 +67,39 @@ class Settings(BaseSettings):
     def llm_base_url(self) -> str | None:
         return "https://api.groq.com/openai/v1" if self.secret_value("groq_api_key") else None
 
+    # Model routing (Issue #233) — disabled by default, backward compatible
+    model_routing_enabled: bool = Field(
+        default=False,
+        description="Enable policy-driven model routing and fallback. When enabled, provider "
+        "selection considers task type, cost, latency, privacy, and availability. "
+        "When disabled (default), the legacy Groq-first/OpenAI-fallback behaviour is used.",
+    )
+    routing_fallback_enabled: bool = Field(
+        default=True,
+        description="When model routing is enabled, attempt fallback to alternative providers "
+        "if the primary provider fails or is unavailable. Only meaningful when "
+        "model_routing_enabled is True.",
+    )
+    routing_max_cost_usd: Decimal = Field(
+        default=Decimal("0"),
+        description="Maximum cost per LLM call in USD when routing is enabled. "
+        "0 means no cost limit. Used by the routing policy to prefer "
+        "cheaper providers when cost is constrained.",
+    )
+    routing_preferred_provider: str = Field(
+        default="",
+        description="Explicit provider name to prefer when routing is enabled. "
+        "Empty string means auto-select based on policy. When set, the "
+        "router uses this provider if it is available and meets capability "
+        "requirements.",
+    )
+    routing_budget_enabled: bool = Field(
+        default=False,
+        description="Enable usage accounting and budget tracking for provider calls. "
+        "When enabled, the UsageTracker records token counts, costs, and "
+        "checks budgets before allowing further calls.",
+    )
+
     # X (Twitter)
     x_username: str = ""
     x_password: str = ""
