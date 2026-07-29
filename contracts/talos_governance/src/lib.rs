@@ -72,7 +72,17 @@ pub enum DataKey {
     Proposal(u32),
     Vote(u32, Address),
     TokenBalanceSnapshot(u32, Address),
+    Checkpoint(Address, u32),
+    CheckpointCount(Address),
+    Delegation(Address),
     LastTouched(u32),
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Checkpoint {
+    pub ledger: u32,
+    pub votes: i128,
 }
 
 // ── Pause Domains ───────────────────────────────────────────────────
@@ -574,10 +584,73 @@ impl TalosGovernance {
     }
 
     fn get_vote_weight(env: &Env, snapshot_ledger: u32, voter: Address) -> i128 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::TokenBalanceSnapshot(snapshot_ledger, voter))
-            .unwrap_or(0)
+        let delegatee: Address = env.storage().persistent().get(&DataKey::Delegation(voter.clone())).unwrap_or(voter.clone());
+        Self::get_past_votes(env, delegatee, snapshot_ledger)
+    }
+
+    pub fn get_past_votes(env: &Env, account: Address, ledger: u32) -> i128 {
+        let count: u32 = env.storage().persistent().get(&DataKey::CheckpointCount(account.clone())).unwrap_or(0);
+        if count == 0 {
+            return env.storage().persistent().get(&DataKey::TokenBalanceSnapshot(ledger, account)).unwrap_or(0);
+        }
+        
+        // Check latest
+        let latest_ck: Checkpoint = env.storage().persistent().get(&DataKey::Checkpoint(account.clone(), count - 1)).unwrap();
+        if latest_ck.ledger <= ledger {
+            return latest_ck.votes;
+        }
+        
+        // Check earliest
+        let earliest_ck: Checkpoint = env.storage().persistent().get(&DataKey::Checkpoint(account.clone(), 0)).unwrap();
+        if earliest_ck.ledger > ledger {
+            return env.storage().persistent().get(&DataKey::TokenBalanceSnapshot(ledger, account)).unwrap_or(0);
+        }
+
+        // Binary search
+        let mut low = 0;
+        let mut high = count - 1;
+        while low < high {
+            let mid = high - (high - low) / 2;
+            let ck: Checkpoint = env.storage().persistent().get(&DataKey::Checkpoint(account.clone(), mid)).unwrap();
+            if ck.ledger == ledger {
+                return ck.votes;
+            } else if ck.ledger < ledger {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        let found: Checkpoint = env.storage().persistent().get(&DataKey::Checkpoint(account.clone(), low)).unwrap();
+        found.votes
+    }
+
+    pub fn delegate(env: Env, delegator: Address, delegatee: Address) {
+        pause_control::check_not_paused(&env, PAUSE_GOVERNANCE_CONFIG);
+        delegator.require_auth();
+        env.storage().persistent().set(&DataKey::Delegation(delegator.clone()), &delegatee);
+    }
+
+    pub fn update_voting_power(env: Env, admin: Address, account: Address, new_balance: i128) {
+        pause_control::check_not_paused(&env, PAUSE_GOVERNANCE_CONFIG);
+        Self::require_admin(&env, &admin);
+        let current_ledger = env.ledger().sequence();
+        let count: u32 = env.storage().persistent().get(&DataKey::CheckpointCount(account.clone())).unwrap_or(0);
+        
+        if count > 0 {
+            let mut last_ck: Checkpoint = env.storage().persistent().get(&DataKey::Checkpoint(account.clone(), count - 1)).unwrap();
+            if last_ck.ledger == current_ledger {
+                last_ck.votes = new_balance;
+                env.storage().persistent().set(&DataKey::Checkpoint(account.clone(), count - 1), &last_ck);
+                return;
+            }
+        }
+        
+        let ck = Checkpoint {
+            ledger: current_ledger,
+            votes: new_balance,
+        };
+        env.storage().persistent().set(&DataKey::Checkpoint(account.clone(), count), &ck);
+        env.storage().persistent().set(&DataKey::CheckpointCount(account.clone()), &(count + 1));
     }
 
     fn update_status_if_quorum(env: &Env, proposal: &mut Proposal) {
@@ -1008,5 +1081,87 @@ mod tests {
                 },
             }])
             .vote(&voter, &proposal_id, &VoteChoice::Approve);
+    }
+
+    #[test]
+    fn adversarial_voting_prevent_double_voting() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 100;
+        });
+
+        // Set Alice balance at ledger 100
+        client.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "update_voting_power",
+                args: (admin.clone(), alice.clone(), 500i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]).update_voting_power(&admin, &alice, &500);
+
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 110;
+        });
+
+        // Proposal created at ledger 110. Snapshot is 100.
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        // Alice votes
+        client.mock_auths(&[MockAuth {
+            address: &alice,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "vote",
+                args: (alice.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]).vote(&alice, &proposal_id, &VoteChoice::Approve);
+
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.yes_votes, 500);
+
+        // Now, post-proposal, Alice transfers to Bob
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 115;
+        });
+
+        client.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "update_voting_power",
+                args: (admin.clone(), alice.clone(), 0i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]).update_voting_power(&admin, &alice, &0);
+        
+        client.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "update_voting_power",
+                args: (admin.clone(), bob.clone(), 500i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]).update_voting_power(&admin, &bob, &500);
+
+        // Bob tries to vote. Bob's power at snapshot (100) was 0.
+        let res = client.mock_auths(&[MockAuth {
+            address: &bob,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "vote",
+                args: (bob.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]).try_vote(&bob, &proposal_id, &VoteChoice::Approve);
+        
+        assert!(res.is_err(), "Bob should not be able to vote with tokens received after snapshot");
     }
 }
