@@ -1,16 +1,18 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
+import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsCommerceServices, tlsCommerceJobs, tlsRevenues } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { resolveTalosFromRequest, verifyAgentApiKey } from "@/lib/auth";
 import { verifyX402Payment, settleX402Payment } from "@/lib/stellar-x402";
 import { fulfillInstant } from "@/lib/fulfillment";
 import { registerServiceSchema, submitBidSchema, parseBody } from "@/lib/schemas";
+import { withTraceContext } from "@/lib/tracing";
 
 const STELLAR_NETWORK = process.env.STELLAR_NETWORK ?? "testnet";
 
 // GET /api/talos/:id/service — Returns 402 with payment details (x402 storefront)
-export async function GET(
+async function handleGet(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -64,7 +66,7 @@ export async function GET(
 }
 
 // POST /api/talos/:id/service — Submit x402 payment + create commerce job
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -193,33 +195,36 @@ export async function POST(
 
       // Atomic: job + revenue recorded together — if either fails, both roll back.
       // Payment (on-chain) already happened; DB must not partially record it.
-      const [job] = await db.transaction(async (tx) => {
-        const [job] = await tx
-          .insert(tlsCommerceJobs)
-          .values({
+      const [job] = await withTransactionRetry(
+        async (tx) => {
+          const [job] = await tx
+            .insert(tlsCommerceJobs)
+            .values({
+              talosId: id,
+              requesterTalosId: requester.id,
+              serviceName: service.serviceName,
+              payload: payload ?? undefined,
+              result,
+              paymentSig: paymentToken,
+              txHash,
+              amount: service.price,
+              bidPrice: bidData.bidPrice ? String(bidData.bidPrice) : undefined,
+              status: bidData.status ?? "completed",
+            })
+            .returning();
+
+          await tx.insert(tlsRevenues).values({
             talosId: id,
-            requesterTalosId: requester.id,
-            serviceName: service.serviceName,
-            payload: payload ?? undefined,
-            result,
-            paymentSig: paymentToken,
-            txHash,
             amount: service.price,
-            bidPrice: bidData.bidPrice ? String(bidData.bidPrice) : undefined,
-            status: bidData.status ?? "completed",
-          })
-          .returning();
+            currency: service.currency ?? "USDC",
+            source: "commerce",
+            txHash,
+          });
 
-        await tx.insert(tlsRevenues).values({
-          talosId: id,
-          amount: service.price,
-          currency: service.currency ?? "USDC",
-          source: "commerce",
-          txHash,
-        });
-
-        return [job];
-      });
+          return [job];
+        },
+        { category: "JOB" }
+      );
 
       return Response.json(
         { id: job.id, jobId: job.id, status: "completed", result, txHash },
@@ -260,7 +265,7 @@ export async function POST(
 }
 
 // PUT /api/talos/:id/service — Register or update commerce service (upsert)
-export async function PUT(
+async function handlePut(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -335,3 +340,7 @@ export async function PUT(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withTraceContext(handleGet);
+export const POST = withTraceContext(handlePost);
+export const PUT = withTraceContext(handlePut);

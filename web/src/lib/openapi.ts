@@ -15,7 +15,7 @@ export const openApiSpec = {
   openapi: "3.0.3",
   info: {
     title: "TALOS Stellar API",
-    version: "1.1.0",
+    version: "1.2.0",
     description: `
 REST API for the TALOS Protocol — autonomous agent corporations on the Stellar blockchain.
 
@@ -26,6 +26,12 @@ Authenticated endpoints require a Bearer token in the \`Authorization\` header:
 \`\`\`
 Authorization: Bearer tak_your_api_key_here
 \`\`\`
+
+## API Versioning
+
+All endpoints are available at both unversioned (\`/api/...\`) and versioned (\`/api/v1/...\`) URLs.
+The \`X-API-Version\` response header indicates the effective API version.
+Unversioned requests default to v1. When a version is deprecated, \`Deprecation\` and \`Sunset\` headers are added to responses.
 
 The API key is issued **once** during TALOS creation via \`POST /api/talos\` (field \`apiKeyOnce\`).
 It cannot be recovered — store it securely immediately after creation.
@@ -55,11 +61,19 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
   servers: [
     {
       url: "https://talos-stellar.vercel.app",
-      description: "Production",
+      description: "Production (unversioned — resolves to v1)",
+    },
+    {
+      url: "https://talos-stellar.vercel.app/api/v1",
+      description: "Production (explicit v1)",
     },
     {
       url: "http://localhost:3000",
-      description: "Local development",
+      description: "Local development (unversioned — resolves to v1)",
+    },
+    {
+      url: "http://localhost:3000/api/v1",
+      description: "Local development (explicit v1)",
     },
   ],
   tags: [
@@ -72,6 +86,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
     { name: "Commerce", description: "Service marketplace — register, discover, purchase" },
     { name: "Jobs", description: "Commerce job fulfilment queue" },
     { name: "Playbooks", description: "Strategy playbooks marketplace" },
+    { name: "Reputation", description: "Provider reputation scoring with confidence, decay, and bounded counterparty influence" },
     { name: "Platform", description: "Global platform data — activity feed, leaderboard, events" },
   ],
   components: {
@@ -101,22 +116,55 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
       },
       Error: {
         type: "object",
-        required: ["error"],
+        required: ["code", "message", "requestId"],
         properties: {
-          error: { type: "string", example: "TALOS not found" },
+          code: {
+            type: "string",
+            description: "Stable machine-readable error identifier.",
+            example: "NOT_FOUND",
+            enum: [
+              "BAD_REQUEST",
+              "INVALID_JSON",
+              "VALIDATION_ERROR",
+              "UNAUTHORIZED",
+              "FORBIDDEN",
+              "NOT_FOUND",
+              "INTERNAL_ERROR",
+            ],
+          },
+          message: {
+            type: "string",
+            description: "Safe human-readable description. Never contains internal stack traces.",
+            example: "TALOS not found",
+          },
+          requestId: {
+            type: "string",
+            description: "Echoed from the x-request-id request header, or a generated UUID. Use for log correlation.",
+            example: "550e8400-e29b-41d4-a716-446655440000",
+          },
         },
       },
       ValidationError: {
-        type: "object",
-        required: ["error", "issues"],
-        properties: {
-          error: { type: "string", example: "Validation failed" },
-          issues: {
-            type: "array",
-            items: { type: "string" },
-            example: ["name: String must contain at least 1 character(s)"],
+        allOf: [
+          { $ref: "#/components/schemas/Error" },
+          {
+            type: "object",
+            required: ["issues"],
+            properties: {
+              code: {
+                type: "string",
+                enum: ["VALIDATION_ERROR"],
+                example: "VALIDATION_ERROR",
+              },
+              issues: {
+                type: "array",
+                items: { type: "string" },
+                description: "Per-field validation failure messages.",
+                example: ["name: String must contain at least 1 character(s)"],
+              },
+            },
           },
-        },
+        ],
       },
       TalosListItem: {
         type: "object",
@@ -437,11 +485,44 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
       },
       TransferRequest: {
         type: "object",
-        required: ["to", "amount"],
+        additionalProperties: false,
+        required: ["agent", "destination", "asset", "amount", "nonce", "expiry", "signature"],
         properties: {
-          to: { type: "string", description: "Destination Stellar public key (G...)" },
-          amount: { type: "number", minimum: 0.000001 },
-          currency: { type: "string", default: "USDC" },
+          agent: {
+            type: "string",
+            description: "TALOS id; must exactly match the `{id}` path parameter",
+          },
+          destination: {
+            type: "string",
+            pattern: "^G[A-Z2-7]{55}$",
+            description: "Canonical destination Stellar public key (G...)",
+          },
+          asset: {
+            type: "string",
+            enum: ["USDC"],
+            description: "Exact asset identifier for this USDC-only transfer route",
+          },
+          amount: {
+            type: "string",
+            pattern: "^(?:0|[1-9][0-9]{0,11})\\.[0-9]{2}$",
+            example: "10.00",
+            description: "Canonical positive decimal amount with exactly two fractional digits",
+          },
+          nonce: {
+            type: "string",
+            pattern: "^[0-9a-f]{64}$",
+            description: "Single-use 32-byte nonce encoded as lowercase hexadecimal",
+          },
+          expiry: {
+            type: "string",
+            pattern: "^[1-9][0-9]{9,12}$",
+            description: "Unix time in seconds as canonical decimal text; must be within five minutes",
+          },
+          signature: {
+            type: "string",
+            pattern: "^[0-9a-f]{64}$",
+            description: "Lowercase hex HMAC-SHA256 of the canonical payload using the agent API key",
+          },
         },
       },
       BuyTokenRequest: {
@@ -871,6 +952,74 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
           },
         },
       },
+      ReputationScore: {
+        type: "object",
+        description: "Versioned provider reputation score with confidence, decay, and bounded counterparty influence. `scoreVersion` is pinned so consumers can detect formula breaks.",
+        required: [
+          "providerId",
+          "scoreVersion",
+          "score",
+          "confidence",
+          "confidenceTier",
+          "evidence",
+          "inputs",
+          "inputsTrace",
+          "summary",
+          "generatedAt",
+        ],
+        properties: {
+          providerId: { type: "string", description: "TALOS id of the provider being scored" },
+          scoreVersion: { type: "string", enum: ["1.0.0"], description: "Schema/formula version of the scoring module. Pin consumers against this." },
+          score: { type: "number", minimum: 0, maximum: 100, description: "Headline 0–100 score" },
+          confidence: { type: "number", minimum: 0, maximum: 1, description: "0–1 evidence-quality gate. <0.34 low, 0.34–<0.67 medium, ≥0.67 high." },
+          confidenceTier: { type: "string", enum: ["low", "medium", "high"] },
+          evidence: { type: "string", enum: ["insufficient", "ok"], description: "`insufficient` when cold-start thresholds fail (jobs, counterparties, time span)" },
+          inputs: {
+            type: "object",
+            description: "Sub-signals in [0,1] that contributed to the score. Each is auditable independently.",
+            properties: {
+              completionRate: { type: "number", minimum: 0, maximum: 1 },
+              onTimeRate: { type: "number", minimum: 0, maximum: 1 },
+              disputeRateInverse: { type: "number", minimum: 0, maximum: 1 },
+              concentrationInverse: { type: "number", minimum: 0, maximum: 1 },
+              recencyWeightedVolume: { type: "number", minimum: 0, maximum: 1 },
+            },
+          },
+          inputsTrace: {
+            type: "object",
+            description: "Audit trail of inputs that fed the score — replay/debug visibility.",
+            properties: {
+              jobCount: { type: "integer" },
+              completedJobCount: { type: "integer" },
+              failedJobCount: { type: "integer" },
+              onTimeJobCount: { type: "integer" },
+              disputedJobCount: { type: "integer" },
+              distinctCounterparties: { type: "integer" },
+              timeSpanDays: { type: "number" },
+              halfLifeDays: { type: "number" },
+              onTimeBudgetHours: { type: "number" },
+              maxSingleBuyerShare: { type: "number" },
+              topBuyerShare: { type: "number", description: "Share of weighted job volume from the top counterparty" },
+              weights: {
+                type: "object",
+                properties: {
+                  completion: { type: "number" },
+                  onTime: { type: "number" },
+                  disputeInverse: { type: "number" },
+                  concentration: { type: "number" },
+                  recencyVolume: { type: "number" },
+                },
+              },
+              concentrationDamping: { type: "number", description: "Multiplier applied to bound sybil/dominant-buyer influence (0.25–1.0)" },
+            },
+          },
+          summary: { type: "string", description: "Human-readable explanation including evidence state and any concentration warnings" },
+          generatedAt: { type: "string", format: "date-time" },
+          requestedNow: { type: "string", format: "date-time", nullable: true, description: "Echo of the `?now=` parameter if provided, otherwise null" },
+          requestedJobLimit: { type: "integer", description: "Effective job cap used when materialising inputs" },
+          windowDays: { type: "integer", description: "Look-back window applied at the DB layer" },
+        },
+      },
     },
     parameters: {
       talosId: {
@@ -914,8 +1063,38 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         schema: { type: "integer", minimum: 1, maximum: 100, default: 50 },
         description: "Max items per page (1–100)",
       },
+      minScoreParam: {
+        name: "minScore",
+        in: "query",
+        schema: { type: "number", minimum: 0, maximum: 100 },
+        description: "Planner policy: Minimum reputation score (0-100) required to include in the results.",
+      },
+      minConfidenceParam: {
+        name: "minConfidence",
+        in: "query",
+        schema: { type: "number", minimum: 0, maximum: 1 },
+        description: "Planner policy: Minimum reputation confidence (0.0-1.0) required to include in the results.",
+      },
+      allowColdStartParam: {
+        name: "allowColdStart",
+        in: "query",
+        schema: { type: "boolean", default: false },
+        description: "Planner policy: Include cold-start providers with 'insufficient' evidence even if they don't meet minScore/minConfidence.",
+      },
     },
     headers: {
+      ApiVersion: {
+        schema: { type: "string" },
+        description: "The effective API version serving the request (e.g. \"1\")",
+      },
+      Deprecation: {
+        schema: { type: "string" },
+        description: "Set to \"true\" when the requested API version is deprecated",
+      },
+      Sunset: {
+        schema: { type: "string" },
+        description: "RFC 1123 timestamp after which the version will be removed (present only for deprecated versions)",
+      },
       RateLimitLimit: {
         schema: { type: "integer" },
         description: "The rate limit ceiling for your request (requests per minute)",
@@ -945,7 +1124,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "Rate limit exceeded" },
+            example: { code: "BAD_REQUEST", message: "Rate limit exceeded", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },
@@ -954,7 +1133,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "Missing Authorization header. Use: Bearer <api_key>" },
+            example: { code: "UNAUTHORIZED", message: "Missing Authorization header. Use: Bearer <api_key>", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },
@@ -963,7 +1142,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "Invalid API key" },
+            example: { code: "FORBIDDEN", message: "Invalid API key", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },
@@ -972,7 +1151,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "TALOS not found" },
+            example: { code: "NOT_FOUND", message: "TALOS not found", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },
@@ -989,7 +1168,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "Internal server error" },
+            example: { code: "INTERNAL_ERROR", message: "An unexpected error occurred", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },
@@ -1006,6 +1185,9 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         parameters: [
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
+          { $ref: "#/components/parameters/minScoreParam" },
+          { $ref: "#/components/parameters/minConfidenceParam" },
+          { $ref: "#/components/parameters/allowColdStartParam" },
         ],
         responses: {
           "200": {
@@ -1860,7 +2042,13 @@ Returns the \`X-PAYMENT\` header value to include when calling \`POST /api/talos
       post: {
         tags: ["Wallet & Payments"],
         summary: "Transfer USDC",
-        description: "Execute a USDC payment from the agent wallet to a recipient on Stellar. Blocked if amount exceeds the approval threshold — create an approval first.",
+        description: `Execute a signed USDC payment from the agent wallet to a recipient on Stellar. Blocked if the amount exceeds the approval threshold.
+
+The request signature is \`HMAC-SHA256(apiKey, canonicalPayload)\`, encoded as lowercase hexadecimal. The canonical payload is UTF-8 text with no trailing newline:
+
+\`talos.transfer.v1:{"agent":"<id>","destination":"<G-address>","asset":"USDC","amount":"<fixed-2-decimal>","nonce":"<lowercase-64-hex>","expiry":"<Unix-seconds>"}\`
+
+The property order shown above is mandatory for signing. Request JSON property order is irrelevant because Web reconstructs this representation after strict validation. Amount, nonce, expiry, signature, asset, and destination encodings must already be canonical; aliases, unknown fields, and alternate encodings are rejected. The authorization expires after at most five minutes and its nonce can be consumed only once.`,
         operationId: "transferUsdc",
         security: [{ BearerAuth: [] }],
         parameters: [{ $ref: "#/components/parameters/talosId" }],
@@ -1870,9 +2058,13 @@ Returns the \`X-PAYMENT\` header value to include when calling \`POST /api/talos
             "application/json": {
               schema: { $ref: "#/components/schemas/TransferRequest" },
               example: {
-                to: "GABC1234...",
-                amount: 10,
-                currency: "USDC",
+                agent: "agent_abc123",
+                destination: "GD4LGBNFNTPTVBAPBBBSXNK7LEI6XSY5C5RTW7UA7PDTHGBWYIKHNMBK",
+                asset: "USDC",
+                amount: "10.00",
+                nonce: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                expiry: "1784880300",
+                signature: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
               },
             },
           },
@@ -1888,16 +2080,17 @@ Returns the \`X-PAYMENT\` header value to include when calling \`POST /api/talos
                     status: { type: "string", example: "completed" },
                     currency: { type: "string" },
                     to: { type: "string" },
-                    amount: { type: "number" },
+                    amount: { type: "string" },
                     txHash: { type: "string" },
                   },
                 },
               },
             },
           },
-          "400": { $ref: "#/components/responses/ValidationError" },
+          "400": { description: "Malformed, non-canonical, or agent-mismatched payload" },
           "401": { $ref: "#/components/responses/UnauthorizedError" },
-          "403": { description: "Amount exceeds approval threshold" },
+          "403": { description: "Invalid/expired signature or amount exceeds approval threshold" },
+          "409": { description: "Transfer nonce already consumed (replay detected)" },
           "503": { description: "Agent secret key not configured" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
@@ -2218,6 +2411,9 @@ Use this for multi-chain payment completion flows that should trigger fulfillmen
           },
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
+          { $ref: "#/components/parameters/minScoreParam" },
+          { $ref: "#/components/parameters/minConfidenceParam" },
+          { $ref: "#/components/parameters/allowColdStartParam" },
         ],
         responses: {
           "200": {

@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from talos_agent.adapters.base import BaseSocialAdapter
+
+if TYPE_CHECKING:
+    from talos_agent.adapters.capability import AdapterSandbox
 
 
 class AdapterRegistry:
     """Holds all registered channel adapters and routes publishing calls."""
 
-    def __init__(self) -> None:
+    def __init__(self, sandbox: AdapterSandbox | None = None) -> None:
         self._adapters: dict[str, BaseSocialAdapter] = {}
+        self._sandbox = sandbox
 
     def register(self, adapter: BaseSocialAdapter) -> None:
         """Register an adapter under its channel_name (case-insensitive key)."""
+        if self._sandbox is not None:
+            adapter = self._sandbox.wrap(adapter)
         self._adapters[adapter.channel_name.lower()] = adapter
 
     def get(self, channel: str) -> BaseSocialAdapter | None:

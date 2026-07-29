@@ -142,3 +142,69 @@ def test_transaction_safety(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert cursor.fetchone() is None
 
     conn.close()
+
+
+def test_secret_rotation_upgrade_from_version_6_preserves_existing_data(tmp_path: Path):
+    """Migration 7 adds secret tables without rewriting legacy agent state."""
+    db_file = tmp_path / "secret-upgrade.db"
+    db = LocalDB(path=db_file)
+    db._conn.execute(
+        "INSERT INTO talos_config (key, value) VALUES ('name', 'legacy-agent')"
+    )
+    db._conn.execute("DROP TABLE secret_audit_events")
+    db._conn.execute("DROP TABLE secret_heads")
+    db._conn.execute("DROP TABLE secret_versions")
+    db._conn.execute("PRAGMA user_version = 6")
+    db._conn.commit()
+    db.close()
+
+    upgraded = LocalDB(path=db_file)
+    tables = {
+        row[0]
+        for row in upgraded._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+
+    assert {"secret_versions", "secret_heads", "secret_audit_events"} <= tables
+    assert upgraded._conn.execute(
+        "SELECT value FROM talos_config WHERE key = 'name'"
+    ).fetchone()[0] == "legacy-agent"
+    assert upgraded._conn.execute("PRAGMA user_version").fetchone()[0] == _MIGRATIONS[-1][0]
+    upgraded.close()
+
+
+def test_adapter_sandbox_upgrade_from_version_7_preserves_existing_data(tmp_path: Path):
+    """Migration 8 adds invocation admission state without rewriting agent data."""
+    db_file = tmp_path / "adapter-upgrade.db"
+    db = LocalDB(path=db_file)
+    db._conn.execute(
+        "INSERT INTO talos_config (key, value) VALUES ('sandbox-upgrade', 'preserved')"
+    )
+    db._conn.execute("DROP TABLE adapter_invocations")
+    db._conn.execute("PRAGMA user_version = 7")
+    db._conn.commit()
+    db.close()
+
+    upgraded = LocalDB(path=db_file)
+    columns = {
+        row[1]
+        for row in upgraded._conn.execute(
+            "PRAGMA table_info(adapter_invocations)"
+        ).fetchall()
+    }
+    assert {
+        "operation_id",
+        "adapter_name",
+        "operation",
+        "input_digest",
+        "state",
+        "owner_id",
+        "lease_expires_at",
+        "attempt_count",
+    } <= columns
+    assert upgraded._conn.execute(
+        "SELECT value FROM talos_config WHERE key = 'sandbox-upgrade'"
+    ).fetchone()[0] == "preserved"
+    assert upgraded._conn.execute("PRAGMA user_version").fetchone()[0] == 8
+    upgraded.close()

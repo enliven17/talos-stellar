@@ -4,6 +4,7 @@ import { tlsTalos, tlsDividends } from "@/db/schema";
 import { desc, eq } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
 import { recordDividendSchema, parseBody } from "@/lib/schemas";
+import { emitWebhookEvent } from "@/lib/webhooks/delivery";
 
 /**
  * GET /api/talos/:id/dividends
@@ -112,6 +113,21 @@ export async function POST(
         status: status ?? "completed",
       })
       .returning();
+
+    // Fire webhook event (non-blocking)
+    emitWebhookEvent({
+      type: "dividend.distributed",
+      talosId: id,
+      payload: {
+        dividendId: dividend.id,
+        amount: String(amount),
+        currency: currency ?? "USDC",
+        patronCount,
+        source: source ?? "revenue-share",
+        txHash: txHash ?? null,
+        status,
+      },
+    }).catch(() => {});
 
     return Response.json(dividend, { status: 201 });
   } catch {

@@ -4,7 +4,7 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "declaration": true,
-    "outDir": "dist",
+    "outDir": "dist/esm",
     "rootDir": "src",
     "strict": true,
     "esModuleInterop": true,
@@ -12,5 +12,5 @@
     "forceConsistentCasingInFileNames": true
   },
   "include": ["src"],
-  "exclude": ["dist", "node_modules"]
+  "exclude": ["dist", "node_modules", "tests", "scripts"]
 }

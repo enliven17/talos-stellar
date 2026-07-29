@@ -49,12 +49,31 @@ vi.mock("@stellar/stellar-sdk", () => {
   };
 });
 
-const mockSelectChain = (result: any) => {
+const mockSelectChain = (result: unknown[]) => {
+  const chain = {
+    from: vi.fn(),
+    where: vi.fn(),
+    limit: vi.fn(),
+    then: vi.fn(),
+  };
+  chain.from.mockReturnValue(chain);
+  chain.where.mockReturnValue(chain);
+  chain.limit.mockReturnValue(chain);
+  chain.then.mockImplementation(
+    (callback: (rows: unknown[]) => unknown) => callback(result),
+  );
+  return chain;
+};
+
+/**
+ * Build an insert mock that supports both .values().returning() (for upsert)
+ * and .values() alone (for side-effect-only inserts inside transactions).
+ */
+const mockInsertChain = (returningResult: any[] = []) => {
   const chain: any = {
-    from: vi.fn().mockReturnThis(),
-    where: vi.fn().mockReturnThis(),
-    limit: vi.fn().mockReturnThis(),
-    then: vi.fn().mockImplementation((callback) => callback(result)),
+    values: vi.fn().mockReturnThis(),
+    onConflictDoUpdate: vi.fn().mockReturnThis(),
+    returning: vi.fn().mockResolvedValue(returningResult),
   };
   return chain;
 };
@@ -88,14 +107,20 @@ describe("Async Jobs Revenue Recording Unit Tests", () => {
         serviceName: "research",
       };
 
-      // Mock select calls:
-      // 1. service select
-      // 2. talos select
-      // 3. duplicate job check (returns empty list, i.e., no duplicate)
+      // Mock select calls in order:
+      // 1. service select (tlsCommerceServices)
+      // 2. talos select   (tlsTalos)
+      // 3. quota config   (tlsQuotaConfigs — resolveQuotaConfig; returns empty → disabled fallback)
+      // 4. duplicate job check (tlsCommerceJobs — returns empty, no duplicate)
       mockDb.select
         .mockReturnValueOnce(mockSelectChain([mockService]))
         .mockReturnValueOnce(mockSelectChain([mockTalos]))
-        .mockReturnValueOnce(mockSelectChain([]));
+        .mockReturnValueOnce(mockSelectChain([]))   // quota config → safe fallback (disabled)
+        .mockReturnValueOnce(mockSelectChain([]));  // duplicate job check
+
+      // quota insert (upsert into tlsQuotaUsage) — returns a row with count=1
+      mockDb.insert
+        .mockReturnValueOnce(mockInsertChain([{ count: 1 }]));
 
       // Mock transaction
       const mockTxInsert = vi.fn().mockReturnValue({
@@ -264,9 +289,53 @@ describe("Async Jobs Revenue Recording Unit Tests", () => {
         params: Promise.resolve({ id: "job_1" }),
       });
 
+      // The pre-guard catches completed status before the transaction
       expect(response.status).toBe(409);
+      // Verify that the transaction was never entered
+      expect(mockDb.transaction).not.toHaveBeenCalled();
+    });
 
-      // Verify that tx.insert was NOT called since the job status was already "completed"
+    it("does NOT record revenue when a concurrent completion loses the pending-state CAS", async () => {
+      // Both workers may read "pending" before either transaction commits.
+      // The UPDATE includes status='pending', so the loser returns no row.
+      mockDb.select
+        .mockReturnValueOnce(mockSelectChain([{ id: "agent_1" }]))
+        .mockReturnValueOnce(mockSelectChain([mockJob]));
+
+      const mockTxUpdate = vi.fn().mockReturnValue({
+        set: vi.fn().mockReturnValue({
+          where: vi.fn().mockReturnValue({
+            returning: vi.fn().mockResolvedValue([]),
+          }),
+        }),
+      });
+      const mockTxInsert = vi.fn();
+
+      mockDb.transaction.mockImplementation(async (callback) => {
+        const mockTx = {
+          update: mockTxUpdate,
+          insert: mockTxInsert,
+          select: vi.fn(),
+        };
+        return callback(mockTx);
+      });
+
+      const request = new NextRequest("http://localhost:3000/api/jobs/job_1/result", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer mock_token",
+        },
+        body: JSON.stringify({
+          result: { data: "concurrent-result" },
+        }),
+      });
+
+      const response = await completeJobPOST(request, {
+        params: Promise.resolve({ id: "job_1" }),
+      });
+
+      expect(response.status).toBe(409);
+      expect(mockTxUpdate).toHaveBeenCalledTimes(1);
       expect(mockTxInsert).not.toHaveBeenCalled();
     });
   });

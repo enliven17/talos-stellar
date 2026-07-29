@@ -19,7 +19,7 @@ export default function Error({ error, reset }: ErrorProps) {
         Talos
       </Link>
 
-      <div className="text-xs text-muted mb-4 tracking-wide">// ERROR</div>
+      <div className="text-xs text-muted mb-4 tracking-wide">{/* ERROR */}</div>
 
       <h1 className="text-2xl font-bold text-accent mb-3">
         Something went wrong

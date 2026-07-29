@@ -1,6 +1,8 @@
 # Talos Protocol
 
+
 [![Prime Agent CI](https://github.com/enliven17/talos-stellar/actions/workflows/ci-prime-agent.yml/badge.svg)](https://github.com/enliven17/talos-stellar/actions/workflows/ci-prime-agent.yml)
+[![Web CI/CD](https://github.com/enliven17/talos-stellar/actions/workflows/deploy.yml/badge.svg)](https://github.com/enliven17/talos-stellar/actions/workflows/deploy.yml)
 
 [Contributing Guide](CONTRIBUTING.md)
 
@@ -123,6 +125,39 @@ cargo test --target wasm32-unknown-unknown
 cargo build --target wasm32-unknown-unknown --release
 ```
 
+## One-command local integration stack
+
+The repository now includes a reproducible local stack that starts Postgres, a mock Stellar provider, the web app, and optional agent services with a single command:
+
+```bash
+pnpm stack:up
+```
+
+Useful follow-ups:
+
+```bash
+pnpm stack:logs
+pnpm stack:down
+pnpm stack:reset
+```
+
+The stack exposes:
+- Web UI and API: http://localhost:3000
+- Health endpoint: http://localhost:3000/api/health
+- Mock Stellar service: http://localhost:4010/health
+
+To include the optional prime-agent profile:
+
+```bash
+docker compose --profile agent up -d prime-agent
+```
+
+Windows users can run the equivalent batch helper from the repository root:
+
+```bat
+scripts\local-stack.bat up
+```
+
 ## Security & Best Practices
 
 - **Scoped API Keys**: Agents use scoped API keys to access endpoints with least-privilege authorization. A key hashed with SHA-256 is stored in the database (`tls_api_keys` table), and each key corresponds to specific scopes (e.g., `commerce:write`, `wallet:sign`). The legacy `TALOS_API_KEY` acts as an "admin" scoped fallback. To restrict an agent's access, generate new API keys mapping to minimal scopes required for their routines.
@@ -134,6 +169,46 @@ uv run talos-agent encrypt-keys --env-file .env
 ```
 
 - On startup the agent will prompt for the master password (or read it from the `TALOS_MASTER_KEY` env var) to decrypt secrets. Keep the master password secure and do not commit it to source control.
+
+## Backup / Restore / Disaster Recovery
+
+The repository ships first-class DR primitives on both stacks. The
+prime-agent CLI exposes `talos-agent backup`, `talos-agent restore`, and
+`talos-agent backup-doctor`. The web app exposes `POST /api/ops/backup`,
+`POST /api/ops/restore`, and `GET /api/ops/backup/status`.
+
+```bash
+# Prime agent encrypted backup of local SQLite state
+cd packages/prime-agent
+uv run talos-agent backup
+
+# Verify an artifact without applying it
+uv run talos-agent backup-doctor --artifact ~/.talos-agent/backups/talos-agent-...enc
+
+# Restore from an artifact (DBs are pre-renamed to .pre-restore siblings)
+uv run talos-agent restore ~/.talos-agent/backups/talos-agent-...enc --confirm
+```
+
+```bash
+# Trigger a Postgres snapshot from the web app
+curl -sS -X POST https://talos-stellar.vercel.app/api/ops/backup \
+  -H "X-Ops-Token: $OPS_ADMIN_SECRET" \
+  -H "X-Backup-Passphrase: $BACKUP_PASSPHRASE" \
+  -H "Content-Type: application/json" \
+  -d '{"scope":"system","triggeredBy":"cli"}'
+```
+
+Cypher envelope:
+
+```
+"ENC::" + base64(salt[16] | nonce[12] | AES-256-GCM(ct) | gcmTag[16])
+KDF: PBKDF2-HMAC-SHA256, 200 000 iterations, 32-byte derived key
+```
+
+Format is shared with `packages/prime-agent/src/talos_agent/crypto.py` so a
+file encrypted by the agent CLI can be inspected by either side against a
+fixed test vector. See [`docs/DR_RUNBOOK.md`](docs/DR_RUNBOOK.md) for RPO /
+RTO targets, runbooks, and rollback procedures.
 
 ## Health check
 

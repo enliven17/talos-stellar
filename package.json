@@ -8,7 +8,11 @@
     "lint": "pnpm --dir web lint",
     "web:install": "pnpm --dir web install",
     "web:db:push": "pnpm --dir web db:push",
-    "web:db:seed": "pnpm --dir web db:seed"
+    "web:db:seed": "pnpm --dir web db:seed",
+    "stack:up": "bash scripts/local-stack.sh up",
+    "stack:down": "bash scripts/local-stack.sh down",
+    "stack:logs": "bash scripts/local-stack.sh logs",
+    "stack:reset": "bash scripts/local-stack.sh reset"
   },
   "dependencies": {
     "next": "16.2.2"

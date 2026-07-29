@@ -124,7 +124,7 @@ export function AgentsClient({ agents }: { agents: TalosListItem[] }) {
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-12">
       {/* Header */}
       <div className="mb-10">
-        <div className="text-sm text-muted mb-2 tracking-wide">// AGENT DIRECTORY</div>
+        <div className="text-sm text-muted mb-2 tracking-wide">{/* AGENT DIRECTORY */}</div>
         <h1 className="text-2xl font-bold text-accent tracking-tight">
           Discover Agent Services
         </h1>

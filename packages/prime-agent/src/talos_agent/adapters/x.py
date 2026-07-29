@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from rich.console import Console
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
+from talos_agent.adapters.capability import SecretProvider
+from talos_agent.config import resolve_setting_secret
 
 if TYPE_CHECKING:
     from talos_agent.browser.session import BrowserSession
@@ -23,16 +26,44 @@ _SEARCH_URL = "https://x.com/search?q={query}&src=typed_query&f=live"
 _PROFILE_URL = "https://x.com/{username}"
 
 
+@dataclass(frozen=True)
+class XAdapterConfig:
+    username: str = ""
+    email: str = ""
+
+
 class XAdapter(BaseSocialAdapter):
     """Publishes to X (Twitter) using Stagehand browser automation."""
 
     channel_name = "X"
 
-    def __init__(self, browser: BrowserSession, settings: Settings) -> None:
+    def __init__(
+        self,
+        browser: BrowserSession,
+        config: Settings | XAdapterConfig,
+        *,
+        secrets: SecretProvider | None = None,
+    ) -> None:
         self._browser = browser
-        self._settings = settings
+        self._settings: Settings | None
+        if isinstance(config, XAdapterConfig):
+            self._settings = None
+            self._username = config.username
+            self._email = config.email
+        else:
+            self._settings = config
+            self._username = config.x_username
+            self._email = config.x_email
+        self._secrets = secrets
         self._logged_in = False
         self._cookie_dismissed = False
+
+    @property
+    def _password(self) -> str:
+        if self._secrets is not None:
+            return self._secrets.get("x_password")
+        assert self._settings is not None
+        return resolve_setting_secret(self._settings, "x_password")
 
     # ── Capabilities ─────────────────────────────────────────
 
@@ -46,6 +77,21 @@ class XAdapter(BaseSocialAdapter):
             supports_mentions=True,
             supports_analytics=True,
         )
+
+    def health_snapshot(self) -> dict[str, bool]:
+        live_check = getattr(self._browser, "is_live", None)
+        if callable(live_check):
+            browser_live = bool(live_check())
+        else:
+            stagehand = getattr(self._browser, "_stagehand", None)
+            browser_live = bool(
+                stagehand is not None and getattr(stagehand, "page", None) is not None
+            )
+        return {
+            "has_username": bool(self._username),
+            "has_password": bool(self._password),
+            "browser_live": browser_live,
+        }
 
     # ── Auth ─────────────────────────────────────────────────
 
@@ -63,7 +109,8 @@ class XAdapter(BaseSocialAdapter):
         if self._logged_in:
             return
 
-        if not self._settings.x_username or not self._settings.x_password:
+        password = self._password
+        if not self._username or not password:
             console.print("[yellow]X credentials not configured — skipping login.[/yellow]")
             return
 
@@ -91,7 +138,7 @@ class XAdapter(BaseSocialAdapter):
         await asyncio.sleep(4)
 
         await self._browser.act(
-            f"Click on the username or email input field and type: {self._settings.x_username}"
+            f"Click on the username or email input field and type: {self._username}"
         )
         await asyncio.sleep(2)
         await self._browser.act("Click the Next button")
@@ -106,16 +153,16 @@ class XAdapter(BaseSocialAdapter):
             schema={"type": "object", "properties": {"type": {"type": "string"}}, "required": ["type"]},
         )
         page_type = check.get("type", "other") if isinstance(check, dict) else "other"
-        if page_type == "verification" and self._settings.x_email:
+        if page_type == "verification" and self._email:
             await self._browser.act(
-                f"Click on the input field and type: {self._settings.x_email}"
+                f"Click on the input field and type: {self._email}"
             )
             await asyncio.sleep(1)
             await self._browser.act("Click the Next button")
             await asyncio.sleep(4)
 
         await self._browser.act(
-            f"Click on the password input field and type: {self._settings.x_password}"
+            f"Click on the password input field and type: {password}"
         )
         await asyncio.sleep(1)
         await self._browser.act("Click the Log in button")
@@ -212,7 +259,7 @@ class XAdapter(BaseSocialAdapter):
 
     async def get_post_performance(self, content_snippet: str, **kwargs) -> dict:
         await self._ensure_login()
-        username = self._settings.x_username
+        username = self._username
         if not username:
             return {"error": "X username not configured"}
         await self._browser.goto(_PROFILE_URL.format(username=username))
@@ -239,7 +286,7 @@ class XAdapter(BaseSocialAdapter):
 
     async def get_profile_stats(self, **kwargs) -> dict:
         await self._ensure_login()
-        username = self._settings.x_username
+        username = self._username
         if not username:
             return {"error": "X username not configured"}
         await self._browser.goto(_PROFILE_URL.format(username=username))

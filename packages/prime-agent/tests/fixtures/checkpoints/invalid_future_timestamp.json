@@ -1,0 +1,24 @@
+{
+  "_comment": "INVALID: created_at is far in the future (year 2099); verify_checkpoint must reject this.",
+  "config": {
+    "api_url": "https://talos-stellar.vercel.app",
+    "talos_id": "talos-vega-001"
+  },
+  "envelope_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "meta": {
+    "agent_id": "vega-001",
+    "created_at": "2099-01-01T00:00:00+00:00",
+    "schema_version": 1
+  },
+  "section_hashes": {
+    "config": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "meta": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "state": {
+    "balance_usdc": 10.0,
+    "cycle_count": 1,
+    "last_task": "post_content",
+    "wallet_public_key": "GDQP2KPQGKIHYJGXNUIYOMHARUARCA7DJT5FO2FFOOKY3B2WSQHG4W37"
+  }
+}

@@ -4,12 +4,15 @@ import {
   fetchActivityTransactions,
   InvalidActivityCursorError,
 } from "./query";
+import { parseLimit } from "@/lib/parse-limit";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "25", 10) || 25, 1), 100);
+  const parsedLimit = parseLimit(searchParams.get("limit"), 25, 100);
+  if (!parsedLimit.ok) return parsedLimit.response;
+  const limit = parsedLimit.limit;
   const cursor = searchParams.get("cursor");
   const statsOnly = searchParams.get("statsOnly") === "true";
 
@@ -29,10 +32,13 @@ export async function GET(request: Request) {
     return Response.json({ stats });
   }
 
-  const [stats, { transactions, nextCursor }] = await Promise.all([
-    fetchActivityStats(),
-    fetchActivityTransactions(limit, cursor),
-  ]);
+    const [stats, { transactions, nextCursor }] = await Promise.all([
+      fetchActivityStats(),
+      fetchActivityTransactions(limit, cursor),
+    ]);
 
-  return Response.json({ stats, transactions, nextCursor });
+    return Response.json({ stats, transactions, nextCursor });
+  } catch {
+    return internalError(request);
+  }
 }

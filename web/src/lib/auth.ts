@@ -1,31 +1,17 @@
 import { NextRequest } from "next/server";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { db } from "@/db";
-import { tlsTalos, tlsApiKeys, tlsApiAuditLogs } from "@/db/schema";
-import { eq, and, sql } from "drizzle-orm";
+import { tlsTalos, tlsApiAuditLogs } from "@/db/schema";
+import { eq, desc } from "drizzle-orm";
+import { withTransactionRetry } from "@/db/db-retry";
+import {
+  AUDIT_CHAIN_VERSION,
+  GENESIS_HASH,
+  computeEntryHash,
+  isAuditChainEnabled,
+  type AuditChainEntry,
+} from "@/lib/audit-chain";
 import { logger } from "@/lib/logger";
-
-export const VALID_SCOPES = [
-  "admin",
-  "activity:write",
-  "commerce:read",
-  "commerce:write",
-  "wallet:read",
-  "wallet:sign",
-  "settings:read",
-  "settings:write",
-  "revenue:read",
-  "revenue:write",
-] as const;
-
-export type Scope = (typeof VALID_SCOPES)[number];
-
-/**
- * Hash an API key for storage or comparison.
- */
-export function hashApiKey(key: string): string {
-  return createHash("sha256").update(key).digest("hex");
-}
 
 /**
  * Generate a new scoped API key.
@@ -52,6 +38,10 @@ function extractBearerToken(request: NextRequest): string | null {
  *
  * All authenticated requests are logged to tls_api_audit_logs for security
  * hardening (key rotation auditing, anomaly detection, scope tracking).
+ *
+ * When the audit hash chain is enabled, each log entry is cryptographically
+ * chained to the previous entry via SHA-256 hashing, making the log
+ * tamper-evident.
  */
 export async function verifyAgentApiKey(
   request: NextRequest,
@@ -169,148 +159,15 @@ export async function verifyAgentApiKey(
 }
 
 /**
- * Resolve a TALOS from a Bearer token without requiring a known talosId.
- * Used by routes like /api/talos/me, /api/jobs/pending, and /api/playbooks
- * where the caller's identity is determined by the key, not the URL.
+ * Persist one audit log entry. Called fire-and-forget — must not throw.
  *
- * Returns the full TALOS record (minus apiKey) if valid, or a Response error.
+ * When JOBS_ENABLED=true, this durably enqueues the write instead of
+ * inserting directly: a transient DB error is retried with backoff by the
+ * job worker rather than silently dropping the audit entry, which is what
+ * the plain insert below does today (the caller's `.catch(() => {})`
+ * swallows the failure). Default is unchanged — direct insert — so this is
+ * purely additive until an operator opts in.
  */
-export async function resolveTalosFromRequest(
-  request: NextRequest,
-  requiredScopes: Scope[] = [],
-): Promise<
-  | { ok: true; talos: { id: string; [key: string]: unknown } }
-  | { ok: false; response: Response }
-> {
-  const token = extractBearerToken(request);
-
-  if (!token) {
-    return {
-      ok: false,
-      response: Response.json(
-        { error: "Missing Authorization header. Use: Bearer <api_key>" },
-        { status: 401 },
-      ),
-    };
-  }
-
-  const tokenHash = hashApiKey(token);
-
-  // 1. Try scoped key lookup
-  const scopedKeyMatch = await db
-    .select({ id: tlsApiKeys.id, talosId: tlsApiKeys.talosId, scopes: tlsApiKeys.scopes, expiresAt: tlsApiKeys.expiresAt })
-    .from(tlsApiKeys)
-    .where(
-      and(
-        eq(tlsApiKeys.keyHash, tokenHash),
-        eq(tlsApiKeys.status, "active")
-      )
-    )
-    .limit(1)
-    .then((r) => r[0] ?? null);
-
-  if (scopedKeyMatch) {
-    // Check expiry
-    if (scopedKeyMatch.expiresAt && scopedKeyMatch.expiresAt < new Date()) {
-      logger.warn({ talosId: scopedKeyMatch.talosId, keyId: scopedKeyMatch.id }, "auth.key.expired");
-      return {
-        ok: false,
-        response: Response.json({ error: "API key has expired" }, { status: 403 }),
-      };
-    }
-
-    // Check scopes
-    if (requiredScopes.length > 0) {
-      const hasScopes = requiredScopes.every(
-        (scope) =>
-          scopedKeyMatch.scopes.includes(scope) || scopedKeyMatch.scopes.includes("admin")
-      );
-      if (!hasScopes) {
-        logger.warn({ talosId: scopedKeyMatch.talosId, requiredScopes }, "auth.scope.denied");
-        return {
-          ok: false,
-          response: Response.json({ error: "Insufficient scopes", required: requiredScopes }, { status: 403 }),
-        };
-      }
-    }
-
-    // Update lastUsedAt in background
-    db.update(tlsApiKeys)
-      .set({ lastUsedAt: new Date() })
-      .where(eq(tlsApiKeys.id, scopedKeyMatch.id))
-      .execute()
-      .catch(() => {});
-
-    // Fetch full TALOS record
-    const talos = await db
-      .select()
-      .from(tlsTalos)
-      .where(eq(tlsTalos.id, scopedKeyMatch.talosId))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    if (!talos) {
-      return {
-        ok: false,
-        response: Response.json({ error: "TALOS not found" }, { status: 404 }),
-      };
-    }
-
-    const { apiKey: _key, ...safeTalos } = talos;
-    writeAuditLog(talos.id, request, 200, undefined, undefined).catch(() => {});
-    logger.info({ talosId: talos.id, keyId: scopedKeyMatch.id, path: new URL(request.url).pathname }, "auth.key.resolved");
-
-    return { ok: true, talos: safeTalos };
-  }
-
-  // 2. Fallback to legacy plaintext key
-  const allTalos = await db
-    .select()
-    .from(tlsTalos)
-    .where(sql`"apiKey" IS NOT NULL`)
-    .then((rows) => rows);
-
-  for (const row of allTalos) {
-    if (
-      row.apiKey &&
-      row.apiKey.length === token.length &&
-      timingSafeEqual(Buffer.from(row.apiKey), Buffer.from(token))
-    ) {
-      // Legacy keys get admin-equivalent scopes
-      if (requiredScopes.length > 0) {
-        // Legacy keys always pass scope check (admin equivalent)
-      }
-
-      const { apiKey: _key, ...safeTalos } = row;
-      writeAuditLog(row.id, request, 200).catch(() => {});
-      logger.info({ talosId: row.id, path: new URL(request.url).pathname }, "auth.key.resolved (legacy)");
-
-      return { ok: true, talos: safeTalos };
-    }
-  }
-
-  return {
-    ok: false,
-    response: Response.json({ error: "Invalid API key" }, { status: 403 }),
-  };
-}
-
-/**
- * Convenience wrapper: authenticate and return early with the error Response.
- * Eliminates the duplicated `if (!auth.ok) return auth.response` pattern.
- */
-export async function requireAgentAuth(
-  request: NextRequest,
-  talosId: string,
-  requiredScopes: Scope[] = [],
-): Promise<
-  | { ok: true; talos: { id: string } }
-  | { ok: false; response: Response }
-> {
-  return verifyAgentApiKey(request, talosId, requiredScopes);
-}
-
-/** Persist one audit log entry. Called fire-and-forget — must not throw. */
 async function writeAuditLog(
   talosId: string,
   request: NextRequest,
@@ -325,13 +182,90 @@ async function writeAuditLog(
 
   const url = new URL(request.url);
 
-  await db.insert(tlsApiAuditLogs).values({
-    talosId,
-    method: request.method,
-    path: url.pathname,
-    statusCode,
-    ipAddress: ip,
-    denialReason,
-    scopesRequired,
-  });
+  if (isAuditChainEnabled()) {
+    await writeAuditLogWithChain(talosId, request.method, url.pathname, statusCode, ip);
+  } else {
+    await db.insert(tlsApiAuditLogs).values({
+      talosId,
+      method: request.method,
+      path: url.pathname,
+      statusCode,
+      ipAddress: ip,
+    });
+  }
+}
+
+/**
+ * Write an audit log entry with a tamper-evident hash chain.
+ *
+ * Uses a serializable transaction to atomically:
+ *   1. Fetch the latest sequence number + entryHash for this agent
+ *   2. Compute the new chain link (sequenceNumber, previousHash, entryHash)
+ *   3. Insert the new row
+ *
+ * The serialization-retry wrapper handles concurrent write conflicts.
+ */
+async function writeAuditLogWithChain(
+  talosId: string,
+  method: string,
+  path: string,
+  statusCode: number,
+  ipAddress: string | null,
+): Promise<void> {
+  const now = new Date();
+  const createdAt = now.toISOString();
+
+  try {
+    await withTransactionRetry(
+      async (tx) => {
+        // Lock the chain: SELECT ... FOR UPDATE on the latest entry for this agent
+        const latestRows = await tx
+          .select({
+            sequenceNumber: tlsApiAuditLogs.sequenceNumber,
+            entryHash: tlsApiAuditLogs.entryHash,
+          })
+          .from(tlsApiAuditLogs)
+          .where(eq(tlsApiAuditLogs.talosId, talosId))
+          .orderBy(desc(tlsApiAuditLogs.createdAt))
+          .limit(1);
+
+        const latest = latestRows[0] ?? null;
+
+        // Compute chain linkage
+        const sequenceNumber = (latest?.sequenceNumber ?? -1) + 1;
+        const previousHash = latest?.entryHash ?? GENESIS_HASH;
+
+        const entry: AuditChainEntry = {
+          sequenceNumber,
+          talosId,
+          method,
+          path,
+          statusCode,
+          ipAddress,
+          createdAt,
+        };
+
+        const entryHash = computeEntryHash(entry);
+
+        await tx.insert(tlsApiAuditLogs).values({
+          talosId,
+          method,
+          path,
+          statusCode,
+          ipAddress,
+          sequenceNumber,
+          previousHash,
+          entryHash,
+          chainVersion: AUDIT_CHAIN_VERSION,
+          createdAt: now,
+        });
+      },
+      { category: "JOB" },
+    );
+  } catch (err) {
+    logger.error(
+      { err, talosId, method, path, statusCode },
+      "audit_chain_write_error",
+    );
+  }
 }

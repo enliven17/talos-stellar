@@ -3,7 +3,8 @@ import { db } from "@/db";
 import { tlsTalos, tlsPlaybooks, tlsPlaybookPurchases } from "@/db/schema";
 import { and, arrayContains, desc, eq, ilike, lt, or, sql } from "drizzle-orm";
 import { createPlaybookSchema, parseBody } from "@/lib/schemas";
-import { resolveTalosFromRequest } from "@/lib/auth";
+import { parseLimit } from "@/lib/parse-limit";
+import { withTraceContext } from "@/lib/tracing";
 
 
 // GET /api/playbooks — List playbooks (with optional filters and cursor pagination)
@@ -14,7 +15,9 @@ export async function GET(request: NextRequest) {
     const channel = searchParams.get("channel");
     const search = searchParams.get("search");
     const cursor = searchParams.get("cursor");
-    const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 1), 100);
+    const parsedLimit = parseLimit(searchParams.get("limit"), 50, 100);
+    if (!parsedLimit.ok) return parsedLimit.response;
+    const limit = parsedLimit.limit;
 
     const conditions = [eq(tlsPlaybooks.status, "active")];
 
@@ -110,8 +113,7 @@ export async function GET(request: NextRequest) {
 }
 
 // POST /api/playbooks — Create a playbook (requires TALOS apiKey)
-// Uses resolveTalosFromRequest for scoped key + legacy key support.
-export async function POST(request: NextRequest) {
+async function handlePost(request: NextRequest) {
   try {
     const auth = await resolveTalosFromRequest(request, ["commerce:write"]);
     if (!auth.ok) return auth.response;
@@ -155,3 +157,5 @@ const {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withTraceContext(handlePost);

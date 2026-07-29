@@ -14,13 +14,11 @@ AdapterState:   _worst() ordering
 from __future__ import annotations
 
 import asyncio
-import datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from talos_agent.adapters.health import (
-    PROBE_TIMEOUT_SECONDS,
     AdapterHealthReporter,
     AdapterState,
     BrowserSessionProbe,
@@ -401,8 +399,6 @@ class TestAdapterHealthReporter:
         reporter = AdapterHealthReporter(registry, timeout=0.05)
 
         # Monkey-patch the probe for "x" to a hanging one
-        original_report = reporter.report
-
         async def patched_report():
             reporter._registry._adapters["x"] = x_adapter
             # Replace probe resolution inside reporter

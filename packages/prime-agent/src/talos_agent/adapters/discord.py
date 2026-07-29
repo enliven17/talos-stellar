@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-import httpx
 from rich.console import Console
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
+from talos_agent.adapters.capability import (
+    AdapterHTTPClient,
+    DirectHTTPClient,
+    SecretProvider,
+)
+from talos_agent.config import resolve_setting_secret
 
 if TYPE_CHECKING:
     from talos_agent.config import Settings
@@ -26,6 +32,14 @@ _COLOR_GTM = 0x57F287      # Discord green — positive revenue / milestone
 _COLOR_WARN = 0xFEE75C     # Yellow — warnings / alerts
 
 
+@dataclass(frozen=True)
+class DiscordAdapterConfig:
+    channel_id: str = ""
+    guild_id: str = ""
+    legacy_webhook_url: str = ""
+    legacy_bot_token: str = ""
+
+
 class DiscordAdapter(BaseSocialAdapter):
     """Publishes Talos agent updates to Discord via webhook or bot REST API.
 
@@ -39,13 +53,47 @@ class DiscordAdapter(BaseSocialAdapter):
 
     channel_name = "Discord"
 
-    def __init__(self, settings: Settings) -> None:
-        self._settings = settings
-        self._webhook_url: str = settings.discord_webhook_url
-        self._bot_token: str = settings.discord_bot_token
-        self._channel_id: str = settings.discord_channel_id
-        self._guild_id: str = settings.discord_guild_id
+    def __init__(
+        self,
+        config: Settings | DiscordAdapterConfig,
+        *,
+        secrets: SecretProvider | None = None,
+        http: AdapterHTTPClient | None = None,
+    ) -> None:
+        self._settings: Settings | None
+        if isinstance(config, DiscordAdapterConfig):
+            self._settings = None
+            self._legacy_webhook_url = config.legacy_webhook_url
+            self._legacy_bot_token = config.legacy_bot_token
+            self._channel_id = config.channel_id
+            self._guild_id = config.guild_id
+        else:
+            self._settings = config
+            self._legacy_webhook_url = config.discord_webhook_url
+            self._legacy_bot_token = config.discord_bot_token
+            self._channel_id = config.discord_channel_id
+            self._guild_id = config.discord_guild_id
+        self._secrets = secrets
+        self._http = http or DirectHTTPClient()
         self._cached_bot_id: str | None = None
+
+    @property
+    def _webhook_url(self) -> str:
+        if self._secrets is not None:
+            return self._secrets.get("discord_webhook_url")
+        assert self._settings is not None
+        return resolve_setting_secret(
+            self._settings, "discord_webhook_url", self._legacy_webhook_url
+        )
+
+    @property
+    def _bot_token(self) -> str:
+        if self._secrets is not None:
+            return self._secrets.get("discord_bot_token")
+        assert self._settings is not None
+        return resolve_setting_secret(
+            self._settings, "discord_bot_token", self._legacy_bot_token
+        )
 
     # ── Capabilities ─────────────────────────────────────────
 
@@ -59,6 +107,13 @@ class DiscordAdapter(BaseSocialAdapter):
             supports_mentions=bool(self._bot_token and self._channel_id),
             supports_analytics=bool(self._bot_token and self._channel_id),
         )
+
+    def health_snapshot(self) -> dict[str, bool]:
+        return {
+            "has_webhook": bool(self._webhook_url),
+            "has_token": bool(self._bot_token),
+            "has_channel": bool(self._channel_id),
+        }
 
     # ── GTM message formatting ────────────────────────────────
 
@@ -138,8 +193,7 @@ class DiscordAdapter(BaseSocialAdapter):
         )
 
     async def _webhook_post(self, payload: dict, content: str) -> PublishResult:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(f"{self._webhook_url}?wait=true", json=payload)
+        resp = await self._http.post(f"{self._webhook_url}?wait=true", json=payload)
         if resp.status_code in (200, 204):
             data: dict = resp.json() if resp.content else {}
             msg_id = str(data.get("id", ""))
@@ -161,8 +215,7 @@ class DiscordAdapter(BaseSocialAdapter):
         )
 
     async def _api_post(self, url: str, payload: dict, content: str) -> PublishResult:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(url, headers=self._auth_headers, json=payload)
+        resp = await self._http.post(url, headers=self._auth_headers, json=payload)
         if resp.status_code == 200:
             data = resp.json()
             msg_id = data.get("id", "")
@@ -202,8 +255,7 @@ class DiscordAdapter(BaseSocialAdapter):
             payload["message_reference"] = {"message_id": message_id}
 
         url = f"{_DISCORD_API}/channels/{channel_id}/messages"
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(url, headers=self._auth_headers, json=payload)
+        resp = await self._http.post(url, headers=self._auth_headers, json=payload)
         if resp.status_code == 200:
             data = resp.json()
             return PublishResult(
@@ -228,12 +280,11 @@ class DiscordAdapter(BaseSocialAdapter):
             console.print("[yellow]Discord get_mentions: requires BOT_TOKEN + CHANNEL_ID.[/yellow]")
             return []
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                f"{_DISCORD_API}/channels/{self._channel_id}/messages",
-                headers=self._auth_headers,
-                params={"limit": 50},
-            )
+        resp = await self._http.get(
+            f"{_DISCORD_API}/channels/{self._channel_id}/messages",
+            headers=self._auth_headers,
+            params={"limit": 50},
+        )
         if resp.status_code != 200:
             return []
 
@@ -258,12 +309,11 @@ class DiscordAdapter(BaseSocialAdapter):
         if not (self._bot_token and self._channel_id):
             return []
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                f"{_DISCORD_API}/channels/{self._channel_id}/messages",
-                headers=self._auth_headers,
-                params={"limit": 100},
-            )
+        resp = await self._http.get(
+            f"{_DISCORD_API}/channels/{self._channel_id}/messages",
+            headers=self._auth_headers,
+            params={"limit": 100},
+        )
         if resp.status_code != 200:
             return []
 
@@ -286,12 +336,11 @@ class DiscordAdapter(BaseSocialAdapter):
         if not (self._bot_token and self._channel_id):
             return {"error": "Requires DISCORD_BOT_TOKEN + DISCORD_CHANNEL_ID"}
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                f"{_DISCORD_API}/channels/{self._channel_id}/messages",
-                headers=self._auth_headers,
-                params={"limit": 100},
-            )
+        resp = await self._http.get(
+            f"{_DISCORD_API}/channels/{self._channel_id}/messages",
+            headers=self._auth_headers,
+            params={"limit": 100},
+        )
         if resp.status_code != 200:
             return {"found": False, "error": f"HTTP {resp.status_code}"}
 
@@ -316,8 +365,9 @@ class DiscordAdapter(BaseSocialAdapter):
         if not self._bot_token:
             return {"error": "Requires DISCORD_BOT_TOKEN"}
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            bot_resp = await client.get(f"{_DISCORD_API}/users/@me", headers=self._auth_headers)
+        bot_resp = await self._http.get(
+            f"{_DISCORD_API}/users/@me", headers=self._auth_headers
+        )
         if bot_resp.status_code != 200:
             return {"error": f"HTTP {bot_resp.status_code}"}
 
@@ -325,11 +375,10 @@ class DiscordAdapter(BaseSocialAdapter):
         stats: dict = {"bot_username": bot.get("username"), "bot_id": bot.get("id")}
 
         if self._guild_id:
-            async with httpx.AsyncClient(timeout=30) as client:
-                guild_resp = await client.get(
-                    f"{_DISCORD_API}/guilds/{self._guild_id}?with_counts=true",
-                    headers=self._auth_headers,
-                )
+            guild_resp = await self._http.get(
+                f"{_DISCORD_API}/guilds/{self._guild_id}?with_counts=true",
+                headers=self._auth_headers,
+            )
             if guild_resp.status_code == 200:
                 guild = guild_resp.json()
                 stats["guild_name"] = guild.get("name")
@@ -345,8 +394,9 @@ class DiscordAdapter(BaseSocialAdapter):
             return self._cached_bot_id
         if not self._bot_token:
             return None
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{_DISCORD_API}/users/@me", headers=self._auth_headers)
+        resp = await self._http.get(
+            f"{_DISCORD_API}/users/@me", headers=self._auth_headers
+        )
         if resp.status_code == 200:
             self._cached_bot_id = resp.json()["id"]
             return self._cached_bot_id
