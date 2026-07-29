@@ -6,6 +6,7 @@ import {
   SbomAuditResult,
   SbomStateTransition,
   SbomFailureMode,
+  EnvStateTransition,
 } from "./types";
 
 const isCI = !!process.env.CI;
@@ -195,5 +196,21 @@ export function logSbomMetricSample(sample: SbomMetricsSample): void {
     logger.info(safe, "SBOM sample");
   } else {
     logger.warn(safe, "SBOM sample (failed)");
+  }
+}
+
+export function logEnvStateTransition(transition: EnvStateTransition): void {
+  const safe = sanitizeForLogging({
+    prNumber: transition.prNumber,
+    from: transition.from,
+    to: transition.to,
+    at: new Date(transition.at).toISOString(),
+    failureMode: transition.failureMode,
+    detail: transition.detail ? transition.detail.slice(0, 200) : undefined,
+  });
+  if (transition.to === "failed" || transition.failureMode) {
+    logger.warn(safe, `Env state: ${transition.from} -> ${transition.to}`);
+  } else {
+    logger.info(safe, `Env state: ${transition.from} -> ${transition.to}`);
   }
 }

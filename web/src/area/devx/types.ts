@@ -289,3 +289,24 @@ export interface SbomStateTransition {
   detail?: string;
   failureMode?: SbomFailureMode;
 }
+
+export type EnvState = "provisioning" | "ready" | "failed" | "tearing_down" | "destroyed";
+
+export interface EnvironmentMetadata {
+  prNumber: number;
+  branch: string;
+  createdAt: string;
+  ttlHours: number;
+  costLimitUsd: number;
+  dbUrl: string;
+  directUrl: string;
+}
+
+export interface EnvStateTransition {
+  from: EnvState | "pending";
+  to: EnvState;
+  at: number;
+  prNumber: number;
+  detail?: string;
+  failureMode?: string;
+}

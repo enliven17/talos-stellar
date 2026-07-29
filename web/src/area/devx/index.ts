@@ -27,6 +27,9 @@ export {
 export type { ThresholdRule } from "./thresholds";
 export { writeArtifact, loadArtifact, listArtifacts } from "./artifacts";
 export { buildTrendReport, formatTrendReport } from "./trend";
+export * from "./types";
+export * from "./config";
+export * from "./environments";
 export {
   logger,
   sanitizeForLogging,
@@ -38,6 +41,7 @@ export {
   logSbomAudit,
   logSbomMetricsSummary,
   logSbomMetricSample,
+  logEnvStateTransition,
 } from "./logger";
 export {
   sha256Buffer,

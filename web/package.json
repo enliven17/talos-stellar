@@ -21,7 +21,9 @@
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "db:seed": "tsx src/db/seed.ts",
-    "db:seed-demo": "tsx scripts/seed-demo-agents.ts"
+    "db:seed-demo": "tsx scripts/seed-demo-agents.ts",
+    "env:provision": "tsx src/area/devx/env-cli.ts provision",
+    "env:teardown": "tsx src/area/devx/env-cli.ts teardown"
   },
   "dependencies": {
     "@creit.tech/stellar-wallets-kit": "^2.1.0",

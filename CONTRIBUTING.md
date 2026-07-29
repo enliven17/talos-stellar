@@ -347,6 +347,43 @@ npm test        # runs vitest — all 93 tests should pass
 npm run build   # tsc compile check
 ```
 
+## PR Preview Environments
+
+Talos Protocol supports reproducible, ephemeral per-PR web and database preview environments with automatic lifecycle management. This ensures contributors can verify full-stack changes safely before merging.
+
+### Setup and Provisioning
+
+When you open or synchronize a PR, the `PR Preview Provision` GitHub Action automatically provisions an ephemeral database branch (e.g., using Neon or a mock provider during development). It will:
+1. Provision the database and configure environment naming (e.g., `pr-123`).
+2. Run database migrations (`pnpm db:migrate`).
+3. Seed the database with demo data (`pnpm db:seed-demo`).
+4. Generate an isolated Vercel Preview URL linked to this ephemeral database.
+
+A bot will comment on your PR with the connection details and the preview link once it is ready.
+
+### Verification
+
+To verify the preview environments locally or manually test the lifecycle:
+```bash
+# Provision a mock environment for a specific PR
+pnpm --dir web env:provision 123 my-feature-branch
+
+# Teardown the mock environment
+pnpm --dir web env:teardown 123
+```
+Unit tests for the environment lifecycle logic reside in `web/src/area/devx/__tests__/environments.test.ts` (or similar tests). Make sure tests pass locally by running `pnpm --dir web test:bench` or your standard test suites.
+
+### Rollback and Teardown
+
+Preview environments are destroyed automatically when the PR is closed or merged via the `PR Preview Teardown` GitHub workflow.
+Cost limits and TTLs (Time-To-Live) are enforced programmatically. If an environment becomes unstable, you can manually trigger a rebuild by closing and reopening the PR, or trigger the teardown script via CLI.
+
+### Troubleshooting
+
+- **Database provisioning fails**: Check the GitHub Actions logs for `PR Preview Provision`. Ensure your branch passes linting and type checks, as migration errors often cause provisioning failures.
+- **Preview URL is missing**: Vercel manages the web preview natively. Ensure the Vercel GitHub integration is active for the repository.
+- **Stale data**: The environment is seeded once upon provisioning. If you change the seed script, you may need to close and reopen the PR to provision a fresh database.
+
 ## Pull Request Workflow
 
 1. Create a branch from the latest `main`

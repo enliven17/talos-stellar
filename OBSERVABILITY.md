@@ -240,3 +240,19 @@ Signals to alert on (Sentry):
   the expected version (cache or formula break)
 
 Cache key for downstream stores: `(talosId, scoreVersion, dayBucket)`.
+
+## PR Preview Environments
+
+The `PR Preview Provision` and `Teardown` GitHub workflows emit structured logs via the `env:provision` and `env:teardown` CLI tools in `web/src/area/devx/env-cli.ts`.
+
+### Structured log events (pino)
+
+| `event` / message | Level | Meaning |
+|---|---|---|
+| `Env state: pending -> provisioning` | `info` | Starting DB provisioning for PR |
+| `Env state: provisioning -> ready` | `info` | Ephemeral DB is ready and seeded |
+| `Env state: ready -> tearing_down` | `info` | Starting DB teardown |
+| `Env state: tearing_down -> destroyed` | `info` | Ephemeral DB was successfully destroyed |
+| `Env state: * -> failed` | `warn` | The environment lifecycle encountered a failure (`failureMode` included) |
+
+The log context includes `prNumber` but strictly excludes connection strings and passwords via `sanitizeForLogging`.
