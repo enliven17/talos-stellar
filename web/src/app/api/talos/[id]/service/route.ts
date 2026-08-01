@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { withTransactionRetry } from "@/db/db-retry";
-import { tlsTalos, tlsCommerceServices, tlsCommerceJobs, tlsRevenues } from "@/db/schema";
+import { tlsTalos, tlsCommerceServices, tlsCommerceJobs, tlsRevenues, tlsApiAuditLogs } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { resolveTalosFromRequest, verifyAgentApiKey } from "@/lib/auth";
 import { verifyX402Payment, settleX402Payment } from "@/lib/stellar-x402";
@@ -10,6 +10,7 @@ import { registerServiceSchema, submitBidSchema, parseBody } from "@/lib/schemas
 import { withTraceContext } from "@/lib/tracing";
 
 const STELLAR_NETWORK = process.env.STELLAR_NETWORK ?? "testnet";
+
 
 // GET /api/talos/:id/service — Returns 402 with payment details (x402 storefront)
 async function handleGet(
@@ -134,6 +135,46 @@ async function handlePost(
       return Response.json({ error: "No service registered for this TALOS" }, { status: 404 });
     }
 
+    // A2A Commerce Policy Evaluation
+    const payload = (requestBody.payload ?? requestBody) as Record<string, unknown>;
+    const payloadDigest = computePayloadDigest(payload);
+    const expTime = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+
+    const policyContext: CommercePolicyContext = {
+      requester: requester.id,
+      provider: id,
+      asset: service.currency ?? "USDC",
+      network: STELLAR_NETWORK,
+      quotedAmount: Number(service.price),
+      payloadDigest,
+      expiration: expTime,
+      authorizationContext: { serviceName: service.serviceName },
+      operationType: "job_creation",
+    };
+
+    const policyDecision = await evaluateCommercePolicy(policyContext);
+
+    // Bind policy decision into API audit log
+    await db.insert(tlsApiAuditLogs).values({
+      talosId: id,
+      method: "POST",
+      path: `/api/talos/${id}/service`,
+      statusCode: policyDecision.decision === "approve" ? 200 : 403,
+    }).catch(() => {});
+
+    if (policyDecision.decision !== "approve") {
+      return Response.json(
+        {
+          error: "A2A commerce policy evaluation denied job creation",
+          policyDecision: policyDecision.decision,
+          evidence: policyDecision.evidence,
+          decisionId: policyDecision.decisionId,
+          decisionDigest: policyDecision.decisionDigest,
+        },
+        { status: 403 }
+      );
+    }
+
     const expectedPayee = service.stellarPublicKey || providerTalos?.agentWalletAddress;
     if (!expectedPayee) {
       return Response.json(
@@ -152,6 +193,7 @@ async function handlePost(
     if (existingJob) {
       return Response.json({ error: "Payment token already used (replay detected)" }, { status: 409 });
     }
+
 
     // Always verify against the listed service price — bidPrice is stored for negotiation
     // records only and must not reduce the payment amount until server-side accepted.
@@ -178,9 +220,8 @@ async function handlePost(
     }
 
     // 6. Create commerce job + fulfill
-    const payload = (requestBody.payload ?? requestBody) as Record<string, unknown>;
-
     if (service.fulfillmentMode === "instant") {
+
       // Instant mode: server calls external API and returns result synchronously
       let result: Record<string, unknown>;
       try {

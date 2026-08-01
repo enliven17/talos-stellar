@@ -101,6 +101,57 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
     payment_details = response.json()
     price = payment_details.get("price", 0)
     payee = payment_details.get("payee", "")
+
+    # A2A Commerce Policy Evaluation (Gating payment signing & job creation)
+    from datetime import timedelta, timezone
+    from talos_agent.policy.commerce_policy import (
+        CommercePolicyEvaluator,
+        CommercePolicyContext,
+        CommerceOperationType,
+        compute_payload_digest,
+    )
+    from talos_agent.policy.engine import PolicyEngine
+    from talos_agent.policy.schema import PolicyDecision
+
+    exp_time = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    policy_context = CommercePolicyContext(
+        requester=_settings.talos_id if _settings else "agent-client",
+        provider=talos_id,
+        asset=payment_details.get("assetCode", "USDC"),
+        network=payment_details.get("network", "testnet"),
+        quoted_amount=float(price),
+        payload_digest=compute_payload_digest(payload_dict),
+        expiration=exp_time,
+        authorization_context={"service_type": service_type},
+        operation_type=CommerceOperationType.JOB_CREATION,
+    )
+
+    try:
+        from talos_agent.policy.middleware import get_commerce_policy_evaluator
+        evaluator = get_commerce_policy_evaluator()
+    except Exception:
+        evaluator = CommercePolicyEvaluator(PolicyEngine())
+
+    policy_decision = await evaluator.evaluate_commerce_operation(policy_context)
+
+    if _db is not None:
+        _db.add_commerce_audit_log(
+            decision_id=policy_decision.decision_id,
+            decision_digest=policy_decision.decision_digest,
+            operation=CommerceOperationType.JOB_CREATION.value,
+            requester=policy_context.requester,
+            outcome=policy_decision.decision.value,
+        )
+
+    if policy_decision.decision != PolicyDecision.APPROVE:
+        return {
+            "error": "A2A commerce policy evaluation denied operation",
+            "policy_decision": policy_decision.decision.value,
+            "evidence": list(policy_decision.evidence),
+            "decision_id": policy_decision.decision_id,
+            "decision_digest": policy_decision.decision_digest,
+        }
+
     # Check if purchase would exceed GTM budget
     if spent_month + float(price) > gtm_budget:
         return {
@@ -141,6 +192,7 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
         amount=amount_units,
         asset_code="USDC",
         asset_issuer=USDC_TESTNET_ISSUER,
+        policy_decision=policy_decision,
     )
 
     if "error" in sign_result:
@@ -182,6 +234,8 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
             "talos_id": talos_id,
             "service_type": service_type,
             "result": submit_result["result"],
+            "decision_id": policy_decision.decision_id,
+            "decision_digest": policy_decision.decision_digest,
         }
 
     return {
@@ -190,7 +244,10 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
         "price": price,
         "talos_id": talos_id,
         "service_type": service_type,
+        "decision_id": policy_decision.decision_id,
+        "decision_digest": policy_decision.decision_digest,
     }
+
 
 
 @tool(
@@ -417,7 +474,10 @@ async def claim_job(job_id: str, ttl_seconds: int = 300) -> dict:
         "job_id": job_id,
         "fencing_token": fencing_token,
         "lease_expires_at": result.get("leaseExpiresAt"),
+        "decision_id": policy_decision.decision_id,
+        "decision_digest": policy_decision.decision_digest,
     }
+
 
 
 @tool(
@@ -605,6 +665,60 @@ async def evaluate_marketplace_bid(
     min_acceptable_price_usdc: float,
 ) -> dict:
     """Evaluate a bid using current budget state and price thresholds."""
+    from datetime import timedelta, timezone
+    from talos_agent.policy.commerce_policy import (
+        CommercePolicyEvaluator,
+        CommercePolicyContext,
+        CommerceOperationType,
+        compute_payload_digest,
+    )
+    from talos_agent.policy.engine import PolicyEngine
+    from talos_agent.policy.schema import PolicyDecision
+
+    exp_time = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    policy_context = CommercePolicyContext(
+        requester=bidder_agent_id,
+        provider=_settings.talos_id if _settings else "agent-seller",
+        asset="USDC",
+        network="testnet",
+        quoted_amount=float(bid_amount_usdc),
+        payload_digest=compute_payload_digest({"bid_id": bid_id, "service_id": service_id}),
+        expiration=exp_time,
+        authorization_context={
+            "listed_price": listed_price_usdc,
+            "min_acceptable": min_acceptable_price_usdc,
+        },
+        operation_type=CommerceOperationType.QUOTE_ACCEPTANCE,
+    )
+    try:
+        from talos_agent.policy.middleware import get_commerce_policy_evaluator
+        evaluator = get_commerce_policy_evaluator()
+    except Exception:
+        evaluator = CommercePolicyEvaluator(PolicyEngine())
+
+    policy_decision = await evaluator.evaluate_commerce_operation(policy_context)
+
+    if _db is not None:
+        _db.add_commerce_audit_log(
+            decision_id=policy_decision.decision_id,
+            decision_digest=policy_decision.decision_digest,
+            operation=CommerceOperationType.QUOTE_ACCEPTANCE.value,
+            requester=policy_context.requester,
+            outcome=policy_decision.decision.value,
+        )
+
+    if policy_decision.decision != PolicyDecision.APPROVE:
+        return {
+            "bid_id": bid_id,
+            "bidder_agent_id": bidder_agent_id,
+            "service_id": service_id,
+            "decision": "reject",
+            "counter_offer_usdc": None,
+            "reason": f"A2A commerce policy evaluation denied quote acceptance: {'; '.join(policy_decision.evidence)}",
+            "decision_id": policy_decision.decision_id,
+            "decision_digest": policy_decision.decision_digest,
+        }
+
     talos_config = _db.get_talos_config()
     gtm_budget = float((talos_config or {}).get("gtmBudget", 200))
     spent_month = _db.get_spending_period(30)
@@ -654,9 +768,12 @@ async def evaluate_marketplace_bid(
         "decision": decision,
         "counter_offer_usdc": counter_offer,
         "reason": reason,
+        "decision_id": policy_decision.decision_id,
+        "decision_digest": policy_decision.decision_digest,
         "budget_context": {
             "monthly_budget": gtm_budget,
             "spent_this_month": spent_month,
             "remaining": budget_remaining,
         },
     }
+

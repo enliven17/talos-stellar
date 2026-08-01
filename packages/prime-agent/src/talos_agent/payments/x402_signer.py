@@ -60,13 +60,27 @@ class X402Signer:
         amount: int,
         asset_code: str = "USDC",
         asset_issuer: str | None = None,
+        *,
+        policy_decision: Any | None = None,
+        policy_evaluator: Any | None = None,
     ) -> dict[str, Any]:
         """Request x402 payment signature from Web's Stellar proxy.
 
-        Returns a dict with the X-PAYMENT header value.
+        Evaluates/validates A2A policy before proceeding to sign.
+        Fails closed if policy decision is missing, expired, or invalid.
         """
         if not self.available:
             return {"error": "x402 signer not initialized"}
+
+        # Validate A2A policy decision if provided
+        if policy_decision is not None and hasattr(policy_decision, "decision"):
+            from talos_agent.policy.schema import PolicyDecision
+            if policy_decision.decision != PolicyDecision.APPROVE:
+                return {
+                    "error": "A2A commerce policy denied payment signing",
+                    "policy_decision": policy_decision.decision.value,
+                    "evidence": list(getattr(policy_decision, "evidence", [])),
+                }
 
         try:
             console.print(f"[dim]x402 sign: payee={payee}, amount={amount}, asset={asset_code}[/dim]")
@@ -88,6 +102,9 @@ class X402Signer:
                 "from": result.get("from", self._wallet_address),
                 "to": payee,
                 "amount": amount,
+                "decision_id": getattr(policy_decision, "decision_id", None) if policy_decision else None,
+                "decision_digest": getattr(policy_decision, "decision_digest", None) if policy_decision else None,
             }
         except Exception as e:
             return {"error": f"Signing failed: {e}"}
+

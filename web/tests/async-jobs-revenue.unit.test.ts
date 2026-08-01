@@ -254,6 +254,8 @@ describe("Async Jobs Revenue Recording Unit Tests", () => {
         status: "completed",
       };
 
+      const mockActiveTalos = { id: "agent_1", status: "Active" };
+
       mockDb.select
         .mockReturnValueOnce(mockSelectChain([mockAlreadyCompletedJob]));
 

@@ -8,6 +8,7 @@ import { parseLimit } from "@/lib/parse-limit";
 
 export const dynamic = "force-dynamic";
 
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const parsedLimit = parseLimit(searchParams.get("limit"), 25, 100);
