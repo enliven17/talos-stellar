@@ -1,0 +1,51 @@
+name: PR Preview Provision
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    environment: preview
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        run: corepack enable && corepack prepare pnpm@9 --activate
+
+      - name: Install dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Provision Ephemeral DB
+        working-directory: web
+        run: pnpm env:provision ${{ github.event.pull_request.number }} ${{ github.head_ref }}
+
+      - name: Run Migrations
+        working-directory: web
+        run: |
+          # Normally would use the real directUrl from the provision step
+          export DATABASE_URL="postgresql://pr_${{ github.event.pull_request.number }}:secret@mock-db.local:5432/talos_pr_${{ github.event.pull_request.number }}"
+          # In a real environment, uncomment these to migrate and seed:
+          # pnpm db:migrate
+          # pnpm db:seed-demo
+          echo "Mocking migration and seed..."
+
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '🚀 Preview Environment Provisioned!\n\nDatabase: `mock-db.local`\n*(Vercel Preview URL will be attached natively by Vercel)*'
+            })

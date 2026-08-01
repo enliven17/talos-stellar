@@ -11,6 +11,7 @@ doctest = false
 [dependencies]
 soroban-sdk = { workspace = true }
 ttl-manager = { path = "../ttl_manager" }
+storage-migration = { path = "../storage_migration" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

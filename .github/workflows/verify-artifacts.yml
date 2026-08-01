@@ -1,0 +1,472 @@
+name: Verify Release Artifacts
+
+# Verifies release-artifact signatures, SBOM file integrity, and provenance
+# attestation structure for published releases. Runs on demand with a tag
+# input, on every release publication, and nightly against the latest release
+# to catch certificate-expiry drift or release-tampering events.
+#
+# Designed to be fork-safe: in forks, the workflow only reads local inputs
+# and never touches secrets or tokens beyond the default read-only scope.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to verify (e.g. sdk-v1.2.3, contracts-v0.4.0)'
+        required: true
+        type: string
+      strict:
+        description: 'Fail on missing signatures / provenance (strict mode)'
+        required: false
+        default: true
+        type: boolean
+  release:
+    types: [published, edited]
+  schedule:
+    # Nightly verification of most recent release — catches cert chain
+    # expiration and any tampering events outside the release pipeline.
+    - cron: '17 4 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-artifacts-${{ github.event.inputs.tag || github.event.release.tag_name || 'nightly' }}
+  cancel-in-progress: true
+
+env:
+  OIDC_ISSUER: 'https://token.actions.githubusercontent.com'
+  WORKFLOW_IDENTITY_PREFIX: 'https://github.com/'
+  PROVENANCE_PREDICATE: 'https://slsa.dev/provenance/v1'
+
+jobs:
+  resolve-target:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      component: ${{ steps.resolve.outputs.component }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+      assets: ${{ steps.list.outputs.assets }}
+      assets_count: ${{ steps.list.outputs.assets_count }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Install gh CLI for release queries
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          command -v gh >/dev/null 2>&1 && gh --version || echo "gh already present"
+
+      - name: Resolve target tag
+        id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG=""
+          case "${{ github.event_name }}" in
+            release)
+              TAG="${{ github.event.release.tag_name }}"
+              PRERELEASE="${{ github.event.release.prerelease }}"
+              ;;
+            workflow_dispatch)
+              TAG="${{ inputs.tag }}"
+              PRERELEASE="false"
+              set +e
+              info=$(gh release view "$TAG" --json isPrerelease 2>/dev/null)
+              set -e
+              if [ -n "$info" ]; then
+                PRERELEASE=$(echo "$info" | node -e "process.stdin.on('data',d=>{console.log(JSON.parse(d).isPrerelease)})")
+              fi
+              ;;
+            schedule)
+              set +e
+              TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null)
+              set -e
+              if [ -z "$TAG" ]; then
+                echo "::warning::No releases found to verify nightly — stopping"
+                echo "tag=" >> "$GITHUB_OUTPUT"
+                echo "component=none" >> "$GITHUB_OUTPUT"
+                echo "prerelease=false" >> "$GITHUB_OUTPUT"
+                echo "assets=[]" >> "$GITHUB_OUTPUT"
+                echo "assets_count=0" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              PRERELEASE=$(gh release view "$TAG" --json isPrerelease --jq '.isPrerelease')
+              ;;
+          esac
+
+          COMPONENT="unknown"
+          case "$TAG" in
+            sdk-*)        COMPONENT="sdk" ;;
+            agent-*)      COMPONENT="agent" ;;
+            contracts-*)  COMPONENT="contracts" ;;
+            web-*)        COMPONENT="web" ;;
+          esac
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "component=$COMPONENT" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Selected tag=$TAG component=$COMPONENT prerelease=$PRERELEASE"
+
+      - name: List release assets
+        id: list
+        if: steps.resolve.outputs.tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.resolve.outputs.tag }}"
+          set +e
+          ASSETS_JSON=$(gh release view "$TAG" --json assets --jq '.assets | map({name: .name, size: .size, downloadCount: .downloadCount})' 2>/dev/null)
+          set -e
+          if [ -z "$ASSETS_JSON" ] || [ "$ASSETS_JSON" = "null" ]; then
+            ASSETS_JSON="[]"
+          fi
+          COUNT=$(echo "$ASSETS_JSON" | jq 'length')
+          echo "assets=$ASSETS_JSON" >> "$GITHUB_OUTPUT"
+          echo "assets_count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Found $COUNT assets for $TAG"
+
+  verify-signatures:
+    needs: resolve-target
+    if: needs.resolve-target.outputs.tag != '' && needs.resolve-target.outputs.assets_count > 0
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [cosign-artifact, cosign-sbom]
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Fetch release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.resolve-target.outputs.tag }}"
+          OUT="./release-assets/$TAG"
+          mkdir -p "$OUT"
+          cd "$OUT"
+          gh release download "$TAG" --pattern "*" 2>/dev/null || gh release download "$TAG" 2>/dev/null || echo "::warning::Some assets failed to download — continuing with what we got"
+          ls -la
+          echo "asset_dir=$PWD" >> "$GITHUB_ENV"
+
+      - name: Verify cosign signatures on release artifacts
+        if: matrix.kind == 'cosign-artifact'
+        shell: bash
+        run: |
+          set -euo pipefail
+          STRICT="${{ github.event_name == 'workflow_dispatch' && inputs.strict == true && true || (github.event_name == 'release' && true) || false }}"
+          cd "${asset_dir}"
+          TAG="${{ needs.resolve-target.outputs.tag }}"
+          COMPONENT="${{ needs.resolve-target.outputs.component }}"
+
+          case "$COMPONENT" in
+            sdk)       ARTIFACT_PATTERNS=("*.tgz") ;;
+            agent)     ARTIFACT_PATTERNS=("*.whl" "*.tar.gz") ;;
+            contracts) ARTIFACT_PATTERNS=("*.wasm") ;;
+            *)         ARTIFACT_PATTERNS=() ;;
+          esac
+
+          TOTAL=0; OK=0; MISSING=0; FAIL=0
+          for PAT in "${ARTIFACT_PATTERNS[@]}"; do
+            for ART in $PAT; do
+              [ -e "$ART" ] || continue
+              TOTAL=$((TOTAL+1))
+              SIG="${ART}.sig"
+              PEM="${ART}.pem"
+              if [ ! -e "$SIG" ] || [ ! -e "$PEM" ]; then
+                MISSING=$((MISSING+1))
+                echo "::warning::$ART: missing signature ($SIG/$PEM)"
+                continue
+              fi
+              set +e
+              cosign verify-blob \
+                --signature "$SIG" \
+                --certificate "$PEM" \
+                --certificate-oidc-issuer "$OIDC_ISSUER" \
+                --certificate-identity-regexp "^$WORKFLOW_IDENTITY_PREFIX${GITHUB_REPOSITORY}/.github/workflows/(release-publish|sbom-provenance)\.yml@.*" \
+                --insecure-ignore-tlog=true \
+                "$ART"
+              RC=$?
+              set -e
+              if [ "$RC" -eq 0 ]; then
+                OK=$((OK+1))
+                echo "✅ Verified $ART"
+              else
+                FAIL=$((FAIL+1))
+                echo "::error::FAILED signature verification for $ART (rc=$RC)"
+              fi
+            done
+          done
+
+          echo "artifact_total=$TOTAL" >> "$GITHUB_STEP_SUMMARY"
+          echo "artifact_verified=$OK" >> "$GITHUB_STEP_SUMMARY"
+          echo "artifact_missing_sig=$MISSING" >> "$GITHUB_STEP_SUMMARY"
+          echo "artifact_failed=$FAIL" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$FAIL" -gt 0 ] || { [ "$MISSING" -gt 0 ] && [ "$STRICT" = "true" ]; }; then
+            exit 1
+          fi
+          echo "Artifact signature verification complete: $OK/$TOTAL passed (missing=$MISSING, fail=$FAIL)"
+
+      - name: Verify cosign signatures on SBOM files
+        if: matrix.kind == 'cosign-sbom'
+        shell: bash
+        run: |
+          set -euo pipefail
+          STRICT="${{ github.event_name == 'workflow_dispatch' && inputs.strict == true && true || false }}"
+          cd "${asset_dir}"
+          TOTAL=0; OK=0; MISSING=0; FAIL=0
+          for SBOM in *.cdx.json *.spdx; do
+            [ -e "$SBOM" ] || continue
+            TOTAL=$((TOTAL+1))
+            SIG="${SBOM}.sig"
+            PEM="${SBOM}.pem"
+            if [ ! -e "$SIG" ] || [ ! -e "$PEM" ]; then
+              MISSING=$((MISSING+1))
+              echo "::warning::$SBOM: missing SBOM signature ($SIG/$PEM)"
+              continue
+            fi
+            set +e
+            cosign verify-blob \
+              --signature "$SIG" \
+              --certificate "$PEM" \
+              --certificate-oidc-issuer "$OIDC_ISSUER" \
+              --certificate-identity-regexp "^$WORKFLOW_IDENTITY_PREFIX${GITHUB_REPOSITORY}/.github/workflows/sbom-provenance\.yml@.*" \
+              --insecure-ignore-tlog=true \
+              "$SBOM"
+            RC=$?
+            set -e
+            if [ "$RC" -eq 0 ]; then
+              OK=$((OK+1))
+              echo "✅ Verified SBOM $SBOM"
+            else
+              FAIL=$((FAIL+1))
+              echo "::error::FAILED SBOM verification for $SBOM"
+            fi
+          done
+
+          echo "sbom_total=$TOTAL" >> "$GITHUB_STEP_SUMMARY"
+          echo "sbom_verified=$OK" >> "$GITHUB_STEP_SUMMARY"
+          echo "sbom_missing_sig=$MISSING" >> "$GITHUB_STEP_SUMMARY"
+          echo "sbom_failed=$FAIL" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$FAIL" -gt 0 ] || { [ "$MISSING" -gt 0 ] && [ "$STRICT" = "true" ]; }; then
+            exit 1
+          fi
+          echo "SBOM signature verification: $OK/$TOTAL passed"
+
+  verify-sbom-structure:
+    needs: resolve-target
+    if: needs.resolve-target.outputs.tag != '' && needs.resolve-target.outputs.assets_count > 0
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Fetch release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          TAG="${{ needs.resolve-target.outputs.tag }}"
+          OUT="./release-assets/$TAG"
+          mkdir -p "$OUT"; cd "$OUT"
+          gh release download "$TAG" --pattern "*.cdx.json" --pattern "*.spdx" 2>/dev/null || true
+          ls -la || echo "No SBOM files attached"
+          echo "asset_dir=$PWD" >> "$GITHUB_ENV"
+
+      - name: Validate CycloneDX SBOM schemas
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${asset_dir}"
+          PASS=0; FAIL=0; TOTAL=0
+          for SBOM in *.cdx.json; do
+            [ -e "$SBOM" ] || continue
+            TOTAL=$((TOTAL+1))
+            node -e "
+              const fs=require('fs');
+              try {
+                const j=JSON.parse(fs.readFileSync('$SBOM','utf8'));
+                if (j.bomFormat !== 'CycloneDX') throw new Error('bad bomFormat: '+j.bomFormat);
+                if (!j.specVersion) throw new Error('missing specVersion');
+                if (!j.metadata || !j.metadata.component) throw new Error('missing metadata.component');
+                const n=(j.components||[]).length;
+                console.log('OK $SBOM:', j.bomFormat, j.specVersion, 'components=', n);
+              } catch (e) {
+                console.error('FAIL $SBOM:', e.message);
+                process.exit(1);
+              }
+            " && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+          done
+          echo "cyclonedx_total=$TOTAL" >> "$GITHUB_STEP_SUMMARY"
+          echo "cyclonedx_valid=$PASS" >> "$GITHUB_STEP_SUMMARY"
+          echo "cyclonedx_invalid=$FAIL" >> "$GITHUB_STEP_SUMMARY"
+          [ "$FAIL" -eq 0 ] || exit 1
+
+      - name: Validate SPDX SBOM syntax / checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${asset_dir}"
+          PASS=0; FAIL=0; TOTAL=0
+          for SBOM in *.spdx; do
+            [ -e "$SBOM" ] || continue
+            TOTAL=$((TOTAL+1))
+            node -e "
+              const fs=require('fs');
+              const s=fs.readFileSync('$SBOM','utf8');
+              const lines=s.split('\n');
+              const required=['SPDXVersion:','DataLicense:','SPDXID: SPDXRef-DOCUMENT','DocumentName:','DocumentNamespace:','Created:','Creator: Tool:'];
+              for (const r of required) {
+                if (!lines.some(l => l.startsWith(r))) throw new Error('missing SPDX field line starting with: '+r);
+              }
+              const pkgs = lines.filter(l => l.startsWith('PackageName:')).length;
+              console.log('OK $SBOM:', lines[0], 'PackageName entries=', pkgs);
+            " && PASS=$((PASS+1)) || FAIL=$((FAIL+1))
+          done
+          echo "spdx_total=$TOTAL" >> "$GITHUB_STEP_SUMMARY"
+          echo "spdx_valid=$PASS" >> "$GITHUB_STEP_SUMMARY"
+          echo "spdx_invalid=$FAIL" >> "$GITHUB_STEP_SUMMARY"
+          [ "$FAIL" -eq 0 ] || exit 1
+
+  verify-provenance:
+    needs: resolve-target
+    if: needs.resolve-target.outputs.tag != '' && needs.resolve-target.outputs.assets_count > 0
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Fetch release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          TAG="${{ needs.resolve-target.outputs.tag }}"
+          OUT="./release-assets/$TAG"
+          mkdir -p "$OUT"; cd "$OUT"
+          gh release download "$TAG" --pattern "*.intoto.jsonl" 2>/dev/null || true
+          ls -la || echo "No provenance files attached"
+          echo "asset_dir=$PWD" >> "$GITHUB_ENV"
+
+      - name: Validate in-toto / SLSA provenance structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${asset_dir}"
+          TOTAL=0; OK=0; FAIL=0
+          for PROV in *.intoto.jsonl; do
+            [ -e "$PROV" ] || continue
+            TOTAL=$((TOTAL+1))
+            node -e "
+              const fs=require('fs');
+              const raw=fs.readFileSync('$PROV','utf8').trim().split('\n');
+              for (const line of raw) {
+                const stmt=JSON.parse(line);
+                if (stmt['_type'] !== 'https://in-toto.io/Statement/v1') throw new Error('bad _type');
+                if (!Array.isArray(stmt.subject) || stmt.subject.length === 0) throw new Error('bad subject');
+                for (const s of stmt.subject) {
+                  if (!s.name || !s.digest || !s.digest.sha256) throw new Error('bad subject entry');
+                  if (!/^[0-9a-f]{64}$/.test(s.digest.sha256)) throw new Error('sha256 format wrong for '+s.name);
+                }
+                if (stmt.predicateType !== '$PROVENANCE_PREDICATE') throw new Error('bad predicateType: '+stmt.predicateType);
+                const pred=stmt.predicate || {};
+                if (!pred.buildDefinition || !pred.runDetails) throw new Error('missing provenance fields');
+                const bd=pred.buildDefinition;
+                if (!bd.buildType || !bd.externalParameters) throw new Error('bad buildDefinition');
+              }
+              console.log('OK $PROV:', raw.length, 'statement(s)');
+            " && OK=$((OK+1)) || FAIL=$((FAIL+1))
+          done
+
+          echo "provenance_total=$TOTAL" >> "$GITHUB_STEP_SUMMARY"
+          echo "provenance_valid=$OK" >> "$GITHUB_STEP_SUMMARY"
+          echo "provenance_invalid=$FAIL" >> "$GITHUB_STEP_SUMMARY"
+          [ "$FAIL" -eq 0 ] || exit 1
+
+  digest-audit:
+    needs: [resolve-target, verify-signatures, verify-sbom-structure, verify-provenance]
+    if: always() && needs.resolve-target.outputs.tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Fetch all release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          TAG="${{ needs.resolve-target.outputs.tag }}"
+          OUT="./release-assets/$TAG"
+          mkdir -p "$OUT"; cd "$OUT"
+          gh release download "$TAG" 2>/dev/null || true
+          ls -la; echo "asset_dir=$PWD" >> "$GITHUB_ENV"
+
+      - name: Compute and publish digest manifest
+        shell: bash
+        run: |
+          cd "${asset_dir}"
+          TAG="${{ needs.resolve-target.outputs.tag }}"
+          MANIFEST="/tmp/digest-manifest-${TAG}.txt"
+          echo "# Artifact digest manifest for $TAG" > "$MANIFEST"
+          echo "# Generated $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >> "$MANIFEST"
+          echo "" >> "$MANIFEST"
+          printf '%-64s  %s\n' "SHA256" "FILENAME" >> "$MANIFEST"
+          for f in *; do
+            [ -f "$f" ] || continue
+            hash=$(node -e "const c=require('crypto');const h=c.createHash('sha256');h.update(require('fs').readFileSync('$f'));console.log(h.digest('hex'))")
+            printf '%-64s  %s\n' "$hash" "$f" >> "$MANIFEST"
+          done
+          cat "$MANIFEST"
+          echo "digest_manifest<<EOF" >> "$GITHUB_STEP_SUMMARY"
+          cat "$MANIFEST" >> "$GITHUB_STEP_SUMMARY"
+          echo "EOF" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Alert on verification-job failures
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        shell: bash
+        run: |
+          echo "::warning::One or more verification jobs failed for ${{ needs.resolve-target.outputs.tag }}. Check previous jobs for details."
+          exit 1

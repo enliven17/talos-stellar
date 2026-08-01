@@ -1,14 +1,3 @@
-/**
- * Tests for GET /api/health/live (liveness probe) and
- * GET /api/health/ready (readiness probe).
- *
- * Coverage:
- *   - Liveness: always 200, correct shape, no external I/O
- *   - Readiness: healthy (both deps ok), degraded (one dep down),
- *                unavailable (both deps down), timeout behaviour,
- *                Cache-Control header, backward-compat alias
- */
-
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ─── Liveness probe ───────────────────────────────────────────────────────────
@@ -60,11 +49,13 @@ const mockExecute = db.execute as ReturnType<typeof vi.fn>;
 describe("GET /api/health/ready", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn());
+    vi.useFakeTimers();
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+    vi.useRealTimers();
   });
 
   // ── Healthy ────────────────────────────────────────────────────────
@@ -77,7 +68,7 @@ describe("GET /api/health/ready", () => {
 
     const res = await getReady();
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(999); // DELIBERATELY BROKEN FOR CI VALIDATION
     const body = await res.json();
     expect(body.ok).toBe(true);
     expect(body.checks.db).toBe("ok");
@@ -150,33 +141,68 @@ describe("GET /api/health/ready", () => {
 
   // ── Timeout behaviour ──────────────────────────────────────────────
 
-  it("returns 503 when DB check times out", async () => {
-    // Never resolves — simulates a hung DB
+  it("returns 503 with checks.db=error when DB check times out", async () => {
     mockExecute.mockReturnValue(new Promise(() => {}));
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(null, { status: 200 }),
     );
 
-    const res = await getReady();
+    const promise = getReady();
+    vi.advanceTimersByTime(2500);
+    const res = await promise;
 
     expect(res.status).toBe(503);
     const body = await res.json();
     expect(body.checks.db).toBe("error");
     expect(body.checks.stellar).toBe("ok");
-  }, 10_000);
+  });
 
-  it("returns 503 when Stellar check times out", async () => {
+  it("returns 503 with checks.stellar=error when Stellar check times out", async () => {
     mockExecute.mockResolvedValue([]);
-    // Never resolves — simulates a hung Horizon
     (fetch as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
 
-    const res = await getReady();
+    const promise = getReady();
+    vi.advanceTimersByTime(4000);
+    const res = await promise;
 
     expect(res.status).toBe(503);
     const body = await res.json();
     expect(body.checks.db).toBe("ok");
     expect(body.checks.stellar).toBe("error");
-  }, 10_000);
+  });
+
+  // ── AbortController cancellation on timeout ────────────────────────
+
+  it("aborts the fetch call via AbortSignal when Stellar check times out", async () => {
+    mockExecute.mockResolvedValue([]);
+    let fetchSignal: AbortSignal | undefined;
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation((_url, opts) => {
+      fetchSignal = opts?.signal;
+      return new Promise(() => {});
+    });
+
+    const promise = getReady();
+    vi.advanceTimersByTime(4000);
+    await promise;
+
+    expect(fetchSignal).toBeDefined();
+    expect(fetchSignal?.aborted).toBe(true);
+  });
+
+  // ── Timer cleanup ──────────────────────────────────────────────────
+
+  it("clears timeout timers when checks complete before their deadlines", async () => {
+    const clearTimeoutSpy = vi.spyOn(global, "clearTimeout");
+    mockExecute.mockResolvedValue([]);
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(null, { status: 200 }),
+    );
+
+    await getReady();
+
+    expect(clearTimeoutSpy).toHaveBeenCalled();
+    clearTimeoutSpy.mockRestore();
+  });
 
   // ── Headers ────────────────────────────────────────────────────────
 
@@ -206,11 +232,13 @@ import { GET as getLegacy } from "@/app/api/health/route";
 describe("GET /api/health (legacy alias)", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn());
+    vi.useFakeTimers();
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+    vi.useRealTimers();
   });
 
   it("returns 200 with ok=true when both deps pass (same behaviour as /ready)", async () => {
@@ -250,5 +278,36 @@ describe("GET /api/health (legacy alias)", () => {
 
     const res = await getLegacy();
     expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("aborts fetch request on timeout via AbortSignal", async () => {
+    mockExecute.mockResolvedValue([]);
+    let fetchSignal: AbortSignal | undefined;
+    (fetch as ReturnType<typeof vi.fn>).mockImplementation((_url, opts) => {
+      fetchSignal = opts?.signal;
+      return new Promise(() => {});
+    });
+
+    const promise = getLegacy();
+    vi.advanceTimersByTime(4000);
+    await promise;
+
+    expect(fetchSignal?.aborted).toBe(true);
+  });
+
+  it("clears timers when main promise resolves before timeout", async () => {
+    const setTimeoutSpy = vi.spyOn(global, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(global, "clearTimeout");
+    mockExecute.mockResolvedValue([]);
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(null, { status: 200 }),
+    );
+
+    await getLegacy();
+
+    expect(setTimeoutSpy).toHaveBeenCalled();
+    expect(clearTimeoutSpy).toHaveBeenCalled();
+    setTimeoutSpy.mockRestore();
+    clearTimeoutSpy.mockRestore();
   });
 });

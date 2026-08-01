@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from talos_agent.db import normalize_playbook_name
+from talos_agent.observability import log
 from talos_agent.payments import USDC_TESTNET_ISSUER
 from talos_agent.payments.x402_signer import X402Signer
 from talos_agent.tools.registry import tool
@@ -16,12 +17,15 @@ if TYPE_CHECKING:
     from talos_agent.api_client import TalosAPIClient
     from talos_agent.config import Settings
     from talos_agent.db import LocalDB
+    from talos_agent.job_effects import JobEffectDispatcher, JobEffectStore
 
 # Injected by registry.build_all_tools
 _api: TalosAPIClient = None  # type: ignore[assignment]
 _db: LocalDB = None  # type: ignore[assignment]
 _settings: Settings = None  # type: ignore[assignment]
 _signer: X402Signer | None = None
+_job_effect_store: JobEffectStore | None = None
+_job_effect_dispatcher: JobEffectDispatcher | None = None
 
 ALL_CATEGORIES = [
     "Sales", "Marketing", "Analytics", "Development", "Research",
@@ -388,6 +392,26 @@ async def remove_claimed_job(job_id: str) -> None:
     "Check for incoming x402 service requests that Other Taloses have purchased from us. Returns pending jobs available to fulfill.",
 )
 async def get_pending_jobs() -> dict:
+    if _job_effect_store is not None:
+        try:
+            jobs = await _api.get_pending_jobs()
+        except Exception:
+            jobs = []
+        for job in jobs:
+            try:
+                _job_effect_store.ingest(job)
+            except Exception as exc:
+                from talos_agent.job_effects import JobEffectError
+
+                if isinstance(exc, JobEffectError):
+                    log.warning("job_inbox_rejected", error_code=exc.code)
+                    continue
+                raise
+        durable_jobs = _job_effect_store.pending_jobs()
+        if not durable_jobs:
+            return {"status": "no_pending_jobs", "count": 0}
+        return {"jobs": durable_jobs, "count": len(durable_jobs)}
+
     jobs = await _api.get_pending_jobs()
     if not jobs:
         return {"status": "no_pending_jobs", "count": 0}
@@ -412,55 +436,18 @@ async def get_pending_jobs() -> dict:
     "Call this before working on a job, then call fulfill_job with the result.",
 )
 async def claim_job(job_id: str, ttl_seconds: int = 300) -> dict:
-    # A2A Commerce Policy Evaluation (Reservation Creation)
-    from datetime import timedelta, timezone
-    from talos_agent.policy.commerce_policy import (
-        CommercePolicyEvaluator,
-        CommercePolicyContext,
-        CommerceOperationType,
-        compute_payload_digest,
-    )
-    from talos_agent.policy.engine import PolicyEngine
-    from talos_agent.policy.schema import PolicyDecision
-
-    exp_time = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
-    policy_context = CommercePolicyContext(
-        requester=_settings.talos_id if _settings else "agent-worker",
-        provider="system",
-        asset="USDC",
-        network="testnet",
-        quoted_amount=0.0,
-        payload_digest=compute_payload_digest(job_id),
-        expiration=exp_time,
-        authorization_context={"job_id": job_id, "ttl_seconds": ttl_seconds},
-        operation_type=CommerceOperationType.RESERVATION_CREATION,
-    )
-    try:
-        from talos_agent.policy.middleware import get_commerce_policy_evaluator
-        evaluator = get_commerce_policy_evaluator()
-    except Exception:
-        evaluator = CommercePolicyEvaluator(PolicyEngine())
-
-    policy_decision = await evaluator.evaluate_commerce_operation(policy_context)
-
-    if _db is not None:
-        _db.add_commerce_audit_log(
-            decision_id=policy_decision.decision_id,
-            decision_digest=policy_decision.decision_digest,
-            operation=CommerceOperationType.RESERVATION_CREATION.value,
-            requester=policy_context.requester,
-            outcome=policy_decision.decision.value,
-        )
-
-    if policy_decision.decision != PolicyDecision.APPROVE:
-        return {
-            "error": "A2A commerce policy evaluation denied job reservation",
-            "policy_decision": policy_decision.decision.value,
-            "evidence": list(policy_decision.evidence),
-            "decision_id": policy_decision.decision_id,
-            "decision_digest": policy_decision.decision_digest,
-        }
-
+    if _job_effect_store is not None:
+        if (
+            not isinstance(ttl_seconds, int)
+            or isinstance(ttl_seconds, bool)
+            or ttl_seconds < 1
+            or ttl_seconds > 600
+        ):
+            return {"error": "validation_error"}
+        # A direct claim may race ahead of polling. Refreshing the durable inbox
+        # first preserves the invariant that remote leases always have a local
+        # owner and payload record.
+        await get_pending_jobs()
     result = await _api.claim_job(job_id, ttl_seconds=ttl_seconds)
     if not result:
         return {"error": f"Failed to claim job {job_id} — it may be leased by another worker"}
@@ -504,6 +491,36 @@ async def fulfill_job(job_id: str, result: str = "{}") -> dict:
         result_dict = json.loads(result)
     except json.JSONDecodeError:
         result_dict = {"text": result}
+
+    if _job_effect_store is not None and _job_effect_dispatcher is not None:
+        try:
+            effect_id = _job_effect_store.prepare_effect(job_id, result_dict)
+            await _job_effect_dispatcher.dispatch_once()
+            effect = _job_effect_store.effect_status(effect_id)
+        except Exception as exc:
+            from talos_agent.job_effects import JobEffectError
+
+            if isinstance(exc, JobEffectError):
+                return {"error": exc.code, "job_id": job_id}
+            raise
+        if effect["state"] == "succeeded":
+            return {
+                "status": "fulfilled",
+                "job_id": job_id,
+                "effect_id": effect_id,
+            }
+        if effect["state"] == "conflict":
+            return {
+                "error": "remote_result_conflict",
+                "job_id": job_id,
+                "effect_id": effect_id,
+            }
+        return {
+            "status": "queued",
+            "job_id": job_id,
+            "effect_id": effect_id,
+            "effect_state": effect["state"],
+        }
 
     fencing_token = _claimed_jobs.get(job_id, 0)
     response = await _api.submit_job_result(job_id, result_dict, fencing_token=fencing_token)

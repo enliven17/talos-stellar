@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
-import { tlsCommerceJobs, tlsTalos } from "@/db/schema";
+import { tlsReputationInputs, tlsTalos } from "@/db/schema";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod/v4";
 import {
@@ -8,6 +8,7 @@ import {
   REPUTATION_SCORE_VERSION,
   reputationInputsSchema,
   ReputationJobInput,
+  MAX_JOB_AGE_DAYS,
 } from "@/lib/reputation";
 
 export const dynamic = "force-dynamic";
@@ -39,12 +40,6 @@ const querySchema = z.object({
   jobLimit: z.coerce.number().int().positive().max(10_000).optional(),
 });
 
-/**
- * Maximum age of a job (days) that will be considered for scoring.
- * Prevents ancient activity from skewing the score and bounds query
- * cost at the DB layer (one indexed scan filtered by `createdAt`).
- */
-const MAX_JOB_AGE_DAYS = 365;
 
 /**
  * GET /api/talos/:id/reputation
@@ -130,34 +125,31 @@ export async function GET(
 
     const jobRows = await db
       .select({
-        id: tlsCommerceJobs.id,
-        status: tlsCommerceJobs.status,
-        requesterTalosId: tlsCommerceJobs.requesterTalosId,
-        createdAt: tlsCommerceJobs.createdAt,
-        updatedAt: tlsCommerceJobs.updatedAt,
-        result: tlsCommerceJobs.result,
+        id: tlsReputationInputs.jobId,
+        status: tlsReputationInputs.status,
+        requesterTalosId: tlsReputationInputs.requesterTalosId,
+        createdAt: tlsReputationInputs.jobCreatedAt,
+        updatedAt: tlsReputationInputs.jobUpdatedAt,
+        hasResult: tlsReputationInputs.hasResult,
       })
-      .from(tlsCommerceJobs)
+      .from(tlsReputationInputs)
       .where(
         and(
-          eq(tlsCommerceJobs.talosId, id),
-          sql`${tlsCommerceJobs.createdAt} >= ${cutoff}`,
+          eq(tlsReputationInputs.talosId, id),
+          sql`${tlsReputationInputs.jobCreatedAt} >= ${cutoff}`,
         ),
       )
-      .orderBy(desc(tlsCommerceJobs.createdAt))
+      .orderBy(desc(tlsReputationInputs.jobCreatedAt))
       .limit(limit);
 
-    // Map DB rows → reputation input.  `hasResult` is true when the seller
-    // submitted a non-null structured result payload (a stronger signal
-    // than `status=completed` alone because empty results can exist as
-    // placeholders during async chutes).
+    // Map DB rows → reputation input.
     const jobs: ReputationJobInput[] = jobRows.map((row) => ({
       id: row.id,
       status: row.status ?? "unknown",
       requesterTalosId: row.requesterTalosId,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
-      hasResult: row.result != null && Object.keys(row.result as object).length > 0,
+      hasResult: row.hasResult,
     }));
 
     // Validate before passing to the pure scoring module.  This guards

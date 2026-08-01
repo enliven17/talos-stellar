@@ -1,7 +1,14 @@
 """Social channel adapters — modular publishing interface."""
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
-from talos_agent.adapters.discord import DiscordAdapter
+from talos_agent.adapters.capability import (
+    AdapterCapabilityManifest,
+    AdapterResourceLimits,
+    AdapterSandbox,
+    CapabilityDeniedError,
+    NetworkRule,
+)
+from talos_agent.adapters.discord import DiscordAdapter, DiscordAdapterConfig
 from talos_agent.adapters.health import (
     AdapterHealthReporter,
     AdapterProbe,
@@ -31,7 +38,16 @@ __all__ = [
     "ChannelCapabilities",
     "PublishResult",
     "AdapterRegistry",
+    "AdapterCapabilityManifest",
+    "AdapterResourceLimits",
+    "AdapterSandbox",
+    "CapabilityDeniedError",
+    "NetworkRule",
     "DiscordAdapter",
+    "DiscordAdapterConfig",
+    "TelegramAdapter",
+    "TelegramAdapterConfig",
+    "XAdapterConfig",
     # Health probes
     "AdapterState",
     "ProbeResult",

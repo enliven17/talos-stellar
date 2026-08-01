@@ -1,0 +1,559 @@
+/**
+ * A2A Intent and Decision Validation Tests
+ * 
+ * Unit tests covering success and negative paths for A2A purchase intents
+ * and deterministic decisions.
+ */
+
+// Note: vitest is a dev dependency. These tests require vitest to run.
+// import { describe, it, expect } from "vitest";
+import {
+  validateA2APurchaseIntent,
+  validateDeterministicDecision,
+  validateQuote,
+  validatePayloadDigest,
+  validateDecisionDigest,
+  computePayloadDigest,
+  computeDecisionDigest,
+  verifyPayloadDigest,
+  verifyQuoteNotExpired,
+  verifyIntentNotExpired,
+  verifyDeadlineNotPassed,
+  verifyProviderMatchesNetwork,
+  verifyAssetForNetwork,
+  isValidCanonicalDecimal,
+  isValidStellarPublicKey,
+  isValidEthereumAddress,
+  isValidBitcoinAddress,
+  isValidISO8601Timestamp,
+  isValidUUID,
+  isValidSHA256Digest,
+  isValidSignature,
+} from "../src/a2a-validation";
+import {
+  validA2APurchaseIntent,
+  validAllowDecision,
+  validDenyDecision,
+  validRequireApprovalDecision,
+  validQuote,
+  validPayloadDigest,
+  validDecisionDigest,
+  malformedIntentMissingFields,
+  malformedIntentInvalidValues,
+  malformedIntentBusinessLogic,
+  malformedDecisionMissingFields,
+  malformedDecisionInvalidValues,
+  malformedDecisionMissingApprovalConditions,
+  edgeCaseMaxValuesIntent,
+  edgeCaseMinValuesIntent,
+  edgeCaseExpiredQuoteIntent,
+  edgeCaseExpiredDeadlineIntent,
+  ethereumIntent,
+  bitcoinIntent,
+  polygonIntent,
+  VALID_STELLAR_PROVIDER,
+  VALID_ETHEREUM_PROVIDER,
+  VALID_BITCOIN_PROVIDER,
+} from "./a2a-fixtures";
+
+describe("A2A Validation - Format Validators", () => {
+  describe("isValidCanonicalDecimal", () => {
+    it("should accept valid canonical decimal format", () => {
+      expect(isValidCanonicalDecimal("100.000000")).toBe(true);
+      expect(isValidCanonicalDecimal("0.000001")).toBe(true);
+      expect(isValidCanonicalDecimal("922337203685.477580")).toBe(true);
+    });
+
+    it("should reject invalid decimal formats", () => {
+      expect(isValidCanonicalDecimal("100.00")).toBe(false);
+      expect(isValidCanonicalDecimal("100")).toBe(false);
+      expect(isValidCanonicalDecimal("0.000000")).toBe(false);
+      expect(isValidCanonicalDecimal("100.0000000")).toBe(false);
+      expect(isValidCanonicalDecimal("abc")).toBe(false);
+    });
+  });
+
+  describe("isValidStellarPublicKey", () => {
+    it("should accept valid Stellar public keys", () => {
+      expect(isValidStellarPublicKey(VALID_STELLAR_PROVIDER)).toBe(true);
+      expect(isValidStellarPublicKey("GABC1234567890ABCDEFGHIJ1234567890ABCDEFGHIJ1234567890AB")).toBe(true);
+    });
+
+    it("should reject invalid Stellar public keys", () => {
+      expect(isValidStellarPublicKey("invalid")).toBe(false);
+      expect(isValidStellarPublicKey(VALID_ETHEREUM_PROVIDER)).toBe(false);
+      expect(isValidStellarPublicKey("")).toBe(false);
+    });
+  });
+
+  describe("isValidEthereumAddress", () => {
+    it("should accept valid Ethereum addresses", () => {
+      expect(isValidEthereumAddress(VALID_ETHEREUM_PROVIDER)).toBe(true);
+      expect(isValidEthereumAddress("0x1234567890123456789012345678901234567890")).toBe(true);
+    });
+
+    it("should reject invalid Ethereum addresses", () => {
+      expect(isValidEthereumAddress("invalid")).toBe(false);
+      expect(isValidEthereumAddress(VALID_STELLAR_PROVIDER)).toBe(false);
+      expect(isValidEthereumAddress("")).toBe(false);
+    });
+  });
+
+  describe("isValidBitcoinAddress", () => {
+    it("should accept valid Bitcoin addresses", () => {
+      expect(isValidBitcoinAddress(VALID_BITCOIN_PROVIDER)).toBe(true);
+      expect(isValidBitcoinAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa")).toBe(true);
+      expect(isValidBitcoinAddress("bc1qar0mrr5x9nyx3r2q2q3q2q2q2q2q2q2q2q2q2q")).toBe(true);
+    });
+
+    it("should reject invalid Bitcoin addresses", () => {
+      expect(isValidBitcoinAddress("invalid")).toBe(false);
+      expect(isValidBitcoinAddress(VALID_STELLAR_PROVIDER)).toBe(false);
+      expect(isValidBitcoinAddress("")).toBe(false);
+    });
+  });
+
+  describe("isValidISO8601Timestamp", () => {
+    it("should accept valid ISO 8601 timestamps", () => {
+      expect(isValidISO8601Timestamp("2026-01-01T00:00:00.000Z")).toBe(true);
+      expect(isValidISO8601Timestamp("2026-01-01T00:00:00Z")).toBe(true);
+      expect(isValidISO8601Timestamp("2026-01-01T00:00:00+00:00")).toBe(true);
+    });
+
+    it("should reject invalid timestamps", () => {
+      expect(isValidISO8601Timestamp("invalid")).toBe(false);
+      expect(isValidISO8601Timestamp("")).toBe(false);
+      expect(isValidISO8601Timestamp("2026-01-01")).toBe(false);
+    });
+  });
+
+  describe("isValidUUID", () => {
+    it("should accept valid UUID v4", () => {
+      expect(isValidUUID("550e8400-e29b-41d4-a716-446655440000")).toBe(true);
+      expect(isValidUUID("660e8400-e29b-41d4-a716-446655440001")).toBe(true);
+    });
+
+    it("should reject invalid UUIDs", () => {
+      expect(isValidUUID("invalid")).toBe(false);
+      expect(isValidUUID("")).toBe(false);
+      expect(isValidUUID("550e8400-e29b-41d4-a716-44665544000")).toBe(false);
+    });
+  });
+
+  describe("isValidSHA256Digest", () => {
+    it("should accept valid SHA-256 digests", () => {
+      expect(isValidSHA256Digest("a".repeat(64))).toBe(true);
+      expect(isValidSHA256Digest("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")).toBe(true);
+    });
+
+    it("should reject invalid digests", () => {
+      expect(isValidSHA256Digest("invalid")).toBe(false);
+      expect(isValidSHA256Digest("a".repeat(63))).toBe(false);
+      expect(isValidSHA256Digest("a".repeat(65))).toBe(false);
+    });
+  });
+
+  describe("isValidSignature", () => {
+    it("should accept valid signatures", () => {
+      expect(isValidSignature("a".repeat(64))).toBe(true);
+    });
+
+    it("should reject invalid signatures", () => {
+      expect(isValidSignature("invalid")).toBe(false);
+      expect(isValidSignature("a".repeat(63))).toBe(false);
+    });
+  });
+});
+
+describe("A2A Validation - Component Validation", () => {
+  describe("validateQuote", () => {
+    it("should validate a valid quote", () => {
+      const errors = validateQuote(validQuote);
+      expect(errors).toHaveLength(0);
+    });
+
+    it("should reject quote with invalid provider ID", () => {
+      const invalidQuote = { ...validQuote, providerId: "invalid" };
+      const errors = validateQuote(invalidQuote);
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors.some(e => e.field === "quote.providerId")).toBe(true);
+    });
+
+    it("should reject quote with invalid asset code", () => {
+      const invalidQuote = { ...validQuote, assetCode: "INVALID" as any };
+      const errors = validateQuote(invalidQuote);
+      expect(errors.some(e => e.field === "quote.assetCode")).toBe(true);
+    });
+
+    it("should reject quote with invalid network", () => {
+      const invalidQuote = { ...validQuote, network: "invalid" as any };
+      const errors = validateQuote(invalidQuote);
+      expect(errors.some(e => e.field === "quote.network")).toBe(true);
+    });
+
+    it("should reject quote with invalid amount", () => {
+      const invalidQuote = { ...validQuote, amount: "100.00" };
+      const errors = validateQuote(invalidQuote);
+      expect(errors.some(e => e.field === "quote.amount")).toBe(true);
+    });
+
+    it("should reject quote with invalid timestamp", () => {
+      const invalidQuote = { ...validQuote, expiresAt: "invalid" };
+      const errors = validateQuote(invalidQuote);
+      expect(errors.some(e => e.field === "quote.expiresAt")).toBe(true);
+    });
+
+    it("should reject quote with invalid signature", () => {
+      const invalidQuote = { ...validQuote, signature: "invalid" };
+      const errors = validateQuote(invalidQuote);
+      expect(errors.some(e => e.field === "quote.signature")).toBe(true);
+    });
+  });
+
+  describe("validatePayloadDigest", () => {
+    it("should validate a valid payload digest", () => {
+      const errors = validatePayloadDigest(validPayloadDigest);
+      expect(errors).toHaveLength(0);
+    });
+
+    it("should reject digest with invalid hash", () => {
+      const invalidDigest = { ...validPayloadDigest, hash: "invalid" };
+      const errors = validatePayloadDigest(invalidDigest);
+      expect(errors.some(e => e.field === "payloadDigest.hash")).toBe(true);
+    });
+
+    it("should reject digest with invalid algorithm", () => {
+      const invalidDigest = { ...validPayloadDigest, algorithm: "invalid" as any };
+      const errors = validatePayloadDigest(invalidDigest);
+      expect(errors.some(e => e.field === "payloadDigest.algorithm")).toBe(true);
+    });
+
+    it("should reject digest with invalid timestamp", () => {
+      const invalidDigest = { ...validPayloadDigest, timestamp: "invalid" };
+      const errors = validatePayloadDigest(invalidDigest);
+      expect(errors.some(e => e.field === "payloadDigest.timestamp")).toBe(true);
+    });
+  });
+
+  describe("validateDecisionDigest", () => {
+    it("should validate a valid decision digest", () => {
+      const errors = validateDecisionDigest(validDecisionDigest);
+      expect(errors).toHaveLength(0);
+    });
+
+    it("should reject digest with invalid hash", () => {
+      const invalidDigest = { ...validDecisionDigest, hash: "invalid" };
+      const errors = validateDecisionDigest(invalidDigest);
+      expect(errors.some(e => e.field === "decisionDigest.hash")).toBe(true);
+    });
+  });
+});
+
+describe("A2A Validation - Intent Validation", () => {
+  describe("validateA2APurchaseIntent", () => {
+    it("should validate a valid A2A purchase intent", () => {
+      const result = validateA2APurchaseIntent(validA2APurchaseIntent);
+      expect(result.valid).toBe(true);
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it("should reject intent with missing required fields", () => {
+      const result = validateA2APurchaseIntent(malformedIntentMissingFields);
+      expect(result.valid).toBe(false);
+      expect(result.errors.length).toBeGreaterThan(0);
+    });
+
+    it("should reject intent with invalid field values", () => {
+      const result = validateA2APurchaseIntent(malformedIntentInvalidValues);
+      expect(result.valid).toBe(false);
+      expect(result.errors.length).toBeGreaterThan(0);
+    });
+
+    it("should reject intent with business logic violations", () => {
+      const result = validateA2APurchaseIntent(malformedIntentBusinessLogic);
+      expect(result.valid).toBe(false);
+      expect(result.errors.some(e => e.code === "INVALID_DEADLINE")).toBe(true);
+      expect(result.errors.some(e => e.code === "INVALID_EXPIRY")).toBe(true);
+      expect(result.errors.some(e => e.code === "INVALID_MAXIMUM_COST")).toBe(true);
+      expect(result.errors.some(e => e.code === "QUOTE_EXPIRY_AFTER_DEADLINE")).toBe(true);
+    });
+
+    it("should validate intent with maximum allowed values", () => {
+      const result = validateA2APurchaseIntent(edgeCaseMaxValuesIntent);
+      expect(result.valid).toBe(true);
+    });
+
+    it("should validate intent with minimum allowed values", () => {
+      const result = validateA2APurchaseIntent(edgeCaseMinValuesIntent);
+      expect(result.valid).toBe(true);
+    });
+
+    it("should validate Ethereum intent", () => {
+      const result = validateA2APurchaseIntent(ethereumIntent);
+      expect(result.valid).toBe(true);
+    });
+
+    it("should validate Bitcoin intent", () => {
+      const result = validateA2APurchaseIntent(bitcoinIntent);
+      expect(result.valid).toBe(true);
+    });
+
+    it("should validate Polygon intent", () => {
+      const result = validateA2APurchaseIntent(polygonIntent);
+      expect(result.valid).toBe(true);
+    });
+
+    it("should reject non-object input", () => {
+      const result = validateA2APurchaseIntent(null);
+      expect(result.valid).toBe(false);
+      expect(result.errors.some(e => e.code === "INVALID_TYPE")).toBe(true);
+    });
+
+    it("should reject intent with empty payload", () => {
+      const invalidIntent = { ...validA2APurchaseIntent, payload: {} };
+      const result = validateA2APurchaseIntent(invalidIntent);
+      expect(result.valid).toBe(false);
+      expect(result.errors.some(e => e.code === "INVALID_PAYLOAD")).toBe(true);
+    });
+  });
+});
+
+describe("A2A Validation - Decision Validation", () => {
+  describe("validateDeterministicDecision", () => {
+    it("should validate a valid allow decision", () => {
+      const result = validateDeterministicDecision(validAllowDecision);
+      expect(result.valid).toBe(true);
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it("should validate a valid deny decision", () => {
+      const result = validateDeterministicDecision(validDenyDecision);
+      expect(result.valid).toBe(true);
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it("should validate a valid require_approval decision", () => {
+      const result = validateDeterministicDecision(validRequireApprovalDecision);
+      expect(result.valid).toBe(true);
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it("should reject decision with missing required fields", () => {
+      const result = validateDeterministicDecision(malformedDecisionMissingFields);
+      expect(result.valid).toBe(false);
+      expect(result.errors.length).toBeGreaterThan(0);
+    });
+
+    it("should reject decision with invalid field values", () => {
+      const result = validateDeterministicDecision(malformedDecisionInvalidValues);
+      expect(result.valid).toBe(false);
+      expect(result.errors.length).toBeGreaterThan(0);
+    });
+
+    it("should reject require_approval decision without conditions", () => {
+      const result = validateDeterministicDecision(malformedDecisionMissingApprovalConditions);
+      expect(result.valid).toBe(false);
+      expect(result.errors.some(e => e.code === "MISSING_APPROVAL_CONDITIONS")).toBe(true);
+    });
+
+    it("should reject non-object input", () => {
+      const result = validateDeterministicDecision(null);
+      expect(result.valid).toBe(false);
+      expect(result.errors.some(e => e.code === "INVALID_TYPE")).toBe(true);
+    });
+  });
+});
+
+describe("A2A Validation - Digest Computation", () => {
+  describe("computePayloadDigest", () => {
+    it("should compute deterministic payload digest", () => {
+      const payload = { key1: "value1", key2: "value2" };
+      const digest1 = computePayloadDigest(payload);
+      const digest2 = computePayloadDigest(payload);
+      
+      expect(digest1.hash).toBe(digest2.hash);
+      expect(digest1.algorithm).toBe("sha-256");
+      expect(digest1.hash).toHaveLength(64);
+    });
+
+    it("should produce different digests for different payloads", () => {
+      const payload1 = { key1: "value1" };
+      const payload2 = { key1: "value2" };
+      
+      const digest1 = computePayloadDigest(payload1);
+      const digest2 = computePayloadDigest(payload2);
+      
+      expect(digest1.hash).not.toBe(digest2.hash);
+    });
+
+    it("should handle payload with nested objects", () => {
+      const payload = { nested: { key: "value" } };
+      const digest = computePayloadDigest(payload);
+      
+      expect(digest.hash).toHaveLength(64);
+      expect(digest.algorithm).toBe("sha-256");
+    });
+  });
+
+  describe("computeDecisionDigest", () => {
+    it("should compute deterministic decision digest", () => {
+      const digest1 = computeDecisionDigest(
+        "intent-123",
+        "allow",
+        "WITHIN_BUDGET",
+        "system",
+        "2026-01-01T00:00:00.000Z"
+      );
+      const digest2 = computeDecisionDigest(
+        "intent-123",
+        "allow",
+        "WITHIN_BUDGET",
+        "system",
+        "2026-01-01T00:00:00.000Z"
+      );
+      
+      expect(digest1.hash).toBe(digest2.hash);
+      expect(digest1.algorithm).toBe("sha-256");
+    });
+
+    it("should produce different digests for different decisions", () => {
+      const digest1 = computeDecisionDigest("intent-123", "allow", "WITHIN_BUDGET", "system", "2026-01-01T00:00:00.000Z");
+      const digest2 = computeDecisionDigest("intent-123", "deny", "EXCEEDS_BUDGET", "system", "2026-01-01T00:00:00.000Z");
+      
+      expect(digest1.hash).not.toBe(digest2.hash);
+    });
+  });
+});
+
+describe("A2A Validation - Verification Functions", () => {
+  describe("verifyPayloadDigest", () => {
+    it("should verify matching payload digest", () => {
+      const payload = { key: "value" };
+      const digest = computePayloadDigest(payload);
+      
+      expect(verifyPayloadDigest(payload, digest)).toBe(true);
+    });
+
+    it("should reject mismatched payload digest", () => {
+      const payload1 = { key: "value1" };
+      const payload2 = { key: "value2" };
+      const digest = computePayloadDigest(payload1);
+      
+      expect(verifyPayloadDigest(payload2, digest)).toBe(false);
+    });
+
+    it("should reject digest with different algorithm", () => {
+      const payload = { key: "value" };
+      const digest = computePayloadDigest(payload);
+      const invalidDigest = { ...digest, algorithm: "md5" as any };
+      
+      expect(verifyPayloadDigest(payload, invalidDigest)).toBe(false);
+    });
+  });
+
+  describe("verifyQuoteNotExpired", () => {
+    it("should verify non-expired quote", () => {
+      const futureQuote = { ...validQuote, expiresAt: "2030-01-01T00:00:00.000Z" };
+      expect(verifyQuoteNotExpired(futureQuote)).toBe(true);
+    });
+
+    it("should reject expired quote", () => {
+      const expiredQuote = { ...validQuote, expiresAt: "2020-01-01T00:00:00.000Z" };
+      expect(verifyQuoteNotExpired(expiredQuote)).toBe(false);
+    });
+  });
+
+  describe("verifyIntentNotExpired", () => {
+    it("should verify non-expired intent", () => {
+      const futureIntent = { ...validA2APurchaseIntent, expiresAt: "2030-01-01T00:00:00.000Z" };
+      expect(verifyIntentNotExpired(futureIntent)).toBe(true);
+    });
+
+    it("should reject expired intent", () => {
+      const expiredIntent = { ...validA2APurchaseIntent, expiresAt: "2020-01-01T00:00:00.000Z" };
+      expect(verifyIntentNotExpired(expiredIntent)).toBe(false);
+    });
+  });
+
+  describe("verifyDeadlineNotPassed", () => {
+    it("should verify non-passed deadline", () => {
+      const futureIntent = { ...validA2APurchaseIntent, deadline: "2030-01-01T00:00:00.000Z" };
+      expect(verifyDeadlineNotPassed(futureIntent)).toBe(true);
+    });
+
+    it("should reject passed deadline", () => {
+      const pastIntent = { ...validA2APurchaseIntent, deadline: "2020-01-01T00:00:00.000Z" };
+      expect(verifyDeadlineNotPassed(pastIntent)).toBe(false);
+    });
+  });
+
+  describe("verifyProviderMatchesNetwork", () => {
+    it("should verify Stellar provider matches Stellar network", () => {
+      expect(verifyProviderMatchesNetwork(VALID_STELLAR_PROVIDER, "stellar")).toBe(true);
+    });
+
+    it("should verify Ethereum provider matches Ethereum network", () => {
+      expect(verifyProviderMatchesNetwork(VALID_ETHEREUM_PROVIDER, "ethereum")).toBe(true);
+    });
+
+    it("should verify Ethereum provider matches Polygon network", () => {
+      expect(verifyProviderMatchesNetwork(VALID_ETHEREUM_PROVIDER, "polygon")).toBe(true);
+    });
+
+    it("should verify Bitcoin provider matches Bitcoin network", () => {
+      expect(verifyProviderMatchesNetwork(VALID_BITCOIN_PROVIDER, "bitcoin")).toBe(true);
+    });
+
+    it("should reject mismatched provider and network", () => {
+      expect(verifyProviderMatchesNetwork(VALID_STELLAR_PROVIDER, "ethereum")).toBe(false);
+      expect(verifyProviderMatchesNetwork(VALID_ETHEREUM_PROVIDER, "stellar")).toBe(false);
+    });
+  });
+
+  describe("verifyAssetForNetwork", () => {
+    it("should verify USDC is valid for Stellar", () => {
+      expect(verifyAssetForNetwork("USDC", "stellar")).toBe(true);
+    });
+
+    it("should verify ETH is valid for Ethereum", () => {
+      expect(verifyAssetForNetwork("ETH", "ethereum")).toBe(true);
+    });
+
+    it("should verify BTC is valid for Bitcoin", () => {
+      expect(verifyAssetForNetwork("BTC", "bitcoin")).toBe(true);
+    });
+
+    it("should verify USDC is valid for Polygon", () => {
+      expect(verifyAssetForNetwork("USDC", "polygon")).toBe(true);
+    });
+
+    it("should reject invalid asset for network", () => {
+      expect(verifyAssetForNetwork("BTC", "stellar")).toBe(false);
+      expect(verifyAssetForNetwork("ETH", "stellar")).toBe(false);
+      expect(verifyAssetForNetwork("XLM", "ethereum")).toBe(false);
+    });
+  });
+});
+
+describe("A2A Validation - Warning Generation", () => {
+  it("should generate warning for intent close to expiry", () => {
+    const nearExpiryIntent = {
+      ...validA2APurchaseIntent,
+      expiresAt: new Date(Date.now() + 1800000).toISOString(), // 30 minutes from now
+    };
+    const result = validateA2APurchaseIntent(nearExpiryIntent);
+    expect(result.warnings.some(w => w.code === "CLOSE_TO_EXPIRY")).toBe(true);
+  });
+
+  it("should generate warning for quote close to expiry", () => {
+    const nearExpiryIntent = {
+      ...validA2APurchaseIntent,
+      quote: {
+        ...validQuote,
+        expiresAt: new Date(Date.now() + 900000).toISOString(), // 15 minutes from now
+      },
+    };
+    const result = validateA2APurchaseIntent(nearExpiryIntent);
+    expect(result.warnings.some(w => w.code === "QUOTE_CLOSE_TO_EXPIRY")).toBe(true);
+  });
+});

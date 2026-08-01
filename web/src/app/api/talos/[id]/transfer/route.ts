@@ -10,16 +10,17 @@ import {
   verifyTransferSignature,
   type TransferSignedPayload,
 } from "@/lib/transfer-signature";
+import { withTraceContext } from "@/lib/tracing";
 
 // POST /api/talos/:id/transfer — Execute a signed USDC transfer on Stellar
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   try {
-    const auth = await verifyAgentApiKey(request, id);
+    const auth = await verifyAgentApiKey(request, id, ["wallet:sign"]);
     if (!auth.ok) return auth.response;
 
     const parsed = await parseBody(request, transferSchema);
@@ -102,9 +103,10 @@ export async function POST(
     }
 
     // Consume immediately before the first money-moving side effect. The
-    // synchronous guard prevents two requests in this process from using the
-    // same signed nonce concurrently.
-    const nonceResult = consumeTransferNonce(signedPayload, nowSeconds);
+    // database UNIQUE constraint on (talosId, nonce) prevents two concurrent
+    // requests from using the same signed nonce — exactly one INSERT succeeds
+    // and the other fails with a unique-violation error.
+    const nonceResult = await consumeTransferNonce(signedPayload, nowSeconds);
     if (!nonceResult.ok) {
       if (nonceResult.reason === "replayed") {
         return Response.json(
@@ -137,3 +139,5 @@ export async function POST(
     return Response.json({ error: "Transfer failed" }, { status: 500 });
   }
 }
+
+export const POST = withTraceContext(handlePost);

@@ -4,6 +4,7 @@ import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsCommerceJobs, tlsRevenues, tlsCommerceServices } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { logger } from "@/lib/logger";
+import { ingestJobToLedger } from "@/lib/reputation-ledger";
 
 async function resolveCallerTalos(request: NextRequest): Promise<string | null> {
   const authHeader = request.headers.get("authorization");
@@ -19,17 +20,15 @@ async function resolveCallerTalos(request: NextRequest): Promise<string | null> 
 }
 
 // POST /api/jobs/:id/result — Submit job result (from service provider agent)
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   try {
-    const callerTalosId = await resolveCallerTalos(request);
-    if (!callerTalosId) {
-      return Response.json({ error: "Missing or invalid Authorization" }, { status: 401 });
-    }
+    const auth = await resolveTalosFromRequest(request, ["commerce:write"]);
+    if (!auth.ok) return auth.response;
 
     const body = await request.json();
     const { result, fencingToken } = body;
@@ -98,6 +97,7 @@ export async function POST(
             and(
               eq(tlsCommerceJobs.id, id),
               eq(tlsCommerceJobs.fencingToken, effectiveFencingToken),
+              eq(tlsCommerceJobs.status, "pending"),
             ),
           )
           .returning();
@@ -120,6 +120,9 @@ export async function POST(
           source: "commerce",
           txHash: job.txHash,
         });
+
+        // Record terminal status to the reputation input ledger idempotently
+        await ingestJobToLedger(job.id, tx);
 
         return updatedJob;
       },
@@ -146,17 +149,15 @@ export async function POST(
 }
 
 // GET /api/jobs/:id/result — Poll for job result (from requester agent)
-export async function GET(
+async function handleGet(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   try {
-    const callerTalosId = await resolveCallerTalos(request);
-    if (!callerTalosId) {
-      return Response.json({ error: "Missing or invalid Authorization" }, { status: 401 });
-    }
+    const auth = await resolveTalosFromRequest(request, ["commerce:read"]);
+    if (!auth.ok) return auth.response;
 
     const job = await db
       .select()
@@ -184,3 +185,6 @@ export async function GET(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withTraceContext(handlePost);
+export const GET = withTraceContext(handleGet);

@@ -6,7 +6,7 @@ import { isNameAvailableOnChain } from "@/lib/soroban";
 
 // GET /api/talos/check-name?name=foo
 export async function GET(request: NextRequest) {
-  const name = request.nextUrl.searchParams.get("name")?.toLowerCase().trim();
+  const name = new URL(request.url).searchParams.get("name")?.toLowerCase().trim();
 
   if (!name || name.length < 3) {
     return Response.json({ available: false, reason: "Name must be at least 3 characters" });

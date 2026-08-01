@@ -98,6 +98,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from talos_agent.observability import log
+from talos_agent.state_classify import (
+    StateCategory,
+    registered_classification,
+    require_classification,
+)
 
 if TYPE_CHECKING:
     from talos_agent.api_client import TalosAPIClient
@@ -862,6 +867,15 @@ class StagedRestoreManager:
             tables_data = payload.get("tables_data", {})
             if isinstance(tables_data, dict) and tables_data:
                 for table_name, rows in tables_data.items():
+                    # ── Classification guard ──────────────────────────────
+                    # Every table in a checkpoint must be registered.
+                    require_classification(table_name)
+                    cls_ = registered_classification(table_name)
+                    if cls_ is not None and cls_.category is StateCategory.FORBIDDEN:
+                        raise StagingError(
+                            f"Table {table_name!r} is classified as FORBIDDEN "
+                            f"and must not appear in checkpoint payloads."
+                        )
                     if isinstance(rows, list):
                         for row in rows:
                             if isinstance(row, dict):
@@ -893,8 +907,15 @@ class StagedRestoreManager:
             log.info("restore_staged_staging_completed", staged_path=str(staged_path))
             return staged_path
         except Exception as exc:
+            try:
+                staged_db.close()
+            except Exception:
+                pass
             if staged_path.exists():
-                staged_path.unlink(missing_ok=True)
+                try:
+                    staged_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
             raise StagingError(f"Failed to create staged database: {exc}") from exc
 
     def _verify_invariants(

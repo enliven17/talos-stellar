@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useWallet } from "@/components/wallet-gate";
 import { AgentAvatar } from "@/components/agent-avatar";
+import { AgentLifecyclePanel } from "@/components/agent-lifecycle-panel";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER as STELLAR_USDC_ISSUER } from "@/lib/stellar-config";
 
 
@@ -184,9 +185,9 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
         alert(data.error || "Job creation failed");
         setServiceStatus("error");
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error("[request-service]", err);
-      alert(err?.message ?? "Transaction failed");
+      alert(err instanceof Error ? err.message : "Transaction failed");
       setServiceStatus("error");
     }
   }, [address, talos.id, talos.service, talos.agentWalletAddress, servicePayload, signTransaction]);
@@ -353,7 +354,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       if (assetCode && assetCode.includes(":")) {
         const [mitosCode, mitosIssuer] = assetCode.split(":");
         const mitosAsset = new Asset(mitosCode, mitosIssuer);
-        const hasTrustline = (account.balances as any[]).some(
+        const hasTrustline = (account.balances as Array<{ asset_type: string; asset_code?: string; asset_issuer?: string }>).some(
           (b) => b.asset_type !== "native" && b.asset_code === mitosCode && b.asset_issuer === mitosIssuer,
         );
         if (!hasTrustline) {
@@ -395,12 +396,12 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
         alert(data.error || "Purchase failed");
         setBuyStatus("error");
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error("[buy-token]", err);
-      alert(err?.message ?? "Transaction failed");
+      alert(err instanceof Error ? err.message : "Transaction failed");
       setBuyStatus("error");
     }
-  }, [address, buyQty, buyCost, talos.id, talos.agentWalletAddress, signTransaction]);
+  }, [address, buyQty, buyCost, talos.id, talos.agentWalletAddress, talos.stellarAssetCode, signTransaction]);
 
   const closeBuyModal = useCallback(() => {
     setBuyOpen(false);
@@ -1105,6 +1106,9 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       {/* ─── Governance Tab ─────────────────────────────── */}
       {tab === "Governance" && (
         <div className="space-y-6">
+          {/* Lifecycle state, durable job progress, and transition history */}
+          <AgentLifecyclePanel talosId={talos.id} />
+
           {/* Propose + Approve section */}
           <div className="flex items-center justify-between">
             <div className="text-xs text-muted">{approvals.length} proposals total</div>

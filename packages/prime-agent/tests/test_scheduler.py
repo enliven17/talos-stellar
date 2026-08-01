@@ -206,7 +206,7 @@ async def test_dividend_preview_failure_aborts_distribution():
 @pytest.mark.asyncio
 async def test_dividend_none_preview_aborts_distribution():
     """None preview response should return 'preview_failed' without calling distribute."""
-    talos_config, settings, stellar, api, db = _make_deps(preview=False)
+    talos_config, settings, _stellar, api, db = _make_deps(preview=False)
 
     # Force None from the mock
     stellar2 = MagicMock()

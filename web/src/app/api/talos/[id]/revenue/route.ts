@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { tlsTalos, tlsRevenues } from "@/db/schema";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
+import { emitWebhookEvent } from "@/lib/webhooks/delivery";
 
 // GET /api/talos/:id/revenue — Get revenue history
 export async function GET(
@@ -48,14 +49,14 @@ export async function GET(
 
 // POST /api/talos/:id/revenue — Report revenue (from Local Agent)
 // All revenue stays in Agent Treasury. No distribution to external wallets.
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   try {
-    const auth = await verifyAgentApiKey(request, id);
+    const auth = await verifyAgentApiKey(request, id, ["revenue:write"]);
     if (!auth.ok) return auth.response;
 
     const body = await request.json();
@@ -93,6 +94,9 @@ export async function POST(
     }
 
     // Record revenue in DB — all revenue stays in Agent Treasury
+    const quotaResult = await checkAndIncrementQuota(db, id, "revenue_writes");
+    if (!quotaResult.ok) return quotaExceededResponse(quotaResult);
+
     const [revenue] = await db
       .insert(tlsRevenues)
       .values({
@@ -104,8 +108,23 @@ export async function POST(
       })
       .returning();
 
+    // Fire webhook event (non-blocking)
+    emitWebhookEvent({
+      type: "revenue.recorded",
+      talosId: id,
+      payload: {
+        revenueId: revenue.id,
+        amount: String(amount),
+        currency: currency ?? "USDC",
+        source,
+        txHash,
+      },
+    }).catch(() => {});
+
     return Response.json(revenue, { status: 201 });
   } catch {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withTraceContext(handlePost);

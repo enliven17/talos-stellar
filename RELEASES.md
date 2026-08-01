@@ -77,7 +77,65 @@ git checkout -- .   # discard the dry run
 node --test scripts/release/*.test.mjs
 ```
 
-## Limitations
+## Signed SBOMs and build provenance
+
+Every component release automatically attaches:
+
+| Attachment | Pattern | Purpose |
+|------------|---------|---------|
+| CycloneDX SBOM | `talos-<component>-<tag>-<ts>.cdx.json` | Machine-readable dependency inventory (JSON, CycloneDX 1.6) |
+| SPDX SBOM | `talos-<component>-<tag>-<ts>.spdx` | SPDX 2.3 tag-value inventory (SPDX license scanner compatible) |
+| SLSA provenance | `talos-<component>-<tag>-<ts>.intoto.jsonl` | in-toto v1 statement + SLSA v1 predicate (level L3 aspiration) |
+| Cosign keyless signatures | `<artifact>.<ext>.sig` + `<artifact>.<ext>.pem` for each attachment | OIDC-keyless Fulcio-issued signature + signing certificate |
+
+Generation happens in [`.github/workflows/sbom-provenance.yml`](.github/workflows/sbom-provenance.yml), called as a reusable workflow from the release pipeline. Each SBOM is signed with OIDC keyless cosign (issuer `https://token.actions.githubusercontent.com`, workflow identity bound to `.github/workflows/(release-publish|sbom-provenance).yml`).
+
+### Verification
+
+Every release publishes a block of verification instructions in the release notes header. One-shot:
+
+```bash
+# Download all release assets for e.g. sdk-v1.2.3
+gh release download sdk-v1.2.3 --dir artifacts
+
+# Verify an artifact against its cosign signature + certificate
+cosign verify-blob \
+  --signature artifacts/@talos-protocol/sdk-1.2.3.tgz.sig \
+  --certificate artifacts/@talos-protocol/sdk-1.2.3.tgz.pem \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/.+/\.github/workflows/(release-publish|sbom-provenance)\.yml@.*' \
+  --insecure-ignore-tlog=true \
+  artifacts/@talos-protocol/sdk-1.2.3.tgz
+```
+
+For a full audit, run [`.github/workflows/verify-artifacts.yml`](.github/workflows/verify-artifacts.yml) via `workflow_dispatch` with the release tag. It checks:
+
+1. All artifact signatures verify against expected OIDC issuer/identity.
+2. All SBOM signatures verify (CycloneDX + SPDX).
+3. CycloneDX `bomFormat`/`specVersion`/`metadata.component` fields and SPDX required fields.
+4. in-toto statement `_type`, predicate v1, and sha256 of each subject.
+5. Outputs a SHA256 digest manifest for every attached file.
+
+A scheduled nightly run re-verifies the most recent release so certificate-expiry or post-publication tampering events turn up without a human trigger.
+
+### Configuration (devx subsystem)
+
+The `src/area/devx` module exposes typed programmatic access used by the web dashboard and ops routes:
+
+- `loadSbomConfig()` — feature flags, OIDC issuer expectations, retention, threshold rules (environment variable overridable, see `SBOM_*` in `config.ts`).
+- `validateCycloneDxJson()`, `validateSpdxText()`, `validateIntotoStatement()` — strict parsers with deterministic `SbomFailureMode` error typing.
+- `logSbomAudit()`, `logSbomFailure()`, `logSbomMetricSample()` — privacy-safe structured logs (signature blobs never recorded; keys matching `*sig*`, `*cert*`, `*secret*` are redacted via the existing `sanitizeForLogging` allowlist).
+- `recordSbomMetric()`, `summarizeSbomMetrics()`, `validateSbomThresholds()` — bounded-memory metrics (percentile aggregation from samples, no unbounded arrays).
+
+### Rollout, rollback, and troubleshooting
+
+- **Rollout is gated at the workflow level**: forks without the reusable workflow file fall through without failures (reusable jobs are guarded by `if: needs.*.result != 'cancelled'` and the release pipeline tolerates `sbom-provenance.result ∈ {success, skipped, failure}`).
+- **Disable for a component:** pass `SBOM_ENABLED=0` for runtime, or for CI, remove the component name from `sbom-provenance.yml`'s `detect-components` set. A clean rollback is reverting the PR that introduced this — no database migrations or on-disk state exist.
+- **`cosign` install failures in CI**: fallback generators for CycloneDX / SPDX ship inside the workflow and produce valid-if-minimal SBOMs (marked in metadata via `tool.name = talos-*-fallback-generator`) instead of failing the release.
+- **Re-run a partial release**: the existing release idempotency rules apply. `gh release create` is guarded against double-creation and artifacts are uploaded with `--clobber`, so a re-trigger after SBOM failure uploads what was missing the first pass without double-tagging.
+- **Missing signatures on an already-published release**: run `verify-artifacts.yml` on-demand with `strict=true` to surface exactly which files, then manually re-run `sbom-provenance.yml` with `upload_release=true` against the tag.
+
+### Limitations
 
 - Version classification is per-commit-subject only; it does not inspect diffs, so a commit
   mislabeled with the wrong Conventional Commit type will bump the wrong severity.
@@ -86,3 +144,9 @@ node --test scripts/release/*.test.mjs
   off whatever the manifest says, so keep manual edits out of the affected commits.
 - `contracts`'s three crates must always share one version; a mismatch fails `plan`/`tag` loudly
   rather than guessing which one is right.
+- Provenance subjects currently cover SBOMs and (for contracts) the WASM binaries; SDK and
+  agent `.tgz`/`.whl` hashes are attested in *artifact* cosign signatures but not yet re-checked
+  inside the in-toto subject list in every case — tracked as a follow-up to tighten the SLSA L3
+  closure without breaking the idempotent-release contract.
+- Rekor (`tlog-upload=false`) is disabled to avoid external dependency latency during the release
+  hot path. Transparency-log inclusion is planned as a separate, non-blocking post-release job.

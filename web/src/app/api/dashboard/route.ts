@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPatrons } from "@/db/schema";
-import { eq, or, sql, inArray } from "drizzle-orm";
+import { eq, or, inArray } from "drizzle-orm";
+import { withTimeout, TimeoutError } from "@/lib/timeout";
 
 export async function GET(req: NextRequest) {
   const wallet = req.nextUrl.searchParams.get("wallet");
@@ -12,11 +13,24 @@ export async function GET(req: NextRequest) {
   // Stellar public keys are case-sensitive; compare exactly.
   const addr = wallet;
 
-  // Find TALOS IDs where user is a patron
-  const patronTalosIds = await db
-    .select({ talosId: tlsPatrons.talosId })
-    .from(tlsPatrons)
-    .where(eq(tlsPatrons.stellarPublicKey, addr));
+  // Add timeout for patron query
+  let patronTalosIds = [];
+  try {
+    patronTalosIds = await withTimeout(
+      db.select({ talosId: tlsPatrons.talosId }).from(tlsPatrons).where(eq(tlsPatrons.stellarPublicKey, addr)),
+      25000,
+      "Dashboard patron query timeout",
+    );
+  } catch (error) {
+    if (error instanceof TimeoutError) {
+      return NextResponse.json(
+        { error: "Query timeout. Please try again with a simpler query.", details: error.message },
+        { status: 408 },
+      );
+    }
+    console.error("Dashboard query error:", error);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
 
   const patronIds = patronTalosIds.map((p) => p.talosId);
 
@@ -32,15 +46,31 @@ export async function GET(req: NextRequest) {
     : ownerCondition!;
 
   // Query only the matching TALOS records with their relations
-  const talosRows = await db.query.tlsTalos.findMany({
-    where: whereCondition,
-    with: {
-      approvals: { orderBy: (a, { desc: d }) => [d(a.createdAt)] },
-      activities: { orderBy: (a, { desc: d }) => [d(a.createdAt)], limit: 10 },
-      revenues: { orderBy: (r, { desc: d }) => [d(r.createdAt)] },
-      patrons: true,
-    },
-  });
+  let talosRows = [];
+  try {
+    talosRows = await withTimeout(
+      db.query.tlsTalos.findMany({
+        where: whereCondition,
+        with: {
+          approvals: { orderBy: (a, { desc: d }) => [d(a.createdAt)] },
+          activities: { orderBy: (a, { desc: d }) => [d(a.createdAt)], limit: 10 },
+          revenues: { orderBy: (r, { desc: d }) => [d(r.createdAt)] },
+          patrons: true,
+        },
+      }),
+      30000,
+      "Dashboard main query timeout",
+    );
+  } catch (error) {
+    if (error instanceof TimeoutError) {
+      return NextResponse.json(
+        { error: "Query timeout. Please try again with a simpler query.", details: error.message },
+        { status: 408 },
+      );
+    }
+    console.error("Dashboard query error:", error);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
 
   // Aggregate data
   const totalValue = talosRows.reduce(

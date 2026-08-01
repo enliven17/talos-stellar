@@ -67,6 +67,7 @@ export async function GET(
 }
 
 // PATCH /api/playbooks/:id — Update playbook (requires TALOS apiKey)
+// Uses resolveTalosFromRequest for scoped key + legacy key support.
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -74,29 +75,19 @@ export async function PATCH(
   try {
     const { id } = await params;
 
-    const authHeader = request.headers.get("authorization");
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return Response.json(
-        { error: "Missing Authorization header. Use: Bearer <api_key>" },
-        { status: 401 }
-      );
-    }
-
-    const token = authHeader.slice(7);
+    const auth = await resolveTalosFromRequest(request, ["commerce:write"]);
+    if (!auth.ok) return auth.response;
 
     const playbook = await db.query.tlsPlaybooks.findFirst({
       where: eq(tlsPlaybooks.id, id),
-      with: {
-        talos: { columns: { apiKey: true } },
-      },
     });
 
     if (!playbook) {
       return Response.json({ error: "Playbook not found" }, { status: 404 });
     }
 
-    if (!playbook.talos.apiKey || playbook.talos.apiKey !== token) {
-      return Response.json({ error: "Invalid API key" }, { status: 403 });
+    if (playbook.talosId !== auth.talos.id) {
+      return Response.json({ error: "Not authorized to update this playbook" }, { status: 403 });
     }
 
     const body = await request.json();

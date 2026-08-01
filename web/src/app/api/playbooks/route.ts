@@ -4,6 +4,7 @@ import { tlsTalos, tlsPlaybooks, tlsPlaybookPurchases } from "@/db/schema";
 import { and, arrayContains, desc, eq, ilike, lt, or, sql } from "drizzle-orm";
 import { createPlaybookSchema, parseBody } from "@/lib/schemas";
 import { parseLimit } from "@/lib/parse-limit";
+import { withTraceContext } from "@/lib/tracing";
 
 
 // GET /api/playbooks — List playbooks (with optional filters and cursor pagination)
@@ -112,27 +113,10 @@ export async function GET(request: NextRequest) {
 }
 
 // POST /api/playbooks — Create a playbook (requires TALOS apiKey)
-export async function POST(request: NextRequest) {
+async function handlePost(request: NextRequest) {
   try {
-    const authHeader = request.headers.get("authorization");
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return Response.json(
-        { error: "Missing Authorization header. Use: Bearer <api_key>" },
-        { status: 401 }
-      );
-    }
-
-    const token = authHeader.slice(7);
-    const talos = await db
-      .select({ id: tlsTalos.id, apiKey: tlsTalos.apiKey })
-      .from(tlsTalos)
-      .where(eq(tlsTalos.apiKey, token))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    if (!talos) {
-      return Response.json({ error: "Invalid API key" }, { status: 403 });
-    }
+    const auth = await resolveTalosFromRequest(request, ["commerce:write"]);
+    if (!auth.ok) return auth.response;
 
     const { data, error } = await parseBody(request, createPlaybookSchema);
 if (error) return error;
@@ -153,7 +137,7 @@ const {
     const [playbook] = await db
       .insert(tlsPlaybooks)
       .values({
-        talosId: talos.id,
+        talosId: auth.talos.id,
         title,
         category,
         channel: channel ?? "",
@@ -173,3 +157,5 @@ const {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withTraceContext(handlePost);

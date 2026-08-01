@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { tlsTalos, tlsCommerceJobs } from "@/db/schema";
 import { and, asc, eq, lt, or, sql } from "drizzle-orm";
 import { logger } from "@/lib/logger";
+import { withTraceContext } from "@/lib/tracing";
 
 async function resolveCallerTalos(request: NextRequest): Promise<string | null> {
   const authHeader = request.headers.get("authorization");
@@ -18,7 +19,7 @@ async function resolveCallerTalos(request: NextRequest): Promise<string | null> 
 }
 
 // GET /api/jobs/pending — Get pending jobs for the authenticated TALOS (as service provider)
-export async function GET(request: NextRequest) {
+async function handleGet(request: NextRequest) {
   try {
     const callerTalosId = await resolveCallerTalos(request);
     if (!callerTalosId) {
@@ -90,3 +91,5 @@ export async function GET(request: NextRequest) {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withTraceContext(handleGet);
