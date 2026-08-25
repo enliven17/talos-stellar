@@ -52,10 +52,10 @@ export async function GET(
       return Response.json({ error: "TALOS not found" }, { status: 404 });
     }
 
-    const { windowMs, windowDays } = parseWindow(request.nextUrl.searchParams.get("window"));
+    const { searchParams } = new URL(request.url);
+    const { windowMs, windowDays } = parseWindow(searchParams.get("window"));
     const { limit, cursor } = parsePagination(request);
     const since = new Date(Date.now() - windowMs);
-    const { searchParams } = new URL(request.url);
 
     const rows = await db
       .select({
