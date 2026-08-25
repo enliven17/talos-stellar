@@ -2,14 +2,29 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsCommerceServices, tlsCommerceJobs, tlsRevenues } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { resolveTalosFromRequest, verifyAgentApiKey } from "@/lib/auth";
 import { verifyX402Payment, settleX402Payment } from "@/lib/stellar-x402";
 import { fulfillInstant } from "@/lib/fulfillment";
 import { registerServiceSchema, submitBidSchema, parseBody } from "@/lib/schemas";
 import { withTraceContext } from "@/lib/tracing";
+import { logger } from "@/lib/logger";
 
 const STELLAR_NETWORK = process.env.STELLAR_NETWORK ?? "testnet";
+const IDEMPOTENCY_KEY_MAX_BYTES = 128;
+
+/** Build a JSON response with standard idempotency echo headers. */
+function idempotentResponse(
+  body: unknown,
+  status: number,
+  idempotencyKey: string,
+  replayed: boolean,
+): Response {
+  const res = Response.json(body, { status });
+  res.headers.set("Idempotency-Key", idempotencyKey);
+  res.headers.set("X-Idempotent-Replayed", String(replayed));
+  return res;
+}
 
 // GET /api/talos/:id/service — Returns 402 with payment details (x402 storefront)
 async function handleGet(
@@ -81,7 +96,21 @@ async function handlePost(
     if (!auth.ok) return auth.response;
     const requester = { id: auth.talos.id };
 
-    // 1b. Read body once (request body can only be consumed once)
+    // 1b. Read optional idempotency key from the request header.
+    // Trim whitespace; treat an empty string as absent.
+    const rawKey = request.headers.get("Idempotency-Key")?.trim() || null;
+    if (rawKey !== null) {
+      const byteLength = Buffer.byteLength(rawKey, "utf8");
+      if (byteLength > IDEMPOTENCY_KEY_MAX_BYTES) {
+        return Response.json(
+          { error: `Idempotency-Key must be at most ${IDEMPOTENCY_KEY_MAX_BYTES} bytes` },
+          { status: 400 },
+        );
+      }
+    }
+    const idempotencyKey = rawKey;
+
+    // 1c. Read body once (request body can only be consumed once)
     const requestBody = await request.json().catch(() => ({})) as Record<string, unknown>;
 
     // 1c. Validate bid payload if present — only run when client actually sends bid fields.
@@ -101,6 +130,10 @@ async function handlePost(
       }
       bidData = bidValidation.data;
     }
+
+    // Extract the effective payload for idempotency comparison and job creation.
+    const payload = (requestBody.payload ?? requestBody) as Record<string, unknown>;
+
     // 2. Validate X-PAYMENT header (Stellar x402 token)
     const paymentHeader = request.headers.get("x-payment");
     if (!paymentHeader) {
@@ -142,7 +175,81 @@ async function handlePost(
       );
     }
 
-    // 3. Replay prevention — check payment token against existing jobs
+    // 3. Idempotency check — if a key was supplied, look it up before any
+    //    payment work.  Scoped per (talosId, requesterTalosId, idempotencyKey)
+    //    so the same key is safe to reuse across different buyers.
+    if (idempotencyKey) {
+      const existing = await db
+        .select()
+        .from(tlsCommerceJobs)
+        .where(
+          and(
+            eq(tlsCommerceJobs.talosId, id),
+            eq(tlsCommerceJobs.requesterTalosId, requester.id),
+            eq(tlsCommerceJobs.idempotencyKey, idempotencyKey),
+          ),
+        )
+        .limit(1)
+        .then((r) => r[0] ?? null);
+
+      if (existing) {
+        // Payload conflict check: same key must carry the same payload
+        // contents to be considered equivalent.  Different payload →
+        // reject to prevent silent mis-billing.
+        const incomingPayloadJson = JSON.stringify(payload ?? {});
+        const storedPayloadJson = JSON.stringify(existing.payload ?? {});
+        if (incomingPayloadJson !== storedPayloadJson) {
+          logger.warn({
+            event: "idempotency_conflict",
+            idempotencyKey,
+            talosId: id,
+            requesterTalosId: requester.id,
+          }, "service purchase idempotency key reused with different payload");
+          return Response.json(
+            {
+              error:
+                "Idempotency-Key reused with a different payload. " +
+                "Use a new key for a different request.",
+            },
+            { status: 409 },
+          );
+        }
+
+        // Equivalent retry — return the original response from cache.
+        if (existing.idempotencyResponse) {
+          logger.info({
+            event: "idempotency_hit",
+            idempotencyKey,
+            talosId: id,
+            jobId: existing.id,
+            replayed: true,
+          }, "service purchase idempotent replay — returning cached response");
+          return idempotentResponse(existing.idempotencyResponse, 201, idempotencyKey, true);
+        }
+
+        // Key exists but no cached response yet (edge case: concurrent first
+        // request still in flight).  Treat as a duplicate in progress.
+        logger.info({
+          event: "idempotency_inflight",
+          idempotencyKey,
+          talosId: id,
+          jobId: existing.id,
+        }, "service purchase idempotent request in flight");
+        return Response.json(
+          { error: "Request with this Idempotency-Key is already being processed" },
+          { status: 409 },
+        );
+      }
+
+      logger.info({
+        event: "idempotency_miss",
+        idempotencyKey,
+        talosId: id,
+        requesterTalosId: requester.id,
+      }, "new service purchase idempotent request");
+    }
+
+    // 4. Replay prevention — check payment token against existing jobs
     const existingJob = await db
       .select({ id: tlsCommerceJobs.id })
       .from(tlsCommerceJobs)
@@ -177,8 +284,7 @@ async function handlePost(
       );
     }
 
-    // 6. Create commerce job + fulfill
-    const payload = (requestBody.payload ?? requestBody) as Record<string, unknown>;
+    // 7. Create commerce job + fulfill
 
     if (service.fulfillmentMode === "instant") {
       // Instant mode: server calls external API and returns result synchronously
@@ -193,72 +299,172 @@ async function handlePost(
         );
       }
 
-      // Atomic: job + revenue recorded together — if either fails, both roll back.
-      // Payment (on-chain) already happened; DB must not partially record it.
-      const [job] = await withTransactionRetry(
-        async (tx) => {
-          const [job] = await tx
-            .insert(tlsCommerceJobs)
-            .values({
-              talosId: id,
-              requesterTalosId: requester.id,
-              serviceName: service.serviceName,
-              payload: payload ?? undefined,
-              result,
-              paymentSig: paymentToken,
-              txHash,
-              amount: service.price,
-              bidPrice: bidData.bidPrice ? String(bidData.bidPrice) : undefined,
-              status: bidData.status ?? "completed",
-            })
-            .returning();
-
-          await tx.insert(tlsRevenues).values({
-            talosId: id,
-            amount: service.price,
-            currency: service.currency ?? "USDC",
-            source: "commerce",
-            txHash,
-          });
-
-          return [job];
-        },
-        { category: "JOB" }
-      );
-
-      return Response.json(
-        { id: job.id, jobId: job.id, status: "completed", result, txHash },
-        { status: 201 }
-      );
-    }
-
-    // Async mode: create pending job for agent to fulfill via polling
-    // Revenue is recorded when the job is fulfilled, not on creation
-    const [job] = await db
-      .insert(tlsCommerceJobs)
-      .values({
-        talosId: id,
-        requesterTalosId: requester.id,
-        serviceName: service.serviceName,
-        payload: payload ?? undefined,
-        paymentSig: paymentToken,
+      // Build the response body (jobId filled in after insert).
+      const responseBody = {
+        jobId: "",
+        status: bidData.status ?? "completed",
+        result,
         txHash,
-        amount: service.price,
-        bidPrice: bidData.bidPrice ? String(bidData.bidPrice) : undefined,
-        status: bidData.status ?? "pending",
-      })
-      .returning();
+      };
 
-    return Response.json(
-      { id: job.id, jobId: job.id, status: "pending", txHash },
-      { status: 201 }
-    );
-  } catch (err: unknown) {
-    // Catch unique constraint violation on paymentSig (replay race condition)
-    const e = err as Record<string, unknown>;
-    if (e?.code === "23505" && String(e?.constraint ?? "").includes("paymentSig")) {
-      return Response.json({ error: "Payment token already used (replay detected)" }, { status: 409 });
+      // Atomic: job + revenue + idempotency cache recorded together — if either
+      // fails, all roll back.  Payment (on-chain) already happened; DB must not
+      // partially record it.
+      try {
+        const [job] = await withTransactionRetry(
+          async (tx) => {
+            const [job] = await tx
+              .insert(tlsCommerceJobs)
+              .values({
+                talosId: id,
+                requesterTalosId: requester.id,
+                serviceName: service.serviceName,
+                payload: payload ?? undefined,
+                result,
+                paymentSig: paymentToken,
+                txHash,
+                amount: service.price,
+                bidPrice: bidData.bidPrice ? String(bidData.bidPrice) : undefined,
+                status: bidData.status ?? "completed",
+                ...(idempotencyKey ? { idempotencyKey } : {}),
+              })
+              .returning();
+
+            await tx.insert(tlsRevenues).values({
+              talosId: id,
+              amount: service.price,
+              currency: service.currency ?? "USDC",
+              source: "commerce",
+              txHash,
+            });
+
+            // Cache the response body for future idempotent replays.
+            if (idempotencyKey) {
+              const finalResponse = { ...responseBody, jobId: job.id };
+              await tx
+                .update(tlsCommerceJobs)
+                .set({ idempotencyResponse: finalResponse })
+                .where(eq(tlsCommerceJobs.id, job.id));
+            }
+
+            return [job];
+          },
+          { category: "JOB" }
+        );
+
+        const finalBody = { ...responseBody, jobId: job.id };
+        if (idempotencyKey) {
+          return idempotentResponse(finalBody, 201, idempotencyKey, false);
+        }
+        return Response.json(finalBody, { status: 201 });
+      } catch (err: unknown) {
+        const e = err as Record<string, unknown>;
+        if (e?.code === "23505") {
+          const constraint = String(e?.constraint ?? e?.detail ?? "");
+          if (constraint.includes("idempotencyKey")) {
+            // Concurrent request with same idempotency key already inserted.
+            // Fetch the cached response from that row.
+            const existing = await db
+              .select({ idempotencyResponse: tlsCommerceJobs.idempotencyResponse })
+              .from(tlsCommerceJobs)
+              .where(
+                and(
+                  eq(tlsCommerceJobs.talosId, id),
+                  eq(tlsCommerceJobs.requesterTalosId, requester.id),
+                  eq(tlsCommerceJobs.idempotencyKey, idempotencyKey!),
+                ),
+              )
+              .limit(1)
+              .then((r) => r[0] ?? null);
+
+            if (existing?.idempotencyResponse) {
+              return idempotentResponse(existing.idempotencyResponse, 201, idempotencyKey!, true);
+            }
+            return Response.json(
+              { error: "Request with this Idempotency-Key is already being processed" },
+              { status: 409 },
+            );
+          }
+          if (constraint.includes("paymentSig")) {
+            return Response.json({ error: "Payment token already used (replay detected)" }, { status: 409 });
+          }
+        }
+        throw err;
+      }
     }
+
+    // Async mode: create pending job for agent to fulfill via polling.
+    // Revenue is recorded when the job is fulfilled, not on creation.
+    const responseBody = {
+      jobId: "",
+      status: bidData.status ?? "pending",
+      txHash,
+    };
+
+    try {
+      const [job] = await db
+        .insert(tlsCommerceJobs)
+        .values({
+          talosId: id,
+          requesterTalosId: requester.id,
+          serviceName: service.serviceName,
+          payload: payload ?? undefined,
+          paymentSig: paymentToken,
+          txHash,
+          amount: service.price,
+          bidPrice: bidData.bidPrice ? String(bidData.bidPrice) : undefined,
+          status: bidData.status ?? "pending",
+          ...(idempotencyKey ? { idempotencyKey } : {}),
+        })
+        .returning();
+
+      // Cache the response body for future idempotent replays.
+      if (idempotencyKey) {
+        const finalResponse = { ...responseBody, jobId: job.id };
+        await db
+          .update(tlsCommerceJobs)
+          .set({ idempotencyResponse: finalResponse })
+          .where(eq(tlsCommerceJobs.id, job.id));
+      }
+
+      const finalBody = { ...responseBody, jobId: job.id };
+      if (idempotencyKey) {
+        return idempotentResponse(finalBody, 201, idempotencyKey, false);
+      }
+      return Response.json(finalBody, { status: 201 });
+    } catch (err: unknown) {
+      const e = err as Record<string, unknown>;
+      if (e?.code === "23505") {
+        const constraint = String(e?.constraint ?? e?.detail ?? "");
+        if (constraint.includes("idempotencyKey")) {
+          const existing = await db
+            .select({ idempotencyResponse: tlsCommerceJobs.idempotencyResponse })
+            .from(tlsCommerceJobs)
+            .where(
+              and(
+                eq(tlsCommerceJobs.talosId, id),
+                eq(tlsCommerceJobs.requesterTalosId, requester.id),
+                eq(tlsCommerceJobs.idempotencyKey, idempotencyKey!),
+              ),
+            )
+            .limit(1)
+            .then((r) => r[0] ?? null);
+
+          if (existing?.idempotencyResponse) {
+            return idempotentResponse(existing.idempotencyResponse, 201, idempotencyKey!, true);
+          }
+          return Response.json(
+            { error: "Request with this Idempotency-Key is already being processed" },
+            { status: 409 },
+          );
+        }
+        if (constraint.includes("paymentSig")) {
+          return Response.json({ error: "Payment token already used (replay detected)" }, { status: 409 });
+        }
+      }
+      throw err;
+    }
+  } catch (err: unknown) {
     console.error("Service POST error:", err);
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }

@@ -4166,7 +4166,7 @@
           "Commerce"
         ],
         "summary": "Purchase service (inter-agent x402)",
-        "description": "Submit an x402 payment and create a commerce job (agent-to-agent).\n\n**Required headers:**\n- `Authorization: Bearer <api_key>` — buyer agent's API key\n- `X-PAYMENT: x402 <token>` — signed payment token from `POST /api/talos/{buyerId}/sign`\n\nThe server verifies the payment on-chain, settles it, and creates a job.\n\n- `instant` mode: returns the result synchronously\n- `async` mode: returns a `pending` job — poll `GET /api/jobs/{id}/result`",
+        "description": "Submit an x402 payment and create a commerce job (agent-to-agent).\n\n**Required headers:**\n- `Authorization: Bearer <api_key>` — buyer agent's API key\n- `X-PAYMENT: x402 <token>` — signed payment token from `POST /api/talos/{buyerId}/sign`\n\n**Optional header:**\n- `Idempotency-Key` — opaque string (UUID recommended, max 128 bytes) for safe retry. Scoped per buyer and service.\n\nThe server verifies the payment on-chain, settles it, and creates a job.\n\n- `instant` mode: returns the result synchronously\n- `async` mode: returns a `pending` job — poll `GET /api/jobs/{id}/result`\n\n**Idempotency contract:**\n- No header → request is processed normally (backward compatible).\n- New key → job is created, response cached. `X-Idempotent-Replayed: false`.\n- Same key + same payload → original cached 201 response returned. `X-Idempotent-Replayed: true`.\n- Same key + different payload → 409 Conflict.\n- Concurrent requests with same key → 409 \"already being processed\".",
         "operationId": "purchaseService",
         "security": [
           {
@@ -4176,6 +4176,16 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/talosId"
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "description": "Opaque idempotency key for safe retry (UUID recommended). Scoped per buyer and service."
           }
         ],
         "requestBody": {
@@ -4190,6 +4200,24 @@
         "responses": {
           "201": {
             "description": "Job created",
+            "headers": {
+              "Idempotency-Key": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Echoes the idempotency key (if provided)"
+              },
+              "X-Idempotent-Replayed": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "true",
+                    "false"
+                  ]
+                },
+                "description": "Whether this response was served from the idempotency cache"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -4199,7 +4227,7 @@
             }
           },
           "400": {
-            "description": "Missing X-PAYMENT header"
+            "description": "Missing X-PAYMENT header or Idempotency-Key too large"
           },
           "401": {
             "$ref": "#/components/responses/UnauthorizedError"
@@ -4211,7 +4239,7 @@
             "description": "No service registered for this TALOS"
           },
           "409": {
-            "description": "Payment token already used (replay detected)"
+            "description": "Payment token already used, idempotency key reused with different payload, or request in progress"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
