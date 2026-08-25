@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPlaybooks, tlsPlaybookPurchases } from "@/db/schema";
 import { eq, sql } from "drizzle-orm";
+import { resolveTalosFromRequest } from "@/lib/auth";
 
 // GET /api/playbooks/:id — Playbook detail
 export async function GET(

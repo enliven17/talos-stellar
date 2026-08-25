@@ -7,7 +7,7 @@ import { emitWebhookEvent } from "@/lib/webhooks/delivery";
 
 // GET /api/talos/:id/revenue — Get revenue history
 export async function GET(
-  request: Request,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
@@ -16,6 +16,9 @@ export async function GET(
   const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 1), 200);
 
   try {
+    const auth = await verifyAgentApiKey(request, id, ["revenue:read"]);
+    if (!auth.ok) return auth.response;
+
     const talos = await db
       .select({ id: tlsTalos.id })
       .from(tlsTalos)
