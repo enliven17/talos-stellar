@@ -305,6 +305,7 @@ def build_all_tools(
             manifests=manifests,
             db=db,
             secret_resolver=settings.secret_value,
+            retry_configs=settings.adapter_retry_configs,
         )
         adapter_registry = AdapterRegistry(sandbox)
         adapter_registry.register(

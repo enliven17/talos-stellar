@@ -22,6 +22,12 @@ from urllib.parse import unquote, urlsplit
 import httpx
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
+from talos_agent.circuit_breaker import (
+    CircuitBreakerConfig,
+    CircuitBreakerOpen,
+    CircuitBreakerRegistry,
+    execute_with_retry,
+)
 from talos_agent.observability import log
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
@@ -815,6 +821,7 @@ class AdapterSandbox:
         manifests: Mapping[str, AdapterCapabilityManifest],
         db: object,
         secret_resolver: Callable[[str], str],
+        retry_configs: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         self._manifests = dict(manifests)
         self._store = AdapterInvocationStore(db)
@@ -824,6 +831,8 @@ class AdapterSandbox:
             for name, manifest in self._manifests.items()
         }
         self._owner_id = str(uuid.uuid4())
+        self._retry_configs = dict(retry_configs or {})
+        self._breakers = CircuitBreakerRegistry()
 
     def manifest(self, adapter_id: str) -> AdapterCapabilityManifest:
         normalized = adapter_id.lower()
@@ -854,6 +863,10 @@ class AdapterSandbox:
             store=self._store,
             semaphore=self._semaphores[adapter_id],
             owner_id=self._owner_id,
+            breaker=self._breakers.get_or_create(
+                adapter_id,
+                CircuitBreakerConfig.from_mapping(self._retry_configs.get(adapter_id)),
+            ),
         )
 
 
@@ -868,12 +881,14 @@ class SandboxedAdapter(BaseSocialAdapter):
         store: AdapterInvocationStore,
         semaphore: asyncio.Semaphore,
         owner_id: str,
+        breaker: Any,
     ) -> None:
         self.__adapter = adapter
         self.__manifest = manifest
         self.__store = store
         self.__semaphore = semaphore
         self.__owner_id = owner_id
+        self.__breaker = breaker
         self.channel_name = adapter.channel_name
 
     def get_capabilities(self) -> ChannelCapabilities:
@@ -967,9 +982,19 @@ class SandboxedAdapter(BaseSocialAdapter):
             )
             acquired = True
             method = getattr(self.__adapter, operation)
-            result = await asyncio.wait_for(
-                method(*args, **kwargs),
-                timeout=max(0.001, deadline - time.monotonic()),
+
+            async def invoke() -> Any:
+                return await asyncio.wait_for(
+                    method(*args, **kwargs),
+                    timeout=max(0.001, deadline - time.monotonic()),
+                )
+
+            result = await execute_with_retry(
+                invoke,
+                self.__breaker,
+                is_failure=lambda value: (
+                    isinstance(value, PublishResult) and value.status == "failed"
+                ),
             )
             output_bytes, output_items = _output_shape(
                 result.to_dict() if isinstance(result, PublishResult) else result
