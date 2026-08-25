@@ -105,13 +105,12 @@ export async function verifyAgentApiKey(
 
   // 1. Try to match a scoped key
   const scopedKey = await db
-    .select({ id: tlsApiKeys.id, scopes: tlsApiKeys.scopes, expiresAt: tlsApiKeys.expiresAt })
+    .select({ id: tlsApiKeys.id, scopes: tlsApiKeys.scopes, expiresAt: tlsApiKeys.expiresAt, status: tlsApiKeys.status })
     .from(tlsApiKeys)
     .where(
       and(
         eq(tlsApiKeys.talosId, talosId),
         eq(tlsApiKeys.keyHash, tokenHash),
-        eq(tlsApiKeys.status, "active")
       )
     )
     .limit(1)
@@ -121,6 +120,15 @@ export async function verifyAgentApiKey(
   let hasRequiredScopes = false;
 
   if (scopedKey) {
+    if (scopedKey.status === "revoked") {
+      logger.warn({ talosId, keyId: scopedKey.id }, "auth.key.revoked");
+      writeAuditLog(talos.id, request, 403, "revoked_key", requiredScopes).catch(() => {});
+      return {
+        ok: false,
+        response: Response.json({ error: "API key has been revoked" }, { status: 403 }),
+      };
+    }
+
     // Check expiry
     if (scopedKey.expiresAt && scopedKey.expiresAt < new Date()) {
       logger.warn({ talosId, keyId: scopedKey.id }, "auth.key.expired");

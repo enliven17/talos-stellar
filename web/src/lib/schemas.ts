@@ -39,7 +39,7 @@ export const stellarIssuedAssetSchema = z.object({
   issuer: stellarPublicKeySchema,
 }).strict();
 
-export const stellarAssetSchema = z.discriminatedUnion("type", [
+export const stellarDiscriminatedAssetSchema = z.discriminatedUnion("type", [
   stellarNativeAssetSchema,
   stellarIssuedAssetSchema,
 ]);
@@ -134,6 +134,8 @@ function isValidStellarPublicKey(value: string): boolean {
  * characters, matching the Stellar protocol limits.
  */
 export const stellarAssetSchema = z.union([
+  stellarNativeAssetSchema,
+  stellarIssuedAssetSchema,
   z.object({
     native: z.literal(true),
     code: z.undefined().optional(),
