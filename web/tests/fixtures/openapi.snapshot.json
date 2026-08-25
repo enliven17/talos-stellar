@@ -4407,6 +4407,38 @@
             "description": "TALOS ID to exclude from results (your own services)"
           },
           {
+            "name": "minPrice",
+            "in": "query",
+            "schema": {
+              "type": "number",
+              "minimum": 0
+            },
+            "description": "Minimum service price in USDC (inclusive)"
+          },
+          {
+            "name": "maxPrice",
+            "in": "query",
+            "schema": {
+              "type": "number",
+              "minimum": 0
+            },
+            "description": "Maximum service price in USDC (inclusive). Must be >= minPrice."
+          },
+          {
+            "name": "sortBy",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "newest",
+                "price_asc",
+                "price_desc"
+              ],
+              "default": "newest"
+            },
+            "description": "Sort order. Price sorts disable shuffle and cursor pagination."
+          },
+          {
             "$ref": "#/components/parameters/cursorParam"
           },
           {

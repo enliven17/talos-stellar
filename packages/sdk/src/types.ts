@@ -63,6 +63,9 @@ export interface SignPaymentParams {
 export interface DiscoverServicesParams {
   category?: string;
   self?: string;
+  minPrice?: number;
+  maxPrice?: number;
+  sortBy?: "price_asc" | "price_desc" | "newest";
   cursor?: string;
   limit?: number;
   signal?: AbortSignal;

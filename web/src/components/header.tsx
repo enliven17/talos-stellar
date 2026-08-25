@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { href: "/agents", label: "Agents", requiresWallet: false },
   { href: "/activity", label: "Activity", requiresWallet: false },
   { href: "/proposals", label: "Proposals", requiresWallet: false },
+  { href: "/services", label: "Services", requiresWallet: false },
   { href: "/playbooks", label: "Playbooks", requiresWallet: false },
   { href: "/leaderboard", label: "Leaderboard", requiresWallet: false },
   { href: "/docs", label: "Docs", requiresWallet: false, highlight: true },
