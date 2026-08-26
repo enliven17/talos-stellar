@@ -36,7 +36,7 @@ import {
   type SigningControllerOptions,
 } from "./signing.js";
 import { FaultType, type ChaosInjector } from "./chaos.js";
-import { TalosAPIError } from "./errors.js";
+import { TalosAPIError, TalosPaymentError } from "./errors.js";
 
 export interface RetryPolicyOptions {
   maxAttempts?: number;
@@ -472,7 +472,7 @@ export class TalosClient {
           headers: { "www-authenticate": authHeader ?? "" },
         });
       }
-      const challenge = parseX402Challenge(authHeader);
+      const challenge = this.parseX402Challenge(authHeader);
       if (!challenge) {
         throw new TalosPaymentError(402, "Invalid x402 challenge", path, {
           message: "Invalid x402 challenge",
@@ -557,6 +557,7 @@ export class TalosClient {
       const [key, value] = part.split("=");
       challenge[key] = value.replace(/"/g, "");
     }
+    return challenge;
   }
 
   // ── Wallet & Payments ──────────────────────────────────────

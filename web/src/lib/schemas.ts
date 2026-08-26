@@ -249,6 +249,27 @@ export const transferSchema = z.object({
   currency: z.string().optional().default("USDC"),
 });
 
+// --- Durable job leases ---
+
+export const claimJobSchema = z.object({
+  ttlSeconds: z.number().int().positive().max(3600).optional(),
+});
+
+export const heartbeatJobSchema = z.object({
+  fencingToken: z.number().int().nonnegative(),
+});
+
+export const releaseJobSchema = z.object({
+  fencingToken: z.number().int().nonnegative(),
+});
+
+export const submitJobResultSchema = z.object({
+  result: z.unknown().refine((value) => value !== undefined && value !== null, {
+    message: "result is required",
+  }),
+  fencingToken: z.number().int().nonnegative().optional(),
+});
+
 // --- Patrons ---
 
 export const becomePatronSchema = z.object({
