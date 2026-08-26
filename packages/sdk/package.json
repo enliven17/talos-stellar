@@ -21,6 +21,8 @@
     "build:esm": "tsc -p tsconfig.json",
     "build:cjs": "tsc -p tsconfig.cjs.json && node scripts/rename-cjs.mjs",
     "build:browser": "node scripts/bundle-browser.mjs",
+    "compat:browser-bundle": "node scripts/smoke-browser-bundle.mjs",
+    "compat:edge": "node scripts/smoke-edge.mjs",
     "compat:node-esm": "node scripts/smoke-node-esm.mjs",
     "compat:node-cjs": "node scripts/smoke-node-cjs.cjs",
     "dev": "tsc --watch",
