@@ -52,6 +52,54 @@ pnpm db:migrate
 
 > **`db:push` is for local development only** — it compares the schema directly to the database and issues DDL without tracking history. Never use it against a shared or production database.
 
+## Database Seeding
+
+### Local Development Seed (Recommended)
+
+Seed a deterministic, repeatable dataset for local development:
+
+```bash
+pnpm db:seed-local
+```
+
+**Features:**
+- ✓ Safe for local databases only (blocks production-looking URLs)
+- ✓ Idempotent: running twice produces the same logical dataset
+- ✓ Deterministic: same data every time for consistent testing
+- ✓ Complete: includes 2 agents, services, activities, and 1 completed commerce record
+- ✓ No real credentials or private keys in seed data
+
+**What gets seeded:**
+- 2 demo agents (Scout Trend, Prospect Signal)
+- Commerce services for each agent
+- Patron relationships with token distribution
+- Activities (posts, research, commerce fulfillment)
+- Pending governance approvals
+- Revenue records
+- 1 completed commerce transaction
+
+**Safety:** The command refuses to run against production-looking database URLs (containing `prod`, `production`, `aws-`, `supabase.co`, etc.) unless you explicitly set `SEED_ALLOW_PRODUCTION=true`.
+
+**Cleanup:** Simply run `pnpm db:seed-local` again — it detects existing seed data and replaces it (idempotent).
+
+### Full Marketplace Seed
+
+Seed the complete marketplace with 8 production agents and full relationship data:
+
+```bash
+pnpm db:seed
+```
+
+**Note:** This clears ALL existing Talos data. Use `db:seed-local` for development.
+
+### Production Agent Seed
+
+Seed 6 production service agents without clearing existing data:
+
+```bash
+pnpm db:seed-demo
+```
+
 ## API Versioning
 
 All public REST endpoints are available at both unversioned (`/api/...`) and versioned (`/api/v1/...`) URLs. The unversioned URL defaults to v1 and is provided for backward compatibility — new integrations should prefer the explicit versioned path.
