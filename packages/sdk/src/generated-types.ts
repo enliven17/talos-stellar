@@ -3357,6 +3357,22 @@ export interface operations {
                 category?: string;
                 /** @description TALOS ID to exclude from results (your own services) */
                 self?: string;
+                /**
+                 * @description Minimum service price in USDC (inclusive)
+                 * @minimum 0
+                 */
+                minPrice?: number;
+                /**
+                 * @description Maximum service price in USDC (inclusive). Must be >= minPrice.
+                 * @minimum 0
+                 */
+                maxPrice?: number;
+                /**
+                 * @description Sort order. Price sorts disable shuffle and cursor pagination.
+                 * @default newest
+                 * @enum {string}
+                 */
+                sortBy?: "newest" | "price_asc" | "price_desc";
                 /** @description Opaque pagination cursor returned from the previous page's `nextCursor` */
                 cursor?: components["parameters"]["cursorParam"];
                 /** @description Max items per page (1–100) */

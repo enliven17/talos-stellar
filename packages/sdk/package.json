@@ -23,7 +23,11 @@
     "build:browser": "node scripts/bundle-browser.mjs",
     "dev": "tsc --watch",
     "test": "vitest run",
-    "generate:types": "openapi-typescript \"../../web/tests/fixtures/openapi.snapshot.json\" -o \"src/generated-types.ts\""
+    "generate:types": "openapi-typescript \"../../web/tests/fixtures/openapi.snapshot.json\" -o \"src/generated-types.ts\"",
+    "compat:node-esm": "node scripts/smoke-node-esm.mjs",
+    "compat:node-cjs": "node scripts/smoke-node-cjs.cjs",
+    "compat:edge": "node scripts/smoke-edge.mjs",
+    "compat:browser-bundle": "node scripts/smoke-browser-bundle.mjs"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.2.0"
