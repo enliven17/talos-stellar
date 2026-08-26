@@ -9,6 +9,7 @@ import {
 } from "@/db/schema";
 import { and, eq, gte, sql, desc } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
+import { parseAnalyticsLimit } from "@/lib/analytics-limits";
 
 /**
  * Monetary Value Representation Standard:
@@ -56,6 +57,11 @@ export async function GET(
   try {
     const auth = await verifyAgentApiKey(request, id, ["revenue:read"]);
     if (!auth.ok) return auth.response;
+
+    const { searchParams } = new URL(request.url);
+    const parsedLimit = parseAnalyticsLimit(searchParams.get("limit"), 20, 100);
+    if (!parsedLimit.ok) return parsedLimit.response;
+    const limit = parsedLimit.limit;
 
     // ── Verify the TALOS agent exists ─────────────────────────────
     const talos = await db
@@ -213,7 +219,7 @@ export async function GET(
         ),
       )
       .orderBy(desc(tlsApprovals.createdAt))
-      .limit(20);
+      .limit(limit);
 
     // ── Playbook sales metrics ───────────────────────────────────
     const playbookRows = await db
@@ -240,7 +246,8 @@ export async function GET(
         tlsPlaybooks.currency,
         tlsPlaybooks.category,
         tlsPlaybooks.status,
-      );
+      )
+      .limit(limit);
 
     // ── Compute derived monetary analytics ───────────────────────
     const totalRevenueNum = toMonetaryValue(revenueAllTime?.totalRevenue);

@@ -433,7 +433,7 @@ describe("State machine edge cases", () => {
   });
 
   it("handles a record with null confirmedLedger in CONFIRMING (stays CONFIRMING)", () => {
-    const rec = makeRecord({ finalityStatus: "CONFIRMING", confirmedLedger: null });
+    const rec = makeRecord({ finalityStatus: "CONFIRMING", confirmedLedger: null, ledgerSubmitted: null });
     const update = transitionFromConfirming(rec, 9999, BASE_CONFIG);
     // confirmedLedger is null → can't compute depth → just update checkpoint
     expect(update?.finalityStatus).toBeUndefined();

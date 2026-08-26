@@ -9,6 +9,9 @@ import { createTalosSchema, parseBody } from "@/lib/schemas";
 import { parseLimit } from "@/lib/parse-limit";
 import { TimeoutError, withTimeout } from "@/lib/timeout";
 import { fetchReputations } from "@/lib/reputation-ledger";
+import { withDriftDetection } from "@/lib/drift";
+import "@/lib/drift-schemas";
+import { internalError } from "@/lib/api-response";
 
 // GET /api/talos — List TALOS entries with cursor-based pagination
 export async function GET(request: NextRequest) {

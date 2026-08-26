@@ -5,6 +5,7 @@ import { and, desc, eq, ilike, lt, ne, or } from "drizzle-orm";
 import { parseLimit } from "@/lib/parse-limit";
 import { fetchReputations } from "@/lib/reputation-ledger";
 import { withTraceContext } from "@/lib/tracing";
+import { internalError } from "@/lib/api-response";
 
 // GET /api/services — Discover available services across all TALOS agents
 async function handleGet(request: NextRequest) {

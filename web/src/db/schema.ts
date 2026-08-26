@@ -712,3 +712,122 @@ export const tlsReputationInputs = pgTable(
     index("tls_reputation_inputs_talosId_requester_idx").on(t.talosId, t.requesterTalosId),
   ],
 );
+
+// ─── Webhook Subscriptions ────────────────────────────────────────
+export const tlsWebhookSubscriptions = pgTable(
+  "tls_webhook_subscriptions",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talos_id").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    url: text("url").notNull(),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    signatureVersion: integer("signature_version").notNull().default(1),
+    eventTypes: text("event_types").array().notNull().default([]),
+    description: text("description"),
+    active: boolean("active").notNull().default(true),
+
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    index("tls_webhook_subscriptions_talos_id_idx").on(t.talosId),
+  ],
+);
+
+// ─── Webhook Deliveries ────────────────────────────────────────────
+export const tlsWebhookDeliveries = pgTable(
+  "tls_webhook_deliveries",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    subscriptionId: text("subscription_id").notNull().references(() => tlsWebhookSubscriptions.id, { onDelete: "cascade" }),
+    eventType: text("event_type").notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(5),
+    lastStatusCode: integer("last_status_code"),
+    lastError: text("last_error"),
+    lastAttemptAt: timestamp("last_attempt_at", { mode: "date", precision: 3 }),
+    nextAttemptAt: timestamp("next_attempt_at", { mode: "date", precision: 3 }),
+    completedAt: timestamp("completed_at", { mode: "date", precision: 3 }),
+    responseBody: text("response_body"),
+
+    leasedBy: text("leased_by"),
+    leasedAt: timestamp("leased_at", { mode: "date", precision: 3 }),
+    leaseExpiresAt: timestamp("lease_expires_at", { mode: "date", precision: 3 }),
+    fencingToken: integer("fencing_token").notNull().default(0),
+
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tls_webhook_deliveries_sub_id_payload_hash_unique").on(t.subscriptionId, t.payloadHash),
+    index("tls_webhook_deliveries_pending_idx").on(t.nextAttemptAt, t.status)
+      .where(sql`${t.status} = ANY(ARRAY['pending', 'failed'])`),
+  ],
+);
+
+// ─── Transactional Outbox for Domain Events ───────────────────────
+export const tlsOutboxEvents = pgTable(
+  "tls_outbox_events",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    aggregateType: text("aggregateType").notNull(),
+    aggregateId: text("aggregateId").notNull(),
+    eventType: text("eventType").notNull(),
+    payload: jsonb("payload").default({}).notNull(),
+    status: text("status").default("pending").notNull(),
+    runAt: timestamp("runAt", { mode: "date", precision: 3 }).default(sql`now()`).notNull(),
+    leaseId: text("leaseId"),
+    leaseOwner: text("leaseOwner"),
+    leaseExpiresAt: timestamp("leaseExpiresAt", { mode: "date", precision: 3 }),
+    attempts: integer("attempts").default(0).notNull(),
+    maxAttempts: integer("maxAttempts").default(8).notNull(),
+    dedupeKey: text("dedupeKey"),
+    lastError: text("lastError"),
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).default(sql`now()`).notNull(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+    dispatchedAt: timestamp("dispatchedAt", { mode: "date", precision: 3 }),
+  },
+  (table) => [
+    index("tls_outbox_events_status_runAt_idx").on(table.status, table.runAt),
+    index("tls_outbox_events_eventType_status_idx").on(table.eventType, table.status),
+    index("tls_outbox_events_leaseExpiresAt_idx").on(table.leaseExpiresAt),
+    index("tls_outbox_events_dispatchedAt_idx").on(table.dispatchedAt),
+    uniqueIndex("tls_outbox_events_eventType_dedupeKey_unique").on(table.eventType, table.dedupeKey),
+  ],
+);
+
+// ─── Background Jobs ──────────────────────────────────────────────
+export const tlsJobs = pgTable(
+  "tls_jobs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    queue: text("queue").notNull(),
+    payload: jsonb("payload").default({}).notNull(),
+    status: text("status").default("pending").notNull(),
+    priority: integer("priority").default(0).notNull(),
+    runAt: timestamp("runAt", { mode: "date", precision: 3 }).default(sql`now()`).notNull(),
+    leaseId: text("leaseId"),
+    leaseOwner: text("leaseOwner"),
+    leaseExpiresAt: timestamp("leaseExpiresAt", { mode: "date", precision: 3 }),
+    heartbeatAt: timestamp("heartbeatAt", { mode: "date", precision: 3 }),
+    attempts: integer("attempts").default(0).notNull(),
+    maxAttempts: integer("maxAttempts").default(8).notNull(),
+    retryClass: text("retryClass").default("transient").notNull(),
+    cancelRequested: boolean("cancelRequested").default(false).notNull(),
+    idempotencyKey: text("idempotencyKey"),
+    lastError: text("lastError"),
+    result: jsonb("result"),
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).default(sql`now()`).notNull(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+    completedAt: timestamp("completedAt", { mode: "date", precision: 3 }),
+  },
+  (table) => [
+    index("tls_jobs_status_runAt_idx").on(table.status, table.runAt),
+    index("tls_jobs_queue_status_idx").on(table.queue, table.status),
+    index("tls_jobs_leaseExpiresAt_idx").on(table.leaseExpiresAt),
+    uniqueIndex("tls_jobs_queue_idempotencyKey_unique").on(table.queue, table.idempotencyKey),
+  ],
+);
+
+

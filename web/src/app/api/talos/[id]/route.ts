@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { tlsTalos } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { internalError, notFound } from "@/lib/api-response";
+import { withTraceContext } from "@/lib/tracing";
 
 function maskApiKey(key: string | null): string | null {
   if (!key || key.length < 12) return null;
@@ -10,7 +11,7 @@ function maskApiKey(key: string | null): string | null {
 }
 
 // GET /api/talos/:id — TALOS detail + configuration
-export async function GET(
+async function handleGet(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -40,3 +41,4 @@ export async function GET(
 }
 
 export const GET = withTraceContext(handleGet);
+

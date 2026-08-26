@@ -17,14 +17,14 @@ export async function GET(req: NextRequest) {
   let patronTalosIds = [];
   try {
     patronTalosIds = await withTimeout(
-      db.select({ talosId: tlsPatrons.talosId }).from(tlsPatrons).where(eq(tlsPatrons.stellarPublicKey, addr)),
+      db.select({ talosId: tlsPatrons.talosId }).from(tlsPatrons).where(eq(tlsPatrons.stellarPublicKey, addr)).limit(100),
       25000,
       "Dashboard patron query timeout",
     );
   } catch (error) {
     if (error instanceof TimeoutError) {
       return NextResponse.json(
-        { error: "Query timeout. Please try again with a simpler query.", details: error.message },
+        { error: "Query timeout. Please try again with a simpler query." },
         { status: 408 },
       );
     }
@@ -51,11 +51,12 @@ export async function GET(req: NextRequest) {
     talosRows = await withTimeout(
       db.query.tlsTalos.findMany({
         where: whereCondition,
+        limit: 100,
         with: {
-          approvals: { orderBy: (a, { desc: d }) => [d(a.createdAt)] },
+          approvals: { orderBy: (a, { desc: d }) => [d(a.createdAt)], limit: 50 },
           activities: { orderBy: (a, { desc: d }) => [d(a.createdAt)], limit: 10 },
-          revenues: { orderBy: (r, { desc: d }) => [d(r.createdAt)] },
-          patrons: true,
+          revenues: { orderBy: (r, { desc: d }) => [d(r.createdAt)], limit: 50 },
+          patrons: { limit: 50 },
         },
       }),
       30000,
@@ -64,7 +65,7 @@ export async function GET(req: NextRequest) {
   } catch (error) {
     if (error instanceof TimeoutError) {
       return NextResponse.json(
-        { error: "Query timeout. Please try again with a simpler query.", details: error.message },
+        { error: "Query timeout. Please try again with a simpler query." },
         { status: 408 },
       );
     }

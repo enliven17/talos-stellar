@@ -14,6 +14,8 @@ import {
   tlsTokenPurchases,
   tlsBenchmarkRuns,
   tlsBenchmarkResults,
+  tlsWebhookSubscriptions,
+  tlsWebhookDeliveries,
 } from "./schema";
 
 export const talosRelations = relations(tlsTalos, ({ many, one }) => ({

@@ -67,3 +67,10 @@ export function verifyInternalSecret(
 
   return { ok: true };
 }
+
+export function verifyInternalJobsSecret(
+  request: NextRequest,
+): { ok: true } | { ok: false; response: Response } {
+  return verifyInternalSecret(request, "INTERNAL_JOBS_SECRET", "x-internal-jobs-secret");
+}
+

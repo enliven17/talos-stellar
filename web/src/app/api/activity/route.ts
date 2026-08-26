@@ -5,6 +5,7 @@ import {
   InvalidActivityCursorError,
 } from "./query";
 import { parseLimit } from "@/lib/parse-limit";
+import { internalError, badRequest } from "@/lib/api-response";
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +22,7 @@ export async function GET(request: Request) {
       decodeActivityCursor(cursor);
     } catch (error) {
       if (error instanceof InvalidActivityCursorError) {
-        return Response.json({ error: "Invalid cursor" }, { status: 400 });
+        return badRequest(request, "Invalid cursor");
       }
       throw error;
     }
@@ -40,9 +41,6 @@ export async function GET(request: Request) {
 
     return Response.json({ stats, transactions, nextCursor });
   } catch {
-    return Response.json(
-      { error: "An unexpected error occurred" },
-      { status: 500 },
-    );
+    return internalError(request);
   }
 }

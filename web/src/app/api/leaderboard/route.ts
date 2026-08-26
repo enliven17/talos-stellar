@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { tlsTalos, tlsPatrons, tlsActivities, tlsRevenues } from "@/db/schema";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { parseLimit } from "@/lib/parse-limit";
+import { internalError, badRequest } from "@/lib/api-response";
 
 // GET /api/leaderboard — Ranking data with cursor-based pagination
 export async function GET(request: NextRequest) {

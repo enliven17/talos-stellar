@@ -4,6 +4,8 @@ import { tlsTalos, tlsRevenues } from "@/db/schema";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
 import { emitWebhookEvent } from "@/lib/webhooks/delivery";
+import { parseAnalyticsLimit } from "@/lib/analytics-limits";
+import { withTraceContext } from "@/lib/tracing";
 
 // GET /api/talos/:id/revenue — Get revenue history
 export async function GET(
@@ -13,7 +15,9 @@ export async function GET(
   const { id } = await params;
   const { searchParams } = new URL(request.url);
   const cursor = searchParams.get("cursor");
-  const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "50", 10) || 50, 1), 200);
+  const parsedLimit = parseAnalyticsLimit(searchParams.get("limit"), 50, 100);
+  if (!parsedLimit.ok) return parsedLimit.response;
+  const limit = parsedLimit.limit;
 
   try {
     const auth = await verifyAgentApiKey(request, id, ["revenue:read"]);

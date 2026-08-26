@@ -758,4 +758,18 @@ describe("GET /api/ecosystem-intelligence", () => {
     expect(body.demand.byCategory).toEqual({ marketing: 1 });
     expect(body.metadata.privacy.deduplicatedRows).toBe(49);
   });
+
+  it("returns 400 when limit exceeds maximum allowed limit of 50", async () => {
+    const res = await GET(new Request("http://localhost/api/ecosystem-intelligence?limit=100"));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain("exceeds maximum allowed limit of 50");
+  });
+
+  it.each(["0", "-1", "abc", "1.5", ""])("returns 400 for malformed limit=%s", async (val) => {
+    const res = await GET(new Request(`http://localhost/api/ecosystem-intelligence?limit=${val}`));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("limit must be a positive integer");
+  });
 });
