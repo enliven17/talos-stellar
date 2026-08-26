@@ -29,6 +29,8 @@ export const VALID_SCOPES = [
 ] as const;
 
 export type Scope = typeof VALID_SCOPES[number];
+// Backwards-compatible name used by route authorization tests and consumers.
+export type ApiScope = Scope;
 
 /**
  * Generate a new scoped API key.
@@ -111,6 +113,7 @@ export async function verifyAgentApiKey(
       and(
         eq(tlsApiKeys.talosId, talosId),
         eq(tlsApiKeys.keyHash, tokenHash),
+        eq(tlsApiKeys.status, "active"),
       )
     )
     .limit(1)
@@ -120,12 +123,22 @@ export async function verifyAgentApiKey(
   let hasRequiredScopes = false;
 
   if (scopedKey) {
-    if (scopedKey.status === "revoked") {
+    if (scopedKey.status !== "active") {
       logger.warn({ talosId, keyId: scopedKey.id }, "auth.key.revoked");
-      writeAuditLog(talos.id, request, 403, "revoked_key", requiredScopes).catch(() => {});
+      const isRevoked = scopedKey.status === "revoked";
+      writeAuditLog(
+        talos.id,
+        request,
+        403,
+        isRevoked ? "revoked_key" : "inactive_key",
+        requiredScopes,
+      ).catch(() => {});
       return {
         ok: false,
-        response: Response.json({ error: "API key has been revoked" }, { status: 403 }),
+        response: Response.json(
+          { error: isRevoked ? "API key has been revoked" : "API key is not active" },
+          { status: 403 },
+        ),
       };
     }
 

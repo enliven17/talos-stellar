@@ -150,6 +150,25 @@ describe("Route-to-Scope Authorization Matrix & Key Compatibility", () => {
       }
     });
 
+    it("denies access when the key is not active", async () => {
+      const rawKey = "tak_test_inactive_key_123456789012345678901234567890";
+
+      const selectTalosMock = mockSelectChain([{ id: talosId, legacyApiKey: null }]);
+      const selectKeysMock = mockSelectChain([
+        { id: "k-inactive", scopes: [requiredScopes[0]], expiresAt: null, status: "disabled" },
+      ]);
+
+      vi.mocked(db.select)
+        .mockImplementationOnce(() => selectTalosMock as any)
+        .mockImplementationOnce(() => selectKeysMock as any);
+
+      const req = makeRequest(route, rawKey, method);
+      const res = await verifyAgentApiKey(req, talosId, requiredScopes);
+
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.response.status).toBe(403);
+    });
+
     it("denies access with 403 when key lacks required scope", async () => {
       const rawKey = "tak_test_invalid_scope_key_12345678901234567890";
 
