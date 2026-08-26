@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from talos_agent.db import LocalDB
 
 
@@ -75,6 +77,37 @@ class TestCommerceLifecycle:
         ).fetchall()
         assert len(rows) == 1
         assert rows[0]["talos_id"] == "c1"
+
+
+class TestPlaybookLookup:
+    def test_find_playbook_by_name_returns_exact_match(self, mock_db: LocalDB):
+        mock_db.save_playbook("Growth Engine", {"cadence": "daily"})
+        mock_db.save_playbook("Growth Engine Pro", {"cadence": "weekly"})
+
+        playbook = mock_db.find_playbook_by_name("Growth Engine")
+
+        assert playbook is not None
+        assert playbook["name"] == "Growth Engine"
+        assert playbook["data"] == {"cadence": "daily"}
+
+    def test_find_playbook_by_name_strips_surrounding_whitespace(self, mock_db: LocalDB):
+        mock_db.save_playbook("Launch Plan", {"channel": "email"})
+
+        playbook = mock_db.find_playbook_by_name("  Launch Plan  ")
+
+        assert playbook is not None
+        assert playbook["name"] == "Launch Plan"
+
+    def test_find_playbook_by_name_rejects_blank_input(self, mock_db: LocalDB):
+        with pytest.raises(ValueError, match="cannot be empty"):
+            mock_db.find_playbook_by_name("   ")
+
+    def test_find_playbook_by_name_returns_none_for_partial_match(self, mock_db: LocalDB):
+        mock_db.save_playbook("Growth Engine Pro", {"cadence": "weekly"})
+
+        playbook = mock_db.find_playbook_by_name("Growth")
+
+        assert playbook is None
 
 
 class TestLearningsLifecycle:

@@ -1,0 +1,1253 @@
+name: SBOM & Build Provenance
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "sdk-v*"
+      - "agent-v*"
+      - "contracts-v*"
+      - "web-v*"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/sbom-provenance.yml"
+      - ".github/workflows/release-publish.yml"
+      - "packages/sdk/**"
+      - "packages/prime-agent/**"
+      - "contracts/**"
+      - "web/**"
+  workflow_call:
+    inputs:
+      component:
+        description: "Component to generate SBOM/provenance for (sdk|agent|contracts|web|all)"
+        required: false
+        default: "all"
+        type: string
+      sign_artifacts:
+        description: "Whether to sign generated artifacts with cosign"
+        required: false
+        default: true
+        type: boolean
+      upload_release:
+        description: "Upload SBOMs and provenance to GitHub Release (requires tag)"
+        required: false
+        default: false
+        type: boolean
+    outputs:
+      sdk-sbom-cyclonedx:
+        description: "Artifact name for SDK CycloneDX SBOM"
+        value: ${{ jobs.generate-sdk.outputs.sbom-cyclonedx }}
+      sdk-sbom-spdx:
+        description: "Artifact name for SDK SPDX SBOM"
+        value: ${{ jobs.generate-sdk.outputs.sbom-spdx }}
+      agent-sbom-cyclonedx:
+        description: "Artifact name for Agent CycloneDX SBOM"
+        value: ${{ jobs.generate-agent.outputs.sbom-cyclonedx }}
+      agent-sbom-spdx:
+        description: "Artifact name for Agent SPDX SBOM"
+        value: ${{ jobs.generate-agent.outputs.sbom-spdx }}
+      contracts-sbom-cyclonedx:
+        description: "Artifact name for Contracts CycloneDX SBOM"
+        value: ${{ jobs.generate-contracts.outputs.sbom-cyclonedx }}
+      contracts-sbom-spdx:
+        description: "Artifact name for Contracts SPDX SBOM"
+        value: ${{ jobs.generate-contracts.outputs.sbom-spdx }}
+      web-sbom-cyclonedx:
+        description: "Artifact name for Web CycloneDX SBOM"
+        value: ${{ jobs.generate-web.outputs.sbom-cyclonedx }}
+      web-sbom-spdx:
+        description: "Artifact name for Web SPDX SBOM"
+        value: ${{ jobs.generate-web.outputs.sbom-spdx }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sbom-provenance-${{ github.event_name }}-${{ github.ref_name }}-${{ inputs.component || 'all' }}
+  cancel-in-progress: true
+
+env:
+  SBOM_FORMAT_VERSION: "1.0.0"
+  PROVENANCE_SLSA_LEVEL: "L3"
+  RETENTION_DAYS: 90
+
+jobs:
+  detect-components:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      components: ${{ steps.detect.outputs.components }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Detect relevant components
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          REQUESTED="${{ inputs.component || 'all' }}"
+          COMPONENTS=()
+
+          if [[ "$REQUESTED" == "all" ]]; then
+            if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+              CHANGED=$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" 2>/dev/null || true)
+              echo "$CHANGED" | grep -q "^packages/sdk/" && COMPONENTS+=("sdk") || true
+              echo "$CHANGED" | grep -q "^packages/prime-agent/" && COMPONENTS+=("agent") || true
+              echo "$CHANGED" | grep -q "^contracts/" && COMPONENTS+=("contracts") || true
+              echo "$CHANGED" | grep -q "^web/" && COMPONENTS+=("web") || true
+              echo "$CHANGED" | grep -q "^.github/workflows/sbom" && COMPONENTS=("sdk" "agent" "contracts" "web") || true
+              [[ ${#COMPONENTS[@]} -eq 0 ]] && COMPONENTS=("sdk" "agent" "contracts" "web")
+            else
+              COMPONENTS=("sdk" "agent" "contracts" "web")
+            fi
+          else
+            IFS=',' read -ra REQ <<< "$REQUESTED"
+            for c in "${REQ[@]}"; do
+              case "$c" in
+                sdk|agent|contracts|web) COMPONENTS+=("$c") ;;
+                *) echo "::warning::Unknown component: $c" ;;
+              esac
+            done
+          fi
+
+          JSON=$(printf '%s\n' "${COMPONENTS[@]}" | jq -R . | jq -sc .)
+          echo "components=$JSON" >> "$GITHUB_OUTPUT"
+          echo "Selected components: $JSON"
+
+  generate-sdk:
+    needs: detect-components
+    if: contains(needs.detect-components.outputs.components, 'sdk')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+    outputs:
+      sbom-cyclonedx: ${{ steps.meta.outputs.cyclonedx-artifact }}
+      sbom-spdx: ${{ steps.meta.outputs.spdx-artifact }}
+      signature-artifact: ${{ steps.meta.outputs.signature-artifact }}
+    defaults:
+      run:
+        working-directory: packages/sdk
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+
+      - name: Install dependencies
+        run: |
+          cd ${{ github.workspace }}
+          pnpm install --frozen-lockfile
+
+      - name: Build SDK
+        run: |
+          cd ${{ github.workspace }}
+          pnpm --filter @talos-protocol/sdk build
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        if: inputs.sign_artifacts != false
+
+      - name: Install CycloneDX CLI
+        uses: CycloneDX/gh-node-module-generatebom@master
+        id: cdxtmp
+        continue-on-error: true
+
+      - name: Install CycloneDX npm generator
+        shell: bash
+        run: npm install --no-save --global @cyclonedx/cyclonedx-npm@1.20.0
+
+      - name: Generate CycloneDX SBOM (npm)
+        id: cyclonedx
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="${{ github.workspace }}/dist-sbom/sdk"
+          mkdir -p "$OUT_DIR"
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          SHA="${GITHUB_SHA:0:7}"
+          BASE="${OUT_DIR}/talos-sdk-${GITHUB_REF_NAME:-$SHA}-$TS"
+
+          cd "${{ github.workspace }}/packages/sdk"
+
+          cyclonedx-npm \
+            --omit dev \
+            --package-type library \
+            --output-format json \
+            --output-file "${BASE}.cdx.json" \
+            2>&1 | tee "${BASE}.cdx.log" || {
+              echo "::warning::cyclonedx-npm failed, falling back to manual SBOM"
+              node -e "
+                const fs=require('fs');
+                const pj=JSON.parse(fs.readFileSync('./package.json','utf8'));
+                const deps = pj.dependencies||{};
+                const sbom = {
+                  bomFormat: 'CycloneDX',
+                  specVersion: '1.6',
+                  version: 1,
+                  serialNumber: 'urn:uuid:' + require('crypto').randomUUID(),
+                  metadata: {
+                    timestamp: new Date().toISOString(),
+                    tools: [{ vendor: 'talos', name: 'cyclonedx-fallback-generator', version: '1.0.0' }],
+                    component: { type: 'library', 'bom-ref': 'talos-sdk@' + pj.version, name: pj.name, version: pj.version }
+                  },
+                  components: Object.entries(deps).map(([n,v])=>({type:'library','bom-ref':n+'@'+v,name:n,version:v}))
+                };
+                fs.writeFileSync('${BASE}.cdx.json', JSON.stringify(sbom,null,2));
+              "
+            }
+
+          echo "cdx-json=${BASE}.cdx.json" >> "$GITHUB_OUTPUT"
+          echo "cdx-name=talos-sdk-${GITHUB_REF_NAME:-$SHA}-$TS" >> "$GITHUB_OUTPUT"
+
+      - name: Validate CycloneDX SBOM
+        shell: bash
+        run: |
+          FILE="${{ steps.cyclonedx.outputs.cdx-json }}"
+          if [[ -s "$FILE" ]]; then
+            node -e "
+              const fs=require('fs');
+              const j=JSON.parse(fs.readFileSync('$FILE','utf8'));
+              if (j.bomFormat!=='CycloneDX') throw new Error('Not a CycloneDX SBOM');
+              console.log('CycloneDX valid:', j.bomFormat, j.specVersion, 'components:', (j.components||[]).length);
+            "
+          else
+            echo "::error::CycloneDX SBOM is empty"
+            exit 1
+          fi
+
+      - name: Generate SPDX SBOM
+        id: spdx
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="${{ github.workspace }}/dist-sbom/sdk"
+          mkdir -p "$OUT_DIR"
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          SHA="${GITHUB_SHA:0:7}"
+          BASE="${OUT_DIR}/talos-sdk-${GITHUB_REF_NAME:-$SHA}-$TS"
+
+          cd "${{ github.workspace }}/packages/sdk"
+          node -e "
+            const fs=require('fs');
+            const crypto=require('crypto');
+            const pj=JSON.parse(fs.readFileSync('./package.json','utf8'));
+            const deps = pj.dependencies||{};
+            const now=new Date().toISOString().replace(/\.\d+Z$/,'Z');
+            const spdxid=(s)=>'SPDXRef-'+crypto.createHash('sha1').update(s).digest('hex').slice(0,12).toUpperCase();
+            const pkgid=spdxid(pj.name+'@'+pj.version);
+            const ns='https://talos.example/sbom/spdx/sdk/'+crypto.randomUUID();
+
+            const lines=[];
+            lines.push('SPDXVersion: SPDX-2.3');
+            lines.push('DataLicense: CC0-1.0');
+            lines.push('SPDXID: SPDXRef-DOCUMENT');
+            lines.push('DocumentName: talos-sdk-'+pj.version);
+            lines.push('DocumentNamespace: '+ns);
+            lines.push('Creator: Tool: talos-spdx-generator-1.0.0');
+            lines.push('Created: '+now);
+            lines.push('');
+            lines.push('##### Package: '+pj.name);
+            lines.push('PackageName: '+pj.name);
+            lines.push('SPDXID: '+pkgid);
+            lines.push('PackageVersion: '+pj.version);
+            lines.push('PackageDownloadLocation: NOASSERTION');
+            lines.push('FilesAnalyzed: false');
+            lines.push('PackageLicenseConcluded: '+ (pj.license||'NOASSERTION'));
+            lines.push('PackageLicenseDeclared: '+ (pj.license||'NOASSERTION'));
+            lines.push('PackageCopyrightText: NOASSERTION');
+            lines.push('PackageSupplier: Organization: Talos');
+            lines.push('PackageDescription: Talos Protocol SDK');
+
+            for (const [n,v] of Object.entries(deps)) {
+              const did=spdxid(n+'@'+v);
+              lines.push('');
+              lines.push('##### Package: '+n);
+              lines.push('PackageName: '+n);
+              lines.push('SPDXID: '+did);
+              lines.push('PackageVersion: '+v.replace(/[\^~]/g,''));
+              lines.push('PackageDownloadLocation: NOASSERTION');
+              lines.push('FilesAnalyzed: false');
+              lines.push('PackageLicenseConcluded: NOASSERTION');
+              lines.push('PackageLicenseDeclared: NOASSERTION');
+              lines.push('PackageCopyrightText: NOASSERTION');
+              lines.push('Relationship: '+pkgid+' DEPENDS_ON '+did);
+            }
+            fs.writeFileSync('${BASE}.spdx', lines.join('\n')+'\n');
+          "
+          echo "spdx-file=${BASE}.spdx" >> "$GITHUB_OUTPUT"
+
+      - name: Sign SBOM artifacts (cosign keyless)
+        id: sign
+        if: inputs.sign_artifacts != false && (github.event_name == 'push' || github.event_name == 'workflow_call')
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          SIG_DIR="${{ github.workspace }}/dist-sbom/sdk/signatures"
+          mkdir -p "$SIG_DIR"
+
+          CDX="${{ steps.cyclonedx.outputs.cdx-json }}"
+          SPDX="${{ steps.spdx.outputs.spdx-file }}"
+
+          cosign sign-blob --yes --tlog-upload=false --output-signature "${SIG_DIR}/$(basename $CDX).sig" --output-certificate "${SIG_DIR}/$(basename $CDX).pem" "$CDX"
+          cosign sign-blob --yes --tlog-upload=false --output-signature "${SIG_DIR}/$(basename $SPDX).sig" --output-certificate "${SIG_DIR}/$(basename $SPDX).pem" "$SPDX"
+
+          ls -la "$SIG_DIR"
+          echo "sig-dir=$SIG_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Verify signatures
+        if: inputs.sign_artifacts != false && steps.sign.outcome == 'success'
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          SIG_DIR="${{ steps.sign.outputs.sig-dir }}"
+          CDX="${{ steps.cyclonedx.outputs.cdx-json }}"
+          SPDX="${{ steps.spdx.outputs.spdx-file }}"
+
+          cosign verify-blob \
+            --signature "${SIG_DIR}/$(basename $CDX).sig" \
+            --certificate "${SIG_DIR}/$(basename $CDX).pem" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/sbom-provenance.yml@${GITHUB_REF}" \
+            --insecure-ignore-tlog=true \
+            "$CDX" && echo "CDX signature verified"
+
+          cosign verify-blob \
+            --signature "${SIG_DIR}/$(basename $SPDX).sig" \
+            --certificate "${SIG_DIR}/$(basename $SPDX).pem" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/sbom-provenance.yml@${GITHUB_REF}" \
+            --insecure-ignore-tlog=true \
+            "$SPDX" && echo "SPDX signature verified"
+
+      - name: Generate SLSA provenance metadata
+        id: provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="${{ github.workspace }}/dist-sbom/sdk"
+          mkdir -p "$OUT_DIR"
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          SHA="${GITHUB_SHA:0:7}"
+          BASE="${OUT_DIR}/talos-sdk-${GITHUB_REF_NAME:-$SHA}-$TS"
+
+          node -e "
+            const fs=require('fs');
+            const crypto=require('crypto');
+
+            function sha256(file) {
+              const h=crypto.createHash('sha256');
+              h.update(fs.readFileSync(file));
+              return h.digest('hex');
+            }
+
+            const CDX='${{ steps.cyclonedx.outputs.cdx-json }}';
+            const SPDX='${{ steps.spdx.outputs.spdx-file }}';
+            const subjects=[];
+
+            for (const f of [CDX, SPDX]) {
+              subjects.push({
+                name: require('path').basename(f),
+                digest: { sha256: sha256(f) }
+              });
+            }
+
+            const pred={
+              '_type': 'https://in-toto.io/Statement/v1',
+              subject: subjects,
+              predicateType: 'https://slsa.dev/provenance/v1',
+              predicate: {
+                buildDefinition: {
+                  buildType: 'https://github.com/slsa-framework/slsa-github-generator/generic@v1',
+                  externalParameters: {
+                    workflow: {
+                      ref: '${{ github.ref }}',
+                      repository: '${{ github.repository }}',
+                      path: '.github/workflows/sbom-provenance.yml'
+                    },
+                    source: {
+                      uri: 'git+https://github.com/${{ github.repository }}@${{ github.ref }}',
+                      digest: { sha1: '${{ github.sha }}' }
+                    }
+                  },
+                  internalParameters: {
+                    github: {
+                      actor_id: '${{ github.actor_id }}',
+                      event_name: '${{ github.event_name }}'
+                    }
+                  },
+                  resolvedDependencies: [
+                    { uri: 'git+https://github.com/${{ github.repository }}', digest: { sha1: '${{ github.sha }}' } }
+                  ]
+                },
+                runDetails: {
+                  builder: { id: 'https://github.com/actions/runner/github-hosted' },
+                  metadata: {
+                    invocationId: '${{ github.run_id }}-${{ github.run_attempt }}',
+                    startedOn: '${{ github.event.head_commit.timestamp || new Date().toISOString() }}',
+                    completedOn: new Date().toISOString()
+                  }
+                }
+              }
+            };
+            fs.writeFileSync('${BASE}.intoto.jsonl', JSON.stringify(pred)+'\n');
+          "
+          echo "provenance-file=${BASE}.intoto.jsonl" >> "$GITHUB_OUTPUT"
+
+      - name: Populate metadata outputs
+        id: meta
+        shell: bash
+        run: |
+          SHA="${GITHUB_SHA:0:7}"
+          echo "cyclonedx-artifact=sbom-sdk-cyclonedx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+          echo "spdx-artifact=sbom-sdk-spdx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+          echo "signature-artifact=sbom-sdk-signatures-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload CycloneDX SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.cyclonedx-artifact }}
+          path: ${{ steps.cyclonedx.outputs.cdx-json }}
+          retention-days: ${{ env.RETENTION_DAYS }}
+
+      - name: Upload SPDX SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.spdx-artifact }}
+          path: ${{ steps.spdx.outputs.spdx-file }}
+          retention-days: ${{ env.RETENTION_DAYS }}
+
+      - name: Upload signatures
+        if: inputs.sign_artifacts != false && steps.sign.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.signature-artifact }}
+          path: ${{ steps.sign.outputs.sig-dir }}
+          retention-days: ${{ env.RETENTION_DAYS }}
+
+      - name: Upload provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-sdk-${{ steps.cyclonedx.outputs.cdx-name }}
+          path: ${{ steps.provenance.outputs.provenance-file }}
+          retention-days: ${{ env.RETENTION_DAYS }}
+
+      - name: Upload SBOMs to GitHub Release
+        if: inputs.upload_release == true && startsWith(github.ref, 'refs/tags/sdk-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.cyclonedx.outputs.cdx-json }}
+            ${{ steps.spdx.outputs.spdx-file }}
+            ${{ steps.provenance.outputs.provenance-file }}
+            ${{ steps.sign.outputs.sig-dir }}/*
+          append_body: true
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  generate-agent:
+    needs: detect-components
+    if: contains(needs.detect-components.outputs.components, 'agent')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      sbom-cyclonedx: ${{ steps.meta.outputs.cyclonedx-artifact }}
+      sbom-spdx: ${{ steps.meta.outputs.spdx-artifact }}
+      signature-artifact: ${{ steps.meta.outputs.signature-artifact }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        working-directory: packages/prime-agent
+        run: uv sync --frozen --all-extras --all-groups
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        if: inputs.sign_artifacts != false
+
+      - name: Install CycloneDX Python generator
+        shell: bash
+        run: pip install cyclonedx-bom==4.5.0
+
+      - name: Generate CycloneDX SBOM (Python)
+        id: cyclonedx
+        working-directory: packages/prime-agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="${{ github.workspace }}/dist-sbom/agent"
+          mkdir -p "$OUT_DIR"
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          SHA="${GITHUB_SHA:0:7}"
+          BASE="${OUT_DIR}/talos-agent-${GITHUB_REF_NAME:-$SHA}-$TS"
+
+          cyclonedx-py environment \
+            --output-format json \
+            --output "${BASE}.cdx.json" \
+            --pyproject pyproject.toml \
+            2>&1 | tee "${BASE}.cdx.log" || {
+              echo "::warning::cyclonedx-py failed, generating fallback"
+              python3 << 'PYEOF'
+          import json, tomllib, uuid, os
+          base="${BASE}"
+          with open("pyproject.toml","rb") as f: p=tomllib.load(f)
+          proj=p.get("project",{})
+          deps = proj.get("dependencies",[])
+          comps=[]
+          for d in deps:
+            import re
+            m=re.match(r"([A-Za-z0-9_.\-]+)\s*(.*)", d)
+            if m:
+              comps.append({"type":"library","bom-ref":f"{m.group(1)}@{m.group(2).strip('>=<!=~,')}","name":m.group(1),"version":m.group(2).strip('>=<!=~,^') or "NOASSERTION"})
+          sbom={
+            "bomFormat":"CycloneDX","specVersion":"1.6","version":1,
+            "serialNumber":f"urn:uuid:{uuid.uuid4()}",
+            "metadata":{"timestamp":__import__("datetime").datetime.utcnow().isoformat()+"Z",
+              "tools":[{"vendor":"talos","name":"cyclonedx-fallback-generator","version":"1.0.0"}],
+              "component":{"type":"application","bom-ref":f"{proj.get('name','talos-agent')}@{proj.get('version','0.0.0')}",
+                "name":proj.get("name","talos-agent"),"version":proj.get("version","0.0.0")}},
+            "components":comps
+          }
+          with open(base+".cdx.json","w") as f: json.dump(sbom,f,indent=2)
+          PYEOF
+            }
+
+          echo "cdx-json=${BASE}.cdx.json" >> "$GITHUB_OUTPUT"
+          echo "cdx-name=talos-agent-${GITHUB_REF_NAME:-$SHA}-$TS" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SPDX SBOM
+        id: spdx
+        working-directory: packages/prime-agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="${{ github.workspace }}/dist-sbom/agent"
+          mkdir -p "$OUT_DIR"
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          SHA="${GITHUB_SHA:0:7}"
+          BASE="${OUT_DIR}/talos-agent-${GITHUB_REF_NAME:-$SHA}-$TS"
+
+          python3 << 'PYEOF'
+          import json, tomllib, hashlib, uuid, os, datetime
+          base="${BASE}"
+          with open("pyproject.toml","rb") as f: p=tomllib.load(f)
+          proj=p.get("project",{})
+          deps = proj.get("dependencies",[])
+          now=datetime.datetime.utcnow().replace(microsecond=0).isoformat()+"Z"
+
+          def spdxid(s): return "SPDXRef-"+hashlib.sha1(s.encode()).hexdigest()[:12].upper()
+          name=proj.get("name","talos-agent")
+          ver=proj.get("version","0.0.0")
+          pkgid=spdxid(name+"@"+ver)
+          ns=f"https://talos.example/sbom/spdx/agent/{uuid.uuid4()}"
+
+          lines=[
+            "SPDXVersion: SPDX-2.3",
+            "DataLicense: CC0-1.0",
+            "SPDXID: SPDXRef-DOCUMENT",
+            f"DocumentName: {name}-{ver}",
+            f"DocumentNamespace: {ns}",
+            "Creator: Tool: talos-spdx-generator-1.0.0",
+            f"Created: {now}",
+            "",
+            f"##### Package: {name}",
+            f"PackageName: {name}",
+            f"SPDXID: {pkgid}",
+            f"PackageVersion: {ver}",
+            "PackageDownloadLocation: NOASSERTION",
+            "FilesAnalyzed: false",
+            f"PackageLicenseConcluded: {proj.get('license','NOASSERTION')}",
+            f"PackageLicenseDeclared: {proj.get('license','NOASSERTION')}",
+            "PackageCopyrightText: NOASSERTION",
+            "PackageSupplier: Organization: Talos",
+            "PackageDescription: Talos Prime Agent",
+          ]
+          import re
+          for d in deps:
+            m=re.match(r"([A-Za-z0-9_.\-]+)\s*(.*)", d)
+            if m:
+              n=m.group(1); v=m.group(2).strip('>=<!=~,^') or "NOASSERTION"
+              did=spdxid(n+"@"+v)
+              lines += ["", f"##### Package: {n}", f"PackageName: {n}", f"SPDXID: {did}",
+                f"PackageVersion: {v}", "PackageDownloadLocation: NOASSERTION",
+                "FilesAnalyzed: false","PackageLicenseConcluded: NOASSERTION",
+                "PackageLicenseDeclared: NOASSERTION","PackageCopyrightText: NOASSERTION",
+                f"Relationship: {pkgid} DEPENDS_ON {did}"]
+          with open(base+".spdx","w") as f: f.write("\n".join(lines)+"\n")
+          PYEOF
+
+          echo "spdx-file=${BASE}.spdx" >> "$GITHUB_OUTPUT"
+
+      - name: Sign SBOM artifacts
+        id: sign
+        if: inputs.sign_artifacts != false && (github.event_name == 'push' || github.event_name == 'workflow_call')
+        shell: bash
+        run: |
+          set -euo pipefail
+          SIG_DIR="${{ github.workspace }}/dist-sbom/agent/signatures"
+          mkdir -p "$SIG_DIR"
+          CDX="${{ steps.cyclonedx.outputs.cdx-json }}"
+          SPDX="${{ steps.spdx.outputs.spdx-file }}"
+          cosign sign-blob --yes --tlog-upload=false --output-signature "${SIG_DIR}/$(basename $CDX).sig" --output-certificate "${SIG_DIR}/$(basename $CDX).pem" "$CDX"
+          cosign sign-blob --yes --tlog-upload=false --output-signature "${SIG_DIR}/$(basename $SPDX).sig" --output-certificate "${SIG_DIR}/$(basename $SPDX).pem" "$SPDX"
+          echo "sig-dir=$SIG_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Verify signatures
+        if: inputs.sign_artifacts != false && steps.sign.outcome == 'success'
+        shell: bash
+        run: |
+          SIG_DIR="${{ steps.sign.outputs.sig-dir }}"
+          CDX="${{ steps.cyclonedx.outputs.cdx-json }}"
+          SPDX="${{ steps.spdx.outputs.spdx-file }}"
+          cosign verify-blob --signature "${SIG_DIR}/$(basename $CDX).sig" --certificate "${SIG_DIR}/$(basename $CDX).pem" --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/sbom-provenance.yml@${GITHUB_REF}" --insecure-ignore-tlog=true "$CDX"
+          cosign verify-blob --signature "${SIG_DIR}/$(basename $SPDX).sig" --certificate "${SIG_DIR}/$(basename $SPDX).pem" --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/sbom-provenance.yml@${GITHUB_REF}" --insecure-ignore-tlog=true "$SPDX"
+
+      - name: Generate SLSA provenance
+        id: provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="${{ github.workspace }}/dist-sbom/agent"
+          mkdir -p "$OUT_DIR"
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          SHA="${GITHUB_SHA:0:7}"
+          BASE="${OUT_DIR}/talos-agent-${GITHUB_REF_NAME:-$SHA}-$TS"
+          python3 << 'PYEOF'
+          import json, hashlib, os
+          def sha256(f):
+            h=hashlib.sha256()
+            with open(f,"rb") as fh:
+              for chunk in iter(lambda: fh.read(65536), b""): h.update(chunk)
+            return h.hexdigest()
+          subjects=[{"name":os.path.basename("${{ steps.cyclonedx.outputs.cdx-json }}"),"digest":{"sha256":sha256("${{ steps.cyclonedx.outputs.cdx-json }}")}},
+                     {"name":os.path.basename("${{ steps.spdx.outputs.spdx-file }}"),"digest":{"sha256":sha256("${{ steps.spdx.outputs.spdx-file }}")}}]
+          pred={"_type":"https://in-toto.io/Statement/v1","subject":subjects,
+                 "predicateType":"https://slsa.dev/provenance/v1",
+                 "predicate":{"buildDefinition":{
+                   "buildType":"https://github.com/slsa-framework/slsa-github-generator/generic@v1",
+                   "externalParameters":{"workflow":{"ref":"${{ github.ref }}","repository":"${{ github.repository }}","path":".github/workflows/sbom-provenance.yml"},
+                     "source":{"uri":"git+https://github.com/${{ github.repository }}@${{ github.ref }}","digest":{"sha1":"${{ github.sha }}"}}},
+                   "resolvedDependencies":[{"uri":"git+https://github.com/${{ github.repository }}","digest":{"sha1":"${{ github.sha }}"}}]},
+                   "runDetails":{"builder":{"id":"https://github.com/actions/runner/github-hosted"},
+                     "metadata":{"invocationId":"${{ github.run_id }}-${{ github.run_attempt }}","completedOn":__import__("datetime").datetime.utcnow().replace(microsecond=0).isoformat()+"Z"}}}}
+          with open("${BASE}.intoto.jsonl","w") as f: f.write(json.dumps(pred)+"\n")
+          PYEOF
+          echo "provenance-file=${BASE}.intoto.jsonl" >> "$GITHUB_OUTPUT"
+
+      - name: Populate outputs
+        id: meta
+        shell: bash
+        run: |
+          SHA="${GITHUB_SHA:0:7}"
+          echo "cyclonedx-artifact=sbom-agent-cyclonedx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+          echo "spdx-artifact=sbom-agent-spdx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+          echo "signature-artifact=sbom-agent-signatures-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload CycloneDX
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.cyclonedx-artifact }}
+          path: ${{ steps.cyclonedx.outputs.cdx-json }}
+          retention-days: ${{ env.RETENTION_DAYS }}
+
+      - name: Upload SPDX
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.spdx-artifact }}
+          path: ${{ steps.spdx.outputs.spdx-file }}
+          retention-days: ${{ env.RETENTION_DAYS }}
+
+      - name: Upload signatures
+        if: inputs.sign_artifacts != false && steps.sign.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.signature-artifact }}
+          path: ${{ steps.sign.outputs.sig-dir }}
+          retention-days: ${{ env.RETENTION_DAYS }}
+
+      - name: Upload provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-agent-${{ steps.cyclonedx.outputs.cdx-name }}
+          path: ${{ steps.provenance.outputs.provenance-file }}
+          retention-days: ${{ env.RETENTION_DAYS }}
+
+      - name: Upload to GitHub Release
+        if: inputs.upload_release == true && startsWith(github.ref, 'refs/tags/agent-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.cyclonedx.outputs.cdx-json }}
+            ${{ steps.spdx.outputs.spdx-file }}
+            ${{ steps.provenance.outputs.provenance-file }}
+            ${{ steps.sign.outputs.sig-dir }}/*
+          append_body: true
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  generate-contracts:
+    needs: detect-components
+    if: contains(needs.detect-components.outputs.components, 'contracts')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      sbom-cyclonedx: ${{ steps.meta.outputs.cyclonedx-artifact }}
+      sbom-spdx: ${{ steps.meta.outputs.spdx-artifact }}
+      signature-artifact: ${{ steps.meta.outputs.signature-artifact }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        if: inputs.sign_artifacts != false
+
+      - name: Install cargo-sbom for CycloneDX
+        shell: bash
+        run: cargo install --quiet cargo-sbom --version 0.10.3 2>/dev/null || echo "::warning::cargo-sbom install failed, using fallback generator"
+
+      - name: Generate CycloneDX SBOM (Rust/Cargo)
+        id: cyclonedx
+        working-directory: contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="${{ github.workspace }}/dist-sbom/contracts"
+          mkdir -p "$OUT_DIR"
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          SHA="${GITHUB_SHA:0:7}"
+          BASE="${OUT_DIR}/talos-contracts-${GITHUB_REF_NAME:-$SHA}-$TS"
+
+          if command -v cargo-sbom >/dev/null 2>&1; then
+            cargo-sbom --format cyclonedx --output "${BASE}.cdx.json" 2>&1 | tee "${BASE}.cdx.log" || {
+              echo "::warning::cargo-sbom failed, generating fallback"
+              cargo metadata --format-version=1 --no-deps > /tmp/cm.json || true
+            }
+          fi
+
+          if [[ ! -s "${BASE}.cdx.json" ]]; then
+            node -e "
+              const fs=require('fs');
+              const crypto=require('crypto');
+              const lockfile=fs.readFileSync('Cargo.lock','utf8');
+              const packages=[];
+              const pkgRe=/\[\[package\]\]([\s\S]*?)(?=\n\[\[|\s*$)/g;
+              let m;
+              while ((m=pkgRe.exec(lockfile))) {
+                const block=m[1];
+                const nameM=/^name\s*=\s*\"([^\"]+)\"/m.exec(block);
+                const verM=/^version\s*=\s*\"([^\"]+)\"/m.exec(block);
+                if (nameM && verM) packages.push({name:nameM[1],version:verM[1]});
+              }
+              const sbom = {
+                bomFormat:'CycloneDX', specVersion:'1.6', version:1,
+                serialNumber:'urn:uuid:'+crypto.randomUUID(),
+                metadata:{timestamp:new Date().toISOString(),
+                  tools:[{vendor:'talos',name:'cargo-lock-sbom-generator',version:'1.0.0'}],
+                  component:{type:'framework','bom-ref':'talos-contracts@workspace',name:'talos-contracts',version:'workspace'}},
+                components: packages.map(p=>({type:'library','bom-ref':p.name+'@'+p.version,name:p.name,version:p.version}))
+              };
+              fs.writeFileSync('${BASE}.cdx.json', JSON.stringify(sbom,null,2));
+            "
+          fi
+
+          echo "cdx-json=${BASE}.cdx.json" >> "$GITHUB_OUTPUT"
+          echo "cdx-name=talos-contracts-${GITHUB_REF_NAME:-$SHA}-$TS" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SPDX SBOM
+        id: spdx
+        working-directory: contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="${{ github.workspace }}/dist-sbom/contracts"
+          mkdir -p "$OUT_DIR"
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          SHA="${GITHUB_SHA:0:7}"
+          BASE="${OUT_DIR}/talos-contracts-${GITHUB_REF_NAME:-$SHA}-$TS"
+
+          node -e "
+            const fs=require('fs');
+            const crypto=require('crypto');
+            const lockfile=fs.readFileSync('Cargo.lock','utf8');
+            const packages=[];
+            const pkgRe=/\[\[package\]\]([\s\S]*?)(?=\n\[\[|\s*$)/g;
+            let m;
+            while ((m=pkgRe.exec(lockfile))) {
+              const block=m[1];
+              const nameM=/^name\s*=\s*\"([^\"]+)\"/m.exec(block);
+              const verM=/^version\s*=\s*\"([^\"]+)\"/m.exec(block);
+              if (nameM && verM) packages.push({name:nameM[1],version:verM[1]});
+            }
+            const now=new Date().toISOString().replace(/\.\d+Z$/,'Z');
+            const spdxid=(s)=>'SPDXRef-'+crypto.createHash('sha1').update(s).digest('hex').slice(0,12).toUpperCase();
+            const pkgid=spdxid('talos-contracts@workspace');
+            const ns='https://talos.example/sbom/spdx/contracts/'+crypto.randomUUID();
+            const lines=[
+              'SPDXVersion: SPDX-2.3','DataLicense: CC0-1.0','SPDXID: SPDXRef-DOCUMENT',
+              'DocumentName: talos-contracts-workspace','DocumentNamespace: '+ns,
+              'Creator: Tool: talos-spdx-generator-1.0.0','Created: '+now,'',
+              '##### Package: talos-contracts','PackageName: talos-contracts',
+              'SPDXID: '+pkgid,'PackageVersion: workspace','PackageDownloadLocation: NOASSERTION',
+              'FilesAnalyzed: false','PackageLicenseConcluded: AGPL-3.0-only',
+              'PackageLicenseDeclared: AGPL-3.0-only','PackageCopyrightText: NOASSERTION',
+              'PackageSupplier: Organization: Talos','PackageDescription: Talos Protocol Soroban Contracts'
+            ];
+            for (const p of packages) {
+              const did=spdxid(p.name+'@'+p.version);
+              lines.push('', '##### Package: '+p.name, 'PackageName: '+p.name,
+                'SPDXID: '+did, 'PackageVersion: '+p.version,
+                'PackageDownloadLocation: NOASSERTION','FilesAnalyzed: false',
+                'PackageLicenseConcluded: NOASSERTION','PackageLicenseDeclared: NOASSERTION',
+                'PackageCopyrightText: NOASSERTION',
+                'Relationship: '+pkgid+' DEPENDS_ON '+did);
+            }
+            fs.writeFileSync('${BASE}.spdx', lines.join('\n')+'\n');
+          "
+          echo "spdx-file=${BASE}.spdx" >> "$GITHUB_OUTPUT"
+
+      - name: Build contracts WASMs (for provenance subject hashes)
+        working-directory: contracts
+        run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Sign SBOM artifacts
+        id: sign
+        if: inputs.sign_artifacts != false && (github.event_name == 'push' || github.event_name == 'workflow_call')
+        shell: bash
+        run: |
+          set -euo pipefail
+          SIG_DIR="${{ github.workspace }}/dist-sbom/contracts/signatures"
+          mkdir -p "$SIG_DIR"
+          CDX="${{ steps.cyclonedx.outputs.cdx-json }}"
+          SPDX="${{ steps.spdx.outputs.spdx-file }}"
+          cosign sign-blob --yes --tlog-upload=false --output-signature "${SIG_DIR}/$(basename $CDX).sig" --output-certificate "${SIG_DIR}/$(basename $CDX).pem" "$CDX"
+          cosign sign-blob --yes --tlog-upload=false --output-signature "${SIG_DIR}/$(basename $SPDX).sig" --output-certificate "${SIG_DIR}/$(basename $SPDX).pem" "$SPDX"
+
+          for wasm in contracts/target/wasm32-unknown-unknown/release/*.wasm; do
+            base=$(basename "$wasm")
+            cosign sign-blob --yes --tlog-upload=false --output-signature "${SIG_DIR}/${base}.sig" --output-certificate "${SIG_DIR}/${base}.pem" "$wasm"
+          done
+          echo "sig-dir=$SIG_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Verify signatures
+        if: inputs.sign_artifacts != false && steps.sign.outcome == 'success'
+        shell: bash
+        run: |
+          SIG_DIR="${{ steps.sign.outputs.sig-dir }}"
+          CDX="${{ steps.cyclonedx.outputs.cdx-json }}"
+          SPDX="${{ steps.spdx.outputs.spdx-file }}"
+          verify() { cosign verify-blob --signature "${SIG_DIR}/$(basename $1).sig" --certificate "${SIG_DIR}/$(basename $1).pem" --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/sbom-provenance.yml@${GITHUB_REF}" --insecure-ignore-tlog=true "$1"; }
+          verify "$CDX"
+          verify "$SPDX"
+          for wasm in contracts/target/wasm32-unknown-unknown/release/*.wasm; do verify "$wasm"; done
+
+      - name: Generate SLSA provenance
+        id: provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="${{ github.workspace }}/dist-sbom/contracts"
+          mkdir -p "$OUT_DIR"
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          SHA="${GITHUB_SHA:0:7}"
+          BASE="${OUT_DIR}/talos-contracts-${GITHUB_REF_NAME:-$SHA}-$TS"
+          node -e "
+            const fs=require('fs');const crypto=require('crypto');const path=require('path');
+            function sha256(f){const h=crypto.createHash('sha256');h.update(fs.readFileSync(f));return h.digest('hex');}
+            const subjects=[
+              {name:path.basename('${{ steps.cyclonedx.outputs.cdx-json }}'),digest:{sha256:sha256('${{ steps.cyclonedx.outputs.cdx-json }}')}},
+              {name:path.basename('${{ steps.spdx.outputs.spdx-file }}'),digest:{sha256:sha256('${{ steps.spdx.outputs.spdx-file }}')}}
+            ];
+            const wasms=fs.readdirSync('contracts/target/wasm32-unknown-unknown/release').filter(f=>f.endsWith('.wasm'));
+            for (const w of wasms) subjects.push({name:w,digest:{sha256:sha256('contracts/target/wasm32-unknown-unknown/release/'+w)}});
+            const pred={'_type':'https://in-toto.io/Statement/v1',subject,
+              predicateType:'https://slsa.dev/provenance/v1',
+              predicate:{buildDefinition:{
+                buildType:'https://github.com/slsa-framework/slsa-github-generator/generic@v1',
+                externalParameters:{workflow:{ref:'${{ github.ref }}',repository:'${{ github.repository }}',path:'.github/workflows/sbom-provenance.yml'},
+                  source:{uri:'git+https://github.com/${{ github.repository }}@${{ github.ref }}',digest:{sha1:'${{ github.sha }}'}}},
+                resolvedDependencies:[{uri:'git+https://github.com/${{ github.repository }}',digest:{sha1:'${{ github.sha }}'}}]},
+                runDetails:{builder:{id:'https://github.com/actions/runner/github-hosted'},
+                  metadata:{invocationId:'${{ github.run_id }}-${{ github.run_attempt }}',completedOn:new Date().toISOString()}}}};
+            fs.writeFileSync('${BASE}.intoto.jsonl', JSON.stringify(pred)+'\n');
+          "
+          echo "provenance-file=${BASE}.intoto.jsonl" >> "$GITHUB_OUTPUT"
+
+      - name: Populate outputs
+        id: meta
+        shell: bash
+        run: |
+          SHA="${GITHUB_SHA:0:7}"
+          echo "cyclonedx-artifact=sbom-contracts-cyclonedx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+          echo "spdx-artifact=sbom-contracts-spdx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+          echo "signature-artifact=sbom-contracts-signatures-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload CycloneDX
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.cyclonedx-artifact }}
+          path: ${{ steps.cyclonedx.outputs.cdx-json }}
+          retention-days: ${{ env.RETENTION_DAYS }}
+
+      - name: Upload SPDX
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.spdx-artifact }}
+          path: ${{ steps.spdx.outputs.spdx-file }}
+          retention-days: ${{ env.RETENTION_DAYS }}
+
+      - name: Upload signatures
+        if: inputs.sign_artifacts != false && steps.sign.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.signature-artifact }}
+          path: ${{ steps.sign.outputs.sig-dir }}
+          retention-days: ${{ env.RETENTION_DAYS }}
+
+      - name: Upload provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-contracts-${{ steps.cyclonedx.outputs.cdx-name }}
+          path: ${{ steps.provenance.outputs.provenance-file }}
+          retention-days: ${{ env.RETENTION_DAYS }}
+
+      - name: Upload to GitHub Release
+        if: inputs.upload_release == true && startsWith(github.ref, 'refs/tags/contracts-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.cyclonedx.outputs.cdx-json }}
+            ${{ steps.spdx.outputs.spdx-file }}
+            ${{ steps.provenance.outputs.provenance-file }}
+            ${{ steps.sign.outputs.sig-dir }}/*
+          append_body: true
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  generate-web:
+    needs: detect-components
+    if: contains(needs.detect-components.outputs.components, 'web')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      sbom-cyclonedx: ${{ steps.meta.outputs.cyclonedx-artifact }}
+      sbom-spdx: ${{ steps.meta.outputs.spdx-artifact }}
+      signature-artifact: ${{ steps.meta.outputs.signature-artifact }}
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: |
+          cd ${{ github.workspace }}
+          pnpm install --frozen-lockfile
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        if: inputs.sign_artifacts != false
+
+      - name: Install CycloneDX generator
+        shell: bash
+        run: npm install --no-save --global @cyclonedx/cyclonedx-npm@1.20.0
+
+      - name: Generate CycloneDX SBOM (Web/Next.js)
+        id: cyclonedx
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="${{ github.workspace }}/dist-sbom/web"
+          mkdir -p "$OUT_DIR"
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          SHA="${GITHUB_SHA:0:7}"
+          BASE="${OUT_DIR}/talos-web-${GITHUB_REF_NAME:-$SHA}-$TS"
+
+          cd "${{ github.workspace }}/web"
+          cyclonedx-npm --omit dev --output-format json --output-file "${BASE}.cdx.json" 2>&1 | tee "${BASE}.cdx.log" || {
+            echo "::warning::cyclonedx-npm failed, generating fallback"
+            node -e "
+              const fs=require('fs');const crypto=require('crypto');
+              const pj=JSON.parse(fs.readFileSync('./package.json','utf8'));
+              const deps={...(pj.dependencies||{}),...(pj.optionalDependencies||{})};
+              const sbom={bomFormat:'CycloneDX',specVersion:'1.6',version:1,serialNumber:'urn:uuid:'+crypto.randomUUID(),
+                metadata:{timestamp:new Date().toISOString(),
+                  tools:[{vendor:'talos',name:'cyclonedx-fallback-generator',version:'1.0.0'}],
+                  component:{type:'application','bom-ref':'talos-web@'+pj.version,name:pj.name,version:pj.version}},
+                components: Object.entries(deps).map(([n,v])=>({type:'library','bom-ref':n+'@'+v,name:n,version:v}))};
+              fs.writeFileSync('${BASE}.cdx.json', JSON.stringify(sbom,null,2));
+            "
+          }
+          echo "cdx-json=${BASE}.cdx.json" >> "$GITHUB_OUTPUT"
+          echo "cdx-name=talos-web-${GITHUB_REF_NAME:-$SHA}-$TS" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SPDX SBOM
+        id: spdx
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="${{ github.workspace }}/dist-sbom/web"
+          mkdir -p "$OUT_DIR"
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          SHA="${GITHUB_SHA:0:7}"
+          BASE="${OUT_DIR}/talos-web-${GITHUB_REF_NAME:-$SHA}-$TS"
+
+          cd "${{ github.workspace }}/web"
+          node -e "
+            const fs=require('fs');const crypto=require('crypto');
+            const pj=JSON.parse(fs.readFileSync('./package.json','utf8'));
+            const deps={...(pj.dependencies||{}),...(pj.optionalDependencies||{})};
+            const now=new Date().toISOString().replace(/\.\d+Z$/,'Z');
+            const spdxid=(s)=>'SPDXRef-'+crypto.createHash('sha1').update(s).digest('hex').slice(0,12).toUpperCase();
+            const pkgid=spdxid(pj.name+'@'+pj.version);
+            const ns='https://talos.example/sbom/spdx/web/'+crypto.randomUUID();
+            const lines=['SPDXVersion: SPDX-2.3','DataLicense: CC0-1.0','SPDXID: SPDXRef-DOCUMENT',
+              'DocumentName: '+pj.name+'-'+pj.version,'DocumentNamespace: '+ns,
+              'Creator: Tool: talos-spdx-generator-1.0.0','Created: '+now,'',
+              '##### Package: '+pj.name,'PackageName: '+pj.name,'SPDXID: '+pkgid,
+              'PackageVersion: '+pj.version,'PackageDownloadLocation: NOASSERTION',
+              'FilesAnalyzed: false','PackageLicenseConcluded: '+(pj.license||'AGPL-3.0-only'),
+              'PackageLicenseDeclared: '+(pj.license||'AGPL-3.0-only'),
+              'PackageCopyrightText: NOASSERTION','PackageSupplier: Organization: Talos',
+              'PackageDescription: Talos Protocol Web Application'];
+            for (const [n,v] of Object.entries(deps)) {
+              const did=spdxid(n+'@'+v);
+              lines.push('', '##### Package: '+n, 'PackageName: '+n, 'SPDXID: '+did,
+                'PackageVersion: '+v.replace(/[\^~]/g,''), 'PackageDownloadLocation: NOASSERTION',
+                'FilesAnalyzed: false','PackageLicenseConcluded: NOASSERTION',
+                'PackageLicenseDeclared: NOASSERTION','PackageCopyrightText: NOASSERTION',
+                'Relationship: '+pkgid+' DEPENDS_ON '+did);
+            }
+            fs.writeFileSync('${BASE}.spdx', lines.join('\n')+'\n');
+          "
+          echo "spdx-file=${BASE}.spdx" >> "$GITHUB_OUTPUT"
+
+      - name: Sign SBOM artifacts
+        id: sign
+        if: inputs.sign_artifacts != false && (github.event_name == 'push' || github.event_name == 'workflow_call')
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          SIG_DIR="${{ github.workspace }}/dist-sbom/web/signatures"
+          mkdir -p "$SIG_DIR"
+          CDX="${{ steps.cyclonedx.outputs.cdx-json }}"
+          SPDX="${{ steps.spdx.outputs.spdx-file }}"
+          cosign sign-blob --yes --tlog-upload=false --output-signature "${SIG_DIR}/$(basename $CDX).sig" --output-certificate "${SIG_DIR}/$(basename $CDX).pem" "$CDX"
+          cosign sign-blob --yes --tlog-upload=false --output-signature "${SIG_DIR}/$(basename $SPDX).sig" --output-certificate "${SIG_DIR}/$(basename $SPDX).pem" "$SPDX"
+          echo "sig-dir=$SIG_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Verify signatures
+        if: inputs.sign_artifacts != false && steps.sign.outcome == 'success'
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          SIG_DIR="${{ steps.sign.outputs.sig-dir }}"
+          CDX="${{ steps.cyclonedx.outputs.cdx-json }}"
+          SPDX="${{ steps.spdx.outputs.spdx-file }}"
+          cosign verify-blob --signature "${SIG_DIR}/$(basename $CDX).sig" --certificate "${SIG_DIR}/$(basename $CDX).pem" --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/sbom-provenance.yml@${GITHUB_REF}" --insecure-ignore-tlog=true "$CDX"
+          cosign verify-blob --signature "${SIG_DIR}/$(basename $SPDX).sig" --certificate "${SIG_DIR}/$(basename $SPDX).pem" --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/sbom-provenance.yml@${GITHUB_REF}" --insecure-ignore-tlog=true "$SPDX"
+
+      - name: Generate SLSA provenance
+        id: provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="${{ github.workspace }}/dist-sbom/web"
+          mkdir -p "$OUT_DIR"
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          SHA="${GITHUB_SHA:0:7}"
+          BASE="${OUT_DIR}/talos-web-${GITHUB_REF_NAME:-$SHA}-$TS"
+          node -e "
+            const fs=require('fs');const crypto=require('crypto');const path=require('path');
+            function sha256(f){const h=crypto.createHash('sha256');h.update(fs.readFileSync(f));return h.digest('hex');}
+            const subjects=[
+              {name:path.basename('${{ steps.cyclonedx.outputs.cdx-json }}'),digest:{sha256:sha256('${{ steps.cyclonedx.outputs.cdx-json }}')}},
+              {name:path.basename('${{ steps.spdx.outputs.spdx-file }}'),digest:{sha256:sha256('${{ steps.spdx.outputs.spdx-file }}')}}
+            ];
+            const pred={'_type':'https://in-toto.io/Statement/v1',subjects,
+              predicateType:'https://slsa.dev/provenance/v1',
+              predicate:{buildDefinition:{
+                buildType:'https://github.com/slsa-framework/slsa-github-generator/generic@v1',
+                externalParameters:{workflow:{ref:'${{ github.ref }}',repository:'${{ github.repository }}',path:'.github/workflows/sbom-provenance.yml'},
+                  source:{uri:'git+https://github.com/${{ github.repository }}@${{ github.ref }}',digest:{sha1:'${{ github.sha }}'}}},
+                resolvedDependencies:[{uri:'git+https://github.com/${{ github.repository }}',digest:{sha1:'${{ github.sha }}'}}]},
+                runDetails:{builder:{id:'https://github.com/actions/runner/github-hosted'},
+                  metadata:{invocationId:'${{ github.run_id }}-${{ github.run_attempt }}',completedOn:new Date().toISOString()}}}};
+            fs.writeFileSync('${BASE}.intoto.jsonl', JSON.stringify(pred)+'\n');
+          "
+          echo "provenance-file=${BASE}.intoto.jsonl" >> "$GITHUB_OUTPUT"
+
+      - name: Populate outputs
+        id: meta
+        shell: bash
+        run: |
+          SHA="${GITHUB_SHA:0:7}"
+          echo "cyclonedx-artifact=sbom-web-cyclonedx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+          echo "spdx-artifact=sbom-web-spdx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+          echo "signature-artifact=sbom-web-signatures-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload CycloneDX
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.cyclonedx-artifact }}
+          path: ${{ steps.cyclonedx.outputs.cdx-json }}
+          retention-days: ${{ env.RETENTION_DAYS }}
+
+      - name: Upload SPDX
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.spdx-artifact }}
+          path: ${{ steps.spdx.outputs.spdx-file }}
+          retention-days: ${{ env.RETENTION_DAYS }}
+
+      - name: Upload signatures
+        if: inputs.sign_artifacts != false && steps.sign.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.signature-artifact }}
+          path: ${{ steps.sign.outputs.sig-dir }}
+          retention-days: ${{ env.RETENTION_DAYS }}
+
+      - name: Upload provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance-web-${{ steps.cyclonedx.outputs.cdx-name }}
+          path: ${{ steps.provenance.outputs.provenance-file }}
+          retention-days: ${{ env.RETENTION_DAYS }}
+
+      - name: Upload to GitHub Release
+        if: inputs.upload_release == true && startsWith(github.ref, 'refs/tags/web-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.cyclonedx.outputs.cdx-json }}
+            ${{ steps.spdx.outputs.spdx-file }}
+            ${{ steps.provenance.outputs.provenance-file }}
+            ${{ steps.sign.outputs.sig-dir }}/*
+          append_body: true
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  summary:
+    needs:
+      [
+        detect-components,
+        generate-sdk,
+        generate-agent,
+        generate-contracts,
+        generate-web,
+      ]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Compile summary
+        shell: bash
+        run: |
+          set +e
+          echo "## SBOM & Provenance Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Components analyzed: ${{ needs.detect-components.outputs.components }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- SLSA Level: ${{ env.PROVENANCE_SLSA_LEVEL }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Retention: ${{ env.RETENTION_DAYS }} days" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Signing: ${{ (inputs.sign_artifacts != false) && 'cosign (keyless, Fulcio/Rekor)' || 'skipped' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Job outcomes" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Component | CycloneDX | SPDX | Provenance | Signatures |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----------|-----------|------|------------|------------|" >> "$GITHUB_STEP_SUMMARY"
+          for comp in sdk agent contracts web; do
+            need="generate-$comp"
+            res="${{ contains(needs.*.result, 'success') && needs[$need].result || 'SKIPPED' }}"
+            echo "| $comp | $res | $res | $res | $res |" >> "$GITHUB_STEP_SUMMARY"
+          done

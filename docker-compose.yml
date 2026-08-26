@@ -1,0 +1,124 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: talos-postgres
+    environment:
+      POSTGRES_DB: talos
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d talos"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+
+  mock-stellar:
+    image: node:20-alpine
+    container_name: talos-mock-stellar
+    working_dir: /app
+    command: ["node", "/app/scripts/mock-stellar-server.mjs"]
+    ports:
+      - "4010:4010"
+    volumes:
+      - .:/app
+    environment:
+      PORT: 4010
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4010/health >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+
+  web:
+    image: node:20-bookworm
+    container_name: talos-web
+    working_dir: /workspace
+    command: >
+      sh -c "corepack enable && corepack prepare pnpm@9 --activate && pnpm install --frozen-lockfile && pnpm --dir web db:migrate && pnpm --dir web db:seed && pnpm --dir web dev"
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/workspace
+    environment:
+      NODE_ENV: development
+      NEXT_TELEMETRY_DISABLED: "1"
+      PORT: 3000
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/talos
+      DIRECT_URL: postgresql://postgres:postgres@postgres:5432/talos
+      STELLAR_NETWORK: testnet
+      STELLAR_HORIZON_URL: http://mock-stellar:4010
+      STELLAR_RPC_URL: http://mock-stellar:4010
+      NEXT_PUBLIC_STELLAR_NETWORK: testnet
+      NEXT_PUBLIC_STELLAR_RPC_URL: http://mock-stellar:4010
+      NEXT_PUBLIC_STELLAR_WALLET_NETWORK: testnet
+      NEXT_PUBLIC_STELLAR_OPERATOR_PUBLIC_KEY: GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL
+      STELLAR_OPERATOR_PUBLIC_KEY: GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL
+      NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT: CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+      NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT: CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+      NEXT_PUBLIC_TALOS_CREATION_XLM: "20"
+      X402_FACILITATOR_URL: http://mock-stellar:4010
+      X402_API_KEY: local-dev
+      X402_SETTLEMENT_NETWORK: stellar-testnet
+      CROSS_CHAIN_WEBHOOK_SECRET: local-stack-secret
+      OPENAI_API_KEY: dummy
+      TAVILY_API_KEY: dummy
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mock-stellar:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health/live >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 25s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+
+  prime-agent:
+    build:
+      context: ./packages/prime-agent
+      dockerfile: Dockerfile
+    container_name: talos-prime-agent
+    profiles: ["agent"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      BROWSER_HEADLESS: "true"
+      STAGEHAND_HEADLESS: "true"
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/talos
+      STELLAR_NETWORK: testnet
+      STELLAR_HORIZON_URL: http://mock-stellar:4010
+      STELLAR_RPC_URL: http://mock-stellar:4010
+      OPENAI_API_KEY: dummy
+      TAVILY_API_KEY: dummy
+      TALOS_MASTER_KEY: local-dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mock-stellar:
+        condition: service_healthy
+    command: ["sh", "-c", "uv run talos-agent start || tail -f /dev/null"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+
+volumes:
+  postgres-data:

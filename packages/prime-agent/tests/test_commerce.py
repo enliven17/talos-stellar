@@ -5,7 +5,13 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from talos_agent.payments import USDC_TESTNET_ISSUER
-from talos_agent.tools.commerce import price_to_usdc_units, ALL_CATEGORIES, discover_services, purchase_service
+from talos_agent.tools.commerce import (
+    ALL_CATEGORIES,
+    apply_playbook,
+    discover_services,
+    price_to_usdc_units,
+    purchase_service,
+)
 
 
 class TestPriceToUsdcUnits:
@@ -139,3 +145,45 @@ class TestPurchaseServiceSignPayment:
         _, call_kwargs = mock_sign.call_args
         assert "token_address" not in call_kwargs
         assert "chain_id" not in call_kwargs
+
+
+class TestApplyPlaybook:
+    @pytest.mark.asyncio
+    async def test_apply_playbook_uses_exact_lookup_method(self):
+        mock_db = MagicMock()
+        mock_db.find_playbook_by_name.return_value = {
+            "id": 7,
+            "name": "Alpha Playbook",
+            "data": {"stage": "launch"},
+        }
+
+        with patch("talos_agent.tools.commerce._db", mock_db):
+            result = await apply_playbook("  Alpha Playbook  ")
+
+        mock_db.find_playbook_by_name.assert_called_once_with("Alpha Playbook")
+        mock_db.apply_playbook.assert_called_once_with(7)
+        assert result["status"] == "applied"
+        assert result["playbook"] == "Alpha Playbook"
+
+    @pytest.mark.asyncio
+    async def test_apply_playbook_rejects_blank_name(self):
+        mock_db = MagicMock()
+
+        with patch("talos_agent.tools.commerce._db", mock_db):
+            result = await apply_playbook("   ")
+
+        assert result == {"error": "Playbook name cannot be empty"}
+        mock_db.find_playbook_by_name.assert_not_called()
+        mock_db.apply_playbook.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_apply_playbook_returns_not_found_for_exact_lookup_miss(self):
+        mock_db = MagicMock()
+        mock_db.find_playbook_by_name.return_value = None
+
+        with patch("talos_agent.tools.commerce._db", mock_db):
+            result = await apply_playbook("Growth")
+
+        assert result == {"error": "No playbook found named 'Growth'"}
+        mock_db.find_playbook_by_name.assert_called_once_with("Growth")
+        mock_db.apply_playbook.assert_not_called()

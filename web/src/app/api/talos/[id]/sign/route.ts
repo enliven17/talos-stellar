@@ -5,10 +5,11 @@ import { eq } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
 import { signX402Payment } from "@/lib/stellar-x402";
 import { signPaymentSchema, parseBody } from "@/lib/schemas";
+import { withTraceContext } from "@/lib/tracing";
 
 // POST /api/talos/:id/sign — Signing proxy for Stellar x402 payments
 // Agent sends payment details, Web signs via Stellar ED25519, returns payment token
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -16,7 +17,7 @@ export async function POST(
 
   try {
     // 1. Authenticate agent
-    const auth = await verifyAgentApiKey(request, id);
+    const auth = await verifyAgentApiKey(request, id, ["wallet:sign"]);
     if (!auth.ok) return auth.response;
 
     // 2. Get TALOS wallet info
@@ -39,13 +40,18 @@ export async function POST(
     const parsed = await parseBody(request, signPaymentSchema);
     if (parsed.error) return parsed.error;
 
-    const { payee, amount, assetCode } = parsed.data;
-    const amountStr = typeof amount === "number" ? String(amount) : amount;
-    const amountUsd = Number(amountStr);
+    const { payee, amount, asset, assetCode } = parsed.data;
+
+    // Resolve the effective asset code: prefer the typed `asset` field,
+    // fall back to the legacy `assetCode` string, then default to USDC.
+    const effectiveAssetCode = asset?.code ?? assetCode ?? "USDC";
+    const amountUsd = Number(amount);
 
     if (!Number.isFinite(amountUsd) || amountUsd <= 0) {
       return Response.json({ error: "amount must be a positive number" }, { status: 400 });
     }
+
+    const amountStr = amountUsd.toFixed(2);
 
     // 4. Check against Kernel approval threshold
     const threshold = Number(talos.approvalThreshold);
@@ -75,7 +81,7 @@ export async function POST(
       from: talos.agentWalletAddress,
       to: payee,
       amount: amountStr,
-      assetCode: assetCode ?? "USDC",
+      assetCode: effectiveAssetCode,
     });
 
     // 7. Return X-Payment header value + metadata
@@ -85,10 +91,12 @@ export async function POST(
       from: talos.agentWalletAddress,
       to: payee,
       amount: amountStr,
-      assetCode: assetCode ?? "USDC",
+      assetCode: effectiveAssetCode,
     });
   } catch (err) {
     console.error("Signing error:", err);
     return Response.json({ error: "Signing failed" }, { status: 500 });
   }
 }
+
+export const POST = withTraceContext(handlePost);

@@ -26,7 +26,7 @@ rustup target add wasm32-unknown-unknown
 
 - `web/` - Next.js application, API routes, and frontend
 - `packages/prime-agent/` - Python agent runtime
-- `contracts/` - Soroban smart contracts and deploy scripts
+- `contracts/` - Soroban smart contracts and deploy scripts (see `contracts/EVENTS.md` for the event schema)
 - `packages/openclaw/` - skill definitions and agent helper code
 
 ## Setup
@@ -113,6 +113,7 @@ If you deploy new contracts, update the contract IDs in `web/.env.local` with th
 - `X_USERNAME`, `X_PASSWORD`, and `X_EMAIL`
 - `BROWSER_HEADLESS`
 - agent timing and approval settings such as `AGENT_CYCLE_INTERVAL`, `POLLING_INTERVAL`, and `APPROVAL_THRESHOLD`
+- opt-in durable job inbox/outbox settings under `TALOS_DURABLE_JOB_EFFECTS_*` and `TALOS_JOB_EFFECT_*`
 
 ### Contracts env
 
@@ -123,6 +124,30 @@ If you deploy new contracts, update the contract IDs in `web/.env.local` with th
 - commented placeholders for the post-deployment contract IDs used by the web app
 
 ## Running the Project
+
+### One-command local integration stack
+
+A reproducible local integration stack is available for contributors:
+
+```bash
+pnpm stack:up
+```
+
+This starts PostgreSQL, a mock Stellar provider, the web app, and seeds the local database. The web service exposes health and readiness endpoints at `/api/health` and `/api/health/ready`.
+
+Use these commands to manage the environment:
+
+```bash
+pnpm stack:logs
+pnpm stack:down
+pnpm stack:reset
+```
+
+The stack defaults to the web service and a mock Stellar provider. Add the optional prime-agent service with:
+
+```bash
+docker compose --profile agent up -d prime-agent
+```
 
 ### Web
 
@@ -146,7 +171,15 @@ pnpm build
 pnpm lint
 pnpm test:unit
 pnpm test:e2e
+pnpm test:bench       # Run performance benchmarks
 ```
+
+See [BENCHMARKS.md](./BENCHMARKS.md) for the benchmark system documentation.
+
+Any PR that changes `web/drizzle/**` or `web/src/db/**` is validated by the `Web Migrations CI`
+workflow, which applies your migrations to an ephemeral Postgres instance. See
+[`MIGRATIONS.md`](./MIGRATIONS.md) for what it checks, how to reproduce it locally, and rollback
+guidance.
 
 ### Prime Agent
 
@@ -178,7 +211,178 @@ cargo test --target wasm32-unknown-unknown
 - Do not commit secrets, keys, or generated `.env` files
 - For TypeScript and React, run `pnpm lint` and the relevant `pnpm test:*` command before opening a PR
 - For Python, prefer explicit types and validate changes with `uv run pytest`
+- For provider job-effect changes, also run
+  `uv run pytest tests/test_durable_job_effects.py` and follow the
+  [durable job effects runbook](./docs/prime-agent-durable-job-effects.md).
 - For Rust, keep formatting standard with `cargo fmt` and validate with `cargo test`
+
+## Database Transaction Retry & Serialization Hardening
+
+Critical database state transitions (money, token purchases, patron creation, job state transitions, agent genesis) use `withTransactionRetry` from `web/src/db/db-retry.ts` to automatically recover from PostgreSQL serialization conflicts (`40001`), deadlocks (`40P01`), lock timeouts (`55P03`), and transient connection failures.
+
+### Environment Configuration
+
+- `DB_TRANSACTION_RETRY_ENABLED`: Controls transaction retry behavior (default: `true`). Set to `false` to disable retries instantly.
+- `DB_TRANSACTION_RETRY_MAX_RETRIES`: Maximum number of retry attempts (default: `5`).
+- `DB_TRANSACTION_RETRY_INITIAL_DELAY_MS`: Initial exponential backoff delay in milliseconds (default: `50`).
+- `DB_TRANSACTION_RETRY_MAX_DELAY_MS`: Maximum exponential backoff cap in milliseconds (default: `1000`).
+
+### Operational Signals & Observability
+
+Retries emit structured Pino log events with domain categories (`MONEY`, `TOKEN`, `PATRON`, `JOB`, `GENESIS`):
+
+- `db_transaction_retry_attempt` (`logger.warn`): Logged when a retryable serialization/connection error triggers a retry attempt.
+- `db_transaction_retry_success` (`logger.info`): Logged when a transaction succeeds after prior failed attempts.
+- `db_transaction_retry_exhausted` (`logger.error`): Logged when maximum retry attempts are exceeded.
+
+Sensitive data (keys, passphrases, raw payloads) are excluded from log context.
+
+### Local Verification
+
+To run unit and concurrency contention tests:
+
+```bash
+pnpm --filter web exec vitest run tests/db-retry.unit.test.ts tests/db-retry.contention.test.ts
+```
+
+### Rollback Guidance
+
+If operational issues or database performance degradation occur:
+
+1. Set `DB_TRANSACTION_RETRY_ENABLED=false` in `web/.env.local` or application environment variables.
+2. Restart the web server. This immediately falls back to single-attempt database transactions without requiring application redeployments or code rollbacks.
+
+## SDK Event Stream (`TalosEventStream`)
+
+The `packages/sdk` package exports a browser and Node-compatible SSE client for the Talos platform event stream.
+
+### Quick start
+
+```ts
+import { TalosEventStream, InMemorySeenStore } from "@talos-protocol/sdk";
+
+const stream = new TalosEventStream("https://talos-stellar.vercel.app", {
+  authHeader: "Bearer <api-key>",
+  seenStore: new InMemorySeenStore(), // optional, suppresses duplicates on reconnect
+});
+
+stream.on("event", (evt) => console.log(evt.type, evt.data));
+stream.on("error", (err, attempt) => console.error("attempt", attempt, err));
+stream.on("close", () => console.log("stream closed"));
+
+stream.connect();
+
+// To stop:
+stream.close();
+```
+
+### Configuration reference
+
+| Option                 | Default       | Notes                                                     |
+| ---------------------- | ------------- | --------------------------------------------------------- |
+| `path`                 | `/api/events` | Stream endpoint path                                      |
+| `authHeader`           | —             | Sent as `Authorization` header. Never logged.             |
+| `maxReconnectAttempts` | `10`          | Total attempts before permanent close                     |
+| `baseReconnectDelayMs` | `1000`        | Base delay; doubles per attempt                           |
+| `maxReconnectDelayMs`  | `30000`       | Backoff ceiling                                           |
+| `jitter`               | `true`        | Full-jitter on reconnect delay                            |
+| `maxHeartbeatMisses`   | `3`           | Consecutive missed heartbeat ticks before stall reconnect |
+| `heartbeatIntervalMs`  | `30000`       | Heartbeat watchdog interval                               |
+| `seenStore`            | —             | `SeenStore` implementation for duplicate suppression      |
+| `signal`               | —             | External `AbortSignal` to close the stream                |
+
+### Operational signals
+
+The optional `logger` receives structured, privacy-safe events (no payloads, no credentials):
+
+| Event                      | Level | Meaning                                         |
+| -------------------------- | ----- | ----------------------------------------------- |
+| `sse:connecting`           | info  | Initial connect or reconnect                    |
+| `sse:reconnect_scheduled`  | info  | Reconnect delay queued with `delayMs`           |
+| `sse:duplicate_suppressed` | info  | An event ID was already in `seenStore`          |
+| `sse:error`                | warn  | Connection error, `attempt` included            |
+| `sse:heartbeat_miss`       | warn  | No server activity during watchdog interval     |
+| `sse:stall_detected`       | warn  | `maxHeartbeatMisses` reached; forcing reconnect |
+| `sse:budget_exhausted`     | warn  | All reconnect attempts used                     |
+| `sse:handler_error`        | error | An `on("event")` handler threw                  |
+
+Pass any `{ info, warn, error }` compatible logger (e.g. `pino`, `console`):
+
+```ts
+import pino from "pino";
+const stream = new TalosEventStream(url, { logger: pino(), authHeader });
+```
+
+### Duplicate suppression
+
+`InMemorySeenStore` (capacity 10 000, LRU eviction) covers process-lifetime dedup.
+For cross-restart guarantees supply a persistent implementation:
+
+```ts
+class RedisSeenStore implements SeenStore {
+  async has(id: string) {
+    return Boolean(await redis.exists(`seen:${id}`));
+  }
+  async add(id: string) {
+    await redis.set(`seen:${id}`, 1, "EX", 86400);
+  }
+}
+```
+
+### Rollback
+
+`TalosEventStream` is additive — no existing API surface changed. To disable the feature: simply don't call `connect()`, or `close()` the stream immediately.
+
+### Compatibility notes
+
+- Requires `fetch` and `ReadableStream` (native in browsers and Node ≥ 18).
+- In Node 18 you may need `--experimental-fetch` if not enabled by default; Node 20+ needs nothing.
+- The `fetch` option in `TalosEventStreamOptions` lets you inject a polyfill or mock for older runtimes and tests.
+
+### Local verification
+
+```bash
+cd packages/sdk
+npm test        # runs vitest — all 93 tests should pass
+npm run build   # tsc compile check
+```
+
+## PR Preview Environments
+
+Talos Protocol supports reproducible, ephemeral per-PR web and database preview environments with automatic lifecycle management. This ensures contributors can verify full-stack changes safely before merging.
+
+### Setup and Provisioning
+
+When you open or synchronize a PR, the `PR Preview Provision` GitHub Action automatically provisions an ephemeral database branch (e.g., using Neon or a mock provider during development). It will:
+1. Provision the database and configure environment naming (e.g., `pr-123`).
+2. Run database migrations (`pnpm db:migrate`).
+3. Seed the database with demo data (`pnpm db:seed-demo`).
+4. Generate an isolated Vercel Preview URL linked to this ephemeral database.
+
+A bot will comment on your PR with the connection details and the preview link once it is ready.
+
+### Verification
+
+To verify the preview environments locally or manually test the lifecycle:
+```bash
+# Provision a mock environment for a specific PR
+pnpm --dir web env:provision 123 my-feature-branch
+
+# Teardown the mock environment
+pnpm --dir web env:teardown 123
+```
+Unit tests for the environment lifecycle logic reside in `web/src/area/devx/__tests__/environments.test.ts` (or similar tests). Make sure tests pass locally by running `pnpm --dir web test:bench` or your standard test suites.
+
+### Rollback and Teardown
+
+Preview environments are destroyed automatically when the PR is closed or merged via the `PR Preview Teardown` GitHub workflow.
+Cost limits and TTLs (Time-To-Live) are enforced programmatically. If an environment becomes unstable, you can manually trigger a rebuild by closing and reopening the PR, or trigger the teardown script via CLI.
+
+### Troubleshooting
+
+- **Database provisioning fails**: Check the GitHub Actions logs for `PR Preview Provision`. Ensure your branch passes linting and type checks, as migration errors often cause provisioning failures.
+- **Preview URL is missing**: Vercel manages the web preview natively. Ensure the Vercel GitHub integration is active for the repository.
+- **Stale data**: The environment is seeded once upon provisioning. If you change the seed script, you may need to close and reopen the PR to provision a fresh database.
 
 ## Pull Request Workflow
 
@@ -188,6 +392,13 @@ cargo test --target wasm32-unknown-unknown
 4. Run the relevant tests for the area you touched
 5. Open a pull request using the template in [`.github/PULL_REQUEST_TEMPLATE.md`](./.github/PULL_REQUEST_TEMPLATE.md)
 6. Link the issue in your PR description, for example `Closes #39`
+
+## Releases
+
+Versioning, changelogs, and tagging for `web`, `sdk`, `agent`, and `contracts` are automated —
+see [`RELEASES.md`](./RELEASES.md). You don't need to do anything for this beyond writing
+[Conventional Commits](https://www.conventionalcommits.org/) subjects (`feat: ...`, `fix: ...`,
+etc.) in your PRs; version bumps are computed from those.
 
 ## Issue and PR Templates
 

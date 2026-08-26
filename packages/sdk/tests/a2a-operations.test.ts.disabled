@@ -1,0 +1,575 @@
+/**
+ * A2A Operations Integration Tests
+ * 
+ * Integration tests with real boundaries for A2A operations including
+ * concurrency, retry, timeout, duplication, and cancellation scenarios.
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import {
+  A2AOperationManager,
+  createOperationId,
+  isRetryableError,
+  calculateBackoff,
+  hasOperationTimedOut,
+  DEFAULT_OPERATION_CONFIG,
+  type OperationConfig,
+  type OperationContext,
+} from "../src/a2a-operations";
+import {
+  validA2APurchaseIntent,
+  validAllowDecision,
+  duplicateIntent1,
+  duplicateIntent2,
+} from "./a2a-fixtures";
+
+describe("A2A Operations - Idempotency", () => {
+  let manager: A2AOperationManager;
+
+  beforeEach(() => {
+    manager = new A2AOperationManager();
+  });
+
+  afterEach(() => {
+    manager.reset();
+  });
+
+  it("should prevent duplicate operations with same idempotency key", async () => {
+    const operation = vi.fn().mockResolvedValue({ success: true });
+    
+    // First submission
+    const result1 = await manager.submitIntent(duplicateIntent1, operation);
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(result1).toEqual({ success: true });
+
+    // Second submission with same idempotency key
+    const result2 = await manager.submitIntent(duplicateIntent2, operation);
+    expect(operation).toHaveBeenCalledTimes(1); // Should not call again
+    expect(result2).toEqual({ success: true });
+  });
+
+  it("should allow different operations with different idempotency keys", async () => {
+    const operation = vi.fn().mockResolvedValue({ success: true });
+    
+    const intent1 = { ...validA2APurchaseIntent, intentId: "intent-1", idempotencyKey: "key-1" };
+    const intent2 = { ...validA2APurchaseIntent, intentId: "intent-2", idempotencyKey: "key-2" };
+    
+    await manager.submitIntent(intent1, operation);
+    await manager.submitIntent(intent2, operation);
+    
+    expect(operation).toHaveBeenCalledTimes(2);
+  });
+
+  it("should expire idempotency entries after window", async () => {
+    const config: Partial<OperationConfig> = { idempotencyWindow: 100 }; // 100ms window
+    const shortWindowManager = new A2AOperationManager(config);
+    
+    const operation = vi.fn().mockResolvedValue({ success: true });
+    
+    await shortWindowManager.submitIntent(duplicateIntent1, operation);
+    
+    // Wait for window to expire
+    await new Promise(resolve => setTimeout(resolve, 150));
+    
+    // Should allow new operation after window expires
+    await shortWindowManager.submitIntent(duplicateIntent2, operation);
+    
+    expect(operation).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("A2A Operations - Concurrency Control", () => {
+  let manager: A2AOperationManager;
+
+  beforeEach(() => {
+    manager = new A2AOperationManager({ concurrencyLimit: 2 });
+  });
+
+  afterEach(() => {
+    manager.reset();
+  });
+
+  it("should respect concurrency limit", async () => {
+    const slowOperation = vi.fn().mockImplementation(
+      () => new Promise(resolve => setTimeout(() => resolve({ success: true }), 100))
+    );
+    
+    const intent1 = { ...validA2APurchaseIntent, intentId: "intent-1" };
+    const intent2 = { ...validA2APurchaseIntent, intentId: "intent-2" };
+    const intent3 = { ...validA2APurchaseIntent, intentId: "intent-3" };
+    
+    // Start two concurrent operations
+    const op1 = manager.submitIntent(intent1, slowOperation);
+    const op2 = manager.submitIntent(intent2, slowOperation);
+    
+    // Third should fail due to concurrency limit
+    await expect(manager.submitIntent(intent3, slowOperation)).rejects.toThrow("CONCURRENCY_LIMIT_REACHED");
+    
+    await Promise.all([op1, op2]);
+  });
+
+  it("should allow new operations after completion", async () => {
+    const fastOperation = vi.fn().mockResolvedValue({ success: true });
+    
+    const intent1 = { ...validA2APurchaseIntent, intentId: "intent-1" };
+    const intent2 = { ...validA2APurchaseIntent, intentId: "intent-2" };
+    const intent3 = { ...validA2APurchaseIntent, intentId: "intent-3" };
+    
+    await manager.submitIntent(intent1, fastOperation);
+    await manager.submitIntent(intent2, fastOperation);
+    
+    // After first two complete, third should succeed
+    await manager.submitIntent(intent3, fastOperation);
+    
+    expect(fastOperation).toHaveBeenCalledTimes(3);
+  });
+
+  it("should track active operations correctly", async () => {
+    const slowOperation = vi.fn().mockImplementation(
+      () => new Promise(resolve => setTimeout(() => resolve({ success: true }), 100))
+    );
+    
+    const intent1 = { ...validA2APurchaseIntent, intentId: "intent-1" };
+    
+    manager.submitIntent(intent1, slowOperation);
+    
+    const activeOps = manager.getActiveOperations();
+    expect(activeOps).toHaveLength(1);
+    expect(activeOps[0].state).toBe("processing");
+  });
+});
+
+describe("A2A Operations - Retry Logic", () => {
+  let manager: A2AOperationManager;
+
+  beforeEach(() => {
+    manager = new A2AOperationManager({ 
+      maxRetries: 3, 
+      retryDelay: 50,
+      timeout: 5000 
+    });
+  });
+
+  afterEach(() => {
+    manager.reset();
+  });
+
+  it("should retry on transient failures", async () => {
+    let attemptCount = 0;
+    const flakyOperation = vi.fn().mockImplementation(() => {
+      attemptCount++;
+      if (attemptCount < 2) {
+        throw new Error("TRANSIENT_ERROR");
+      }
+      return Promise.resolve({ success: true });
+    });
+    
+    const result = await manager.submitIntent(validA2APurchaseIntent, flakyOperation);
+    
+    expect(attemptCount).toBe(2);
+    expect(result).toEqual({ success: true });
+  });
+
+  it("should not retry on non-retryable errors", async () => {
+    const invalidOperation = vi.fn().mockRejectedValue(
+      new Error("MALFORMED_REQUEST")
+    );
+    
+    await expect(
+      manager.submitIntent(validA2APurchaseIntent, invalidOperation)
+    ).rejects.toThrow("MALFORMED_REQUEST");
+    
+    expect(invalidOperation).toHaveBeenCalledTimes(1);
+  });
+
+  it("should stop after max retries", async () => {
+    const failingOperation = vi.fn().mockRejectedValue(
+      new Error("TRANSIENT_ERROR")
+    );
+    
+    await expect(
+      manager.submitIntent(validA2APurchaseIntent, failingOperation)
+    ).rejects.toThrow("TRANSIENT_ERROR");
+    
+    expect(failingOperation).toHaveBeenCalledTimes(4); // Initial + 3 retries
+  });
+
+  it("should use exponential backoff", async () => {
+    const startTime = Date.now();
+    let attemptCount = 0;
+    
+    const slowFailingOperation = vi.fn().mockImplementation(() => {
+      attemptCount++;
+      throw new Error("TRANSIENT_ERROR");
+    });
+    
+    try {
+      await manager.submitIntent(validA2APurchaseIntent, slowFailingOperation);
+    } catch (error) {
+      // Expected to fail
+    }
+    
+    const elapsed = Date.now() - startTime;
+    // With exponential backoff: 50ms + 100ms + 200ms = 350ms minimum
+    expect(elapsed).toBeGreaterThan(300);
+  });
+});
+
+describe("A2A Operations - Timeout Handling", () => {
+  let manager: A2AOperationManager;
+
+  beforeEach(() => {
+    manager = new A2AOperationManager({ 
+      timeout: 100, // 100ms timeout
+      maxRetries: 1,
+      retryDelay: 10
+    });
+  });
+
+  afterEach(() => {
+    manager.reset();
+  });
+
+  it("should timeout slow operations", async () => {
+    const slowOperation = vi.fn().mockImplementation(
+      () => new Promise(resolve => setTimeout(() => resolve({ success: true }), 500))
+    );
+    
+    await expect(
+      manager.submitIntent(validA2APurchaseIntent, slowOperation)
+    ).rejects.toThrow("OPERATION_TIMEOUT");
+  });
+
+  it("should complete fast operations before timeout", async () => {
+    const fastOperation = vi.fn().mockResolvedValue({ success: true });
+    
+    const result = await manager.submitIntent(validA2APurchaseIntent, fastOperation);
+    
+    expect(result).toEqual({ success: true });
+  });
+});
+
+describe("A2A Operations - Cancellation", () => {
+  let manager: A2AOperationManager;
+
+  beforeEach(() => {
+    manager = new A2AOperationManager();
+  });
+
+  afterEach(() => {
+    manager.reset();
+  });
+
+  it("should cancel pending operations", async () => {
+    const slowOperation = vi.fn().mockImplementation(
+      () => new Promise(resolve => setTimeout(() => resolve({ success: true }), 100))
+    );
+    
+    const intent = { ...validA2APurchaseIntent, intentId: "intent-1" };
+    
+    // Start operation
+    const operationPromise = manager.submitIntent(intent, slowOperation);
+    
+    // Cancel immediately
+    manager.cancelOperation(intent.intentId);
+    
+    await expect(operationPromise).rejects.toThrow("OPERATION_CANCELLED");
+  });
+
+  it("should return true when cancelling successfully", () => {
+    const intent = { ...validA2APurchaseIntent, intentId: "intent-1" };
+    
+    const result = manager.cancelOperation(intent.intentId);
+    
+    expect(result).toBe(true);
+  });
+
+  it("should return false when already cancelled", () => {
+    const intent = { ...validA2APurchaseIntent, intentId: "intent-1" };
+    
+    manager.cancelOperation(intent.intentId);
+    const result = manager.cancelOperation(intent.intentId);
+    
+    expect(result).toBe(false);
+  });
+});
+
+describe("A2A Operations - Decision Evaluation", () => {
+  let manager: A2AOperationManager;
+
+  beforeEach(() => {
+    manager = new A2AOperationManager();
+  });
+
+  afterEach(() => {
+    manager.reset();
+  });
+
+  it("should evaluate decisions with retry logic", async () => {
+    const decisionOperation = vi.fn().mockResolvedValue({ decision: "allow" });
+    
+    const result = await manager.evaluateDecision(validAllowDecision, decisionOperation);
+    
+    expect(result).toEqual({ decision: "allow" });
+    expect(decisionOperation).toHaveBeenCalledTimes(1);
+  });
+
+  it("should handle decision evaluation failures with retry", async () => {
+    let attemptCount = 0;
+    const flakyDecisionOperation = vi.fn().mockImplementation(() => {
+      attemptCount++;
+      if (attemptCount < 2) {
+        throw new Error("TRANSIENT_ERROR");
+      }
+      return Promise.resolve({ decision: "deny" });
+    });
+    
+    const result = await manager.evaluateDecision(validAllowDecision, flakyDecisionOperation);
+    
+    expect(attemptCount).toBe(2);
+    expect(result).toEqual({ decision: "deny" });
+  });
+});
+
+describe("A2A Operations - Operation Status", () => {
+  let manager: A2AOperationManager;
+
+  beforeEach(() => {
+    manager = new A2AOperationManager();
+  });
+
+  afterEach(() => {
+    manager.reset();
+  });
+
+  it("should track operation status", async () => {
+    const operation = vi.fn().mockResolvedValue({ success: true });
+    const intent = { ...validA2APurchaseIntent, intentId: "intent-1" };
+    
+    // Start operation
+    const operationPromise = manager.submitIntent(intent, operation);
+    
+    // Check status while processing
+    const status = manager.getOperationStatus(intent.intentId);
+    expect(status).toBeDefined();
+    expect(status?.state).toBe("processing");
+    
+    await operationPromise;
+    
+    // Check status after completion
+    const finalStatus = manager.getOperationStatus(intent.intentId);
+    expect(finalStatus).toBeUndefined(); // Should be unregistered after completion
+  });
+
+  it("should return undefined for non-existent operations", () => {
+    const status = manager.getOperationStatus("non-existent");
+    expect(status).toBeUndefined();
+  });
+});
+
+describe("A2A Operations - Configuration", () => {
+  it("should use default configuration", () => {
+    const manager = new A2AOperationManager();
+    
+    // Verify default config is used by checking behavior
+    expect(manager).toBeDefined();
+  });
+
+  it("should accept custom configuration", () => {
+    const customConfig: Partial<OperationConfig> = {
+      maxRetries: 5,
+      retryDelay: 2000,
+      timeout: 60000,
+      concurrencyLimit: 20,
+    };
+    
+    const manager = new A2AOperationManager(customConfig);
+    
+    expect(manager).toBeDefined();
+  });
+
+  it("should update configuration at runtime", () => {
+    const manager = new A2AOperationManager();
+    
+    manager.updateConfig({ maxRetries: 10 });
+    
+    expect(manager).toBeDefined();
+  });
+});
+
+describe("A2A Operations - Utility Functions", () => {
+  describe("createOperationId", () => {
+    it("should create unique operation IDs", () => {
+      const id1 = createOperationId();
+      const id2 = createOperationId();
+      
+      expect(id1).not.toBe(id2);
+      expect(id1).toMatch(/^op-\d+-[a-z0-9]+$/);
+    });
+  });
+
+  describe("isRetryableError", () => {
+    it("should identify retryable errors", () => {
+      const retryableError = new Error("TRANSIENT_ERROR");
+      expect(isRetryableError(retryableError)).toBe(true);
+    });
+
+    it("should identify non-retryable errors", () => {
+      const nonRetryableError = new Error("MALFORMED_REQUEST");
+      expect(isRetryableError(nonRetryableError)).toBe(false);
+      
+      const duplicateError = new Error("DUPLICATE_REQUEST");
+      expect(isRetryableError(duplicateError)).toBe(false);
+    });
+  });
+
+  describe("calculateBackoff", () => {
+    it("should calculate exponential backoff", () => {
+      expect(calculateBackoff(0)).toBe(1000);
+      expect(calculateBackoff(1)).toBe(2000);
+      expect(calculateBackoff(2)).toBe(4000);
+      expect(calculateBackoff(3)).toBe(8000);
+    });
+
+    it("should accept custom base delay", () => {
+      expect(calculateBackoff(0, 500)).toBe(500);
+      expect(calculateBackoff(1, 500)).toBe(1000);
+    });
+  });
+
+  describe("hasOperationTimedOut", () => {
+    it("should detect timed out operations", () => {
+      const oldContext: OperationContext = {
+        operationId: "op-1",
+        operationType: "intent_submission",
+        state: "processing",
+        attempt: 1,
+        startedAt: new Date(Date.now() - 60000).toISOString(), // 1 minute ago
+        lastAttemptAt: new Date().toISOString(),
+        config: { ...DEFAULT_OPERATION_CONFIG, timeout: 30000 },
+      };
+      
+      expect(hasOperationTimedOut(oldContext)).toBe(true);
+    });
+
+    it("should not detect timeout for recent operations", () => {
+      const recentContext: OperationContext = {
+        operationId: "op-1",
+        operationType: "intent_submission",
+        state: "processing",
+        attempt: 1,
+        startedAt: new Date(Date.now() - 1000).toISOString(), // 1 second ago
+        lastAttemptAt: new Date().toISOString(),
+        config: { ...DEFAULT_OPERATION_CONFIG, timeout: 30000 },
+      };
+      
+      expect(hasOperationTimedOut(recentContext)).toBe(false);
+    });
+  });
+});
+
+describe("A2A Operations - Cleanup and Reset", () => {
+  let manager: A2AOperationManager;
+
+  beforeEach(() => {
+    manager = new A2AOperationManager();
+  });
+
+  afterEach(() => {
+    manager.reset();
+  });
+
+  it("should clean up expired idempotency entries", async () => {
+    const config: Partial<OperationConfig> = { idempotencyWindow: 50 };
+    const shortWindowManager = new A2AOperationManager(config);
+    
+    const operation = vi.fn().mockResolvedValue({ success: true });
+    
+    await shortWindowManager.submitIntent(duplicateIntent1, operation);
+    
+    // Wait for expiry
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
+    shortWindowManager.cleanup();
+    
+    // Should allow new operation after cleanup
+    await shortWindowManager.submitIntent(duplicateIntent2, operation);
+    
+    expect(operation).toHaveBeenCalledTimes(2);
+  });
+
+  it("should reset all state", async () => {
+    const operation = vi.fn().mockResolvedValue({ success: true });
+    
+    await manager.submitIntent(duplicateIntent1, operation);
+    manager.cancelOperation(duplicateIntent1.intentId);
+    
+    manager.reset();
+    
+    // Should allow new operation after reset
+    await manager.submitIntent(duplicateIntent2, operation);
+    
+    expect(operation).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("A2A Operations - Real-World Scenarios", () => {
+  it("should handle high-volume intent submission", async () => {
+    const manager = new A2AOperationManager({ 
+      concurrencyLimit: 5,
+      maxRetries: 2,
+      retryDelay: 100,
+      timeout: 5000 
+    });
+    
+    const operation = vi.fn().mockResolvedValue({ success: true });
+    
+    const intents = Array.from({ length: 10 }, (_, i) => ({
+      ...validA2APurchaseIntent,
+      intentId: `intent-${i}`,
+      idempotencyKey: `key-${i}`,
+    }));
+    
+    const results = await Promise.allSettled(
+      intents.map(intent => manager.submitIntent(intent, operation))
+    );
+    
+    const successful = results.filter(r => r.status === "fulfilled");
+    const failed = results.filter(r => r.status === "rejected");
+    
+    // Some should succeed, some should fail due to concurrency limit
+    expect(successful.length).toBeGreaterThan(0);
+    expect(failed.length).toBeGreaterThan(0);
+    
+    manager.reset();
+  });
+
+  it("should handle mixed success and failure scenarios", async () => {
+    const manager = new A2AOperationManager({ maxRetries: 2, retryDelay: 50 });
+    
+    let callCount = 0;
+    const mixedOperation = vi.fn().mockImplementation(() => {
+      callCount++;
+      if (callCount % 3 === 0) {
+        throw new Error("TRANSIENT_ERROR");
+      }
+      return Promise.resolve({ success: true });
+    });
+    
+    const intents = Array.from({ length: 5 }, (_, i) => ({
+      ...validA2APurchaseIntent,
+      intentId: `intent-${i}`,
+      idempotencyKey: `key-${i}`,
+    }));
+    
+    const results = await Promise.allSettled(
+      intents.map(intent => manager.submitIntent(intent, mixedOperation))
+    );
+    
+    // All should eventually succeed with retries
+    const successful = results.filter(r => r.status === "fulfilled");
+    expect(successful.length).toBe(5);
+    
+    manager.reset();
+  });
+});

@@ -43,7 +43,9 @@ def _publish_safe(fn: Callable) -> Callable:
     "Publish content to a social channel. Call get_publishing_channels first to see available channels and their character limits.",
 )
 @_publish_safe
-async def publish_content(content: str, channel: str = "X") -> dict:
+async def publish_content(
+    content: str, channel: str = "X", operation_id: str | None = None
+) -> dict:
     adapter = _adapter_registry.get(channel)
     if not adapter:
         return {
@@ -53,7 +55,7 @@ async def publish_content(content: str, channel: str = "X") -> dict:
     valid, error = adapter.validate_content(content)
     if not valid:
         return {"error": error}
-    result = await adapter.post(content)
+    result = await adapter.post(content, operation_id=operation_id)
     return result.to_dict()
 
 
@@ -62,7 +64,12 @@ async def publish_content(content: str, channel: str = "X") -> dict:
     "Reply to a post on a social channel. Requires channel name, target post URL, and reply content.",
 )
 @_publish_safe
-async def reply_on_channel(channel: str, target_url: str, content: str) -> dict:
+async def reply_on_channel(
+    channel: str,
+    target_url: str,
+    content: str,
+    operation_id: str | None = None,
+) -> dict:
     adapter = _adapter_registry.get(channel)
     if not adapter:
         return {"error": f"Channel '{channel}' not available"}
@@ -72,7 +79,7 @@ async def reply_on_channel(channel: str, target_url: str, content: str) -> dict:
     valid, error = adapter.validate_content(content)
     if not valid:
         return {"error": error}
-    result = await adapter.reply(target_url, content)
+    result = await adapter.reply(target_url, content, operation_id=operation_id)
     return result.to_dict()
 
 

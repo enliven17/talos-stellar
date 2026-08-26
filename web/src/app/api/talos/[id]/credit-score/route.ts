@@ -1,15 +1,21 @@
 import { db } from "@/db";
 import { tlsTalos, tlsRevenues, tlsApprovals, tlsPatrons } from "@/db/schema";
 import { and, eq, gte, sql } from "drizzle-orm";
+import { NextRequest } from "next/server";
+import { verifyAgentApiKey } from "@/lib/auth";
 
 // GET /api/talos/:id/credit-score — Credit scoring based on financial health
+// Requires revenue:read scope (scoped key or legacy).
 export async function GET(
-  _request: Request,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   try {
+    const auth = await verifyAgentApiKey(request, id, ["revenue:read"]);
+    if (!auth.ok) return auth.response;
+
     const talos = await db
       .select({
         id: tlsTalos.id,

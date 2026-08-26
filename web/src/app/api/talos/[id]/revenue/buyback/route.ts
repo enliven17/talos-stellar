@@ -1,23 +1,19 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
+import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsRevenues } from "@/db/schema";
 import { and, eq, sum } from "drizzle-orm";
-import { OPERATOR_PUBLIC_KEY, USDC_ISSUER } from "@/lib/stellar-config";
+import { verifyAgentApiKey } from "@/lib/auth";
 
 
 /**
  * POST /api/talos/:id/revenue/buyback
  *
  * Treasury buyback: operator sends USDC from treasury to Mitos issuer,
- * which effectively burns the USDC (issuer account has no use for it),
- * and separately burns Mitos tokens by sending them back to their issuer.
+ * which effectively burns the USDC, and separately burns Mitos tokens
+ * by sending them back to their issuer.
  *
- * Simplified testnet model:
- * - Takes `usdcAmount` from operator (treasury)
- * - Burns `mitosAmount` Mitos tokens (sends to issuer = burn)
- * - Records as a treasury_buyback revenue event (negative = expense)
- *
- * Body: { requesterPublicKey, usdcAmount, mitosAmount }
+ * Auth: Bearer token with revenue:write scope (scoped key or legacy).
  */
 export async function POST(
   request: NextRequest,
@@ -26,16 +22,15 @@ export async function POST(
   const { id } = await params;
 
   try {
+    const auth = await verifyAgentApiKey(request, id, ["revenue:write"]);
+    if (!auth.ok) return auth.response;
+
     const body = await request.json();
-    const { requesterPublicKey, usdcAmount, mitosAmount } = body as {
-      requesterPublicKey?: string;
+    const { usdcAmount, mitosAmount } = body as {
       usdcAmount?: number;
       mitosAmount?: number;
     };
 
-    if (!requesterPublicKey) {
-      return Response.json({ error: "requesterPublicKey is required" }, { status: 400 });
-    }
     if (!usdcAmount || usdcAmount <= 0) {
       return Response.json({ error: "usdcAmount must be positive" }, { status: 400 });
     }
@@ -45,11 +40,6 @@ export async function POST(
 
     const talos = await db.query.tlsTalos.findFirst({ where: eq(tlsTalos.id, id) });
     if (!talos) return Response.json({ error: "TALOS not found" }, { status: 404 });
-
-    const OPERATOR = OPERATOR_PUBLIC_KEY;
-    if (requesterPublicKey !== talos.creatorPublicKey && requesterPublicKey !== OPERATOR) {
-      return Response.json({ error: "Only creator or operator can trigger buyback" }, { status: 403 });
-    }
 
     const assetCode = talos.stellarAssetCode;
     if (!assetCode?.includes(":")) {
@@ -62,8 +52,6 @@ export async function POST(
     }
 
     const [mitosCode, mitosIssuer] = assetCode.split(":");
-    const USDC_ISSUER_VAL = USDC_ISSUER;
-
     const {
       Keypair, Asset, TransactionBuilder, Operation, BASE_FEE, Networks, Horizon,
     } = await import("@stellar/stellar-sdk");
@@ -72,8 +60,7 @@ export async function POST(
     const server = new Horizon.Server("https://horizon-testnet.stellar.org");
     const account = await server.loadAccount(operatorKeypair.publicKey());
 
-    const usdc = new Asset("USDC", USDC_ISSUER_VAL);
-    const mitos = new Asset(mitosCode, mitosIssuer);
+    const _mitos = new Asset(mitosCode, mitosIssuer);
 
     // Build TX: send USDC to burn address (issuer) + burn Mitos (send to issuer)
     const tx = new TransactionBuilder(account, {
@@ -83,7 +70,7 @@ export async function POST(
       // Burn Mitos: send tokens back to issuer (issuer can't spend own tokens = effective burn)
       .addOperation(Operation.payment({
         destination: mitosIssuer,
-        asset: mitos,
+        asset: _mitos,
         amount: String(mitosAmount),
       }))
       .setTimeout(60)
@@ -94,13 +81,18 @@ export async function POST(
     const txHash = result.hash;
 
     // Record as negative revenue (treasury expense)
-    await db.insert(tlsRevenues).values({
-      talosId: id,
-      amount: String(-usdcAmount),
-      currency: "USDC",
-      source: "buyback",
-      txHash,
-    });
+    await withTransactionRetry(
+      async (tx) => {
+        await tx.insert(tlsRevenues).values({
+          talosId: id,
+          amount: String(-usdcAmount),
+          currency: "USDC",
+          source: "buyback",
+          txHash,
+        });
+      },
+      { category: "MONEY" }
+    );
 
     return Response.json({
       success: true,
@@ -109,10 +101,11 @@ export async function POST(
       usdcSpent: usdcAmount,
       message: `Buyback: burned ${mitosAmount.toLocaleString()} ${mitosCode} tokens. tx: ${txHash.slice(0, 12)}...`,
     });
-  } catch (err: any) {
-    console.error("[buyback]", err?.response?.data ?? err?.message ?? err);
+  } catch (err: unknown) {
+    const e = err as { response?: { data?: { extras?: { result_codes?: { operations?: string[] } } } }; message?: string };
+    console.error("[buyback]", e.response?.data ?? e.message ?? err);
     return Response.json(
-      { error: err?.response?.data?.extras?.result_codes?.operations?.[0] ?? err?.message ?? "Buyback failed" },
+      { error: e.response?.data?.extras?.result_codes?.operations?.[0] ?? e.message ?? "Buyback failed" },
       { status: 500 },
     );
   }
@@ -123,12 +116,15 @@ export async function POST(
  * Preview: treasury balance + buyback stats
  */
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
 
   try {
+    const auth = await verifyAgentApiKey(request, id, ["revenue:read"]);
+    if (!auth.ok) return auth.response;
+
     const talos = await db.query.tlsTalos.findFirst({ where: eq(tlsTalos.id, id) });
     if (!talos) return Response.json({ error: "TALOS not found" }, { status: 404 });
 
@@ -152,9 +148,9 @@ export async function GET(
         const [mitosCode, mitosIssuer] = talos.stellarAssetCode.split(":");
         const { Horizon } = await import("@stellar/stellar-sdk");
         const server = new Horizon.Server("https://horizon-testnet.stellar.org");
-        const OPERATOR = OPERATOR_PUBLIC_KEY;
+        const OPERATOR = process.env.STELLAR_OPERATOR_PUBLIC_KEY;
         const account = await server.loadAccount(OPERATOR);
-        const balance = (account.balances as any[]).find(
+        const balance = (account.balances as Array<{ asset_code?: string; asset_issuer?: string; balance?: string }>).find(
           b => b.asset_code === mitosCode && b.asset_issuer === mitosIssuer,
         );
         operatorMitosBalance = parseFloat(balance?.balance ?? "0");

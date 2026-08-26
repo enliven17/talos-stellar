@@ -1,21 +1,38 @@
 import { db } from "@/db";
-import { tlsTalos, tlsPatrons, tlsRevenues } from "@/db/schema";
+import { withTransactionRetry } from "@/db/db-retry";
+import { tlsTalos, tlsPatrons, tlsRevenues, tlsTokenPurchases } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { getAccountInfo, getNetworkPassphrase, getUSDCIssuer } from "@/lib/stellar";
 import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
+import { logger } from "@/lib/logger";
 
 /**
  * Buy Mitos tokens from a Talos.
  *
+ * Idempotency contract
+ * ────────────────────
+ * The Stellar txHash supplied by the caller is used as the idempotency key.
+ * Before any side effects are executed we INSERT a row into tls_token_purchases
+ * with status="pending". The txHash PRIMARY KEY makes that INSERT fail for any
+ * concurrent or duplicate request, which returns 409 immediately.
+ *
+ * After the on-chain transfer succeeds, a single db.transaction() atomically:
+ *   1. upserts the patron record
+ *   2. inserts the revenue record
+ *   3. flips the purchase row to status="completed" with a cached responseBody
+ *
+ * A retry of a completed purchase receives the original 200 response from the
+ * cache — no side effects are repeated.
+ *
  * Flow:
- * 1. Verify buyer's Stellar account exists
- * 2. Calculate total cost (amount * pricePerToken)
- * 3. Check if buyer has sufficient USDC balance
- * 4. Verify txHash is present (USDC payment already submitted by client)
- * 5. Send Mitos tokens from operator to buyer (server-side)
- * 6. Record patron status if buyer meets minimum threshold
- * 7. Record revenue
+ * 1. Validate request body
+ * 2. Fetch Talos, compute cost
+ * 3. INSERT pending idempotency row (blocks concurrent dupes)
+ * 4. Verify Stellar txHash on Horizon
+ * 5. Send Mitos tokens from operator to buyer
+ * 6. Commit side effects in a single DB transaction (patron upsert + revenue
+ *    insert + purchase status=completed + cached response)
  */
 export async function POST(
   request: Request,
@@ -40,6 +57,7 @@ export async function POST(
     return NextResponse.json({ error: "txHash is required — submit USDC payment first" }, { status: 400 });
   }
 
+  // ── Talos lookup ─────────────────────────────────────────────────
   const talos = await db.query.tlsTalos.findFirst({
     where: eq(tlsTalos.id, id),
   });
@@ -55,26 +73,100 @@ export async function POST(
 
   const totalCost = Math.round(amount * pricePerToken * 1e6) / 1e6;
 
-  // ── Replay prevention ──────────────────────────────────────────────
-  const duplicate = await db.query.tlsRevenues.findFirst({
-    where: eq(tlsRevenues.txHash, txHash),
+  // ── Idempotency check / claim ─────────────────────────────────────
+  // Look up an existing purchase record first.
+  const existing = await db.query.tlsTokenPurchases.findFirst({
+    where: eq(tlsTokenPurchases.txHash, txHash),
   });
-  if (duplicate) {
-    return NextResponse.json({ error: "Transaction already used (replay)" }, { status: 409 });
+
+  if (existing) {
+    if (existing.status === "completed" && existing.responseBody) {
+      // Idempotent replay — return original response with echo headers
+      logger.info({
+        event: "idempotency_hit",
+        idempotencyKey: txHash,
+        talosId: id,
+        replayed: true,
+      }, "buy-token idempotent replay — returning cached response");
+      const replayRes = NextResponse.json(existing.responseBody, { status: 200 });
+      replayRes.headers.set("Idempotency-Key", txHash);
+      replayRes.headers.set("X-Idempotent-Replayed", "true");
+      return replayRes;
+    }
+    if (existing.status === "pending") {
+      logger.info({
+        event: "idempotency_inflight",
+        idempotencyKey: txHash,
+        talosId: id,
+      }, "buy-token purchase in progress");
+      return NextResponse.json(
+        { error: "Purchase is already in progress for this transaction" },
+        { status: 409 },
+      );
+    }
+    // "failed" — fall through and retry (row will be updated below)
+    logger.info({
+      event: "idempotency_miss",
+      idempotencyKey: txHash,
+      talosId: id,
+      retryOfFailed: true,
+    }, "buy-token retrying failed purchase");
   }
 
-  // ── Horizon Transaction Verification ────────────────────────────────
+  // Claim the idempotency slot. For a brand-new request we insert a pending
+  // row; for a retry of a failed request we update it back to pending.
+  try {
+    if (!existing) {
+      await db.insert(tlsTokenPurchases).values({
+        txHash,
+        talosId: id,
+        buyerPublicKey,
+        amount,
+        totalCost: String(totalCost),
+        status: "pending",
+      });
+    } else {
+      // Retry of a failed purchase — reset to pending
+      await db
+        .update(tlsTokenPurchases)
+        .set({ status: "pending", responseBody: null, updatedAt: new Date() })
+        .where(eq(tlsTokenPurchases.txHash, txHash));
+    }
+  } catch (err: unknown) {
+    // Unique constraint violation → another concurrent request already claimed
+    // this txHash (race condition: two requests arrived simultaneously before
+    // either read the existing row).
+    const e = err as { code?: string };
+    if (e.code === "23505") {
+      return NextResponse.json(
+        { error: "Purchase is already in progress for this transaction" },
+        { status: 409 },
+      );
+    }
+    throw err;
+  }
+
+  // ── Horizon Transaction Verification ─────────────────────────────
   let txResult;
   try {
     const { Horizon } = await import("@stellar/stellar-sdk");
     const server = new Horizon.Server(process.env.STELLAR_HORIZON_URL ?? "https://horizon-testnet.stellar.org");
     txResult = await server.transactions().transaction(txHash).call();
-  } catch (err: any) {
-    console.error("[buy-token] Transaction fetch failed:", err?.message ?? err);
+  } catch (err: unknown) {
+    console.error("[buy-token] Transaction fetch failed:", err);
+    // Mark failed so a later retry (with a corrected txHash) can proceed
+    await db
+      .update(tlsTokenPurchases)
+      .set({ status: "failed", updatedAt: new Date() })
+      .where(eq(tlsTokenPurchases.txHash, txHash));
     return NextResponse.json({ error: "Transaction not found on Stellar network" }, { status: 400 });
   }
 
   if (!txResult.successful) {
+    await db
+      .update(tlsTokenPurchases)
+      .set({ status: "failed", updatedAt: new Date() })
+      .where(eq(tlsTokenPurchases.txHash, txHash));
     return NextResponse.json({ error: "Transaction was not successful on-chain" }, { status: 400 });
   }
 
@@ -84,25 +176,24 @@ export async function POST(
     const usdcIssuer = getUSDCIssuer();
     const usdcAsset = new Asset("USDC", usdcIssuer);
 
-           const tx = TransactionBuilder.fromXDR(txResult.envelope_xdr, networkPassphrase);
-
-    // `fromXDR` may return a FeeBumpTransaction (which has no `source`); in
-    // that case the relevant source is on the wrapped inner transaction.
+    const tx = TransactionBuilder.fromXDR(txResult.envelope_xdr, networkPassphrase);
     const innerTx = "innerTransaction" in tx ? tx.innerTransaction : tx;
 
-    // Validate: source_account == buyerPublicKey
     if (
       innerTx.source !== buyerPublicKey &&
       txResult.source_account !== buyerPublicKey
     ) {
+      await db
+        .update(tlsTokenPurchases)
+        .set({ status: "failed", updatedAt: new Date() })
+        .where(eq(tlsTokenPurchases.txHash, txHash));
       return NextResponse.json(
         { error: "Transaction signer does not match buyerPublicKey" },
         { status: 400 },
       );
     }
 
-    // Validate at least one operation is a USDC payment of the correct amount to the treasury
-            const ops = innerTx.operations as unknown as Array<{
+    const ops = innerTx.operations as unknown as Array<{
       type: string;
       asset?: { code: string; issuer: string };
       destination?: string;
@@ -120,32 +211,44 @@ export async function POST(
         op.asset?.code === usdcAsset.code &&
         op.asset?.issuer === usdcAsset.issuer &&
         expectedDestinations.includes(op.destination ?? "") &&
-        Math.abs(parseFloat(op.amount ?? "0") - totalCost) <= 1e-6
+        Math.abs(parseFloat(op.amount ?? "0") - totalCost) <= 1e-6,
     );
 
     if (!hasValidPayment) {
+      await db
+        .update(tlsTokenPurchases)
+        .set({ status: "failed", updatedAt: new Date() })
+        .where(eq(tlsTokenPurchases.txHash, txHash));
       return NextResponse.json(
         { error: "No matching USDC payment found in transaction" },
         { status: 400 },
       );
     }
-  } catch (err: any) {
-    console.error("[buy-token] Transaction verification failed:", err?.message ?? err);
+  } catch (err: unknown) {
+    console.error("[buy-token] Transaction verification failed:", err);
+    await db
+      .update(tlsTokenPurchases)
+      .set({ status: "failed", updatedAt: new Date() })
+      .where(eq(tlsTokenPurchases.txHash, txHash));
     return NextResponse.json({ error: "Failed to verify transaction details" }, { status: 400 });
   }
 
-  // Verify buyer's Stellar account exists
+  // ── Verify buyer account exists on Stellar ────────────────────────
   const accountInfo = await getAccountInfo(buyerPublicKey);
   if (!accountInfo.exists) {
+    await db
+      .update(tlsTokenPurchases)
+      .set({ status: "failed", updatedAt: new Date() })
+      .where(eq(tlsTokenPurchases.txHash, txHash));
     return NextResponse.json(
       { error: `Stellar account ${buyerPublicKey} does not exist` },
       { status: 400 },
     );
   }
 
-  // ── Send Mitos tokens from operator to buyer ───────────────────────
+  // ── Send Mitos tokens from operator to buyer ──────────────────────
   let mitosTxHash: string | null = null;
-  const assetCode = talos.stellarAssetCode; // format: "SYMBOL:ISSUER"
+  const assetCode = talos.stellarAssetCode;
 
   if (assetCode && assetCode.includes(":")) {
     try {
@@ -186,8 +289,13 @@ export async function POST(
         const mitosTxResult = await server.submitTransaction(mitosTx);
         mitosTxHash = mitosTxResult.hash;
       }
-    } catch (err: any) {
-      console.error("[buy-token] Mitos transfer failed:", err?.response?.data ?? err?.message ?? err);
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: unknown }; message?: string };
+      console.error("[buy-token] Mitos transfer failed:", e.response?.data ?? e.message ?? err);
+      await db
+        .update(tlsTokenPurchases)
+        .set({ status: "failed", updatedAt: new Date() })
+        .where(eq(tlsTokenPurchases.txHash, txHash));
       return NextResponse.json(
         { error: "Failed to send Mitos tokens to buyer. Purchase cancelled." },
         { status: 500 },
@@ -195,7 +303,7 @@ export async function POST(
     }
   }
 
-  // ── Patron threshold check ─────────────────────────────────────────
+  // ── Patron threshold check (pre-compute outside transaction) ──────
   const minForPatron = talos.minPatronPulse ?? 100;
 
   const existingPatron = await db.query.tlsPatrons.findFirst({
@@ -209,42 +317,9 @@ export async function POST(
   const newPulseAmount = currentPulseAmount + amount;
   const becomesPatron = newPulseAmount >= minForPatron;
 
-  if (becomesPatron) {
-    if (existingPatron) {
-      await db
-        .update(tlsPatrons)
-        .set({ pulseAmount: newPulseAmount, updatedAt: new Date() })
-        .where(eq(tlsPatrons.id, existingPatron.id));
-    } else {
-      await db.insert(tlsPatrons).values({
-        talosId: id,
-        stellarPublicKey: buyerPublicKey,
-        role: "patron",
-        share: "0",
-        pulseAmount: newPulseAmount,
-        status: "active",
-      });
-    }
-  } else if (existingPatron) {
-    // Update token balance even if still below threshold
-    await db
-      .update(tlsPatrons)
-      .set({ pulseAmount: newPulseAmount, updatedAt: new Date() })
-      .where(eq(tlsPatrons.id, existingPatron.id));
-  }
-
-  // ── Record revenue ─────────────────────────────────────────────────
-  await db.insert(tlsRevenues).values({
-    talosId: id,
-    amount: String(totalCost),
-    currency: "USDC",
-    source: "token_sale",
-    txHash,
-  });
-
   const tokenSymbol = talos.tokenSymbol ?? "MITOS";
 
-  return NextResponse.json({
+  const responseBody = {
     success: true,
     txHash,
     mitosTxHash,
@@ -263,5 +338,70 @@ export async function POST(
         ? `pending (need ${minForPatron - newPulseAmount} more ${tokenSymbol})`
         : "active",
     message: `Successfully purchased ${amount.toLocaleString()} ${tokenSymbol} for ${totalCost.toFixed(2)} USDC`,
-  });
+  };
+
+  // ── Atomic side-effects transaction ──────────────────────────────
+  // All DB writes — patron upsert, revenue insert, and the idempotency row
+  // flip to "completed" — are committed in one transaction. A crash before
+  // commit rolls back every write; the purchase row stays "pending" and the
+  // next retry can proceed safely.
+  await withTransactionRetry(
+    async (tx) => {
+      // 1. Patron upsert
+      if (becomesPatron) {
+        if (existingPatron) {
+          await tx
+            .update(tlsPatrons)
+            .set({ pulseAmount: newPulseAmount, updatedAt: new Date() })
+            .where(eq(tlsPatrons.id, existingPatron.id));
+        } else {
+          await tx.insert(tlsPatrons).values({
+            talosId: id,
+            stellarPublicKey: buyerPublicKey,
+            role: "patron",
+            share: "0",
+            pulseAmount: newPulseAmount,
+            status: "active",
+          });
+        }
+      } else if (existingPatron) {
+        await tx
+          .update(tlsPatrons)
+          .set({ pulseAmount: newPulseAmount, updatedAt: new Date() })
+          .where(eq(tlsPatrons.id, existingPatron.id));
+      }
+
+      // 2. Revenue record
+      await tx.insert(tlsRevenues).values({
+        talosId: id,
+        amount: String(totalCost),
+        currency: "USDC",
+        source: "token_sale",
+        txHash,
+      });
+
+      // 3. Flip idempotency row to completed with cached response
+      await tx
+        .update(tlsTokenPurchases)
+        .set({
+          status: "completed",
+          responseBody,
+          updatedAt: new Date(),
+        })
+        .where(eq(tlsTokenPurchases.txHash, txHash));
+    },
+    { category: "TOKEN" }
+  );
+
+  logger.info({
+    event: "idempotency_commit",
+    idempotencyKey: txHash,
+    talosId: id,
+    replayed: false,
+  }, "buy-token purchase committed");
+
+  const successRes = NextResponse.json(responseBody);
+  successRes.headers.set("Idempotency-Key", txHash);
+  successRes.headers.set("X-Idempotent-Replayed", "false");
+  return successRes;
 }

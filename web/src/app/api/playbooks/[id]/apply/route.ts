@@ -2,8 +2,10 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsPlaybooks, tlsPlaybookPurchases, tlsActivities } from "@/db/schema";
 import { and, eq } from "drizzle-orm";
+import { resolveTalosFromRequest } from "@/lib/auth";
 
 // PATCH /api/playbooks/:id/apply — Mark a purchased playbook as applied
+// Requires activity:write scope (scoped key or legacy).
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -11,15 +13,8 @@ export async function PATCH(
   try {
     const { id } = await params;
 
-    const body = await request.json();
-    const { buyerPublicKey } = body;
-
-    if (!buyerPublicKey) {
-      return Response.json(
-        { error: "buyerPublicKey is required" },
-        { status: 400 }
-      );
-    }
+    const auth = await resolveTalosFromRequest(request, ["activity:write"]);
+    if (!auth.ok) return auth.response;
 
     // Verify playbook exists
     const playbook = await db
@@ -33,14 +28,13 @@ export async function PATCH(
       return Response.json({ error: "Playbook not found" }, { status: 404 });
     }
 
-    // Verify purchase exists
+    // Verify purchase exists for this caller
     const purchase = await db
       .select()
       .from(tlsPlaybookPurchases)
       .where(
         and(
           eq(tlsPlaybookPurchases.playbookId, id),
-          eq(tlsPlaybookPurchases.buyerPublicKey, buyerPublicKey)
         )
       )
       .limit(1)
@@ -48,7 +42,7 @@ export async function PATCH(
 
     if (!purchase) {
       return Response.json(
-        { error: "No purchase found for this playbook and wallet" },
+        { error: "No purchase found for this playbook" },
         { status: 404 }
       );
     }

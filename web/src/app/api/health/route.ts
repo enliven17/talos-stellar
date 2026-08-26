@@ -1,18 +1,14 @@
 import { db } from "@/db";
 import { sql } from "drizzle-orm";
 import { NextResponse } from "next/server";
+import {
+  DEFAULT_HORIZON,
+  DB_TIMEOUT_MS,
+  STELLAR_TIMEOUT_MS,
+  withTimeout,
+} from "./utils";
 
 export const runtime = "nodejs";
-
-const DEFAULT_HORIZON = "https://horizon-testnet.stellar.org";
-
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  let timerId: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timerId = setTimeout(() => reject(new Error("timeout")), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timerId));
-}
 
 export async function GET() {
   const checks: { db: "ok" | "error"; stellar: "ok" | "error" } = {
@@ -21,14 +17,21 @@ export async function GET() {
   };
 
   await Promise.allSettled([
-    withTimeout(db.execute(sql`SELECT 1`), 2000).then(() => {
+    withTimeout(
+      (signal) => {
+        void signal;
+        return db.execute(sql`SELECT 1`);
+      },
+      DB_TIMEOUT_MS,
+    ).then(() => {
       checks.db = "ok";
     }),
     withTimeout(
-      fetch(process.env.STELLAR_HORIZON_URL ?? DEFAULT_HORIZON).then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      }),
-      3000,
+      (signal) =>
+        fetch(process.env.STELLAR_HORIZON_URL ?? DEFAULT_HORIZON, { signal }).then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        }),
+      STELLAR_TIMEOUT_MS,
     ).then(() => {
       checks.stellar = "ok";
     }),

@@ -91,7 +91,7 @@ class TalosClient:
         r.raise_for_status()
         return r.json()
 
-    async def sign_payment(self, payee: str, amount: int) -> dict:
+    async def sign_payment(self, payee: str, amount: str) -> dict:
         r = await self._http.post(
             f"/api/talos/{self.talos_id}/sign",
             json={"payee": payee, "amount": amount},

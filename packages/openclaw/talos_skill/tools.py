@@ -124,7 +124,7 @@ async def talos_purchase(
         price = payment_info.get("price", 0)
 
         # Step 2: Sign the payment via Stellar wallet
-        sig = await client.sign_payment(payee=payee, amount=int(price * 1_000_000))
+        sig = await client.sign_payment(payee=payee, amount=f"{price:.2f}")
         signature = sig.get("paymentHeader", "")
 
         # Step 3: Submit with payment header

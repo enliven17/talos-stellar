@@ -3,9 +3,27 @@ from __future__ import annotations
 
 import logging
 import os
+
 import structlog
 
 from talos_agent.redaction import redact_event
+
+
+def _inject_trace_context(logger, method_name, event_dict):
+    """Add trace_id/span_id to the log event when a recording span is active.
+
+    No-op field-wise when tracing is disabled: get_current_span() then
+    returns a non-recording span and neither key is added, so log shape is
+    unchanged for anyone who hasn't opted into OTEL_ENABLED.
+    """
+    from opentelemetry import trace
+
+    span = trace.get_current_span()
+    ctx = span.get_span_context()
+    if ctx.is_valid and span.is_recording():
+        event_dict["trace_id"] = format(ctx.trace_id, "032x")
+        event_dict["span_id"] = format(ctx.span_id, "016x")
+    return event_dict
 
 
 def configure_logging() -> None:
@@ -16,6 +34,7 @@ def configure_logging() -> None:
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.format_exc_info,
+            _inject_trace_context,
             redact_event,
             structlog.processors.JSONRenderer(),
         ],
@@ -42,6 +61,12 @@ def init_sentry() -> None:
 def setup() -> None:
     configure_logging()
     init_sentry()
+
+    from talos_agent import metrics as _metrics
+    from talos_agent import tracing as _tracing
+
+    _tracing.configure_tracing()
+    _metrics.configure_metrics()
 
 
 log = structlog.get_logger()
