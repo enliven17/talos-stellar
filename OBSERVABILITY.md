@@ -45,6 +45,10 @@ log.info("event_name", key="value")
 
 Every agent cycle binds a `cycle_id` UUID to the log context via `structlog.contextvars`.
 
+### Safe-to-log field policy
+
+Log correlation IDs, public Stellar addresses, transaction hashes, resource IDs, operation names, status codes, counts, and amounts when needed for debugging. Never log API keys, bearer or bot tokens, webhook URLs, passwords, Stellar secret keys, encrypted key material, signed XDR, signatures, or x402 payment headers/proofs. Structured fields are redacted recursively before JSON serialization; exception text and retry/error output are scrubbed before logging. Keep errors categorized by exception type or status rather than including raw response bodies or credentials.
+
 ## Request Correlation
 
 ### X-Request-Id header

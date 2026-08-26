@@ -5,6 +5,8 @@ import logging
 import os
 import structlog
 
+from talos_agent.redaction import redact_event
+
 
 def configure_logging() -> None:
     """Set up structlog to emit JSON lines to stdout."""
@@ -13,6 +15,8 @@ def configure_logging() -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.format_exc_info,
+            redact_event,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),

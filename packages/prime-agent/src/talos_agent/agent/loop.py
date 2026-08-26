@@ -12,6 +12,7 @@ from rich.console import Console
 from talos_agent.agent.context import AgentContext
 from talos_agent.agent.prompt import build_system_prompt
 from talos_agent.http import call_with_retry
+from talos_agent.redaction import redact, redact_text
 
 if TYPE_CHECKING:
     from talos_agent.config import Settings
@@ -76,7 +77,7 @@ async def agent_loop(
         assistant_msg: dict = {"role": "assistant"}
         if msg.content:
             assistant_msg["content"] = msg.content
-            console.print(f"[blue]Agent:[/blue] {msg.content[:200]}")
+            console.print(f"[blue]Agent:[/blue] {redact_text(msg.content[:200])}")
         if msg.tool_calls:
             assistant_msg["tool_calls"] = [
                 {
@@ -104,9 +105,9 @@ async def agent_loop(
             console.print(f"[yellow]Tool:[/yellow] {fn_name}({_truncate_args(args)})")
 
             result = await tools.execute(fn_name, args)
-            result_str = json.dumps(result, default=str, ensure_ascii=False)
+            result_str = json.dumps(redact(result), default=str, ensure_ascii=False)
 
-            console.print(f"[dim]Result:[/dim] {result_str[:200]}")
+            console.print(f"[dim]Result:[/dim] {redact_text(result_str[:200])}")
 
             messages.append({
                 "role": "tool",
@@ -122,7 +123,7 @@ async def agent_loop(
 def _truncate_args(args: dict) -> str:
     parts = []
     for k, v in args.items():
-        s = str(v)
+        s = redact(v, key=k)
         if len(s) > 50:
             s = s[:47] + "..."
         parts.append(f"{k}={s!r}")

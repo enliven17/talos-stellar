@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from rich.console import Console
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
+from talos_agent.redaction import redact_text
 
 if TYPE_CHECKING:
     from talos_agent.browser.session import BrowserSession
@@ -91,8 +92,9 @@ class XAdapter(BaseSocialAdapter):
         await asyncio.sleep(4)
 
         await self._browser.act(
-            f"Click on the username or email input field and type: {self._settings.x_username}"
+            "Click on the username or email input field and type the configured X username."
         )
+        await self._browser.keyboard_type(redact_text(self._settings.x_username))
         await asyncio.sleep(2)
         await self._browser.act("Click the Next button")
         await asyncio.sleep(4)
@@ -108,15 +110,17 @@ class XAdapter(BaseSocialAdapter):
         page_type = check.get("type", "other") if isinstance(check, dict) else "other"
         if page_type == "verification" and self._settings.x_email:
             await self._browser.act(
-                f"Click on the input field and type: {self._settings.x_email}"
+                "Click on the input field and type the configured X email."
             )
+            await self._browser.keyboard_type(redact_text(self._settings.x_email))
             await asyncio.sleep(1)
             await self._browser.act("Click the Next button")
             await asyncio.sleep(4)
 
         await self._browser.act(
-            f"Click on the password input field and type: {self._settings.x_password}"
+            "Click on the password input field and type the configured X password."
         )
+        await self._browser.keyboard_type(self._settings.x_password)
         await asyncio.sleep(1)
         await self._browser.act("Click the Log in button")
         await asyncio.sleep(5)

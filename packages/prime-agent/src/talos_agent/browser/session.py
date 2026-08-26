@@ -7,6 +7,8 @@ import json
 import subprocess
 
 from rich.console import Console
+
+from talos_agent.redaction import safe_exception_message
 from stagehand import Stagehand
 
 from talos_agent.config import APP_DIR, Settings
@@ -146,7 +148,7 @@ class BrowserSession:
                 console.print(f"[green]Browser reconnected (attempt {attempt}).[/green]")
                 return
             except Exception as e:
-                console.print(f"[red]Reconnect attempt {attempt} failed: {e}[/red]")
+                console.print(f"[red]Reconnect attempt {attempt} failed: {safe_exception_message(e)}[/red]")
                 if attempt == MAX_RECONNECT_ATTEMPTS:
                     raise RuntimeError(
                         f"Browser reconnect failed after {MAX_RECONNECT_ATTEMPTS} attempts"

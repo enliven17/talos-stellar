@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from talos_agent.config import Settings
 
 from talos_agent.observability import log, setup as setup_observability
+from talos_agent.redaction import safe_exception_message
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -388,8 +389,9 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                         db.update_schedule("agent_cycle")
                         log.info("agent_cycle_complete", cycle_id=cycle_id)
                 except Exception as e:
-                    console.print(f"[red]Agent cycle error: {e}[/red]")
-                    log.error("agent_cycle_error", error=str(e), cycle_id=cycle_id)
+                    safe_error = safe_exception_message(e)
+                    console.print(f"[red]Agent cycle error: {safe_error}[/red]")
+                    log.error("agent_cycle_error", error=safe_error, cycle_id=cycle_id)
                     try:
                         import sentry_sdk
 
@@ -430,7 +432,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
 
                 backoff.success()
             except Exception as e:
-                console.print(f"[dim red]Polling error: {e}[/dim red]")
+                console.print(f"[dim red]Polling error: {safe_exception_message(e)}[/dim red]")
                 backoff.failure()
 
             try:
@@ -447,7 +449,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                 await api.update_status(settings.talos_id, online=True)
                 backoff.success()
             except Exception as e:
-                logger.debug(f"Heartbeat error: {e}")
+                logger.debug("Heartbeat error: %s", safe_exception_message(e))
                 backoff.failure()
 
             try:
@@ -473,7 +475,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                     db.mark_activities_sent([a["id"] for a in pending])
                 backoff.success()
             except Exception as e:
-                logger.debug(f"Activity flush error: {e}")
+                logger.debug("Activity flush error: %s", safe_exception_message(e))
                 backoff.failure()
 
             try:

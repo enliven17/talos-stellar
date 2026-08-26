@@ -12,6 +12,8 @@ from typing import Any
 
 from rich.console import Console
 
+from talos_agent.redaction import safe_exception_message
+
 console = Console()
 
 
@@ -44,7 +46,7 @@ class X402Signer:
             else:
                 console.print("[yellow]No agent wallet found. x402 signing disabled.[/yellow]")
         except Exception as e:
-            console.print(f"[yellow]x402 signer init failed: {e}[/yellow]")
+            console.print(f"[yellow]x402 signer init failed: {safe_exception_message(e)}[/yellow]")
 
     @property
     def available(self) -> bool:
