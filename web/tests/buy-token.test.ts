@@ -1,4 +1,5 @@
 import { vi, describe, it, expect, beforeEach } from "vitest";
+import fixtures from "./fixtures/x402-payments.json";
 import { POST } from "../src/app/api/talos/[id]/buy-token/route";
 import { Keypair, Asset, TransactionBuilder, Operation, Networks, Account } from "@stellar/stellar-sdk";
 import { OPERATOR_PUBLIC_KEY } from "../src/lib/stellar-config";
@@ -227,40 +228,18 @@ describe("POST /api/talos/[id]/buy-token — Verification Tests", () => {
     });
     mockFindFirstTokenPurchase.mockResolvedValue(null);
 
-    // Build a transaction signed by a different key than the claimed buyerPublicKey
-    const buyerKeypair = Keypair.random();
-    const otherKeypair = Keypair.random();
-    const sourceAccount = new Account(otherKeypair.publicKey(), "123456789012345");
-    const usdcAsset = new Asset("USDC", "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5");
-
-    const tx = new TransactionBuilder(sourceAccount, {
-      fee: "100",
-      networkPassphrase: Networks.TESTNET,
-    })
-      .addOperation(
-        Operation.payment({
-          destination: operatorTreasury,
-          asset: usdcAsset,
-          amount: "10.0000000",
-        })
-      )
-      .setTimeout(60)
-      .build();
-
-    tx.sign(otherKeypair);
-
     mockTransactionCall.mockResolvedValue({
       successful: true,
-      source_account: otherKeypair.publicKey(),
-      envelope_xdr: tx.toXDR(),
+      source_account: "some-other-public-key", // Not the buyer
+      envelope_xdr: fixtures.valid,
     });
 
     const request = new Request("http://localhost/api/talos/agent-id/buy-token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        buyerPublicKey: buyerKeypair.publicKey(), // claim to be buyer, but transaction source is otherKeypair
-        amount: 10,
+        buyerPublicKey: fixtures.metadata.senderPublicKey, // claim to be buyer, but transaction source is otherKeypair
+        amount: 1.5,
         txHash: "valid-tx-hash",
       }),
     });
@@ -280,55 +259,35 @@ describe("POST /api/talos/[id]/buy-token — Verification Tests", () => {
     });
     mockFindFirstTokenPurchase.mockResolvedValue(null);
 
-    const buyerKeypair = Keypair.random();
-    const buyerPublicKey = buyerKeypair.publicKey();
-    const sourceAccount = new Account(buyerPublicKey, "123456789012345");
-    const usdcAsset = new Asset("USDC", "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5");
-
     // Invalid Destination (pays to another user instead of Operator Treasury)
-    const txWrongDest = new TransactionBuilder(sourceAccount, {
-      fee: "100",
-      networkPassphrase: Networks.TESTNET,
-    })
-      .addOperation(
-        Operation.payment({
-          destination: Keypair.random().publicKey(),
-          asset: usdcAsset,
-          amount: "10.0000000",
-        })
-      )
-      .setTimeout(60)
-      .build();
-    txWrongDest.sign(buyerKeypair);
-
-    mockTransactionCall.mockResolvedValue({
+    mockTransactionCall.mockResolvedValueOnce({
       successful: true,
-      source_account: buyerPublicKey,
-      envelope_xdr: txWrongDest.toXDR(),
+      source_account: fixtures.metadata.senderPublicKey,
+      envelope_xdr: fixtures.invalidWrongRecipient,
     });
 
-    const request = new Request("http://localhost/api/talos/agent-id/buy-token", {
+    const requestWrongDest = new Request("http://localhost/api/talos/agent-id/buy-token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        buyerPublicKey,
-        amount: 10, // expecting 10 USDC
-        txHash: "valid-tx-hash",
+        buyerPublicKey: fixtures.metadata.senderPublicKey,
+        amount: 1.5,
+        txHash: "wrong-dest-tx",
       }),
     });
 
-    const params = Promise.resolve({ id: "agent-id" });
-    const response = await POST(request, { params });
-    const body = await response.json();
+    const paramsWrongDest = Promise.resolve({ id: "agent-id" });
+    const responseWrongDest = await POST(requestWrongDest, { params: paramsWrongDest });
+    const bodyWrongDest = await responseWrongDest.json();
 
-    expect(response.status).toBe(400);
-    expect(body.error).toContain("No matching USDC payment");
+    expect(responseWrongDest.status).toBe(400);
+    expect(bodyWrongDest.error).toContain("No matching USDC payment");
   });
 
   it("processes happy path successfully, issuing Mitos tokens on valid payment details", async () => {
     const mockTalos = {
       id: "agent-id",
-      pulsePrice: "0.5",
+      pulsePrice: "0.15",
       stellarAssetCode: "MITOS:GDN5AZ5KL6ZUN4W7SLRUXA3ZXCF4V6POZPV2QKDVDHM7QAN6R54IB3BV",
       minPatronPulse: 100,
       agentWalletAddress: "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL",
@@ -344,34 +303,13 @@ describe("POST /api/talos/[id]/buy-token — Verification Tests", () => {
       usdcBalance: "1000",
     });
 
-    const buyerKeypair = Keypair.random();
-    const buyerPublicKey = buyerKeypair.publicKey();
-    const sourceAccount = new Account(buyerPublicKey, "123456789012345");
-    const usdcAsset = new Asset("USDC", "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5");
-
-    // Total cost for 10 tokens at 0.5 USDC = 5 USDC
-    const totalCost = 5;
-
-    const tx = new TransactionBuilder(sourceAccount, {
-      fee: "100",
-      networkPassphrase: Networks.TESTNET,
-    })
-      .addOperation(
-        Operation.payment({
-          destination: operatorTreasury,
-          asset: usdcAsset,
-          amount: "5.0000000",
-        })
-      )
-      .setTimeout(60)
-      .build();
-
-    tx.sign(buyerKeypair);
+    // Total cost for 10 tokens at 0.15 USDC = 1.5 USDC
+    const totalCost = 1.5;
 
     mockTransactionCall.mockResolvedValue({
       successful: true,
-      source_account: buyerPublicKey,
-      envelope_xdr: tx.toXDR(),
+      source_account: fixtures.metadata.senderPublicKey,
+      envelope_xdr: fixtures.valid,
     });
 
     mockSubmitTransaction.mockResolvedValue({
@@ -385,7 +323,7 @@ describe("POST /api/talos/[id]/buy-token — Verification Tests", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        buyerPublicKey,
+        buyerPublicKey: fixtures.metadata.senderPublicKey,
         amount: 10,
         txHash: "valid-tx-hash",
       }),

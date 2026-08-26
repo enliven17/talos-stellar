@@ -8,6 +8,7 @@
  * - Replay prevention
  */
 import { describe, it, expect } from "vitest";
+import fixtures from "./fixtures/x402-payments.json";
 
 const BASE = process.env.TEST_BASE_URL || "http://localhost:3000";
 
@@ -132,14 +133,15 @@ describe("PUT /api/talos/:id/service — Register service", () => {
       body: JSON.stringify({
         serviceName: "premium_trend_research",
         description: "Premium market trend research with deeper insights",
-        price: 5.0,
+        price: 1.5,
+        stellarPublicKey: fixtures.metadata.receiverPublicKey,
       }),
     });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.serviceName).toBe("premium_trend_research");
     expect(body.description).toBe("Premium market trend research with deeper insights");
-    expect(body.price).toBe("5.0");
+    expect(body.price).toBe("1.5");
     expect(body.talosId).toBe(sellerTalosId);
   });
 
@@ -213,23 +215,18 @@ describe("POST /api/talos/:id/service — Payment validation", () => {
     expect(res.status).toBe(400);
   });
 
-  it("rejects X-PAYMENT without nonce", async () => {
+  it("rejects missing operations", async () => {
     const res = await api(`/api/talos/${sellerTalosId}/service`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${buyerApiKey}`,
-        "X-PAYMENT": JSON.stringify({
-          from: "0x1111111111111111111111111111111111111111",
-          to: "0x2222222222222222222222222222222222222222",
-          value: "1500000",
-          signature: "0xfake",
-        }),
+        "X-PAYMENT": fixtures.invalidMissingOperation,
       },
       body: JSON.stringify({}),
     });
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(402);
     const body = await res.json();
-    expect(body.error).toContain("nonce");
+    expect(body.error).toContain("Missing operations");
   });
 
   it("rejects invalid X-PAYMENT format", async () => {
@@ -249,17 +246,41 @@ describe("POST /api/talos/:id/service — Payment validation", () => {
       method: "POST",
       headers: {
         Authorization: `Bearer ${buyerApiKey}`,
-        "X-PAYMENT": JSON.stringify({
-          from: "0x1111111111111111111111111111111111111111",
-          to: "0x2222222222222222222222222222222222222222",
-          value: "100", // Way too low (1.5 USDC = 1500000)
-          signature: "0xfake",
-          nonce: "0x" + "00".repeat(32),
-        }),
+        "X-PAYMENT": fixtures.invalidWrongAmount,
       },
       body: JSON.stringify({}),
     });
-    expect(res.status).toBe(400); // payee mismatch will trigger first, but amount check is there
+    expect(res.status).toBe(402);
+    const body = await res.json();
+    expect(body.error).toContain("Wrong amount");
+  });
+  
+  it("rejects wrong recipient", async () => {
+    const res = await api(`/api/talos/${sellerTalosId}/service`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${buyerApiKey}`,
+        "X-PAYMENT": fixtures.invalidWrongRecipient,
+      },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(402);
+    const body = await res.json();
+    expect(body.error).toContain("Wrong recipient");
+  });
+
+  it("rejects wrong asset", async () => {
+    const res = await api(`/api/talos/${sellerTalosId}/service`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${buyerApiKey}`,
+        "X-PAYMENT": fixtures.invalidWrongAsset,
+      },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(402);
+    const body = await res.json();
+    expect(body.error).toContain("Wrong asset");
   });
 
   it("returns 503 when broadcast infra not configured", async () => {
@@ -271,20 +292,14 @@ describe("POST /api/talos/:id/service — Payment validation", () => {
       method: "POST",
       headers: {
         Authorization: `Bearer ${buyerApiKey}`,
-        "X-PAYMENT": JSON.stringify({
-          from: "0x1111111111111111111111111111111111111111",
-          to: "0x0000000000000000000000000000000000000000",
-          value: "1500000",
-          signature: "0xfakesig",
-          nonce: "0x" + "ab".repeat(32),
-          validAfter: 0,
-          validBefore: Math.floor(Date.now() / 1000) + 3600,
-        }),
+        "X-PAYMENT": fixtures.valid,
       },
       body: JSON.stringify({}),
     });
     // Will fail at payee mismatch (400) or signature verification (403) before broadcast
-    expect([400, 403, 503]).toContain(res.status);
+    // In our case with offline XDR, it will pass verification and then try to settle.
+    // We expect a 502 On-chain payment settlement failed if broadcast fails.
+    expect([400, 403, 502, 503]).toContain(res.status);
   });
 });
 

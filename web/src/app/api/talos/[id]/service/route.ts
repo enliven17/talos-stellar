@@ -156,10 +156,17 @@ async function handlePost(
     // Always verify against the listed service price — bidPrice is stored for negotiation
     // records only and must not reduce the payment amount until server-side accepted.
     const expectedAmount = Number(service.price).toFixed(2);
-    const verified = await verifyX402Payment(paymentToken, expectedAmount, expectedPayee);
-    if (!verified) {
+    try {
+      const verified = await verifyX402Payment(paymentToken, expectedAmount, expectedPayee);
+      if (!verified) {
+        return Response.json(
+          { error: "Invalid or insufficient x402 payment" },
+          { status: 402 }
+        );
+      }
+    } catch (verifyErr: any) {
       return Response.json(
-        { error: "Invalid or insufficient x402 payment" },
+        { error: verifyErr.message },
         { status: 402 }
       );
     }

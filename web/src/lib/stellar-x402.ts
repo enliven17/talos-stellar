@@ -130,7 +130,51 @@ export async function verifyX402Payment(
   expectedTo: string,
 ): Promise<boolean> {
   try {
-    // Try x402-stellar verify
+    // 1. Attempt offline XDR parsing (fallback path)
+    let isXdr = false;
+    try {
+      const { TransactionBuilder } = await import("@stellar/stellar-sdk");
+      const networkPassphrase =
+        process.env.STELLAR_NETWORK === "mainnet"
+          ? "Public Global Stellar Network ; September 2015"
+          : "Test SDF Network ; September 2015";
+      
+      const tx = TransactionBuilder.fromXDR(paymentToken, networkPassphrase);
+      isXdr = true;
+      const innerTx = "innerTransaction" in tx ? tx.innerTransaction : tx;
+      
+      const ops = innerTx.operations as Array<{
+        type: string;
+        asset?: { code: string };
+        destination?: string;
+        amount?: string;
+      }>;
+      
+      if (ops.length === 0) throw new Error("Missing operations in XDR");
+
+      const hasValidPayment = ops.some((op) => {
+        if (op.type !== "payment") return false;
+        
+        if (op.asset?.code !== "USDC") {
+          throw new Error("Wrong asset: expected USDC");
+        }
+        if (op.destination !== expectedTo) {
+          throw new Error("Wrong recipient");
+        }
+        if (Math.abs(parseFloat(op.amount ?? "0") - parseFloat(expectedAmount)) > 1e-6) {
+          throw new Error("Wrong amount");
+        }
+        return true;
+      });
+      
+      if (hasValidPayment) return true;
+      throw new Error("Invalid payment operations");
+    } catch (e: any) {
+      if (isXdr) throw new Error(`x402 XDR verification failed: ${e.message}`);
+      // Not an XDR string, fall through to Soroban facilitator checks
+    }
+
+    // 2. Try x402-stellar verify (Soroban auth)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const x402 = await import("x402-stellar").catch(() => null) as any;
     if (x402?.verifyPayment) {
@@ -143,7 +187,7 @@ export async function verifyX402Payment(
       });
     }
 
-    // Fallback: call facilitator /verify directly
+    // 3. Fallback: call facilitator /verify directly
     const res = await fetch(`${X402_FACILITATOR_URL}/verify`, {
       method: "POST",
       headers: {
