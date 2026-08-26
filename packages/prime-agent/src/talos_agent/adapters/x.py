@@ -11,7 +11,6 @@ from rich.console import Console
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
 from talos_agent.adapters.capability import SecretProvider
 from talos_agent.config import resolve_setting_secret
-from talos_agent.redaction import redact_text
 
 if TYPE_CHECKING:
     from talos_agent.browser.session import BrowserSession
@@ -141,7 +140,7 @@ class XAdapter(BaseSocialAdapter):
         await self._browser.act(
             "Click on the username or email input field and type the configured X username."
         )
-        await self._browser.keyboard_type(redact_text(self._username))
+        await self._browser.keyboard_type(self._username)
         await asyncio.sleep(2)
         await self._browser.act("Click the Next button")
         await asyncio.sleep(4)
@@ -159,7 +158,7 @@ class XAdapter(BaseSocialAdapter):
             await self._browser.act(
                 "Click on the input field and type the configured X email."
             )
-            await self._browser.keyboard_type(redact_text(self._email))
+            await self._browser.keyboard_type(self._email)
             await asyncio.sleep(1)
             await self._browser.act("Click the Next button")
             await asyncio.sleep(4)

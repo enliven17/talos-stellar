@@ -884,7 +884,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                         logger.warning("job_lease_heartbeat_failed", job_id=job_id)
                 backoff.success()
             except Exception as e:
-                logger.debug(f"Job heartbeat error: {e}")
+                logger.debug("Job heartbeat error: %s", safe_exception_message(e))
                 backoff.failure()
 
             try:
@@ -994,7 +994,9 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                                 db.update_schedule("learning_cycle")
                                 console.print("[bold magenta]Learning cycle complete.[/bold magenta]")
                     except Exception as e:
-                        console.print(f"[red]Learning cycle error: {e}[/red]")
+                        console.print(
+                            f"[red]Learning cycle error: {safe_exception_message(e)}[/red]"
+                        )
             try:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=learning_interval)
                 break
@@ -1054,7 +1056,10 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                 console.print(f"{color}{msg}[/]")
 
             except Exception as e:
-                console.print(f"[red]Dividend distribution task error: {e}[/red]")
+                    console.print(
+                        f"[red]Dividend distribution task error: "
+                        f"{safe_exception_message(e)}[/red]"
+                    )
 
             try:
                 await asyncio.wait_for(
@@ -1095,7 +1100,9 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                         f"[bold cyan]Loan repayment cycle complete: {result}[/bold cyan]"
                     )
                 except Exception as e:
-                    console.print(f"[red]Loan repayment cycle error: {e}[/red]")
+                    console.print(
+                        f"[red]Loan repayment cycle error: {safe_exception_message(e)}[/red]"
+                    )
             try:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=repayment_interval)
                 break

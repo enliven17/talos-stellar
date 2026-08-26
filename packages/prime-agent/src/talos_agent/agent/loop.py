@@ -274,7 +274,10 @@ async def _routed_agent_loop(
                 )
                 used_provider = decision.provider_name
             except Exception as exc:
-                console.print(f"[red]Provider '{decision.provider_name}' failed: {exc}[/red]")
+                console.print(
+                    f"[red]Provider '{decision.provider_name}' failed: "
+                    f"{redact_text(str(exc))}[/red]"
+                )
                 break
 
         # Track usage
@@ -303,7 +306,10 @@ async def _routed_agent_loop(
         assistant_msg: dict[str, Any] = {"role": "assistant"}
         if msg_content:
             assistant_msg["content"] = msg_content
-            console.print(f"[blue]Agent ({used_provider}):[/blue] {msg_content[:200]}")
+            console.print(
+                f"[blue]Agent ({used_provider}):[/blue] "
+                f"{redact_text(msg_content[:200])}"
+            )
         if msg_tool_calls:
             assistant_msg["tool_calls"] = msg_tool_calls
         messages.append(assistant_msg)
@@ -325,9 +331,9 @@ async def _routed_agent_loop(
             console.print(f"[yellow]Tool:[/yellow] {fn_name}({_truncate_args(args)})")
 
             result = await tools.execute(fn_name, args)
-            result_str = json.dumps(result, default=str, ensure_ascii=False)
+            result_str = json.dumps(redact(result), default=str, ensure_ascii=False)
 
-            console.print(f"[dim]Result:[/dim] {result_str[:200]}")
+            console.print(f"[dim]Result:[/dim] {redact_text(result_str[:200])}")
 
             tc_id = tc["id"] if isinstance(tc, dict) else tc.id
             messages.append({
