@@ -594,7 +594,8 @@ def telemetry(json_output: bool):
         console.print("[bold]Adapter Health[/bold]")
         for a in report.adapters:
             color = {"healthy": "green", "disabled": "dim", "degraded": "yellow", "timeout": "red"}.get(a.state, "dim")
-            console.print(f"  {a.name}: [{color}]{a.state}[/{color}] — {a.detail}")
+            cat_str = f" [{a.error_category}]" if a.error_category and a.error_category != "none" else ""
+            console.print(f"  {a.name}: [{color}]{a.state}[/{color}]{cat_str} — {a.detail}")
         console.print()
 
     console.print("[bold]Content Performance (7d)[/bold]")
@@ -609,3 +610,84 @@ def telemetry(json_output: bool):
     console.print(f"  Escalations: {report.policy_escalate_count}")
 
     db.close()
+
+
+@main.command(name="diagnostics")
+@click.option("--json", "json_output", is_flag=True, help="Output raw JSON instead of a formatted summary.")
+def diagnostics(json_output: bool):
+    """Run health probes across social, browser, and payment adapters.
+
+    Evaluates in-process readiness, credentials, and dependency states
+    without performing side effects, external HTTP calls, or transactions.
+    """
+    import asyncio
+    import json
+    from talos_agent.config import Settings
+    from talos_agent.adapters.health import AdapterHealthReporter
+    from talos_agent.adapters.discord import DiscordAdapter
+    from talos_agent.adapters.telegram import TelegramAdapter
+    from talos_agent.adapters.x import XAdapter
+    from talos_agent.adapters.registry import AdapterRegistry
+    from talos_agent.payments.stellar_kit import StellarKit
+    from talos_agent.payments.x402_signer import X402Signer
+    from talos_agent.api_client import TalosAPIClient
+
+    settings = Settings()
+    registry = AdapterRegistry()
+
+    # Register social adapters safely
+    try:
+        registry.register(DiscordAdapter(settings))
+    except Exception:
+        pass
+    try:
+        registry.register(TelegramAdapter(settings))
+    except Exception:
+        pass
+    try:
+        registry.register(XAdapter(None, settings))
+    except Exception:
+        pass
+
+    # Payment components
+    api_client = None
+    if settings.talos_api_url and settings.talos_api_key and settings.talos_id:
+        try:
+            api_client = TalosAPIClient(settings)
+        except Exception:
+            pass
+
+    stellar_kit = StellarKit(api_client) if api_client else None
+    x402_signer = X402Signer(api_client) if api_client else None
+
+    reporter = AdapterHealthReporter(
+        registry=registry,
+        browser=None,
+        stellar_kit=stellar_kit,
+        x402_signer=x402_signer,
+    )
+
+    report = asyncio.run(reporter.report())
+
+    if json_output:
+        console.print(json.dumps(report.to_dict(), indent=2))
+        return
+
+    overall_color = {
+        "healthy": "green",
+        "disabled": "dim",
+        "degraded": "yellow",
+        "timeout": "red",
+    }.get(report.overall.value, "dim")
+
+    console.print(f"[bold]Adapter Health & Diagnostics:[/bold] [{overall_color}]{report.overall.value.upper()}[/{overall_color}]")
+    console.print(f"  Checked at: {report.checked_at.isoformat()}")
+    console.print()
+
+    for a in report.adapters:
+        color = {"healthy": "green", "disabled": "dim", "degraded": "yellow", "timeout": "red"}.get(a.state.value, "dim")
+        cat_str = f" [{a.error_category.value}]" if a.error_category.value != "none" else ""
+        console.print(f"  [bold]{a.adapter}[/bold]: [{color}]{a.state.value}[/{color}]{cat_str}")
+        if a.detail:
+            console.print(f"    Detail: {a.detail}")
+    console.print()

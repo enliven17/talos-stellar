@@ -41,6 +41,13 @@ class StellarKit:
     def available(self) -> bool:
         return self._initialized
 
+    def health_snapshot(self) -> dict[str, bool]:
+        """Return in-process readiness snapshot for health probes (side-effect free)."""
+        return {
+            "has_api": self._api is not None,
+            "initialized": bool(self._initialized),
+        }
+
     async def get_balance(self, account_id: str = "") -> dict[str, Any]:
         """Query XLM balance via Horizon (public API)."""
         try:

@@ -1,4 +1,4 @@
-﻿"""Main async scheduler — orchestrates all agent tasks."""
+"""Main async scheduler — orchestrates all agent tasks."""
 
 from __future__ import annotations
 
@@ -526,6 +526,35 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
     # Initialize StellarKit for balance checks
     stellar = StellarKit(api)
     await stellar.initialize()
+
+    # ── Adapter health snapshot (#421) ──────────────────────────────────
+    from talos_agent.adapters.health import AdapterHealthReporter
+    from talos_agent.tools.publishing import _adapter_registry
+
+    adapter_health_reporter = AdapterHealthReporter(
+        registry=_adapter_registry,
+        browser=browser,
+        stellar_kit=stellar,
+    )
+    try:
+        startup_health = await adapter_health_reporter.report()
+        log.info(
+            "adapter_health_startup_snapshot",
+            overall=startup_health.overall.value,
+            adapters=[a.to_dict() for a in startup_health.adapters],
+        )
+        if startup_health.has_degraded:
+            degraded_names = [
+                f"{a.adapter} ({a.error_category.value})"
+                for a in startup_health.degraded_adapters
+            ]
+            console.print(
+                f"[yellow]Adapter health warning: degraded adapter(s): {', '.join(degraded_names)}[/yellow]"
+            )
+        else:
+            console.print(f"[green]Adapter health check: {startup_health.overall.value.upper()}[/green]")
+    except Exception as _health_exc:
+        logger.debug("Initial adapter health check failed (non-fatal): %s", _health_exc)
 
     # ── Post-restore reconciliation (#296) ──────────────────────────────────
     # Reconcile backoff state, schedule timestamps, fencing tokens, and
@@ -1130,6 +1159,12 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                     cb_registry=cb_registry,
                     policy_engine=policy_engine if policy_engine.enabled else None,
                 )
+                try:
+                    health_report = await adapter_health_reporter.report()
+                    collector.add_adapter_health(report, health_report.adapters)
+                except Exception as _ah_exc:
+                    logger.debug("Telemetry adapter health probe failed: %s", _ah_exc)
+
                 log.info(
                     "telemetry_snapshot",
                     tasks=[
@@ -1145,6 +1180,10 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                     circuit_breakers=[
                         {"provider": c.get("provider"), "state": c.get("state")}
                         for c in report.circuit_breakers
+                    ],
+                    adapters=[
+                        {"name": a.name, "state": a.state, "error_category": a.error_category}
+                        for a in report.adapters
                     ],
                     policy_evaluations=report.policy_evaluation_count,
                 )
