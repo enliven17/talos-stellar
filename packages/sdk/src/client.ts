@@ -46,6 +46,8 @@ export interface RetryPolicyOptions {
   random?: () => number;
 }
 
+export type RetryOptions = RetryPolicyOptions;
+
 export interface TalosClientOptions {
   /** Base URL of the Talos API. Defaults to `https://talos-stellar.vercel.app`. */
   baseUrl?: string;
@@ -54,6 +56,9 @@ export interface TalosClientOptions {
   /** Opt-in request signer. Omitting it preserves the legacy wire format. */
   signer?: RequestSigner;
   signing?: SigningControllerOptions;
+  retryPolicy?: RetryPolicyOptions;
+  fetch?: typeof fetch;
+  chaosInjector?: ChaosInjector;
 }
 
 /** Structured event emitted to {@link TalosClientOptions.onError}. */
@@ -66,21 +71,6 @@ export interface TalosErrorEvent {
 }
 
 /** Default retry bounds. Conservative — well within RFC 7231 guidance. */
-const DEFAULT_RETRY: Required<RetryOptions> = {
-  maxAttempts: 1,
-  idempotentOnly: true,
-  maxRetryAfterMs: 60_000,
-  baseDelayMs: 500,
-  maxDelayMs: 8_000,
-  jitter: 0.25,
-  onRetry: () => {
-    /* default: no-op observer */
-  },
-};
-
-/** Methods considered safe to retry without further confirmation from the caller. */
-const IDEMPOTENT_METHODS = new Set(["GET", "HEAD"]);
-
 /**
  * Sleep helper. Uses `setTimeout` so it works in both Node and the browser.
  * Returns a promise that resolves after `ms` milliseconds.
