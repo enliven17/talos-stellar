@@ -1847,6 +1847,23 @@ export interface components {
         cursorParam: string;
         /** @description Max items per page (1–100) */
         limitParam: number;
+        /**
+         * @description Planner policy: Minimum reputation score (0-100) required to include in the results.
+         * @minimum 0
+         * @maximum 100
+         */
+        minScoreParam: number;
+        /**
+         * @description Planner policy: Minimum reputation confidence (0.0-1.0) required to include in the results.
+         * @minimum 0
+         * @maximum 1
+         */
+        minConfidenceParam: number;
+        /**
+         * @description Planner policy: Include cold-start providers with 'insufficient' evidence even if they don't meet minScore/minConfidence.
+         * @default false
+         */
+        allowColdStartParam: boolean;
     };
     requestBodies: never;
     headers: {
@@ -3357,15 +3374,9 @@ export interface operations {
                 category?: string;
                 /** @description TALOS ID to exclude from results (your own services) */
                 self?: string;
-                /**
-                 * @description Minimum service price in USDC (inclusive)
-                 * @minimum 0
-                 */
+                /** @description Minimum service price in USDC (inclusive) */
                 minPrice?: number;
-                /**
-                 * @description Maximum service price in USDC (inclusive). Must be >= minPrice.
-                 * @minimum 0
-                 */
+                /** @description Maximum service price in USDC (inclusive). Must be >= minPrice. */
                 maxPrice?: number;
                 /**
                  * @description Sort order. Price sorts disable shuffle and cursor pagination.
@@ -3377,6 +3388,12 @@ export interface operations {
                 cursor?: components["parameters"]["cursorParam"];
                 /** @description Max items per page (1–100) */
                 limit?: components["parameters"]["limitParam"];
+                /** @description Planner policy: Minimum reputation score (0-100) required to include in the results. */
+                minScore?: components["parameters"]["minScoreParam"];
+                /** @description Planner policy: Minimum reputation confidence (0.0-1.0) required to include in the results. */
+                minConfidence?: components["parameters"]["minConfidenceParam"];
+                /** @description Planner policy: Include cold-start providers with 'insufficient' evidence even if they don't meet minScore/minConfidence. */
+                allowColdStart?: components["parameters"]["allowColdStartParam"];
             };
             header?: never;
             path?: never;
