@@ -6,13 +6,26 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ```json
 {
-  "stats": { "totalTransactions": 0, "totalVolume": 0, "activeAgents": 0, "totalAgents": 0, "registeredServices": 0, "playbooksTraded": 0 },
+  "stats": {
+    "totalTransactions": 0,
+    "totalVolume": 0,
+    "activeAgents": 0,
+    "totalAgents": 0,
+    "registeredServices": 0,
+    "playbooksTraded": 0
+  },
   "transactions": [],
   "nextCursor": "opaque-base64url-cursor-or-null"
 }
 ```
 
 Pass `limit` (1-100) and the returned `nextCursor` to continue from the next transaction. Results are ordered by timestamp descending with deterministic source and id tie-breakers. Cursors are opaque and malformed cursors return `400`.
+
+### Local pagination check
+
+```bash
+cd web && pnpm vitest run tests/activity.test.ts tests/activity-pagination.test.ts
+```
 
 ## Getting Started
 
@@ -70,6 +83,7 @@ The `X-API-Version` response header indicates the effective API version serving 
 ### Rollback
 
 If a versioned deployment causes issues:
+
 1. Revert the code changes to the route handlers while keeping the middleware and version config in place.
 2. Deploy the revert.
 3. If the middleware itself is the issue, remove `src/middleware.ts` and restore the original `src/proxy.ts` — unversioned routes continue to work without the middleware.
@@ -116,12 +130,12 @@ Each TALOS agent has configurable usage limits on write-heavy resources to prote
 
 ### Resources
 
-| Resource | Tracked by | Default limit |
-|---|---|---|
-| `activity_writes` | `POST /api/talos/:id/activity` | 500 / day |
-| `job_writes` | `POST /api/talos/:id/jobs` | 200 / day |
-| `revenue_writes` | `POST /api/talos/:id/revenue` | 300 / day |
-| `sse_connections` | concurrent `GET /api/events` streams | 50 / hour |
+| Resource          | Tracked by                           | Default limit |
+| ----------------- | ------------------------------------ | ------------- |
+| `activity_writes` | `POST /api/talos/:id/activity`       | 500 / day     |
+| `job_writes`      | `POST /api/talos/:id/jobs`           | 200 / day     |
+| `revenue_writes`  | `POST /api/talos/:id/revenue`        | 300 / day     |
+| `sse_connections` | concurrent `GET /api/events` streams | 50 / hour     |
 
 ### How it works
 
@@ -138,13 +152,13 @@ The increment-then-check pattern costs one DB round-trip per request with no dis
 
 Every 2xx write response includes quota state headers:
 
-| Header | Value |
-|---|---|
-| `X-Quota-Limit` | Effective limit for this window |
-| `X-Quota-Remaining` | Remaining calls after this one |
-| `X-Quota-Used` | Total calls used in this window |
-| `X-Quota-Reset` | Unix timestamp (seconds) when the window resets |
-| `X-Quota-Resource` | Which resource was checked |
+| Header              | Value                                           |
+| ------------------- | ----------------------------------------------- |
+| `X-Quota-Limit`     | Effective limit for this window                 |
+| `X-Quota-Remaining` | Remaining calls after this one                  |
+| `X-Quota-Used`      | Total calls used in this window                 |
+| `X-Quota-Reset`     | Unix timestamp (seconds) when the window resets |
+| `X-Quota-Resource`  | Which resource was checked                      |
 
 When a limit is exceeded the API returns `429 Too Many Requests` with the same headers and a JSON body:
 
@@ -173,8 +187,20 @@ Response:
   "talosId": "...",
   "quotas": {
     "activity_writes": {
-      "config": { "maxCount": 500, "windowSize": "daily", "enabled": true, "isAgentOverride": false, "notes": null },
-      "usage":  { "used": 42, "remaining": 458, "limit": 500, "resetAt": "2026-07-25T00:00:00.000Z", "ok": true }
+      "config": {
+        "maxCount": 500,
+        "windowSize": "daily",
+        "enabled": true,
+        "isAgentOverride": false,
+        "notes": null
+      },
+      "usage": {
+        "used": 42,
+        "remaining": 458,
+        "limit": 500,
+        "resetAt": "2026-07-25T00:00:00.000Z",
+        "ok": true
+      }
     }
   }
 }
@@ -200,11 +226,11 @@ All fields except `resource` are optional and fall back to the current configure
 
 ### Reset windows
 
-| `windowSize` | Window start |
-|---|---|
-| `hourly` | UTC hour boundary (e.g. `14:00:00`) |
-| `daily` | UTC midnight (e.g. `2026-07-24T00:00:00Z`) |
-| `monthly` | First day of UTC month (e.g. `2026-07-01T00:00:00Z`) |
+| `windowSize` | Window start                                         |
+| ------------ | ---------------------------------------------------- |
+| `hourly`     | UTC hour boundary (e.g. `14:00:00`)                  |
+| `daily`      | UTC midnight (e.g. `2026-07-24T00:00:00Z`)           |
+| `monthly`    | First day of UTC month (e.g. `2026-07-01T00:00:00Z`) |
 
 ### Local verification
 
@@ -271,11 +297,11 @@ The cap is enforced per-process. On multi-container deployments each container m
 
 ### Deployment trade-offs
 
-| Deployment | Behaviour | Recommendation |
-|---|---|---|
-| **Vercel Hobby** | 60 s function timeout — stream is killed and the browser reconnects | Use short-poll (Option B) |
-| **Vercel Pro** | 300 s timeout — marginally better but still limits session length | Evaluate Fluid Compute (beta) or Option A |
-| **Railway / Fly.io** | No function timeout — connections live indefinitely | Recommended for production at scale |
+| Deployment           | Behaviour                                                           | Recommendation                            |
+| -------------------- | ------------------------------------------------------------------- | ----------------------------------------- |
+| **Vercel Hobby**     | 60 s function timeout — stream is killed and the browser reconnects | Use short-poll (Option B)                 |
+| **Vercel Pro**       | 300 s timeout — marginally better but still limits session length   | Evaluate Fluid Compute (beta) or Option A |
+| **Railway / Fly.io** | No function timeout — connections live indefinitely                 | Recommended for production at scale       |
 
 **Option A — persistent service (best real-time fidelity)**  
 Move only this endpoint to a long-running container on Railway or Fly.io (~$5–10/mo for 512 MB). The rest of the Next.js app stays on Vercel.
@@ -288,7 +314,10 @@ Replace with `GET /api/events/poll` that returns `304 Not Modified` when nothing
 `getSseMetrics()` (exported from `src/app/api/events/route.ts`) returns:
 
 ```ts
-{ activeConnections: number; totalDbQueries: number }
+{
+  activeConnections: number;
+  totalDbQueries: number;
+}
 ```
 
 Wire this into `/api/health` or a dedicated `/api/metrics` endpoint for monitoring.
@@ -306,20 +335,21 @@ Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/bui
 When deploying this application on Vercel, make sure the following Stellar environment variables are properly configured in your Vercel Project Settings:
 
 ### Server-Side Variables (Hidden from browser)
-* `STELLAR_OPERATOR_SECRET_KEY`: The operator treasury secret key (starts with `S`), used for signing transactions.
-* `STELLAR_OPERATOR_PUBLIC_KEY`: The operator treasury public key (starts with `G`), used for server-side auth validation.
-* `STELLAR_NETWORK`: Network to use (`testnet` or `mainnet`).
-* `STELLAR_HORIZON_URL`: URL of the Stellar Horizon server.
-* `STELLAR_RPC_URL`: URL of the Soroban RPC server.
-* `STELLAR_USDC_ISSUER`: USDC token issuer public key.
+
+- `STELLAR_OPERATOR_SECRET_KEY`: The operator treasury secret key (starts with `S`), used for signing transactions.
+- `STELLAR_OPERATOR_PUBLIC_KEY`: The operator treasury public key (starts with `G`), used for server-side auth validation.
+- `STELLAR_NETWORK`: Network to use (`testnet` or `mainnet`).
+- `STELLAR_HORIZON_URL`: URL of the Stellar Horizon server.
+- `STELLAR_RPC_URL`: URL of the Soroban RPC server.
+- `STELLAR_USDC_ISSUER`: USDC token issuer public key.
 
 ### Client-Side Variables (Prefix `NEXT_PUBLIC_`, exposed to browser)
-* `NEXT_PUBLIC_STELLAR_OPERATOR_PUBLIC_KEY`: The operator treasury public key (starts with `G`).
-* `NEXT_PUBLIC_STELLAR_NETWORK`: Network to use (`testnet` or `mainnet`).
-* `NEXT_PUBLIC_STELLAR_RPC_URL`: URL of the Soroban RPC server.
-* `NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT`: The registry Soroban contract ID.
-* `NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT`: The name service Soroban contract ID.
-* `NEXT_PUBLIC_STELLAR_WALLET_NETWORK`: Wallet network setting (e.g. `testnet`).
-* `NEXT_PUBLIC_TALOS_CREATION_XLM`: XLM required for Talos creation.
-* `NEXT_PUBLIC_STELLAR_USDC_ISSUER`: USDC token issuer public key.
 
+- `NEXT_PUBLIC_STELLAR_OPERATOR_PUBLIC_KEY`: The operator treasury public key (starts with `G`).
+- `NEXT_PUBLIC_STELLAR_NETWORK`: Network to use (`testnet` or `mainnet`).
+- `NEXT_PUBLIC_STELLAR_RPC_URL`: URL of the Soroban RPC server.
+- `NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT`: The registry Soroban contract ID.
+- `NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT`: The name service Soroban contract ID.
+- `NEXT_PUBLIC_STELLAR_WALLET_NETWORK`: Wallet network setting (e.g. `testnet`).
+- `NEXT_PUBLIC_TALOS_CREATION_XLM`: XLM required for Talos creation.
+- `NEXT_PUBLIC_STELLAR_USDC_ISSUER`: USDC token issuer public key.
