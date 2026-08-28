@@ -3,8 +3,8 @@
   "examples": [
     {
       "contract": "talos_registry",
-      "event": "tls_crt",
-      "topics": ["tls_crt", "<creator: Address>"],
+      "event": "tls_crt2",
+      "topics": ["tls_crt2", "<creator: Address>"],
       "data": {
         "talos_id": 1,
         "name": "Genesis",
@@ -14,8 +14,8 @@
     },
     {
       "contract": "talos_name_service",
-      "event": "name_reg",
-      "topics": ["name_reg", "<talos_id: u32>"],
+      "event": "name_reg2",
+      "topics": ["name_reg2", "<talos_id: u32>"],
       "data": {
         "name": "marketbot",
         "owner": "<Address>",

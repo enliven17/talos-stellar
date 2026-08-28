@@ -170,7 +170,7 @@ pub enum DataKey {
 //                                                  Reasons callers hit a deprecated path.
 
 fn emit_talos_created(env: &Env, talos_id: u32, creator: Address, name: String, category: String) {
-    let topics = (symbol_short!("tls_crt"), creator);
+    let topics = (symbol_short!("tls_crt2"), creator);
     env.events().publish(topics, (talos_id, name, category, 1u32));
 }
 
@@ -2096,19 +2096,22 @@ mod tests {
         let events = env.events().all();
         let (_addr, _topics, data) = events.get(0).unwrap();
 
-        // Simulate a consumer that decodes additively (treating payload as a Vec<Val>)
-        let payload_vec: soroban_sdk::Vec<soroban_sdk::Val> = TryFromVal::try_from_val(&env, &data).unwrap();
+        // Simulate a consumer that decodes additively
+        let mut payload_vec: soroban_sdk::Vec<soroban_sdk::Val> = TryFromVal::try_from_val(&env, &data).unwrap();
         
-        // Assert we can decode the fields safely
+        // Inject an unsupported version (2) to test consumer rejection
+        payload_vec.set(3, 2u32.into_val(&env));
+        
         let got_id: u32 = TryFromVal::try_from_val(&env, &payload_vec.get(0).unwrap()).unwrap();
         assert_eq!(got_id, id);
 
-        // Assert consumer logic rejects unsupported versions (> 1) without failing to decode the tuple shape
         let version: u32 = TryFromVal::try_from_val(&env, &payload_vec.get(3).unwrap()).unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
         
-        // A consumer can check if version > 1 and return/reject early.
-        assert!(version <= 1, "unsupported schema version");
+        let result = std::panic::catch_unwind(|| {
+            assert!(version <= 1, "unsupported schema version");
+        });
+        assert!(result.is_err());
     }
 
     #[test]

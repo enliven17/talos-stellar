@@ -136,7 +136,7 @@ pub enum ContractError {
 //                                                  ids match but version is too old.
 
 fn emit_name_registered(env: &Env, talos_id: u32, name: String, owner: Address) {
-    let topics = (symbol_short!("name_reg"), talos_id);
+    let topics = (symbol_short!("name_reg2"), talos_id);
     env.events().publish(topics, (name, owner, 1u32));
 }
 
@@ -2249,7 +2249,7 @@ mod tests {
         assert_eq!(topics.len() as u32, 2);
         let t0: Symbol = TryFromVal::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
         let t1: u32 = TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
-        assert_eq!(t0, symbol_short!("name_reg"));
+        assert_eq!(t0, symbol_short!("name_reg2"));
         assert_eq!(t1, talos_id);
         let (got_name, got_owner, got_version): (String, Address, u32) =
             TryFromVal::try_from_val(&env, data).unwrap();
@@ -2290,14 +2290,23 @@ mod tests {
             .collect::<std::vec::Vec<_>>();
         let (_addr, _topics, data) = events.get(0).unwrap();
 
-        // Simulate a consumer that decodes additively (treating payload as a Vec<Val>)
-        let payload_vec: soroban_sdk::Vec<soroban_sdk::Val> = TryFromVal::try_from_val(&env, data).unwrap();
+        // Simulate a consumer that decodes additively
+        let mut payload_vec: soroban_sdk::Vec<soroban_sdk::Val> = TryFromVal::try_from_val(&env, data).unwrap();
         
-        // Assert we can decode the fields safely
+        // Inject an unsupported version (2) to test consumer rejection
+        payload_vec.set(2, 2u32.into_val(&env));
+
         let got_name: String = TryFromVal::try_from_val(&env, &payload_vec.get(0).unwrap()).unwrap();
         assert_eq!(got_name, name);
 
-        // Assert consumer logic rejects unsupported versions (> 1) without failing to decode the tuple shape
+        let version: u32 = TryFromVal::try_from_val(&env, &payload_vec.get(2).unwrap()).unwrap();
+        assert_eq!(version, 2);
+
+        let result = std::panic::catch_unwind(|| {
+            assert!(version <= 1, "unsupported schema version");
+        });
+        assert!(result.is_err());
+    }
         let version: u32 = TryFromVal::try_from_val(&env, &payload_vec.get(2).unwrap()).unwrap();
         assert_eq!(version, 1);
         

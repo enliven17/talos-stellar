@@ -21,7 +21,7 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
   - **Version negotiation** (`supports_version(maj, min, patch)`)
   - **Capability catalogue** (`interface_features()` returns `Vec<Symbol>`)
   - **Deprecation telemetry** (`dep_path` event emitted before panic when timelock is enabled)
-  - Events: `tls_crt`, `pat_upd`, `fee_chg`, `adm_prp`, `adm_acc`, `adm_cnl`, `tl_sch`, `tl_exec`, `tl_cnl`, `tl_cfg`, `dep_path`
+  - Events: `tls_crt2`, `pat_upd`, `fee_chg`, `adm_prp`, `adm_acc`, `adm_cnl`, `tl_sch`, `tl_exec`, `tl_cnl`, `tl_cfg`, `dep_path`
 
 ### 2. TalosNameService
 - **Purpose**: Human-readable name registration for Talos IDs
@@ -36,7 +36,7 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
   - **Capability catalogue** (`interface_features()` returns `Vec<Symbol>`)
   - **Cross-contract compatibility** (`assert_registry_compatible()` cross-invokes Registry's `interface_id` + `version`)
   - **Deprecation telemetry** (`dep_path` event emitted before panic when timelock is enabled)
-  - Events: `name_reg`, `tl_sch`, `tl_exec`, `tl_cnl`, `tl_cfg`, `dep_path`, `compat_ok`, `compat_err`
+  - Events: `name_reg2`, `tl_sch`, `tl_exec`, `tl_cnl`, `tl_cfg`, `dep_path`, `compat_ok`, `compat_err`
 
 ### 3. TalosGovernance
 - **Purpose**: Token-weighted governance for Talos Protocol
@@ -390,9 +390,9 @@ Both contracts emit typed Soroban events on every meaningful state change. Off-c
 
 | Event | Topics | Data | Trigger |
 | :--- | :--- | :--- | :--- |
-| `tls_crt` | `(symbol_short!("tls_crt"), creator: Address)` | `(talos_id: u32, name: String, category: String, version: u32)` | `create_talos` success |
+| `tls_crt2` | `(symbol_short!("tls_crt2"), creator: Address)` | `(talos_id: u32, name: String, category: String, version: u32)` | `create_talos` success |
 | `pat_upd` | `(symbol_short!("pat_upd"), talos_id: u32)` | `(creator: Address, creator_share: u32, investor_share: u32)` | `update_patron` success |
-| `fee_chg` | `(symbol_short!("fee_chg"),)` | `(old_bps: u32, new_bps: u32)` | `set_protocol_fee` success | timelock execution |
+| `fee_chg` | `(symbol_short!("fee_chg"),)` | `(old_bps: u32, new_bps: u32)` | `set_protocol_fee` success, timelock execution |
 | `adm_prp` | `(symbol_short!("adm_prp"),)` | `(current: Address, proposed: Address)` | `propose_admin` or timelock execution |
 | `adm_acc` | `(symbol_short!("adm_acc"),)` | `(new_admin: Address,)` | `accept_admin` success |
 | `adm_cnl` | `(symbol_short!("adm_cnl"),)` | `(cancelled: Address,)` | `cancel_admin_transfer` success |
@@ -408,7 +408,7 @@ Both contracts emit typed Soroban events on every meaningful state change. Off-c
 
 ```rust
 // All Talos created by a specific address — filter on topics[1] == creator
-(symbol_short!("tls_crt"), creator_address)
+(symbol_short!("tls_crt2"), creator_address)
 
 // All patron updates for a specific Talos — filter on topics[1] == talos_id
 (symbol_short!("pat_upd"), 42u32)
@@ -427,7 +427,7 @@ Both contracts emit typed Soroban events on every meaningful state change. Off-c
 
 | Event | Topics | Data | Emitted on |
 |-------|--------|------|-----------| 
-| `name_reg` | `(symbol_short!("name_reg"), talos_id: u32)` | `(name: String, owner: Address, version: u32)` | `register_name` success |
+| `name_reg2` | `(symbol_short!("name_reg2"), talos_id: u32)` | `(name: String, owner: Address, version: u32)` | `register_name` success |
 | `reg_upd`  | `(symbol_short!("reg_upd"),)` | `(old_registry: Address, new_registry: Address)` | registry pointer update |
 | `tl_sch`   | `(symbol_short!("tl_sch"), proposal_id: u64)` | `(action: AdminAction, eta: u64, proposer: Address)` | `schedule_action` success |
 | `tl_exec`  | `(symbol_short!("tl_exec"), proposal_id: u64)` | `(action: AdminAction, executor: Address)` | `execute_action` success |
@@ -441,7 +441,7 @@ Both contracts emit typed Soroban events on every meaningful state change. Off-c
 
 ```rust
 // Name registration for a specific Talos — filter on topics[1] == talos_id
-(symbol_short!("name_reg"), 42u32)
+(symbol_short!("name_reg2"), 42u32)
 
 // Any timelock scheduled on name service
 (symbol_short!("tl_sch"),)
