@@ -33,6 +33,8 @@ export function loadReconcilerConfig(): ReconcilerConfig {
       process.env.STELLAR_HORIZON_URL ?? "https://horizon-testnet.stellar.org",
 
     confirmationDepth: parseIntEnv("RECONCILER_CONFIRMATION_DEPTH", 1),
+
+    concurrencyLimit: parseIntEnv("RECONCILER_CONCURRENCY_LIMIT", 5),
   };
 }
 

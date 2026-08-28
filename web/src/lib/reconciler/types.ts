@@ -123,6 +123,12 @@ export interface ReconcilerConfig {
    * after ledger close; set higher if you want belt-and-suspenders).
    */
   confirmationDepth: number;
+
+  /**
+   * Maximum number of concurrent database/Horizon operations allowed.
+   * Default: 5.
+   */
+  concurrencyLimit?: number;
 }
 
 // ─── Scheduler State (in-process singleton) ──────────────────────────────────
@@ -138,4 +144,6 @@ export interface ReconcilerStats {
   totalNotFound: number;
   totalRepairsApplied: number;
   totalErrors: number;
+  activeCount?: number;
+  queueCount?: number;
 }
