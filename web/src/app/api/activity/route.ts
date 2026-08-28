@@ -27,10 +27,11 @@ export async function GET(request: Request) {
     }
   }
 
-  if (statsOnly) {
-    const stats = await fetchActivityStats();
-    return Response.json({ stats });
-  }
+  try {
+    if (statsOnly) {
+      const stats = await fetchActivityStats();
+      return Response.json({ stats });
+    }
 
     const [stats, { transactions, nextCursor }] = await Promise.all([
       fetchActivityStats(),
@@ -39,6 +40,9 @@ export async function GET(request: Request) {
 
     return Response.json({ stats, transactions, nextCursor });
   } catch {
-    return internalError(request);
+    return Response.json(
+      { error: "An unexpected error occurred" },
+      { status: 500 },
+    );
   }
 }

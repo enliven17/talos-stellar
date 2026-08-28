@@ -38,7 +38,7 @@ export async function GET(
   const { id } = await params;
 
   try {
-    const auth = await verifyAgentApiKey(request, id);
+    const auth = await verifyAgentApiKey(request, id, ["revenue:read"]);
     if (!auth.ok) return auth.response;
 
     const talos = await db
@@ -52,10 +52,10 @@ export async function GET(
       return Response.json({ error: "TALOS not found" }, { status: 404 });
     }
 
-    const { windowMs, windowDays } = parseWindow(request.nextUrl.searchParams.get("window"));
+    const { searchParams } = new URL(request.url);
+    const { windowMs, windowDays } = parseWindow(searchParams.get("window"));
     const { limit, cursor } = parsePagination(request);
     const since = new Date(Date.now() - windowMs);
-    const { searchParams } = new URL(request.url);
 
     const rows = await db
       .select({

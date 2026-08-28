@@ -54,6 +54,14 @@ class X402Signer:
     def address(self) -> str | None:
         return self._wallet_address
 
+    def health_snapshot(self) -> dict[str, bool]:
+        """Return in-process readiness snapshot for health probes (side-effect free)."""
+        return {
+            "has_api": self._api is not None,
+            "initialized": bool(self._initialized),
+            "has_wallet": bool(self._wallet_address),
+        }
+
     async def sign_payment(
         self,
         payee: str,

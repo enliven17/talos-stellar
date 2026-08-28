@@ -91,6 +91,8 @@ class AdapterTelemetry:
     name: str
     state: str
     detail: str = ""
+    error_category: str = ""
+    checked_at: str = ""
 
 
 @dataclass
@@ -359,10 +361,17 @@ class TelemetryCollector:
             name = d.get("adapter", "unknown")
             if _is_sensitive_key(name):
                 name = "[REDACTED]"
+            raw_cat = d.get("error_category", "")
+            cat_str = raw_cat.value if hasattr(raw_cat, "value") else str(raw_cat or "")
+            checked_at = d.get("checked_at", "")
+            if hasattr(checked_at, "isoformat"):
+                checked_at = checked_at.isoformat()
             report.adapters.append(
                 AdapterTelemetry(
                     name=name,
                     state=_redact_if_sensitive("state", d.get("state", "unknown")),  # type: ignore[arg-type]
                     detail=_redact_if_sensitive("detail", d.get("detail", "")),  # type: ignore[arg-type]
+                    error_category=_redact_if_sensitive("error_category", cat_str),
+                    checked_at=str(checked_at),
                 )
             )

@@ -15,9 +15,12 @@ from talos_agent.adapters.health import (
     AdapterState,
     BrowserSessionProbe,
     DiscordProbe,
+    ErrorCategory,
     HealthReport,
     ProbeResult,
+    StellarPaymentProbe,
     TelegramProbe,
+    X402PaymentProbe,
     XProbe,
 )
 from talos_agent.adapters.registry import AdapterRegistry
@@ -50,12 +53,15 @@ __all__ = [
     "XAdapterConfig",
     # Health probes
     "AdapterState",
+    "ErrorCategory",
     "ProbeResult",
     "AdapterProbe",
     "DiscordProbe",
     "TelegramProbe",
     "XProbe",
     "BrowserSessionProbe",
+    "StellarPaymentProbe",
+    "X402PaymentProbe",
     "HealthReport",
     "AdapterHealthReporter",
     # Storage adapters and coordinator

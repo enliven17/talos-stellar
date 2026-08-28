@@ -11,10 +11,12 @@
     "deploy:testnet": "soroban contract deploy --wasm target/wasm32-unknown-unknown/release/talos_registry.wasm --network testnet",
     "deploy:name-service:testnet": "soroban contract deploy --wasm target/wasm32-unknown-unknown/release/talos_name_service.wasm --network testnet",
     "invoke:registry": "soroban contract invoke --source-account alice --network testnet",
-    "invoke:name-service": "soroban contract invoke --source-account alice --network testnet"
+    "invoke:name-service": "soroban contract invoke --source-account alice --network testnet",
+    "test:fixtures": "vitest run fixtures"
   },
   "devDependencies": {
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.2"
   },
   "keywords": [
     "stellar",
