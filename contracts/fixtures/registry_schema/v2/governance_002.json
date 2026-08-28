@@ -1,0 +1,23 @@
+{
+  "meta": {
+    "additive_fields": [],
+    "contract": "TalosRegistry",
+    "generator": "scripts/generate-registry-fixtures.mjs v1",
+    "kind": "Governance",
+    "schema_version": 2
+  },
+  "storage_key": {
+    "type": "GovernanceBundle"
+  },
+  "value": {
+    "next_talos_id": 4,
+    "next_timelock_id": 2,
+    "pending_admin": null,
+    "protocol_fee_bps": 300,
+    "protocol_wallet": "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL",
+    "timelock_config": {
+      "grace_period": 604800,
+      "min_delay": 3600
+    }
+  }
+}

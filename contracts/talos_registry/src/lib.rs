@@ -9,11 +9,17 @@
 #![no_std]
 
 pub mod allowlist;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub mod registry_schema_fixtures;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod registry_schema_tests;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 extern crate std;
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec,
+};
 use storage_migration;
 use ttl_manager;
 use pause_control;
@@ -150,6 +156,8 @@ pub enum DataKey {
     TimelockProposal(u64),
     NextTimelockId,
     LastTouched(u32),
+    Guardians,
+    PauseState(PauseDomain),
 }
 
 // ── Events ──────────────────────────────────────────────────────────
@@ -267,6 +275,21 @@ fn emit_guardian_removed(env: &Env, guardian: Address) {
     env.events().publish(topics, (guardian,));
 }
 
+fn emit_allowlist_added(env: &Env, asset: Address, admin: Address) {
+    let topics = (symbol_short!("allow_add"),);
+    env.events().publish(topics, (asset, admin));
+}
+
+fn emit_allowlist_removed(env: &Env, asset: Address, admin: Address) {
+    let topics = (symbol_short!("allow_rem"),);
+    env.events().publish(topics, (asset, admin));
+}
+
+fn emit_deprecated_call(env: &Env, deprecated: &str, replacement: &str) {
+    let topics = (symbol_short!("dep_path"),);
+    env.events().publish(topics, (deprecated, replacement));
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 fn validate_patron_shares(patron: &Patron) {
@@ -342,6 +365,59 @@ const MAX_ROLLBACK_DEPTH: u32 = 1;
 /// therefore immutable once deployed; it cannot be altered by any admin
 /// call, storage write, or cross-contract invocation.
 pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 3, 0);
+
+/// Stable 32-byte interface identifier for TalosRegistry v1.
+///
+/// Derived deterministically from the contract namespace
+/// (`"TalosRegistry"`) and `CONTRACT_VERSION` so that any client or
+/// dependent contract that re-runs the algorithm reproduces the same
+/// bytes (see the golden-vector tests in `mod tests`).
+pub const INTERFACE_ID: [u8; 32] = [
+    0x54, 0x61, 0x6C, 0x6F, 0x73, 0x52, 0x65, 0x67, // "TalosReg"
+    0x69, 0x73, 0x74, 0x72, 0x79, 0x00, 0x00, 0x00, // "istry" + zero pads
+    0x00, 0x00, 0x00, 0x01, // major = 1
+    0x00, 0x00, 0x00, 0x03, // minor = 3
+    0x00, 0x00, 0x00, 0x00, // patch = 0
+    0x00, 0x00, 0x00, 0x00,
+];
+
+pub const INTERFACE_NAMESPACE: &str = "TalosRegistry";
+
+pub fn features_list() -> &'static [&'static str] {
+    &[
+        "create_talos",
+        "talos_lifecycle",
+        "admin_transfer",
+        "timelock_admin",
+        "protocol_fee",
+        "interface_query",
+        "fees_collector",
+    ]
+}
+
+pub const DEPRECATED_DIRECT_ADMIN: &[(&str, &str)] = &[
+    (
+        "set_protocol_fee (direct, pre-timelock)",
+        "schedule_action(SetProtocolFee, ..) + execute_action",
+    ),
+    (
+        "propose_admin (direct, pre-timelock)",
+        "schedule_action(ProposeAdmin, ..) + execute_action",
+    ),
+];
+
+pub fn version_supports(actual: (u32, u32, u32), required: (u32, u32, u32)) -> bool {
+    if actual.0 != required.0 {
+        return false;
+    }
+    if actual.1 > required.1 {
+        return true;
+    }
+    if actual.1 < required.1 {
+        return false;
+    }
+    actual.2 >= required.2
+}
 
 // ── Pause Domains ───────────────────────────────────────────────────
 
@@ -1611,7 +1687,7 @@ mod tests {
     fn version_returns_compile_time_constant() {
         let (env, contract_id) = setup();
         let client = TalosRegistryClient::new(&env, &contract_id);
-        assert_eq!(client.version(), (1u32, 2u32, 0u32));
+        assert_eq!(client.version(), (1u32, 3u32, 0u32));
     }
 
     #[test]
