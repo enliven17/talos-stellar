@@ -155,7 +155,7 @@ pub enum DataKey {
 // ── Events ──────────────────────────────────────────────────────────
 //
 // Event schema (topics → data):
-//   tls_crt : (symbol, creator: Address)   → (talos_id: u32, name: String, category: String, version: u32)
+//   tls_crt : (symbol, creator: Address)   → (talos_id: u32, name: String, category: String)
 //   pat_upd : (symbol, talos_id: u32)      → (creator: Address, creator_share: u32, investor_share: u32)
 //   fee_chg : (symbol,)                    → (old_bps: u32, new_bps: u32)
 //   adm_prp : (symbol,)                    → (current: Address, proposed: Address)
@@ -171,7 +171,7 @@ pub enum DataKey {
 
 fn emit_talos_created(env: &Env, talos_id: u32, creator: Address, name: String, category: String) {
     let topics = (symbol_short!("tls_crt"), creator);
-    env.events().publish(topics, (talos_id, name, category, 1u32));
+    env.events().publish(topics, (talos_id, name, category));
 }
 
 fn emit_patron_updated(env: &Env, talos_id: u32, patron: &Patron) {
@@ -2076,39 +2076,11 @@ mod tests {
         assert_topic_symbol(&env, &topics, 0, symbol_short!("tls_crt"));
         assert_topic_address(&env, &topics, 1, &creator);
 
-        let (got_id, got_name, got_cat, got_version): (u32, String, String, u32) =
+        let (got_id, got_name, got_cat): (u32, String, String) =
             TryFromVal::try_from_val(&env, &data).unwrap();
         assert_eq!(got_id, id);
         assert_eq!(got_name, s(&env, "Genesis"));
         assert_eq!(got_cat, s(&env, "Marketing"));
-        assert_eq!(got_version, 1);
-    }
-
-    #[test]
-    fn consumer_rejects_unsupported_tls_crt_version() {
-        let (env, contract_id) = setup();
-        let client = TalosRegistryClient::new(&env, &contract_id);
-        let creator = Address::generate(&env);
-        let protocol_wallet = Address::generate(&env);
-
-        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
-
-        let events = env.events().all();
-        let (_addr, _topics, data) = events.get(0).unwrap();
-
-        // Simulate a consumer that decodes additively (treating payload as a Vec<Val>)
-        let payload_vec: soroban_sdk::Vec<soroban_sdk::Val> = TryFromVal::try_from_val(&env, &data).unwrap();
-        
-        // Assert we can decode the fields safely
-        let got_id: u32 = TryFromVal::try_from_val(&env, &payload_vec.get(0).unwrap()).unwrap();
-        assert_eq!(got_id, id);
-
-        // Assert consumer logic rejects unsupported versions (> 1) without failing to decode the tuple shape
-        let version: u32 = TryFromVal::try_from_val(&env, &payload_vec.get(3).unwrap()).unwrap();
-        assert_eq!(version, 1);
-        
-        // A consumer can check if version > 1 and return/reject early.
-        assert!(version <= 1, "unsupported schema version");
     }
 
     #[test]

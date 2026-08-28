@@ -8,18 +8,7 @@
       "data": {
         "talos_id": 1,
         "name": "Genesis",
-        "category": "Marketing",
-        "version": 1
-      }
-    },
-    {
-      "contract": "talos_name_service",
-      "event": "name_reg",
-      "topics": ["name_reg", "<talos_id: u32>"],
-      "data": {
-        "name": "marketbot",
-        "owner": "<Address>",
-        "version": 1
+        "category": "Marketing"
       }
     },
     {

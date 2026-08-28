@@ -117,7 +117,7 @@ pub enum ContractError {
 // ── Events ──────────────────────────────────────────────────────────
 //
 // Event schema (topics → data):
-//   name_reg : (symbol, talos_id: u32) → (name: String, owner: Address, version: u32)
+//   name_reg : (symbol, talos_id: u32) → (name: String, owner: Address)
 //   reg_upd  : (symbol,)               → (old_registry: Address, new_registry: Address)
 //   tl_sch   : (symbol, proposal_id: u64) → (action: AdminAction, eta: u64, proposer: Address)
 //   tl_exec  : (symbol, proposal_id: u64) → (action: AdminAction, executor: Address)
@@ -137,7 +137,7 @@ pub enum ContractError {
 
 fn emit_name_registered(env: &Env, talos_id: u32, name: String, owner: Address) {
     let topics = (symbol_short!("name_reg"), talos_id);
-    env.events().publish(topics, (name, owner, 1u32));
+    env.events().publish(topics, (name, owner));
 }
 
 fn emit_registry_updated(env: &Env, old_registry: Address, new_registry: Address) {
@@ -2251,58 +2251,10 @@ mod tests {
         let t1: u32 = TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
         assert_eq!(t0, symbol_short!("name_reg"));
         assert_eq!(t1, talos_id);
-        let (got_name, got_owner, got_version): (String, Address, u32) =
+        let (got_name, got_owner): (String, Address) =
             TryFromVal::try_from_val(&env, data).unwrap();
         assert_eq!(got_name, name);
         assert_eq!(got_owner, owner);
-        assert_eq!(got_version, 1);
-    }
-
-    #[test]
-    fn consumer_rejects_unsupported_name_reg_version() {
-        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
-        let owner = Address::generate(&env);
-        let protocol_wallet = Address::generate(&env);
-        let name = s(&env, "marketbot");
-
-        let talos_id = create_talos_with_auth(
-            &env,
-            &registry_client,
-            &registry_contract,
-            &owner,
-            &protocol_wallet,
-        );
-
-        register_name_with_auth(
-            &env,
-            &client,
-            &contract_id,
-            &registry_contract,
-            &owner,
-            talos_id,
-            &name,
-        );
-
-        let all_events = env.events().all();
-        let events = all_events
-            .iter()
-            .filter(|e| e.0 == contract_id)
-            .collect::<std::vec::Vec<_>>();
-        let (_addr, _topics, data) = events.get(0).unwrap();
-
-        // Simulate a consumer that decodes additively (treating payload as a Vec<Val>)
-        let payload_vec: soroban_sdk::Vec<soroban_sdk::Val> = TryFromVal::try_from_val(&env, data).unwrap();
-        
-        // Assert we can decode the fields safely
-        let got_name: String = TryFromVal::try_from_val(&env, &payload_vec.get(0).unwrap()).unwrap();
-        assert_eq!(got_name, name);
-
-        // Assert consumer logic rejects unsupported versions (> 1) without failing to decode the tuple shape
-        let version: u32 = TryFromVal::try_from_val(&env, &payload_vec.get(2).unwrap()).unwrap();
-        assert_eq!(version, 1);
-        
-        // A consumer can check if version > 1 and return/reject early.
-        assert!(version <= 1, "unsupported schema version");
     }
 
     #[test]

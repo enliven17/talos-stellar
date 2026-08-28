@@ -145,7 +145,7 @@ export async function verifyX402Payment(
       
       const ops = innerTx.operations as Array<{
         type: string;
-        asset?: { code: string };
+        asset?: { code: string; issuer?: string };
         destination?: string;
         amount?: string;
       }>;
@@ -155,8 +155,8 @@ export async function verifyX402Payment(
       const hasValidPayment = ops.some((op) => {
         if (op.type !== "payment") return false;
         
-        if (op.asset?.code !== "USDC") {
-          throw new Error("Wrong asset: expected USDC");
+        if (op.asset?.code !== "USDC" || op.asset?.issuer !== USDC_ISSUER) {
+          throw new Error("Wrong asset: expected USDC with valid issuer");
         }
         if (op.destination !== expectedTo) {
           throw new Error("Wrong recipient");

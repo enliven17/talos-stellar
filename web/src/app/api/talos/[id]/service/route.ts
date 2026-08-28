@@ -165,8 +165,9 @@ async function handlePost(
         );
       }
     } catch (verifyErr: any) {
+      console.error("X402 verification failed:", verifyErr);
       return Response.json(
-        { error: verifyErr.message },
+        { error: "Invalid or insufficient x402 payment" },
         { status: 402 }
       );
     }

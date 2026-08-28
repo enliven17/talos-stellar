@@ -386,13 +386,13 @@ contracts/
 
 Both contracts emit typed Soroban events on every meaningful state change. Off-chain consumers (dashboards, indexers, Stellar Expert) can subscribe using topic filters.
 
-### Talos Registry Events
+### TalosRegistry
 
-| Event | Topics | Data | Trigger |
-| :--- | :--- | :--- | :--- |
-| `tls_crt` | `(symbol_short!("tls_crt"), creator: Address)` | `(talos_id: u32, name: String, category: String, version: u32)` | `create_talos` success |
+| Event | Topics | Data | Emitted on |
+|-------|--------|------|-----------| 
+| `tls_crt` | `(symbol_short!("tls_crt"), creator: Address)` | `(talos_id: u32, name: String, category: String)` | `create_talos` success |
 | `pat_upd` | `(symbol_short!("pat_upd"), talos_id: u32)` | `(creator: Address, creator_share: u32, investor_share: u32)` | `update_patron` success |
-| `fee_chg` | `(symbol_short!("fee_chg"),)` | `(old_bps: u32, new_bps: u32)` | `set_protocol_fee` success | timelock execution |
+| `fee_chg` | `(symbol_short!("fee_chg"),)` | `(old_bps: u32, new_bps: u32)` | `set_protocol_fee` or timelock execution |
 | `adm_prp` | `(symbol_short!("adm_prp"),)` | `(current: Address, proposed: Address)` | `propose_admin` or timelock execution |
 | `adm_acc` | `(symbol_short!("adm_acc"),)` | `(new_admin: Address,)` | `accept_admin` success |
 | `adm_cnl` | `(symbol_short!("adm_cnl"),)` | `(cancelled: Address,)` | `cancel_admin_transfer` success |
@@ -427,7 +427,7 @@ Both contracts emit typed Soroban events on every meaningful state change. Off-c
 
 | Event | Topics | Data | Emitted on |
 |-------|--------|------|-----------| 
-| `name_reg` | `(symbol_short!("name_reg"), talos_id: u32)` | `(name: String, owner: Address, version: u32)` | `register_name` success |
+| `name_reg` | `(symbol_short!("name_reg"), talos_id: u32)` | `(name: String, owner: Address)` | `register_name` success |
 | `reg_upd`  | `(symbol_short!("reg_upd"),)` | `(old_registry: Address, new_registry: Address)` | registry pointer update |
 | `tl_sch`   | `(symbol_short!("tl_sch"), proposal_id: u64)` | `(action: AdminAction, eta: u64, proposer: Address)` | `schedule_action` success |
 | `tl_exec`  | `(symbol_short!("tl_exec"), proposal_id: u64)` | `(action: AdminAction, executor: Address)` | `execute_action` success |
