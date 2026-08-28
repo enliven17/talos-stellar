@@ -312,3 +312,36 @@ describe("malformed payloads", () => {
     ).toThrow(UnknownEventError);
   });
 });
+
+describe("malformed-fixture failure-path check", () => {
+  it("rejects fixture set with missing format", () => {
+    const bad = { ...raw };
+    delete (bad as any).format;
+    expect(() => parseFixtureSet(bad)).toThrow(MalformedEventError);
+  });
+
+  it("rejects fixture set with invalid bounds min/max page size", () => {
+    const bad = {
+      ...raw,
+      bounds: {
+        min_page_size: 10,
+        max_page_size: 5,
+        max_ledger_span: 100,
+      },
+    };
+    expect(() => parseFixtureSet(bad)).toThrow(MalformedEventError);
+  });
+
+  it("rejects an invalid event fixture with mismatched topic[0] symbol value", () => {
+    const badFixture = {
+      id: "bad.mismatched_symbol",
+      family: "creation",
+      event: "tls_crt",
+      contract: "talos_registry",
+      ledger_sequence: 100,
+      topics: [{ type: "symbol", value: "wrong_symbol_name" }],
+      data: [],
+    };
+    expect(() => parseEventFixture(badFixture, set)).toThrow(MalformedEventError);
+  });
+});
