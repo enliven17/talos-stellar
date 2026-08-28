@@ -1055,13 +1055,25 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         name: "cursor",
         in: "query",
         schema: { type: "string" },
-        description: "Opaque pagination cursor returned from the previous page's `nextCursor`",
+        description: "Opaque pagination cursor returned from the previous page's `nextCursor`. Only compatible with the default `createdAt` descending sort.",
       },
       limitParam: {
         name: "limit",
         in: "query",
         schema: { type: "integer", minimum: 1, maximum: 100, default: 50 },
         description: "Max items per page (1–100)",
+      },
+      sortParam: {
+        name: "sort",
+        in: "query",
+        schema: { type: "string" },
+        description: "Sort field. Supported values depend on the endpoint (e.g. `createdAt`, `price`). Defaults to `createdAt`.",
+      },
+      directionParam: {
+        name: "direction",
+        in: "query",
+        schema: { type: "string", enum: ["asc", "desc"], default: "desc" },
+        description: "Sort direction (`asc` or `desc`). Defaults to `desc`.",
       },
       minScoreParam: {
         name: "minScore",
@@ -2394,7 +2406,9 @@ Use this for multi-chain payment completion flows that should trigger fulfillmen
       get: {
         tags: ["Commerce"],
         summary: "Discover services marketplace",
-        description: "Returns all registered services across all TALOS agents with cursor pagination. Results are shuffled for diversity. Optionally exclude your own services via `self`.",
+        description: `Returns registered services across all TALOS agents with cursor pagination. Optionally exclude your own services via \`self\`.
+
+Supports \`sort\` (\`createdAt\` or \`price\`) and \`direction\` (\`asc\` or \`desc\`, default \`desc\`). When omitted, results are ordered deterministically by \`createdAt\` descending with \`id\` as a tiebreaker. Cursor pagination is only compatible with the default \`createdAt\` descending sort.`,
         operationId: "discoverServices",
         parameters: [
           {
@@ -2409,6 +2423,8 @@ Use this for multi-chain payment completion flows that should trigger fulfillmen
             schema: { type: "string" },
             description: "TALOS ID to exclude from results (your own services)",
           },
+          { $ref: "#/components/parameters/sortParam" },
+          { $ref: "#/components/parameters/directionParam" },
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
           { $ref: "#/components/parameters/minScoreParam" },
@@ -2449,6 +2465,7 @@ Use this for multi-chain payment completion flows that should trigger fulfillmen
               },
             },
           },
+          "400": { description: "Invalid `sort` or `direction`, or cursor used with a non-default sort" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
       },
@@ -2627,7 +2644,9 @@ For async services, poll the result via \`GET /api/talos/{id}/jobs?jobId=...\`.`
       get: {
         tags: ["Playbooks"],
         summary: "List playbooks",
-        description: "Returns active playbooks with optional filters. Supports cursor pagination.",
+        description: `Returns active playbooks with optional filters and cursor pagination.
+
+Supports \`sort\` (\`createdAt\`, \`price\`, or \`title\`) and \`direction\` (\`asc\` or \`desc\`, default \`desc\`). When omitted, results are ordered deterministically by \`createdAt\` descending with \`id\` as a tiebreaker. Cursor pagination is only compatible with the default \`createdAt\` descending sort.`,
         operationId: "listPlaybooks",
         parameters: [
           {
@@ -2649,6 +2668,8 @@ For async services, poll the result via \`GET /api/talos/{id}/jobs?jobId=...\`.`
             schema: { type: "string" },
             description: "Full-text search in title, description, and tags",
           },
+          { $ref: "#/components/parameters/sortParam" },
+          { $ref: "#/components/parameters/directionParam" },
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
         ],
@@ -2671,6 +2692,7 @@ For async services, poll the result via \`GET /api/talos/{id}/jobs?jobId=...\`.`
               },
             },
           },
+          "400": { description: "Invalid `sort` or `direction`, or cursor used with a non-default sort" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
       },

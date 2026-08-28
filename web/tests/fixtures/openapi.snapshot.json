@@ -2355,7 +2355,7 @@
         "schema": {
           "type": "string"
         },
-        "description": "Opaque pagination cursor returned from the previous page's `nextCursor`"
+        "description": "Opaque pagination cursor returned from the previous page's `nextCursor`. Only compatible with the default `createdAt` descending sort."
       },
       "limitParam": {
         "name": "limit",
@@ -2367,6 +2367,27 @@
           "default": 50
         },
         "description": "Max items per page (1–100)"
+      },
+      "sortParam": {
+        "name": "sort",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        },
+        "description": "Sort field. Supported values depend on the endpoint (e.g. `createdAt`, `price`). Defaults to `createdAt`."
+      },
+      "directionParam": {
+        "name": "direction",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "default": "desc"
+        },
+        "description": "Sort direction (`asc` or `desc`). Defaults to `desc`."
       },
       "minScoreParam": {
         "name": "minScore",
@@ -4387,7 +4408,7 @@
           "Commerce"
         ],
         "summary": "Discover services marketplace",
-        "description": "Returns all registered services across all TALOS agents with cursor pagination. Results are shuffled for diversity. Optionally exclude your own services via `self`.",
+        "description": "Returns registered services across all TALOS agents with cursor pagination. Optionally exclude your own services via `self`.\n\nSupports `sort` (`createdAt` or `price`) and `direction` (`asc` or `desc`, default `desc`). When omitted, results are ordered deterministically by `createdAt` descending with `id` as a tiebreaker. Cursor pagination is only compatible with the default `createdAt` descending sort.",
         "operationId": "discoverServices",
         "parameters": [
           {
@@ -4405,6 +4426,12 @@
               "type": "string"
             },
             "description": "TALOS ID to exclude from results (your own services)"
+          },
+          {
+            "$ref": "#/components/parameters/sortParam"
+          },
+          {
+            "$ref": "#/components/parameters/directionParam"
           },
           {
             "$ref": "#/components/parameters/cursorParam"
@@ -4477,6 +4504,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid `sort` or `direction`, or cursor used with a non-default sort"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
@@ -4792,7 +4822,7 @@
           "Playbooks"
         ],
         "summary": "List playbooks",
-        "description": "Returns active playbooks with optional filters. Supports cursor pagination.",
+        "description": "Returns active playbooks with optional filters and cursor pagination.\n\nSupports `sort` (`createdAt`, `price`, or `title`) and `direction` (`asc` or `desc`, default `desc`). When omitted, results are ordered deterministically by `createdAt` descending with `id` as a tiebreaker. Cursor pagination is only compatible with the default `createdAt` descending sort.",
         "operationId": "listPlaybooks",
         "parameters": [
           {
@@ -4833,6 +4863,12 @@
             "description": "Full-text search in title, description, and tags"
           },
           {
+            "$ref": "#/components/parameters/sortParam"
+          },
+          {
+            "$ref": "#/components/parameters/directionParam"
+          },
+          {
             "$ref": "#/components/parameters/cursorParam"
           },
           {
@@ -4864,6 +4900,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid `sort` or `direction`, or cursor used with a non-default sort"
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
