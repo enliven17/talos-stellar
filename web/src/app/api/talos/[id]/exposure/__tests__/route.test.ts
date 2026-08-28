@@ -22,6 +22,7 @@ function chain(result: unknown) {
     from: vi.fn().mockReturnThis(),
     leftJoin: vi.fn().mockReturnThis(),
     where: vi.fn().mockReturnThis(),
+    limit: vi.fn().mockReturnThis(),
     groupBy: vi.fn().mockReturnThis(),
     orderBy: vi.fn().mockReturnThis(),
     then: vi.fn().mockImplementation((resolve?: Function) => {

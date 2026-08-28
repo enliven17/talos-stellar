@@ -3,21 +3,10 @@ import { db } from "@/db";
 import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsCommerceJobs, tlsRevenues, tlsCommerceServices } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
+import { resolveTalosFromRequest } from "@/lib/auth";
 import { logger } from "@/lib/logger";
 import { ingestJobToLedger } from "@/lib/reputation-ledger";
-
-async function resolveCallerTalos(request: NextRequest): Promise<string | null> {
-  const authHeader = request.headers.get("authorization");
-  if (!authHeader?.startsWith("Bearer ")) return null;
-  const token = authHeader.slice(7);
-  const talos = await db
-    .select({ id: tlsTalos.id })
-    .from(tlsTalos)
-    .where(eq(tlsTalos.apiKey, token))
-    .limit(1)
-    .then((r) => r[0] ?? null);
-  return talos?.id ?? null;
-}
+import { withTraceContext } from "@/lib/tracing";
 
 // POST /api/jobs/:id/result — Submit job result (from service provider agent)
 async function handlePost(
@@ -29,6 +18,7 @@ async function handlePost(
   try {
     const auth = await resolveTalosFromRequest(request, ["commerce:write"]);
     if (!auth.ok) return auth.response;
+    const callerTalosId = auth.talos.id;
 
     const body = await request.json();
     const { result, fencingToken } = body;
@@ -158,6 +148,7 @@ async function handleGet(
   try {
     const auth = await resolveTalosFromRequest(request, ["commerce:read"]);
     if (!auth.ok) return auth.response;
+    const callerTalosId = auth.talos.id;
 
     const job = await db
       .select()

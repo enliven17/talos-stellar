@@ -116,12 +116,15 @@ export async function POST(
  * Preview: treasury balance + buyback stats
  */
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
 
   try {
+    const auth = await verifyAgentApiKey(request, id, ["revenue:read"]);
+    if (!auth.ok) return auth.response;
+
     const talos = await db.query.tlsTalos.findFirst({ where: eq(tlsTalos.id, id) });
     if (!talos) return Response.json({ error: "TALOS not found" }, { status: 404 });
 

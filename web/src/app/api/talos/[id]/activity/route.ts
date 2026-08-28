@@ -6,17 +6,74 @@ import { verifyAgentApiKey } from "@/lib/auth";
 import { parseLimit } from "@/lib/parse-limit";
 import { withTraceContext } from "@/lib/tracing";
 
-// GET /api/talos/:id/activity — Get activities
+// ─── Cursor helpers ───────────────────────────────────────────────────────────
+//
+// The per-agent activity feed is ordered deterministically by
+// (createdAt DESC, id DESC).  The cursor encodes both fields so that pages
+// never overlap or skip rows even when multiple activities share an identical
+// timestamp.
+//
+// Encoding: base64url(JSON.stringify({ createdAt: ISO-string, id: string }))
+// The cursor is opaque to callers — internal fields are never leaked as-is.
+
+type AgentActivityCursor = { createdAt: string; id: string };
+
+export class InvalidAgentActivityCursorError extends Error {
+  constructor() {
+    super("Invalid cursor");
+    this.name = "InvalidAgentActivityCursorError";
+  }
+}
+
+export function decodeAgentActivityCursor(raw: string): AgentActivityCursor {
+  try {
+    const decoded = JSON.parse(
+      Buffer.from(raw, "base64url").toString("utf8"),
+    ) as Partial<AgentActivityCursor>;
+
+    const date = decoded.createdAt ? new Date(decoded.createdAt) : null;
+    if (
+      !date ||
+      Number.isNaN(date.getTime()) ||
+      typeof decoded.id !== "string" ||
+      decoded.id.length === 0
+    ) {
+      throw new Error("invalid cursor fields");
+    }
+    return { createdAt: date.toISOString(), id: decoded.id };
+  } catch {
+    throw new InvalidAgentActivityCursorError();
+  }
+}
+
+export function encodeAgentActivityCursor(cursor: AgentActivityCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+// ─── GET /api/talos/:id/activity ─────────────────────────────────────────────
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
   const { searchParams } = new URL(request.url);
-  const cursor = searchParams.get("cursor");
+  const rawCursor = searchParams.get("cursor");
   const parsedLimit = parseLimit(searchParams.get("limit"), 50, 200);
   if (!parsedLimit.ok) return parsedLimit.response;
   const limit = parsedLimit.limit;
+
+  // Validate cursor eagerly — before any DB work — so callers get a clear 400.
+  let decodedCursor: AgentActivityCursor | null = null;
+  if (rawCursor) {
+    try {
+      decodedCursor = decodeAgentActivityCursor(rawCursor);
+    } catch (err) {
+      if (err instanceof InvalidAgentActivityCursorError) {
+        return Response.json({ error: "Invalid cursor" }, { status: 400 });
+      }
+      throw err;
+    }
+  }
 
   try {
     const talos = await db
@@ -30,19 +87,39 @@ export async function GET(
       return Response.json({ error: "TALOS not found" }, { status: 404 });
     }
 
+    // Build WHERE conditions.
+    // Ordering is (createdAt DESC, id DESC), so the keyset predicate is:
+    //   createdAt < cursorDate
+    //   OR (createdAt = cursorDate AND id < cursorId)
     const conditions = [eq(tlsActivities.talosId, id)];
-    if (cursor) conditions.push(sql`${tlsActivities.createdAt} < ${new Date(cursor)}`);
+    if (decodedCursor) {
+      const cursorDate = new Date(decodedCursor.createdAt);
+      conditions.push(
+        sql`(${tlsActivities.createdAt} < ${cursorDate}
+             OR (${tlsActivities.createdAt} = ${cursorDate}
+                 AND ${tlsActivities.id} < ${decodedCursor.id}))`,
+      );
+    }
 
+    // Fetch limit + 1 to detect whether a next page exists.
     const rows = await db
       .select()
       .from(tlsActivities)
       .where(and(...conditions))
-      .orderBy(desc(tlsActivities.createdAt))
+      .orderBy(desc(tlsActivities.createdAt), desc(tlsActivities.id))
       .limit(limit + 1);
 
     const hasMore = rows.length > limit;
     const activities = hasMore ? rows.slice(0, limit) : rows;
-    const nextCursor = hasMore ? activities[activities.length - 1]?.createdAt.toISOString() ?? null : null;
+
+    const lastItem = activities[activities.length - 1];
+    const nextCursor =
+      hasMore && lastItem
+        ? encodeAgentActivityCursor({
+            createdAt: lastItem.createdAt.toISOString(),
+            id: lastItem.id,
+          })
+        : null;
 
     return Response.json({ activities, nextCursor });
   } catch {
