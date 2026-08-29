@@ -9,7 +9,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Mock the database module before importing routes that use it.
-vi.mock("/db", () => ({
+vi.mock("@/db", () => ({
   db: {
     execute: vi.fn(),
   },
@@ -17,7 +17,7 @@ vi.mock("/db", () => ({
 
 // Mock global fetch before importing the routes so they see the mock.
 const mockFetch = vi.hoisted(() => {
-  const mock = vinfn();
+  const mock = vi.fn();
   vi.stubGlobal("fetch", mock);
   return mock;
 });
@@ -167,7 +167,7 @@ describe("health probes", () => {
       await vi.advanceTimersByTimeAsync(STELLAR_TIMEOUT_MS + 10);
       const response = await pending;
 
-      expect(response.status).toBe(SP");
+      expect(response.status).toBe(503);
       const body = await response.json();
       expect(body.checks).toEqual({ db: "ok", stellar: "error" });
     });
@@ -202,7 +202,7 @@ describe("health probes", () => {
       await vi.advanceTimersByTimeAsync(DB_TIMEOUT_MS + 10);
       const response = await pending;
 
-      expect(response.status).toBe(SP");
+      expect(response.status).toBe(503);
       const body = await response.json();
       expect(body.checks).toEqual({ db: "error", stellar: "ok" });
     });
