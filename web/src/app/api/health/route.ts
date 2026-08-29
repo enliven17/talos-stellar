@@ -18,9 +18,17 @@ type HealthDeps = {
   db: Db;
   fetchFn: typeof fetch;
   now?: () => Date;
+  dbTimeoutMs?: number;
+  stellarTimeoutMs?: number;
 };
 
-export function createHealthHandler({ db, fetchFn, now = () => new Date() }: HealthDeps) {
+export function createHealthHandler({
+  db,
+  fetchFn,
+  now = () => new Date(),
+  dbTimeoutMs = DB_TIMEOUT_MS,
+  stellarTimeoutMs = STELLAR_TIMEOUT_MS,
+}: HealthDeps) {
   return async function GET(request: NextRequest) {
     const probe = request.nextUrl.searchParams.get("probe");
 
@@ -42,7 +50,7 @@ export function createHealthHandler({ db, fetchFn, now = () => new Date() }: Hea
       withTimeout((signal) => {
         void signal;
         return db.execute(sql`SELECT 1`);
-      }, DB_TIMEOUT_MS).then(() => {
+      }, dbTimeoutMs).then(() => {
         checks.db = "ok";
       }),
       withTimeout(
@@ -50,7 +58,7 @@ export function createHealthHandler({ db, fetchFn, now = () => new Date() }: Hea
           fetchFn(process.env.STELLAR_HORIZON_URL ?? DEFAULT_HORIZON, { signal }).then((r) => {
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
           }),
-        STELLAR_TIMEOUT_MS,
+        stellarTimeoutMs,
       ).then(() => {
         checks.stellar = "ok";
       }),
