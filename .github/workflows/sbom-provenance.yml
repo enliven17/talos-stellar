@@ -128,6 +128,10 @@ jobs:
     if: contains(needs.detect-components.outputs.components, 'web')
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        readiness-scenario: [healthy, database-degraded, database-timeout, horizon-degraded, horizon-timeout, dependencies-unavailable, mixed-dependency-timeout]
     env:
       TZ: UTC
     steps:
@@ -159,6 +163,10 @@ jobs:
 
       - name: Run web tests (readiness/liveness focus)
         run: pnpm --dir web test -- --run
+        timeout-minutes: 2
+        env:
+          READINESS_SCENARIO: ${{ matrix.readiness-scenario }}
+          MOCK_CLOCK_ISO: "2024-01-01T00:00:00.000Z"
 
   generate-sdk:
     needs: detect-components
