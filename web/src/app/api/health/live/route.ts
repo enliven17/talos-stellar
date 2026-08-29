@@ -1,44 +1,20 @@
-/**
- * GET /api/health/live — Liveness probe
- *
- * Answers the single question: "Is the Node.js process alive?"
- * It performs NO external I/O — no DB query, no Horizon call.
- *
- * This probe is synchronous and always returns immediately, so timeouts
- * are not a concern: it cannot hang.
- *
- * Use this probe for:
- *   - Kubernetes livenessProbe (restart the container when this fails)
- *   - Docker HEALTHCHECK as a cheap process-alive signal
- *
- * A liveness failure means the process itself is broken; the orchestrator
- * should restart it.  Dependency failures belong in the readiness probe
- * (GET /api/health/ready) and must NOT affect liveness.
- *
- * Response shape:
- *   200  { status: "ok",   uptime: <seconds>, ts: <ISO-8601> }
- *
- * Headers:
- *   Cache-Control: no-store   (never cache health responses)
- */
-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
 export function buildLivenessResponse(uptime: number, ts: string) {
-  return {
-    status: "ok",
-    uptime,
-    ts,
-  };
+  return { status: "ok", uptime, ts };
 }
-
 export function GET() {
   return Response.json(
     buildLivenessResponse(Math.floor(process.uptime()), new Date().toISOString()),
-    {
-      status: 200,
-      headers: { "Cache-Control": "no-store" },
-    },
+    { status: 200, headers: { "Cache-Control": "no-store" } }
   );
+}
+if (import.meta.vitest) {
+  const { describe, it, expect } = import.meta.vitest;
+  describe("liveness", () {
+    it("returns 200", async () => {
+      const res = GET();
+      expect(res.status).toBe(200);
+    });
+  });
 }
