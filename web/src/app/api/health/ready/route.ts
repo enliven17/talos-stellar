@@ -1,11 +1,11 @@
-/**
- * GET /api/health/ready — Readiness probe
+/** * GET /api/health/ready - Readiness probe
+
  *
  * Answers: "Is the service ready to accept traffic?"
  * Runs all dependency checks in parallel with bounded timeouts:
  *   - db      SELECT 1 against Postgres           (2 s timeout)
- *   - stellar GET to Stellar Horizon RPC           (3 s timeout)
- *
+ *   - stellar GET to Stellar Horizon RPC          (3 s timeout)
+
  * Use this probe for:
  *   - Kubernetes readinessProbe (remove pod from load-balancer when degraded)
  *   - UptimeRobot / Better Uptime monitoring (1-minute interval)
@@ -20,6 +20,9 @@
  *
  * Headers:
  *   Cache-Control: no-store   (never cache health responses)
+ *
+ * Each dependency check is bound by a timeout; if it exceeds the timeout
+ * the check is reported as "error" within that bound.
  */
 
 import { db } from "@/db";
@@ -34,8 +37,48 @@ import {
 
 export const runtime = "nodejs";
 
-export async function GET() {
-  const checks: { db: "ok" | "error"; stellar: "ok" | "error" } = {
+type CheckResult = "ok" | "error";
+type CheckName = "db" | "stellar";
+type HealthChecks = Record<CheckName, CheckResult>;
+
+interface HealthCheckResult {
+  ok: boolean;
+  checks: HealthChecks;
+  ts: string;
+}
+
+export interface HealthCheckOptions {
+  /** Database client, must support `.execute(query)` */
+  db: Pick<typeof db, "execute">;
+  /** Fetch-compatible function for making HTTP requests */
+  fetch: typeof fetch;
+  /** Clock function used for the response `ts` field */
+  now: () => Date;
+  /** Timeout for the database check */
+  dbTimeoutMs: number;
+  /** Timeout for the stellar check */
+  stellarTimeoutMs: number;
+  /** Horezon URL to check */
+  stellarUrl: string;
+}
+
+/**
+ * Run the readiness dependency checks with the provided options.
+ * Exported separately to make the route deterministic and testable.
+ */
+export async function performHealthCheck(
+  options: HealthCheckOptions,
+): Promise<HealthCheckResult> {
+  const {
+    db,
+    fetch,
+    now,
+    dbTimeoutMs,
+    stellarTimeoutMs,
+    stellarUrl,
+  } = options;
+
+  const checks: HealthChecks = {
     db: "error",
     stellar: "error",
   };
@@ -46,28 +89,37 @@ export async function GET() {
         void signal;
         return db.execute(sql`SELECT 1`);
       },
-      DB_TIMEOUT_MS,
+      dbTimeoutMs,
     ).then(() => {
       checks.db = "ok";
     }),
     withTimeout(
       (signal) =>
-        fetch(process.env.STELLAR_HORIZON_URL ?? DEFAULT_HORIZON, { signal }).then((r) => {
+        fetch(stellarUrl, { signal }).then((r) => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
         }),
-      STELLAR_TIMEOUT_MS,
+      stellarTimeoutMs,
     ).then(() => {
       checks.stellar = "ok";
     }),
   ]);
 
   const ok = checks.db === "ok" && checks.stellar === "ok";
+  return { ok, checks, ts: now().toISOString() };
+}
 
-  return NextResponse.json(
-    { ok, checks, ts: new Date().toISOString() },
-    {
-      status: ok ? 200 : 503,
-      headers: { "Cache-Control": "no-store" },
-    },
-  );
+export async function GET() {
+  const result = await performHealthCheck({
+    db,
+    fetch,
+    now: () => new Date(),
+    dbTimeoutMs: DB_TIMEOUT_MS,
+    stellarTimeoutMs: STELLAR_TIMEOUT_MS,
+    stellarUrl: process.env.STELLAR_HORIZON_URL ?? DEFAULT_HORIZON,
+  });
+
+  return NextResponse.json(result, {
+    status: result.ok ? 200 : 503,
+    headers: { "Cache-Control": "no-store" },
+  });
 }
