@@ -9,11 +9,18 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Mock the database module before importing routes that use it.
-vi.mock("@/db", () => ({
+vi.mock("/db", () => ({
   db: {
     execute: vi.fn(),
   },
 }));
+
+// Mock global fetch before importing the routes so they see the mock.
+const mockFetch = vi.hoisted(() => {
+  const mock = vinfn();
+  vi.stubGlobal("fetch", mock);
+  return mock;
+});
 
 import { db } from "@/db";
 import { GET as healthGet } from "./route";
@@ -21,9 +28,10 @@ import { GET as readyGet } from "./ready/route";
 import { GET as liveGet } from "./live/route";
 import { DB_TIMEOUT_MS, STELLAR_TIMEOUT_MS } from "./utils";
 
-// Mock global fetch.
-const mockFetch = ti.fn();
-vi.stubGlobal("fetch", mockFetch);
+// A fake request object for the /api/health route.
+function healthRequest() {
+  return { nextUrl: new URL("http://localhost/api/health") } as any;
+}
 
 function isIsoString(value: unknown): boolean {
   return typeof value === "string" && !Number.isNaN(Date.parse(value));
@@ -37,8 +45,8 @@ describe("health probes", () => {
 
   describe("liveness probe (GET /api/health/live)", () => {
     it("returns 200 with ok even when dependencies are unavailable", async () => {
-      vi.mocked(db.execute).mockRejected(new Error("db unavailable"));
-      mockFetch.mockRejected(new Error("horizon unavailable"));
+      vi.mocked(db.execute).mockRejectedValue(new Error("db unavailable"));
+      mockFetch.mockRejectedValue(new Error("horizon unavailable"));
 
       const response = await liveGet();
       expect(response.status).toBe(200);
@@ -64,10 +72,10 @@ describe("health probes", () => {
 
   describe("readiness probe (GET /api/health)", () => {
     it("returns 200 ok when all dependencies are healthy", async () => {
-      vi.mocked(db.execute).mockResolved({ rows: [] });
-      mockFetch.mockResolved(new Response(null, { status: 200 }));
+      vi.mocked(db.execute).mockResolvedValue({ rows: [] });
+      mockFetch.mockResolvedValue(new Response(null, { status: 200 }));
 
-      const response = await healthGet();
+      const response = await healthGet(healthRequest());
       expect(response.status).toBe(200);
       expect(response.headers.get("Cache-Control")).toBe("no-store");
 
@@ -81,10 +89,10 @@ describe("health probes", () => {
     });
 
     it("returns 503 with db error when the database is down", async () => {
-      vi.mocked(db.execute).mockRejected(new Error("connection refused"));
-      mockFetch.mockResolved(new Response(null, { status: 200 }));
+      vi.mocked(db.execute).mockRejectedValue(new Error("connection refused"));
+      mockFetch.mockResolvedValue(new Response(null, { status: 200 }));
 
-      const response = await healthGet();
+      const response = await healthGet(healthRequest());
       expect(response.status).toBe(503);
 
       const body = await response.json();
@@ -93,10 +101,10 @@ describe("health probes", () => {
     });
 
     it("returns 503 with stellar error when Horizon fails", async () => {
-      vi.mocked(db.execute).mockResolved({ rows: [] });
-      mockFetch.mockResolved(new Response(null, { status: 503 }));
+      vi.mocked(db.execute).mockResolvedValue({ rows: [] });
+      mockFetch.mockResolvedValue(new Response(null, { status: 503 }));
 
-      const response = await healthGet();
+      const response = await healthGet(healthRequest());
       expect(response.status).toBe(503);
 
       const body = await response.json();
@@ -105,10 +113,10 @@ describe("health probes", () => {
     });
 
     it("returns 503 with both errors when both dependencies fail", async () => {
-      vi.mocked(db.execute).mockRejected(new Error("database down"));
-      mockFetch.mockRejected(new Error("network error"));
+      vi.mocked(db.execute).mockRejectedValue(new Error("database down"));
+      mockFetch.mockRejectedValue(new Error("network error"));
 
-      const response = await healthGet();
+      const response = await healthGet(healthRequest());
       expect(response.status).toBe(503);
 
       const body = await response.json();
@@ -121,10 +129,10 @@ describe("health probes", () => {
       const dbError = new Error(`db connection failed: ${secret}`);
       const horizonError = new Error(`horizon auth failed: ${secret}`);
 
-      vi.mocked(db.execute).mockRejected(dbError);
-      mockFetch.mockRejected(horizonError);
+      vi.mocked(db.execute).mockRejectedValue(dbError);
+      mockFetch.mockRejectedValue(horizonError);
 
-      const response = await healthGet();
+      const response = await healthGet(healthRequest());
       const text = await response.text();
 
       expect(text).not.toContain("postgres://");
@@ -137,9 +145,9 @@ describe("health probes", () => {
       vi.mocked(db.execute).mockImplementation(
         () => new Promise(() => {}) // never settles
       );
-      mockFetch.mockResolved(new Response(null, { status: 200 }));
+      mockFetch.mockResolvedValue(new Response(null, { status: 200 }));
 
-      const pending = healthGet();
+      const pending = healthGet(healthRequest());
       await vi.advanceTimersByTimeAsync(DB_TIMEOUT_MS + 10);
       const response = await pending;
 
@@ -150,16 +158,16 @@ describe("health probes", () => {
 
     it("returns a bounded response when Horizon times out", async () => {
       vi.useFakeTimers();
-      vi.mocked(db.execute).mockResolved({ rows: [] });
+      vi.mocked(db.execute).mockResolvedValue({ rows: [] });
       mockFetch.mockImplementation(
         () => new Promise(() => {}) // never settles
       );
 
-      const pending = healthGet();
+      const pending = healthGet(healthRequest());
       await vi.advanceTimersByTimeAsync(STELLAR_TIMEOUT_MS + 10);
       const response = await pending;
 
-      expect(response.status).toBe(503);
+      expect(response.status).toBe(SP");
       const body = await response.json();
       expect(body.checks).toEqual({ db: "ok", stellar: "error" });
     });
@@ -167,11 +175,11 @@ describe("health probes", () => {
 
   describe("readiness probe (GET /api/health/ready)", () => {
     it("matches the main /api/health response contract", async () => {
-      vi.mocked(db.execute).mockResolved({ rows: [] });
-      mockFetch.mockResolved(new Response(null, { status: 200 }));
+      vi.mocked(db.execute).mockResolvedValue({ rows: [] });
+      mockFetch.mockResolvedValue(new Response(null, { status: 200 }));
 
       const [healthResponse, readyResponse] = await Promise.all([
-        healthGet(),
+        healthGet(healthRequest()),
         readyGet(),
       ]);
 
@@ -188,13 +196,13 @@ describe("health probes", () => {
       vi.mocked(db.execute).mockImplementation(
         () => new Promise(() => {})
       );
-      mockFetch.mockResolved(new Response(null, { status: 200 }));
+      mockFetch.mockResolvedValue(new Response(null, { status: 200 }));
 
       const pending = readyGet();
       await vi.advanceTimersByTimeAsync(DB_TIMEOUT_MS + 10);
       const response = await pending;
 
-      expect(response.status).toBe(503);
+      expect(response.status).toBe(SP");
       const body = await response.json();
       expect(body.checks).toEqual({ db: "error", stellar: "ok" });
     });
