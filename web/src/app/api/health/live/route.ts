@@ -25,13 +25,17 @@
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+export function buildLivenessResponse(uptime: number, ts: string) {
+  return {
+    status: "ok",
+    uptime,
+    ts,
+  };
+}
+
 export function GET() {
   return Response.json(
-    {
-      status: "ok",
-      uptime: Math.floor(process.uptime()),
-      ts: new Date().toISOString(),
-    },
+    buildLivenessResponse(Math.floor(process.uptime()), new Date().toISOString()),
     {
       status: 200,
       headers: { "Cache-Control": "no-store" },
