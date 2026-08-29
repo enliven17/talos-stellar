@@ -216,6 +216,40 @@ cargo test --target wasm32-unknown-unknown
   [durable job effects runbook](./docs/prime-agent-durable-job-effects.md).
 - For Rust, keep formatting standard with `cargo fmt` and validate with `cargo test`
 
+## Lockfile drift verification
+
+Every maintained package ships a committed lockfile so dependency state is
+reproducible. Before opening (or merging) a PR, run the lockfile drift check —
+it fails clearly when a manifest and its lockfile have diverged (a stale
+lockfile, or generated files that differ):
+
+```bash
+pnpm verify:lockfiles            # offline, deterministic checks
+pnpm verify:lockfiles:frozen     # also run `pnpm install --frozen-lockfile`
+```
+
+What it covers:
+
+- **Node (pnpm workspace)** — root `pnpm-lock.yaml` vs every `package.json`
+  (web, contracts, `packages/sdk`, workspace root)
+- **Node (standalone)** — `web/pnpm-lock.yaml` and
+  `packages/sdk/package-lock.json`
+- **Python (uv)** — `packages/prime-agent/uv.lock` via `uv lock --check`
+- **Rust (cargo)** — `contracts/Cargo.lock` via `cargo metadata --locked`
+
+CI (`lockfile-drift-ci.yml`) runs the same command on every PR, so the local
+check and the gate can never drift apart. When a check reports a stale
+lockfile, fix it with the package manager's install/lock command (e.g.
+`pnpm install`, `uv lock`, `cargo generate-lockfile`) and commit the updated
+lockfile. You can self-test the detector's pass/fail behaviour with:
+
+```bash
+pnpm test:lockfile-fixture
+```
+
+Note: the Rust check may need to fetch the contract dependencies on first run
+(the CI runner has network); it never modifies tracked files.
+
 ## Database Transaction Retry & Serialization Hardening
 
 Critical database state transitions (money, token purchases, patron creation, job state transitions, agent genesis) use `withTransactionRetry` from `web/src/db/db-retry.ts` to automatically recover from PostgreSQL serialization conflicts (`40001`), deadlocks (`40P01`), lock timeouts (`55P03`), and transient connection failures.

@@ -125,6 +125,15 @@ cargo test --target wasm32-unknown-unknown
 cargo build --target wasm32-unknown-unknown --release
 ```
 
+Verify committed lockfiles are in sync with their manifests before opening a PR
+(run by CI on every pull request; fails clearly on stale lockfiles):
+
+```bash
+pnpm verify:lockfiles            # offline, deterministic checks
+pnpm verify:lockfiles:frozen     # also run `pnpm install --frozen-lockfile`
+pnpm test:lockfile-fixture       # self-test the detector (pass + fail paths)
+```
+
 ## One-command local integration stack
 
 The repository now includes a reproducible local stack that starts Postgres, a mock Stellar provider, the web app, and optional agent services with a single command:

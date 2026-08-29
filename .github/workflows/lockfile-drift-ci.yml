@@ -1,0 +1,94 @@
+name: Lockfile Drift CI
+
+# Detects manifest <-> lockfile drift across every maintained package before
+# merge or deployment. Fails clearly when a lockfile is stale or generated
+# files differ. The authoritative logic lives in scripts/verify-lockfiles.sh so
+# the local command and CI never diverge.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'web/package.json'
+      - 'web/pnpm-lock.yaml'
+      - 'packages/sdk/package.json'
+      - 'packages/sdk/package-lock.json'
+      - 'packages/prime-agent/pyproject.toml'
+      - 'packages/prime-agent/uv.lock'
+      - 'contracts/Cargo.toml'
+      - 'contracts/Cargo.lock'
+      - 'contracts/**/Cargo.toml'
+      - 'scripts/verify-lockfiles.sh'
+      - 'scripts/check-node-lock.js'
+      - 'scripts/test-lockfile-fixture.sh'
+      - '.github/workflows/lockfile-drift-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'web/package.json'
+      - 'web/pnpm-lock.yaml'
+      - 'packages/sdk/package.json'
+      - 'packages/sdk/package-lock.json'
+      - 'packages/prime-agent/pyproject.toml'
+      - 'packages/prime-agent/uv.lock'
+      - 'contracts/Cargo.toml'
+      - 'contracts/Cargo.lock'
+      - 'contracts/**/Cargo.toml'
+      - 'scripts/verify-lockfiles.sh'
+      - 'scripts/check-node-lock.js'
+      - 'scripts/test-lockfile-fixture.sh'
+      - '.github/workflows/lockfile-drift-ci.yml'
+  workflow_dispatch:
+
+# Only read the repository; the drift check must never touch secrets.
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: lockfile-drift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-lockfiles:
+    name: Verify manifests & lockfiles
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (documented: >=20)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup pnpm (documented: >=9)
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run lockfile drift verification (offline, deterministic)
+        run: bash scripts/verify-lockfiles.sh
+
+      - name: Run authoritative frozen-lockfile verification
+        run: bash scripts/verify-lockfiles.sh --frozen
+
+      # Self-check that the drift detector itself can tell the difference.
+      - name: Run lockfile drift fixture (pass + fail paths)
+        run: bash scripts/test-lockfile-fixture.sh
