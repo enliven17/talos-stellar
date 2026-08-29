@@ -14,8 +14,70 @@ from enum import Enum
 from typing import Any, Callable
 
 from talos_agent.circuit_breaker import CircuitBreakerOpen, cb_registry
+from talos_agent.telemetry import _is_sensitive_key
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class FallbackMetricsSnapshot:
+    """A typed snapshot of fallback operational metrics for diagnostics."""
+
+    attempts: dict[str, int]
+    successes: dict[str, int]
+    skips: dict[str, int]
+    exhaustions: dict[str, int]
+
+
+class FallbackMetrics:
+    """Registry for fallback operational metrics."""
+
+    def __init__(self) -> None:
+        self._attempts: dict[str, int] = {}
+        self._successes: dict[str, int] = {}
+        self._skips: dict[str, int] = {}
+        self._exhaustions: dict[str, int] = {}
+
+    def _increment(self, counter: dict[str, int], provider: str) -> None:
+        """Increment the metric for the given provider, bounding cardinality and redacting if sensitive."""
+        # Hard limit on unique providers to prevent unbounded memory growth
+        if len(counter) >= 100 and provider not in counter:
+            provider = "OTHER_OVERFLOW"
+        elif _is_sensitive_key(provider):
+            provider = "[REDACTED]"
+        
+        counter[provider] = counter.get(provider, 0) + 1
+
+    def record_attempt(self, provider: str) -> None:
+        self._increment(self._attempts, provider)
+
+    def record_success(self, provider: str) -> None:
+        self._increment(self._successes, provider)
+
+    def record_skip(self, provider: str) -> None:
+        self._increment(self._skips, provider)
+
+    def record_exhaustion(self, provider: str) -> None:
+        self._increment(self._exhaustions, provider)
+
+    def snapshot(self) -> FallbackMetricsSnapshot:
+        """Return a typed snapshot of the current metric state."""
+        return FallbackMetricsSnapshot(
+            attempts=dict(self._attempts),
+            successes=dict(self._successes),
+            skips=dict(self._skips),
+            exhaustions=dict(self._exhaustions),
+        )
+
+    def reset(self) -> None:
+        """Clear all metric counters."""
+        self._attempts.clear()
+        self._successes.clear()
+        self._skips.clear()
+        self._exhaustions.clear()
+
+
+fallback_metrics = FallbackMetrics()
 
 
 class FallbackStrategy(str, Enum):
@@ -120,6 +182,7 @@ class FallbackChain:
                 cooldown = breaker.remaining_cooldown() or 0.0
                 msg = f"Circuit breaker OPEN (retry in {cooldown:.1f}s)"
                 attempts.append((provider_name, msg))
+                fallback_metrics.record_skip(provider_name)
                 logger.warning(
                     "Fallback skipping '%s' — %s",
                     provider_name,
@@ -127,9 +190,11 @@ class FallbackChain:
                 )
                 continue
 
+            fallback_metrics.record_attempt(provider_name)
             try:
                 result = await operation(provider_name, *args, **kwargs)
                 await breaker.record_success()
+                fallback_metrics.record_success(provider_name)
                 logger.info(
                     "Fallback succeeded with '%s' after %d attempt(s)",
                     provider_name,
@@ -162,6 +227,9 @@ class FallbackChain:
                 )
 
         # All providers exhausted
+        for p, _ in attempts:
+            fallback_metrics.record_exhaustion(p)
+
         logger.error(
             "Fallback chain exhausted after %d provider(s): %s",
             len(attempts),
