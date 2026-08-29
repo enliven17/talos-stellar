@@ -9,3 +9,33 @@
  * The timer handle is cleared on every code path (resolve, reject, timeout)
  * so no dangling timer is ever leaked.
  */
+
+export const DEFAULT_HORIZON = "https://horizon.stellar.org";
+export const DB_TIMEOUT_MS = 2000;
+export const STELLAR_TIMEOUT_MS = 3000;
+
+export function withTimeout<T>(
+  fn: (signal: AbortSignal) => Promise<T>,
+  ms: number,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`Timed out after ${ms}ms`));
+    }, ms);
+
+    Promise.resolve()
+      .then(() => fn(controller.signal))
+      .then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+  });
+}
