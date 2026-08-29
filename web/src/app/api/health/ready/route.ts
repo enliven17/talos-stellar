@@ -1,5 +1,4 @@
 /** * GET /api/health/ready - Readiness probe
-
  *
  * Answers: "Is the service ready to accept traffic?"
  * Runs all dependency checks in parallel with bounded timeouts:
@@ -37,11 +36,11 @@ import {
 
 export const runtime = "nodejs";
 
-type CheckResult = "ok" | "error";
-type CheckName = "db" | "stellar";
-type HealthChecks = Record<CheckName, CheckResult>;
+export type CheckResult = "ok" | "error";
+export type CheckName = "db" | "stellar";
+export type HealthChecks = Record<CheckName, CheckResult>;
 
-interface HealthCheckResult {
+export interface HealthCheckResult {
   ok: boolean;
   checks: HealthChecks;
   ts: string;
@@ -58,7 +57,7 @@ export interface HealthCheckOptions {
   dbTimeoutMs: number;
   /** Timeout for the stellar check */
   stellarTimeoutMs: number;
-  /** Horezon URL to check */
+  /** Horizon URL to check */
   stellarUrl: string;
 }
 
