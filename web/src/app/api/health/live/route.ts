@@ -4,6 +4,9 @@
  * Answers the single question: "Is the Node.js process alive?"
  * It performs NO external I/O — no DB query, no Horizon call.
  *
+ * This probe is synchronous and always returns immediately, so timeouts
+ * are not a concern: it cannot hang.
+ *
  * Use this probe for:
  *   - Kubernetes livenessProbe (restart the container when this fails)
  *   - Docker HEALTHCHECK as a cheap process-alive signal
@@ -20,6 +23,7 @@
  */
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export function GET() {
   return Response.json(
