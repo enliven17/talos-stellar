@@ -14,7 +14,10 @@ type Db = {
   execute: (query: any) => Promise<any>;
 };
 
-type HealthDeps = {
+/**
+ * Health check dependencies that can be injected for testing.
+ */
+export type HealthDeps = {
   db: Db;
   fetchFn: typeof fetch;
   now?: () => Date;
@@ -22,6 +25,38 @@ type HealthDeps = {
   stellarTimeoutMs?: number;
 };
 
+/**
+ * The readiness state of a single dependency. Only "ok" or "error" is
+ * reported; no internal error details or connection strings are exposed.
+ */
+export type DependencyStatus = "ok" | "error";
+
+/**
+ * Readiness check results with one entry per dependency.
+ */
+export type HealthChecks = {
+  db: DependencyStatus;
+  stellar: DependencyStatus;
+};
+
+/**
+ * Creates a health check handler for Next.js.
+ *
+ * The `probe` query parameter controls the behavior:
+ * - `?probe=live`: liveness probe, always responds 200 as long as the
+ *   process is running. It does not touch any dependencies.
+ * - no `probe` (or any other value): readiness probe, checks all
+ *   dependencies and responds 200 if healthy, or 503 with a `checks`
+ *   object identifying which dependencies failed.
+ *
+ * Dependencies are checked with a hard timeout; the response is always
+ * bounded by the configured timeout values and will never hang.
+ *
+ * @example
+ * Liveness: GET /api/health?probe=live -> 200 { ok: true, ts: ... }
+ * Readiness healthy: GET /api/health -> 200 { ok: true, checks: { db: "ok", stellar: "ok" }, ts: ... }
+ * Readiness degraded: GET /api/health -> 503 { ok: false, checks: { db: "error", stellar: "ok" }, ts: ... }
+ */
 export function createHealthHandler({
   db,
   fetchFn,
@@ -41,7 +76,7 @@ export function createHealthHandler({
     }
 
     // Readiness probe: checks dependencies and returns 503 if any is failing.
-    const checks: { db: "ok" | "error"; stellar: "ok" | "error" } = {
+    const checks: HealthChecks = {
       db: "error",
       stellar: "error",
     };
