@@ -10,7 +10,7 @@
  * so no dangling timer is ever leaked.
  */
 
-export const DEFAULT_HORIZON = "https://horizon-testnet.stellar.org";
+export const DEFAULT HORIZON = "https://horizon-testnet.stellar.org";
 
 /** DB check timeout — 2 s */
 export const DB_TIMEOUT_MS = 2_000;
@@ -18,7 +18,7 @@ export const DB_TIMEOUT_MS = 2_000;
 /** Stellar Horizon check timeout — 3 s */
 export const STELLAR_TIMEOUT_MS = 3_000;
 
-export function withTimeout<T>(
+export function withTimeout<T(
   fn: (signal: AbortSignal) => Promise<T>,
   ms: number,
 ): Promise<T> {
