@@ -1,39 +1,17 @@
 //! storage_migration — Versioned storage migration framework for Talos
 //! Protocol Soroban contracts.
 //!
-//! ## Model
+//! Each contract keeps a single u32 schema version in persistent storage.
+//! Migrations move the version forward one ordered step at a time.
 //!
-//! Each contract keeps a single `u32` schema version in its own persistent
-//! storage (via this crate's private [`MigrationKey`] type, which cannot
-//! collide with a host contract's own `DataKey` enum since Soroban storage
-//! keys are typed). Migrations move the version forward **one ordered step
-//! at a time**: `begin_migration(e, current, from, to)` only succeeds when
-//! `current == from` and `to > from`, so steps can never be skipped or
-//! applied out of order, and a step that has already been applied becomes a
-//! no-op rejection rather than a silent double-apply — the caller is
-//! expected to check [`schema_version`] before invoking a step, which makes
-//! a top-level "run all pending migrations" dispatcher naturally idempotent
-//! (see `talos_registry::run_migrations` for the reference integration).
+//! A migration in progress holds a lock so a second migration cannot begin
+//! until the current migration is completed or aborted.
 //!
-//! A migration in progress holds a lock (cleared by [`complete_migration`]
-//! or [`abort_migration`]) so a re-entrant or concurrent call cannot begin a
-//! second step while one is uncommitted.
+//! Every completed migration and rollback is recorded in an on-chain history
+//! log and emits an audit event.
 //!
-//! Every applied step and rollback is appended to an on-chain history log
-//! ([`migration_history_len`] / [`migration_record_at`]) and emits an event,
-//! giving operators an audit trail without needing off-chain indexing.
-//!
-//! ## Rollback
-//!
-//! [`rollback`] only moves the version pointer backwards, bounded by a
-//! caller-supplied `max_depth` (see [`validate_rollback`]). It does **not**
-//! undo any data written by forward migrations — schema migrations in this
-//! framework are intentionally not required to be reversible at the data
-//! level. Operators must confirm the target version's data shape is safe to
-//! resume from before relying on old entry-points again.
-//!
-//! See `contracts/storage_migration/README.md` for the full design and an
-//! operator runbook.
+//! Rollback only moves the schema-version pointer. It does not undo data
+//! written by a forward migration.
 
 #![no_std]
 
@@ -47,16 +25,19 @@ use soroban_sdk::{contracterror, contracttype, symbol_short, Env};
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MigrationError {
-    /// `to <= from`: migrations must move the schema version strictly forward.
+    /// `to <= from`: migrations must move the schema version forward.
     NotForward = 1,
-    /// `current != from`: this step does not apply at the contract's current
-    /// version (already applied, or attempted out of order).
+
+    /// The supplied/current stored version does not match `from`.
     OutOfOrder = 2,
-    /// A migration was started but never completed or aborted.
+
+    /// A migration is already in progress.
     MigrationInProgress = 3,
-    /// Rollback target must be strictly below the current version.
+
+    /// Rollback target must be below current version.
     RollbackNotAllowed = 4,
-    /// Rollback target is further back than the allowed depth.
+
+    /// Rollback is deeper than the allowed depth.
     RollbackTooDeep = 5,
 }
 
@@ -71,7 +52,7 @@ enum MigrationKey {
     History(u32),
 }
 
-/// A single applied migration or rollback, in chronological order.
+/// A single migration or rollback record.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MigrationRecord {
@@ -82,36 +63,54 @@ pub struct MigrationRecord {
 }
 
 // ── Events ──────────────────────────────────────────────────────────
-//
-// Event schema (topics → data):
-//   sch_mig : (symbol,) → (from_version: u32, to_version: u32)
-//   sch_rbk : (symbol,) → (from_version: u32, to_version: u32)
 
-fn emit_schema_migrated(env: &Env, from_version: u32, to_version: u32) {
+fn emit_schema_migrated(
+    env: &Env,
+    from_version: u32,
+    to_version: u32,
+) {
     let topics = (symbol_short!("sch_mig"),);
-    env.events().publish(topics, (from_version, to_version));
+
+    env.events()
+        .publish(topics, (from_version, to_version));
 }
 
-fn emit_schema_rolled_back(env: &Env, from_version: u32, to_version: u32) {
+fn emit_schema_rolled_back(
+    env: &Env,
+    from_version: u32,
+    to_version: u32,
+) {
     let topics = (symbol_short!("sch_rbk"),);
-    env.events().publish(topics, (from_version, to_version));
+
+    env.events()
+        .publish(topics, (from_version, to_version));
 }
 
-fn append_history(env: &Env, from_version: u32, to_version: u32, rolled_back: bool) {
+// ── Internal helpers ────────────────────────────────────────────────
+
+fn append_history(
+    env: &Env,
+    from_version: u32,
+    to_version: u32,
+    rolled_back: bool,
+) {
     let len: u32 = env
         .storage()
         .persistent()
         .get(&MigrationKey::HistoryLen)
         .unwrap_or(0);
+
     let record = MigrationRecord {
         from_version,
         to_version,
         applied_at: env.ledger().timestamp(),
         rolled_back,
     };
+
     env.storage()
         .persistent()
         .set(&MigrationKey::History(len), &record);
+
     env.storage()
         .persistent()
         .set(&MigrationKey::HistoryLen, &(len + 1));
@@ -124,109 +123,220 @@ fn is_locked(env: &Env) -> bool {
         .unwrap_or(false)
 }
 
-// ── Pure validation (unit-testable without an Env) ─────────────────
+// ── Pure validation ─────────────────────────────────────────────────
 
-/// A forward migration step is valid only when it starts exactly at the
-/// contract's current version and strictly increases the version. This is
-/// what makes step application order-safe: a step whose `from` no longer
-/// matches `current` (because it was already applied, or a later step ran
-/// first) is rejected rather than silently reapplied or skipped.
-pub fn validate_forward_step(current: u32, from: u32, to: u32) -> Result<(), MigrationError> {
+/// Validate a forward migration step.
+///
+/// The migration must:
+/// 1. Increase the version.
+/// 2. Start exactly at the contract's current version.
+pub fn validate_forward_step(
+    current: u32,
+    from: u32,
+    to: u32,
+) -> Result<(), MigrationError> {
     if to <= from {
         return Err(MigrationError::NotForward);
     }
+
     if current != from {
         return Err(MigrationError::OutOfOrder);
     }
+
     Ok(())
 }
 
-/// A rollback is valid only when the target is strictly below the current
-/// version and within `max_depth` steps of it.
-pub fn validate_rollback(current: u32, target: u32, max_depth: u32) -> Result<(), MigrationError> {
+/// Validate a rollback.
+///
+/// The target must be strictly below the current version and within
+/// the caller-supplied maximum rollback depth.
+pub fn validate_rollback(
+    current: u32,
+    target: u32,
+    max_depth: u32,
+) -> Result<(), MigrationError> {
     if target >= current {
         return Err(MigrationError::RollbackNotAllowed);
     }
+
     if current - target > max_depth {
         return Err(MigrationError::RollbackTooDeep);
     }
+
     Ok(())
 }
 
 // ── Public API ──────────────────────────────────────────────────────
 
-/// Read the on-chain schema version, if one has ever been recorded.
-/// Contracts adopting this framework should treat `None` as their
-/// pre-migration-system genesis version.
+/// Read the currently stored schema version.
+///
+/// Returns `None` when the migration framework has not yet been initialized.
 pub fn schema_version(e: &Env) -> Option<u32> {
-    e.storage().persistent().get(&MigrationKey::SchemaVersion)
+    e.storage()
+        .persistent()
+        .get(&MigrationKey::SchemaVersion)
 }
 
-/// Record an explicit genesis version. Idempotent: does nothing if a
-/// version is already recorded (e.g. on re-`initialize` guards, or when
-/// called against a contract instance that already adopted this framework).
+/// Initialize the schema version.
+///
+/// This operation is idempotent. If a schema version already exists,
+/// the existing value is preserved.
 pub fn initialize_schema(e: &Env, genesis: u32) {
     if schema_version(e).is_none() {
         e.storage()
             .persistent()
             .set(&MigrationKey::SchemaVersion, &genesis);
+
         append_history(e, genesis, genesis, false);
     }
 }
 
-/// Begin a single ordered migration step. Must be followed by
-/// [`complete_migration`] (on success) or [`abort_migration`] (to release
-/// the lock without advancing the version).
-pub fn begin_migration(e: &Env, current: u32, from: u32, to: u32) -> Result<(), MigrationError> {
-    validate_forward_step(current, from, to)?;
+/// Begin one ordered migration step.
+///
+/// `current` is retained in the API for compatibility with existing
+/// callers, but the stored schema version is authoritative once the
+/// migration framework has been initialized.
+pub fn begin_migration(
+    e: &Env,
+    current: u32,
+    from: u32,
+    to: u32,
+) -> Result<(), MigrationError> {
+    // The stored value is authoritative.
+    //
+    // For an uninitialized contract, the caller-provided `current`
+    // is used as the initial baseline. Existing integrations can
+    // therefore continue using this API.
+    let stored_current = schema_version(e).unwrap_or(current);
+
+    if stored_current != current {
+        return Err(MigrationError::OutOfOrder);
+    }
+
+    validate_forward_step(stored_current, from, to)?;
+
     if is_locked(e) {
         return Err(MigrationError::MigrationInProgress);
     }
+
     e.storage()
         .persistent()
         .set(&MigrationKey::MigrationLock, &true);
+
     Ok(())
 }
 
-/// Commit a migration step started with [`begin_migration`]: advances the
-/// schema version, releases the lock, appends a history record, and emits
-/// `sch_mig`.
-pub fn complete_migration(e: &Env, from_version: u32, to_version: u32) {
+/// Complete a migration that was previously started with
+/// [`begin_migration`].
+///
+/// The schema version is advanced, the migration lock is released,
+/// history is appended, and the migration event is emitted.
+pub fn complete_migration(
+    e: &Env,
+    from_version: u32,
+    to_version: u32,
+) {
+    // Do not silently commit an invalid migration.
+    //
+    // `complete_migration` has historically returned `()`, so a failed
+    // invariant is treated as a contract failure rather than returning
+    // an error that callers could accidentally ignore.
+    let current = schema_version(e).unwrap_or(from_version);
+
+    if current != from_version {
+        panic!("Migration completion version mismatch");
+    }
+
+    if !is_locked(e) {
+        panic!("No migration is currently in progress");
+    }
+
+    if to_version <= from_version {
+        panic!("Migration target must be greater than source");
+    }
+
     e.storage()
         .persistent()
         .set(&MigrationKey::SchemaVersion, &to_version);
+
     e.storage()
         .persistent()
         .set(&MigrationKey::MigrationLock, &false);
-    append_history(e, from_version, to_version, false);
-    emit_schema_migrated(e, from_version, to_version);
+
+    append_history(
+        e,
+        from_version,
+        to_version,
+        false,
+    );
+
+    emit_schema_migrated(
+        e,
+        from_version,
+        to_version,
+    );
 }
 
-/// Release the migration lock without advancing the schema version, e.g.
-/// when a step's precondition fails after `begin_migration` succeeded.
+/// Abort the currently running migration.
+///
+/// The schema version remains unchanged and the migration lock is released.
 pub fn abort_migration(e: &Env) {
     e.storage()
         .persistent()
         .set(&MigrationKey::MigrationLock, &false);
 }
 
-/// Roll the schema version back to `target`, bounded by `max_depth` steps.
-/// Only moves the version pointer — see the module docs for why forward
-/// migrations are not required to be reversible at the data level.
-pub fn rollback(e: &Env, current: u32, target: u32, max_depth: u32) -> Result<(), MigrationError> {
-    validate_rollback(current, target, max_depth)?;
+/// Roll the schema version back to `target`.
+///
+/// This changes only the schema-version pointer. It does not reverse
+/// storage/data changes made by the forward migration.
+pub fn rollback(
+    e: &Env,
+    current: u32,
+    target: u32,
+    max_depth: u32,
+) -> Result<(), MigrationError> {
+    // Stored schema version is authoritative.
+    let stored_current = schema_version(e).unwrap_or(current);
+
+    if stored_current != current {
+        return Err(MigrationError::OutOfOrder);
+    }
+
+    validate_rollback(
+        stored_current,
+        target,
+        max_depth,
+    )?;
+
     if is_locked(e) {
         return Err(MigrationError::MigrationInProgress);
     }
+
     e.storage()
         .persistent()
-        .set(&MigrationKey::SchemaVersion, &target);
-    append_history(e, current, target, true);
-    emit_schema_rolled_back(e, current, target);
+        .set(
+            &MigrationKey::SchemaVersion,
+            &target,
+        );
+
+    append_history(
+        e,
+        stored_current,
+        target,
+        true,
+    );
+
+    emit_schema_rolled_back(
+        e,
+        stored_current,
+        target,
+    );
+
     Ok(())
 }
 
-/// Number of entries in the migration/rollback history log.
+/// Number of migration/rollback history records.
 pub fn migration_history_len(e: &Env) -> u32 {
     e.storage()
         .persistent()
@@ -234,10 +344,16 @@ pub fn migration_history_len(e: &Env) -> u32 {
         .unwrap_or(0)
 }
 
-/// Fetch a single history entry by index (`0..migration_history_len`),
-/// oldest first.
-pub fn migration_record_at(e: &Env, index: u32) -> Option<MigrationRecord> {
-    e.storage().persistent().get(&MigrationKey::History(index))
+/// Fetch a history record by index.
+///
+/// Index `0` is the oldest record.
+pub fn migration_record_at(
+    e: &Env,
+    index: u32,
+) -> Option<MigrationRecord> {
+    e.storage()
+        .persistent()
+        .get(&MigrationKey::History(index))
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -246,12 +362,22 @@ pub fn migration_record_at(e: &Env, index: u32) -> Option<MigrationRecord> {
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::Address;
+    use soroban_sdk::Env;
 
     #[test]
     fn forward_step_accepts_matching_sequential_version() {
-        assert_eq!(validate_forward_step(1, 1, 2), Ok(()));
+        assert_eq!(
+            validate_forward_step(1, 1, 2),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn forward_step_accepts_larger_target_version() {
+        assert_eq!(
+            validate_forward_step(1, 1, 5),
+            Ok(())
+        );
     }
 
     #[test]
@@ -260,6 +386,7 @@ mod tests {
             validate_forward_step(1, 1, 1),
             Err(MigrationError::NotForward)
         );
+
         assert_eq!(
             validate_forward_step(2, 2, 1),
             Err(MigrationError::NotForward)
@@ -268,12 +395,11 @@ mod tests {
 
     #[test]
     fn forward_step_rejects_out_of_order_current() {
-        // Step is written for from=1, but the contract is already at 2
-        // (already applied) or still at 0 (an earlier step hasn't run yet).
         assert_eq!(
             validate_forward_step(2, 1, 2),
             Err(MigrationError::OutOfOrder)
         );
+
         assert_eq!(
             validate_forward_step(0, 1, 2),
             Err(MigrationError::OutOfOrder)
@@ -282,8 +408,15 @@ mod tests {
 
     #[test]
     fn rollback_accepts_target_within_depth() {
-        assert_eq!(validate_rollback(3, 2, 1), Ok(()));
-        assert_eq!(validate_rollback(3, 1, 2), Ok(()));
+        assert_eq!(
+            validate_rollback(3, 2, 1),
+            Ok(())
+        );
+
+        assert_eq!(
+            validate_rollback(3, 1, 2),
+            Ok(())
+        );
     }
 
     #[test]
@@ -292,6 +425,7 @@ mod tests {
             validate_rollback(3, 3, 5),
             Err(MigrationError::RollbackNotAllowed)
         );
+
         assert_eq!(
             validate_rollback(3, 4, 5),
             Err(MigrationError::RollbackNotAllowed)
@@ -307,68 +441,274 @@ mod tests {
     }
 
     #[test]
-    fn full_lifecycle_begin_complete_advances_version_and_history() {
+    fn initialize_schema_is_idempotent() {
         let env = Env::default();
-        let contract_id = soroban_sdk::Address::generate(&env);
+
+        let contract_id =
+            soroban_sdk::Address::generate(&env);
+
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 1);
-            assert_eq!(schema_version(&env), Some(1));
-            assert_eq!(migration_history_len(&env), 1);
 
-            begin_migration(&env, 1, 1, 2).unwrap();
-            complete_migration(&env, 1, 2);
+            assert_eq!(
+                schema_version(&env),
+                Some(1)
+            );
 
-            assert_eq!(schema_version(&env), Some(2));
-            assert_eq!(migration_history_len(&env), 2);
+            assert_eq!(
+                migration_history_len(&env),
+                1
+            );
+
+            // Second initialization must not overwrite
+            // the existing schema version.
+            initialize_schema(&env, 99);
+
+            assert_eq!(
+                schema_version(&env),
+                Some(1)
+            );
+
+            assert_eq!(
+                migration_history_len(&env),
+                1
+            );
+        });
+    }
+
+    #[test]
+    fn full_lifecycle_begin_complete_advances_version_and_history() {
+        let env = Env::default();
+
+        let contract_id =
+            soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 1);
+
+            assert_eq!(
+                schema_version(&env),
+                Some(1)
+            );
+
+            assert_eq!(
+                migration_history_len(&env),
+                1
+            );
+
+            begin_migration(
+                &env,
+                1,
+                1,
+                2,
+            )
+            .unwrap();
+
+            complete_migration(
+                &env,
+                1,
+                2,
+            );
+
+            assert_eq!(
+                schema_version(&env),
+                Some(2)
+            );
+
+            assert_eq!(
+                migration_history_len(&env),
+                2
+            );
+
             assert!(!is_locked(&env));
 
-            let record = migration_record_at(&env, 1).unwrap();
-            assert_eq!(record.from_version, 1);
-            assert_eq!(record.to_version, 2);
+            let record =
+                migration_record_at(&env, 1).unwrap();
+
+            assert_eq!(
+                record.from_version,
+                1
+            );
+
+            assert_eq!(
+                record.to_version,
+                2
+            );
+
             assert!(!record.rolled_back);
+        });
+    }
+
+    #[test]
+    fn begin_rejects_stale_caller_version() {
+        let env = Env::default();
+
+        let contract_id =
+            soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 2);
+
+            assert_eq!(
+                begin_migration(
+                    &env,
+                    1,
+                    1,
+                    2,
+                ),
+                Err(MigrationError::OutOfOrder)
+            );
+
+            assert_eq!(
+                schema_version(&env),
+                Some(2)
+            );
         });
     }
 
     #[test]
     fn concurrent_begin_is_rejected_until_completed_or_aborted() {
         let env = Env::default();
-        let contract_id = soroban_sdk::Address::generate(&env);
+
+        let contract_id =
+            soroban_sdk::Address::generate(&env);
+
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 1);
 
-            begin_migration(&env, 1, 1, 2).unwrap();
-            // A second, concurrent/re-entrant attempt must not be able to
-            // start while the first step is uncommitted.
+            begin_migration(
+                &env,
+                1,
+                1,
+                2,
+            )
+            .unwrap();
+
             assert_eq!(
-                begin_migration(&env, 1, 1, 2),
+                begin_migration(
+                    &env,
+                    1,
+                    1,
+                    2,
+                ),
                 Err(MigrationError::MigrationInProgress)
             );
 
             abort_migration(&env);
-            // Once aborted (lock released, version unchanged), the same
-            // step can be retried.
-            assert_eq!(schema_version(&env), Some(1));
-            begin_migration(&env, 1, 1, 2).unwrap();
-            complete_migration(&env, 1, 2);
-            assert_eq!(schema_version(&env), Some(2));
+
+            assert_eq!(
+                schema_version(&env),
+                Some(1)
+            );
+
+            begin_migration(
+                &env,
+                1,
+                1,
+                2,
+            )
+            .unwrap();
+
+            complete_migration(
+                &env,
+                1,
+                2,
+            );
+
+            assert_eq!(
+                schema_version(&env),
+                Some(2)
+            );
         });
     }
 
     #[test]
     fn rollback_then_reapply_round_trips() {
         let env = Env::default();
-        let contract_id = soroban_sdk::Address::generate(&env);
+
+        let contract_id =
+            soroban_sdk::Address::generate(&env);
+
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 1);
-            begin_migration(&env, 1, 1, 2).unwrap();
-            complete_migration(&env, 1, 2);
 
-            rollback(&env, 2, 1, 1).unwrap();
-            assert_eq!(schema_version(&env), Some(1));
+            begin_migration(
+                &env,
+                1,
+                1,
+                2,
+            )
+            .unwrap();
 
-            begin_migration(&env, 1, 1, 2).unwrap();
-            complete_migration(&env, 1, 2);
-            assert_eq!(schema_version(&env), Some(2));
+            complete_migration(
+                &env,
+                1,
+                2,
+            );
+
+            rollback(
+                &env,
+                2,
+                1,
+                1,
+            )
+            .unwrap();
+
+            assert_eq!(
+                schema_version(&env),
+                Some(1)
+            );
+
+            begin_migration(
+                &env,
+                1,
+                1,
+                2,
+            )
+            .unwrap();
+
+            complete_migration(
+                &env,
+                1,
+                2,
+            );
+
+            assert_eq!(
+                schema_version(&env),
+                Some(2)
+            );
+
+            assert_eq!(
+                migration_history_len(&env),
+                4
+            );
+        });
+    }
+
+    #[test]
+    fn rollback_rejects_stale_caller_version() {
+        let env = Env::default();
+
+        let contract_id =
+            soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 3);
+
+            assert_eq!(
+                rollback(
+                    &env,
+                    2,
+                    1,
+                    1,
+                ),
+                Err(MigrationError::OutOfOrder)
+            );
+
+            assert_eq!(
+                schema_version(&env),
+                Some(3)
+            );
         });
     }
 }
