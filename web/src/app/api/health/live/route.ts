@@ -11,7 +11,7 @@ export function GET() {
 }
 if (import.meta.vitest) {
   const { describe, it, expect } = import.meta.vitest;
-  describe("liveness", () {
+  describe("liveness", () => {
     it("returns 200", async () => {
       const res = GET();
       expect(res.status).toBe(200);
