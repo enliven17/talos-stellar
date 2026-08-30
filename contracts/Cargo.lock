@@ -1528,6 +1528,7 @@ dependencies = [
 name = "talos-registry"
 version = "0.1.0"
 dependencies = [
+ "pause-control",
  "soroban-sdk",
  "storage-migration",
  "ttl-manager",

@@ -247,7 +247,7 @@ pub fn migration_record_at(e: &Env, index: u32) -> Option<MigrationRecord> {
 mod tests {
     use super::*;
     use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::Address;
+    use soroban_sdk::{contract, contractimpl, Address};
 
     #[test]
     fn forward_step_accepts_matching_sequential_version() {
@@ -306,10 +306,16 @@ mod tests {
         );
     }
 
+    #[contract]
+    pub struct DummyContract;
+
+    #[contractimpl]
+    impl DummyContract {}
+
     #[test]
     fn full_lifecycle_begin_complete_advances_version_and_history() {
         let env = Env::default();
-        let contract_id = soroban_sdk::Address::generate(&env);
+        let contract_id = env.register_contract(None, DummyContract);
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 1);
             assert_eq!(schema_version(&env), Some(1));
@@ -332,7 +338,7 @@ mod tests {
     #[test]
     fn concurrent_begin_is_rejected_until_completed_or_aborted() {
         let env = Env::default();
-        let contract_id = soroban_sdk::Address::generate(&env);
+        let contract_id = env.register_contract(None, DummyContract);
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 1);
 
@@ -357,7 +363,7 @@ mod tests {
     #[test]
     fn rollback_then_reapply_round_trips() {
         let env = Env::default();
-        let contract_id = soroban_sdk::Address::generate(&env);
+        let contract_id = env.register_contract(None, DummyContract);
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 1);
             begin_migration(&env, 1, 1, 2).unwrap();

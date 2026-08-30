@@ -99,6 +99,10 @@ pub enum DataKey {
     NextTimelockId,
     LastTouched(u32),
     NameFeeAmount,
+    /// Active pause record for a domain, if any. Absence means unpaused.
+    PauseState(PauseDomain),
+    /// Bounded list of guardian addresses authorized to trigger (but not lift) pauses.
+    Guardians,
 }
 
 #[contracterror]
@@ -178,6 +182,17 @@ fn emit_timelock_config_changed(
         .publish(topics, (old_min_delay, new_min_delay, grace_period));
 }
 
+fn emit_name_fee_paid(
+    env: &Env,
+    talos_id: u32,
+    payer: &Address,
+    asset: &Address,
+    amount: i128,
+) {
+    let topics = (symbol_short!("nm_fee"), talos_id);
+    env.events().publish(topics, (payer.clone(), asset.clone(), amount));
+}
+
 fn emit_pause_set(env: &Env, domain: &PauseDomain, actor: &Address, expires_at: u64) {
     let topics = (symbol_short!("pause_on"), domain.clone());
     env.events().publish(topics, (actor.clone(), expires_at));
@@ -250,7 +265,7 @@ pub const INTERFACE_ID: [u8; 32] = [
     0x65, 0x53, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, // "eService"
     // (major, minor, patch) big-endian u32s
     0x00, 0x00, 0x00, 0x01, // major = 1
-    0x00, 0x00, 0x00, 0x01, // minor = 1
+    0x00, 0x00, 0x00, 0x03, // minor = 3
     0x00, 0x00, 0x00, 0x00, // patch = 0
     // reserved
     0x00, 0x00, 0x00, 0x00,
@@ -258,7 +273,7 @@ pub const INTERFACE_ID: [u8; 32] = [
 
 /// Expected `INTERFACE_ID` of the configured `RegistryContract`, mirroring
 /// the bytes published by `talos_registry::INTERFACE_ID` (namespace
-/// `"TalosRegistry"`, version `(1, 1, 0)`). Kept as an inline copy rather
+/// `"TalosRegistry"`, version `(1, 3, 0)`). Kept as an inline copy rather
 /// than a crate dependency so this contract's ABI check has no build-time
 /// coupling to the Registry crate; see the golden-vector test for the
 /// independent reproduction of the byte layout.
@@ -267,7 +282,7 @@ pub const EXPECTED_REGISTRY_INTERFACE_ID: [u8; 32] = [
     0x69, 0x73, 0x74, 0x72, 0x79, 0x00, 0x00, 0x00, // "istry" + zero pads
     // (major, minor, patch) big-endian u32s
     0x00, 0x00, 0x00, 0x01, // major = 1
-    0x00, 0x00, 0x00, 0x01, // minor = 1
+    0x00, 0x00, 0x00, 0x03, // minor = 3
     0x00, 0x00, 0x00, 0x00, // patch = 0
     // reserved
     0x00, 0x00, 0x00, 0x00,
@@ -1673,7 +1688,7 @@ mod tests {
     #[test]
     fn version_returns_compile_time_constant() {
         let (_env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
-        assert_eq!(client.version(), (1u32, 2u32, 0u32));
+        assert_eq!(client.version(), (1u32, 3u32, 0u32));
     }
 
     #[test]
@@ -1728,7 +1743,7 @@ mod tests {
 
     #[test]
     fn interface_id_returns_expected_bytes() {
-        let (env, _registry_contract, _contract_id, _registry_client, client) = setup();
+        let (env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
         let id = client.interface_id();
         let expected = soroban_sdk::BytesN::<32>::from_array(&env, &INTERFACE_ID);
         assert_eq!(id, expected);
@@ -1745,7 +1760,7 @@ mod tests {
 
     #[test]
     fn interface_id_is_unaffected_by_state_changes() {
-        let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
         let before = client.interface_id();
 
         // Register a name — a storage write must not affect the interface ID.
@@ -1779,7 +1794,7 @@ mod tests {
     /// a `major` bump and reviewers should reject the diff.
     #[test]
     fn interface_id_golden_vector_matches_derivation() {
-        let (env, _rc, _cid, _rc2, _cli) = setup();
+        let (env, _rc, _cid, _admin, _rc2, _cli) = setup();
         let expected = soroban_sdk::BytesN::<32>::from_array(&env, &INTERFACE_ID);
 
         let namespace = INTERFACE_NAMESPACE.as_bytes();
@@ -1801,7 +1816,7 @@ mod tests {
     //    call below asserts that interface_features() does not regress it.
     #[test]
     fn interface_features_does_not_register_resolve() {
-        let (_env, _rc, _cid, _rc2, client) = setup();
+        let (_env, _rc, _cid, _admin, _rc2, client) = setup();
         // capture features once to ensure the call compiles and returns a
         // well-formed Vec; downstream tests already cover name resolution.
         let _ = client.interface_features();
@@ -1811,35 +1826,35 @@ mod tests {
 
     #[test]
     fn supports_version_accepts_exact_match() {
-        let (_env, _rc, _cid, _rc2, client) = setup();
+        let (_env, _rc, _cid, _admin, _rc2, client) = setup();
         let (maj, min, pat) = CONTRACT_VERSION;
         assert!(client.supports_version(&maj, &min, &pat));
     }
 
     #[test]
     fn supports_version_accepts_lower_minor_and_patch() {
-        let (_env, _rc, _cid, _rc2, client) = setup();
+        let (_env, _rc, _cid, _admin, _rc2, client) = setup();
         let (maj, _min, _pat) = CONTRACT_VERSION;
         assert!(client.supports_version(&maj, &0, &0));
     }
 
     #[test]
     fn supports_version_rejects_higher_minor() {
-        let (_env, _rc, _cid, _rc2, client) = setup();
+        let (_env, _rc, _cid, _admin, _rc2, client) = setup();
         let (maj, min, _pat) = CONTRACT_VERSION;
         assert!(!client.supports_version(&maj, &(min + 1), &0));
     }
 
     #[test]
     fn supports_version_rejects_higher_patch_when_minor_matches() {
-        let (_env, _rc, _cid, _rc2, client) = setup();
+        let (_env, _rc, _cid, _admin, _rc2, client) = setup();
         let (maj, min, pat) = CONTRACT_VERSION;
         assert!(!client.supports_version(&maj, &min, &(pat + 1)));
     }
 
     #[test]
     fn supports_version_rejects_different_major() {
-        let (_env, _rc, _cid, _rc2, client) = setup();
+        let (_env, _rc, _cid, _admin, _rc2, client) = setup();
         let (_maj, min, pat) = CONTRACT_VERSION;
         assert!(!client.supports_version(&42, &min, &pat));
     }
@@ -1848,7 +1863,7 @@ mod tests {
 
     #[test]
     fn interface_features_lists_known_capabilities() {
-        let (_env, _rc, _cid, _rc2, client) = setup();
+        let (_env, _rc, _cid, _admin, _rc2, client) = setup();
         let features = client.interface_features();
         let expected: std::vec::Vec<std::string::String> = features_list()
             .iter()
@@ -1864,7 +1879,7 @@ mod tests {
 
     #[test]
     fn interface_features_is_stable_across_calls() {
-        let (_env, _rc, _cid, _rc2, client) = setup();
+        let (_env, _rc, _cid, _admin, _rc2, client) = setup();
         let a = client.interface_features();
         let b = client.interface_features();
         assert_eq!(a.len(), b.len());
@@ -1875,7 +1890,7 @@ mod tests {
 
     #[test]
     fn deprecated_entry_count_matches_table() {
-        let (_env, _rc, _cid, _rc2, client) = setup();
+        let (_env, _rc, _cid, _admin, _rc2, client) = setup();
         assert_eq!(
             client.deprecated_entry_count(),
             DEPRECATED_DIRECT_ADMIN.len() as u32
@@ -1888,7 +1903,7 @@ mod tests {
     /// succeeds (emits `compat_ok`).
     #[test]
     fn assert_registry_compatible_returns_true_for_real_registry() {
-        let (env, _registry_contract, _contract_id, _registry_client, client) = setup();
+        let (env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
         assert!(client.assert_registry_compatible());
 
         // Locate the compat_ok event to confirm telemetry fires.
@@ -1919,19 +1934,9 @@ mod tests {
         let name_service_id = env.register_contract(None, TalosNameService);
         let name_service_client = TalosNameServiceClient::new(&env, &name_service_id);
 
-        // A different registry instance — real TalosRegistry code, but the
-        // bytes we observe via invoke_contract are the same `interface_id()`
-        // of TalosRegistry, which IS the expected ID. To force a mismatch,
-        // point at an address that exists but is not TalosRegistry — the
-        // invoke_contract will still execute the registered code, which is
-        // also TalosRegistry, so the helper succeeds. That's the realistic
-        // case: a wrong pointer still resolves to TalosRegistry WASM and
-        // returns the right ID, so no panic. We assert that to lock the
-        // happy path. A real on-chain mismatch would require a non-Soroban
-        // address — out of scope for the unit harness.
-
         let registry_id = env.register_contract(None, talos_registry::TalosRegistry);
-        name_service_client.initialize(&registry_id);
+        let admin = Address::generate(&env);
+        name_service_client.initialize(&registry_id, &admin, &0i128);
         assert!(name_service_client.assert_registry_compatible());
     }
 
@@ -1939,9 +1944,21 @@ mod tests {
 
     #[test]
     fn set_registry_contract_emits_dep_path_event_when_timelocked() {
-        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
+        let (env, _registry_contract, contract_id, existing_admin, _registry_client, client) =
+            setup();
         let admin = Address::generate(&env);
-        client.set_admin(&admin);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &existing_admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_admin",
+                    args: (admin.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_admin(&admin);
 
         client
             .mock_auths(&[MockAuth {

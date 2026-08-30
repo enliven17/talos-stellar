@@ -146,163 +146,226 @@ fn emit_domain_expired(env: &Env, domain_id: DomainId) {
 mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::{contract, contractimpl};
 
-    fn setup_env() -> (Env, Address) {
+    #[contract]
+    pub struct DummyContract;
+
+    #[contractimpl]
+    impl DummyContract {
+        pub fn pause(env: Env, domain_id: u32, admin: Address, duration: u64) {
+            pause_domain(&env, domain_id, &admin, duration);
+        }
+
+        pub fn unpause(env: Env, domain_id: u32, admin: Address) {
+            unpause_domain(&env, domain_id, &admin);
+        }
+    }
+
+    fn setup_env() -> (Env, Address, Address) {
         let env = Env::default();
+        env.mock_all_auths();
         let admin = Address::generate(&env);
+        let contract_id = env.register_contract(None, DummyContract);
         env.ledger().set_timestamp(1_000_000);
-        (env, admin)
+        (env, admin, contract_id)
     }
 
     #[test]
     fn test_is_not_paused_by_default() {
-        let (env, _admin) = setup_env();
-        assert!(!is_paused(&env, 1));
+        let (env, _admin, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assert!(!is_paused(&env, 1));
+        });
     }
 
     #[test]
     fn test_get_pause_status_none_by_default() {
-        let (env, _admin) = setup_env();
-        assert!(get_pause_status(&env, 1).is_none());
+        let (env, _admin, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            assert!(get_pause_status(&env, 1).is_none());
+        });
     }
 
     #[test]
     fn test_require_not_paused_does_not_panic_when_not_paused() {
-        let (env, _admin) = setup_env();
-        require_not_paused(&env, 1);
+        let (env, _admin, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            require_not_paused(&env, 1);
+        });
     }
 
     #[test]
     fn test_pause_domain() {
-        let (env, admin) = setup_env();
-        pause_domain(&env, 1, &admin, 0);
-        assert!(is_paused(&env, 1));
+        let (env, admin, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            pause_domain(&env, 1, &admin, 0);
+            assert!(is_paused(&env, 1));
+        });
     }
 
     #[test]
     #[should_panic(expected = "Domain is paused")]
     fn test_require_not_paused_panics_when_paused() {
-        let (env, admin) = setup_env();
-        pause_domain(&env, 1, &admin, 0);
-        require_not_paused(&env, 1);
+        let (env, admin, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            pause_domain(&env, 1, &admin, 0);
+            require_not_paused(&env, 1);
+        });
     }
 
     #[test]
     fn test_unpause_domain() {
-        let (env, admin) = setup_env();
-        pause_domain(&env, 1, &admin, 0);
-        assert!(is_paused(&env, 1));
-        unpause_domain(&env, 1, &admin);
-        assert!(!is_paused(&env, 1));
+        let (env, admin, contract_id) = setup_env();
+        let client = DummyContractClient::new(&env, &contract_id);
+        client.pause(&1, &admin, &0);
+        env.as_contract(&contract_id, || {
+            assert!(is_paused(&env, 1));
+        });
+        client.unpause(&1, &admin);
+        env.as_contract(&contract_id, || {
+            assert!(!is_paused(&env, 1));
+        });
     }
 
     #[test]
     #[should_panic(expected = "Domain is not paused")]
     fn test_unpause_not_paused_panics() {
-        let (env, admin) = setup_env();
-        unpause_domain(&env, 1, &admin);
+        let (env, admin, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            unpause_domain(&env, 1, &admin);
+        });
     }
 
     #[test]
     fn test_pause_with_expiry() {
-        let (env, admin) = setup_env();
-        pause_domain(&env, 1, &admin, 100);
-        assert!(is_paused(&env, 1));
-        env.ledger().set_timestamp(1_000_050);
-        assert!(!expire_if_elapsed(&env, 1));
-        assert!(is_paused(&env, 1));
-        env.ledger().set_timestamp(1_000_100);
-        assert!(expire_if_elapsed(&env, 1));
-        assert!(!is_paused(&env, 1));
+        let (env, admin, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            pause_domain(&env, 1, &admin, 100);
+            assert!(is_paused(&env, 1));
+            env.ledger().set_timestamp(1_000_050);
+            assert!(!expire_if_elapsed(&env, 1));
+            assert!(is_paused(&env, 1));
+            env.ledger().set_timestamp(1_000_100);
+            assert!(expire_if_elapsed(&env, 1));
+            assert!(!is_paused(&env, 1));
+        });
     }
 
     #[test]
     fn test_expire_after_exact_timestamp() {
-        let (env, admin) = setup_env();
-        pause_domain(&env, 1, &admin, 100);
-        env.ledger().set_timestamp(1_000_100);
-        assert!(expire_if_elapsed(&env, 1));
-        assert!(!is_paused(&env, 1));
+        let (env, admin, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            pause_domain(&env, 1, &admin, 100);
+            env.ledger().set_timestamp(1_000_100);
+            assert!(expire_if_elapsed(&env, 1));
+            assert!(!is_paused(&env, 1));
+        });
     }
 
     #[test]
     fn test_expire_before_timestamp_does_not_expire() {
-        let (env, admin) = setup_env();
-        pause_domain(&env, 1, &admin, 100);
-        env.ledger().set_timestamp(1_000_099);
-        assert!(!expire_if_elapsed(&env, 1));
-        assert!(is_paused(&env, 1));
+        let (env, admin, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            pause_domain(&env, 1, &admin, 100);
+            env.ledger().set_timestamp(1_000_099);
+            assert!(!expire_if_elapsed(&env, 1));
+            assert!(is_paused(&env, 1));
+        });
     }
 
     #[test]
     fn test_indefinite_pause_does_not_expire() {
-        let (env, admin) = setup_env();
-        pause_domain(&env, 1, &admin, 0);
-        assert!(!expire_if_elapsed(&env, 1));
-        assert!(is_paused(&env, 1));
+        let (env, admin, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            pause_domain(&env, 1, &admin, 0);
+            assert!(!expire_if_elapsed(&env, 1));
+            assert!(is_paused(&env, 1));
+        });
     }
 
     #[test]
     fn test_check_not_paused_expires_automatically() {
-        let (env, admin) = setup_env();
-        pause_domain(&env, 1, &admin, 50);
-        env.ledger().set_timestamp(1_000_100);
-        check_not_paused(&env, 1);
-        assert!(!is_paused(&env, 1));
+        let (env, admin, contract_id) = setup_env();
+        env.as_contract(&contract_id, || {
+            pause_domain(&env, 1, &admin, 50);
+            env.ledger().set_timestamp(1_000_100);
+            check_not_paused(&env, 1);
+            assert!(!is_paused(&env, 1));
+        });
     }
 
     #[test]
     fn test_multiple_domains_independent() {
-        let (env, admin) = setup_env();
-        pause_domain(&env, 1, &admin, 0);
-        pause_domain(&env, 2, &admin, 0);
-        assert!(is_paused(&env, 1));
-        assert!(is_paused(&env, 2));
-        unpause_domain(&env, 1, &admin);
-        assert!(!is_paused(&env, 1));
-        assert!(is_paused(&env, 2));
+        let (env, admin, contract_id) = setup_env();
+        let client = DummyContractClient::new(&env, &contract_id);
+        client.pause(&1, &admin, &0);
+        client.pause(&2, &admin, &0);
+        env.as_contract(&contract_id, || {
+            assert!(is_paused(&env, 1));
+            assert!(is_paused(&env, 2));
+        });
+        client.unpause(&1, &admin);
+        env.as_contract(&contract_id, || {
+            assert!(!is_paused(&env, 1));
+            assert!(is_paused(&env, 2));
+        });
     }
 
     #[test]
     fn test_pause_then_unpause_then_pause_again() {
-        let (env, admin) = setup_env();
-        pause_domain(&env, 1, &admin, 0);
-        unpause_domain(&env, 1, &admin);
-        pause_domain(&env, 1, &admin, 100);
-        assert!(is_paused(&env, 1));
+        let (env, admin, contract_id) = setup_env();
+        let client = DummyContractClient::new(&env, &contract_id);
+        client.pause(&1, &admin, &0);
+        client.unpause(&1, &admin);
+        client.pause(&1, &admin, &100);
+        env.as_contract(&contract_id, || {
+            assert!(is_paused(&env, 1));
+        });
     }
 
     #[test]
     fn test_get_pause_status_after_pause() {
-        let (env, admin) = setup_env();
-        pause_domain(&env, 1, &admin, 100);
-        let status = get_pause_status(&env, 1).unwrap();
-        assert!(status.paused);
-        assert_eq!(status.paused_by, admin);
-        assert_eq!(status.paused_at, 1_000_000);
-        assert_eq!(status.expires_at, 1_000_100);
+        let (env, admin, contract_id) = setup_env();
+        let client = DummyContractClient::new(&env, &contract_id);
+        client.pause(&1, &admin, &100);
+        env.as_contract(&contract_id, || {
+            let status = get_pause_status(&env, 1).unwrap();
+            assert!(status.paused);
+            assert_eq!(status.paused_by, admin);
+            assert_eq!(status.paused_at, 1_000_000);
+            assert_eq!(status.expires_at, 1_000_100);
+        });
     }
 
     #[test]
     fn test_domains_are_independent() {
-        let (env, admin) = setup_env();
-        pause_domain(&env, 5, &admin, 0);
-        pause_domain(&env, 10, &admin, 0);
-        assert!(is_paused(&env, 5));
-        assert!(is_paused(&env, 10));
-        unpause_domain(&env, 5, &admin);
-        assert!(!is_paused(&env, 5));
-        assert!(is_paused(&env, 10));
+        let (env, admin, contract_id) = setup_env();
+        let client = DummyContractClient::new(&env, &contract_id);
+        client.pause(&5, &admin, &0);
+        client.pause(&10, &admin, &0);
+        env.as_contract(&contract_id, || {
+            assert!(is_paused(&env, 5));
+            assert!(is_paused(&env, 10));
+        });
+        client.unpause(&5, &admin);
+        env.as_contract(&contract_id, || {
+            assert!(!is_paused(&env, 5));
+            assert!(is_paused(&env, 10));
+        });
     }
 
     #[test]
     fn test_pause_status_returns_correct_values() {
-        let (env, admin) = setup_env();
-        pause_domain(&env, 42, &admin, 500);
-        let status = get_pause_status(&env, 42).unwrap();
-        assert!(status.paused);
-        assert_eq!(status.paused_by, admin);
-        assert_eq!(status.paused_at, 1_000_000);
-        assert_eq!(status.expires_at, 1_000_500);
+        let (env, admin, contract_id) = setup_env();
+        let client = DummyContractClient::new(&env, &contract_id);
+        client.pause(&42, &admin, &500);
+        env.as_contract(&contract_id, || {
+            let status = get_pause_status(&env, 42).unwrap();
+            assert!(status.paused);
+            assert_eq!(status.paused_by, admin);
+            assert_eq!(status.paused_at, 1_000_000);
+            assert_eq!(status.expires_at, 1_000_500);
+        });
     }
 }
