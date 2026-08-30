@@ -204,7 +204,7 @@ cargo test --target wasm32-unknown-unknown
 
 ## Focused Test Selection and CI Triage
 
-Run the smallest test set that covers the files you touched before falling back to a full suite. The commands below avoid database resets and hidden local state. Run them after installing dependencies with `pnpm install` at the repository root, `uv sync --extra dev` in `packages/prime-agent/`, or the Rust setup from the prerequisites.
+Run the smallest test set that covers the files you touched before falling back to a full suite. The commands below avoid database resets and hidden local state. Run them after installing dependencies with `pnpm install` at the repository root, `uv sync --extra dev` in `packages/prime-agent/`, or the Rust setup from the prerequisites. In this section, commands that call package scripts use `pnpm run <script>` so the script name can be checked directly in the package's `package.json`.
 
 ### Web changes
 
@@ -214,9 +214,9 @@ Use the web package scripts for Next.js, API, database, and DevX changes. The ma
 # POSIX shells
 pnpm --dir web exec vitest run tests/health.test.ts
 pnpm --dir web exec vitest run tests/*.unit.test.ts
-pnpm --dir web test:openapi
-pnpm --dir web test:bench
-pnpm --dir web lint
+pnpm --dir web run test:openapi
+pnpm --dir web run test:bench
+pnpm --dir web run lint
 pnpm --dir web exec tsc --noEmit
 ```
 
@@ -224,9 +224,9 @@ pnpm --dir web exec tsc --noEmit
 # Windows PowerShell
 pnpm --dir web exec vitest run tests\health.test.ts
 pnpm --dir web exec vitest run tests\*.unit.test.ts
-pnpm --dir web test:openapi
-pnpm --dir web test:bench
-pnpm --dir web lint
+pnpm --dir web run test:openapi
+pnpm --dir web run test:bench
+pnpm --dir web run lint
 pnpm --dir web exec tsc --noEmit
 ```
 
@@ -234,13 +234,13 @@ Choose the focused command by area:
 
 | Changed files | Focused command | CI workflow |
 | --- | --- | --- |
-| `web/src/app/api/**`, `web/src/lib/openapi.ts`, `web/tests/fixtures/openapi.snapshot.json` | `pnpm --dir web test:openapi` | `Web OpenAPI CI` |
-| `web/drizzle/**`, `web/src/db/**`, `web/drizzle.config.ts` | `pnpm --dir web db:migrate`, then the specific DB test with `pnpm --dir web exec vitest run tests/<name>.test.ts` | `Web Migrations CI` |
-| `web/src/area/devx/**` | `pnpm --dir web test:bench` | `Benchmark CI - regression gates` |
+| `web/src/app/api/**`, `web/src/lib/openapi.ts`, `web/tests/fixtures/openapi.snapshot.json` | `pnpm --dir web run test:openapi` | `Web OpenAPI CI` |
+| `web/drizzle/**`, `web/src/db/**`, `web/drizzle.config.ts` | `pnpm --dir web run db:migrate`, then the specific DB test with `pnpm --dir web exec vitest run tests/<name>.test.ts` | `Web Migrations CI` |
+| `web/src/area/devx/**` | `pnpm --dir web run test:bench` | `Benchmark CI - regression gates` |
 | API route or library unit tests | `pnpm --dir web exec vitest run tests/<name>.test.ts` | `Deploy Web -> Vercel` |
 | Backup or restore paths | `pnpm --dir web exec vitest run tests/backup-crypto.test.ts tests/backup-types.test.ts` | `Web Backups CI` |
 
-Use `pnpm --dir web test:e2e` only when API route behavior depends on the running app or cross-route state. Use the local stack with `pnpm stack:up` when you need Postgres plus the mock Stellar provider, and clean it up with `pnpm stack:down`. Do not use `pnpm stack:reset` unless you intentionally want to destroy and recreate local stack data.
+Use `pnpm --dir web run test:e2e` only when API route behavior depends on the running app or cross-route state. Use the local stack with `pnpm stack:up` when you need Postgres plus the mock Stellar provider, and clean it up with `pnpm stack:down`. Do not use `pnpm stack:reset` unless you intentionally want to destroy and recreate local stack data.
 
 ### SDK changes
 
@@ -249,17 +249,17 @@ The TypeScript SDK lives in `packages/sdk/`. The expected build artifact is `pac
 ```bash
 # POSIX shells
 pnpm --filter @talos-protocol/sdk exec vitest run tests/client.test.ts
-pnpm --filter @talos-protocol/sdk test
-pnpm --filter @talos-protocol/sdk build
-pnpm --filter @talos-protocol/sdk generate:types
+pnpm --filter @talos-protocol/sdk run test
+pnpm --filter @talos-protocol/sdk run build
+pnpm --filter @talos-protocol/sdk run generate:types
 ```
 
 ```powershell
 # Windows PowerShell
 pnpm --filter @talos-protocol/sdk exec vitest run tests\client.test.ts
-pnpm --filter @talos-protocol/sdk test
-pnpm --filter @talos-protocol/sdk build
-pnpm --filter @talos-protocol/sdk generate:types
+pnpm --filter @talos-protocol/sdk run test
+pnpm --filter @talos-protocol/sdk run build
+pnpm --filter @talos-protocol/sdk run generate:types
 ```
 
 Choose the focused command by area:
@@ -267,8 +267,8 @@ Choose the focused command by area:
 | Changed files | Focused command | CI workflow |
 | --- | --- | --- |
 | `packages/sdk/src/**`, `packages/sdk/tests/**` | `pnpm --filter @talos-protocol/sdk exec vitest run tests/<name>.test.ts` | `SDK Compatibility Tests` |
-| `packages/sdk/src/generated-types.ts`, `web/tests/fixtures/openapi.snapshot.json` | `pnpm --filter @talos-protocol/sdk generate:types`, then verify `git diff` | `SDK Types CI` |
-| SDK build, packaging, or browser bundle files | `pnpm --filter @talos-protocol/sdk build` | `SDK Compatibility Tests` |
+| `packages/sdk/src/generated-types.ts`, `web/tests/fixtures/openapi.snapshot.json` | `pnpm --filter @talos-protocol/sdk run generate:types`, then verify `git diff` | `SDK Types CI` |
+| SDK build, packaging, or browser bundle files | `pnpm --filter @talos-protocol/sdk run build` | `SDK Compatibility Tests` |
 
 If `SDK Compatibility Tests` reports a missing `compat:*` script, check `.github/workflows/sdk-compatibility.yml` and `packages/sdk/package.json` together. The workflow invokes smoke-test script names, while the package manifest is the source of available local scripts.
 
@@ -313,7 +313,7 @@ cd contracts
 cargo test -p talos-registry
 cargo test
 cargo build --target wasm32-unknown-unknown --release
-pnpm test:fixtures
+pnpm run test:fixtures
 ```
 
 ```powershell
@@ -322,7 +322,7 @@ Set-Location contracts
 cargo test -p talos-registry
 cargo test
 cargo build --target wasm32-unknown-unknown --release
-pnpm test:fixtures
+pnpm run test:fixtures
 Set-Location ..
 ```
 
@@ -335,10 +335,10 @@ Choose the focused command by area:
 | `contracts/talos_governance/**` | `cargo test -p talos-governance` | `Contracts CI` |
 | `contracts/ttl_manager/**` | `cargo test -p ttl-manager` | `Contracts CI` |
 | `contracts/storage_migration/**` | `cargo test -p storage-migration` | `Contracts CI` |
-| `contracts/fixtures/**` | `pnpm --dir contracts test:fixtures` | `Contracts CI` |
+| `contracts/fixtures/**` | `pnpm --dir contracts run test:fixtures` | `Contracts CI` |
 | Contract release output or Wasm compatibility | `cargo build --target wasm32-unknown-unknown --release` | `Contracts CI` |
 
-Deploy commands such as `pnpm --dir contracts deploy:testnet` and `./deploy.sh testnet` require configured Stellar credentials and network access. Treat failures from missing signers, RPC timeouts, Horizon rate limits, or Soroban testnet availability as deployment-environment issues unless local `cargo test` or Wasm build also fails.
+Deploy commands such as `pnpm --dir contracts run deploy:testnet` and `./deploy.sh testnet` require configured Stellar credentials and network access. Treat failures from missing signers, RPC timeouts, Horizon rate limits, or Soroban testnet availability as deployment-environment issues unless local `cargo test` or Wasm build also fails.
 
 ### Common failure messages
 
@@ -348,9 +348,9 @@ Deploy commands such as `pnpm --dir contracts deploy:testnet` and `./deploy.sh t
 | `No test files found` | The path or glob does not match from the package working directory | Re-run from the package root or use `pnpm --dir <package> exec vitest run <path>`. |
 | `DATABASE_URL` or `DIRECT_URL` is missing | The command needs a Postgres-backed environment | Copy `web/.env.example` to `web/.env.local` or use `pnpm stack:up` for local integration work. |
 | `ECONNREFUSED`, `ENOTFOUND`, Horizon/RPC timeout, or preview URL missing | External service, local server, mock provider, or Vercel preview is unavailable | Check the named workflow logs first. If local unit tests pass and only the external service failed, note it as environment-dependent. |
-| `schema.ts is out of sync with committed migration files` | Drizzle schema and migrations diverged | Run `pnpm --dir web db:generate`, inspect the generated SQL, and commit it only when the schema change is intended. |
-| `Generated types differ from committed version` | OpenAPI snapshot and SDK generated types drifted | Run `pnpm --filter @talos-protocol/sdk generate:types` and review `packages/sdk/src/generated-types.ts`. |
-| `Browser bundle not built` or missing `packages/sdk/dist/browser/sdk.bundle.js` | SDK build did not produce the expected browser artifact | Run `pnpm --filter @talos-protocol/sdk build:browser` or the full SDK build. |
+| `schema.ts is out of sync with committed migration files` | Drizzle schema and migrations diverged | Run `pnpm --dir web run db:generate`, inspect the generated SQL, and commit it only when the schema change is intended. |
+| `Generated types differ from committed version` | OpenAPI snapshot and SDK generated types drifted | Run `pnpm --filter @talos-protocol/sdk run generate:types` and review `packages/sdk/src/generated-types.ts`. |
+| `Browser bundle not built` or missing `packages/sdk/dist/browser/sdk.bundle.js` | SDK build did not produce the expected browser artifact | Run `pnpm --filter @talos-protocol/sdk run build:browser` or the full SDK build. |
 | `ruff` violations | Python formatting or lint rule failures | Run `uv run ruff check src tests` in `packages/prime-agent/` and fix the reported files. |
 | `wasm32-unknown-unknown` target not installed | Rust cannot build Soroban Wasm artifacts | Run `rustup target add wasm32-unknown-unknown`. |
 | PR preview comment is present but Vercel URL is absent | The repo preview workflow provisions the mock DB; Vercel attaches previews separately | Check Vercel's GitHub integration/status before treating it as an application failure. |
@@ -524,7 +524,7 @@ pnpm --dir web env:provision 123 my-feature-branch
 # Teardown the mock environment
 pnpm --dir web env:teardown 123
 ```
-Unit tests for the environment lifecycle logic reside in `web/src/area/devx/__tests__/environments.test.ts` (or similar tests). Make sure tests pass locally by running `pnpm --dir web test:bench` or your standard test suites.
+Unit tests for the environment lifecycle logic reside in `web/src/area/devx/__tests__/environments.test.ts` (or similar tests). Make sure tests pass locally by running `pnpm --dir web run test:bench` or your standard test suites.
 
 ### Rollback and Teardown
 
