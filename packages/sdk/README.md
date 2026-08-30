@@ -355,15 +355,27 @@ const client = new TalosClient({
 ```
 
 **Retry semantics (deterministic & bounded):**
-- Only retries when `err.isRetryable === true` (429, 502/503/504, transport,
-  timeout).
-- Only retries when `idempotentOnly === true` (default) **and** the method is
-  `GET`/`HEAD`/`OPTIONS` — POST/PUT/PATCH/DELETE are never retried without
-  explicit opt-out via `idempotentOnly: false`.
-- `maxAttempts` is hard-capped at 8 regardless of user input.
+- Retry statuses are the transient set: `429`, `500`, `502`, `503`, `504`.
+- By default only non-POST methods (`GET`/`HEAD`/`PUT`/`DELETE`/`OPTIONS`) are
+  retried. Passing an **idempotency key** (`options.idempotencyKey`) makes a
+  request safe to retry regardless of method — the server deduplicates on the
+  key, so `POST` write paths can retry against transient failures.
+- `maxAttempts` is hard-capped at 8 regardless of user input. When not set
+  explicitly, requests carry 1 attempt (no retry) and 3 attempts when an
+  idempotency key is present.
 - Server-supplied `Retry-After` is honored (clamped to `maxRetryAfterMs`).
 - Exponential backoff `baseDelayMs * 2^(attempt-1)` capped at `maxDelayMs`.
-- Validation/auth/conflict/payment errors are **never** retried.
+- Validation/auth/conflict/payment errors are **never** retried. A 409 that
+  indicates the idempotency key was reused with a different payload surfaces
+  as `IdempotencyConflictError` instead.
+
+**Typed error parsing is wired into every request** — `TalosClient.request`
+(and every typed method) dispatches non-2xx responses through
+`errorFromResponse`, so consumers receive the typed subclasses documented
+above with `status`, `code`, `message`, `requestId`, validation `issues`, safe
+headers, and retry hints. Fetch-level failures are classified via
+`classifyTransportError` (transport vs timeout). Successful responses are
+unchanged.
 
 ### Privacy
 
