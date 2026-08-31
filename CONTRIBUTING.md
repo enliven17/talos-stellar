@@ -214,8 +214,8 @@ Use the web package scripts for Next.js, API, database, and DevX changes. The ma
 # POSIX shells
 pnpm --dir web exec vitest run tests/health.test.ts
 pnpm --dir web exec vitest run tests/*.unit.test.ts
-pnpm --dir web run test:openapi
-pnpm --dir web run test:bench
+pnpm --dir web exec vitest run tests/openapi-snapshot.test.ts
+pnpm --dir web exec vitest run src/area/devx/__tests__/runner.test.ts
 pnpm --dir web run lint
 pnpm --dir web exec tsc --noEmit
 ```
@@ -224,8 +224,8 @@ pnpm --dir web exec tsc --noEmit
 # Windows PowerShell
 pnpm --dir web exec vitest run tests\health.test.ts
 pnpm --dir web exec vitest run tests\*.unit.test.ts
-pnpm --dir web run test:openapi
-pnpm --dir web run test:bench
+pnpm --dir web exec vitest run tests/openapi-snapshot.test.ts
+pnpm --dir web exec vitest run src/area/devx/__tests__/runner.test.ts
 pnpm --dir web run lint
 pnpm --dir web exec tsc --noEmit
 ```
@@ -234,9 +234,9 @@ Choose the focused command by area:
 
 | Changed files | Focused command | CI workflow |
 | --- | --- | --- |
-| `web/src/app/api/**`, `web/src/lib/openapi.ts`, `web/tests/fixtures/openapi.snapshot.json` | `pnpm --dir web run test:openapi` | `Web OpenAPI CI` |
+| `web/src/app/api/**`, `web/src/lib/openapi.ts`, `web/tests/fixtures/openapi.snapshot.json` | `pnpm --dir web exec vitest run tests/openapi-snapshot.test.ts` | `Web OpenAPI CI` |
 | `web/drizzle/**`, `web/src/db/**`, `web/drizzle.config.ts` | `pnpm --dir web run db:migrate`, then the specific DB test with `pnpm --dir web exec vitest run tests/<name>.test.ts` | `Web Migrations CI` |
-| `web/src/area/devx/**` | `pnpm --dir web run test:bench` | `Benchmark CI - regression gates` |
+| `web/src/area/devx/**` | `pnpm --dir web exec vitest run src/area/devx/__tests__/runner.test.ts` | `Benchmark CI - regression gates` |
 | API route or library unit tests | `pnpm --dir web exec vitest run tests/<name>.test.ts` | `Deploy Web -> Vercel` |
 | Backup or restore paths | `pnpm --dir web exec vitest run tests/backup-crypto.test.ts tests/backup-types.test.ts` | `Web Backups CI` |
 
@@ -249,17 +249,15 @@ The TypeScript SDK lives in `packages/sdk/`. The expected build artifact is `pac
 ```bash
 # POSIX shells
 pnpm --filter @talos-protocol/sdk exec vitest run tests/client.test.ts
-pnpm --filter @talos-protocol/sdk run test
 pnpm --filter @talos-protocol/sdk run build
-pnpm --filter @talos-protocol/sdk run generate:types
+pnpm --filter @talos-protocol/sdk exec tsc --noEmit
 ```
 
 ```powershell
 # Windows PowerShell
 pnpm --filter @talos-protocol/sdk exec vitest run tests\client.test.ts
-pnpm --filter @talos-protocol/sdk run test
 pnpm --filter @talos-protocol/sdk run build
-pnpm --filter @talos-protocol/sdk run generate:types
+pnpm --filter @talos-protocol/sdk exec tsc --noEmit
 ```
 
 Choose the focused command by area:
@@ -267,7 +265,7 @@ Choose the focused command by area:
 | Changed files | Focused command | CI workflow |
 | --- | --- | --- |
 | `packages/sdk/src/**`, `packages/sdk/tests/**` | `pnpm --filter @talos-protocol/sdk exec vitest run tests/<name>.test.ts` | `SDK Compatibility Tests` |
-| `packages/sdk/src/generated-types.ts`, `web/tests/fixtures/openapi.snapshot.json` | `pnpm --filter @talos-protocol/sdk run generate:types`, then verify `git diff` | `SDK Types CI` |
+| `packages/sdk/src/generated-types.ts`, `web/tests/fixtures/openapi.snapshot.json` | `pnpm --filter @talos-protocol/sdk run build`, then verify `git diff` | `SDK Types CI` |
 | SDK build, packaging, or browser bundle files | `pnpm --filter @talos-protocol/sdk run build` | `SDK Compatibility Tests` |
 
 If `SDK Compatibility Tests` reports a missing `compat:*` script, check `.github/workflows/sdk-compatibility.yml` and `packages/sdk/package.json` together. The workflow invokes smoke-test script names, while the package manifest is the source of available local scripts.
@@ -313,7 +311,8 @@ cd contracts
 cargo test -p talos-registry
 cargo test
 cargo build --target wasm32-unknown-unknown --release
-pnpm run test:fixtures
+pnpm --dir contracts exec tsc --noEmit
+pnpm --dir contracts exec vitest run fixtures
 ```
 
 ```powershell
@@ -322,7 +321,8 @@ Set-Location contracts
 cargo test -p talos-registry
 cargo test
 cargo build --target wasm32-unknown-unknown --release
-pnpm run test:fixtures
+pnpm --dir contracts exec tsc --noEmit
+pnpm --dir contracts exec vitest run fixtures
 Set-Location ..
 ```
 
@@ -335,7 +335,7 @@ Choose the focused command by area:
 | `contracts/talos_governance/**` | `cargo test -p talos-governance` | `Contracts CI` |
 | `contracts/ttl_manager/**` | `cargo test -p ttl-manager` | `Contracts CI` |
 | `contracts/storage_migration/**` | `cargo test -p storage-migration` | `Contracts CI` |
-| `contracts/fixtures/**` | `pnpm --dir contracts run test:fixtures` | `Contracts CI` |
+| `contracts/fixtures/**` | `pnpm --dir contracts exec tsc --noEmit; pnpm --dir contracts exec vitest run fixtures` | `Contracts CI` |
 | Contract release output or Wasm compatibility | `cargo build --target wasm32-unknown-unknown --release` | `Contracts CI` |
 
 Deploy commands such as `pnpm --dir contracts run deploy:testnet` and `./deploy.sh testnet` require configured Stellar credentials and network access. Treat failures from missing signers, RPC timeouts, Horizon rate limits, or Soroban testnet availability as deployment-environment issues unless local `cargo test` or Wasm build also fails.
@@ -349,7 +349,7 @@ Deploy commands such as `pnpm --dir contracts run deploy:testnet` and `./deploy.
 | `DATABASE_URL` or `DIRECT_URL` is missing | The command needs a Postgres-backed environment | Copy `web/.env.example` to `web/.env.local` or use `pnpm stack:up` for local integration work. |
 | `ECONNREFUSED`, `ENOTFOUND`, Horizon/RPC timeout, or preview URL missing | External service, local server, mock provider, or Vercel preview is unavailable | Check the named workflow logs first. If local unit tests pass and only the external service failed, note it as environment-dependent. |
 | `schema.ts is out of sync with committed migration files` | Drizzle schema and migrations diverged | Run `pnpm --dir web run db:generate`, inspect the generated SQL, and commit it only when the schema change is intended. |
-| `Generated types differ from committed version` | OpenAPI snapshot and SDK generated types drifted | Run `pnpm --filter @talos-protocol/sdk run generate:types` and review `packages/sdk/src/generated-types.ts`. |
+| `Generated types differ from committed version` | OpenAPI snapshot and SDK generated types drifted | Run the repository's generated-type workflow and review `packages/sdk/src/generated-types.ts`. |
 | `Browser bundle not built` or missing `packages/sdk/dist/browser/sdk.bundle.js` | SDK build did not produce the expected browser artifact | Run `pnpm --filter @talos-protocol/sdk run build:browser` or the full SDK build. |
 | `ruff` violations | Python formatting or lint rule failures | Run `uv run ruff check src tests` in `packages/prime-agent/` and fix the reported files. |
 | `wasm32-unknown-unknown` target not installed | Rust cannot build Soroban Wasm artifacts | Run `rustup target add wasm32-unknown-unknown`. |
@@ -524,7 +524,7 @@ pnpm --dir web env:provision 123 my-feature-branch
 # Teardown the mock environment
 pnpm --dir web env:teardown 123
 ```
-Unit tests for the environment lifecycle logic reside in `web/src/area/devx/__tests__/environments.test.ts` (or similar tests). Make sure tests pass locally by running `pnpm --dir web run test:bench` or your standard test suites.
+Unit tests for the environment lifecycle logic reside in `web/src/area/devx/__tests__/environments.test.ts` (or similar tests). Make sure tests pass locally by running the relevant Vitest file directly, for example `pnpm --dir web exec vitest run src/area/devx/__tests__/environments.test.ts`.
 
 ### Rollback and Teardown
 
