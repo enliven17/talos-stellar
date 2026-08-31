@@ -17,6 +17,7 @@ from rich.console import Console
 from talos_agent import __version__
 from talos_agent.checkpoint_cli import checkpoint
 from talos_agent.config import APP_DIR, Settings, ensure_app_dir
+from talos_agent.redaction import safe_exception_message
 
 console = Console()
 
@@ -68,7 +69,7 @@ def start(talos_id: str | None, env_file: str):
                     dec = decrypt_with_password(value, master_key)
                     os.environ.setdefault(key, dec)
                 except Exception as e:
-                    console.print(f"[red]Error decrypting {key}:[/red] {e}")
+                    console.print(f"[red]Error decrypting {key}:[/red] {safe_exception_message(e)}")
                     sys.exit(1)
             else:
                 os.environ.setdefault(key, value)

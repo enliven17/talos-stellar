@@ -11,16 +11,12 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
-from talos_agent.clock import ClockProtocol, SystemClock
-from talos_agent import metrics
-
 import structlog
 from rich.console import Console
 
-if TYPE_CHECKING:
-    from talos_agent.config import Settings
-
 from talos_agent.circuit_breaker import cb_registry
+from talos_agent.clock import ClockProtocol, SystemClock
+from talos_agent import metrics
 from talos_agent.observability import log, setup as setup_observability
 from talos_agent.redaction import safe_exception_message
 from talos_agent.tracing import (
@@ -28,6 +24,9 @@ from talos_agent.tracing import (
     shutdown_tracing,
     traced_span,
 )
+
+if TYPE_CHECKING:
+    from talos_agent.config import Settings
 
 console = Console()
 logger = logging.getLogger(__name__)

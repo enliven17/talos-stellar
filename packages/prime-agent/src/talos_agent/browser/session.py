@@ -7,11 +7,10 @@ import json
 import subprocess
 
 from rich.console import Console
-
-from talos_agent.redaction import safe_exception_message
 from stagehand import Stagehand
 
 from talos_agent.config import APP_DIR, Settings
+from talos_agent.redaction import safe_exception_message
 
 console = Console()
 
