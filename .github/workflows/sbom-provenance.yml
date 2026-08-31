@@ -162,7 +162,7 @@ jobs:
           pnpm install --frozen-lockfile
 
       - name: Run web tests (readiness/liveness focus)
-        run: pnpm --dir web test -- --run
+        run: pnpm --dir web test:readiness
         timeout-minutes: 2
         env:
           READINESS_SCENARIO: ${{ matrix.readiness-scenario }}
