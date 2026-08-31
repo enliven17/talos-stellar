@@ -575,7 +575,7 @@ jobs:
           SHA="${GITHUB_SHA:0:7}"
           BASE="${OUT_DIR}/talos-agent-${GITHUB_REF_NAME:-$SHA}-$TS"
 
-          python3 << 'PYEOF'
+          python3 << PYEOF
           import json, tomllib, hashlib, uuid, os, datetime
           base="${BASE}"
           with open("pyproject.toml","rb") as f: p=tomllib.load(f)
@@ -660,7 +660,7 @@ jobs:
           TS="$(date -u +%Y%m%d-%H%M%S)"
           SHA="${GITHUB_SHA:0:7}"
           BASE="${OUT_DIR}/talos-agent-${GITHUB_REF_NAME:-$SHA}-$TS"
-          python3 << 'PYEOF'
+          python3 << PYEOF
           import json, hashlib, os
           def sha256(f):
             h=hashlib.sha256()
@@ -1248,6 +1248,6 @@ jobs:
           echo "|-----------|-----------|------|------------|------------|" >> "$GITHUB_STEP_SUMMARY"
           for comp in sdk agent contracts web; do
             need="generate-$comp"
-            res="${{ contains(needs.*.result, 'success') && needs[$need].result || 'SKIPPED' }}"
+            res=$(jq -r --arg job "$need" '.[$job].result // "SKIPPED"' <<< '${{ toJSON(needs) }}')
             echo "| $comp | $res | $res | $res | $res |" >> "$GITHUB_STEP_SUMMARY"
           done
