@@ -3361,6 +3361,16 @@ export interface operations {
                 category?: string;
                 /** @description TALOS ID to exclude from results (your own services) */
                 self?: string;
+                /**
+                 * @description Minimum service price in USDC (inclusive)
+                 * @minimum 0
+                 */
+                minPrice?: number;
+                /**
+                 * @description Maximum service price in USDC (inclusive). Must be ≥ minPrice.
+                 * @minimum 0
+                 */
+                maxPrice?: number;
                 /** @description Sort field. Supported values depend on the endpoint (e.g. `createdAt`, `price`). Defaults to `createdAt`. */
                 sort?: components["parameters"]["sortParam"];
                 /** @description Sort direction (`asc` or `desc`). Defaults to `desc`. */
@@ -3396,7 +3406,7 @@ export interface operations {
                     };
                 };
             };
-            /** @description Invalid `sort` or `direction`, or cursor used with a non-default sort */
+            /** @description Invalid `sort` or `direction`, cursor used with a non-default sort, or invalid price range */
             400: {
                 headers: {
                     [name: string]: unknown;

@@ -63,10 +63,12 @@ export interface SignPaymentParams {
 export interface DiscoverServicesParams {
   category?: string;
   self?: string;
-  cursor?: string;
-  limit?: number;
+  minPrice?: number;
+  maxPrice?: number;
   sort?: "createdAt" | "price";
   direction?: "asc" | "desc";
+  cursor?: string;
+  limit?: number;
   signal?: AbortSignal;
 }
 

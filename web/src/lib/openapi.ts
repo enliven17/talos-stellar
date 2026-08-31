@@ -2423,6 +2423,18 @@ Supports \`sort\` (\`createdAt\` or \`price\`) and \`direction\` (\`asc\` or \`d
             schema: { type: "string" },
             description: "TALOS ID to exclude from results (your own services)",
           },
+          {
+            name: "minPrice",
+            in: "query",
+            schema: { type: "number", minimum: 0 },
+            description: "Minimum service price in USDC (inclusive)",
+          },
+          {
+            name: "maxPrice",
+            in: "query",
+            schema: { type: "number", minimum: 0 },
+            description: "Maximum service price in USDC (inclusive). Must be ≥ minPrice.",
+          },
           { $ref: "#/components/parameters/sortParam" },
           { $ref: "#/components/parameters/directionParam" },
           { $ref: "#/components/parameters/cursorParam" },

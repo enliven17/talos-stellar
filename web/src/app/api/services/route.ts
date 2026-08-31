@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsCommerceServices } from "@/db/schema";
-import { and, eq, ilike, lt, ne, or, type SQLWrapper } from "drizzle-orm";
+import { and, eq, gte, ilike, lt, lte, ne, or, type SQLWrapper } from "drizzle-orm";
 import { parseLimit } from "@/lib/parse-limit";
 import {
   buildMarketplaceOrderBy,
@@ -58,6 +58,28 @@ async function handleGet(request: NextRequest) {
     const minConfidence = searchParams.has("minConfidence") ? Number(searchParams.get("minConfidence")) : undefined;
     const allowColdStart = searchParams.get("allowColdStart") === "true";
 
+    // Price range filters
+    const minPriceRaw = searchParams.get("minPrice");
+    const maxPriceRaw = searchParams.get("maxPrice");
+    const minPrice = minPriceRaw !== null ? parseFloat(minPriceRaw) : null;
+    const maxPrice = maxPriceRaw !== null ? parseFloat(maxPriceRaw) : null;
+
+    if (minPrice !== null && isNaN(minPrice)) {
+      return Response.json({ error: "minPrice must be a number" }, { status: 400 });
+    }
+    if (maxPrice !== null && isNaN(maxPrice)) {
+      return Response.json({ error: "maxPrice must be a number" }, { status: 400 });
+    }
+    if (minPrice !== null && minPrice < 0) {
+      return Response.json({ error: "minPrice must be non-negative" }, { status: 400 });
+    }
+    if (maxPrice !== null && maxPrice < 0) {
+      return Response.json({ error: "maxPrice must be non-negative" }, { status: 400 });
+    }
+    if (minPrice !== null && maxPrice !== null && minPrice > maxPrice) {
+      return Response.json({ error: "minPrice cannot be greater than maxPrice" }, { status: 400 });
+    }
+
     let currentCursor = cursor;
     const accumulated: any[] = [];
     let exhausted = false;
@@ -74,6 +96,14 @@ async function handleGet(request: NextRequest) {
       // Filter by TALOS category (case-insensitive match in DB)
       if (category) {
         conditions.push(ilike(tlsTalos.category, category));
+      }
+
+      if (minPrice !== null) {
+        conditions.push(gte(tlsCommerceServices.price, String(minPrice)));
+      }
+
+      if (maxPrice !== null) {
+        conditions.push(lte(tlsCommerceServices.price, String(maxPrice)));
       }
 
       // Cursor condition (createdAt DESC with id tiebreaker)
