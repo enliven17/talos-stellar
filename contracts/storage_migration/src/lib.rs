@@ -362,6 +362,7 @@ pub fn migration_record_at(
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
 
     #[test]
