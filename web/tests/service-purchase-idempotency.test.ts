@@ -606,3 +606,123 @@ describe("service-purchase idempotency — different buyer with same key", () =>
     expect(mocks.mockVerifyX402Payment).toHaveBeenCalled();
   });
 });
+
+describe("service-purchase idempotency — write scope requirement", () => {
+  it("requires the commerce:write scope for the mutating purchase", async () => {
+    vi.clearAllMocks();
+    setupAuth();
+    setupPayment();
+    resetInsertMock();
+    resetUpdateMock();
+    resetTxMocks();
+    setupSelects({ idempotencyResult: [], paymentSigResult: [] });
+
+    const req = makeRequest({ idempotencyKey: "key-scope", paymentToken: "tok-scope" });
+    await POST(req, { params: routeParams });
+
+    const scopeArg = mocks.mockResolveTalosFromRequest.mock.calls[0]?.[1];
+    expect(scopeArg).toContain("commerce:write");
+  });
+});
+
+describe("service-purchase idempotency — migration / index boundary", () => {
+  it("drops the provider-scoped index and adds the per-buyer composite index", async () => {
+    // Guards the migration against reintroducing the (talosId, idempotencyKey)
+    // unique index, which would block two buyers from reusing a key on one
+    // service and contradict the documented per-buyer contract.
+    const sql = await import("fs/promises")
+      .then((fs) => fs.readFile(
+        new URL("../drizzle/0018_add_service_purchase_idempotency.sql", import.meta.url),
+        "utf8",
+      ));
+
+    expect(sql).toContain('DROP INDEX IF EXISTS "tls_commerce_jobs_talosId_idempotencyKey_unique"');
+    expect(sql).toContain(
+      'CREATE UNIQUE INDEX IF NOT EXISTS "tls_commerce_jobs_talos_requester_idempotencyKey_unique"',
+    );
+  });
+});
+
+describe("service-purchase idempotency — async cache write atomicity", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setupAuth();
+    setupPayment();
+    resetInsertMock();
+    resetUpdateMock();
+    resetTxMocks();
+  });
+
+  it("rolls back the whole transaction if the idempotency cache write fails (no orphan 201)", async () => {
+    // async mode: job insert + idempotencyResponse update must commit together.
+    setupSelects({ idempotencyResult: [], paymentSigResult: [] });
+
+    // Ensure the transaction routes to the tx insert/update mocks (a later
+    // describe overrides mockTransaction to use the outer mocks, which is not
+    // reset by clearAllMocks).
+    mocks.mockTransaction.mockImplementation(async (cb: any) =>
+      cb({ insert: mocks.mockTxInsert, update: mocks.mockTxUpdate }),
+    );
+
+    // Insert succeeds, but the cache write (update) fails inside the transaction.
+    mocks.mockTxInsert.mockImplementation((table: any) => {
+      if (table === tlsCommerceJobs) {
+        return {
+          values: vi.fn().mockReturnValue({
+            returning: vi.fn().mockResolvedValue([{
+              id: "job-orphan",
+              status: "pending",
+              serviceName: "research",
+            }]),
+          }),
+        };
+      }
+      return { values: vi.fn().mockResolvedValue([]) };
+    });
+    mocks.mockTxUpdate.mockReturnValue({
+      set: vi.fn().mockReturnValue({
+        where: vi.fn().mockRejectedValue(new Error("cache write failed")),
+      }),
+    });
+
+    const req = makeRequest({ idempotencyKey: "key-atomic", paymentToken: "tok-atomic" });
+    const res = await POST(req, { params: routeParams });
+
+    // Because the insert and cache write are one transaction, a failed cache
+    // write aborts the whole operation rather than leaving a row without a
+    // cached response (which would otherwise turn every retry into a 409).
+    expect(res.status).toBe(500);
+  });
+
+  it("recovers on retry instead of surfacing a permanent 409 after a failed cache write", async () => {
+    // First attempt: transaction insert succeeds, cache update fails → whole
+    // transaction rolls back → 500 and NO row persists with this key.
+    setupSelects({ idempotencyResult: [], paymentSigResult: [] });
+    mocks.mockTransaction.mockImplementation(async (cb: any) =>
+      cb({ insert: mocks.mockTxInsert, update: mocks.mockTxUpdate }),
+    );
+    mocks.mockTxUpdate.mockReturnValue({
+      set: vi.fn().mockReturnValue({
+        where: vi.fn().mockRejectedValue(new Error("cache write failed")),
+      }),
+    });
+
+    const first = await POST(
+      makeRequest({ idempotencyKey: "key-recover", paymentToken: "tok-1" }),
+      { params: routeParams },
+    );
+    expect(first.status).toBe(500);
+
+    // Retry with the same key: since nothing was persisted, the idempotency
+    // lookup finds no row and the purchase proceeds as a fresh request.
+    resetTxMocks();
+    setupSelects({ idempotencyResult: [], paymentSigResult: [] });
+
+    const second = await POST(
+      makeRequest({ idempotencyKey: "key-recover", paymentToken: "tok-2" }),
+      { params: routeParams },
+    );
+    expect(second.status).toBe(201);
+    expect(second.headers.get("X-Idempotent-Replayed")).toBe("false");
+  });
+});

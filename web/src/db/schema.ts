@@ -344,9 +344,11 @@ export const tlsCommerceJobs = pgTable(
     bidPrice: numeric("bidPrice", { precision: 18, scale: 6 }), // Negotiated bid price (nullable)
 
     // Client-supplied idempotency key (Idempotency-Key request header).
-    // Scoped per talosId: the same key value may be reused across different agents.
-    // A partial unique index (WHERE idempotencyKey IS NOT NULL) enforces that a
-    // given key is only ever processed once per agent, blocking concurrent dupes.
+    // Scoped per (talosId, requesterTalosId): the same key value may be
+    // reused across different agents or different buyers, but only ever
+    // processed once for a given buyer+service combination.  A partial
+    // unique index (WHERE idempotencyKey IS NOT NULL) enforces this,
+    // blocking concurrent duplicate jobs for the same buyer+service+key.
     idempotencyKey: text("idempotencyKey"),
 
     // Cached 201 response body so an identical retry returns the original result.
@@ -363,8 +365,8 @@ export const tlsCommerceJobs = pgTable(
   },
   (t) => [
     index("tls_commerce_jobs_talosId_status_idx").on(t.talosId, t.status),
-    uniqueIndex("tls_commerce_jobs_talosId_idempotencyKey_unique")
-      .on(t.talosId, t.idempotencyKey)
+    uniqueIndex("tls_commerce_jobs_talos_requester_idempotencyKey_unique")
+      .on(t.talosId, t.requesterTalosId, t.idempotencyKey)
       .where(sql`"idempotencyKey" IS NOT NULL`),
   ],
 );

@@ -92,7 +92,7 @@ async function handlePost(
     // The URL param `id` identifies the service *provider*; the Bearer token
     // identifies the *requester* (buyer). resolveTalosFromRequest resolves the
     // caller from their key without requiring a known talosId.
-    const auth = await resolveTalosFromRequest(request, ["commerce:read"]);
+    const auth = await resolveTalosFromRequest(request, ["commerce:write"]);
     if (!auth.ok) return auth.response;
     const requester = { id: auth.talos.id };
 
@@ -402,30 +402,43 @@ async function handlePost(
     };
 
     try {
-      const [job] = await db
-        .insert(tlsCommerceJobs)
-        .values({
-          talosId: id,
-          requesterTalosId: requester.id,
-          serviceName: service.serviceName,
-          payload: payload ?? undefined,
-          paymentSig: paymentToken,
-          txHash,
-          amount: service.price,
-          bidPrice: bidData.bidPrice ? String(bidData.bidPrice) : undefined,
-          status: bidData.status ?? "pending",
-          ...(idempotencyKey ? { idempotencyKey } : {}),
-        })
-        .returning();
+      // Atomic: the job insert and the idempotency cache write must commit
+      // together.  If the cache update fails, the job insert rolls back too,
+      // otherwise the row would be left without a cached response and every
+      // retry would receive a permanent 409.  Async mode records revenue on
+      // fulfillment, so no revenue row is written here.
+      const [job] = await withTransactionRetry(
+        async (tx) => {
+          const [job] = await tx
+            .insert(tlsCommerceJobs)
+            .values({
+              talosId: id,
+              requesterTalosId: requester.id,
+              serviceName: service.serviceName,
+              payload: payload ?? undefined,
+              paymentSig: paymentToken,
+              txHash,
+              amount: service.price,
+              bidPrice: bidData.bidPrice ? String(bidData.bidPrice) : undefined,
+              status: bidData.status ?? "pending",
+              ...(idempotencyKey ? { idempotencyKey } : {}),
+            })
+            .returning();
 
-      // Cache the response body for future idempotent replays.
-      if (idempotencyKey) {
-        const finalResponse = { ...responseBody, jobId: job.id };
-        await db
-          .update(tlsCommerceJobs)
-          .set({ idempotencyResponse: finalResponse })
-          .where(eq(tlsCommerceJobs.id, job.id));
-      }
+          // Cache the response body for future idempotent replays, in the
+          // same transaction as the job insert.
+          if (idempotencyKey) {
+            const finalResponse = { ...responseBody, jobId: job.id };
+            await tx
+              .update(tlsCommerceJobs)
+              .set({ idempotencyResponse: finalResponse })
+              .where(eq(tlsCommerceJobs.id, job.id));
+          }
+
+          return [job];
+        },
+        { category: "JOB" }
+      );
 
       const finalBody = { ...responseBody, jobId: job.id };
       if (idempotencyKey) {
