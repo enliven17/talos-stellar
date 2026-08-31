@@ -47,7 +47,11 @@ def _text(value: Any, maximum: int) -> str:
 
 
 def _label(value: Any, maximum: int, allowed: frozenset[str] | None = None) -> str:
-    text = _text(_redact(value), maximum)
+    redacted = _redact(value)
+    raw_text = str(redacted)
+    if len(raw_text) > maximum:
+        return "unknown"
+    text = _text(redacted, maximum)
     return text if _SAFE_LABEL.fullmatch(text) and (allowed is None or text in allowed) else "unknown"
 
 
