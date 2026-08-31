@@ -412,7 +412,7 @@ jobs:
                   builder: { id: 'https://github.com/actions/runner/github-hosted' },
                   metadata: {
                     invocationId: '${{ github.run_id }}-${{ github.run_attempt }}',
-                    startedOn: '${{ github.event.head_commit.timestamp || new Date().toISOString() }}',
+                    startedOn: new Date().toISOString(),
                     completedOn: new Date().toISOString()
                   }
                 }
@@ -1248,6 +1248,11 @@ jobs:
           echo "|-----------|-----------|------|------------|------------|" >> "$GITHUB_STEP_SUMMARY"
           for comp in sdk agent contracts web; do
             need="generate-$comp"
-            res="${{ contains(needs.*.result, 'success') && needs[$need].result || 'SKIPPED' }}"
+            case "$comp" in
+              sdk) res="${{ needs.generate-sdk.result }}" ;;
+              agent) res="${{ needs.generate-agent.result }}" ;;
+              contracts) res="${{ needs.generate-contracts.result }}" ;;
+              web) res="${{ needs.generate-web.result }}" ;;
+            esac
             echo "| $comp | $res | $res | $res | $res |" >> "$GITHUB_STEP_SUMMARY"
           done
