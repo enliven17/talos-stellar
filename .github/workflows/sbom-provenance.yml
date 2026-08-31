@@ -224,7 +224,7 @@ jobs:
             }
 
           echo "cdx-json=${BASE}.cdx.json" >> "$GITHUB_OUTPUT"
-          echo "cdx-name=talos-sdk-${GITHUB_REF_NAME:-$SHA}-$TS" >> "$GITHUB_OUTPUT"
+          echo "cdx-name=talos-sdk-${SHA}-$TS" >> "$GITHUB_OUTPUT"
 
       - name: Validate CycloneDX SBOM
         shell: bash
@@ -427,9 +427,9 @@ jobs:
         shell: bash
         run: |
           SHA="${GITHUB_SHA:0:7}"
-          echo "cyclonedx-artifact=sbom-sdk-cyclonedx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
-          echo "spdx-artifact=sbom-sdk-spdx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
-          echo "signature-artifact=sbom-sdk-signatures-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+          echo "cyclonedx-artifact=sbom-sdk-cyclonedx-${SHA}" >> "$GITHUB_OUTPUT"
+          echo "spdx-artifact=sbom-sdk-spdx-${SHA}" >> "$GITHUB_OUTPUT"
+          echo "signature-artifact=sbom-sdk-signatures-${SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Upload CycloneDX SBOM
         uses: actions/upload-artifact@v4
@@ -561,7 +561,7 @@ jobs:
             }
 
           echo "cdx-json=${BASE}.cdx.json" >> "$GITHUB_OUTPUT"
-          echo "cdx-name=talos-agent-${GITHUB_REF_NAME:-$SHA}-$TS" >> "$GITHUB_OUTPUT"
+          echo "cdx-name=talos-agent-${SHA}-$TS" >> "$GITHUB_OUTPUT"
 
       - name: Generate SPDX SBOM
         id: spdx
@@ -687,9 +687,9 @@ jobs:
         shell: bash
         run: |
           SHA="${GITHUB_SHA:0:7}"
-          echo "cyclonedx-artifact=sbom-agent-cyclonedx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
-          echo "spdx-artifact=sbom-agent-spdx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
-          echo "signature-artifact=sbom-agent-signatures-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+          echo "cyclonedx-artifact=sbom-agent-cyclonedx-${SHA}" >> "$GITHUB_OUTPUT"
+          echo "spdx-artifact=sbom-agent-spdx-${SHA}" >> "$GITHUB_OUTPUT"
+          echo "signature-artifact=sbom-agent-signatures-${SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Upload CycloneDX
         uses: actions/upload-artifact@v4
@@ -816,7 +816,7 @@ jobs:
           fi
 
           echo "cdx-json=${BASE}.cdx.json" >> "$GITHUB_OUTPUT"
-          echo "cdx-name=talos-contracts-${GITHUB_REF_NAME:-$SHA}-$TS" >> "$GITHUB_OUTPUT"
+          echo "cdx-name=talos-contracts-${SHA}-$TS" >> "$GITHUB_OUTPUT"
 
       - name: Generate SPDX SBOM
         id: spdx
@@ -942,9 +942,9 @@ jobs:
         shell: bash
         run: |
           SHA="${GITHUB_SHA:0:7}"
-          echo "cyclonedx-artifact=sbom-contracts-cyclonedx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
-          echo "spdx-artifact=sbom-contracts-spdx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
-          echo "signature-artifact=sbom-contracts-signatures-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+          echo "cyclonedx-artifact=sbom-contracts-cyclonedx-${SHA}" >> "$GITHUB_OUTPUT"
+          echo "spdx-artifact=sbom-contracts-spdx-${SHA}" >> "$GITHUB_OUTPUT"
+          echo "signature-artifact=sbom-contracts-signatures-${SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Upload CycloneDX
         uses: actions/upload-artifact@v4
@@ -1066,7 +1066,7 @@ jobs:
             "
           }
           echo "cdx-json=${BASE}.cdx.json" >> "$GITHUB_OUTPUT"
-          echo "cdx-name=talos-web-${GITHUB_REF_NAME:-$SHA}-$TS" >> "$GITHUB_OUTPUT"
+          echo "cdx-name=talos-web-${SHA}-$TS" >> "$GITHUB_OUTPUT"
 
       - name: Generate SPDX SBOM
         id: spdx
@@ -1170,9 +1170,9 @@ jobs:
         shell: bash
         run: |
           SHA="${GITHUB_SHA:0:7}"
-          echo "cyclonedx-artifact=sbom-web-cyclonedx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
-          echo "spdx-artifact=sbom-web-spdx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
-          echo "signature-artifact=sbom-web-signatures-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+          echo "cyclonedx-artifact=sbom-web-cyclonedx-${SHA}" >> "$GITHUB_OUTPUT"
+          echo "spdx-artifact=sbom-web-spdx-${SHA}" >> "$GITHUB_OUTPUT"
+          echo "signature-artifact=sbom-web-signatures-${SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Upload CycloneDX
         uses: actions/upload-artifact@v4
