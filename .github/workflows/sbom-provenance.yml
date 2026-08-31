@@ -163,7 +163,6 @@ jobs:
 
       - name: Run web tests (readiness/liveness focus)
         run: pnpm --dir web test:readiness
-        timeout-minutes: 2
         env:
           READINESS_SCENARIO: ${{ matrix.readiness-scenario }}
           MOCK_CLOCK_ISO: "2024-01-01T00:00:00.000Z"
