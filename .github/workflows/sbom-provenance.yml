@@ -1292,7 +1292,12 @@ jobs:
           echo "| Component | CycloneDX | SPDX | Provenance | Signatures |" >> "$GITHUB_STEP_SUMMARY"
           echo "|-----------|-----------|------|------------|------------|" >> "$GITHUB_STEP_SUMMARY"
           for comp in sdk agent contracts web; do
-            need="generate-$comp"
-            res="${{ contains(needs.*.result, 'success') && needs[$need].result || 'SKIPPED' }}"
+            res="SKIPPED"
+            case "$comp" in
+              sdk) res="${{ needs.generate-sdk.result }}" ;;
+              agent) res="${{ needs.generate-agent.result }}" ;;
+              contracts) res="${{ needs.generate-contracts.result }}" ;;
+              web) res="${{ needs.generate-web.result }}" ;;
+            esac
             echo "| $comp | $res | $res | $res | $res |" >> "$GITHUB_STEP_SUMMARY"
           done
