@@ -621,6 +621,8 @@ export class TalosClient {
       category?: string;
       channel?: string;
       search?: string;
+      sort?: "createdAt" | "price" | "title";
+      direction?: "asc" | "desc";
     } & CursorRequestOptions,
   ): Promise<CursorPage<Playbook>> {
     return this.requestPage("/api/playbooks", params);

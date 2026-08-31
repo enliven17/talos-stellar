@@ -18,6 +18,8 @@ export interface AuditLogWritePayload {
   path: string;
   statusCode: number;
   ipAddress: string | null;
+  denialReason?: string | null;
+  scopesRequired?: string[] | null;
 }
 
 registerHandler<AuditLogWritePayload, { inserted: true }>(AUDIT_LOG_WRITE_QUEUE, async (ctx) => {
@@ -27,6 +29,8 @@ registerHandler<AuditLogWritePayload, { inserted: true }>(AUDIT_LOG_WRITE_QUEUE,
     path: ctx.payload.path,
     statusCode: ctx.payload.statusCode,
     ipAddress: ctx.payload.ipAddress,
+    denialReason: ctx.payload.denialReason ?? null,
+    scopesRequired: ctx.payload.scopesRequired ?? null,
   });
   return { inserted: true };
 });

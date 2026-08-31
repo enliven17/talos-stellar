@@ -123,6 +123,50 @@ jobs:
           echo "components=$JSON" >> "$GITHUB_OUTPUT"
           echo "Selected components: $JSON"
 
+  test-web-readiness:
+    needs: detect-components
+    if: contains(needs.detect-components.outputs.components, 'web')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        readiness-scenario: [healthy, database-degraded, database-timeout, horizon-degraded, horizon-timeout, dependencies-unavailable, mixed-dependency-timeout]
+    env:
+      TZ: UTC
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: |
+          cd ${{ github.workspace }}
+          pnpm install --frozen-lockfile
+
+      - name: Run web tests (readiness/liveness focus)
+        run: pnpm --dir web exec vitest run src/app/api/health/health.test.ts
+        env:
+          READINESS_SCENARIO: ${{ matrix.readiness-scenario }}
+          MOCK_CLOCK_ISO: "2024-01-01T00:00:00.000Z"
+
   generate-sdk:
     needs: detect-components
     if: contains(needs.detect-components.outputs.components, 'sdk')
@@ -1247,7 +1291,12 @@ jobs:
           echo "| Component | CycloneDX | SPDX | Provenance | Signatures |" >> "$GITHUB_STEP_SUMMARY"
           echo "|-----------|-----------|------|------------|------------|" >> "$GITHUB_STEP_SUMMARY"
           for comp in sdk agent contracts web; do
-            need="generate-$comp"
-            res="${{ contains(needs.*.result, 'success') && needs[$need].result || 'SKIPPED' }}"
+            res="SKIPPED"
+            case "$comp" in
+              sdk) res="${{ needs.generate-sdk.result }}" ;;
+              agent) res="${{ needs.generate-agent.result }}" ;;
+              contracts) res="${{ needs.generate-contracts.result }}" ;;
+              web) res="${{ needs.generate-web.result }}" ;;
+            esac
             echo "| $comp | $res | $res | $res | $res |" >> "$GITHUB_STEP_SUMMARY"
           done

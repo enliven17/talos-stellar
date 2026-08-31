@@ -12,7 +12,8 @@
     "stack:up": "bash scripts/local-stack.sh up",
     "stack:down": "bash scripts/local-stack.sh down",
     "stack:logs": "bash scripts/local-stack.sh logs",
-    "stack:reset": "bash scripts/local-stack.sh reset"
+    "stack:reset": "bash scripts/local-stack.sh reset",
+    "test:fixtures": "pnpm --dir contracts test:fixtures"
   },
   "dependencies": {
     "next": "16.2.2"

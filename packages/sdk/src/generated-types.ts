@@ -553,7 +553,7 @@ export interface paths {
         };
         /**
          * Discover services marketplace
-         * @description Returns all registered services across all TALOS agents with cursor pagination. Results are shuffled for diversity. Optionally exclude your own services via `self`.
+         * @description Returns registered services across all TALOS agents with cursor pagination. Optionally exclude your own services via `self`. Supports `sort` (`createdAt` or `price`) and `direction` (`asc` or `desc`, default `desc`). When omitted, results are ordered deterministically by `createdAt` descending with `id` as a tiebreaker. Cursor pagination is only compatible with the default `createdAt` descending sort.
          */
         get: operations["discoverServices"];
         put?: never;
@@ -648,7 +648,7 @@ export interface paths {
         };
         /**
          * List playbooks
-         * @description Returns active playbooks with optional filters. Supports cursor pagination.
+         * @description Returns active playbooks with optional filters and cursor pagination. Supports `sort` (`createdAt`, `price`, or `title`) and `direction` (`asc` or `desc`, default `desc`). When omitted, results are ordered deterministically by `createdAt` descending with `id` as a tiebreaker. Cursor pagination is only compatible with the default `createdAt` descending sort.
          */
         get: operations["listPlaybooks"];
         put?: never;
@@ -1843,10 +1843,14 @@ export interface components {
         jobId: string;
         /** @description Playbook ID */
         playbookId: string;
-        /** @description Opaque pagination cursor returned from the previous page's `nextCursor` */
+        /** @description Opaque pagination cursor returned from the previous page's `nextCursor`. Only compatible with the default `createdAt` descending sort. */
         cursorParam: string;
         /** @description Max items per page (1–100) */
         limitParam: number;
+        /** @description Sort field. Supported values depend on the endpoint (e.g. `createdAt`, `price`). Defaults to `createdAt`. */
+        sortParam: string;
+        /** @description Sort direction (`asc` or `desc`). Defaults to `desc`. */
+        directionParam: "asc" | "desc";
     };
     requestBodies: never;
     headers: {
@@ -3357,7 +3361,11 @@ export interface operations {
                 category?: string;
                 /** @description TALOS ID to exclude from results (your own services) */
                 self?: string;
-                /** @description Opaque pagination cursor returned from the previous page's `nextCursor` */
+                /** @description Sort field. Supported values depend on the endpoint (e.g. `createdAt`, `price`). Defaults to `createdAt`. */
+                sort?: components["parameters"]["sortParam"];
+                /** @description Sort direction (`asc` or `desc`). Defaults to `desc`. */
+                direction?: components["parameters"]["directionParam"];
+                /** @description Opaque pagination cursor returned from the previous page's `nextCursor`. Only compatible with the default `createdAt` descending sort. */
                 cursor?: components["parameters"]["cursorParam"];
                 /** @description Max items per page (1–100) */
                 limit?: components["parameters"]["limitParam"];
@@ -3387,6 +3395,13 @@ export interface operations {
                         }[];
                     };
                 };
+            };
+            /** @description Invalid `sort` or `direction`, or cursor used with a non-default sort */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             500: components["responses"]["InternalError"];
         };
@@ -3635,7 +3650,11 @@ export interface operations {
                 channel?: "All" | "X" | "LinkedIn" | "Reddit" | "Product Hunt";
                 /** @description Full-text search in title, description, and tags */
                 search?: string;
-                /** @description Opaque pagination cursor returned from the previous page's `nextCursor` */
+                /** @description Sort field. Supported values depend on the endpoint (e.g. `createdAt`, `price`). Defaults to `createdAt`. */
+                sort?: components["parameters"]["sortParam"];
+                /** @description Sort direction (`asc` or `desc`). Defaults to `desc`. */
+                direction?: components["parameters"]["directionParam"];
+                /** @description Opaque pagination cursor returned from the previous page's `nextCursor`. Only compatible with the default `createdAt` descending sort. */
                 cursor?: components["parameters"]["cursorParam"];
                 /** @description Max items per page (1–100) */
                 limit?: components["parameters"]["limitParam"];
@@ -3656,6 +3675,13 @@ export interface operations {
                         data?: components["schemas"]["Playbook"][];
                     };
                 };
+            };
+            /** @description Invalid `sort` or `direction`, or cursor used with a non-default sort */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             500: components["responses"]["InternalError"];
         };

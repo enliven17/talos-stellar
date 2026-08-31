@@ -10,34 +10,32 @@
  * so no dangling timer is ever leaked.
  */
 
-export const DEFAULT_HORIZON = "https://horizon-testnet.stellar.org";
-
-/** DB check timeout — 2 s */
-export const DB_TIMEOUT_MS = 2_000;
-
-/** Stellar Horizon check timeout — 3 s */
-export const STELLAR_TIMEOUT_MS = 3_000;
+export const DEFAULT_HORIZON = "https://horizon.stellar.org";
+export const DB_TIMEOUT_MS = 2000;
+export const STELLAR_TIMEOUT_MS = 3000;
 
 export function withTimeout<T>(
   fn: (signal: AbortSignal) => Promise<T>,
   ms: number,
 ): Promise<T> {
-  const controller = new AbortController();
-  let timerId: ReturnType<typeof setTimeout> | undefined;
-
-  const timeout = new Promise<never>((_, reject) => {
-    timerId = setTimeout(() => {
-      controller.abort(new Error("timeout"));
-      reject(new Error("timeout"));
-    }, ms);
-  });
-
-  const main = Promise.race([fn(controller.signal), timeout]).finally(() => {
-    clearTimeout(timerId);
-    if (!controller.signal.aborted) {
+  return new Promise<T>((resolve, reject) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
       controller.abort();
-    }
-  });
+      reject(new Error(`Timed out after ${ms}ms`));
+    }, ms);
 
-  return main;
+    Promise.resolve()
+      .then(() => fn(controller.signal))
+      .then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+  });
 }

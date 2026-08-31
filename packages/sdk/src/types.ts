@@ -65,6 +65,8 @@ export interface DiscoverServicesParams {
   self?: string;
   cursor?: string;
   limit?: number;
+  sort?: "createdAt" | "price";
+  direction?: "asc" | "desc";
   signal?: AbortSignal;
 }
 

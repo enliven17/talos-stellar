@@ -1,37 +1,408 @@
 {
-  "spec_version": "1.0.0",
-  "examples": [
+  "spec_version": "1.1.0",
+  "format": "talos-event-fixtures",
+  "description": "Canonical, versioned event-query fixtures for indexers consuming Talos Soroban contract events by topic and ledger range. Consumers load this JSON directly (TypeScript, Python, Rust). Any change that alters decoding MUST bump spec_version and follow the versioning rules in contracts/EVENTS.md.",
+  "bounds": {
+    "min_page_size": 1,
+    "max_page_size": 100,
+    "max_ledger_span": 10000
+  },
+  "event_catalog": {
+    "creation": {
+      "tls_crt": {
+        "contract": "talos_registry",
+        "topics": [
+          { "position": 0, "type": "symbol", "name": "event", "description": "event type symbol" },
+          { "position": 1, "type": "address", "name": "creator", "description": "address that created the Talos" }
+        ],
+        "data": [
+          { "position": 0, "type": "u32", "name": "talos_id" },
+          { "position": 1, "type": "string", "name": "name" },
+          { "position": 2, "type": "string", "name": "category" }
+        ]
+      }
+    },
+    "update": {
+      "pat_upd": {
+        "contract": "talos_registry",
+        "topics": [
+          { "position": 0, "type": "symbol", "name": "event", "description": "event type symbol" },
+          { "position": 1, "type": "u32", "name": "talos_id", "description": "Talos whose patron split changed" }
+        ],
+        "data": [
+          { "position": 0, "type": "address", "name": "creator_addr" },
+          { "position": 1, "type": "u32", "name": "creator_share" },
+          { "position": 2, "type": "u32", "name": "investor_share" }
+        ]
+      },
+      "reg_upd": {
+        "contract": "talos_name_service",
+        "topics": [
+          { "position": 0, "type": "symbol", "name": "event", "description": "event type symbol" }
+        ],
+        "data": [
+          { "position": 0, "type": "address", "name": "old_registry" },
+          { "position": 1, "type": "address", "name": "new_registry" }
+        ]
+      }
+    },
+    "governance": {
+      "prop_crt": {
+        "contract": "talos_governance",
+        "topics": [
+          { "position": 0, "type": "symbol", "name": "event", "description": "event type symbol" },
+          { "position": 1, "type": "u32", "name": "proposal_id" }
+        ],
+        "data": [
+          { "position": 0, "type": "u32", "name": "talos_id" },
+          { "position": 1, "type": "address", "name": "proposer" }
+        ]
+      },
+      "vote": {
+        "contract": "talos_governance",
+        "topics": [
+          { "position": 0, "type": "symbol", "name": "event", "description": "event type symbol" },
+          { "position": 1, "type": "u32", "name": "proposal_id" }
+        ],
+        "data": [
+          { "position": 0, "type": "address", "name": "voter" },
+          { "position": 1, "type": "symbol", "name": "choice" },
+          { "position": 2, "type": "i128", "name": "weight" }
+        ]
+      },
+      "prop_stat": {
+        "contract": "talos_governance",
+        "topics": [
+          { "position": 0, "type": "symbol", "name": "event", "description": "event type symbol" },
+          { "position": 1, "type": "u32", "name": "proposal_id" }
+        ],
+        "data": [
+          { "position": 0, "type": "symbol", "name": "status" }
+        ]
+      }
+    },
+    "payment": {
+      "ep_cmt": {
+        "contract": "talos_dividends",
+        "topics": [
+          { "position": 0, "type": "symbol", "name": "event", "description": "event type symbol" },
+          { "position": 1, "type": "u32", "name": "talos_id" }
+        ],
+        "data": [
+          { "position": 0, "type": "u64", "name": "epoch_id" },
+          { "position": 1, "type": "i128", "name": "total" },
+          { "position": 2, "type": "u64", "name": "expiry_secs" }
+        ]
+      },
+      "div_clm": {
+        "contract": "talos_dividends",
+        "topics": [
+          { "position": 0, "type": "symbol", "name": "event", "description": "event type symbol" },
+          { "position": 1, "type": "u64", "name": "epoch_id" },
+          { "position": 2, "type": "address", "name": "patron" }
+        ],
+        "data": [
+          { "position": 0, "type": "u32", "name": "talos_id" },
+          { "position": 1, "type": "i128", "name": "amount" },
+          { "position": 2, "type": "symbol", "name": "role" }
+        ]
+      }
+    }
+  },
+  "fixtures": [
     {
-      "contract": "talos_registry",
+      "id": "creation.tls_crt.normal",
+      "family": "creation",
       "event": "tls_crt",
-      "topics": ["tls_crt", "<creator: Address>"],
-      "data": {
-        "talos_id": 1,
-        "name": "Genesis",
-        "category": "Marketing"
+      "contract": "talos_registry",
+      "ledger_sequence": 100000,
+      "tx_hash": "a1b2c3d4e5f60718293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f60",
+      "event_index_in_tx": 0,
+      "topics": [
+        { "type": "symbol", "value": "tls_crt" },
+        { "type": "address", "value": "GDC2TFRPZ3SJJYE2GDOIVHVGU3J7RZ7WCDIGKNZC4OY4CCIY7JK5JGYZ" }
+      ],
+      "data": [
+        { "type": "u32", "value": 1 },
+        { "type": "string", "value": "Genesis" },
+        { "type": "string", "value": "Marketing" }
+      ],
+      "decoded": {
+        "event": "tls_crt",
+        "contract": "talos_registry",
+        "ledger_sequence": 100000,
+        "topics": { "event": "tls_crt", "creator": "GDC2TFRPZ3SJJYE2GDOIVHVGU3J7RZ7WCDIGKNZC4OY4CCIY7JK5JGYZ" },
+        "data": { "talos_id": 1, "name": "Genesis", "category": "Marketing" }
       }
     },
     {
-      "contract": "talos_registry",
+      "id": "update.pat_upd.normal",
+      "family": "update",
       "event": "pat_upd",
-      "topics": ["pat_upd", "<talos_id: u32>"],
-      "data": {
-        "creator_addr": "<Address>",
-        "creator_share": 7000,
-        "investor_share": 3000
+      "contract": "talos_registry",
+      "ledger_sequence": 100010,
+      "tx_hash": "b2c3d4e5f60718293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f6071",
+      "event_index_in_tx": 1,
+      "topics": [
+        { "type": "symbol", "value": "pat_upd" },
+        { "type": "u32", "value": 1 }
+      ],
+      "data": [
+        { "type": "address", "value": "GDC2TFRPZ3SJJYE2GDOIVHVGU3J7RZ7WCDIGKNZC4OY4CCIY7JK5JGYZ" },
+        { "type": "u32", "value": 5000 },
+        { "type": "u32", "value": 3000 }
+      ],
+      "decoded": {
+        "event": "pat_upd",
+        "contract": "talos_registry",
+        "ledger_sequence": 100010,
+        "topics": { "event": "pat_upd", "talos_id": 1 },
+        "data": { "creator_addr": "GDC2TFRPZ3SJJYE2GDOIVHVGU3J7RZ7WCDIGKNZC4OY4CCIY7JK5JGYZ", "creator_share": 5000, "investor_share": 3000 }
       }
     },
     {
-      "contract": "talos_registry",
-      "event": "fee_chg",
-      "topics": ["fee_chg"],
-      "data": { "old_bps": 300, "new_bps": 250 }
+      "id": "update.reg_upd.normal",
+      "family": "update",
+      "event": "reg_upd",
+      "contract": "talos_name_service",
+      "ledger_sequence": 100020,
+      "tx_hash": "c3d4e5f60718293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f60712",
+      "event_index_in_tx": 0,
+      "topics": [
+        { "type": "symbol", "value": "reg_upd" }
+      ],
+      "data": [
+        { "type": "address", "value": "GCFUXR57HNFGGUWGSOW4O6NGE5RQTYE5MFAFLTU2CCNPBRUQUFEJAUV3" },
+        { "type": "address", "value": "GAUC4C3V3FNCSJBILLB56MAVMUTOWQR2YQ5P7LTL2SDGC5CQ4D7WHER7" }
+      ],
+      "decoded": {
+        "event": "reg_upd",
+        "contract": "talos_name_service",
+        "ledger_sequence": 100020,
+        "topics": { "event": "reg_upd" },
+        "data": { "old_registry": "GCFUXR57HNFGGUWGSOW4O6NGE5RQTYE5MFAFLTU2CCNPBRUQUFEJAUV3", "new_registry": "GAUC4C3V3FNCSJBILLB56MAVMUTOWQR2YQ5P7LTL2SDGC5CQ4D7WHER7" }
+      }
     },
     {
+      "id": "governance.prop_crt.normal",
+      "family": "governance",
+      "event": "prop_crt",
+      "contract": "talos_governance",
+      "ledger_sequence": 100100,
+      "tx_hash": "d4e5f60718293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f607123",
+      "event_index_in_tx": 0,
+      "topics": [
+        { "type": "symbol", "value": "prop_crt" },
+        { "type": "u32", "value": 7 }
+      ],
+      "data": [
+        { "type": "u32", "value": 1 },
+        { "type": "address", "value": "GDURVWHBP27CFBLJKVI2UISXSQU52MJABOJWVFKJKFYWDC6E6GDOTIFW" }
+      ],
+      "decoded": {
+        "event": "prop_crt",
+        "contract": "talos_governance",
+        "ledger_sequence": 100100,
+        "topics": { "event": "prop_crt", "proposal_id": 7 },
+        "data": { "talos_id": 1, "proposer": "GDURVWHBP27CFBLJKVI2UISXSQU52MJABOJWVFKJKFYWDC6E6GDOTIFW" }
+      }
+    },
+    {
+      "id": "governance.vote.normal",
+      "family": "governance",
+      "event": "vote",
+      "contract": "talos_governance",
+      "ledger_sequence": 100110,
+      "tx_hash": "e5f60718293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f6071234",
+      "event_index_in_tx": 0,
+      "topics": [
+        { "type": "symbol", "value": "vote" },
+        { "type": "u32", "value": 7 }
+      ],
+      "data": [
+        { "type": "address", "value": "GD7B7EF2S2AHRXDZVOBRUKFOXF373C7J43LAACLCL2NW4XKEFFH63NMK" },
+        { "type": "symbol", "value": "Approve" },
+        { "type": "i128", "value": 150 }
+      ],
+      "decoded": {
+        "event": "vote",
+        "contract": "talos_governance",
+        "ledger_sequence": 100110,
+        "topics": { "event": "vote", "proposal_id": 7 },
+        "data": { "voter": "GD7B7EF2S2AHRXDZVOBRUKFOXF373C7J43LAACLCL2NW4XKEFFH63NMK", "choice": "Approve", "weight": 150 }
+      }
+    },
+    {
+      "id": "governance.prop_stat.normal",
+      "family": "governance",
+      "event": "prop_stat",
+      "contract": "talos_governance",
+      "ledger_sequence": 100120,
+      "tx_hash": "f60718293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f60712345",
+      "event_index_in_tx": 0,
+      "topics": [
+        { "type": "symbol", "value": "prop_stat" },
+        { "type": "u32", "value": 7 }
+      ],
+      "data": [
+        { "type": "symbol", "value": "Approved" }
+      ],
+      "decoded": {
+        "event": "prop_stat",
+        "contract": "talos_governance",
+        "ledger_sequence": 100120,
+        "topics": { "event": "prop_stat", "proposal_id": 7 },
+        "data": { "status": "Approved" }
+      }
+    },
+    {
+      "id": "payment.ep_cmt.normal",
+      "family": "payment",
+      "event": "ep_cmt",
+      "contract": "talos_dividends",
+      "ledger_sequence": 100200,
+      "tx_hash": "0718293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f607123456",
+      "event_index_in_tx": 0,
+      "topics": [
+        { "type": "symbol", "value": "ep_cmt" },
+        { "type": "u32", "value": 1 }
+      ],
+      "data": [
+        { "type": "u64", "value": 42 },
+        { "type": "i128", "value": 1000000 },
+        { "type": "u64", "value": 2592000 }
+      ],
+      "decoded": {
+        "event": "ep_cmt",
+        "contract": "talos_dividends",
+        "ledger_sequence": 100200,
+        "topics": { "event": "ep_cmt", "talos_id": 1 },
+        "data": { "epoch_id": 42, "total": 1000000, "expiry_secs": 2592000 }
+      }
+    },
+    {
+      "id": "payment.div_clm.normal",
+      "family": "payment",
+      "event": "div_clm",
+      "contract": "talos_dividends",
+      "ledger_sequence": 100210,
+      "tx_hash": "18293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f6071234567",
+      "event_index_in_tx": 0,
+      "topics": [
+        { "type": "symbol", "value": "div_clm" },
+        { "type": "u64", "value": 42 },
+        { "type": "address", "value": "GBUC4RLWOMRLPAIL4UZPB3MZYHVMMCC2UUEOVJ4DCFVHWHHRT7WY4F33" }
+      ],
+      "data": [
+        { "type": "u32", "value": 1 },
+        { "type": "i128", "value": 600000 },
+        { "type": "symbol", "value": "Creator" }
+      ],
+      "decoded": {
+        "event": "div_clm",
+        "contract": "talos_dividends",
+        "ledger_sequence": 100210,
+        "topics": { "event": "div_clm", "epoch_id": 42, "patron": "GBUC4RLWOMRLPAIL4UZPB3MZYHVMMCC2UUEOVJ4DCFVHWHHRT7WY4F33" },
+        "data": { "talos_id": 1, "amount": 600000, "role": "Creator" }
+      }
+    }
+  ],
+  "empty_ranges": [
+    {
+      "id": "empty.range.creation",
+      "family": "creation",
       "contract": "talos_registry",
-      "event": "tl_cfg",
-      "topics": ["tl_cfg"],
-      "data": { "old_min_delay": 0, "new_min_delay": 3600, "grace_period": 86400 }
+      "topic": "tls_crt",
+      "start_ledger": 900000,
+      "end_ledger": 900100
+    },
+    {
+      "id": "empty.range.payment",
+      "family": "payment",
+      "contract": "talos_dividends",
+      "topic": "div_clm",
+      "start_ledger": 999000,
+      "end_ledger": 999999
+    }
+  ],
+  "malformed": [
+    {
+      "id": "malformed.no_topics",
+      "reason": "topics array is empty — topic[0] must be the event symbol",
+      "fixture": {
+        "id": "malformed.no_topics.fixture",
+        "family": "creation",
+        "event": "tls_crt",
+        "contract": "talos_registry",
+        "ledger_sequence": 1,
+        "topics": [],
+        "data": [{ "type": "u32", "value": 1 }]
+      }
+    },
+    {
+      "id": "malformed.topic0_not_symbol",
+      "reason": "topic[0] must be a symbol identifying the event type",
+      "fixture": {
+        "id": "malformed.topic0_not_symbol.fixture",
+        "family": "creation",
+        "event": "tls_crt",
+        "contract": "talos_registry",
+        "ledger_sequence": 2,
+        "topics": [{ "type": "u32", "value": 99 }],
+        "data": [{ "type": "u32", "value": 1 }]
+      }
+    },
+    {
+      "id": "malformed.topic_mismatch",
+      "reason": "topic[1] must be an address for tls_crt, got a u32",
+      "fixture": {
+        "id": "malformed.topic_mismatch.fixture",
+        "family": "creation",
+        "event": "tls_crt",
+        "contract": "talos_registry",
+        "ledger_sequence": 3,
+        "topics": [
+          { "type": "symbol", "value": "tls_crt" },
+          { "type": "u32", "value": 1 }
+        ],
+        "data": [{ "type": "u32", "value": 1 }]
+      }
+    },
+    {
+      "id": "malformed.data_arity",
+      "reason": "data has wrong arity for tls_crt (expected 3 fields, got 2)",
+      "fixture": {
+        "id": "malformed.data_arity.fixture",
+        "family": "creation",
+        "event": "tls_crt",
+        "contract": "talos_registry",
+        "ledger_sequence": 4,
+        "topics": [
+          { "type": "symbol", "value": "tls_crt" },
+          { "type": "address", "value": "GDC2TFRPZ3SJJYE2GDOIVHVGU3J7RZ7WCDIGKNZC4OY4CCIY7JK5JGYZ" }
+        ],
+        "data": [{ "type": "u32", "value": 1 }, { "type": "string", "value": "Genesis" }]
+      }
+    },
+    {
+      "id": "malformed.data_type",
+      "reason": "data[0] must be u32 for tls_crt, got a string",
+      "fixture": {
+        "id": "malformed.data_type.fixture",
+        "family": "creation",
+        "event": "tls_crt",
+        "contract": "talos_registry",
+        "ledger_sequence": 5,
+        "topics": [
+          { "type": "symbol", "value": "tls_crt" },
+          { "type": "address", "value": "GDC2TFRPZ3SJJYE2GDOIVHVGU3J7RZ7WCDIGKNZC4OY4CCIY7JK5JGYZ" }
+        ],
+        "data": [
+          { "type": "string", "value": "not-a-number" },
+          { "type": "string", "value": "Genesis" },
+          { "type": "string", "value": "Marketing" }
+        ]
+      }
     }
   ]
 }

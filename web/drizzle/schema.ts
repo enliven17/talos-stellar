@@ -264,11 +264,31 @@ talosId: text().notNull(),
 method: text().notNull(),
 path: text().notNull(),
 statusCode: integer().notNull(),
+denialReason: text(),
+scopesRequired: text().array(),
 ipAddress: text(),
 createdAt: timestamp({ precision: 3, mode: 'string' }).default(sql`CURRENT_TIMESTAMP`).notNull(),
 }, (table) => [
 index("tls_api_audit_logs_talosId_createdAt_idx").using("btree", table.talosId.asc().nullsLast().op("text_ops"), table.createdAt.desc().nullsFirst().op("text_ops")),
 foreignKey({ columns: [table.talosId], foreignColumns: [tlsTalos.id], name: "tls_api_audit_logs_talosId_fkey" }).onUpdate("cascade").onDelete("cascade"),
+]);
+
+// 0017: Scoped API keys
+export const tlsApiKeys = pgTable("tls_api_keys", {
+id: text().primaryKey().notNull(),
+talosId: text().notNull(),
+name: text().notNull(),
+keyHash: text().notNull(),
+scopes: text().array().default([]).notNull(),
+expiresAt: timestamp({ precision: 3, mode: 'string' }),
+lastUsedAt: timestamp({ precision: 3, mode: 'string' }),
+status: text().default('active').notNull(),
+createdAt: timestamp({ precision: 3, mode: 'string' }).default(sql`CURRENT_TIMESTAMP`).notNull(),
+updatedAt: timestamp({ precision: 3, mode: 'string' }).default(sql`CURRENT_TIMESTAMP`).notNull(),
+}, (table) => [
+uniqueIndex("tls_api_keys_keyHash_unique").using("btree", table.keyHash.asc().nullsLast().op("text_ops")),
+index("tls_api_keys_talosId_status_idx").using("btree", table.talosId.asc().nullsLast().op("text_ops"), table.status.asc().nullsLast().op("text_ops")),
+foreignKey({ columns: [table.talosId], foreignColumns: [tlsTalos.id], name: "tls_api_keys_talosId_fkey" }).onUpdate("cascade").onDelete("cascade"),
 ]);
 
 // 0014: governed agent lifecycle event log + durable provisioning jobs

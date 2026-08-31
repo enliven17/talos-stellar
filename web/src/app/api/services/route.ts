@@ -1,8 +1,15 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsCommerceServices } from "@/db/schema";
-import { and, desc, eq, ilike, lt, ne, or } from "drizzle-orm";
+import { and, eq, ilike, lt, ne, or, type SQLWrapper } from "drizzle-orm";
 import { parseLimit } from "@/lib/parse-limit";
+import {
+  buildMarketplaceOrderBy,
+  isDefaultMarketplaceSort,
+  parseMarketplaceSort,
+  SERVICES_SORT_FIELDS,
+  type ServicesSortField,
+} from "@/lib/marketplace-sort";
 import { fetchReputations } from "@/lib/reputation-ledger";
 import { withTraceContext } from "@/lib/tracing";
 
@@ -16,6 +23,36 @@ async function handleGet(request: NextRequest) {
     const parsedLimit = parseLimit(searchParams.get("limit"), 50, 100);
     if (!parsedLimit.ok) return parsedLimit.response;
     const limit = parsedLimit.limit;
+
+    const parsedSort = parseMarketplaceSort(
+      searchParams.get("sort"),
+      searchParams.get("direction"),
+      { allowedFields: SERVICES_SORT_FIELDS, fieldLabel: "createdAt, price" },
+    );
+    if (!parsedSort.ok) return parsedSort.response;
+    const sort = parsedSort.sort;
+
+    // Cursor pagination encodes a `createdAt|id` position, so it is only
+    // compatible with the default `createdAt desc` ordering.
+    if (cursor && !isDefaultMarketplaceSort(sort)) {
+      return Response.json(
+        {
+          error:
+            "cursor pagination is only supported with the default createdAt desc sort",
+        },
+        { status: 400 },
+      );
+    }
+
+    const sortColumns: Record<ServicesSortField, SQLWrapper> = {
+      createdAt: tlsCommerceServices.createdAt,
+      price: tlsCommerceServices.price,
+    };
+    const orderBy = buildMarketplaceOrderBy(
+      sort,
+      sortColumns,
+      tlsCommerceServices.id,
+    );
 
     const minScore = searchParams.has("minScore") ? Number(searchParams.get("minScore")) : undefined;
     const minConfidence = searchParams.has("minConfidence") ? Number(searchParams.get("minConfidence")) : undefined;
@@ -71,7 +108,7 @@ async function handleGet(request: NextRequest) {
         .from(tlsCommerceServices)
         .innerJoin(tlsTalos, eq(tlsCommerceServices.talosId, tlsTalos.id))
         .where(conditions.length > 0 ? and(...conditions) : undefined)
-        .orderBy(desc(tlsCommerceServices.createdAt), desc(tlsCommerceServices.id))
+        .orderBy(...orderBy)
         .limit(limit * 2);
 
       if (services.length === 0) {
@@ -124,12 +161,6 @@ async function handleGet(request: NextRequest) {
         }
         currentCursor = `${service.createdAt.toISOString()}|${service.id}`;
       }
-    }
-
-    // Shuffle for diversity — agents see different services each cycle
-    for (let i = accumulated.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [accumulated[i], accumulated[j]] = [accumulated[j], accumulated[i]];
     }
 
     const nextCursor = (exhausted && accumulated.length < limit) ? null : currentCursor;

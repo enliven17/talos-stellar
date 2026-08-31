@@ -22,7 +22,7 @@ export async function GET(
   const { id } = await params;
 
   try {
-    const auth = await verifyAgentApiKey(request, id);
+    const auth = await verifyAgentApiKey(request, id, ["revenue:read"]);
     if (!auth.ok) return auth.response;
 
     const talos = await db
