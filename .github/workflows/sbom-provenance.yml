@@ -13,6 +13,7 @@ on:
     paths:
       - ".github/workflows/sbom-provenance.yml"
       - ".github/workflows/release-publish.yml"
+      - "docs/**"
       - "packages/sdk/**"
       - "packages/prime-agent/**"
       - "contracts/**"
