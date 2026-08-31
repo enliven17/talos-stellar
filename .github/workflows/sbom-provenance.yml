@@ -133,9 +133,9 @@ jobs:
       id-token: write
       packages: read
     outputs:
-      sbom-cyclonedx: ${{ steps.meta.outputs.cyclonedx-artifact }}
-      sbom-spdx: ${{ steps.meta.outputs.spdx-artifact }}
-      signature-artifact: ${{ steps.meta.outputs.signature-artifact }}
+      sbom-cyclonedx: ${{ steps.cyclonedx.outputs.cdx-name }}
+      sbom-spdx: ${{ steps.spdx.outputs.spdx-file }}
+      signature-artifact: ${{ steps.sign.outputs.signature-artifact }}
     defaults:
       run:
         working-directory: packages/sdk
