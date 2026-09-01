@@ -23,6 +23,10 @@ DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
 MAX_TOOL_TIMEOUT_SECONDS = 300.0
 
 
+class _ToolTimeoutError(Exception):
+    """Raised when a tool itself raises TimeoutError, distinct from wait_for expiry."""
+
+
 def _validate_tool_timeout(timeout: float | None) -> float:
     """Normalize a per-tool timeout, applying the safe default and bound."""
     if timeout is None:
@@ -188,13 +192,16 @@ class ToolRegistry:
                 {"tool.name": name, "tool.arg_keys": list(arguments.keys())},
             ):
                 async def _invoke_tool() -> Any:
-                    if inspect.iscoroutinefunction(tool.fn):
-                        result = await tool.fn(**arguments)
-                    else:
-                        result = await asyncio.to_thread(tool.fn, **arguments)
-                    if inspect.isawaitable(result):
-                        result = await result
-                    return result
+                    try:
+                        if inspect.iscoroutinefunction(tool.fn):
+                            result = await tool.fn(**arguments)
+                        else:
+                            result = await asyncio.to_thread(tool.fn, **arguments)
+                        if inspect.isawaitable(result):
+                            result = await result
+                        return result
+                    except asyncio.TimeoutError as exc:
+                        raise _ToolTimeoutError(str(exc)) from exc
 
                 result = await asyncio.wait_for(
                     _invoke_tool(), timeout=tool.timeout
@@ -212,6 +219,8 @@ class ToolRegistry:
                 "timeout_seconds": tool.timeout,
             }
         except Exception as e:
+            if isinstance(e, _ToolTimeoutError) and e.__cause__ is not None:
+                e = e.__cause__
             outcome = "error"
             return {"error": f"{type(e).__name__}: {e}"}
         finally:
