@@ -1,4 +1,4 @@
-[package]
+[packaged
 name = "talos-registry"
 version = "0.1.0"
 edition = "2021"
@@ -13,7 +13,7 @@ soroban-sdk = { workspace = true }
 ttl-manager = { path = "../ttl_manager" }
 storage-migration = { path = "../storage_migration" }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+[target.'cfg(not(target_arch = "wasm32")'.dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
