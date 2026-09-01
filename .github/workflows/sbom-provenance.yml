@@ -192,7 +192,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Run contract tests (authorization coverage)
-        run: cargo test
+        run: cargo test --workspace
 
   generate-sdk:
     needs: detect-components
