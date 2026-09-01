@@ -917,7 +917,7 @@ mod tests {
 
     #[test]
     fn test_update_patron_creator_only() {
-        let (env, _admin, contract_id) = setup();
+        let (env, admin, contract_id) = setup();
         let creator = Address::generate(&env);
         let investor = Address::generate(&env);
         let treasury = Address::generate(&env);
@@ -934,6 +934,14 @@ mod tests {
         assert_eq!(stored.patron.investor_addr, investor, "patron unchanged");
         assert_eq!(env.events().all().len(), events_before, "no event emitted");
 
+        // Admin is not an intended caller for patron updates; only the creator is.
+        assert_unauthorized(|| {
+            env.invoke_contract::<()>(&contract_id, "update_patron", (talos_id, new_patron.clone()).into_val(&env), &[&admin]);
+        });
+        let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos_id)).unwrap();
+        assert_eq!(stored.patron.investor_addr, investor, "patron unchanged after admin attempt");
+        assert_eq!(env.events().all().len(), events_before, "no event emitted after admin attempt");
+
         // Creator can update.
         env.invoke_contract::<()>(&contract_id, "update_patron", (talos_id, new_patron.clone()).into_val(&env), &[&creator]);
         let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos_id)).unwrap();
@@ -942,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_kernel_admin_only() {
+    fn test_update_kernel_requires_creator() {
         let (env, admin, contract_id) = setup();
         let creator = Address::generate(&env);
         let investor = Address::generate(&env);
@@ -964,14 +972,22 @@ mod tests {
         assert_eq!(stored.kernel.approval_threshold, 3, "kernel unchanged");
         assert_eq!(env.events().all().len(), events_before);
 
-        // Admin can update.
-        env.invoke_contract::<()>(&contract_id, "update_kernel", (talos_id, new_kernel.clone()).into_val(&env), &[&admin]);
+        // Admin is not an intended caller for kernel updates; only the creator is.
+        assert_unauthorized(|| {
+            env.invoke_contract::<()>(&contract_id, "update_kernel", (talos_id, new_kernel.clone()).into_val(&env), &[&admin]);
+        });
+        let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos_id)).unwrap();
+        assert_eq!(stored.kernel.approval_threshold, 3, "kernel unchanged after admin attempt");
+        assert_eq!(env.events().all().len(), events_before, "no event emitted after admin attempt");
+
+        // Creator can update.
+        env.invoke_contract::<()>(&contract_id, "update_kernel", (talos_id, new_kernel.clone()).into_val(&env), &[&creator]);
         let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos_id)).unwrap();
         assert_eq!(stored.kernel.approval_threshold, 5, "kernel updated");
     }
 
     #[test]
-    fn test_update_pulse_admin_only() {
+    fn test_update_pulse_requires_creator() {
         let (env, admin, contract_id) = setup();
         let creator = Address::generate(&env);
         let investor = Address::generate(&env);
@@ -984,19 +1000,30 @@ mod tests {
             token_symbol: String::from_str(&env, "TLS"),
         };
 
+        let events_before = env.events().all().len();
         assert_unauthorized(|| {
             env.invoke_contract::<()>(&contract_id, "update_pulse", (talos_id, new_pulse.clone()).into_val(&env), &[&attacker]);
         });
         let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos_id)).unwrap();
         assert_eq!(stored.pulse.total_supply, 1_000_000);
+        assert_eq!(env.events().all().len(), events_before, "no pulse event emitted");
 
-        env.invoke_contract::<()>(&contract_id, "update_pulse", (talos_id, new_pulse.clone()).into_val(&env), &[&admin]);
+        // Admin is not an intended caller for pulse updates; only the creator is.
+        assert_unauthorized(|| {
+            env.invoke_contract::<()>(&contract_id, "update_pulse", (talos_id, new_pulse.clone()).into_val(&env), &[&admin]);
+        });
+        let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos_id)).unwrap();
+        assert_eq!(stored.pulse.total_supply, 1_000_000, "pulse unchanged after admin attempt");
+        assert_eq!(env.events().all().len(), events_before, "no pulse event emitted after admin attempt");
+
+        // Creator can update.
+        env.invoke_contract::<()>(&contract_id, "update_pulse", (talos_id, new_pulse.clone()).into_val(&env), &[&creator]);
         let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos_id)).unwrap();
         assert_eq!(stored.pulse.total_supply, 2_000_000);
     }
 
     #[test]
-    fn test_deactivate_talos_creator_or_admin() {
+    fn test_deactivate_talos_requires_creator() {
         let (env, admin, contract_id) = setup();
         let creator = Address::generate(&env);
         let investor = Address::generate(&env);
@@ -1017,9 +1044,19 @@ mod tests {
         env.invoke_contract::<()>(&contract_id, "deactivate_talos", (talos_id,).into_val(&env), &[&creator]);
         let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos_id)).unwrap();
         assert!(!stored.active);
-        // Reactivate for admin test? We'll create another talos or just check admin.
+
+        // Admin is not an intended caller for deactivation; only the creator is.
         let talos2 = create_talos(&env, &contract_id, &creator, &investor, &treasury);
-        env.invoke_contract::<()>(&contract_id, "deactivate_talos", (talos2,).into_val(&env), &[&admin]);
+        let events_before_admin = env.events().all().len();
+        assert_unauthorized(|| {
+            env.invoke_contract::<()>(&contract_id, "deactivate_talos", (talos2,).into_val(&env), &[&admin]);
+        });
+        let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos2)).unwrap();
+        assert!(stored.active, "talos must remain active after admin attempt");
+        assert_eq!(env.events().all().len(), events_before_admin, "no deactivation event emitted");
+
+        // Creator can deactivate the second talos.
+        env.invoke_contract::<()>(&contract_id, "deactivate_talos", (talos2,).into_val(&env), &[&creator]);
         let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos2)).unwrap();
         assert!(!stored.active);
     }
