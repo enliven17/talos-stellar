@@ -21,8 +21,10 @@ breaker that stops cascading failures when a provider is degraded.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import math
 import re
 import unicodedata
 from collections.abc import Awaitable, Callable
@@ -65,6 +67,9 @@ SECRET_FIELD_NAMES = {
     "privateKey",
 }
 
+DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
+MAX_TOOL_TIMEOUT_SECONDS = 300.0
+
 T = TypeVar("T")
 
 
@@ -79,6 +84,16 @@ class RetryableHTTPError(Exception):
         except RuntimeError:
             url = str(response.url)
         super().__init__(f"HTTP {response.status_code} from {url}")
+
+
+class ToolTimeoutError(Exception):
+    """Raised when a tool call exceeds its execution deadline."""
+
+    def __init__(self, tool_name: str, timeout: float):
+        self.tool_name = tool_name
+        self.timeout = timeout
+        self.timed_out = True
+        super().__init__(f"Tool {tool_name!r} timed out after {timeout:g}s")
 
 
 def _sanitize_json_value(value: object) -> object:
@@ -192,6 +207,51 @@ def _retry_policy() -> AsyncRetrying:
         before_sleep=_log_before_sleep,
         reraise=True,
     )
+
+
+def validate_tool_timeout(timeout: float | None) -> float:
+    """Validate a tool timeout against safe bounds."""
+    if timeout is None:
+        return DEFAULT_TOOL_TIMEOUT_SECONDS
+    try:
+        parsed = float(timeout)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("tool timeout must be a number") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ValueError("tool timeout must be a positive finite number")
+    if parsed > MAX_TOOL_TIMEOUT_SECONDS:
+        raise ValueError(
+            f"tool timeout cannot exceed {MAX_TOOL_TIMEOUT_SECONDS:g} seconds"
+        )
+    return parsed
+
+
+def _record_tool_timeout_metric(tool_name: str, timeout: float) -> None:
+    # Keep metrics free of operation args/response bodies.
+    logger.warning(
+        "Tool execution timeout; tool_name=%s timeout_seconds=%.3f",
+        _strip_control_chars(str(tool_name)),
+        timeout,
+    )
+
+
+async def call_with_tool_timeout(
+    operation: Callable[[], Awaitable[T]],
+    *,
+    tool_name: str,
+    timeout: float | None = None,
+) -> T:
+    """Run an external tool call under a bounded execution deadline.
+
+    Shared by legacy and routed agent loops; ``asyncio.wait_for`` cancels the
+    underlying operation when the deadline elapses and on caller cancellation.
+    """
+    deadline = validate_tool_timeout(timeout)
+    try:
+        return await asyncio.wait_for(operation(), timeout=deadline)
+    except asyncio.TimeoutError:
+        _record_tool_timeout_metric(tool_name, deadline)
+        raise ToolTimeoutError(tool_name, deadline) from None
 
 
 async def request_with_retry(
