@@ -10,6 +10,7 @@ on:
       - 'web/tests/fixtures/openapi.snapshot.json'
       - 'web/scripts/write-openapi-snapshot.ts'
       - 'web/scripts/check-openapi-coverage.ts'
+      - 'web/openapi-route-exclusions.json'
       - 'web/package.json'
       - 'web/pnpm-lock.yaml'
       - '.github/workflows/web-openapi-ci.yml'
@@ -22,9 +23,10 @@ on:
       - 'web/tests/fixtures/openapi.snapshot.json'
       - 'web/scripts/write-openapi-snapshot.ts'
       - 'web/scripts/check-openapi-coverage.ts'
+      - 'web/openapi-route-exclusions.json'
       - 'web/package.json'
       - 'web/pnpm-lock.yaml'
-      - '.github/workflows/web-openapi-ci.yaml'
+      - '.github/workflows/web-openapi-ci.yml'
 
 jobs:
   openapi-snapshot:
@@ -56,4 +58,4 @@ jobs:
         run: pnpm test:openapi
 
       - name: Check OpenAPI route coverage
-        run: pnpm test:openapi:coverage
+        run: pnpm openapi:check
