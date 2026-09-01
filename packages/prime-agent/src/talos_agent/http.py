@@ -257,6 +257,7 @@ async def call_with_tool_timeout(
 async def request_with_retry(
     send: Callable[[], Awaitable[httpx.Response]],
     provider: str | None = None,
+    timeout: float | None = None,
 ) -> httpx.Response:
     """Execute an httpx call with bounded retries on transient failures.
 
@@ -286,6 +287,7 @@ async def request_with_retry(
     Non-retryable responses (including other 4xx/5xx) are returned
     so callers can inspect status_code as before.
     """
+    timeout = validate_tool_timeout(timeout)
     breaker: ProviderCircuitBreaker | None = None
     if provider:
         breaker = cb_registry.get(provider)
@@ -296,7 +298,11 @@ async def request_with_retry(
     async for attempt in _retry_policy():
         with attempt:
             try:
-                response = await send()
+                response = await call_with_tool_timeout(
+                    send,
+                    tool_name=provider or "http_request",
+                    timeout=timeout,
+                )
                 if response.status_code in RETRYABLE_STATUSES:
                     raise RetryableHTTPError(response)
             except Exception:
@@ -315,6 +321,7 @@ async def request_with_retry(
 async def call_with_retry(
     operation: Callable[[], Awaitable[T]],
     provider: str | None = None,
+    timeout: float | None = None,
 ) -> T:
     """Retry an arbitrary awaitable on transient external failures.
 
@@ -335,6 +342,7 @@ async def call_with_retry(
     CircuitBreakerOpen
         If the circuit is OPEN and *provider* was given.
     """
+    timeout = validate_tool_timeout(timeout)
     breaker: ProviderCircuitBreaker | None = None
     if provider:
         breaker = cb_registry.get(provider)
@@ -345,7 +353,11 @@ async def call_with_retry(
     async for attempt in _retry_policy():
         with attempt:
             try:
-                return await operation()
+                return await call_with_tool_timeout(
+                    operation,
+                    tool_name=provider or "llm_call",
+                    timeout=timeout,
+                )
             except Exception:
                 if breaker:
                     await breaker.record_failure()
