@@ -116,12 +116,14 @@ async def _execute_tool_with_timeout(
         done, _ = await asyncio.wait({task}, timeout=timeout)
     except asyncio.CancelledError:
         task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0)
         raise
     if task in done:
         return task.result()
     task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
+    # Do not block on cancellation: a non-cooperative tool must not extend
+    # the deadline.  The task is left to be reclaimed by the event loop.
+    await asyncio.sleep(0)
     elapsed = time.monotonic() - started
     _record_tool_timeout(timeout, elapsed)
     return {
