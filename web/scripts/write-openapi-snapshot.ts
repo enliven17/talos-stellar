@@ -1,5 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdr, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { openApiSpec } from "../src/lib/openapi";
 
@@ -26,7 +27,7 @@ async function loadExclusions(): Promise<Exclusions> {
   }
 }
 
-function isExcluded(path: string, exclusions: Exclusions): boolean {
+export function isExcluded(path: string, exclusions: Exclusions): boolean {
   return Object.prototype.hasOwnProperty.call(exclusions, path);
 }
 
@@ -44,7 +45,7 @@ export async function runCheck(): Promise<void> {
     snapshot = JSON.parse(existing);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      console.error(`OpenAPI snapshot is missing: ${snapshotPath}. Run `\openapi:snapshot` to create it.`);
+      console.error(`OpenAPI snapshot is missing: ${snapshotPath}. Run "pnpm openapi:snapshot" to create it.`);
       process.exitCode = 1;
       return;
     } else if (err instanceof SyntaxError) {
@@ -60,12 +61,14 @@ export async function runCheck(): Promise<void> {
   const currentPaths = Object.keys(openApiSpec.paths || {});
   const snapshotPaths = Object.keys(snapshot.paths || {});
   const publicPaths = currentPaths.filter((p) => !isExcluded(p, exclusions));
+  const publicPathSet = new Set(publicPaths);
+  const snapshotPathSet = new Set(snapshotPaths);
 
-  const missing = publicPaths.filter((p) => !snapshotPaths.includes(p));
+  const missing = publicPaths.filter((p) => !snapshotPathSet.has(p));
   const changed = publicPaths.filter(
-    (p) => snapshotPaths.includes(p) && JSON.stringify(openApiSpec.paths[p]) !== JSON.stringify(snapshot.paths[p])
+    (p) => snapshotPathSet.has(p) && !isDeepStrictEqual(openApiSpec.paths[p], snapshot.paths[p])
   );
-  const extra = snapshotPaths.filter((p) => !publicPaths.includes(p));
+  const extra = snapshotPaths.filter((p) => !publicPathSet.has(p));
 
   if (missing.length === 0 && changed.length === 0 && extra.length === 0) {
     console.log("OpenAPI snapshot is up to date.");
@@ -83,9 +86,9 @@ export async function runCheck(): Promise<void> {
   }
   if (extra.length > 0) {
     console.error("Stale routes in snapshot (no longer public or excluded):");
-    for (const p of extra) console.error(c  - ${p}`);
+    for (const p of extra) console.error(`  - ${p}`);
   }
-  console.error(`\nPlease update the snapshot by running: \`npm run openapi:snapshot\`);
+  console.error('\nPlease update the snapshot by running: "pnpm openapi:snapshot"');
   console.error(`Snapshot file: ${snapshotPath}`);
   if (Object.keys(exclusions).length > 0) {
     console.error(`Exclusions file: ${exclusionsPath}`);
@@ -96,7 +99,7 @@ export async function runCheck(): Promise<void> {
 export async function runWrite(): Promise<void> {
   const exclusions = await loadExclusions();
   const filteredSpec = filterPaths(openApiSpec, exclusions);
-  await mkdir(path.dirname(snapshotPath), { recursive: true });
+  await mkdr(path.dirname(snapshotPath), { recursive: true });
   await writeFile(snapshotPath, `${JSON.stringify(filteredSpec, null, 2)}\n`);
   console.log(`Wrote ${snapshotPath}`);
 }
