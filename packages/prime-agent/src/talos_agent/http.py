@@ -215,7 +215,7 @@ def validate_tool_timeout(timeout: float | None) -> float:
         return DEFAULT_TOOL_TIMEOUT_SECONDS
     try:
         parsed = float(timeout)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError("tool timeout must be a number") from exc
     if not math.isfinite(parsed) or parsed <= 0:
         raise ValueError("tool timeout must be a positive finite number")
