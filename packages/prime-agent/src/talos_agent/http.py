@@ -93,6 +93,11 @@ class ToolTimeoutError(Exception):
         self.tool_name = tool_name
         self.timeout = timeout
         self.timed_out = True
+        self.result = {
+            "status": "timeout",
+            "tool_name": tool_name,
+            "timeout_seconds": timeout,
+        }
         super().__init__(f"Tool {tool_name!r} timed out after {timeout:g}s")
 
 
