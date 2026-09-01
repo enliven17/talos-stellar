@@ -47,6 +47,9 @@ class Tool:
     permissions: ToolPermissions | None = None
     timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS
 
+    def __post_init__(self) -> None:
+        self.timeout = _validate_tool_timeout(self.timeout)
+
     def to_openai_schema(self) -> dict:
         return {
             "type": "function",
