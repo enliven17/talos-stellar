@@ -286,6 +286,8 @@ class FallbackChain:
     @staticmethod
     def _validate_timeout(timeout_seconds: float) -> float:
         """Validate and normalise a per-attempt timeout value."""
+        if isinstance(timeout_seconds, bool):
+            raise TypeError("timeout_seconds must be a number")
         if not isinstance(timeout_seconds, (int, float)):
             raise TypeError("timeout_seconds must be a number")
         if not math.isfinite(timeout_seconds):
