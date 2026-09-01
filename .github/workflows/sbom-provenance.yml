@@ -123,6 +123,112 @@ jobs:
           echo "components=$JSON" >> "$GITHUB_OUTPUT"
           echo "Selected components: $JSON"
 
+  openapi-route-drift:
+    needs: detect-components
+    if: contains(needs.detect-components.outputs.components, 'web')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check OpenAPI route-coverage drift
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const root = process.env.GITHUB_WORKSPACE || '.';
+          const candidates = ['web/openapi.json', 'openapi.json', '.github/openapi.json'];
+          const snapshotFile = candidates.find((p) => fs.existsSync(path.join(root, p)));
+          if (!snapshotFile) {
+            console.error(`::error::No OpenAPI snapshot found. Expected one of: ${candidates.join(', ')}`);
+            process.exit(1);
+          }
+          const snapshot = JSON.parse(fs.readFileSync(path.join(root, snapshotFile), 'utf8'));
+          const methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'];
+          const documentedOps = new Set();
+          const excludedOps = new Set();
+          const routeFilesByOp = new Map();
+          const normalize = (p) => (p.length > 1 ? p.replace(/\/+$/, '') : p);
+          for (const [p, item] of Object.entries(snapshot.paths || {})) {
+            const pathExcluded = item['x-internal'] || item['x-experimental'];
+            for (const method of methods) {
+              const operation = item[method];
+              if (!operation) continue;
+              const op = `${method} ${normalize(p)}`;
+              if (pathExcluded || operation['x-internal'] || operation['x-experimental']) excludedOps.add(op);
+              else documentedOps.add(op);
+            }
+          }
+          for (const exclusion of snapshot['x-route-exclusions'] || []) {
+            const methodsToExclude = !exclusion.method || exclusion.method === '*' ? methods : [String(exclusion.method).toUpperCase()];
+            for (const method of methodsToExclude) excludedOps.add(`${method} ${normalize(exclusion.path)}`);
+          }
+          function walk(dir) {
+            return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+              const full = path.join(dir, entry.name);
+              return entry.isDirectory() ? walk(full) : [full];
+            });
+          }
+          function toOpenApiPath(segment) {
+            return segment
+              .replace(/^\[\.\.\.(.+)\]$/, '{$1}')
+              .replace(/^\[\[\.\.\.(.+)\]\]$/, '{$1}')
+              .replace(/^\[(.+)\]$/, '{$1}');
+          }
+          function routePath(baseDir, file) {
+            const segments = path.relative(baseDir, file).split(path.sep).slice(0, -1);
+            return normalize('/api/' + segments.map(toOpenApiPath).filter(Boolean).join('/'));
+          }
+          function scan(baseDir) {
+            if (!fs.existsSync(baseDir)) return;
+            for (const file of walk(baseDir)) {
+              if (!/^route\.(ts|tsx|js|mjs)$/.test(file.split(path.sep).pop())) continue;
+              const route = routePath(baseDir, file);
+              const source = fs.readFileSync(file, 'utf8');
+              for (const method of methods) {
+                const exported = new RegExp(`export\\s+(async\\s+)?function\\s+${method}\\s*\\(`).test(source) ||
+                  new RegExp(`export\\s+const\\s+${method}\\s*=`).test(source) ||
+                  new RegExp(`export\\s*\\{[^}]*\\b${method}\\b[^}]*\\}`).test(source);
+                if (!exported) continue;
+                const op = `${method} ${route}`;
+                if (!routeFilesByOp.has(op)) routeFilesByOp.set(op, []);
+                routeFilesByOp.get(op).push(path.relative(root, file));
+              }
+            }
+          }
+          scan(path.join(root, 'web/src/app/api'));
+          const implementedOps = new Set(routeFilesByOp.keys());
+          const missing = [...implementedOps].filter((op) => !documentedOps.has(op) && !excludedOps.has(op)).sort();
+          const stale = [...documentedOps].filter((op) => !implementedOps.has(op) && !excludedOps.has(op)).sort();
+          if (missing.length > 0 || stale.length > 0) {
+            for (const op of missing) {
+              const [method, route] = op.split(' ');
+              const files = (routeFilesByOp.get(op) || []).join(', ');
+              console.error(`::error::${method} ${route} implemented in ${files} is missing from ${snapshotFile}`);
+            }
+            for (const op of stale) {
+              console.error(`::error::${op} exists in ${snapshotFile} but no longer matches an implemented route; regenerate ${snapshotFile} or add an exclusion`);
+            }
+            console.error(`::error::OpenAPI route drift detected. Update ${snapshotFile} or the affected route handler file(s).`);
+            process.exit(1);
+          }
+          console.log(`OpenAPI route coverage OK: ${implementedOps.size} implemented ops, ${documentedOps.size} documented ops, ${excludedOps.size} exclusions.`);
+          NODE
+
   test-web-readiness:
     needs: detect-components
     if: contains(needs.detect-components.outputs.components, 'web')
