@@ -84,6 +84,9 @@ def _get_tool_timeout(settings: Settings) -> float:
     except (TypeError, ValueError):
         return DEFAULT_TOOL_TIMEOUT_SECONDS
 
+    if isinstance(raw_timeout, bool):
+        return DEFAULT_TOOL_TIMEOUT_SECONDS
+
     if not math.isfinite(timeout) or timeout <= 0:
         return DEFAULT_TOOL_TIMEOUT_SECONDS
 
