@@ -190,7 +190,7 @@ jobs:
               .replace(/^\[(.+)\]$/, '{$1}');
           }
           function routePath(baseDir, file) {
-            const segments = path.relative(baseDir, file).split(path.sep).slice(0, -1);
+            const segments = path.relative(baseDir, file).split(path.sep).slice(0, -1).filter((s) => !(s.startsWith('(') && s.endsWith(')')));
             return normalize('/api/' + segments.map(toOpenApiPath).filter(Boolean).join('/'));
           }
           function scan(baseDir) {
