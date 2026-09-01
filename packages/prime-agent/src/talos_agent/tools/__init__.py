@@ -11,7 +11,7 @@ MAX_TOOL_TIMEOUT_SECONDS = 300.0
 ToolTimeoutResult = namedtuple('ToolTimeoutResult', ['timeout', 'elapsed', 'timed_out'])
 
 
-async def execute_with_timeout(coro, timeout=DEFAUL\_TOOL_TIMEOUT_SECONDS):
+async def execute_with_timeout(coro, timeout=DEFAULT_TOOL_TIMEOUT_SECONDS):
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
         raise ValueError("timeout must be a number")
     if not (0 < timeout <= MAX_TOOL_TIMEOUT_SECONDS):
