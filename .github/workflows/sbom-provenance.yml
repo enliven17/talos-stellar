@@ -167,6 +167,33 @@ jobs:
           READINESS_SCENARIO: ${{ matrix.readiness-scenario }}
           MOCK_CLOCK_ISO: "2024-01-01T00:00:00.000Z"
 
+  test-contracts-auth:
+    needs: detect-components
+    if: contains(needs.detect-components.outputs.components, 'contracts')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Run contract tests (authorization coverage)
+        run: cargo test
+
   generate-sdk:
     needs: detect-components
     if: contains(needs.detect-components.outputs.components, 'sdk')
