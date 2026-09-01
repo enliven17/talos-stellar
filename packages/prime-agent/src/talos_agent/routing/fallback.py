@@ -225,7 +225,7 @@ class FallbackChain:
             fallback_metrics.record_attempt(provider_name)
             try:
                 result = await asyncio.wait_for(
-                    operation(provider_name, *args, **kwargs),
+                    _call_with_timeout(operation, provider_name, *args, **kwargs),
                     timeout=effective_timeout,
                 )
                 await breaker.record_success()
@@ -250,6 +250,16 @@ class FallbackChain:
                     "Fallback: '%s' rejected by circuit breaker — %s",
                     provider_name,
                     exc,
+                )
+                continue
+            except _OperationTimeoutError as exc:
+                await breaker.record_failure()
+                exc_msg = _summarise_exception(exc.__cause__ or exc)
+                attempts.append((provider_name, exc_msg))
+                logger.warning(
+                    "Fallback: '%s' failed — %s",
+                    provider_name,
+                    exc_msg,
                 )
                 continue
             except asyncio.TimeoutError:
@@ -332,3 +342,19 @@ def _summarise_exception(exc: Exception) -> str:
     if len(msg) > 200:
         msg = msg[:197] + "..."
     return f"{exc_type}: {msg}"
+
+
+class _OperationTimeoutError(Exception):
+    """Raised when the underlying operation raises asyncio.TimeoutError."""
+
+
+async def _call_with_timeout(
+    operation: Callable[..., Any],
+    provider_name: str,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    try:
+        return await operation(provider_name, *args, **kwargs)
+    except asyncio.TimeoutError as exc:
+        raise _OperationTimeoutError from exc
