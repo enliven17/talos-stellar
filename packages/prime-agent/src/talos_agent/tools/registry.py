@@ -200,6 +200,9 @@ class ToolRegistry:
                     _invoke_tool(), timeout=tool.timeout
                 )
                 return result
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
         except asyncio.TimeoutError:
             outcome = "timeout"
             return {
