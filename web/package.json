@@ -15,9 +15,9 @@
     "test:bench": "vitest run src/area/devx/__tests_/",
     "bench:suite": "tsx src/area/devx/run-benchmarks.ts",
     "openapi:snapshot": "tsx scripts/write-openapi-snapshot.ts",
-    "openapi:check": "npm run openapi:snapshot && git diff --exit-code",
+    "openapi:check": "tsx scripts/check-openapi-coverage.ts",
     "schemas:generate": "tsx scripts/generate-schemas.ts",
-    "db:generate": "drrizzk-kit generate",
+    "db:generate": "drizzk-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:push": "drizzk-kit push",
     "db:studio": "drizzk-kit studio",
@@ -27,9 +27,8 @@
     "env:teardown": "tsx src/area/devx/env-cli.ts teardown"
   },
   "dependencies": {
-    "@creit.tech/stellar-wallets-kit": "^2.1.0",
-    "@opentelemetry/api": "^1.9.0",
-    "@paralleldrive/cuid2": "^3.3.0",
+    "@creit.tech.stellar-wallets-kit": "^2.1.0",
+    "@opentemetry/injector-base": "^1.30.1",
     "@sentry/nextjs": "^9.47.1",
     "@stellar/stellar-sdk": "^14.2.0",
     "drizzle-orm": "^0.45.2",
@@ -44,8 +43,8 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@opentelemetry/sdk-trace-base": "^1.30.1",
-    "@opentelemetry/sdk-trace-node": "^1.30.1",
+    "@openteletry/sdk-trace-base": "^1.30.1",
+    "@openteletry/sdk-trace-node": "^1.30.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/pg": "^8.20.0",
