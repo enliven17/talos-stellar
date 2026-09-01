@@ -221,6 +221,7 @@ class Settings(BaseSettings):
         default=30,
         ge=1,
         le=120,
+        validation_alias="TALOS_TOOL_TIMEOUT_SECONDS",
         description="Maximum seconds for a single external tool call before it is cancelled.",
     )
 
