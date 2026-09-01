@@ -111,18 +111,26 @@ async def _execute_tool_with_timeout(
     """Run ``tools.execute`` with a bounded deadline and cancellation."""
     timeout = _get_tool_timeout(settings)
     started = time.monotonic()
+    task = asyncio.ensure_future(tools.execute(fn_name, args))
     try:
-        return await asyncio.wait_for(tools.execute(fn_name, args), timeout=timeout)
-    except asyncio.TimeoutError:
-        elapsed = time.monotonic() - started
-        _record_tool_timeout(timeout, elapsed)
-        return {
-            "status": "timeout",
-            "tool": fn_name,
-            "timeout_seconds": timeout,
-            "elapsed_seconds": round(elapsed, 3),
-            "error": f"Tool execution timed out after {timeout:.1f}s",
-        }
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+    except asyncio.CancelledError:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+    if task in done:
+        return task.result()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    elapsed = time.monotonic() - started
+    _record_tool_timeout(timeout, elapsed)
+    return {
+        "status": "timeout",
+        "tool": fn_name,
+        "timeout_seconds": timeout,
+        "elapsed_seconds": round(elapsed, 3),
+        "error": f"Tool execution timed out after {timeout:.1f}s",
+    }
 
 
 async def agent_loop(
