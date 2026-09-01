@@ -1,0 +1,17 @@
+{
+  "meta": {
+    "additive_fields": [],
+    "contract": "TalosRegistry",
+    "generator": "scripts/generate-registry-fixtures.mjs v1",
+    "kind": "CreatorOf",
+    "schema_version": 1
+  },
+  "storage_key": {
+    "id": 1,
+    "type": "CreatorOf"
+  },
+  "value": {
+    "creator": "GDN5AZ5KL6ZUN4W7SLRUXA3ZXCF4V6POZPV2QKDVDHM7QAN6R54IB3BV",
+    "talos_id": 1
+  }
+}

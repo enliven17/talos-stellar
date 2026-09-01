@@ -13,7 +13,9 @@
     "stack:down": "bash scripts/local-stack.sh down",
     "stack:logs": "bash scripts/local-stack.sh logs",
     "stack:reset": "bash scripts/local-stack.sh reset",
-    "test:fixtures": "pnpm --dir contracts test:fixtures"
+    "test:fixtures": "pnpm --dir contracts test:fixtures",
+    "fixtures:gen": "node scripts/generate-registry-fixtures.mjs",
+    "fixtures:check": "node scripts/generate-registry-fixtures.mjs --check"
   },
   "dependencies": {
     "next": "16.2.2"

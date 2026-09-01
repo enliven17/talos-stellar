@@ -1,0 +1,44 @@
+{
+  "meta": {
+    "additive_fields": [
+      "metadata"
+    ],
+    "contract": "TalosRegistry",
+    "generator": "scripts/generate-registry-fixtures.mjs v1",
+    "kind": "Talos",
+    "note": "Additive field 'metadata' is Option<String>. Current parser must treat missing as None and present as Some.",
+    "schema_version": 2
+  },
+  "storage_key": {
+    "id": 3,
+    "type": "Talos"
+  },
+  "value": {
+    "active": true,
+    "category": "Development",
+    "created_at": "1710007200",
+    "creator": "GBP5QYANYQBGVDFS7K4H5GV4ZSFEOVQ7NXH2ZRKBI5MH36ENH25MQ3CD",
+    "description": "Nexus builder",
+    "id": 3,
+    "kernel": {
+      "approval_threshold": "10",
+      "gtm_budget": "1000",
+      "min_patron_pulse": "100"
+    },
+    "metadata": "ipfs://QmAdditiveMetadataV2Example",
+    "name": "nova",
+    "patron": {
+      "creator_addr": "GBP5QYANYQBGVDFS7K4H5GV4ZSFEOVQ7NXH2ZRKBI5MH36ENH25MQ3CD",
+      "creator_share": 60,
+      "investor_addr": "GATSGV2VGSVIWSMOLRMFFVTAAANHPFINBC3EPLDCJ5A753UTM5WH7V5R",
+      "investor_share": 25,
+      "treasury_addr": "GBIRUHZQUEQEXX57OKZHNX6FI4M52CSDBNYD3S7TVHSH6IPIVFGYDTIC",
+      "treasury_share": 15
+    },
+    "pulse": {
+      "price_usd_cents": "100",
+      "token_symbol": "NOVA",
+      "total_supply": "1000000"
+    }
+  }
+}
