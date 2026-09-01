@@ -1,12 +1,10 @@
-use soroban_sdk::{contracttype, Address, Env};
-#[contracttype]
-#derive(Clone)}
-# [contracttype]
+use soroban_sdk::{Address, Env};
 
-# [contracttype]
-pub enum AllowlistDataKey { AllowedAsset(Address) }
 pub struct AssetAllowlist;
-asset.Allowlist.add(&env, &admin, &asset);
-asset.Allowlist.remove(&env, &admin, &asset);
-asset.Allowlist.is_allowed(&env, &asset);
-asset.Allowlist.enforce(&env, &asset);
+
+impl AssetAllowlist {
+    pub fn add(env: &Env, admin: Address, asset: Address) {
+        admin.require_auth();
+        env.storage().instance().set(&asset, &true);
+    }
+}
