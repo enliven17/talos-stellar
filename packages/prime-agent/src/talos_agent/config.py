@@ -217,6 +217,12 @@ class Settings(BaseSettings):
     approval_threshold: Decimal = Field(default=Decimal("10"), description="USD threshold for auto-approval")
     browser_headless: bool = Field(default=False, description="Run browser in headless mode")
     auto_repay_loans: bool = Field(default=False, description="Enable automatic loan repayment from treasury")
+    tool_timeout_seconds: int = Field(
+        default=30,
+        ge=1,
+        le=120,
+        description="Maximum seconds for a single external tool call before it is cancelled.",
+    )
 
     # Job leasing
     job_lease_ttl: int = Field(
