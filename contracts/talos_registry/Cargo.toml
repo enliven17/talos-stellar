@@ -1,10 +1,10 @@
-[packaged
+[package]
 name = "talos-registry"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
-[1_lib]
+[lib]
 crate-type = ["cdylib", "rlib"]
 doctest = false
 
@@ -13,14 +13,8 @@ soroban-sdk = { workspace = true }
 ttl-manager = { path = "../ttl_manager" }
 storage-migration = { path = "../storage_migration" }
 
-[1_lib.crate-type]
-doctest = false
-
-[dependencies]
+[dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 
-[target.'cfg(not(target_arch = "wasm32")).dev-dependencies]
-soroban-sdk = { workspace = true, features = ["testutils"] }
-
-[target.'cfg(target_arch = "wasm32").dev-dependencies]
+[target.'cfg(target_arch = "wamm32").dependencies]
 soroban-sdk = { workspace = true, features = ["alloc"] }
