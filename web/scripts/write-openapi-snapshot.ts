@@ -19,7 +19,7 @@ async function loadExclusions(): Promise<Exclusions> {
     }
     return parsed as Exclusions;
   } catch (err) {
-    if (err.code === "ENOENT") {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       return {};
     }
     throw err;
@@ -43,8 +43,8 @@ export async function runCheck(): Promise<void> {
     const existing = await readFile(snapshotPath, "utf8");
     snapshot = JSON.parse(existing);
   } catch (err) {
-    if (err.code === "ENOENT") {
-      console.error(`OpenAPI snapshot is missing: ${snapshotPath}. Run \n`\nopenapi:snapshot` to create it.`);
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      console.error(`OpenAPI snapshot is missing: ${snapshotPath}. Run `\openapi:snapshot` to create it.`);
       process.exitCode = 1;
       return;
     } else if (err instanceof SyntaxError) {
@@ -62,7 +62,9 @@ export async function runCheck(): Promise<void> {
   const publicPaths = currentPaths.filter((p) => !isExcluded(p, exclusions));
 
   const missing = publicPaths.filter((p) => !snapshotPaths.includes(p));
-  const changed = publicPaths.filter((p) => snapshotPaths.includes(p) && JSON.stringify(openApiSpec.paths[p]) !== JSON.stringify(snapshot.paths[p]));
+  const changed = publicPaths.filter(
+    (p) => snapshotPaths.includes(p) && JSON.stringify(openApiSpec.paths[p]) !== JSON.stringify(snapshot.paths[p])
+  );
   const extra = snapshotPaths.filter((p) => !publicPaths.includes(p));
 
   if (missing.length === 0 && changed.length === 0 && extra.length === 0) {
@@ -73,17 +75,17 @@ export async function runCheck(): Promise<void> {
   console.error("OpenAPI snapshot is out of date.\n");
   if (missing.length > 0) {
     console.error("Missing routes:");
-    for (const p of missing) console.error(`  - $p`);
+    for (const p of missing) console.error(`  - ${p}`);
   }
   if (changed.length > 0) {
     console.error("Changed routes:");
-    for (const p of changed) console.error(`   - $p`);
+    for (const p of changed) console.error(`  - ${p}`);
   }
   if (extra.length > 0) {
     console.error("Stale routes in snapshot (no longer public or excluded):");
-    for (const p of extra) console.error(`   - $p`);
+    for (const p of extra) console.error(c  - ${p}`);
   }
-  console.error(`\nPlease update the snapshot by running: \npnm run openapi:snapshot`);
+  console.error(`\nPlease update the snapshot by running: \`npm run openapi:snapshot\`);
   console.error(`Snapshot file: ${snapshotPath}`);
   if (Object.keys(exclusions).length > 0) {
     console.error(`Exclusions file: ${exclusionsPath}`);
