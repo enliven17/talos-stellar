@@ -175,6 +175,7 @@ class FallbackChain:
         self,
         operation: Callable[..., Any],
         *args: Any,
+        timeout_seconds: float | None = None,
         **kwargs: Any,
     ) -> FallbackResult:
         """Try each provider in the chain until one succeeds.
@@ -186,6 +187,8 @@ class FallbackChain:
             positional argument (or via the ``provider_keyword`` parameter).
         *args:
             Additional positional arguments forwarded to *operation*.
+        timeout_seconds:
+            Optional per-call override of the configured per-attempt timeout.
         **kwargs:
             Additional keyword arguments forwarded to *operation*.
 
@@ -195,6 +198,11 @@ class FallbackChain:
             The result of the first successful attempt, or a summary of
             all failures.
         """
+        effective_timeout = (
+            self._timeout_seconds
+            if timeout_seconds is None
+            else self._validate_timeout(timeout_seconds)
+        )
         provider_list = self._resolve_order()
         attempts: list[tuple[str, str]] = []
         timeout_events: list[tuple[str, float]] = []
@@ -218,7 +226,7 @@ class FallbackChain:
             try:
                 result = await asyncio.wait_for(
                     operation(provider_name, *args, **kwargs),
-                    timeout=self._timeout_seconds,
+                    timeout=effective_timeout,
                 )
                 await breaker.record_success()
                 fallback_metrics.record_success(provider_name)
@@ -247,13 +255,14 @@ class FallbackChain:
             except asyncio.TimeoutError:
                 await breaker.record_failure()
                 fallback_metrics.record_timeout(provider_name)
-                timeout_msg = f"Timeout after {self._timeout_seconds:g}s"
+                timeout_msg = f"Timeout after {effective_timeout:g}s"
                 attempts.append((provider_name, timeout_msg))
-                timeout_events.append((provider_name, self._timeout_seconds))
+                timeout_events.append((provider_name, effective_timeout))
+                safe_provider = "[REDACTED]" if _is_sensitive_key(provider_name) else provider_name
                 logger.warning(
                     "Fallback: '%s' timed out after %.1fs",
-                    provider_name,
-                    self._timeout_seconds,
+                    safe_provider,
+                    effective_timeout,
                 )
                 continue
             except Exception as exc:
