@@ -608,6 +608,220 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod talos_mutation_auth_tests {
+    use super::*;
+    use soroban_sdk::{
+        testutils::Address as _,
+        Address, Env, IntoVal, String, Vec,
+    };
+
+    fn setup() -> (Env, Address, Address) {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, TalosRegistry);
+        let admin = Address::generate(&env);
+        env.invoke_contract::<()>(&contract_id, "initialize", (admin.clone(),).into_val(&env), &[&admin]);
+        (env, contract_id, admin)
+    }
+
+    fn patron(env: &Env, creator: &Address) -> Patron {
+        Patron {
+            creator_share: 50,
+            investor_share: 30,
+            treasury_share: 20,
+            creator_addr: creator.clone(),
+            investor_addr: Address::generate(env),
+            treasury_addr: Address::generate(env),
+        }
+    }
+
+    fn kernel() -> Kernel {
+        Kernel {
+            approval_threshold: 10,
+            gtm_budget: 1000,
+            min_patron_pulse: 100,
+        }
+    }
+
+    fn pulse(env: &Env) -> Pulse {
+        Pulse {
+            total_supply: 1000,
+            price_usd_cents: 100,
+            token_symbol: String::from_slice(env, b"TLS"),
+        }
+    }
+
+    fn create_talos(env: &Env, contract_id: &Address, creator: &Address, protocol_wallet: &Address) -> u32 {
+        let name = String::from_slice(env, b"Auth");
+        let category = String::from_slice(env, b"Category");
+        let description = String::from_slice(env, b"Description");
+        let patron = patron(env, creator);
+        let kernel = kernel();
+        let pulse = pulse(env);
+        env.invoke_contract::<u32>(
+            contract_id,
+            "create_talos",
+            (name, category, description, patron, kernel, pulse, protocol_wallet.clone()).into_val(env),
+            &[creator],
+        )
+    }
+
+    fn get_talos(env: &Env, contract_id: &Address, id: u32) -> Talos {
+        env.invoke_contract::<Option<Talos>>(contract_id, "get_talos", (id,).into_val(env), &[])
+            .expect("talos exists")
+    }
+
+    fn next_talos_id(env: &Env, contract_id: &Address) -> u32 {
+        env.invoke_contract::<u32>(contract_id, "next_talos_id", ().into_val(env), &[])
+    }
+
+    macro_rules! assert_unauthorized {
+        ($env:expr, $contract_id:expr, $caller:expr, $method:expr, $args:expr, $ret:ty) => {{
+            let before = $env.events().all().len();
+            $env.set_source_account($caller);
+            let result = $env.try_invoke_contract::<$ret>($contract_id, $method, $args);
+            assert!(result.is_err(), "call to '{}' should be rejected", $method);
+            let after = $env.events().all().len();
+            assert_eq!(before, after, "rejected call to '{}' must not emit events", $method);
+        }};
+    }
+
+    #[test]
+    fn create_talos_requires_creator_auth() {
+        let (env, contract_id, admin) = setup();
+        let creator = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        let name = String::from_slice(&env, b"Name");
+        let category = String::from_slice(&env, b"Category");
+        let description = String::from_slice(&env, b"Description");
+        let patron = patron(&env, &creator);
+        let kernel = kernel();
+        let pulse = pulse(&env);
+        let before = next_talos_id(&env, &contract_id);
+
+        assert_unauthorized!(
+            &env, &contract_id, &attacker, "create_talos",
+            (name, category, description, patron, kernel, pulse, admin.clone()).into_val(&env),
+            u32
+        );
+
+        assert_eq!(next_talos_id(&env, &contract_id), before);
+        let id = create_talos(&env, &contract_id, &creator, &admin);
+        assert_eq!(id, before);
+        let talos = get_talos(&env, &contract_id, id);
+        assert!(talos.active);
+        assert_eq!(talos.creator, creator);
+    }
+
+    #[test]
+    fn update_patron_requires_creator() {
+        let (env, contract_id, admin) = setup();
+        let creator = Address::generate(&env);
+        let id = create_talos(&env, &contract_id, &creator, &admin);
+        let old = get_talos(&env, &contract_id, id);
+        let patron_addr = old.patron.investor_addr.clone();
+        let new_patron = Patron {
+            creator_share: 40,
+            investor_share: 40,
+            treasury_share: 20,
+            creator_addr: creator.clone(),
+            investor_addr: Address::generate(&env),
+            treasury_addr: Address::generate(&env),
+        };
+
+        assert_unauthorized!(
+            &env, &contract_id, &patron_addr, "update_patron",
+            (id, new_patron.clone()).into_val(&env),
+            ()
+        );
+
+        let after = get_talos(&env, &contract_id, id);
+        assert_eq!(after.patron.creator_share, old.patron.creator_share);
+        assert_eq!(after.patron.investor_addr, old.patron.investor_addr);
+
+        env.set_source_account(&creator);
+        env.invoke_contract::<()>(&contract_id, "update_patron", (id, new_patron.clone()).into_val(&env), &[&creator]);
+        let updated = get_talos(&env, &contract_id, id);
+        assert_eq!(updated.patron.investor_share, 40);
+    }
+
+    #[test]
+    fn update_kernel_requires_creator() {
+        let (env, contract_id, admin) = setup();
+        let creator = Address::generate(&env);
+        let id = create_talos(&env, &contract_id, &creator, &admin);
+        let old = get_talos(&env, &contract_id, id);
+        let patron_addr = old.patron.treasury_addr.clone();
+        let new_kernel = Kernel { approval_threshold: 20, gtm_budget: 2000, min_patron_pulse: 200 };
+
+        assert_unauthorized!(
+            &env, &contract_id, &patron_addr, "update_kernel",
+            (id, new_kernel.clone()).into_val(&env),
+            ()
+        );
+
+        let after = get_talos(&env, &contract_id, id);
+        assert_eq!(after.kernel.approval_threshold, old.kernel.approval_threshold);
+
+        env.set_source_account(&creator);
+        env.invoke_contract::<()>(&contract_id, "update_kernel", (id, new_kernel.clone()).into_val(&env), &[&creator]);
+        let updated = get_talos(&env, &contract_id, id);
+        assert_eq!(updated.kernel.approval_threshold, 20);
+    }
+
+    #[test]
+    fn update_pulse_requires_creator() {
+        let (env, contract_id, admin) = setup();
+        let creator = Address::generate(&env);
+        let id = create_talos(&env, &contract_id, &creator, &admin);
+        let old = get_talos(&env, &contract_id, id);
+        let patron_addr = old.patron.investor_addr.clone();
+        let new_pulse = Pulse {
+            total_supply: 2000,
+            price_usd_cents: 200,
+            token_symbol: String::from_slice(&env, b"NEW"),
+        };
+
+        assert_unauthorized!(
+            &env, &contract_id, &patron_addr, "update_pulse",
+            (id, new_pulse.clone()).into_val(&env),
+            ()
+        );
+
+        let after = get_talos(&env, &contract_id, id);
+        assert_eq!(after.pulse.total_supply, old.pulse.total_supply);
+
+        env.set_source_account(&creator);
+        env.invoke_contract::<()>(&contract_id, "update_pulse", (id, new_pulse.clone()).into_val(&env), &[&creator]);
+        let updated = get_talos(&env, &contract_id, id);
+        assert_eq!(updated.pulse.total_supply, 2000);
+    }
+
+    #[test]
+    fn deactivate_talos_requires_creator() {
+        let (env, contract_id, admin) = setup();
+        let creator = Address::generate(&env);
+        let id = create_talos(&env, &contract_id, &creator, &admin);
+        let talos = get_talos(&env, &contract_id, id);
+        let patron_addr = talos.patron.investor_addr.clone();
+
+        assert_unauthorized!(
+            &env, &contract_id, &patron_addr, "deactivate_talos",
+            (id,).into_val(&env),
+            ()
+        );
+
+        let after = get_talos(&env, &contract_id, id);
+        assert!(after.active);
+
+        env.set_source_account(&creator);
+        env.invoke_contract::<()>(&contract_id, "deactivate_talos", (id,).into_val(&env), &[&creator]);
+        let updated = get_talos(&env, &contract_id, id);
+        assert!(!updated.active);
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
