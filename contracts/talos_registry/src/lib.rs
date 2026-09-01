@@ -354,6 +354,297 @@ pub const PAUSE_TALOS_DEACTIVATION: u32 = 3;
 /// Pause domain for protocol configuration (fees, admin, timelock).
 pub const PAUSE_PROTOCOL_CONFIG: u32 = 4;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{Vec, IntoVal, TryIntoVal};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    fn setup() -> (Env, Address, Address) {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register_contract(None, TalosRegistry);
+        // Initialize storage with default values.
+        env.storage().persistent().set(&DataKey::ProtocolWallet, &admin);
+        env.storage().persistent().set(&DataKey::NextTalosId, &1u32);
+        env.storage().persistent().set(&DataKey::ProtocolFeeBps, &300u32);
+        (env, admin, contract_id)
+    }
+
+    fn make_patron(env: &Env, creator: &Address, investor: &Address, treasury: &Address) -> Patron {
+        Patron {
+            creator_share: 70,
+            investor_share: 20,
+            treasury_share: 10,
+            creator_addr: creator.clone(),
+            investor_addr: investor.clone(),
+            treasury_addr: treasury.clone(),
+        }
+    }
+
+    fn make_kernel(env: &Env) -> Kernel {
+        Kernel {
+            approval_threshold: 3,
+            gtm_budget: 100_000,
+            min_patron_pulse: 1_000,
+        }
+    }
+
+    fn make_pulse(env: &Env) -> Pulse {
+        Pulse {
+            total_supply: 1_000_000,
+            price_usd_cents: 100,
+            token_symbol: String::from_str(env, "TLS"),
+        }
+    }
+
+    fn create_talos(
+        env: &Env,
+        contract_id: &Address,
+        creator: &Address,
+        investor: &Address,
+        treasury: &Address,
+    ) -> u32 {
+        let name = String::from_str(env, "Test");
+        let category = String::from_str(env, "TestCat");
+        let description = String::from_str(env, "TestDesc");
+        let patron = make_patron(env, creator, investor, treasury);
+        let kernel = make_kernel(env);
+        let pulse = make_pulse(env);
+        env.invoke_contract::<u32>(
+            contract_id,
+            "create_talos",
+            (creator.clone(), name, category, description, patron, kernel, pulse).into_val(env),
+            &[creator],
+        )
+    }
+
+    fn assert_unauthorized(f: impl FnOnce()) {
+        let result = catch_unwind(AssertUnwindSafe(f));
+        assert!(result.is_err(), "expected unauthorized call to panic");
+    }
+
+    #[test]
+    fn test_set_protocol_fee_admin_only() {
+        let (env, admin, contract_id) = setup();
+        let non_admin = Address::generate(&env);
+
+        // Authorized admin can update the fee.
+        env.invoke_contract::<()>(&contract_id, "set_protocol_fee", (500u32,).into_val(&env), &[&admin]);
+        let fee: u32 = env.storage().persistent().get(&DataKey::ProtocolFeeBps).unwrap();
+        assert_eq!(fee, 500);
+        let events_after_admin = env.events().all().len();
+        assert!(events_after_admin > 0, "expected fee_chg event");
+
+        // Unauthorized caller is rejected; storage and event state unchanged.
+        assert_unauthorized(|| {
+            env.invoke_contract::<()>(&contract_id, "set_protocol_fee", (700u32,).into_val(&env), &[&non_admin]);
+        });
+        let fee_after: u32 = env.storage().persistent().get(&DataKey::ProtocolFeeBps).unwrap();
+        assert_eq!(fee_after, 500);
+        assert_eq!(env.events().all().len(), events_after_admin, "no new events expected");
+    }
+
+    #[test]
+    fn test_update_patron_creator_only() {
+        let (env, _admin, contract_id) = setup();
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let talos_id = create_talos(&env, &contract_id, &creator, &investor, &treasury);
+        let attacker = Address::generate(&env);
+        let new_patron = make_patron(&env, &creator, &attacker, &treasury);
+
+        // Unauthorized attacker cannot update patron.
+        let events_before = env.events().all().len();
+        assert_unauthorized(|| {
+            env.invoke_contract::<()>(&contract_id, "update_patron", (talos_id, new_patron.clone()).into_val(&env), &[&attacker]);
+        });
+        let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos_id)).unwrap();
+        assert_eq!(stored.patron.investor_addr, investor, "patron unchanged");
+        assert_eq!(env.events().all().len(), events_before, "no event emitted");
+
+        // Creator can update.
+        env.invoke_contract::<()>(&contract_id, "update_patron", (talos_id, new_patron.clone()).into_val(&env), &[&creator]);
+        let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos_id)).unwrap();
+        assert_eq!(stored.patron.investor_addr, attacker, "patron updated");
+        assert!(env.events().all().len() > events_before, "pat_upd event emitted");
+    }
+
+    #[test]
+    fn test_update_kernel_admin_only() {
+        let (env, admin, contract_id) = setup();
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let talos_id = create_talos(&env, &contract_id, &creator, &investor, &treasury);
+        let attacker = Address::generate(&env);
+        let new_kernel = Kernel {
+            approval_threshold: 5,
+            gtm_budget: 200_000,
+            min_patron_pulse: 2_000,
+        };
+
+        // Unauthorized attacker cannot update kernel.
+        let events_before = env.events().all().len();
+        assert_unauthorized(|| {
+            env.invoke_contract::<()>(&contract_id, "update_kernel", (talos_id, new_kernel.clone()).into_val(&env), &[&attacker]);
+        });
+        let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos_id)).unwrap();
+        assert_eq!(stored.kernel.approval_threshold, 3, "kernel unchanged");
+        assert_eq!(env.events().all().len(), events_before);
+
+        // Admin can update.
+        env.invoke_contract::<()>(&contract_id, "update_kernel", (talos_id, new_kernel.clone()).into_val(&env), &[&admin]);
+        let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos_id)).unwrap();
+        assert_eq!(stored.kernel.approval_threshold, 5, "kernel updated");
+    }
+
+    #[test]
+    fn test_update_pulse_admin_only() {
+        let (env, admin, contract_id) = setup();
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let talos_id = create_talos(&env, &contract_id, &creator, &investor, &treasury);
+        let attacker = Address::generate(&env);
+        let new_pulse = Pulse {
+            total_supply: 2_000_000,
+            price_usd_cents: 200,
+            token_symbol: String::from_str(&env, "TLS"),
+        };
+
+        assert_unauthorized(|| {
+            env.invoke_contract::<()>(&contract_id, "update_pulse", (talos_id, new_pulse.clone()).into_val(&env), &[&attacker]);
+        });
+        let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos_id)).unwrap();
+        assert_eq!(stored.pulse.total_supply, 1_000_000);
+
+        env.invoke_contract::<()>(&contract_id, "update_pulse", (talos_id, new_pulse.clone()).into_val(&env), &[&admin]);
+        let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos_id)).unwrap();
+        assert_eq!(stored.pulse.total_supply, 2_000_000);
+    }
+
+    #[test]
+    fn test_deactivate_talos_creator_or_admin() {
+        let (env, admin, contract_id) = setup();
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let talos_id = create_talos(&env, &contract_id, &creator, &investor, &treasury);
+        let attacker = Address::generate(&env);
+
+        // Unauthorized attacker cannot deactivate.
+        let events_before = env.events().all().len();
+        assert_unauthorized(|| {
+            env.invoke_contract::<()>(&contract_id, "deactivate_talos", (talos_id,).into_val(&env), &[&attacker]);
+        });
+        let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos_id)).unwrap();
+        assert!(stored.active, "talos still active");
+        assert_eq!(env.events().all().len(), events_before);
+
+        // Creator can deactivate.
+        env.invoke_contract::<()>(&contract_id, "deactivate_talos", (talos_id,).into_val(&env), &[&creator]);
+        let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos_id)).unwrap();
+        assert!(!stored.active);
+        // Reactivate for admin test? We'll create another talos or just check admin.
+        let talos2 = create_talos(&env, &contract_id, &creator, &investor, &treasury);
+        env.invoke_contract::<()>(&contract_id, "deactivate_talos", (talos2,).into_val(&env), &[&admin]);
+        let stored: Talos = env.storage().persistent().get(&DataKey::Talos(talos2)).unwrap();
+        assert!(!stored.active);
+    }
+
+    #[test]
+    fn test_propose_admin_admin_only() {
+        let (env, admin, contract_id) = setup();
+        let new_admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        assert_unauthorized(|| {
+            env.invoke_contract::<()>(&contract_id, "propose_admin", (new_admin.clone(),).into_val(&env), &[&attacker]);
+        });
+        assert!(env.storage().persistent().get::<_, Address>(&DataKey::PendingAdmin).is_none());
+
+        env.invoke_contract::<()>(&contract_id, "propose_admin", (new_admin.clone(),).into_val(&env), &[&admin]);
+        let pending: Address = env.storage().persistent().get(&DataKey::PendingAdmin).unwrap();
+        assert_eq!(pending, new_admin);
+    }
+
+    #[test]
+    fn test_accept_admin_pending_only() {
+        let (env, admin, contract_id) = setup();
+        let new_admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        env.invoke_contract::<()>(&contract_id, "propose_admin", (new_admin.clone(),).into_val(&env), &[&admin]);
+
+        assert_unauthorized(|| {
+            env.invoke_contract::<()>(&contract_id, "accept_admin", ().into_val(&env), &[&attacker]);
+        });
+
+        env.invoke_contract::<()>(&contract_id, "accept_admin", ().into_val(&env), &[&new_admin]);
+        let protocol_wallet: Address = env.storage().persistent().get(&DataKey::ProtocolWallet).unwrap();
+        assert_eq!(protocol_wallet, new_admin);
+        assert!(env.storage().persistent().get::<_, Address>(&DataKey::PendingAdmin).is_none());
+    }
+
+    #[test]
+    fn test_pause_domain_admin_or_guardian() {
+        let (env, admin, contract_id) = setup();
+        let guardian = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        // Admin adds guardian.
+        env.invoke_contract::<()>(&contract_id, "add_guardian", (guardian.clone(),).into_val(&env), &[&admin]);
+
+        // Unauthorized attacker cannot pause.
+        assert_unauthorized(|| {
+            env.invoke_contract::<()>(
+                &contract_id,
+                "pause_domain",
+                (PauseDomain::TalosCreation, 1000u64).into_val(&env),
+                &[&attacker],
+            );
+        });
+        // Guardian can pause with expiry.
+        env.invoke_contract::<()>(
+            &contract_id,
+            "pause_domain",
+            (PauseDomain::TalosCreation, 1000u64).into_val(&env),
+            &[&guardian],
+        );
+        let state: PauseState = env.storage().persistent().get(&DataKey::PauseState(PauseDomain::TalosCreation)).unwrap();
+        assert_eq!(state.paused_by, guardian);
+        assert_eq!(state.expires_at, 1000);
+    }
+
+    #[test]
+    fn test_guardian_management_admin_only() {
+        let (env, admin, contract_id) = setup();
+        let guardian = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        assert_unauthorized(|| {
+            env.invoke_contract::<()>(&contract_id, "add_guardian", (guardian.clone(),).into_val(&env), &[&attacker]);
+        });
+
+        env.invoke_contract::<()>(&contract_id, "add_guardian", (guardian.clone(),).into_val(&env), &[&admin]);
+        let guardians: Vec<Address> = env.storage().persistent().get(&DataKey::Guardians).unwrap_or_else(|| Vec::new(&env));
+        assert_eq!(guardians.len(), 1);
+        assert_eq!(guardians.get(0).unwrap(), guardian);
+
+        assert_unauthorized(|| {
+            env.invoke_contract::<()>(&contract_id, "remove_guardian", (guardian.clone(),).into_val(&env), &[&attacker]);
+        });
+
+        env.invoke_contract::<()>(&contract_id, "remove_guardian", (guardian.clone(),).into_val(&env), &[&admin]);
+        let guardians: Vec<Address> = env.storage().persistent().get(&DataKey::Guardians).unwrap_or_else(|| Vec::new(&env));
+        assert_eq!(guardians.len(), 0);
+    }
+}
+
+
 // ── Contract ────────────────────────────────────────────────────────
 
 #[contract]
