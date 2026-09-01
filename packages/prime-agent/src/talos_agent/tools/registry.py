@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, get_type_hints
@@ -17,6 +19,22 @@ from talos_agent.tools.permissions import (
     ToolPermissions,
 )
 
+DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
+MAX_TOOL_TIMEOUT_SECONDS = 300.0
+
+
+def _validate_tool_timeout(timeout: float | None) -> float:
+    """Normalize a per-tool timeout, applying the safe default and bound."""
+    if timeout is None:
+        return DEFAULT_TOOL_TIMEOUT_SECONDS
+    timeout = float(timeout)
+    if not math.isfinite(timeout) or timeout <= 0 or timeout > MAX_TOOL_TIMEOUT_SECONDS:
+        raise ValueError(
+            "tool timeout must be finite, greater than 0, and at most "
+            f"{MAX_TOOL_TIMEOUT_SECONDS}; got {timeout}"
+        )
+    return timeout
+
 
 @dataclass
 class Tool:
@@ -27,6 +45,7 @@ class Tool:
     #: Declared permission surface. `None` means the tool did not declare one
     #: and the enforcer resolved it from the legacy table (or denied it).
     permissions: ToolPermissions | None = None
+    timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS
 
     def to_openai_schema(self) -> dict:
         return {
@@ -78,9 +97,11 @@ class ToolRegistry:
         fn: Callable,
         parameters: dict[str, Any],
         permissions: ToolPermissions | None = None,
+        timeout: float | None = None,
     ) -> None:
         # Raises ManifestValidationError for a declared-but-unenforceable
         # manifest, so the problem surfaces at import rather than first call.
+        timeout = _validate_tool_timeout(timeout)
         self._enforcer.register(name, permissions)
         self._tools[name] = Tool(
             name=name,
@@ -88,6 +109,7 @@ class ToolRegistry:
             fn=fn,
             parameters=parameters,
             permissions=permissions,
+            timeout=timeout,
         )
 
     def get(self, name: str) -> Tool | None:
@@ -162,10 +184,27 @@ class ToolRegistry:
                 f"tool.{name}",
                 {"tool.name": name, "tool.arg_keys": list(arguments.keys())},
             ):
-                result = tool.fn(**arguments)
-                if inspect.isawaitable(result):
-                    result = await result
+                async def _invoke_tool() -> Any:
+                    if inspect.iscoroutinefunction(tool.fn):
+                        result = await tool.fn(**arguments)
+                    else:
+                        result = await asyncio.to_thread(tool.fn, **arguments)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    return result
+
+                result = await asyncio.wait_for(
+                    _invoke_tool(), timeout=tool.timeout
+                )
                 return result
+        except asyncio.TimeoutError:
+            outcome = "timeout"
+            return {
+                "error": "Tool execution timed out",
+                "code": "TOOL_TIMEOUT",
+                "tool": name,
+                "timeout_seconds": tool.timeout,
+            }
         except Exception as e:
             outcome = "error"
             return {"error": f"{type(e).__name__}: {e}"}
@@ -177,7 +216,7 @@ class ToolRegistry:
 registry = ToolRegistry()
 
 
-def tool(name: str, description: str, permissions: ToolPermissions | None = None):
+def tool(name: str, description: str, permissions: ToolPermissions | None = None, timeout: float | None = None):
     """Decorator to register a function as an agent tool.
 
     Usage:
@@ -198,7 +237,7 @@ def tool(name: str, description: str, permissions: ToolPermissions | None = None
     """
     def decorator(fn: Callable) -> Callable:
         params = _fn_to_json_schema(fn)
-        registry.register(name, description, fn, params, permissions)
+        registry.register(name, description, fn, params, permissions, timeout)
         return fn
     return decorator
 
