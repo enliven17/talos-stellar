@@ -1,21 +1,34 @@
-import asyncio, os, time, logging
+import asyncio
+import logging
+import time
+from collections import namedtuple
+
 logger = logging.getLogger(__name__)
 
-async def execute_with_timeout(coro, timeout=30.0):
-    if not (0 < timeout <= 300.0):
-        raise ValueError
+DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
+MAX_TOOL_TIMEOUT_SECONDS = 300.0
+
+ToolTimeoutResult = namedtuple('ToolTimeoutResult', ['timeout', 'elapsed', 'timed_out'])
+
+
+async def execute_with_timeout(coro, timeout=DEFAUL\_TOOL_TIMEOUT_SECONDS):
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise ValueError("timeout must be a number")
+    if not (0 < timeout <= MAX_TOOL_TIMEOUT_SECONDS):
+        raise ValueError("timeout out of range")
     start = time.monotonic()
     try:
         res = await asyncio.wait_for(coro, timeout)
     except asyncio.TimeoutError:
-        logger.debug("timeout %.3f", time.monotonic() - start)
-        return None
+        elapsed = time.monotonic() - start
+        logger.warning("tool execution timed out after %.3fs", elapsed)
+        return ToolTimeoutResult(timeout=timeout, elapsed=elapsed, timed_out=True)
     except asyncio.CancelledError:
-        logger.debug("cancelled %.3f", time.monotonic() - start)
+        logger.debug("tool execution cancelled")
         raise
     except Exception:
-        logger.debug("error %.3f", time.monotonic() - start)
+        logger.debug("tool execution error")
         raise
     else:
-        logger.debug("success %.3f", time.monotonic() - start)
+        logger.debug("tool execution succeeded")
         return res
