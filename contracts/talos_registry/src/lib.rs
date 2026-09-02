@@ -3291,4 +3291,288 @@ mod tests {
         assert!(res.is_err());
         assert_eq!(client.schema_version(), SCHEMA_TIMELOCK_DEFAULTS);
     }
+
+    #[test]
+    fn auth_create_talos_unauthorized_fails_and_leaves_storage_and_events_unchanged() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let imposter = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        client.initialize(&protocol_wallet);
+
+        let initial_events_count = env.events().all().len();
+        let name = s(&env, "TestTalos");
+        let category = s(&env, "AI");
+        let description = s(&env, "Test Desc");
+        let patron_cfg = patron(&env, &creator);
+        let kernel_cfg = kernel();
+        let pulse_cfg = pulse(&env);
+
+        // Attempt creation with imposter auth instead of creator auth
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &imposter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_talos",
+                    args: (
+                        name.clone(),
+                        category.clone(),
+                        description.clone(),
+                        patron_cfg.clone(),
+                        kernel_cfg.clone(),
+                        pulse_cfg.clone(),
+                        protocol_wallet.clone(),
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_talos(
+                &name,
+                &category,
+                &description,
+                &patron_cfg,
+                &kernel_cfg,
+                &pulse_cfg,
+                &protocol_wallet,
+            );
+
+        assert!(res.is_err(), "Unauthorized creator caller must fail");
+        assert_eq!(client.next_talos_id(), 1, "NextTalosId must not increment on auth rejection");
+        assert!(client.get_talos(&1).is_none(), "No Talos record should be created");
+        assert_eq!(env.events().all().len(), initial_events_count, "No new events should be emitted");
+    }
+
+    #[test]
+    fn auth_update_patron_unauthorized_fails_and_preserves_state_and_events() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let imposter = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        client.initialize(&protocol_wallet);
+
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+        let original_talos = client.get_talos(&id).expect("talos exists");
+        let events_before = env.events().all().len();
+
+        let new_patron = Patron {
+            creator_share: 40,
+            investor_share: 40,
+            treasury_share: 20,
+            creator_addr: creator.clone(),
+            investor_addr: Address::generate(&env),
+            treasury_addr: Address::generate(&env),
+        };
+
+        // Unauthorized call (imposter auth)
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &imposter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_patron",
+                    args: (id, new_patron.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_patron(&id, &new_patron);
+
+        assert!(res.is_err(), "Unauthorized update_patron must fail");
+        let current_talos = client.get_talos(&id).expect("talos exists");
+        assert_eq!(current_talos.patron.creator_share, original_talos.patron.creator_share);
+        assert_eq!(current_talos.patron.investor_share, original_talos.patron.investor_share);
+        assert_eq!(current_talos.patron.treasury_share, original_talos.patron.treasury_share);
+        assert_eq!(env.events().all().len(), events_before, "No events should be emitted on auth failure");
+    }
+
+    #[test]
+    fn auth_update_kernel_unauthorized_fails_and_preserves_state() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let imposter = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        client.initialize(&protocol_wallet);
+
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+        let original_talos = client.get_talos(&id).expect("talos exists");
+
+        let new_kernel = Kernel {
+            approval_threshold: 999,
+            gtm_budget: 88888,
+            min_patron_pulse: 777,
+        };
+
+        // Unauthorized call with no auth or imposter auth
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &imposter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_kernel",
+                    args: (id, new_kernel.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_kernel(&id, &new_kernel);
+
+        assert!(res.is_err(), "Unauthorized update_kernel must fail");
+        let current_talos = client.get_talos(&id).expect("talos exists");
+        assert_eq!(current_talos.kernel.approval_threshold, original_talos.kernel.approval_threshold);
+        assert_eq!(current_talos.kernel.gtm_budget, original_talos.kernel.gtm_budget);
+        assert_eq!(current_talos.kernel.min_patron_pulse, original_talos.kernel.min_patron_pulse);
+    }
+
+    #[test]
+    fn auth_update_pulse_unauthorized_fails_and_preserves_state() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let imposter = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        client.initialize(&protocol_wallet);
+
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+        let original_talos = client.get_talos(&id).expect("talos exists");
+
+        let new_pulse = Pulse {
+            total_supply: 99_999_999,
+            price_usd_cents: 500,
+            token_symbol: s(&env, "NEWPULSE"),
+        };
+
+        // Unauthorized update_pulse call
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &imposter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_pulse",
+                    args: (id, new_pulse.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_pulse(&id, &new_pulse);
+
+        assert!(res.is_err(), "Unauthorized update_pulse must fail");
+        let current_talos = client.get_talos(&id).expect("talos exists");
+        assert_eq!(current_talos.pulse.total_supply, original_talos.pulse.total_supply);
+        assert_eq!(current_talos.pulse.price_usd_cents, original_talos.pulse.price_usd_cents);
+        assert_eq!(current_talos.pulse.token_symbol, original_talos.pulse.token_symbol);
+    }
+
+    #[test]
+    fn auth_deactivate_talos_unauthorized_fails_and_remains_active() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let imposter = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        client.initialize(&protocol_wallet);
+
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+        assert!(client.is_active(&id));
+
+        // Imposter attempts deactivation
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &imposter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "deactivate_talos",
+                    args: (id,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_deactivate_talos(&id);
+
+        assert!(res.is_err(), "Unauthorized deactivation must fail");
+        assert!(client.is_active(&id), "Talos must remain active after unauthorized deactivation attempt");
+    }
+
+    #[test]
+    fn auth_governance_and_timelock_unauthorized_mutations_fail() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let imposter = Address::generate(&env);
+        client.initialize(&admin);
+
+        // 1. Unauthorized set_timelock_config
+        let res_cfg = client
+            .mock_auths(&[MockAuth {
+                address: &imposter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_timelock_config",
+                    args: (1000u64, 2000u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_set_timelock_config(&1000, &2000);
+        assert!(res_cfg.is_err(), "Unauthorized set_timelock_config must fail");
+
+        // 2. Unauthorized schedule_action
+        let action = AdminAction::SetProtocolFee(500);
+        let res_sch = client
+            .mock_auths(&[MockAuth {
+                address: &imposter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "schedule_action",
+                    args: (action.clone(), 100u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_schedule_action(&action, &100);
+        assert!(res_sch.is_err(), "Unauthorized schedule_action must fail");
+
+        // Schedule a legitimate action by admin
+        let prop_id = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "schedule_action",
+                    args: (action.clone(), 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .schedule_action(&action, &0);
+
+        // 3. Unauthorized cancel_action by non-admin
+        let res_cnl = client
+            .mock_auths(&[MockAuth {
+                address: &imposter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "cancel_action",
+                    args: (prop_id,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_cancel_action(&prop_id);
+        assert!(res_cnl.is_err(), "Unauthorized cancel_action must fail");
+
+        let prop = client.get_timelock_proposal(&prop_id).expect("proposal exists");
+        assert_eq!(prop.status, ProposalStatus::Scheduled, "Proposal must remain Scheduled");
+
+        // 4. Unauthorized touch_batch by non-admin
+        let res_touch = client
+            .mock_auths(&[MockAuth {
+                address: &imposter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "touch_batch",
+                    args: (1u32, 10u32).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_touch_batch(&1, &10);
+        assert!(res_touch.is_err(), "Unauthorized touch_batch must fail");
+    }
+
 }
