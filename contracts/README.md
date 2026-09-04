@@ -7,6 +7,7 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
 ## Contracts
 
 ### 1. TalosRegistry
+
 - **Purpose**: Creates and manages Talos entities on-chain
 - **Features**:
   - Talos creation with metadata (name, category, description)
@@ -24,6 +25,7 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
   - Events: `tls_crt`, `tls_crt2`, `pat_upd`, `fee_chg`, `adm_prp`, `adm_acc`, `adm_cnl`, `tl_sch`, `tl_exec`, `tl_cnl`, `tl_cfg`, `dep_path`
 
 ### 2. TalosNameService
+
 - **Purpose**: Human-readable name registration for Talos IDs
 - **Features**:
   - Name → Talos ID mapping (e.g., "marketbot" → 42)
@@ -54,6 +56,19 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
   - **Scoped emergency pause controls** (`pause_domain` / `unpause_domain` / `is_domain_paused`) with domain-scoped pausing, auto-expiration, and event emission
 
 All three contracts include scoped emergency pause controls with domain-based pause/unpause, auto-expiration, and event emission.
+
+## Event Schema Compatibility
+
+Both contracts expose a pure-read `event_schema_version()` entry point that
+returns a typed `{ major, minor }` value. The current canonical version is
+`{ major: 1, minor: 0 }`.
+
+Indexers should call this helper during startup and reject or quarantine a
+deployment whose `major` version they do not support. A major-version change
+indicates a breaking event payload change; minor versions are reserved for
+backwards-compatible additions.
+
+The helper does not alter event names, topics, data fields, or field order.
 
 ## Prerequisites
 

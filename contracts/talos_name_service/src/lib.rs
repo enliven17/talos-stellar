@@ -18,6 +18,25 @@ use soroban_sdk::{
 use ttl_manager;
 use pause_control;
 
+// ── Event Schema Version ────────────────────────────────────────────
+
+/// Major event-schema version supported by this contract.
+const SUPPORTED_MAJOR: u32 = 1;
+
+/// Typed event-schema version returned to off-chain indexers.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventSchemaVersion {
+    pub major: u32,
+    pub minor: u32,
+}
+
+/// Canonical event-schema version for this contract.
+pub const EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion {
+    major: SUPPORTED_MAJOR,
+    minor: 0,
+};
+
 // ── Data Types ──────────────────────────────────────────────────────
 
 #[contracttype]
@@ -1110,6 +1129,17 @@ impl TalosNameService {
         get_guardians(&e)
     }
 
+    /// Return the event-schema version expected by off-chain indexers.
+    ///
+    /// This is a pure read. Indexers should reject a deployment when its
+    /// major version differs from the version they support.
+    pub fn event_schema_version(_e: Env) -> EventSchemaVersion {
+        if EVENT_SCHEMA_VERSION.major != SUPPORTED_MAJOR {
+            panic!("Unsupported event schema major version");
+        }
+        EVENT_SCHEMA_VERSION
+    }
+
     /// Resolve a name to a Talos ID.
     /// Returns None if the name doesn't exist.
     pub fn resolve_name(e: Env, name: String) -> Option<u32> {
@@ -1574,6 +1604,23 @@ mod tests {
             registry_client,
             name_service_client,
         )
+    }
+
+    #[test]
+    fn event_schema_version_returns_expected_value() {
+        let (_, _, _, _, _, client) = setup();
+
+        let version = client.event_schema_version();
+
+        assert_eq!(version.major, 1);
+        assert_eq!(version.minor, 0);
+    }
+
+    #[test]
+    fn event_schema_version_major_is_supported() {
+        let (_, _, _, _, _, client) = setup();
+
+        assert_eq!(client.event_schema_version().major, SUPPORTED_MAJOR);
     }
 
     fn s(env: &Env, value: &str) -> String {

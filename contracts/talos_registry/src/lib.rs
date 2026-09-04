@@ -24,6 +24,25 @@ use storage_migration;
 use ttl_manager;
 use pause_control;
 
+// ── Event Schema Version ────────────────────────────────────────────
+
+/// Major event-schema version supported by this contract.
+const SUPPORTED_MAJOR: u32 = 1;
+
+/// Typed event-schema version returned to off-chain indexers.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventSchemaVersion {
+    pub major: u32,
+    pub minor: u32,
+}
+
+/// Canonical event-schema version for this contract.
+pub const EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion {
+    major: SUPPORTED_MAJOR,
+    minor: 0,
+};
+
 // ── Data Types ──────────────────────────────────────────────────────
 
 #[contracttype]
@@ -1343,6 +1362,17 @@ impl TalosRegistry {
         amount * fee_bps as i128 / MAX_PROTOCOL_FEE_BPS as i128
     }
 
+    /// Return the event-schema version expected by off-chain indexers.
+    ///
+    /// This is a pure read. Indexers should reject a deployment when its
+    /// major version differs from the version they support.
+    pub fn event_schema_version(_e: Env) -> EventSchemaVersion {
+        if EVENT_SCHEMA_VERSION.major != SUPPORTED_MAJOR {
+            panic!("Unsupported event schema major version");
+        }
+        EVENT_SCHEMA_VERSION
+    }
+
     // ── Allowlist Management ──────────────────────────────────────
 
     /// Check whether an asset is allowlisted for value-transfer operations.
@@ -1607,6 +1637,25 @@ mod tests {
         let env = Env::default();
         let contract_id = env.register_contract(None, TalosRegistry);
         (env, contract_id)
+    }
+
+    #[test]
+    fn event_schema_version_returns_expected_value() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+
+        let version = client.event_schema_version();
+
+        assert_eq!(version.major, 1);
+        assert_eq!(version.minor, 0);
+    }
+
+    #[test]
+    fn event_schema_version_major_is_supported() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+
+        assert_eq!(client.event_schema_version().major, SUPPORTED_MAJOR);
     }
 
     fn s(env: &Env, value: &str) -> String {
