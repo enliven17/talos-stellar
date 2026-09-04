@@ -21,6 +21,7 @@ import {
   forbidden,
   notFound,
   internalError,
+  sanitizeRequestId,
 } from "@/lib/api-response";
 
 function makeRequest(opts: { requestId?: string; url?: string } = {}): Request {
@@ -31,17 +32,31 @@ function makeRequest(opts: { requestId?: string; url?: string } = {}): Request {
 }
 
 describe("getRequestId()", () => {
-  it("echoes the x-request-id header when present", () => {
+  it("echoes a trusted x-request-id header when present", () => {
     const req = makeRequest({ requestId: "my-req-id" });
     expect(getRequestId(req)).toBe("my-req-id");
   });
 
-  it("generates a UUID when the header is absent", () => {
+  it("generates a safe bounded ID when the header is absent", () => {
     const req = makeRequest();
     const id = getRequestId(req);
-    expect(id).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-    );
+    expect(id).toMatch(/^[A-Za-z0-9._~-]{1,128}$/);
+    expect(id.length).toBeLessThanOrEqual(128);
+  });
+
+  it("rejects malformed incoming IDs and generates a safe replacement", () => {
+    const sanitized = sanitizeRequestId("bad id\nwith:secrets && drop");
+    expect(sanitized).toMatch(/^[A-Za-z0-9._~:-]{1,128}$/);
+    expect(sanitized).toBe("bad-id-with:secrets-drop");
+
+    const malformed = "bad id\nwith:secrets && drop";
+    const req = {
+      headers: { get: (name: string) => (name === "x-request-id" ? malformed : null) },
+    } as unknown as Request;
+
+    const id = getRequestId(req);
+    expect(id).toMatch(/^[A-Za-z0-9._~:-]{1,128}$/);
+    expect(id).not.toBe(malformed);
   });
 });
 

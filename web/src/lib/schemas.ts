@@ -4,6 +4,7 @@
  */
 import { z } from "zod/v4";
 import { StrKey } from "@stellar/stellar-sdk";
+import { errorResponse } from "./api-response";
 
 export const stellarAssetCodeSchema = z
   .string()
@@ -500,8 +501,8 @@ export const BODY_LIMIT_BYTES: number = (() => {
 })();
 
 /** Shared 413 response — body content is never echoed. */
-const payloadTooLarge = () =>
-  Response.json({ error: "Payload Too Large" }, { status: 413 });
+const payloadTooLarge = (request: Request) =>
+  errorResponse(request, 413, "PAYLOAD_TOO_LARGE", "Payload too large");
 
 /**
  * Parse and validate a JSON request body with a Zod schema.
@@ -526,7 +527,7 @@ export async function parseBody<T extends z.ZodType>(
   if (contentLength !== null) {
     const declared = parseInt(contentLength, 10);
     if (Number.isFinite(declared) && declared > BODY_LIMIT_BYTES) {
-      return { error: payloadTooLarge() };
+      return { error: payloadTooLarge(request) };
     }
   }
 
@@ -535,13 +536,13 @@ export async function parseBody<T extends z.ZodType>(
   try {
     const bytes = await request.arrayBuffer();
     if (bytes.byteLength > BODY_LIMIT_BYTES) {
-      return { error: payloadTooLarge() };
+      return { error: payloadTooLarge(request) };
     }
     const text = new TextDecoder().decode(bytes);
     raw = JSON.parse(text);
   } catch {
     return {
-      error: Response.json({ error: "Invalid JSON body" }, { status: 400 }),
+      error: errorResponse(request, 400, "INVALID_JSON", "Invalid JSON body"),
     };
   }
 
@@ -551,10 +552,7 @@ export async function parseBody<T extends z.ZodType>(
       (i) => `${i.path.join(".")}: ${i.message}`,
     );
     return {
-      error: Response.json(
-        { error: "Validation failed", issues },
-        { status: 400 },
-      ),
+      error: errorResponse(request, 400, "VALIDATION_ERROR", "Validation failed", issues),
     };
   }
 

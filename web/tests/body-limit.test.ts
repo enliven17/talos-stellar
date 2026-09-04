@@ -94,8 +94,14 @@ describe("parseBody — body size guard", () => {
     expect(result.error!.status).toBe(413);
     const body = await result.error!.json();
     // Only the safe error key must be present — no input data echoed.
-    expect(body).toEqual({ error: "Payload Too Large" });
-    expect(Object.keys(body)).toHaveLength(1);
+    expect(body).toMatchObject({
+      code: "PAYLOAD_TOO_LARGE",
+      message: "Payload too large",
+    });
+    expect(body.requestId).toEqual(expect.any(String));
+    expect(Object.keys(body)).toEqual(
+      expect.arrayContaining(["code", "message", "requestId"]),
+    );
   });
 
   it("rejects via Content-Length fast path before reading the stream", async () => {
@@ -145,7 +151,11 @@ describe("parseBody — existing behaviour preserved (valid-size requests)", () 
     expect(result.error).toBeDefined();
     expect(result.error!.status).toBe(400);
     const body = await result.error!.json();
-    expect(body.error).toBe("Invalid JSON body");
+    expect(body).toMatchObject({
+      code: "INVALID_JSON",
+      message: "Invalid JSON body",
+    });
+    expect(body.requestId).toEqual(expect.any(String));
   });
 
   it("returns 400 for a valid-size body that fails schema validation", async () => {
@@ -160,7 +170,11 @@ describe("parseBody — existing behaviour preserved (valid-size requests)", () 
     expect(result.error).toBeDefined();
     expect(result.error!.status).toBe(400);
     const body = await result.error!.json();
-    expect(body.error).toBe("Validation failed");
+    expect(body).toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: "Validation failed",
+    });
+    expect(body.requestId).toEqual(expect.any(String));
     expect(Array.isArray(body.issues)).toBe(true);
   });
 });
