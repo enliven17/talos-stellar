@@ -136,7 +136,11 @@ describe("GET /api/activity", () => {
             timestamp: "2026-07-23T10:00:00.000Z",
           },
         ],
-        nextCursor: null,
+        nextCursor: encodeActivityCursor({
+          createdAt: "2026-07-23T10:00:00.000Z",
+          type: "service",
+          id: "service-1",
+        }),
       },
       { transactions: [], nextCursor: null },
     ];
@@ -173,7 +177,7 @@ describe("GET /api/activity", () => {
     expect(pageTwo.status).toBe(200);
     expect(pageThree.status).toBe(200);
     expect(pageOneBody.nextCursor).toBe(fixturePages[0].nextCursor);
-    expect(pageTwoBody.nextCursor).toBeNull();
+    expect(pageTwoBody.nextCursor).toBe(fixturePages[1].nextCursor);
     expect(pageThreeBody.nextCursor).toBeNull();
     expect(combined.map((item) => item.id)).toEqual([
       "service-3",
