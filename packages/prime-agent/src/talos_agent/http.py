@@ -65,6 +65,9 @@ SECRET_FIELD_NAMES = {
     "password",
     "private_key",
     "privateKey",
+    # The x402 payment header carries a signed payment payload (#439).
+    "x-payment",
+    "x_payment",
 }
 
 DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
@@ -134,7 +137,7 @@ def _sanitize_response_text(text: str) -> str:
     )
     sanitized = re.sub(r"S[A-Z2-7]{55}", "[REDACTED]", sanitized)
     sanitized = re.sub(
-        r"""(?i)(?:api[_-]?key|token|secret|authorization|password|private[_-]?key)["'`]?\s*[:=]\s*["'`]([^"'`\s]+)["'`]?""",
+        r"""(?i)(?:api[_-]?key|token|secret|authorization|password|private[_-]?key|x[-_]payment)["'`]?\s*[:=]\s*["'`]?([^"'`\s]+)["'`]?""",
         lambda m: f"{m.group(0).split(m.group(1))[0]}[REDACTED]",
         sanitized,
     )

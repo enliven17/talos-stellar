@@ -16,6 +16,7 @@ from enum import Enum
 from typing import Any, Callable
 
 from talos_agent.circuit_breaker import CircuitBreakerOpen, cb_registry
+from talos_agent.http import _sanitize_response_text
 from talos_agent.telemetry import _is_sensitive_key
 
 logger = logging.getLogger(__name__)
@@ -245,11 +246,14 @@ class FallbackChain:
                 )
             except CircuitBreakerOpen as exc:
                 await breaker.record_failure()
-                attempts.append((provider_name, str(exc)))
+                # The message carries a caller-supplied fallback hint, so it is redacted
+                # like any other exception text before it is kept or logged.
+                open_msg = _sanitize_response_text(str(exc))
+                attempts.append((provider_name, open_msg))
                 logger.warning(
                     "Fallback: '%s' rejected by circuit breaker — %s",
                     provider_name,
-                    exc,
+                    open_msg,
                 )
                 continue
             except _OperationTimeoutError as exc:
@@ -337,7 +341,9 @@ class FallbackChain:
 def _summarise_exception(exc: Exception) -> str:
     """Return a concise, safe summary of an exception for logging."""
     exc_type = type(exc).__name__
-    msg = str(exc)
+    # Redact BEFORE truncating: cutting first can leave a token prefix that the redaction
+    # patterns no longer recognise (#439).
+    msg = _sanitize_response_text(str(exc))
     # Truncate long messages to avoid log floods
     if len(msg) > 200:
         msg = msg[:197] + "..."
