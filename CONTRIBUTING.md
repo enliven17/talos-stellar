@@ -340,6 +340,29 @@ Choose the focused command by area:
 
 Deploy commands such as `pnpm --dir contracts run deploy:testnet` and `./deploy.sh testnet` require configured Stellar credentials and network access. Treat failures from missing signers, RPC timeouts, Horizon rate limits, or Soroban testnet availability as deployment-environment issues unless local `cargo test` or Wasm build also fails.
 
+### Release automation changes
+
+The release planner/tagger/rollback and its tests live in `scripts/release/`. They are pure Node + git — no database, `.env`, or package install is required — so they are the fastest thing to run when touching release behavior. Expected output is the `node:test` TAP report.
+
+```bash
+# From the repository root (POSIX or PowerShell)
+pnpm run test:release
+
+# Or the focused rollback coverage only
+node --test scripts/release/rollback.test.mjs
+node --test scripts/release/rollback-smoke.test.mjs
+```
+
+Choose the focused command by area:
+
+| Changed files | Focused command | CI workflow |
+| --- | --- | --- |
+| `scripts/release/cli.mjs`, `classify.mjs`, `components.mjs`, `version-files.mjs` | `node --test scripts/release/*.test.mjs` | `CI — Changed-Path Package Matrix` (`release-scripts`) |
+| `scripts/release/rollback.mjs`, rollback smoke test | `node --test scripts/release/rollback-smoke.test.mjs` | `CI — Changed-Path Package Matrix` (`release-scripts`) |
+| `scripts/ci-detect-changes.sh` | `bash scripts/ci-detect-changes.test.sh` | `CI — Changed-Path Package Matrix` |
+
+See [`RELEASES.md`](./RELEASES.md#driving-a-rollback-locally) for the rollback procedure these tests pin down.
+
 ### Common failure messages
 
 | Message | Usually means | Next step |
@@ -353,6 +376,7 @@ Deploy commands such as `pnpm --dir contracts run deploy:testnet` and `./deploy.
 | `Browser bundle not built` or missing `packages/sdk/dist/browser/sdk.bundle.js` | SDK build did not produce the expected browser artifact | Run `pnpm --filter @talos-protocol/sdk run build:browser` or the full SDK build. |
 | `ruff` violations | Python formatting or lint rule failures | Run `uv run ruff check src tests` in `packages/prime-agent/` and fix the reported files. |
 | `wasm32-unknown-unknown` target not installed | Rust cannot build Soroban Wasm artifacts | Run `rustup target add wasm32-unknown-unknown`. |
+| `specify --component=<name> or --tag=<tag>` or `no tag named ...` from `cli.mjs rollback` | Ambiguous selector, or the tag was already rolled back | Pass exactly one selector; drop `--strict` if an already-gone tag should be a no-op. |
 | PR preview comment is present but Vercel URL is absent | The repo preview workflow provisions the mock DB; Vercel attaches previews separately | Check Vercel's GitHub integration/status before treating it as an application failure. |
 
 ## Code Style

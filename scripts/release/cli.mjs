@@ -4,6 +4,8 @@
 // Usage:
 //   node scripts/release/cli.mjs plan [--prerelease=<channel>] [--summary-out=<file>]
 //   node scripts/release/cli.mjs tag [--create]
+//   node scripts/release/cli.mjs rollback (--component=<name> | --tag=<tag>)
+//       [--delete-tag] [--strict] [--json]
 //
 // See RELEASES.md for the full workflow this drives.
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
@@ -17,7 +19,8 @@ import {
 } from "./classify.mjs";
 import { readVersion, writeVersion } from "./version-files.mjs";
 import { COMPONENTS } from "./components.mjs";
-import { latestTag, tagExists, commitsTouchingPaths, createAnnotatedTag } from "./git.mjs";
+import { latestTag, tagExists, commitsTouchingPaths, createAnnotatedTag, ensureRepository } from "./git.mjs";
+import { rollbackRelease, RollbackInputError } from "./rollback.mjs";
 
 // Overridable so integration tests can point the CLI at a throwaway repo
 // instead of the real one.
@@ -158,13 +161,52 @@ function tagCommand(args) {
   console.log(JSON.stringify(releasable, null, 2));
 }
 
+function rollbackCommand(args) {
+  const getArg = (name) => args.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3);
+  const component = getArg("component");
+  const tag = getArg("tag");
+  const removeTag = args.includes("--delete-tag");
+  const strict = args.includes("--strict");
+  const asJson = args.includes("--json");
+
+  ensureRepository(REPO_ROOT);
+
+  const result = rollbackRelease({
+    repoRoot: REPO_ROOT,
+    componentName: component,
+    tag,
+    deleteTag: removeTag,
+    strict,
+  });
+
+  if (asJson) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  console.log(result.message);
+  if (result.remoteCommands.length > 0) {
+    console.log("Remote cleanup (run manually; tags are immutable once pushed):");
+    for (const cmd of result.remoteCommands) console.log(`  ${cmd}`);
+  }
+}
+
 const [, , command, ...rest] = process.argv;
 
 if (command === "plan") {
   planCommand(rest);
 } else if (command === "tag") {
   tagCommand(rest);
+} else if (command === "rollback") {
+  try {
+    rollbackCommand(rest);
+  } catch (err) {
+    // Print the explicit, privacy-safe message without a stack trace; rollback
+    // failures must be actionable, not noisy.
+    console.error(err instanceof RollbackInputError ? err.message : err?.message || String(err));
+    process.exit(1);
+  }
 } else {
-  console.error("usage: cli.mjs <plan|tag> [options]");
+  console.error("usage: cli.mjs <plan|tag|rollback> [options]");
   process.exit(1);
 }

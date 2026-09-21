@@ -19,6 +19,27 @@ export function tagExists(cwd, tag) {
 }
 
 /**
+ * Removes a local tag. Only the local ref is deleted — pushing the deletion
+ * (/ force-updating a published tag) is an explicit, separate operator action.
+ */
+export function deleteTag(cwd, tag) {
+  git(cwd, ["tag", "--delete", tag]);
+}
+
+/**
+ * Fails closed with an explicit error when `cwd` is not inside a git work tree,
+ * so rollback never reports success against the wrong directory.
+ */
+export function ensureRepository(cwd) {
+  try {
+    const out = git(cwd, ["rev-parse", "--is-inside-work-tree"]);
+    if (out !== "true") throw new Error("not a work tree");
+  } catch {
+    throw new Error(`not a git repository: ${cwd}`);
+  }
+}
+
+/**
  * Commits touching `paths`, oldest first. `sinceTag` is exclusive; when null
  * the full history reachable from HEAD is used.
  */

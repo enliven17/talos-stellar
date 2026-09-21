@@ -14,6 +14,7 @@
     "stack:logs": "bash scripts/local-stack.sh logs",
     "stack:reset": "bash scripts/local-stack.sh reset",
     "test:fixtures": "pnpm --dir contracts test:fixtures",
+    "test:release": "node --test \"scripts/release/*.test.mjs\"",
     "fixtures:gen": "node scripts/generate-registry-fixtures.mjs",
     "fixtures:check": "node scripts/generate-registry-fixtures.mjs --check"
   },

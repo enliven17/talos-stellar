@@ -162,3 +162,23 @@ jobs:
         if: matrix.package == 'contracts'
         working-directory: contracts
         run: cargo build --target wasm32-unknown-unknown --release
+
+  # ─────────────────────────────────────────────────────────────────
+  # Job 3: Release automation scripts (planner/tagger/rollback).
+  # Node + git only — no dependency install, so it always runs and is
+  # cheap. Covers the release rollback smoke test.
+  # ─────────────────────────────────────────────────────────────────
+  release-scripts:
+    name: "check · release scripts"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Release script tests
+        run: node --test "scripts/release/*.test.mjs"
+

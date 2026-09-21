@@ -65,6 +65,28 @@ GitHub automatically.
 - **A bad version shipped**: cut a new patch/major release with the fix rather than mutating the
   old tag. Consumers that pinned the bad version are unaffected until they upgrade.
 
+### Driving a rollback locally
+
+`node scripts/release/cli.mjs rollback` automates the safe half of the procedure above: it
+resolves the tag for a component, deletes the **local** tag, and prints the destructive remote
+cleanup for an operator to run deliberately. It never force-pushes, re-tags, or touches the
+remote, matching the immutable-tag policy.
+
+```bash
+# Exactly one selector is required; ambiguous input fails closed (exit 1).
+node scripts/release/cli.mjs rollback --component=sdk              # dry run (default)
+node scripts/release/cli.mjs rollback --component=sdk --delete-tag # delete the local tag
+node scripts/release/cli.mjs rollback --tag=sdk-v1.2.3 --delete-tag
+node scripts/release/cli.mjs rollback --component=sdk --delete-tag --json   # machine-readable
+
+# When the tag is already gone, plain mode is a no-op; --strict fails closed:
+node scripts/release/cli.mjs rollback --component=sdk --delete-tag --strict
+```
+
+The command prints (but never runs) `git push origin :refs/tags/<tag>` and
+`gh release delete "<tag>" --yes`. After deleting the tag, revert the release commit and let
+`Release Plan` recompute — the smoke test below exercises exactly that cycle.
+
 ## Local reproduction
 
 ```bash
@@ -75,7 +97,14 @@ git checkout -- .   # discard the dry run
 
 # Run the test suite for the release scripts:
 node --test scripts/release/*.test.mjs
+
+# End-to-end release rollback smoke test (plan -> tag -> rollback -> revert -> re-release):
+node --test scripts/release/rollback-smoke.test.mjs
 ```
+
+The release-script tests are pure Node + git and need no database or `.env`; they scaffold a
+throwaway repo under the OS temp directory, so they are safe to run anywhere. `Release Scripts
+CI` (`.github/workflows/ci.yml`) runs the same command on every push and pull request.
 
 ## Signed SBOMs and build provenance
 
