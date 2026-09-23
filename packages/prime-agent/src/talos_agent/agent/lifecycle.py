@@ -1,7 +1,9 @@
 """Agent lifecycle transition management (pause, recovery, retirement)."""
 
+import json
 import logging
 from enum import Enum
+from typing import Any, Dict, Optional
 
 from talos_agent.config import Settings
 from talos_agent.db import LocalDB
@@ -9,6 +11,10 @@ from talos_agent.api_client import TalosAPIClient
 from talos_agent.payments.stellar_kit import StellarKit
 
 logger = logging.getLogger(__name__)
+
+# Constants for state persistence
+LIFECYCLE_STATE_KEY = "lifecycle_state"
+
 
 class LifecycleState(str, Enum):
     ACTIVE = "active"
@@ -25,7 +31,45 @@ class LifecycleManager:
         self.db = db
         self.api = api
         self.stellar = stellar
-        self.state = LifecycleState.ACTIVE
+        # Initialize state from persistent storage if available, otherwise default to ACTIVE
+        self.state = self._load_state() or LifecycleState.ACTIVE
+
+    def _load_state(self) -> Optional[LifecycleState]:
+        """Load the persisted lifecycle state from the database.
+        
+        Returns:
+            The persisted LifecycleState if found and valid, otherwise None.
+        """
+        try:
+            raw_state = self.db.get(LIFECYCLE_STATE_KEY)
+            if raw_state is None:
+                return None
+            
+            # Handle potential malformed JSON or invalid state values
+            try:
+                state_str = raw_state if isinstance(raw_state, str) else json.loads(raw_state)
+                if state_str in [s.value for s in LifecycleState]:
+                    return LifecycleState(state_str)
+                else:
+                    logger.warning(f"Invalid persisted state value: {state_str}. Resetting to default.")
+                    return None
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.warning(f"Malformed persisted state data: {e}. Resetting to default.")
+                return None
+        except Exception as e:
+            logger.error(f"Failed to load lifecycle state: {e}")
+            return None
+
+    def _save_state(self, state: LifecycleState) -> None:
+        """Persist the current lifecycle state to the database.
+        
+        Args:
+            state: The LifecycleState to persist.
+        """
+        try:
+            self.db.set(LIFECYCLE_STATE_KEY, state.value)
+        except Exception as e:
+            logger.error(f"Failed to persist lifecycle state: {e}")
 
     async def transition_to_paused(self) -> dict:
         """Pause the agent. Rotates credentials, suspends operations."""
@@ -40,6 +84,9 @@ class LifecycleManager:
         
         # Notify API of state change
         await self._notify_state_change("paused")
+        
+        # Persist state
+        self._save_state(self.state)
         
         return {
             "status": "success",
@@ -62,6 +109,9 @@ class LifecycleManager:
         # Notify API
         await self._notify_state_change("retired")
         
+        # Persist state
+        self._save_state(self.state)
+        
         return {
             "status": "success",
             "state": "retired",
@@ -74,14 +124,22 @@ class LifecycleManager:
         logger.info("Transitioning agent to RECOVERING state.")
         self.state = LifecycleState.RECOVERING
         
+        # Persist intermediate recovering state
+        self._save_state(self.state)
+        
         # Attempt recovery logic (mocked)
         recovery_status = await self._recover_state()
         
         if recovery_status:
             self.state = LifecycleState.ACTIVE
             await self._notify_state_change("active")
+            # Persist final active state
+            self._save_state(self.state)
             return {"status": "success", "state": "active"}
         
+        # If recovery fails, stay in recovering state or revert? 
+        # For now, keep as recovering but persist failure state if needed.
+        # The state is already saved as RECOVERING.
         return {"status": "failure", "state": "recovering"}
 
     async def _revoke_credentials(self) -> bool:

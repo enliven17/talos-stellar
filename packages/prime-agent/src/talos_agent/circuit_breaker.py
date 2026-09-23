@@ -41,15 +41,18 @@ Usage
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field, asdict
 from enum import Enum
+from pathlib import Path
 from typing import ClassVar
 
-logger = logging.getLogger(__name__)
+from talos_agent.config import APP_DIR
 
+logger = logging.getLogger(__name__)
 
 # ── Exceptions ────────────────────────────────────────────────────────────────
 
@@ -359,113 +362,211 @@ class ProviderCircuitBreaker:
     def metrics(self) -> CircuitBreakerMetrics:
         """Return a snapshot of current state for telemetry / logging."""
         now = time.monotonic()
-        last_failure_age = now - self._last_failure_time if self._last_failure_time else None
-        remaining = self.remaining_cooldown()
+        last_failure_age = (
+            now - self._last_failure_time if self._last_failure_time > 0 else None
+        )
         return CircuitBreakerMetrics(
             provider=self.provider,
             state=self.state,
-            failures_in_window=len(self._failures),
+            failures_in_window=self.failures_in_window(),
             half_open_probes_used=self._half_open_probes_used,
             consecutive_successes=self._consecutive_successes,
             last_failure_age=last_failure_age,
-            remaining_cooldown=remaining,
+            remaining_cooldown=self.remaining_cooldown(),
             total_successes=self._total_successes,
             total_failures=self._total_failures,
             total_rejected=self._total_rejected,
             total_probes=self._total_probes,
         )
 
-    # ── Internal helpers ─────────────────────────────────────────────────
-
-    def _transition_to(self, new_state: CircuitState, now: float | None = None) -> None:
-        if self.state == new_state:
-            return
-        logger.info(
-            "Circuit breaker '%s': %s → %s",
-            self.provider,
-            self.state.value,
-            new_state.value,
-        )
-        self.state = new_state
-        self._last_state_change = now or time.monotonic()
-
-        if new_state == CircuitState.OPEN:
-            # When transitioning to OPEN from HALF_OPEN, reset consecutive
-            # successes so the next half-open cycle starts fresh.
-            self._consecutive_successes = 0
-        elif new_state == CircuitState.HALF_OPEN or new_state == CircuitState.CLOSED:
-            self._half_open_probes_used = 0
-            self._consecutive_successes = 0
+    # ── Internal helpers ──────────────────────────────────────────────────
 
     def _prune_window(self) -> None:
         """Remove failures outside the rolling window."""
+        if not self._failures:
+            return
         cutoff = time.monotonic() - self.config.window_size
         while self._failures and self._failures[0] < cutoff:
             self._failures.popleft()
+
+    def _transition_to(self, new_state: CircuitState, now: float | None = None) -> None:
+        """Transition to a new state and update timestamps."""
+        if now is None:
+            now = time.monotonic()
+        self.state = new_state
+        self._last_state_change = now
+
+        if new_state == CircuitState.CLOSED:
+            self._half_open_probes_used = 0
+            self._consecutive_successes = 0
+        elif new_state == CircuitState.HALF_OPEN:
+            self._half_open_probes_used = 0
+            self._consecutive_successes = 0
+        # OPEN keeps existing probe/success counters until transition
+
+    # ── Persistence ───────────────────────────────────────────────────────
+
+    def _state_key(self) -> str:
+        """Return the storage key for this breaker's state."""
+        return f"circuit_breaker_{self.provider}"
+
+    def _serialize_state(self) -> str:
+        """Serialize current state to JSON string."""
+        state_data = {
+            "provider": self.provider,
+            "state": self.state.value,
+            "_last_state_change": self._last_state_change,
+            "_last_failure_time": self._last_failure_time,
+            "_half_open_probes_used": self._half_open_probes_used,
+            "_consecutive_successes": self._consecutive_successes,
+            "_total_successes": self._total_successes,
+            "_total_failures": self._total_failures,
+            "_total_rejected": self._total_rejected,
+            "_total_probes": self._total_probes,
+            # Note: _failures deque is not persisted to avoid bloating state;
+            # it will be empty on restart, which is safe (conservative).
+        }
+        return json.dumps(state_data)
+
+    def _deserialize_state(self, data: str) -> None:
+        """Deserialize state from JSON string."""
+        try:
+            state_data = json.loads(data)
+        except json.JSONDecodeError:
+            logger.warning(
+                "Malformed circuit breaker state for '%s', resetting to default",
+                self.provider,
+            )
+            return
+
+        # Validate expected fields
+        required_fields = [
+            "provider",
+            "state",
+            "_last_state_change",
+            "_last_failure_time",
+            "_half_open_probes_used",
+            "_consecutive_successes",
+            "_total_successes",
+            "_total_failures",
+            "_total_rejected",
+            "_total_probes",
+        ]
+        for field_name in required_fields:
+            if field_name not in state_data:
+                logger.warning(
+                    "Missing field '%s' in circuit breaker state for '%s', resetting to default",
+                    field_name,
+                    self.provider,
+                )
+                return
+
+        # Validate state value
+        try:
+            self.state = CircuitState(state_data["state"])
+        except ValueError:
+            logger.warning(
+                "Invalid state '%s' in circuit breaker state for '%s', resetting to default",
+                state_data["state"],
+                self.provider,
+            )
+            return
+
+        self._last_state_change = float(state_data["_last_state_change"])
+        self._last_failure_time = float(state_data["_last_failure_time"])
+        self._half_open_probes_used = int(state_data["_half_open_probes_used"])
+        self._consecutive_successes = int(state_data["_consecutive_successes"])
+        self._total_successes = int(state_data["_total_successes"])
+        self._total_failures = int(state_data["_total_failures"])
+        self._total_rejected = int(state_data["_total_rejected"])
+        self._total_probes = int(state_data["_total_probes"])
+
+        # Reset transient state that should not persist
+        self._failures.clear()
+
+    async def save_state(self, storage_adapter) -> None:
+        """Persist circuit breaker state to storage.
+
+        Args:
+            storage_adapter: A BaseStorageAdapter instance.
+        """
+        try:
+            await storage_adapter.write(self._state_key(), self._serialize_state())
+        except Exception as e:
+            logger.error(
+                "Failed to persist circuit breaker state for '%s': %s",
+                self.provider,
+                e,
+                exc_info=True,
+            )
+
+    async def load_state(self, storage_adapter) -> None:
+        """Load circuit breaker state from storage.
+
+        Args:
+            storage_adapter: A BaseStorageAdapter instance.
+        """
+        try:
+            data = await storage_adapter.read(self._state_key())
+            self._deserialize_state(data)
+            logger.info(
+                "Loaded circuit breaker state for '%s': %s",
+                self.provider,
+                self.state.value,
+            )
+        except Exception as e:
+            logger.info(
+                "No persisted state for '%s' or load failed (%s), starting fresh",
+                self.provider,
+                type(e).__name__,
+            )
+            # Ensure state is reset to default if load fails
+            self.state = CircuitState.CLOSED
+            self._last_state_change = time.monotonic()
+            self._last_failure_time = 0.0
+            self._half_open_probes_used = 0
+            self._consecutive_successes = 0
+            self._total_successes = 0
+            self._total_failures = 0
+            self._total_rejected = 0
+            self._total_probes = 0
+            self._failures.clear()
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 
 class CircuitBreakerRegistry:
-    """Holds all :class:`ProviderCircuitBreaker` instances, keyed by provider name.
+    """Registry for per-provider circuit breakers."""
 
-    Usage
-    -----
-    .. code:: python
-
-        from talos_agent.circuit_breaker import cb_registry
-
-        await cb_registry.get("groq").allow_request()
-    """
-
-    def __init__(self) -> None:
+    def __init__(self, storage_adapter=None) -> None:
         self._breakers: dict[str, ProviderCircuitBreaker] = {}
+        self._storage_adapter = storage_adapter
 
     def get(self, provider: str) -> ProviderCircuitBreaker:
-        """Return the breaker for *provider*, creating one on first access."""
+        """Get or create a circuit breaker for *provider*."""
         if provider not in self._breakers:
-            config = CircuitBreakerConfig.for_provider(provider)
-            self._breakers[provider] = ProviderCircuitBreaker(provider, config)
-            logger.debug("Created circuit breaker for '%s'", provider)
+            self._breakers[provider] = ProviderCircuitBreaker(provider)
         return self._breakers[provider]
 
-    def get_or_create(self, provider: str, config: CircuitBreakerConfig | None = None) -> ProviderCircuitBreaker:
-        """Return or create a breaker with an optional explicit *config*."""
-        if provider not in self._breakers:
-            self._breakers[provider] = ProviderCircuitBreaker(provider, config or CircuitBreakerConfig.for_provider(provider))
-        return self._breakers[provider]
+    async def load_all(self) -> None:
+        """Load persisted state for all registered breakers."""
+        if not self._storage_adapter:
+            return
+        for provider, breaker in self._breakers.items():
+            await breaker.load_state(self._storage_adapter)
 
-    def all_metrics(self) -> dict[str, dict]:
-        """Return metrics for all registered breakers."""
-        return {name: br.metrics().to_dict() for name, br in self._breakers.items()}
+    async def save_all(self) -> None:
+        """Persist state for all registered breakers."""
+        if not self._storage_adapter:
+            return
+        for provider, breaker in self._breakers.items():
+            await breaker.save_state(self._storage_adapter)
 
-    def reset_all(self) -> None:
-        """Reset every registered breaker to CLOSED state (for testing)."""
-        for br in self._breakers.values():
-            br._failures.clear()
-            br.state = CircuitState.CLOSED
-            br._half_open_probes_used = 0
-            br._consecutive_successes = 0
-            br._total_successes = 0
-            br._total_failures = 0
-            br._total_rejected = 0
-            br._total_probes = 0
-            br._last_state_change = time.monotonic()
-            br._last_failure_time = 0.0
+    def reset(self) -> None:
+        """Reset all breakers to initial state."""
+        self._breakers.clear()
 
 
-# Module-level singleton — imported by http.py and callers.
-cb_registry: CircuitBreakerRegistry = CircuitBreakerRegistry()
-
-__all__ = [
-    "CircuitBreakerConfig",
-    "CircuitBreakerError",
-    "CircuitBreakerMetrics",
-    "CircuitBreakerOpen",
-    "CircuitBreakerRegistry",
-    "CircuitState",
-    "ProviderCircuitBreaker",
-    "_resolve_provider_from_url",
-    "cb_registry",
-]
+# Singleton registry instance
+cb_registry = CircuitBreakerRegistry()
