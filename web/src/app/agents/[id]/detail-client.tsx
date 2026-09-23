@@ -5,6 +5,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { useWallet } from "@/components/wallet-gate";
 import { AgentAvatar } from "@/components/agent-avatar";
 import { AgentLifecyclePanel } from "@/components/agent-lifecycle-panel";
+import { AgentAvailabilityBadge } from "@/components/agent-availability-badge";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER as STELLAR_USDC_ISSUER } from "@/lib/stellar-config";
 
 
@@ -428,9 +429,12 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
           <div>
           <div className="flex items-center gap-3 mb-2">
             <h1 className="text-2xl font-bold text-accent">{talos.name}</h1>
-            <span className={`text-xs ${talos.status === "Active" ? "text-accent font-bold" : "text-muted"}`}>
-              [{talos.agentOnline ? "ONLINE" : "OFFLINE"}]
-            </span>
+            <AgentAvailabilityBadge
+              agentOnline={talos.agentOnline}
+              agentLastSeen={talos.agentLastSeen}
+              status={talos.status}
+              size="md"
+            />
           </div>
           {talos.agentName && (
             <div className="flex items-center gap-2 text-sm text-foreground/70 mb-1">
@@ -447,9 +451,6 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
           <div className="flex items-center gap-4 mt-3 text-xs text-muted">
             <span>[{talos.category.toUpperCase()}]</span>
             <span>Created {talos.createdAt}</span>
-            {talos.agentLastSeen && !talos.agentOnline && (
-              <span>Last seen {new Date(talos.agentLastSeen).toLocaleDateString()}</span>
-            )}
           </div>
           </div>
         </div>
@@ -1308,9 +1309,12 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
           <div className="bg-surface border border-border p-6">
             <div className="flex items-center justify-between mb-6">
               <div className="text-xs text-muted">[PRIME AGENT STATUS]</div>
-              <span className={`text-xs ${talos.agentOnline ? "text-green-400" : "text-muted"}`}>
-                {talos.agentOnline ? "[ONLINE]" : "[OFFLINE]"}
-              </span>
+              <AgentAvailabilityBadge
+                agentOnline={talos.agentOnline}
+                agentLastSeen={talos.agentLastSeen}
+                status={talos.status}
+                size="sm"
+              />
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
               <div>
