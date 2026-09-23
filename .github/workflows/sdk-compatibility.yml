@@ -22,7 +22,7 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10
           run_install: false
       - name: Get pnpm store path
         shell: bash
@@ -76,7 +76,7 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10
           run_install: false
       - name: Get pnpm store path
         shell: bash
@@ -128,7 +128,7 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10
           run_install: false
       - name: Install runtime dependencies (for stellar-sdk)
         shell: bash
@@ -170,7 +170,7 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10
           run_install: false
       - name: Install runtime dependencies
         shell: bash
@@ -212,7 +212,7 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10
           run_install: false
       - name: Install runtime dependencies
         shell: bash
@@ -267,7 +267,7 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10
           run_install: false
       - name: Install runtime dependencies
         shell: bash

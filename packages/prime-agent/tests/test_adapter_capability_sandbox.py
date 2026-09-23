@@ -34,6 +34,11 @@ from talos_agent.adapters.capability import (
     default_manifests,
     load_manifests,
 )
+from talos_agent.adapters.diagnostics import (
+    MAX_ERROR_LENGTH,
+    MAX_PROVIDER_LENGTH,
+    safe_adapter_diagnostic_fields,
+)
 from talos_agent.adapters.registry import AdapterRegistry
 from talos_agent.adapters.telegram import TelegramAdapter, TelegramAdapterConfig
 from talos_agent.config import Settings
@@ -341,6 +346,67 @@ async def test_structured_events_never_include_payloads_or_secret_values(
         "adapter_capability_denied",
     }
     db.close()
+
+
+def test_adapter_diagnostic_schema_bounds_and_normalizes_untrusted_labels():
+    fields = safe_adapter_diagnostic_fields(
+        provider="provider-" + "x" * 500,
+        operation="post\nforged",
+        status="succeeded\r\nforged",
+        error_type="Error\x00" + "x" * 500,
+        operation_id="id\n" + "x" * 500,
+        target="target\r\n" + "x" * 500,
+        unexpected="must be dropped",
+    )
+
+    assert fields["adapter"] == "unknown"
+    assert fields["operation"] == "unknown"
+    assert fields["outcome"] == "unknown"
+    assert fields["error_type"] == "unknown"
+    assert fields["operation_id"] == "unknown"
+    assert len(fields["adapter"]) <= MAX_PROVIDER_LENGTH
+    assert "\n" not in repr(fields) and "\r" not in repr(fields)
+    assert "unexpected" not in fields
+
+
+def test_adapter_diagnostic_schema_redacts_nested_secrets_before_truncation():
+    fields = safe_adapter_diagnostic_fields(
+        adapter="telegram",
+        operation="post",
+        outcome="failed",
+        error={"context": {"api_key": "secret-value-that-must-never-appear"}, "message": "x" * 1000},
+    )
+
+    assert fields["adapter"] == "telegram"
+    assert fields["operation"] == "post"
+    assert fields["outcome"] == "failed"
+    assert "secret-value-that-must-never-appear" not in fields["error"]
+    assert "[REDACTED]" in fields["error"]
+    assert len(fields["error"]) <= MAX_ERROR_LENGTH
+
+
+def test_adapter_diagnostic_schema_preserves_normal_diagnostics():
+    assert safe_adapter_diagnostic_fields(
+        adapter="telegram",
+        operation="post",
+        operation_id="delivery-42",
+        outcome="succeeded",
+        error_type="TimeoutError",
+        capability="network",
+        resource="request",
+        target="api.telegram.org",
+        duration_ms=12.345,
+    ) == {
+        "adapter": "telegram",
+        "operation": "post",
+        "operation_id": "delivery-42",
+        "outcome": "succeeded",
+        "error_type": "TimeoutError",
+        "capability": "network",
+        "resource": "request",
+        "target": "api.telegram.org",
+        "duration_ms": 12.35,
+    }
 
 
 @pytest.mark.asyncio

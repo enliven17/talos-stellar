@@ -18,6 +18,7 @@ import {
   suppressSparseRecord,
   suppressSparseRows,
 } from "@/lib/analytics-privacy";
+import { parseAnalyticsLimit } from "@/lib/analytics-limits";
 
 export const dynamic = 'force-dynamic';
 
@@ -109,6 +110,13 @@ export async function GET(req: Request) {
   // if (!wallet) {
   //   return NextResponse.json({ error: "wallet parameter required" }, { status: 400 });
   // }
+
+  const url = new URL(req.url);
+  const parsedLimit = parseAnalyticsLimit(url.searchParams.get("limit"), 10, 50);
+  if (!parsedLimit.ok) {
+    return parsedLimit.response;
+  }
+  const detailedLimit = parsedLimit.limit;
   
   try {
     const now = new Date();
@@ -309,7 +317,7 @@ export async function GET(req: Request) {
     );
     const byAgent = visibleByAgent.rows
       .sort((a, b) => b.completionRate - a.completionRate)
-      .slice(0, 10);
+      .slice(0, detailedLimit);
 
     // Opportunity metrics
     // Calculate demand vs supply by category
@@ -351,7 +359,7 @@ export async function GET(req: Request) {
       row => categoryCohortSizes[row.category] ?? 0,
     );
     const underservedCategories = visibleUnderservedCategories.rows
-      .slice(0, 5);
+      .slice(0, Math.min(detailedLimit, 5));
 
     // Trending agents (by revenue growth)
     const agentRevenue7d = new Map<string, { total: number; events: number }>();
@@ -383,7 +391,7 @@ export async function GET(req: Request) {
       row => row.cohortSize,
     );
     const trendingAgents = visibleTrendingAgents.rows
-      .slice(0, 5)
+      .slice(0, Math.min(detailedLimit, 5))
       .map(agent => ({
         agentId: agent.agentId,
         agentName: agent.agentName,

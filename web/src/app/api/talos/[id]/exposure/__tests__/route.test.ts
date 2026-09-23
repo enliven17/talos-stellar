@@ -79,4 +79,43 @@ describe("GET /api/talos/:id/exposure", () => {
     expect(body.exposures[0].settledAmount).toBe(100);
     expect(body.windowDays).toBe(7);
   });
+
+  it("returns 400 when limit exceeds maximum allowed limit", async () => {
+    mocks.verifyAgentApiKey.mockResolvedValue({ ok: true, talos: { id: "agent-1", apiKey: "valid" } });
+
+    const response = await GET(new NextRequest("http://localhost/api/talos/agent-1/exposure?limit=150"), {
+      params: Promise.resolve({ id: "agent-1" }),
+    });
+
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toContain("exceeds maximum allowed limit of 100");
+  });
+
+  it.each(["0", "-1", "abc", "1.5", ""])("returns 400 for malformed limit=%s", async (val) => {
+    mocks.verifyAgentApiKey.mockResolvedValue({ ok: true, talos: { id: "agent-1", apiKey: "valid" } });
+
+    const response = await GET(new NextRequest(`http://localhost/api/talos/agent-1/exposure?limit=${val}`), {
+      params: Promise.resolve({ id: "agent-1" }),
+    });
+
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toBe("limit must be a positive integer");
+  });
+
+  it("accepts maximum limit of 100", async () => {
+    mocks.verifyAgentApiKey.mockResolvedValue({ ok: true, talos: { id: "agent-1", apiKey: "valid" } });
+    mocks.select
+      .mockReturnValueOnce(chain([{ id: "agent-1" }]))
+      .mockReturnValueOnce(chain([]));
+
+    const response = await GET(new NextRequest("http://localhost/api/talos/agent-1/exposure?limit=100"), {
+      params: Promise.resolve({ id: "agent-1" }),
+    });
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.pagination.limit).toBe(100);
+  });
 });

@@ -109,6 +109,9 @@ export class UnknownEventError extends EventQueryError {}
 /** Event payload does not match its catalog entry (topics/data shape). */
 export class MalformedEventError extends EventQueryError {}
 
+/** Event payload has an unsupported version field. */
+export class UnsupportedVersionError extends EventQueryError {}
+
 export class UnboundedRangeError extends EventQueryError {}
 export class UnboundedPageSizeError extends EventQueryError {}
 
@@ -284,6 +287,12 @@ function decodeData(set: FixtureSet, family: EventFamily, event: string, data: S
   entry.data.forEach((field, i) => {
     out[field.name ?? `data${i}`] = data[i].value;
   });
+
+  // Reject unsupported versions explicitly to prevent mis-decoding
+  if (out.version !== undefined && typeof out.version === 'number' && out.version > 1) {
+    fail(UnsupportedVersionError, `event ${event}: unsupported version ${out.version}`);
+  }
+
   return out;
 }
 

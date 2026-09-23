@@ -120,30 +120,119 @@ export async function signX402Payment(
   }
 }
 
+export type VerifyX402Result = {
+  valid: boolean;
+  errorCategory?: string;
+  errorMessage?: string;
+};
+
 /**
- * Verify an x402 payment token via the facilitator's /verify endpoint.
+ * Perform strict offline verification of the XDR payment token.
+ * Validates the transaction structure, network, missing operations, asset issuer, recipient, and amount.
+ */
+export function verifyX402PaymentOffline(
+  paymentToken: string,
+  expectedAmount: string,
+  expectedTo: string,
+): VerifyX402Result {
+  let tx;
+  const networkPassphrase =
+    process.env.STELLAR_NETWORK === "mainnet"
+      ? "Public Global Stellar Network ; September 2015"
+      : "Test SDF Network ; September 2015";
+
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { TransactionBuilder, Operation } = require("@stellar/stellar-sdk");
+
+  try {
+    tx = TransactionBuilder.fromXDR(paymentToken, networkPassphrase);
+  } catch (err: unknown) {
+    return { valid: false, errorCategory: "malformed-xdr", errorMessage: `Failed to parse XDR: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  // Verify transaction signature against the configured network
+  const { Keypair } = require("@stellar/stellar-sdk");
+  const hash = tx.hash();
+  const hasValidSignature = tx.signatures.some((sig: any) => {
+    try {
+      return Keypair.fromPublicKey(tx.source).verify(hash, sig.signature());
+    } catch {
+      return false;
+    }
+  });
+
+  if (!hasValidSignature) {
+    return { valid: false, errorCategory: "network", errorMessage: "Transaction signature is invalid or network passphrase mismatch" };
+  }
+
+  // Check missing operations
+  if (tx.operations.length !== 1) {
+    return { valid: false, errorCategory: "missing-operation", errorMessage: `Transaction must contain exactly one operation, found ${tx.operations.length}` };
+  }
+
+  const op = tx.operations[0];
+  if (op.type !== "payment") {
+    return { valid: false, errorCategory: "missing-operation", errorMessage: `Operation must be a payment, found ${op.type}` };
+  }
+
+  // Check asset and issuer
+  if (op.asset.isNative()) {
+    return { valid: false, errorCategory: "issuer/asset", errorMessage: "Asset cannot be native XLM, must be USDC" };
+  }
+  
+  if (op.asset.code !== "USDC") {
+    return { valid: false, errorCategory: "issuer/asset", errorMessage: `Asset code must be USDC, found ${op.asset.code}` };
+  }
+
+  if (op.asset.issuer !== USDC_ISSUER) {
+    return { valid: false, errorCategory: "issuer/asset", errorMessage: `Asset issuer must be ${USDC_ISSUER}, found ${op.asset.issuer}` };
+  }
+
+  // Check recipient
+  if (op.destination !== expectedTo) {
+    return { valid: false, errorCategory: "recipient", errorMessage: `Payment destination ${op.destination} does not match expected ${expectedTo}` };
+  }
+
+  // Check amount
+  if (Number(op.amount) < Number(expectedAmount)) {
+    return { valid: false, errorCategory: "amount", errorMessage: `Payment amount ${op.amount} is less than expected ${expectedAmount}` };
+  }
+
+  return { valid: true };
+}
+
+/**
+ * Verify an x402 payment token.
+ * First strictly validates the XDR offline.
  * Replaces: ethers.verifyTypedData() for EIP-712 signature verification.
  */
 export async function verifyX402Payment(
   paymentToken: string,
   expectedAmount: string,
   expectedTo: string,
-): Promise<boolean> {
+): Promise<VerifyX402Result> {
+  // 1. Strict Offline Validation
+  const offlineResult = verifyX402PaymentOffline(paymentToken, expectedAmount, expectedTo);
+  if (!offlineResult.valid) {
+    return offlineResult;
+  }
+
   try {
-    // Try x402-stellar verify
+    // 2. Try x402-stellar verify
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const x402 = await import("x402-stellar").catch(() => null) as any;
     if (x402?.verifyPayment) {
-      return await x402.verifyPayment({
+      const valid = await x402.verifyPayment({
         paymentToken,
         expectedAmount,
         expectedTo,
         facilitatorUrl: X402_FACILITATOR_URL,
         apiKey: X402_API_KEY,
       });
+      return { valid };
     }
 
-    // Fallback: call facilitator /verify directly
+    // 3. Fallback: call facilitator /verify directly
     const res = await fetch(`${X402_FACILITATOR_URL}/verify`, {
       method: "POST",
       headers: {
@@ -157,13 +246,15 @@ export async function verifyX402Payment(
       }),
     });
 
-    if (!res.ok) return false;
+    if (!res.ok) {
+      return { valid: false, errorCategory: "facilitator-error", errorMessage: `Facilitator returned ${res.status}` };
+    }
     const data = await res.json();
-    return data.valid === true;
+    return { valid: data.valid === true, errorCategory: data.valid ? undefined : "facilitator-rejected" };
   } catch (err) {
     const msg = String(err).replace(/S[A-Z2-7]{55}/g, "[REDACTED]");
     console.error("[stellar-x402] verifyX402Payment failed:", msg);
-    return false;
+    return { valid: false, errorCategory: "facilitator-error", errorMessage: msg };
   }
 }
 

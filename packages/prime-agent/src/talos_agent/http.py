@@ -21,8 +21,10 @@ breaker that stops cascading failures when a provider is degraded.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import math
 import re
 import unicodedata
 from collections.abc import Awaitable, Callable
@@ -63,7 +65,13 @@ SECRET_FIELD_NAMES = {
     "password",
     "private_key",
     "privateKey",
+    # The x402 payment header carries a signed payment payload (#439).
+    "x-payment",
+    "x_payment",
 }
+
+DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
+MAX_TOOL_TIMEOUT_SECONDS = 300.0
 
 T = TypeVar("T")
 
@@ -79,6 +87,21 @@ class RetryableHTTPError(Exception):
         except RuntimeError:
             url = str(response.url)
         super().__init__(f"HTTP {response.status_code} from {url}")
+
+
+class ToolTimeoutError(Exception):
+    """Raised when a tool call exceeds its execution deadline."""
+
+    def __init__(self, tool_name: str, timeout: float):
+        self.tool_name = tool_name
+        self.timeout = timeout
+        self.timed_out = True
+        self.result = {
+            "status": "timeout",
+            "tool_name": tool_name,
+            "timeout_seconds": timeout,
+        }
+        super().__init__(f"Tool {tool_name!r} timed out after {timeout:g}s")
 
 
 def _sanitize_json_value(value: object) -> object:
@@ -114,7 +137,7 @@ def _sanitize_response_text(text: str) -> str:
     )
     sanitized = re.sub(r"S[A-Z2-7]{55}", "[REDACTED]", sanitized)
     sanitized = re.sub(
-        r"""(?i)(?:api[_-]?key|token|secret|authorization|password|private[_-]?key)["'`]?\s*[:=]\s*["'`]([^"'`\s]+)["'`]?""",
+        r"""(?i)(?:api[_-]?key|token|secret|authorization|password|private[_-]?key|x[-_]payment)["'`]?\s*[:=]\s*["'`]?([^"'`\s]+)["'`]?""",
         lambda m: f"{m.group(0).split(m.group(1))[0]}[REDACTED]",
         sanitized,
     )
@@ -194,9 +217,55 @@ def _retry_policy() -> AsyncRetrying:
     )
 
 
+def validate_tool_timeout(timeout: float | None) -> float:
+    """Validate a tool timeout against safe bounds."""
+    if timeout is None:
+        return DEFAULT_TOOL_TIMEOUT_SECONDS
+    try:
+        parsed = float(timeout)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("tool timeout must be a number") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ValueError("tool timeout must be a positive finite number")
+    if parsed > MAX_TOOL_TIMEOUT_SECONDS:
+        raise ValueError(
+            f"tool timeout cannot exceed {MAX_TOOL_TIMEOUT_SECONDS:g} seconds"
+        )
+    return parsed
+
+
+def _record_tool_timeout_metric(tool_name: str, timeout: float) -> None:
+    # Keep metrics free of operation args/response bodies.
+    logger.warning(
+        "Tool execution timeout; tool_name=%s timeout_seconds=%.3f",
+        _strip_control_chars(str(tool_name)),
+        timeout,
+    )
+
+
+async def call_with_tool_timeout(
+    operation: Callable[[], Awaitable[T]],
+    *,
+    tool_name: str,
+    timeout: float | None = None,
+) -> T:
+    """Run an external tool call under a bounded execution deadline.
+
+    Shared by legacy and routed agent loops; ``asyncio.wait_for`` cancels the
+    underlying operation when the deadline elapses and on caller cancellation.
+    """
+    deadline = validate_tool_timeout(timeout)
+    try:
+        return await asyncio.wait_for(operation(), timeout=deadline)
+    except asyncio.TimeoutError:
+        _record_tool_timeout_metric(tool_name, deadline)
+        raise ToolTimeoutError(tool_name, deadline) from None
+
+
 async def request_with_retry(
     send: Callable[[], Awaitable[httpx.Response]],
     provider: str | None = None,
+    timeout: float | None = None,
 ) -> httpx.Response:
     """Execute an httpx call with bounded retries on transient failures.
 
@@ -226,6 +295,7 @@ async def request_with_retry(
     Non-retryable responses (including other 4xx/5xx) are returned
     so callers can inspect status_code as before.
     """
+    timeout = validate_tool_timeout(timeout)
     breaker: ProviderCircuitBreaker | None = None
     if provider:
         breaker = cb_registry.get(provider)
@@ -236,7 +306,11 @@ async def request_with_retry(
     async for attempt in _retry_policy():
         with attempt:
             try:
-                response = await send()
+                response = await call_with_tool_timeout(
+                    send,
+                    tool_name=provider or "http_request",
+                    timeout=timeout,
+                )
                 if response.status_code in RETRYABLE_STATUSES:
                     raise RetryableHTTPError(response)
             except Exception:
@@ -255,6 +329,7 @@ async def request_with_retry(
 async def call_with_retry(
     operation: Callable[[], Awaitable[T]],
     provider: str | None = None,
+    timeout: float | None = None,
 ) -> T:
     """Retry an arbitrary awaitable on transient external failures.
 
@@ -275,6 +350,7 @@ async def call_with_retry(
     CircuitBreakerOpen
         If the circuit is OPEN and *provider* was given.
     """
+    timeout = validate_tool_timeout(timeout)
     breaker: ProviderCircuitBreaker | None = None
     if provider:
         breaker = cb_registry.get(provider)
@@ -285,7 +361,11 @@ async def call_with_retry(
     async for attempt in _retry_policy():
         with attempt:
             try:
-                return await operation()
+                return await call_with_tool_timeout(
+                    operation,
+                    tool_name=provider or "llm_call",
+                    timeout=timeout,
+                )
             except Exception:
                 if breaker:
                     await breaker.record_failure()

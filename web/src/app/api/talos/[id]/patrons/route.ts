@@ -4,14 +4,19 @@ import { tlsTalos, tlsPatrons } from "@/db/schema";
 import { and, desc, eq } from "drizzle-orm";
 import { getAccountInfo, verifyStellarSignature } from "@/lib/stellar";
 import { becomePatronSchema, revokePatronSchema, parseBody } from "@/lib/schemas";
+import { parseAnalyticsLimit } from "@/lib/analytics-limits";
 
 // GET /api/talos/:id/patrons — List patrons for a TALOS
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id } = await params;
+    const { searchParams } = new URL(request.url);
+    const parsedLimit = parseAnalyticsLimit(searchParams.get("limit"), 50, 100);
+    if (!parsedLimit.ok) return parsedLimit.response;
+    const limit = parsedLimit.limit;
 
     const talos = await db
       .select({ id: tlsTalos.id })
@@ -28,7 +33,8 @@ export async function GET(
       .select()
       .from(tlsPatrons)
       .where(and(eq(tlsPatrons.talosId, id), eq(tlsPatrons.status, "active")))
-      .orderBy(desc(tlsPatrons.createdAt));
+      .orderBy(desc(tlsPatrons.createdAt))
+      .limit(limit);
 
     return Response.json(patrons);
   } catch {

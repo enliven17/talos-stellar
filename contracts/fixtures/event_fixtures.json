@@ -20,6 +20,19 @@
           { "position": 1, "type": "string", "name": "name" },
           { "position": 2, "type": "string", "name": "category" }
         ]
+      },
+      "tls_crt2": {
+        "contract": "talos_registry",
+        "topics": [
+          { "position": 0, "type": "symbol", "name": "event", "description": "event type symbol" },
+          { "position": 1, "type": "address", "name": "creator", "description": "address that created the Talos" }
+        ],
+        "data": [
+          { "position": 0, "type": "u32", "name": "version" },
+          { "position": 1, "type": "u32", "name": "talos_id" },
+          { "position": 2, "type": "string", "name": "name" },
+          { "position": 3, "type": "string", "name": "category" }
+        ]
       }
     },
     "update": {
@@ -133,6 +146,32 @@
         "ledger_sequence": 100000,
         "topics": { "event": "tls_crt", "creator": "GDC2TFRPZ3SJJYE2GDOIVHVGU3J7RZ7WCDIGKNZC4OY4CCIY7JK5JGYZ" },
         "data": { "talos_id": 1, "name": "Genesis", "category": "Marketing" }
+      }
+    },
+    {
+      "id": "creation.tls_crt2.normal",
+      "family": "creation",
+      "event": "tls_crt2",
+      "contract": "talos_registry",
+      "ledger_sequence": 100000,
+      "tx_hash": "a1b2c3d4e5f60718293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f60",
+      "event_index_in_tx": 1,
+      "topics": [
+        { "type": "symbol", "value": "tls_crt2" },
+        { "type": "address", "value": "GDC2TFRPZ3SJJYE2GDOIVHVGU3J7RZ7WCDIGKNZC4OY4CCIY7JK5JGYZ" }
+      ],
+      "data": [
+        { "type": "u32", "value": 1 },
+        { "type": "u32", "value": 1 },
+        { "type": "string", "value": "Genesis" },
+        { "type": "string", "value": "Marketing" }
+      ],
+      "decoded": {
+        "event": "tls_crt2",
+        "contract": "talos_registry",
+        "ledger_sequence": 100000,
+        "topics": { "event": "tls_crt2", "creator": "GDC2TFRPZ3SJJYE2GDOIVHVGU3J7RZ7WCDIGKNZC4OY4CCIY7JK5JGYZ" },
+        "data": { "version": 1, "talos_id": 1, "name": "Genesis", "category": "Marketing" }
       }
     },
     {
@@ -399,6 +438,27 @@
         ],
         "data": [
           { "type": "string", "value": "not-a-number" },
+          { "type": "string", "value": "Genesis" },
+          { "type": "string", "value": "Marketing" }
+        ]
+      }
+    },
+    {
+      "id": "malformed.unsupported_version",
+      "reason": "version field contains an unsupported value (> 1)",
+      "fixture": {
+        "id": "malformed.unsupported_version.fixture",
+        "family": "creation",
+        "event": "tls_crt2",
+        "contract": "talos_registry",
+        "ledger_sequence": 6,
+        "topics": [
+          { "type": "symbol", "value": "tls_crt2" },
+          { "type": "address", "value": "GDC2TFRPZ3SJJYE2GDOIVHVGU3J7RZ7WCDIGKNZC4OY4CCIY7JK5JGYZ" }
+        ],
+        "data": [
+          { "type": "u32", "value": 2 },
+          { "type": "u32", "value": 1 },
           { "type": "string", "value": "Genesis" },
           { "type": "string", "value": "Marketing" }
         ]

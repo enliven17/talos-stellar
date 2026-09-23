@@ -8,15 +8,22 @@ successes/failures on the appropriate breakers.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
 from talos_agent.circuit_breaker import CircuitBreakerOpen, cb_registry
+from talos_agent.http import _sanitize_response_text
 from talos_agent.telemetry import _is_sensitive_key
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
+MAX_TOOL_TIMEOUT_SECONDS = 300.0
+
 
 
 @dataclass(frozen=True)
@@ -27,6 +34,7 @@ class FallbackMetricsSnapshot:
     successes: dict[str, int]
     skips: dict[str, int]
     exhaustions: dict[str, int]
+    timeouts: dict[str, int] = field(default_factory=dict)
 
 
 class FallbackMetrics:
@@ -37,6 +45,7 @@ class FallbackMetrics:
         self._successes: dict[str, int] = {}
         self._skips: dict[str, int] = {}
         self._exhaustions: dict[str, int] = {}
+        self._timeouts: dict[str, int] = {}
 
     def _increment(self, counter: dict[str, int], provider: str) -> None:
         """Increment the metric for the given provider, bounding cardinality and redacting if sensitive."""
@@ -57,6 +66,9 @@ class FallbackMetrics:
     def record_skip(self, provider: str) -> None:
         self._increment(self._skips, provider)
 
+    def record_timeout(self, provider: str) -> None:
+        self._increment(self._timeouts, provider)
+
     def record_exhaustion(self, provider: str) -> None:
         self._increment(self._exhaustions, provider)
 
@@ -67,6 +79,7 @@ class FallbackMetrics:
             successes=dict(self._successes),
             skips=dict(self._skips),
             exhaustions=dict(self._exhaustions),
+            timeouts=dict(self._timeouts),
         )
 
     def reset(self) -> None:
@@ -75,6 +88,7 @@ class FallbackMetrics:
         self._successes.clear()
         self._skips.clear()
         self._exhaustions.clear()
+        self._timeouts.clear()
 
 
 fallback_metrics = FallbackMetrics()
@@ -106,6 +120,8 @@ class FallbackResult:
         List of ``(provider_name, error_message)`` for each failed attempt.
     total_attempts:
         Total number of providers attempted.
+    timeouts:
+        List of ``(provider_name, timeout_seconds)`` for each timed-out attempt.
     """
 
     success: bool
@@ -113,6 +129,7 @@ class FallbackResult:
     result: Any = None
     attempts: list[tuple[str, str]] = field(default_factory=list)
     total_attempts: int = 0
+    timeouts: list[tuple[str, float]] = field(default_factory=list)
 
 
 class FallbackChain:
@@ -134,10 +151,12 @@ class FallbackChain:
         self,
         providers: list[str],
         strategy: FallbackStrategy = FallbackStrategy.ORDERED,
+        timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
     ) -> None:
         self._providers = list(providers)
         self._strategy = strategy
         self._round_robin_index: int = 0
+        self._timeout_seconds = self._validate_timeout(timeout_seconds)
 
     @property
     def providers(self) -> list[str]:
@@ -148,10 +167,16 @@ class FallbackChain:
     def strategy(self) -> FallbackStrategy:
         return self._strategy
 
+    @property
+    def timeout_seconds(self) -> float:
+        """The configured per-attempt timeout in seconds."""
+        return self._timeout_seconds
+
     async def execute(
         self,
         operation: Callable[..., Any],
         *args: Any,
+        timeout_seconds: float | None = None,
         **kwargs: Any,
     ) -> FallbackResult:
         """Try each provider in the chain until one succeeds.
@@ -163,6 +188,8 @@ class FallbackChain:
             positional argument (or via the ``provider_keyword`` parameter).
         *args:
             Additional positional arguments forwarded to *operation*.
+        timeout_seconds:
+            Optional per-call override of the configured per-attempt timeout.
         **kwargs:
             Additional keyword arguments forwarded to *operation*.
 
@@ -172,8 +199,14 @@ class FallbackChain:
             The result of the first successful attempt, or a summary of
             all failures.
         """
+        effective_timeout = (
+            self._timeout_seconds
+            if timeout_seconds is None
+            else self._validate_timeout(timeout_seconds)
+        )
         provider_list = self._resolve_order()
         attempts: list[tuple[str, str]] = []
+        timeout_events: list[tuple[str, float]] = []
 
         for provider_name in provider_list:
             # Check circuit breaker before attempting
@@ -192,7 +225,10 @@ class FallbackChain:
 
             fallback_metrics.record_attempt(provider_name)
             try:
-                result = await operation(provider_name, *args, **kwargs)
+                result = await asyncio.wait_for(
+                    _call_with_timeout(operation, provider_name, *args, **kwargs),
+                    timeout=effective_timeout,
+                )
                 await breaker.record_success()
                 fallback_metrics.record_success(provider_name)
                 logger.info(
@@ -206,14 +242,41 @@ class FallbackChain:
                     result=result,
                     attempts=attempts,
                     total_attempts=len(attempts) + 1,
+                    timeouts=timeout_events,
                 )
             except CircuitBreakerOpen as exc:
                 await breaker.record_failure()
-                attempts.append((provider_name, str(exc)))
+                # The message carries a caller-supplied fallback hint, so it is redacted
+                # like any other exception text before it is kept or logged.
+                open_msg = _sanitize_response_text(str(exc))
+                attempts.append((provider_name, open_msg))
                 logger.warning(
                     "Fallback: '%s' rejected by circuit breaker — %s",
                     provider_name,
-                    exc,
+                    open_msg,
+                )
+                continue
+            except _OperationTimeoutError as exc:
+                await breaker.record_failure()
+                exc_msg = _summarise_exception(exc.__cause__ or exc)
+                attempts.append((provider_name, exc_msg))
+                logger.warning(
+                    "Fallback: '%s' failed — %s",
+                    provider_name,
+                    exc_msg,
+                )
+                continue
+            except asyncio.TimeoutError:
+                await breaker.record_failure()
+                fallback_metrics.record_timeout(provider_name)
+                timeout_msg = f"Timeout after {effective_timeout:g}s"
+                attempts.append((provider_name, timeout_msg))
+                timeout_events.append((provider_name, effective_timeout))
+                safe_provider = "[REDACTED]" if _is_sensitive_key(provider_name) else provider_name
+                logger.warning(
+                    "Fallback: '%s' timed out after %.1fs",
+                    safe_provider,
+                    effective_timeout,
                 )
                 continue
             except Exception as exc:
@@ -240,7 +303,25 @@ class FallbackChain:
             provider_name="",
             attempts=attempts,
             total_attempts=len(attempts),
+            timeouts=timeout_events,
         )
+
+    @staticmethod
+    def _validate_timeout(timeout_seconds: float) -> float:
+        """Validate and normalise a per-attempt timeout value."""
+        if isinstance(timeout_seconds, bool):
+            raise TypeError("timeout_seconds must be a number")
+        if not isinstance(timeout_seconds, (int, float)):
+            raise TypeError("timeout_seconds must be a number")
+        if not math.isfinite(timeout_seconds):
+            raise ValueError("timeout_seconds must be finite")
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be greater than 0")
+        if timeout_seconds > MAX_TOOL_TIMEOUT_SECONDS:
+            raise ValueError(
+                f"timeout_seconds must not exceed {MAX_TOOL_TIMEOUT_SECONDS}"
+            )
+        return float(timeout_seconds)
 
     def _resolve_order(self) -> list[str]:
         """Return the provider order based on the strategy."""
@@ -260,8 +341,26 @@ class FallbackChain:
 def _summarise_exception(exc: Exception) -> str:
     """Return a concise, safe summary of an exception for logging."""
     exc_type = type(exc).__name__
-    msg = str(exc)
+    # Redact BEFORE truncating: cutting first can leave a token prefix that the redaction
+    # patterns no longer recognise (#439).
+    msg = _sanitize_response_text(str(exc))
     # Truncate long messages to avoid log floods
     if len(msg) > 200:
         msg = msg[:197] + "..."
     return f"{exc_type}: {msg}"
+
+
+class _OperationTimeoutError(Exception):
+    """Raised when the underlying operation raises asyncio.TimeoutError."""
+
+
+async def _call_with_timeout(
+    operation: Callable[..., Any],
+    provider_name: str,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    try:
+        return await operation(provider_name, *args, **kwargs)
+    except asyncio.TimeoutError as exc:
+        raise _OperationTimeoutError from exc

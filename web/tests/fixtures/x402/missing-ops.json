@@ -1,0 +1,5 @@
+{
+  "xdr": "AAAAAgAAAACqeKiWAvJqcnYEKCKhPdiSrLzwMluZ59JCC7VVOHoe+AAAAAAAAAAAAAAAAgAAAAEAAAAAAAAAAAAAAABqlxlHAAAAAAAAAAAAAAAAAAAAATh6HvgAAABAEbvblOqfS+7nQWqQW/yK1dR/yGBit1Ch5XEfD6gUJh3mlh+UD/CKn1YUAj8zKDI19EpZoBlO+C7Dg1vsMbNbAQ==",
+  "description": "Transaction with no operations.",
+  "expectedError": "missing-operation"
+}

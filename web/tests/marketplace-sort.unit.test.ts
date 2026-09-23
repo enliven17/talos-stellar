@@ -265,8 +265,12 @@ describe("GET /api/services — sort validation", () => {
   });
 
   it("returns 400 when a cursor is combined with a non-default sort", async () => {
+    const validCursor = Buffer.from(
+      JSON.stringify({ createdAt: "2026-08-01T00:00:00.000Z", id: "svc-1" }),
+      "utf8",
+    ).toString("base64url");
     const res = await servicesGET(
-      req("/api/services", { sort: "price", cursor: "2026-08-01T00:00:00.000Z|svc-1" }),
+      req("/api/services", { sort: "price", cursor: validCursor }),
     );
     expect(res.status).toBe(400);
     expect(mocks.mockDb.select).not.toHaveBeenCalled();
@@ -274,8 +278,12 @@ describe("GET /api/services — sort validation", () => {
 
   it("allows a cursor with the default sort", async () => {
     mocks.mockDb.select.mockReturnValue(buildChain([]));
+    const validCursor = Buffer.from(
+      JSON.stringify({ createdAt: "2026-08-01T00:00:00.000Z", id: "svc-1" }),
+      "utf8",
+    ).toString("base64url");
     const res = await servicesGET(
-      req("/api/services", { cursor: "2026-08-01T00:00:00.000Z|svc-1" }),
+      req("/api/services", { cursor: validCursor }),
     );
     expect(res.status).toBe(200);
   });

@@ -19,7 +19,7 @@ jobs:
           node-version: '20'
 
       - name: Install pnpm
-        run: corepack enable && corepack prepare pnpm@9 --activate
+        run: corepack enable && corepack prepare pnpm@10 --activate
 
       - name: Install dependencies
         working-directory: web

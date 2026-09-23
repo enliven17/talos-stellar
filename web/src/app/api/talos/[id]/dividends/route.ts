@@ -5,6 +5,7 @@ import { desc, eq } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
 import { recordDividendSchema, parseBody } from "@/lib/schemas";
 import { emitWebhookEvent } from "@/lib/webhooks/delivery";
+import { parseAnalyticsLimit } from "@/lib/analytics-limits";
 
 /**
  * GET /api/talos/:id/dividends
@@ -13,15 +14,20 @@ import { emitWebhookEvent } from "@/lib/webhooks/delivery";
  * revenue that has been shared out to Mitos/Pulse token holders over time.
  *
  * Public read (consistent with revenue history + RLS anon_read policy).
- * Returns the most recent 50 distributions, newest first.
+ * Returns distributions with bounded limit (default 50, max 100), newest first.
  */
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
 
   try {
+    const { searchParams } = new URL(request.url);
+    const parsedLimit = parseAnalyticsLimit(searchParams.get("limit"), 50, 100);
+    if (!parsedLimit.ok) return parsedLimit.response;
+    const limit = parsedLimit.limit;
+
     const talos = await db
       .select({ id: tlsTalos.id })
       .from(tlsTalos)
@@ -38,7 +44,7 @@ export async function GET(
       .from(tlsDividends)
       .where(eq(tlsDividends.talosId, id))
       .orderBy(desc(tlsDividends.createdAt))
-      .limit(50);
+      .limit(limit);
 
     return Response.json(dividends);
   } catch {

@@ -3,6 +3,7 @@ import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { tlsCommerceJobs, tlsCommerceServices, tlsTalos } from "@/db/schema";
 import { verifyAgentApiKey } from "@/lib/auth";
+import { parseAnalyticsLimit } from "@/lib/analytics-limits";
 
 function toNumber(value: unknown): number {
   const parsed = typeof value === "string" ? Number(value) : Number(value ?? 0);
@@ -25,6 +26,11 @@ export async function GET(
     const auth = await verifyAgentApiKey(request, id, ["revenue:read"]);
     if (!auth.ok) return auth.response;
 
+    const { searchParams } = new URL(request.url);
+    const parsedLimit = parseAnalyticsLimit(searchParams.get("limit"), 25, 100);
+    if (!parsedLimit.ok) return parsedLimit.response;
+    const limit = parsedLimit.limit;
+
     const talos = await db
       .select({ id: tlsTalos.id })
       .from(tlsTalos)
@@ -36,7 +42,6 @@ export async function GET(
       return Response.json({ error: "TALOS not found" }, { status: 404 });
     }
 
-    const { searchParams } = new URL(request.url);
     const windowDays = Math.max(1, Number(searchParams.get("window") ?? 30));
     const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
 
@@ -59,7 +64,8 @@ export async function GET(
       )
       .where(and(eq(tlsCommerceJobs.talosId, id), gte(tlsCommerceJobs.createdAt, since)))
       .groupBy(tlsCommerceJobs.requesterTalosId, tlsCommerceServices.currency)
-      .orderBy(desc(sql`max(${tlsCommerceJobs.createdAt})`));
+      .orderBy(desc(sql`max(${tlsCommerceJobs.createdAt})`))
+      .limit(1000);
 
     const alerts = [] as Array<{
       type: string;
@@ -118,7 +124,7 @@ export async function GET(
     return Response.json({
       agentId: id,
       windowDays,
-      alerts,
+      alerts: alerts.slice(0, limit),
     });
   } catch {
     return Response.json({ error: "Internal server error" }, { status: 500 });

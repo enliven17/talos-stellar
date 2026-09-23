@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { randomUUID } from "crypto";
+import { getRequestId } from "./api-response";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type RouteHandler = (req: NextRequest, ...rest: any[]) => Promise<Response>;
@@ -17,7 +17,7 @@ type RouteHandler = (req: NextRequest, ...rest: any[]) => Promise<Response>;
  */
 export function withRequestId<H extends RouteHandler>(handler: H): H {
   return (async (req: NextRequest, ...rest: unknown[]) => {
-    const requestId = req.headers.get("x-request-id") ?? randomUUID();
+    const requestId = getRequestId(req);
     const res = await handler(req, ...rest);
     const newRes = new Response(res.body, res);
     newRes.headers.set("x-request-id", requestId);

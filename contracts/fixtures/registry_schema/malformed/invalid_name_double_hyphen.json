@@ -1,0 +1,17 @@
+{
+  "meta": {
+    "contract": "TalosNameService",
+    "generator": "scripts/generate-registry-fixtures.mjs v1",
+    "kind": "NameRecord",
+    "note": "name 'bad--name' violates TalosNameService validation (no consecutive hyphens)",
+    "schema_version": 1
+  },
+  "storage_key": {
+    "name": "bad--name",
+    "type": "NameRecord"
+  },
+  "value": {
+    "name": "bad--name",
+    "talos_id": 1
+  }
+}

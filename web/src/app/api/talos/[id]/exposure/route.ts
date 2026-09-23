@@ -3,6 +3,7 @@ import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { tlsCommerceJobs, tlsCommerceServices, tlsTalos } from "@/db/schema";
 import { verifyAgentApiKey } from "@/lib/auth";
+import { parseAnalyticsLimit } from "@/lib/analytics-limits";
 
 function parseWindow(windowParam: string | null): { windowMs: number; windowDays: number } {
   const raw = windowParam ?? "30d";
@@ -11,13 +12,6 @@ function parseWindow(windowParam: string | null): { windowMs: number; windowDays
 
   const windowDays = Number(match[1]);
   return { windowMs: windowDays * 24 * 60 * 60 * 1000, windowDays };
-}
-
-function parsePagination(request: Request): { limit: number; cursor: string | null } {
-  const { searchParams } = new URL(request.url);
-  const limit = Math.min(Math.max(parseInt(searchParams.get("limit") ?? "25", 10) || 25, 1), 100);
-  const cursor = searchParams.get("cursor");
-  return { limit, cursor };
 }
 
 function toNumber(value: unknown): number {
@@ -41,6 +35,12 @@ export async function GET(
     const auth = await verifyAgentApiKey(request, id, ["revenue:read"]);
     if (!auth.ok) return auth.response;
 
+    const { searchParams } = new URL(request.url);
+    const parsedLimit = parseAnalyticsLimit(searchParams.get("limit"), 25, 100);
+    if (!parsedLimit.ok) return parsedLimit.response;
+    const limit = parsedLimit.limit;
+    const cursor = searchParams.get("cursor");
+
     const talos = await db
       .select({ id: tlsTalos.id })
       .from(tlsTalos)
@@ -52,9 +52,7 @@ export async function GET(
       return Response.json({ error: "TALOS not found" }, { status: 404 });
     }
 
-    const { searchParams } = new URL(request.url);
     const { windowMs, windowDays } = parseWindow(searchParams.get("window"));
-    const { limit, cursor } = parsePagination(request);
     const since = new Date(Date.now() - windowMs);
 
     const rows = await db
@@ -78,7 +76,8 @@ export async function GET(
       )
       .where(and(eq(tlsCommerceJobs.talosId, id), gte(tlsCommerceJobs.createdAt, since)))
       .groupBy(tlsCommerceJobs.requesterTalosId, tlsCommerceJobs.serviceName, tlsCommerceServices.currency)
-      .orderBy(desc(sql`max(${tlsCommerceJobs.createdAt})`));
+      .orderBy(desc(sql`max(${tlsCommerceJobs.createdAt})`))
+      .limit(1000);
 
     const filtered = rows
       .map((row) => ({

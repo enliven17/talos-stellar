@@ -1,0 +1,164 @@
+name: CI — Changed-Path Package Matrix
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────
+  # Job 1: Detect which packages were affected by changed files.
+  # Outputs a JSON matrix consumed by the downstream job.
+  # ─────────────────────────────────────────────────────────────────
+  detect:
+    name: Detect changed packages
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.changes.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed packages
+        id: changes
+        run: |
+          set -euo pipefail
+
+          # ── Determine base/head SHAs ────────────────────────────
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            # push events diff against the previous push.
+            # Use the detection script (it validates SHAs and falls
+            # back to ALL when the base object is missing, e.g. force push).
+            BASE_SHA="${{ github.event.before }}"
+            HEAD_SHA="${{ github.sha }}"
+          else
+            # workflow_dispatch / unknown events — run all packages.
+            echo "matrix={\"include\":[{\"package\":\"web\"},{\"package\":\"sdk\"},{\"package\":\"prime-agent\"},{\"package\":\"contracts\"}]}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # ── Run the detection script ────────────────────────────
+          MATRIX=$(bash scripts/ci-detect-changes.sh "$BASE_SHA" "$HEAD_SHA")
+          echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
+
+  # ─────────────────────────────────────────────────────────────────
+  # Job 2: Run checks for each affected package.
+  # Skipped entirely when the matrix is empty (no source changes).
+  # ─────────────────────────────────────────────────────────────────
+  package-check:
+    name: "check · ${{ matrix.package }}"
+    needs: detect
+    if: needs.detect.outputs.matrix != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect.outputs.matrix) }}
+      max-parallel: 4
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Shared toolchain setup (only installs what the matrix package needs) ──
+
+      - name: Setup pnpm
+        if: matrix.package == 'web' || matrix.package == 'sdk'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        if: matrix.package == 'web' || matrix.package == 'sdk'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+          package-manager: pnpm
+
+      - name: Install JS/TS dependencies
+        if: matrix.package == 'web' || matrix.package == 'sdk'
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Python
+        if: matrix.package == 'prime-agent'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup uv
+        if: matrix.package == 'prime-agent'
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: packages/prime-agent/uv.lock
+
+      - name: Install Python dependencies
+        if: matrix.package == 'prime-agent'
+        run: uv sync --frozen --all-extras --all-groups
+        working-directory: packages/prime-agent
+
+      - name: Setup Rust toolchain
+        if: matrix.package == 'contracts'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # ── Per-package checks ──────────────────────────────────────
+
+      # ── Web: typecheck, lint, unit tests ────────────────────────
+      - name: "[web] Type check"
+        if: matrix.package == 'web'
+        working-directory: web
+        run: npx tsc --noEmit
+
+      - name: "[web] Lint"
+        if: matrix.package == 'web'
+        working-directory: web
+        run: pnpm lint
+
+      - name: "[web] Unit tests"
+        if: matrix.package == 'web'
+        working-directory: web
+        run: pnpm test:unit
+
+      # ── SDK: build/typecheck, tests ─────────────────────────────
+      - name: "[sdk] Build & typecheck"
+        if: matrix.package == 'sdk'
+        working-directory: packages/sdk
+        run: pnpm run build
+
+      - name: "[sdk] Tests"
+        if: matrix.package == 'sdk'
+        working-directory: packages/sdk
+        run: pnpm run test
+
+      # ── Prime Agent: ruff, pytest ───────────────────────────────
+      - name: "[prime-agent] Lint"
+        if: matrix.package == 'prime-agent'
+        working-directory: packages/prime-agent
+        run: uv run ruff check src tests
+
+      - name: "[prime-agent] Test"
+        if: matrix.package == 'prime-agent'
+        working-directory: packages/prime-agent
+        run: uv run pytest tests/ -v
+
+      # ── Contracts: cargo test, WASM build ───────────────────────
+      - name: "[contracts] Test"
+        if: matrix.package == 'contracts'
+        working-directory: contracts
+        run: cargo test
+
+      - name: "[contracts] WASM build"
+        if: matrix.package == 'contracts'
+        working-directory: contracts
+        run: cargo build --target wasm32-unknown-unknown --release

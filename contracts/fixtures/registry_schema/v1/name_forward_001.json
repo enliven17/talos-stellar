@@ -1,0 +1,17 @@
+{
+  "meta": {
+    "additive_fields": [],
+    "contract": "TalosNameService",
+    "generator": "scripts/generate-registry-fixtures.mjs v1",
+    "kind": "NameRecord",
+    "schema_version": 1
+  },
+  "storage_key": {
+    "name": "vega",
+    "type": "NameRecord"
+  },
+  "value": {
+    "name": "vega",
+    "talos_id": 1
+  }
+}

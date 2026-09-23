@@ -65,7 +65,8 @@ export async function GET(
     const patrons = await db
       .select()
       .from(tlsPatrons)
-      .where(eq(tlsPatrons.talosId, id));
+      .where(eq(tlsPatrons.talosId, id))
+      .limit(100);
 
     // Calculate revenue summary
     const totalRevenue = revenues.reduce(
@@ -232,7 +233,7 @@ Generate projections for the next 12 months.`;
   } catch (error) {
     console.error("Financial projection error:", error);
     return Response.json(
-      { error: "Internal server error", details: error instanceof Error ? error.message : "Unknown error" },
+      { error: "Internal server error" },
       { status: 500 }
     );
   }

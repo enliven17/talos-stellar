@@ -25,18 +25,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import TYPE_CHECKING
 
 from talos_agent.routing.provider import (
     ProviderCapabilities,
     ProviderMetadata,
     ProviderRegistry,
-    ProviderStatus,
     TaskType,
 )
-
-if TYPE_CHECKING:
-    from talos_agent.routing.provider import LLMProvider
 
 logger = logging.getLogger(__name__)
 

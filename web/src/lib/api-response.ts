@@ -32,11 +32,37 @@ export interface ApiErrorBody {
 // ─── Request ID extraction ─────────────────────────────────────────────────
 
 /**
+ * Safe X-Request-Id value: keep lowercase/uppercase letters, digits, and a
+ * short set of punctuation that is safe in log aggregation and HTTP headers.
+ * Length is bounded to avoid unbounded log cardinality.
+ */
+export const REQUEST_ID_HEADER = "x-request-id";
+export const MAX_REQUEST_ID_LENGTH = 128;
+const SAFE_REQUEST_ID_PATTERN = /^[A-Za-z0-9._~:-]{1,128}$/;
+
+export function sanitizeRequestId(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const cleaned = trimmed
+    .replace(/[^A-Za-z0-9._~:-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, MAX_REQUEST_ID_LENGTH);
+
+  if (!cleaned || !SAFE_REQUEST_ID_PATTERN.test(cleaned)) return null;
+  return cleaned;
+}
+
+/**
  * Read the request ID from the incoming request header, or generate a fresh
- * UUID if absent. Always returns a non-empty string.
+ * safe ID if absent or malformed. Always returns a non-empty string.
  */
 export function getRequestId(request: Request): string {
-  return request.headers.get("x-request-id") ?? randomUUID();
+  const incoming = sanitizeRequestId(request.headers.get(REQUEST_ID_HEADER));
+  return incoming ?? randomUUID();
 }
 
 // ─── Error response factory ────────────────────────────────────────────────
@@ -64,7 +90,7 @@ export function errorResponse(
 
   return Response.json(body, {
     status,
-    headers: { "x-request-id": requestId },
+    headers: { [REQUEST_ID_HEADER]: requestId },
   });
 }
 

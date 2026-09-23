@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import time
 from typing import TYPE_CHECKING, Any
 
 from openai import AsyncOpenAI
@@ -31,7 +33,6 @@ from talos_agent.agent.prompt import build_system_prompt
 from talos_agent.http import call_with_retry
 from talos_agent.routing import (
     FallbackChain,
-    ProviderRegistry,
     RoutingConstraints,
     RoutingPolicy,
     UsageTracker,
@@ -62,6 +63,76 @@ def get_openai_client(api_key: str, base_url: str | None = None) -> AsyncOpenAI:
         client = AsyncOpenAI(**kwargs)
         _openai_clients[cache_key] = client
     return client
+
+
+# Tool execution deadline configuration.
+DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
+MAX_TOOL_TIMEOUT_SECONDS = 120.0
+
+_TOOL_TIMEOUT_METRICS = {"count": 0, "total_duration": 0.0}
+
+
+def _get_tool_timeout(settings: Settings) -> float:
+    """Resolve the per-tool execution timeout from settings.
+
+    Invalid or missing values fall back to the safe default, and the timeout
+    never exceeds the safe upper bound.
+    """
+    raw_timeout = getattr(settings, "tool_timeout_seconds", DEFAULT_TOOL_TIMEOUT_SECONDS)
+    try:
+        timeout = float(raw_timeout)
+    except (TypeError, ValueError):
+        return DEFAULT_TOOL_TIMEOUT_SECONDS
+
+    if isinstance(raw_timeout, bool):
+        return DEFAULT_TOOL_TIMEOUT_SECONDS
+
+    if not math.isfinite(timeout) or timeout <= 0:
+        return DEFAULT_TOOL_TIMEOUT_SECONDS
+
+    return min(timeout, MAX_TOOL_TIMEOUT_SECONDS)
+
+
+def _record_tool_timeout(timeout_seconds: float, elapsed_seconds: float) -> None:
+    _TOOL_TIMEOUT_METRICS["count"] += 1
+    _TOOL_TIMEOUT_METRICS["total_duration"] += elapsed_seconds
+    console.print(
+        f"[red]Tool timed out after {timeout_seconds:.1f}s "
+        f"(cumulative timeouts: {_TOOL_TIMEOUT_METRICS['count']}).[/red]"
+    )
+
+
+async def _execute_tool_with_timeout(
+    settings: Settings,
+    tools: ToolRegistry,
+    fn_name: str,
+    args: dict[str, Any],
+) -> Any:
+    """Run ``tools.execute`` with a bounded deadline and cancellation."""
+    timeout = _get_tool_timeout(settings)
+    started = time.monotonic()
+    task = asyncio.ensure_future(tools.execute(fn_name, args))
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+    except asyncio.CancelledError:
+        task.cancel()
+        await asyncio.sleep(0)
+        raise
+    if task in done:
+        return task.result()
+    task.cancel()
+    # Do not block on cancellation: a non-cooperative tool must not extend
+    # the deadline.  The task is left to be reclaimed by the event loop.
+    await asyncio.sleep(0)
+    elapsed = time.monotonic() - started
+    _record_tool_timeout(timeout, elapsed)
+    return {
+        "status": "timeout",
+        "tool": fn_name,
+        "timeout_seconds": timeout,
+        "elapsed_seconds": round(elapsed, 3),
+        "error": f"Tool execution timed out after {timeout:.1f}s",
+    }
 
 
 async def agent_loop(
@@ -163,7 +234,7 @@ async def _legacy_agent_loop(
 
             console.print(f"[yellow]Tool:[/yellow] {fn_name}({_truncate_args(args)})")
 
-            result = await tools.execute(fn_name, args)
+            result = await _execute_tool_with_timeout(settings, tools, fn_name, args)
             result_str = json.dumps(result, default=str, ensure_ascii=False)
 
             console.print(f"[dim]Result:[/dim] {result_str[:200]}")
@@ -232,8 +303,6 @@ async def _routed_agent_loop(
             f"[dim]Router: {decision.provider_name}/{decision.model} "
             f"(score={decision.score:.2f})[/dim]"
         )
-
-        provider = registry.get(decision.provider_name)
 
         # Define the completion operation for fallback
         async def _complete(
@@ -326,7 +395,7 @@ async def _routed_agent_loop(
 
             console.print(f"[yellow]Tool:[/yellow] {fn_name}({_truncate_args(args)})")
 
-            result = await tools.execute(fn_name, args)
+            result = await _execute_tool_with_timeout(settings, tools, fn_name, args)
             result_str = json.dumps(result, default=str, ensure_ascii=False)
 
             console.print(f"[dim]Result:[/dim] {result_str[:200]}")

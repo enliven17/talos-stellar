@@ -94,8 +94,13 @@ export async function POST(
     const expectedPayee = seller?.agentWalletAddress || seller?.walletPublicKey || "";
 
     // Verify x402 payment on Stellar
-    const isValid = await verifyX402Payment(paymentToken, String(playbook.price), expectedPayee);
-    if (!isValid) {
+    const verificationResult = await verifyX402Payment(paymentToken, String(playbook.price), expectedPayee);
+    if (!verificationResult.valid) {
+      console.error("[purchase route] x402 verification failed:", {
+        errorCategory: verificationResult.errorCategory,
+        errorMessage: verificationResult.errorMessage,
+        playbookId: id,
+      });
       return Response.json({ error: "Invalid or insufficient payment" }, { status: 402 });
     }
 

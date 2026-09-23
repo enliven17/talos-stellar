@@ -21,6 +21,7 @@ import {
   UnboundedPageSizeError,
   MalformedEventError,
   UnknownEventError,
+  UnsupportedVersionError,
   type EventFixture,
   type FixtureSet,
 } from "./event-query";
@@ -145,8 +146,8 @@ describe("bounded querying", () => {
       toLedger: 100020,
       pageSize: 10,
     });
-    expect(result.total).toBe(3);
-    expect(result.events.map((e) => e.event).sort()).toEqual(["pat_upd", "reg_upd", "tls_crt"]);
+    expect(result.total).toBe(4);
+    expect(result.events.map((e) => e.event).sort()).toEqual(["pat_upd", "reg_upd", "tls_crt", "tls_crt2"]);
   });
 
   it("treats ledger bounds as inclusive on both ends", () => {
@@ -310,5 +311,44 @@ describe("malformed payloads", () => {
         set,
       ),
     ).toThrow(UnknownEventError);
+  });
+
+  it("rejects an unsupported version", () => {
+    const fixture = set.malformed.find((m) => m.id === "malformed.unsupported_version");
+    expect(fixture).toBeDefined();
+    expect(() => parseEventFixture(fixture!.fixture, set)).toThrow(UnsupportedVersionError);
+  });
+});
+
+describe("malformed-fixture failure-path check", () => {
+  it("rejects fixture set with missing format", () => {
+    const bad = { ...raw };
+    delete (bad as any).format;
+    expect(() => parseFixtureSet(bad)).toThrow(MalformedEventError);
+  });
+
+  it("rejects fixture set with invalid bounds min/max page size", () => {
+    const bad = {
+      ...raw,
+      bounds: {
+        min_page_size: 10,
+        max_page_size: 5,
+        max_ledger_span: 100,
+      },
+    };
+    expect(() => parseFixtureSet(bad)).toThrow(MalformedEventError);
+  });
+
+  it("rejects an invalid event fixture with mismatched topic[0] symbol value", () => {
+    const badFixture = {
+      id: "bad.mismatched_symbol",
+      family: "creation",
+      event: "tls_crt",
+      contract: "talos_registry",
+      ledger_sequence: 100,
+      topics: [{ type: "symbol", value: "wrong_symbol_name" }],
+      data: [],
+    };
+    expect(() => parseEventFixture(badFixture, set)).toThrow(MalformedEventError);
   });
 });

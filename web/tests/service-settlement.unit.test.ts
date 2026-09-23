@@ -14,6 +14,22 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { POST } from "../src/app/api/talos/[id]/service/route";
 
+import fs from "fs";
+import path from "path";
+import { verifyX402PaymentOffline } from "@/lib/stellar-x402";
+
+// Load offline fixtures
+const FIXTURES_DIR = path.join(__dirname, "fixtures/x402");
+const fixtures = {
+  valid: JSON.parse(fs.readFileSync(path.join(FIXTURES_DIR, "valid.json"), "utf8")),
+  invalidAsset: JSON.parse(fs.readFileSync(path.join(FIXTURES_DIR, "invalid-asset.json"), "utf8")),
+  invalidIssuer: JSON.parse(fs.readFileSync(path.join(FIXTURES_DIR, "invalid-issuer.json"), "utf8")),
+  invalidRecipient: JSON.parse(fs.readFileSync(path.join(FIXTURES_DIR, "invalid-recipient.json"), "utf8")),
+  invalidAmount: JSON.parse(fs.readFileSync(path.join(FIXTURES_DIR, "invalid-amount.json"), "utf8")),
+  invalidNetwork: JSON.parse(fs.readFileSync(path.join(FIXTURES_DIR, "invalid-network.json"), "utf8")),
+  missingOps: JSON.parse(fs.readFileSync(path.join(FIXTURES_DIR, "missing-ops.json"), "utf8")),
+};
+
 const mocks = vi.hoisted(() => ({
   resolveTalosFromRequest: vi.fn(),
   verifyX402Payment: vi.fn(),
@@ -28,10 +44,14 @@ vi.mock("@/lib/auth", () => ({
   resolveTalosFromRequest: mocks.resolveTalosFromRequest,
 }));
 
-vi.mock("@/lib/stellar-x402", () => ({
-  verifyX402Payment: mocks.verifyX402Payment,
-  settleX402Payment: mocks.settleX402Payment,
-}));
+vi.mock("@/lib/stellar-x402", async (importOriginal) => {
+  const actual: any = await importOriginal();
+  return {
+    ...actual,
+    verifyX402Payment: mocks.verifyX402Payment,
+    settleX402Payment: mocks.settleX402Payment,
+  };
+});
 
 vi.mock("@/lib/fulfillment", () => ({
   fulfillInstant: mocks.fulfillInstant,
@@ -53,14 +73,14 @@ const SERVICE = {
   talosId: "seller-1",
   serviceName: "trend_research",
   description: "Research market trends",
-  price: "5.00",
+  price: "10.00",
   currency: "USDC",
-  stellarPublicKey: "PAYEE_PUBLIC_KEY",
+  stellarPublicKey: "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL", // From fixtures
   chains: ["stellar"],
   fulfillmentMode: "instant",
 };
 
-const PROVIDER = { agentWalletAddress: "AGENT_WALLET_ADDR" };
+const PROVIDER = { agentWalletAddress: "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL" };
 
 // Drizzle query-builder look-alike: .from().where().limit() are chainable and
 // the builder is thenable, resolving to the fixture row set for this call.
@@ -85,7 +105,7 @@ function makePostRequest(overrides?: {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (overrides?.auth !== false) headers.Authorization = "Bearer buyer-key";
   if (overrides?.xPayment !== null) {
-    headers["X-PAYMENT"] = overrides?.xPayment ?? "x402 valid-payment-token";
+    headers["X-PAYMENT"] = overrides?.xPayment ?? `x402 ${fixtures.valid.xdr}`;
   }
   return new NextRequest("http://localhost/api/talos/seller-1/service", {
     method: "POST",
@@ -100,7 +120,12 @@ describe("POST /api/talos/[id]/service — service-settlement failure matrix", (
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.resolveTalosFromRequest.mockResolvedValue({ ok: true, talos: { id: "buyer-1" } });
-    mocks.verifyX402Payment.mockResolvedValue(true);
+    
+    // Wire up the mock to use our offline verifier for deterministic tests
+    mocks.verifyX402Payment.mockImplementation(async (token: string, amount: string, to: string) => {
+      return verifyX402PaymentOffline(token, amount, to);
+    });
+
     mocks.settleX402Payment.mockResolvedValue({ txHash: "tx-hash-abc" });
     mocks.fulfillInstant.mockResolvedValue({ summary: "ok" });
 
@@ -123,38 +148,29 @@ describe("POST /api/talos/[id]/service — service-settlement failure matrix", (
       expect(mocks.insert).not.toHaveBeenCalled();
     });
 
-    it("returns 402 for an invalid x402 payment token", async () => {
-      mocks.verifyX402Payment.mockResolvedValue(false);
+    const invalidCases = [
+      ["invalid asset", fixtures.invalidAsset],
+      ["invalid issuer", fixtures.invalidIssuer],
+      ["invalid recipient", fixtures.invalidRecipient],
+      ["invalid amount", fixtures.invalidAmount],
+      ["invalid network", fixtures.invalidNetwork],
+      ["missing ops", fixtures.missingOps],
+    ];
 
-      const response = await POST(makePostRequest(), {
+    it.each(invalidCases)("returns 402 for %s and does not expose verifyErr.message", async (_, fixture: any) => {
+      const response = await POST(makePostRequest({ xPayment: `x402 ${fixture.xdr}` }), {
         params: Promise.resolve({ id: "seller-1" }),
       });
 
-      expect(response.status).toBe(402);
       const body = await response.json();
-      expect(body.error).toBe("Invalid or insufficient x402 payment");
-      expect(mocks.settleX402Payment).not.toHaveBeenCalled();
-      expect(mocks.insert).not.toHaveBeenCalled();
-    });
-
-    it("returns 402 and never settles when recipient or amount mismatches the service", async () => {
-      mocks.verifyX402Payment.mockResolvedValue(false);
-
-      const response = await POST(makePostRequest(), {
-        params: Promise.resolve({ id: "seller-1" }),
-      });
-
+      if (response.status !== 402) {
+        console.error("Invalid network failed with status", response.status, "and body:", body);
+      }
       expect(response.status).toBe(402);
-      const body = await response.json();
       expect(body.error).toBe("Invalid or insufficient x402 payment");
-
-      // Route must enforce the listed price and payee (token signed for a
-      // different amount/recipient fails verification and is never settled).
-      expect(mocks.verifyX402Payment).toHaveBeenCalledWith(
-        "valid-payment-token",
-        "5.00",
-        "PAYEE_PUBLIC_KEY",
-      );
+      expect(body.errorCategory).toBeUndefined(); // internal error category should not leak
+      expect(body.errorMessage).toBeUndefined(); // internal error message should not leak
+      
       expect(mocks.settleX402Payment).not.toHaveBeenCalled();
       expect(mocks.insert).not.toHaveBeenCalled();
     });
@@ -196,7 +212,7 @@ describe("POST /api/talos/[id]/service — service-settlement failure matrix", (
       expect(body.status).not.toBe("completed");
 
       // Settlement succeeded on-chain but no completed purchase is returned.
-      expect(mocks.settleX402Payment).toHaveBeenCalledWith("valid-payment-token");
+      expect(mocks.settleX402Payment).toHaveBeenCalledWith(fixtures.valid.xdr);
       expect(mocks.insert).not.toHaveBeenCalled();
     });
 
@@ -256,9 +272,9 @@ describe("POST /api/talos/[id]/service — service-settlement failure matrix", (
       expect(body.jobId).toBe("job-1");
       expect(body.txHash).toBe("tx-hash-abc");
       expect(mocks.verifyX402Payment).toHaveBeenCalledWith(
-        "valid-payment-token",
-        "5.00",
-        "PAYEE_PUBLIC_KEY",
+        fixtures.valid.xdr,
+        "10.00",
+        "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL",
       );
     });
   });

@@ -1,0 +1,12 @@
+{
+  "contracts": [
+    "TalosRegistry",
+    "TalosNameService"
+  ],
+  "description": "Supported on-disk storage schema versions. Latest matches storage_migration::SCHEMA_TIMELOCK_DEFAULTS. Add new version by appending and regenerating fixtures.",
+  "latest": 2,
+  "supported": [
+    1,
+    2
+  ]
+}

@@ -1,0 +1,81 @@
+name: Web & SDK CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/sdk/**'
+      - 'web/**'
+      - '.github/workflows/web-sdk-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packages/sdk/**'
+      - 'web/**'
+      - '.github/workflows/web-sdk-ci.yml'
+
+jobs:
+  sdk:
+    name: SDK – Type-check, Lint & Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/sdk
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript type-check (ESM)
+        run: pnpm build:esm
+
+      - name: Run tests
+        run: pnpm test
+
+  web:
+    name: Web – Type-check, Lint & Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript type-check
+        run: pnpm tsc --noEmit
+
+      - name: ESLint
+        run: pnpm lint
+
+      - name: Run unit tests
+        run: pnpm test:unit

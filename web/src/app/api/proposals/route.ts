@@ -3,11 +3,16 @@ import { db } from "@/db";
 import { tlsApprovals, tlsTalos } from "@/db/schema";
 import { eq, desc } from "drizzle-orm";
 import { internalError } from "@/lib/api-response";
+import { parseAnalyticsLimit } from "@/lib/analytics-limits";
 
 // GET /api/proposals — All proposals across all Talos, newest first
-// Optional ?status=pending|approved|rejected filter
+// Optional ?status=pending|approved|rejected filter, optional ?limit=1..100 (default 50)
 export async function GET(request: NextRequest) {
-  const status = new URL(request.url).searchParams.get("status");
+  const searchParams = new URL(request.url).searchParams;
+  const status = searchParams.get("status");
+  const parsedLimit = parseAnalyticsLimit(searchParams.get("limit"), 50, 100);
+  if (!parsedLimit.ok) return parsedLimit.response;
+  const limit = parsedLimit.limit;
 
   try {
     const rows = await db
@@ -28,7 +33,8 @@ export async function GET(request: NextRequest) {
       .from(tlsApprovals)
       .innerJoin(tlsTalos, eq(tlsApprovals.talosId, tlsTalos.id))
       .where(status ? eq(tlsApprovals.status, status) : undefined)
-      .orderBy(desc(tlsApprovals.createdAt));
+      .orderBy(desc(tlsApprovals.createdAt))
+      .limit(limit);
 
     return Response.json(rows);
   } catch {

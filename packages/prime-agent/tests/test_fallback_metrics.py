@@ -2,7 +2,6 @@ import pytest
 from talos_agent.routing.fallback import (
     FallbackChain,
     fallback_metrics,
-    FallbackStrategy,
 )
 from talos_agent.circuit_breaker import cb_registry
 

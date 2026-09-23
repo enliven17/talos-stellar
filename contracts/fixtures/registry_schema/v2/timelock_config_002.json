@@ -1,0 +1,16 @@
+{
+  "meta": {
+    "additive_fields": [],
+    "contract": "TalosRegistry",
+    "generator": "scripts/generate-registry-fixtures.mjs v1",
+    "kind": "TimelockConfig",
+    "schema_version": 2
+  },
+  "storage_key": {
+    "type": "TimelockConfig"
+  },
+  "value": {
+    "grace_period": 604800,
+    "min_delay": 0
+  }
+}

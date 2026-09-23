@@ -51,6 +51,7 @@ is idempotent per cursor (see §4).
 | topics | data | meaning |
 |---|---|---|
 | (`tls_crt`, creator: Address) | (talos_id: u32, name: String, category: String) | new Talos registered |
+| (`tls_crt2`, creator: Address) | (version: u32, talos_id: u32, name: String, category: String) | new Talos registered (v2) |
 | (`pat_upd`, talos_id: u32) | (creator_addr: Address, creator_share: u32, investor_share: u32) | patron split changed |
 | (`fee_chg`,) | (old_bps: u32, new_bps: u32) | protocol fee changed |
 | (`adm_prp`,) | (current: Address, proposed: Address) | admin transfer proposed |
@@ -72,6 +73,7 @@ is idempotent per cursor (see §4).
 | topics | data |
 |---|---|
 | (`name_reg`, talos_id: u32) | (name: String, owner: Address) |
+| (`name_reg2`, talos_id: u32) | (version: u32, name: String, owner: Address) |
 | (`reg_upd`,) | (old_registry: Address, new_registry: Address) |
 | (`tl_sch`/`tl_exec`/`tl_cnl`/`tl_cfg`) | same shape as registry timelock events |
 

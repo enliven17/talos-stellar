@@ -22,6 +22,7 @@ from urllib.parse import unquote, urlsplit
 import httpx
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
+from talos_agent.adapters.diagnostics import safe_adapter_diagnostic_fields
 from talos_agent.observability import log
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
@@ -1059,10 +1060,9 @@ def _denied(adapter: str, capability: str, target: str) -> None:
     try:
         log.warning(
             "adapter_capability_denied",
-            adapter=adapter,
-            capability=capability,
-            target=target,
-            outcome="denied",
+            **safe_adapter_diagnostic_fields(
+                adapter=adapter, capability=capability, target=target, outcome="denied"
+            ),
         )
     except Exception:
         pass
@@ -1072,10 +1072,9 @@ def _resource(adapter: str, operation: str, resource: str) -> None:
     try:
         log.warning(
             "adapter_resource_limit",
-            adapter=adapter,
-            operation=operation,
-            resource=resource,
-            outcome="denied",
+            **safe_adapter_diagnostic_fields(
+                adapter=adapter, operation=operation, resource=resource, outcome="denied"
+            ),
         )
     except Exception:
         pass
@@ -1099,7 +1098,7 @@ def _invocation_log(
     if error_type is not None:
         fields["error_type"] = error_type.__name__
     try:
-        log.info("adapter_sandbox_invocation", **fields)
+        log.info("adapter_sandbox_invocation", **safe_adapter_diagnostic_fields(**fields))
     except Exception:
         pass
 
