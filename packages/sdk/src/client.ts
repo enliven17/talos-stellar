@@ -35,6 +35,13 @@ import {
   type RequestSigner,
   type SigningControllerOptions,
 } from "./signing.js";
+import {
+  TalosAPIError,
+  TalosTransportError,
+  classifyTransportError,
+  errorFromResponse,
+} from "./errors.js";
+import { ChaosInjector, FaultType } from "./chaos.js";
 
 export interface RetryPolicyOptions {
   maxAttempts?: number;
@@ -46,6 +53,13 @@ export interface RetryPolicyOptions {
   random?: () => number;
 }
 
+export interface RetryOptions extends RetryPolicyOptions {}
+
+export interface WriteOptions {
+  idempotencyKey?: string;
+  signal?: AbortSignal;
+}
+
 export interface TalosClientOptions {
   /** Base URL of the Talos API. Defaults to `https://talos-stellar.vercel.app`. */
   baseUrl?: string;
@@ -54,6 +68,12 @@ export interface TalosClientOptions {
   /** Opt-in request signer. Omitting it preserves the legacy wire format. */
   signer?: RequestSigner;
   signing?: SigningControllerOptions;
+  /** Fetch implementation override for tests, middleware, and Node runtimes. */
+  fetch?: typeof globalThis.fetch;
+  retryPolicy?: RetryPolicyOptions;
+  timeoutMs?: number;
+  onError?: (event: TalosErrorEvent) => void;
+  chaosInjector?: ChaosInjector;
 }
 
 /** Structured event emitted to {@link TalosClientOptions.onError}. */
@@ -63,39 +83,6 @@ export interface TalosErrorEvent {
   method: string;
   attempt: number;
   durationMs: number;
-}
-
-/** Default retry bounds. Conservative — well within RFC 7231 guidance. */
-const DEFAULT_RETRY: Required<RetryOptions> = {
-  maxAttempts: 1,
-  idempotentOnly: true,
-  maxRetryAfterMs: 60_000,
-  baseDelayMs: 500,
-  maxDelayMs: 8_000,
-  jitter: 0.25,
-  onRetry: () => {
-    /* default: no-op observer */
-  },
-};
-
-/** Methods considered safe to retry without further confirmation from the caller. */
-const IDEMPOTENT_METHODS = new Set(["GET", "HEAD"]);
-
-/**
- * Sleep helper. Uses `setTimeout` so it works in both Node and the browser.
- * Returns a promise that resolves after `ms` milliseconds.
- */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Apply jitter to a delay: `delay * (1 - jitter + jitter*random)`.
- * Bounded below by 0 and above by `delay * (1 + jitter)`.
- */
-function applyJitter(delay: number, jitter: number): number {
-  const factor = 1 - jitter + jitter * Math.random();
-  return Math.max(0, Math.round(delay * factor));
 }
 
 /**
@@ -113,6 +100,11 @@ export class TalosClient {
   private baseUrl: string;
   private headers: Record<string, string>;
   private signer?: SigningController;
+  private readonly fetchOverride?: typeof globalThis.fetch;
+  private readonly retryPolicy: Required<RetryOptions>;
+  private readonly timeoutMs?: number;
+  private readonly onError?: (event: TalosErrorEvent) => void;
+  private readonly chaosInjector?: ChaosInjector;
 
   constructor(options: TalosClientOptions = {}) {
     const normalizedRetryMethods = options.retryPolicy?.retryMethods?.map(
@@ -139,6 +131,10 @@ export class TalosClient {
       options.baseUrl ?? "https://talos-stellar.vercel.app"
     ).replace(/\/$/, "");
     this.headers = { "Content-Type": "application/json" };
+    this.fetchOverride = options.fetch;
+    this.timeoutMs = options.timeoutMs;
+    this.onError = options.onError;
+    this.chaosInjector = options.chaosInjector;
     if (options.apiKey) {
       this.headers["Authorization"] = `Bearer ${options.apiKey}`;
     }
@@ -147,7 +143,13 @@ export class TalosClient {
 
   /** Resolve the fetch implementation per request. Prefer override; fall back to global. */
   private resolveFetch(): typeof fetch {
-    return this.fetchOverride ?? globalThis.fetch;
+    const fetchFn = this.fetchOverride ?? globalThis.fetch;
+    if (typeof fetchFn !== "function") {
+      throw new TalosTransportError(0, "Fetch implementation is unavailable", "", {
+        message: "Fetch implementation is unavailable",
+      });
+    }
+    return fetchFn;
   }
 
   private shouldRetry(method: string, status: number, retryMethodsOverride?: string[]): boolean {
@@ -261,16 +263,68 @@ export class TalosClient {
         "X-Talos-Signature": encodeSignature(signed.signature),
       });
     }
-    const res = await fetch(url, {
-      ...init,
-      headers,
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      throw new TalosAPIError(res.status, body, path);
+    const method = (init?.method ?? "GET").toUpperCase();
+    const retryableMethod = this.retryPolicy.retryMethods.includes(method) ||
+      (idempotencyKey !== undefined && method !== "GET");
+    const maxAttempts = retryableMethod ? this.retryPolicy.maxAttempts : 1;
+    const fetchFn = this.resolveFetch();
+    const startedAt = Date.now();
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let controller: AbortController | undefined;
+      let requestSignal = normalizedSignal;
+      if (this.timeoutMs !== undefined) {
+        controller = new AbortController();
+        requestSignal = controller.signal;
+        timeout = setTimeout(() => controller?.abort(), this.timeoutMs);
+      }
+      try {
+        if (this.chaosInjector) {
+          await this.chaosInjector.maybeInjectFault(FaultType.NETWORK_DELAY);
+          await this.chaosInjector.maybeInjectFault(FaultType.NETWORK_DROP);
+          await this.chaosInjector.maybeInjectFault(FaultType.API_TIMEOUT);
+        }
+        const requestHeaders = { ...headers };
+        if (idempotencyKey) requestHeaders["Idempotency-Key"] = idempotencyKey;
+        const res = await fetchFn(url, {
+          ...requestInit,
+          headers: requestHeaders,
+          signal: requestSignal,
+        });
+        if (res.ok) return res.json() as Promise<T>;
+
+        const body = await res.text();
+        const error = errorFromResponse(res.status, path, body, res.headers);
+        const retryMethods = idempotencyKey
+          ? [...this.retryPolicy.retryMethods, method]
+          : undefined;
+        if (attempt < maxAttempts && this.shouldRetry(method, res.status, retryMethods)) {
+          await this.wait(this.getRetryDelay(attempt, res.headers.get("retry-after")), normalizedSignal);
+          continue;
+        }
+        throw error;
+      } catch (error) {
+        if (error instanceof TalosAPIError) throw error;
+        const classified = classifyTransportError(error, path);
+        if (attempt < maxAttempts && classified.isRetryable) {
+          await this.wait(this.getRetryDelay(attempt, null), normalizedSignal);
+          continue;
+        }
+        this.onError?.({
+          error: classified,
+          path,
+          method,
+          attempt,
+          durationMs: Date.now() - startedAt,
+        });
+        throw classified;
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+      }
     }
 
-    throw new Error("Unexpected retry failure");
+    throw new Error("Request attempts exhausted");
   }
 
   private async requestPage<T>(
@@ -315,6 +369,7 @@ export class TalosClient {
   async reportActivity(
     talosId: string,
     params: ReportActivityParams,
+    options?: WriteOptions,
   ): Promise<Activity> {
     return this.request(`/api/talos/${talosId}/activity`, {
       method: "POST",
@@ -333,6 +388,7 @@ export class TalosClient {
   async reportRevenue(
     talosId: string,
     params: ReportRevenueParams,
+    options?: WriteOptions,
   ): Promise<Revenue> {
     return this.request(`/api/talos/${talosId}/revenue`, {
       method: "POST",
@@ -351,6 +407,7 @@ export class TalosClient {
   async createApproval(
     talosId: string,
     params: CreateApprovalParams,
+    options?: WriteOptions,
   ): Promise<Approval> {
     return this.request(`/api/talos/${talosId}/approvals`, {
       method: "POST",
@@ -444,7 +501,8 @@ export class TalosClient {
       method: "POST",
       body: JSON.stringify({ payload }),
     });
-    res = await fetch(url, {
+    const fetchFn = this.resolveFetch();
+    const res = await fetchFn(url, {
       method: "POST",
       headers: initialHeaders,
       body: JSON.stringify({ payload }),

@@ -46,6 +46,25 @@ assert.equal(typeof client.reportActivity, "function", "client.reportActivity mu
 assert.equal(typeof client.reportRevenue, "function", "client.reportRevenue must be callable");
 console.log("  + TalosClient constructor + method check OK");
 
+let injectedCalls = 0;
+const injectedClient = new sdk.TalosClient({
+  baseUrl: "http://example.test",
+  apiKey: "test",
+  fetch: async (url, init) => {
+    injectedCalls += 1;
+    assert.equal(url, "http://example.test/api/talos/injected");
+    assert.equal(init?.headers?.Authorization, "Bearer test");
+    return new Response(JSON.stringify({ id: "injected" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  },
+});
+const injectedResult = await injectedClient.getTalos("injected");
+assert.deepEqual(injectedResult, { id: "injected" });
+assert.equal(injectedCalls, 1);
+console.log("  + injected fetch request check OK");
+
 // Chaos: instantiate ChaosInjector, register a fault, confirm types
 const chaos = new sdk.ChaosInjector({ enabled: false });
 chaos.registerFault({ type: sdk.FaultType.NETWORK_DROP, probability: 0.5 });

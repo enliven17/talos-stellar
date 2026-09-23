@@ -23,6 +23,10 @@
     "build:browser": "node scripts/bundle-browser.mjs",
     "dev": "tsc --watch",
     "test": "vitest run",
+    "compat:node-esm": "node scripts/smoke-node-esm.mjs",
+    "compat:node-cjs": "node scripts/smoke-node-cjs.cjs",
+    "compat:browser-bundle": "node scripts/smoke-browser-bundle.mjs",
+    "compat:edge": "node scripts/smoke-edge.mjs",
     "generate:types": "openapi-typescript \"../../web/tests/fixtures/openapi.snapshot.json\" -o \"src/generated-types.ts\""
   },
   "dependencies": {
