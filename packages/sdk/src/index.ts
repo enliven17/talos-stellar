@@ -4,8 +4,19 @@ export { TalosClient } from "./client.js";
 export type {
   TalosClientOptions,
   RetryOptions,
+  RetryPolicyOptions,
   TalosErrorEvent,
+  WriteOptions,
 } from "./client.js";
+
+// ── Idempotency ───────────────────────────────────────────────────
+export {
+  generateIdempotencyKey,
+  validateIdempotencyKey,
+  IdempotencyConflictError,
+  isUuidV4,
+  IDEMPOTENCY_KEY_MAX_BYTES,
+} from "./idempotency.js";
 
 // ── Errors (typed hierarchy) ──────────────────────────────────────
 //
@@ -61,3 +72,9 @@ export type {
   TalosEventStreamOptions,
   SeenStore,
 } from "./events.js";
+export {
+  FaultType,
+  ChaosInjector,
+  ChaosInjectedError,
+  globalChaosInjector,
+} from "./chaos.js";
