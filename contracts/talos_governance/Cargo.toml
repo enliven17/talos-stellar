@@ -18,3 +18,6 @@ soroban-sdk = { workspace = true, features = ["testutils"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 soroban-sdk = { workspace = true, features = ["alloc"] }
+
+[dev-dependencies]
+proptest = "1.4"
