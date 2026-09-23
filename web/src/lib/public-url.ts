@@ -1,71 +1,115 @@
 import { NextRequest } from "next/server";
 
-export function getPublicBaseUrl(reqOrHeaders: Request | NextRequest | Headers): string {
-  const headers = reqOrHeaders instanceof Headers 
-    ? reqOrHeaders 
-    : ('headers' in reqOrHeaders ? reqOrHeaders.headers : new Headers());
+const LOCAL_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
-  const configuredUrl = process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL;
-  
-  const forwardedHost = headers.get("x-forwarded-host");
-  const hostHeader = headers.get("host");
-  const forwardedProto = headers.get("x-forwarded-proto");
+function isLocalHostname(hostname: string): boolean {
+  return LOCAL_HOSTNAMES.has(hostname) || hostname.endsWith(".local");
+}
 
-  // Reject comma-separated ambiguous values
-  if (forwardedHost && forwardedHost.includes(",")) throw new Error("Ambiguous X-Forwarded-Host");
-  if (hostHeader && hostHeader.includes(",")) throw new Error("Ambiguous Host");
-  if (forwardedProto && forwardedProto.includes(",")) throw new Error("Ambiguous X-Forwarded-Proto");
-
-  // If x-forwarded-host and host both exist and we want to prevent conflicts? 
-  // Normally proxy modifies host, or keeps original in x-forwarded-host. 
-  // We'll trust x-forwarded-host if present, else host.
-  const host = forwardedHost || hostHeader;
-
-  if (!host) {
-    if (configuredUrl) return configuredUrl.replace(/\/$/, "");
-    return "http://localhost:3000";
+/**
+ * Parses a raw Host / X-Forwarded-Host value into a URL, rejecting anything
+ * that isn't a bare `host[:port]` authority component.
+ */
+function parseHostHeader(value: string, headerName: string): URL {
+  // A comma means the header was folded from multiple hops — we can't tell
+  // which hop's value to trust, so treat it as ambiguous.
+  if (value.includes(",")) {
+    throw new Error(`Ambiguous ${headerName}`);
   }
 
-  // Basic malformed host check (e.g. injects paths)
-  if (host.includes("/") || host.includes("\\")) {
+  // Whitespace, userinfo, and path characters have no place in a host header.
+  // Parsing them would let "evil.com@trusted.com" masquerade as trusted.com.
+  if (/[\s@/\\?#]/.test(value)) {
     throw new Error("Malformed host header");
   }
 
-  const protocol = forwardedProto === "http" ? "http" : "https";
-  let hostname = host;
-  if (host.includes(":")) {
-    // IPv6 support needs bracket handling, but for now simple split or URL parser
-    try {
-      const parsed = new URL(`http://${host}`);
-      hostname = parsed.hostname;
-    } catch {
-      throw new Error("Malformed host header");
-    }
+  try {
+    return new URL(`http://${value}`);
+  } catch {
+    throw new Error("Malformed host header");
   }
+}
 
-  const trustedHosts = (process.env.TRUSTED_HOSTS || "")
+function trustedHostnames(configuredUrl: string | undefined): string[] {
+  const hosts = (process.env.TRUSTED_HOSTS || "")
     .split(",")
-    .map((h) => h.trim())
+    .map((h) => h.trim().toLowerCase())
     .filter(Boolean);
 
   if (configuredUrl) {
     try {
-      trustedHosts.push(new URL(configuredUrl).hostname);
-    } catch (e) {}
+      hosts.push(new URL(configuredUrl).hostname.toLowerCase());
+    } catch {
+      // A misconfigured APP_URL shouldn't take down URL building.
+    }
   }
 
+  return hosts;
+}
+
+/**
+ * Resolves the externally visible base URL for a request.
+ *
+ * Only hosts listed in TRUSTED_HOSTS (or derived from APP_URL) are honoured,
+ * plus localhost names outside production. Untrusted or ambiguous headers never
+ * influence the result: we either fall back to the configured APP_URL or throw.
+ * Error messages stay generic so the trusted-host configuration is never
+ * disclosed to a client probing with forged headers.
+ */
+export function getPublicBaseUrl(reqOrHeaders: Request | NextRequest | Headers): string {
+  const headers = reqOrHeaders instanceof Headers
+    ? reqOrHeaders
+    : ('headers' in reqOrHeaders ? reqOrHeaders.headers : new Headers());
+
+  const configuredUrl = (process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL)?.replace(/\/$/, "");
   const isLocal = process.env.NODE_ENV !== "production";
-  const isLocalHost = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" || hostname.endsWith(".local");
+  const trusted = trustedHostnames(configuredUrl);
 
-  const isTrusted = trustedHosts.includes(hostname) || (isLocal && isLocalHost);
+  const rawForwardedHost = headers.get("x-forwarded-host");
+  const rawHost = headers.get("host");
+  const forwardedProto = headers.get("x-forwarded-proto");
 
-  if (!isTrusted) {
-    if (configuredUrl) {
-      return configuredUrl.replace(/\/$/, "");
+  if (forwardedProto) {
+    if (forwardedProto.includes(",")) {
+      throw new Error("Ambiguous X-Forwarded-Proto");
     }
+    if (forwardedProto !== "http" && forwardedProto !== "https") {
+      throw new Error("Invalid X-Forwarded-Proto");
+    }
+  }
+
+  const forwardedHost = rawForwardedHost ? parseHostHeader(rawForwardedHost, "X-Forwarded-Host") : null;
+  const directHost = rawHost ? parseHostHeader(rawHost, "Host") : null;
+
+  const isTrusted = (hostname: string) =>
+    trusted.includes(hostname.toLowerCase()) || (isLocal && isLocalHostname(hostname.toLowerCase()));
+
+  // When both headers are present they usually agree (proxies mirror the
+  // original Host). If they disagree and Host itself names a trusted host,
+  // the request is ambiguous — picking either could select a value the
+  // client forged, so refuse. A differing untrusted Host is just an internal
+  // hop name and the forwarded value wins.
+  if (forwardedHost && directHost) {
+    const sameAuthority = forwardedHost.host === directHost.host;
+    if (!sameAuthority && isTrusted(directHost.hostname)) {
+      throw new Error("Conflicting host headers");
+    }
+  }
+
+  const candidate = forwardedHost ?? directHost;
+
+  if (!candidate) {
+    if (configuredUrl) return configuredUrl;
+    return "http://localhost:3000";
+  }
+
+  if (!isTrusted(candidate.hostname)) {
+    if (configuredUrl) return configuredUrl;
     throw new Error("Untrusted host header");
   }
 
-  const finalProtocol = (isLocal && isLocalHost && !forwardedProto) ? "http" : protocol;
-  return `${finalProtocol}://${host}`;
+  // Local development has no TLS terminator, so default to http there; in
+  // production default to https unless the proxy explicitly forwarded http.
+  const protocol = forwardedProto ?? (isLocal && isLocalHostname(candidate.hostname) ? "http" : "https");
+  return `${protocol}://${candidate.host}`;
 }
