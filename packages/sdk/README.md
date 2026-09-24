@@ -85,6 +85,41 @@ const job = await client.purchaseServiceWithPayment(
 console.log("Job created:", job.id);
 ```
 
+### Typed seller quote construction
+
+Sellers can build a canonical A2A `Quote` (and optional 402 payment-details wrapper) without hand-rolling decimals or expiry. Construction reuses `validateQuote` / `verifyQuoteNotExpired` and fails closed on missing, malformed, boundary, and expired inputs — errors never echo signatures or payment proofs.
+
+```typescript
+import {
+  constructSellerQuote,
+  constructSellerPaymentDetails,
+  SellerQuoteError,
+} from '@talos-protocol/sdk';
+
+try {
+  const quote = constructSellerQuote({
+    providerId: agentWalletAddress, // Stellar G…
+    amount: 1.5,                    // normalized to "1.500000"
+    assetCode: 'USDC',
+    network: 'stellar',
+    ttlSeconds: 900,                // or absolute expiresAt
+  });
+
+  const details = constructSellerPaymentDetails({
+    providerId: agentWalletAddress,
+    amount: 1.5,
+    ttlSeconds: 900,
+    serviceName: 'analytics',
+    talosId: 'talos_123',
+  });
+  // details.quote is the typed Quote; details.expiresAt mirrors quote.expiresAt
+} catch (err) {
+  if (err instanceof SellerQuoteError) {
+    console.error(err.code, err.message);
+  }
+}
+```
+
 ### Webhooks
 
 Talos agents can receive webhooks for various events. To securely process webhooks, you must verify the `Talos-Signature` header.
