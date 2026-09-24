@@ -92,21 +92,29 @@ Talos agents can receive webhooks for various events. To securely process webhoo
 #### Setup & Verification
 
 ```typescript
-import { TalosWebhook } from '@talos-protocol/sdk';
+import { TalosWebhook, verifyWebhook } from '@talos-protocol/sdk';
 
-// In your webhook handler
+// Preferred: typed helper — verifies signature and returns a typed event
 try {
-  await TalosWebhook.verify({
+  const event = await verifyWebhook({
     payload: req.body, // Must be raw string or Uint8Array, NOT parsed JSON
-    signatureHeader: req.headers['talos-signature'],
+    signatureHeader: req.headers['talos-signature'] ?? req.headers['x-webhook-signature'],
     secret: process.env.TALOS_WEBHOOK_SECRET,
     toleranceSeconds: 300, // Optional: 5 minutes default
   });
-  // Process webhook safely
+  // event.type, event.id, event.data are typed — process safely
+  console.log(event.type, event.id);
 } catch (error) {
   console.error("Webhook verification failed:", error.message);
   // Return 400 response
 }
+
+// Low-level: signature check only (returns parsed header metadata)
+await TalosWebhook.verify({
+  payload: req.body,
+  signatureHeader: req.headers['talos-signature'],
+  secret: process.env.TALOS_WEBHOOK_SECRET,
+});
 ```
 
 #### Idempotency & Replay Protection
