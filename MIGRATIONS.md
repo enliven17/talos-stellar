@@ -4,6 +4,30 @@
 `Web Migrations CI` workflow ([`.github/workflows/web-migrations-ci.yml`](.github/workflows/web-migrations-ci.yml))
 validates every migration against an ephemeral Postgres 16 service before merge.
 
+## Migration drift gate
+
+Offline structural gate that keeps `web/drizzle/meta/_journal.json` aligned with
+committed SQL migration files. It does **not** need Postgres or `drizzle-kit` and
+fails closed on missing, malformed, or ambiguous journal input.
+
+```bash
+pnpm migrations:check                 # structural (journal ↔ SQL)
+pnpm migrations:check:strict          # also fail on orphan SQL / prefix collisions
+pnpm test:migration-drift             # focused fixture suite (pass/fail/boundary)
+```
+
+What it enforces:
+
+1. **Journal integrity** — `_journal.json` parses, `entries` is non-empty, idxs are
+   unique and contiguous from `0`, tags are unique.
+2. **SQL presence** — every journal tag has a matching `web/drizzle/<tag>.sql`.
+3. **Bootstrap file** — `bootstrap-roles.sql` is present.
+4. **Strict extras** — orphan `NNNN_*.sql` files not listed in the journal, and
+   ambiguous shared numeric prefixes, fail under `--strict`.
+
+Schema.ts ↔ migration file drift (generate-and-diff) remains covered by the
+Postgres-backed workflow below; run both before merging migration changes.
+
 ## What CI checks
 
 On any PR touching `web/drizzle/**`, `web/src/db/**`, or `web/drizzle.config.ts`:
