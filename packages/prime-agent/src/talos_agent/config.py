@@ -6,8 +6,10 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
-from pydantic import Field, PrivateAttr
+from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from talos_agent.circuit_breaker import CircuitBreakerConfig
 
 APP_DIR = Path.home() / ".talos-agent"
 
@@ -196,6 +198,23 @@ class Settings(BaseSettings):
         le=1000000,
         validation_alias="TALOS_ADAPTER_MAX_INVOCATION_RECORDS",
     )
+    adapter_retry_configs: dict[str, dict] = Field(
+        default_factory=dict,
+        validation_alias="TALOS_ADAPTER_RETRY_CONFIGS",
+        description="Per-adapter retry and circuit breaker settings as JSON",
+    )
+
+    @field_validator("adapter_retry_configs")
+    @classmethod
+    def validate_adapter_retry_configs(cls, value: dict[str, dict]) -> dict[str, dict]:
+        for adapter, config in value.items():
+            if not isinstance(adapter, str) or not adapter or not isinstance(config, dict):
+                raise ValueError("adapter retry configs must map adapter names to objects")
+            try:
+                CircuitBreakerConfig.from_mapping(config)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid retry config for adapter '{adapter}'") from exc
+        return {adapter.lower(): config for adapter, config in value.items()}
 
     # Policy engine (disabled by default — backward compatible)
     policy_engine_enabled: bool = Field(default=False, description="Enable the declarative policy engine for autonomous actions")
