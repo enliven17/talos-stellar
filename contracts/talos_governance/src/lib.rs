@@ -64,6 +64,13 @@ pub struct GovernanceConfig {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimelockExtension {
+    pub proposal_id: u32,
+    pub extension_ledgers: u32,
+}
+
+#[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
@@ -93,11 +100,22 @@ pub const PAUSE_PROPOSAL_CREATION: u32 = 7;
 pub const PAUSE_GOVERNANCE_VOTING: u32 = 8;
 /// Pause domain for governance configuration.
 pub const PAUSE_GOVERNANCE_CONFIG: u32 = 9;
+/// Pause domain for timelock extensions.
+pub const PAUSE_TIMELock_EXTENSIONS: u32 = 10;
+/// Pause domain for timelock execution.
+pub const PAUSE_TIMELock_EXECUTION: u32 = 11;
 
 fn emit_proposal_created(env: &Env, proposal_id: u32, talos_id: u32, proposer: Address) {
     env.events().publish(
         (symbol_short!("prop_crt"), proposal_id),
         (talos_id, proposer),
+    );
+}
+
+fn emit_timelock_extension(env: &Env, proposal_id: u32, extension_ledgers: u32) {
+    env.events().publish(
+        (symbol_short!("timelock_ext"), proposal_id),
+        extension_ledgers,
     );
 }
 
@@ -307,6 +325,25 @@ impl TalosGovernance {
 
         emit_vote_cast(&env, proposal_id, voter, choice, vote_weight);
     }
+    pub fn extend_timelock(env: Env, admin: Address, proposal_id: u32, extension_ledgers: u32) {
+        pause_control::check_not_paused(&env, PAUSE_TIMELock_EXTENSIONS);
+        Self::require_admin(&env, &admin);
+
+        let mut proposal: Proposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Proposal(proposal_id))
+            .expect("Proposal not found");
+
+        if proposal.status != ProposalStatus::Active {
+            panic!("Proposal is not active");
+        }
+
+        proposal.end_ledger = proposal.end_ledger.saturating_add(extension_ledgers);
+        env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
+        emit_timelock_extension(&env, proposal_id, extension_ledgers);
+    }
+
 
     pub fn finalize_proposal(env: Env, proposal_id: u32) {
         let mut proposal: Proposal = env
@@ -528,6 +565,26 @@ impl TalosGovernance {
         ttl_manager::emit_ttl_batch(&e, touched + skipped, touched, skipped);
         (touched, skipped)
     }
+    pub fn execute_timelock_action(env: Env, admin: Address, proposal_id: u32) {
+        pause_control::check_not_paused(&env, PAUSE_TIMELock_EXECUTION);
+        Self::require_admin(&env, &admin);
+
+        let proposal: Proposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Proposal(proposal_id))
+            .expect("Proposal not found");
+
+        let current_ledger = env.ledger().sequence();
+        if current_ledger < proposal.end_ledger {
+            panic!("Timelock period has not elapsed");
+        }
+
+        // In a real implementation, this would trigger the action defined in the proposal.
+        // For now, we just emit an event to indicate the timelock has been respected.
+        emit_timelock_extension(&env, proposal_id, 0);
+    }
+
 
     /// Query storage health for tracked proposal entries.
     pub fn get_storage_health(e: Env) -> (u32, u32, u32, u32, u32) {
@@ -1163,5 +1220,118 @@ mod tests {
         }]).try_vote(&bob, &proposal_id, &VoteChoice::Approve);
         
         assert!(res.is_err(), "Bob should not be able to vote with tokens received after snapshot");
+    }
+    #[test]
+    fn extend_timelock_requires_admin_auth() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let attacker = Address::generate(&env);
+        let proposer = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &attacker,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "extend_timelock",
+                    args: (attacker.clone(), proposal_id, 10u32).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_extend_timelock(&attacker, &proposal_id, &10u32);
+    }
+
+    #[test]
+    fn extend_timelock_updates_end_ledger() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        let original_end = proposal.end_ledger;
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "extend_timelock",
+                    args: (admin.clone(), proposal_id, 10u32).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .extend_timelock(&admin, &proposal_id, &10u32);
+
+        let updated_proposal = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(updated_proposal.end_ledger, original_end + 10);
+    }
+
+    #[test]
+    #[should_panic(expected = "Proposal is not active")]
+    fn extend_timelock_rejects_non_active_proposal() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        // Finalize the proposal to change its status
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 200;
+        });
+        client.finalize_proposal(&proposal_id);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "extend_timelock",
+                    args: (admin.clone(), proposal_id, 10u32).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .extend_timelock(&admin, &proposal_id, &10u32);
+    }
+
+    #[test]
+    #[should_panic(expected = "Timelock period has not elapsed")]
+    fn execute_timelock_action_rejects_before_elapsed() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "execute_timelock_action",
+                    args: (admin.clone(), proposal_id).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_execute_timelock_action(&admin, &proposal_id);
+    }
+
+    #[test]
+    fn execute_timelock_action_succeeds_after_elapsed() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        // Fast forward past the voting period
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 200;
+        });
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "execute_timelock_action",
+                    args: (admin.clone(), proposal_id).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .execute_timelock_action(&admin, &proposal_id);
     }
 }

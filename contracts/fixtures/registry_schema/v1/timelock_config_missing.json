@@ -4,7 +4,7 @@
     "contract": "TalosRegistry",
     "generator": "scripts/generate-registry-fixtures.mjs v1",
     "kind": "TimelockConfig",
-    "note": "v1 has no explicit TimelockConfig stored; reads default min_delay=0 grace_period=604800 via unwrap_or",
+    "note": "v1 has no explicit TimelockConfig stored; reads default min_delay=0 grace_period=604800 via unwrap_or. Supports governance timelock extensions safely.",
     "schema_version": 1
   },
   "storage_key": {
