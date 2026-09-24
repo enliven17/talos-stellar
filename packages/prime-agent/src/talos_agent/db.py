@@ -1052,6 +1052,28 @@ class LocalDB:
         self._conn.commit()
         return cursor.rowcount
 
+    # ── WAL health ─────────────────────────────────────────
+
+    def wal_health(
+        self,
+        *,
+        run_checkpoint: bool = True,
+        run_quick_check: bool = True,
+    ):
+        """Return privacy-safe SQLite WAL health diagnostics for this DB.
+
+        Reuses the open connection. Does not close it. Secrets and row
+        payloads are never included in the report.
+        """
+        from talos_agent.wal_health import collect_wal_health
+
+        return collect_wal_health(
+            path=self._path,
+            conn=self._conn,
+            run_checkpoint=run_checkpoint,
+            run_quick_check=run_quick_check,
+        )
+
     # ── Cleanup ────────────────────────────────────────────
 
     def close(self) -> None:
