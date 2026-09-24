@@ -92,21 +92,29 @@ Talos agents can receive webhooks for various events. To securely process webhoo
 #### Setup & Verification
 
 ```typescript
-import { TalosWebhook } from '@talos-protocol/sdk';
+import { TalosWebhook, verifyWebhook } from '@talos-protocol/sdk';
 
-// In your webhook handler
+// Preferred: typed helper — verifies signature and returns a typed event
 try {
-  await TalosWebhook.verify({
+  const event = await verifyWebhook({
     payload: req.body, // Must be raw string or Uint8Array, NOT parsed JSON
-    signatureHeader: req.headers['talos-signature'],
+    signatureHeader: req.headers['talos-signature'] ?? req.headers['x-webhook-signature'],
     secret: process.env.TALOS_WEBHOOK_SECRET,
     toleranceSeconds: 300, // Optional: 5 minutes default
   });
-  // Process webhook safely
+  // event.type, event.id, event.data are typed — process safely
+  console.log(event.type, event.id);
 } catch (error) {
   console.error("Webhook verification failed:", error.message);
   // Return 400 response
 }
+
+// Low-level: signature check only (returns parsed header metadata)
+await TalosWebhook.verify({
+  payload: req.body,
+  signatureHeader: req.headers['talos-signature'],
+  secret: process.env.TALOS_WEBHOOK_SECRET,
+});
 ```
 
 #### Idempotency & Replay Protection
@@ -321,14 +329,25 @@ switch (error.code) {
 
 ### Retry, Timeout & Observability
 
-`TalosClientOptions` accepts three additional fields, all optional and
-backward-compatible (defaults preserve previous behavior):
+`TalosClientOptions` accepts optional timeout / retry / observer fields.
+Both `retryPolicy` (status-code) and `retry` (typed-error) are validated at
+construction via `resolveRetryPolicy` / `resolveRetryOptions`: missing fields
+use defaults, malformed values throw privacy-safe `TypeError`/`RangeError`,
+and attempt counts are hard-capped at 8. Inspect the effective policy with
+`client.getRetryPolicy()` and `client.getRetryOptions()`.
 
 ```typescript
 const client = new TalosClient({
   baseUrl: "https://talos-stellar.vercel.app",
   apiKey: process.env.TALOS_KEY!,
   timeoutMs: 30_000,                     // per-request AbortController timeout
+  retryPolicy: {
+    maxAttempts: 3,                      // status-code policy (default on)
+    baseDelayMs: 100,
+    maxDelayMs: 1000,
+    retryMethods: ["GET", "HEAD", "PUT", "DELETE", "OPTIONS"],
+    retryStatusCodes: [429, 500, 502, 503, 504],
+  },
   retry: {
     maxAttempts: 4,                      // initial + 3 retries (default 1 = off)
     idempotentOnly: true,               // POST/PUT/PATCH never auto-retried

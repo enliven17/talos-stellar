@@ -72,7 +72,7 @@ def _prepare(
     return store.prepare_effect(job_id, result or {"answer": "done"})
 
 
-def test_migration_7_creates_durable_job_tables(tmp_path: Path):
+def test_migration_creates_durable_job_and_audit_tables(tmp_path: Path):
     db = LocalDB(path=tmp_path / "migration.db")
     tables = {
         row[0]
@@ -82,8 +82,12 @@ def test_migration_7_creates_durable_job_tables(tmp_path: Path):
     }
     version = db._conn.execute("PRAGMA user_version").fetchone()[0]
 
-    assert {"job_inbox", "job_effect_outbox"}.issubset(tables)
-    assert version == _MIGRATIONS[-1][0] == 7
+    assert {
+        "job_inbox",
+        "job_effect_outbox",
+        "job_effect_replay_audit",
+    }.issubset(tables)
+    assert version == _MIGRATIONS[-1][0] == 10
     db.close()
 
 
@@ -95,11 +99,11 @@ def test_store_enables_crash_safe_sqlite_settings(tmp_path: Path):
     db.close()
 
 
-def test_migration_7_upgrades_v6_without_losing_existing_data(
+def test_migration_10_upgrades_v9_without_losing_existing_data(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    path = tmp_path / "upgrade-v6.db"
+    path = tmp_path / "upgrade-v9.db"
     original = list(db_module._MIGRATIONS)
     monkeypatch.setattr(db_module, "_MIGRATIONS", original[:-1])
     old = LocalDB(path=path)
@@ -109,7 +113,7 @@ def test_migration_7_upgrades_v6_without_losing_existing_data(
     monkeypatch.setattr(db_module, "_MIGRATIONS", original)
     upgraded = LocalDB(path=path)
 
-    assert upgraded._conn.execute("PRAGMA user_version").fetchone()[0] == 7
+    assert upgraded._conn.execute("PRAGMA user_version").fetchone()[0] == 10
     assert (
         upgraded._conn.execute(
             "SELECT content FROM activity_log WHERE type = 'existing'"
@@ -119,6 +123,12 @@ def test_migration_7_upgrades_v6_without_losing_existing_data(
     assert (
         upgraded._conn.execute(
             "SELECT name FROM sqlite_master WHERE name = 'job_effect_outbox'"
+        ).fetchone()
+        is not None
+    )
+    assert (
+        upgraded._conn.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'job_effect_replay_audit'"
         ).fetchone()
         is not None
     )

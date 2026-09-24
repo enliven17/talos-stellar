@@ -292,6 +292,90 @@ CREATE INDEX IF NOT EXISTS idx_completion_markers_expires_at
     ON completion_markers(expires_at);
         """,
     ),
+    (
+        10,
+        # Restore durable job inbox/outbox if an earlier migration collision
+        # dropped them, and add an append-only audit trail for effect replay.
+        """
+CREATE TABLE IF NOT EXISTS job_inbox (
+    owner_talos_id         TEXT NOT NULL,
+    job_id                 TEXT NOT NULL,
+    requester_talos_id     TEXT,
+    service_type           TEXT NOT NULL,
+    payload_json           TEXT NOT NULL,
+    payload_digest         TEXT NOT NULL,
+    state                  TEXT NOT NULL DEFAULT 'received'
+                           CHECK (state IN (
+                               'received', 'claimed', 'effect_pending',
+                               'completed', 'conflict'
+                           )),
+    fencing_token          INTEGER,
+    remote_lease_expires_at TEXT,
+    completed_at           TEXT,
+    created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (owner_talos_id, job_id)
+);
+
+CREATE TABLE IF NOT EXISTS job_effect_outbox (
+    effect_id          TEXT PRIMARY KEY,
+    owner_talos_id     TEXT NOT NULL,
+    job_id             TEXT NOT NULL,
+    effect_type        TEXT NOT NULL,
+    deduplication_key  TEXT NOT NULL,
+    result_json        TEXT NOT NULL,
+    result_digest      TEXT NOT NULL,
+    fencing_token      INTEGER NOT NULL,
+    state              TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (state IN (
+                           'pending', 'dispatching', 'succeeded', 'retryable',
+                           'indeterminate', 'conflict', 'dead'
+                       )),
+    attempt_count      INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at    TEXT NOT NULL,
+    lease_owner        TEXT,
+    lease_until        TEXT,
+    last_error_code    TEXT,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (owner_talos_id, deduplication_key),
+    FOREIGN KEY (owner_talos_id, job_id)
+        REFERENCES job_inbox(owner_talos_id, job_id)
+);
+
+CREATE TABLE IF NOT EXISTS job_effect_replay_audit (
+    audit_id        TEXT PRIMARY KEY,
+    owner_talos_id  TEXT NOT NULL,
+    effect_id       TEXT NOT NULL,
+    job_id          TEXT NOT NULL,
+    action          TEXT NOT NULL
+                    CHECK (action IN (
+                        'effect_prepared',
+                        'dispatch_claimed',
+                        'dispatch_succeeded',
+                        'dispatch_reconciled',
+                        'dispatch_failed',
+                        'dispatch_conflict',
+                        'operator_requeued'
+                    )),
+    from_state      TEXT,
+    to_state        TEXT NOT NULL,
+    attempt_count   INTEGER NOT NULL DEFAULT 0,
+    error_code      TEXT,
+    actor           TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_inbox_state
+    ON job_inbox(owner_talos_id, state, created_at);
+CREATE INDEX IF NOT EXISTS idx_job_effect_outbox_due
+    ON job_effect_outbox(owner_talos_id, state, next_attempt_at, lease_until);
+CREATE INDEX IF NOT EXISTS idx_job_effect_replay_audit_effect
+    ON job_effect_replay_audit(owner_talos_id, effect_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_job_effect_replay_audit_job
+    ON job_effect_replay_audit(owner_talos_id, job_id, created_at);
+        """,
+    ),
 ]
 
 
@@ -683,6 +767,29 @@ class LocalDB:
         )
         self._conn.commit()
 
+    def evict_expired_learnings(self, *, now: datetime | None = None) -> dict:
+        """Delete strategy learnings whose expires_at is in the past.
+
+        Learnings with NULL expires_at are retained (no TTL). Returns a
+        privacy-safe summary — ids only, never insight text.
+        """
+        clock = now or datetime.now(timezone.utc)
+        # Compare as ISO-8601 strings; save_learning stores aware UTC isoformat.
+        cutoff = clock.isoformat()
+        rows = self._conn.execute(
+            "SELECT id FROM strategy_learnings "
+            "WHERE expires_at IS NOT NULL AND expires_at <= ?",
+            (cutoff,),
+        ).fetchall()
+        ids = [int(r["id"] if isinstance(r, dict) or hasattr(r, "keys") else r[0]) for r in rows]
+        if ids:
+            self._conn.execute(
+                f"DELETE FROM strategy_learnings WHERE id IN ({','.join('?' for _ in ids)})",
+                ids,
+            )
+            self._conn.commit()
+        return {"evicted": len(ids), "ids": ids}
+
     # ── Audience Insights ──────────────────────────────────
 
     def upsert_audience_insight(
@@ -1051,6 +1158,28 @@ class LocalDB:
         )
         self._conn.commit()
         return cursor.rowcount
+
+    # ── WAL health ─────────────────────────────────────────
+
+    def wal_health(
+        self,
+        *,
+        run_checkpoint: bool = True,
+        run_quick_check: bool = True,
+    ):
+        """Return privacy-safe SQLite WAL health diagnostics for this DB.
+
+        Reuses the open connection. Does not close it. Secrets and row
+        payloads are never included in the report.
+        """
+        from talos_agent.wal_health import collect_wal_health
+
+        return collect_wal_health(
+            path=self._path,
+            conn=self._conn,
+            run_checkpoint=run_checkpoint,
+            run_quick_check=run_quick_check,
+        )
 
     # ── Cleanup ────────────────────────────────────────────
 

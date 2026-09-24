@@ -401,10 +401,11 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         timeout_ms=settings.secret_db_timeout_ms,
     )
     if settings.secret_rotation_enabled:
-        from talos_agent.secret_store import SecretStore, decode_keyring
+        from talos_agent.secret_store import build_secret_store, decode_keyring
 
-        secret_store = SecretStore(
-            db,
+        secret_store = build_secret_store(
+            backend=settings.secret_store_backend,
+            db=db,
             keyring=decode_keyring(settings.secret_keyring),
             active_key_id=settings.secret_active_key_id,
             scope=settings.secret_scope,
@@ -691,6 +692,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
 
     # Shutdown handler — force-exit on second signal
     shutdown_event = asyncio.Event()
+    shutdown_drain_complete = asyncio.Event()
     _signal_count = 0
 
     def _handle_signal():
@@ -895,10 +897,10 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                 pass
 
     async def job_heartbeat_task():
-        """Extend leases on claimed jobs periodically."""
+        """Extend leases until the graceful shutdown drain has completed."""
         from talos_agent.tools.commerce import get_claimed_jobs_copy
         backoff = DurableBackoff(task_name="job_heartbeat", db=db, base_delay=settings.job_heartbeat_interval)
-        while not shutdown_event.is_set():
+        while True:
             try:
                 claimed = (
                     job_effect_store.claimed_jobs()
@@ -908,15 +910,26 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                 for job_id, fencing_token in claimed.items():
                     result = await api.heartbeat_job(job_id, fencing_token)
                     if not result:
-                        logger.warning("job_lease_heartbeat_failed", job_id=job_id)
+                        logger.warning("job_lease_heartbeat_failed")
                 backoff.success()
             except Exception as e:
-                logger.debug(f"Job heartbeat error: {e}")
+                logger.debug("Job heartbeat error: %s", e)
                 backoff.failure()
 
-            try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=backoff.next_delay())
+            if shutdown_drain_complete.is_set():
                 break
+
+            try:
+                if shutdown_event.is_set():
+                    await asyncio.wait_for(
+                        shutdown_drain_complete.wait(),
+                        timeout=backoff.next_delay(),
+                    )
+                    break
+                await asyncio.wait_for(
+                    shutdown_event.wait(),
+                    timeout=backoff.next_delay(),
+                )
             except asyncio.TimeoutError:
                 pass
 
@@ -1219,6 +1232,12 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         # Stop polling: shutdown_event is already set so each task's inner
         # wait() will break on the next iteration without starting new work.
         #
+        # The job heartbeat is deliberately excluded from the drain wait: it
+        # must continue renewing active remote leases while in-flight work is
+        # given the graceful shutdown window.
+        heartbeat_task = next((t for t in tasks if t.get_name() == "job_heartbeat"), None)
+        drain_tasks = [t for t in tasks if t is not heartbeat_task]
+
         # Wait up to shutdown_deadline seconds for running tasks to finish
         # naturally before we force-cancel them.
         deadline = settings.shutdown_deadline
@@ -1228,18 +1247,17 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             )
             try:
                 await asyncio.wait_for(
-                    asyncio.shield(asyncio.gather(*tasks, return_exceptions=True)),
+                    asyncio.shield(asyncio.gather(*drain_tasks, return_exceptions=True)),
                     timeout=deadline,
                 )
                 console.print("[green]All tasks finished within deadline.[/green]")
             except asyncio.TimeoutError:
-                still_running = [t for t in tasks if not t.done()]
+                still_running = [t for t in drain_tasks if not t.done()]
                 console.print(
                     f"[red]Deadline exceeded — cancelling {len(still_running)} task(s): "
                     + ", ".join(t.get_name() for t in still_running)
                     + "[/red]"
                 )
-                # Record each cancelled task so operators can inspect what was cut short.
                 for t in still_running:
                     try:
                         db.add_activity(
@@ -1251,12 +1269,37 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                         pass
                 for t in still_running:
                     t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.gather(*drain_tasks, return_exceptions=True)
         else:
             # Immediate cancel when deadline == 0.
-            for t in tasks:
+            for t in drain_tasks:
                 t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*drain_tasks, return_exceptions=True)
+
+        # Stop the heartbeat before releasing persisted provider-job leases.
+        # This prevents a heartbeat from racing with claim release.
+        shutdown_drain_complete.set()
+        if heartbeat_task is not None:
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+
+        # Release legacy persisted provider-job leases after in-flight work has
+        # either completed or been cancelled. Failed releases remain durable
+        # for restore reconciliation on the next run.
+        try:
+            from talos_agent.tools.commerce import release_claimed_jobs
+
+            released, release_failures = await release_claimed_jobs()
+            if released or release_failures:
+                log.info(
+                    "job_shutdown_drain_complete",
+                    released=released,
+                    release_failures=release_failures,
+                )
+        except Exception as exc:
+            logger.warning(
+                "job_shutdown_release_failed",
+                error_type=type(exc).__name__,
+            )
         # ─────────────────────────────────────────────────────────────────
     finally:
         console.print("[yellow]Cleaning up...[/yellow]")

@@ -29,8 +29,8 @@ import { sql } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import {
   DEFAULT_HORIZON,
-  DB_TIMEOUT_MS,
-  STELLAR_TIMEOUT_MS,
+  resolveDbTimeoutMs,
+  resolveStellarTimeoutMs,
   withTimeout,
 } from "../utils";
 
@@ -112,8 +112,8 @@ export async function GET() {
     db,
     fetch,
     now: () => new Date(),
-    dbTimeoutMs: DB_TIMEOUT_MS,
-    stellarTimeoutMs: STELLAR_TIMEOUT_MS,
+    dbTimeoutMs: resolveDbTimeoutMs(),
+    stellarTimeoutMs: resolveStellarTimeoutMs(),
     stellarUrl: process.env.STELLAR_HORIZON_URL ?? DEFAULT_HORIZON,
   });
 

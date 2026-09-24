@@ -980,3 +980,5 @@ The test suites live in each contract's `#[cfg(test)] mod tests` block and cover
 ## License
 
 MIT
+
+See [ERRORS.md](./ERRORS.md) for typed error codes, common panic diagnostics, and caller recovery guidance.

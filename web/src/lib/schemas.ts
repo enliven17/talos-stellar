@@ -500,9 +500,98 @@ export const BODY_LIMIT_BYTES: number = (() => {
   return 102_400; // 100 KB safe default
 })();
 
+/**
+ * Soft caps on JSON graph shape (after the byte-size gate).
+ * Prevents nested / wide payloads that fit under BODY_LIMIT_BYTES from
+ * burning CPU in Zod walks. Tuned for fuzz + production write routes.
+ */
+export const MAX_JSON_DEPTH = 32;
+export const MAX_JSON_KEYS = 1_024;
+
+const SENSITIVE_ISSUE_SEGMENTS = new Set([
+  "signature",
+  "apikey",
+  "authorization",
+  "paymentproof",
+  "seed",
+  "secret",
+  "privatekey",
+  "password",
+  "token",
+]);
+
 /** Shared 413 response — body content is never echoed. */
 const payloadTooLarge = (request: Request) =>
   errorResponse(request, 413, "PAYLOAD_TOO_LARGE", "Payload too large");
+
+/** Shared 400 response for over-complex JSON graphs. */
+const payloadTooComplex = (request: Request) =>
+  errorResponse(
+    request,
+    400,
+    "PAYLOAD_TOO_COMPLEX",
+    "JSON payload exceeds allowed depth or key count",
+  );
+
+/**
+ * Walk a parsed JSON value and reject graphs that are too deep or too wide.
+ * Returns false when the payload should be refused at the request boundary.
+ */
+export function isJsonComplexityAcceptable(
+  value: unknown,
+  maxDepth = MAX_JSON_DEPTH,
+  maxKeys = MAX_JSON_KEYS,
+): boolean {
+  let keyCount = 0;
+
+  const walk = (node: unknown, depth: number): boolean => {
+    if (depth > maxDepth) return false;
+    if (node === null || typeof node !== "object") return true;
+
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        if (!walk(item, depth + 1)) return false;
+      }
+      return true;
+    }
+
+    for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
+      keyCount += 1;
+      if (keyCount > maxKeys) return false;
+      // Sensitive key names are fine structurally; values are redacted later.
+      void key;
+      if (!walk(child, depth + 1)) return false;
+    }
+    return true;
+  };
+
+  return walk(value, 0);
+}
+
+/**
+ * Privacy-safe Zod issue formatting for the request boundary.
+ *
+ * Paths that touch secrets (signature, seed, paymentProof, …) never include
+ * the received value — only a generic reason — so fuzz or attacker-controlled
+ * secrets cannot leak through the error envelope.
+ */
+export function formatValidationIssues(
+  issues: ReadonlyArray<{ path: PropertyKey[]; message: string }>,
+): string[] {
+  return issues.map((issue) => {
+    const pathParts = issue.path.map(String);
+    const path = pathParts.join(".");
+    const sensitive = pathParts.some((p) =>
+      SENSITIVE_ISSUE_SEGMENTS.has(p.toLowerCase()),
+    );
+    if (sensitive) {
+      return path
+        ? `${path}: invalid or missing sensitive field`
+        : "invalid or missing sensitive field";
+    }
+    return path ? `${path}: ${issue.message}` : issue.message;
+  });
+}
 
 /**
  * Parse and validate a JSON request body with a Zod schema.
@@ -512,7 +601,9 @@ const payloadTooLarge = (request: Request) =>
  *     reading the body stream
  *   - rejects requests whose measured byte length exceeds BODY_LIMIT_BYTES when
  *     the client omits Content-Length or sends a mismatched value
+ *   - rejects over-deep / over-wide JSON graphs with PAYLOAD_TOO_COMPLEX
  *   - returns HTTP 400 for invalid JSON and schema validation failures
+ *   - validation issue strings never echo secrets, seeds, or payment proofs
  *   - returns { data } for valid payloads; { error: Response } otherwise
  */
 export async function parseBody<T extends z.ZodType>(
@@ -546,13 +637,22 @@ export async function parseBody<T extends z.ZodType>(
     };
   }
 
+  // ── 3. Fuzz / DoS shape gate before Zod walks the graph ─────────────
+  if (!isJsonComplexityAcceptable(raw)) {
+    return { error: payloadTooComplex(request) };
+  }
+
   const result = schema.safeParse(raw);
   if (!result.success) {
-    const issues = result.error.issues.map(
-      (i) => `${i.path.join(".")}: ${i.message}`,
-    );
+    const issues = formatValidationIssues(result.error.issues);
     return {
-      error: errorResponse(request, 400, "VALIDATION_ERROR", "Validation failed", issues),
+      error: errorResponse(
+        request,
+        400,
+        "VALIDATION_ERROR",
+        "Validation failed",
+        issues,
+      ),
     };
   }
 

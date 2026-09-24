@@ -10,6 +10,21 @@ NEXT_PUBLIC_SENTRY_DSN=<your-dsn>
 ```
 in `web/.env.local`. Both vars are needed: `SENTRY_DSN` for server-side routes, `NEXT_PUBLIC_SENTRY_DSN` for client-side.
 
+Before any event leaves the web process, the client, server, and edge Sentry
+configurations run `web/src/lib/sentry-scrub.ts` through both `beforeSend` and
+`beforeSendTransaction`, so sampled performance transactions are sanitized the
+same way as error events. It removes user identity, credentials, cookies,
+wallet/account identifiers, seeds, signing material, payment proofs, sensitive
+media/content fields, the URL query, and the request `query_string` (which
+Sentry sends separately from `request.url`) while retaining safe diagnostics
+such as operation names and counters. Add new sensitive fields to the
+sanitizer's key policy rather than logging them directly. The focused
+regression command is:
+
+```bash
+pnpm --filter web exec vitest run src/lib/__tests__/sentry-scrub.test.ts
+```
+
 To verify Sentry is working, add a deliberate throw to any API route:
 ```ts
 throw new Error("Sentry test error");

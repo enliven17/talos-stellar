@@ -3,8 +3,8 @@ import { sql } from "drizzle-orm";
 import { NextRequest, NextResponse } from "next/server";
 import {
   DEFAULT_HORIZON,
-  DB_TIMEOUT_MS,
-  STELLAR_TIMEOUT_MS,
+  resolveDbTimeoutMs,
+  resolveStellarTimeoutMs,
   withTimeout,
 } from "./utils";
 
@@ -61,8 +61,8 @@ export function createHealthHandler({
   db,
   fetchFn,
   now = () => new Date(),
-  dbTimeoutMs = DB_TIMEOUT_MS,
-  stellarTimeoutMs = STELLAR_TIMEOUT_MS,
+  dbTimeoutMs = resolveDbTimeoutMs(),
+  stellarTimeoutMs = resolveStellarTimeoutMs(),
 }: HealthDeps) {
   return async function GET(request: NextRequest) {
     const probe = request.nextUrl.searchParams.get("probe");

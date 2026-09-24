@@ -85,6 +85,7 @@ Limitations
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -92,7 +93,7 @@ import secrets
 import shutil
 import sqlite3
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -128,6 +129,205 @@ _CHECKPOINT_TABLES = (
     "retry_state",
 )
 
+# Primary-key columns used for privacy-safe key-level diffs (names only, never values).
+_TABLE_KEY_COLUMNS: dict[str, str] = {
+    "schedules": "task_name",
+    "talos_config": "key",
+    "retry_state": "task_name",
+    "playbooks": "name",
+    "approval_cache": "action_hash",
+    "commerce_queue": "id",
+    "claimed_jobs": "job_id",
+    "completion_markers": "marker_key",
+}
+
+# Substrings that mark config/row keys as sensitive — values are never returned.
+_SENSITIVE_KEY_SUBSTRINGS: tuple[str, ...] = (
+    "secret",
+    "password",
+    "token",
+    "seed",
+    "api_key",
+    "apikey",
+    "private",
+    "proof",
+    "payment",
+    "credential",
+    "master_password",
+    "mnemonic",
+    "signing",
+)
+
+
+def _is_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(part in lowered for part in _SENSITIVE_KEY_SUBSTRINGS)
+
+
+@dataclass
+class RestoreTableDiff:
+    """Privacy-safe per-table restore delta (counts + key names only)."""
+
+    table: str
+    before_count: int = 0
+    after_count: int = 0
+    delta: int = 0
+    added_keys: list[str] = field(default_factory=list)
+    removed_keys: list[str] = field(default_factory=list)
+    changed_keys: list[str] = field(default_factory=list)
+    key_column: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class RestoreStateDiff:
+    """Aggregate dry-run state diff between active and staged restore databases.
+
+    Values that may contain secrets, seeds, payment proofs, or other sensitive
+    media are never included — only table counts and non-sensitive key names.
+    """
+
+    tables: list[RestoreTableDiff] = field(default_factory=list)
+    tables_added: list[str] = field(default_factory=list)
+    tables_removed: list[str] = field(default_factory=list)
+    tables_changed: list[str] = field(default_factory=list)
+    unchanged_tables: list[str] = field(default_factory=list)
+    total_rows_before: int = 0
+    total_rows_after: int = 0
+    would_commit: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tables": [t.to_dict() for t in self.tables],
+            "tables_added": list(self.tables_added),
+            "tables_removed": list(self.tables_removed),
+            "tables_changed": list(self.tables_changed),
+            "unchanged_tables": list(self.unchanged_tables),
+            "total_rows_before": self.total_rows_before,
+            "total_rows_after": self.total_rows_after,
+            "would_commit": self.would_commit,
+        }
+
+
+def _list_user_tables(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    return {r[0] for r in rows}
+
+
+def _table_row_count(conn: sqlite3.Connection, table: str) -> int:
+    try:
+        return int(conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+    except sqlite3.Error:
+        return 0
+
+
+def _table_key_map(conn: sqlite3.Connection, table: str, key_column: str) -> dict[str, str]:
+    """Map primary-key -> stable non-sensitive fingerprint (never raw secret values)."""
+    try:
+        col_info = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+        cols = [r[1] for r in col_info]
+        if key_column not in cols:
+            return {}
+        other_cols = sorted(c for c in cols if c != key_column)
+        select_cols = [key_column, *other_cols]
+        col_sql = ", ".join(f'"{c}"' for c in select_cols)
+        out: dict[str, str] = {}
+        for row in conn.execute(f'SELECT {col_sql} FROM "{table}"').fetchall():
+            key = row[0]
+            if key is None:
+                continue
+            key_s = str(key)
+            if _is_sensitive_key(key_s):
+                # Keep the fact that a sensitive key exists/changes, but redact the name.
+                key_s = f"<redacted:{len(key_s)}>"
+            # Fingerprint is only used for equality; never expose raw values.
+            payload = json.dumps(list(row[1:]), sort_keys=False, default=str)
+            fp = hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()[:16]
+            out[key_s] = fp
+        return out
+    except sqlite3.Error:
+        return {}
+
+
+def compute_restore_state_diff(
+    current_db_path: Path | str | None,
+    staged_db_path: Path | str,
+) -> RestoreStateDiff:
+    """Compare active vs staged SQLite state for a restore dry-run.
+
+    Missing current DB is treated as empty. Sensitive key names are redacted;
+    row values are never returned.
+    """
+    staged_path = Path(staged_db_path)
+    if not staged_path.exists():
+        raise StagingError(f"Staged database not found for dry-run diff: {staged_path}")
+
+    staged_conn = sqlite3.connect(str(staged_path))
+    try:
+        staged_tables = _list_user_tables(staged_conn)
+        current_tables: set[str] = set()
+        current_conn: sqlite3.Connection | None = None
+        if current_db_path is not None and Path(current_db_path).exists():
+            current_conn = sqlite3.connect(str(current_db_path))
+            current_tables = _list_user_tables(current_conn)
+
+        all_tables = sorted(staged_tables | current_tables)
+        diff = RestoreStateDiff(would_commit=True)
+
+        for table in all_tables:
+            before = _table_row_count(current_conn, table) if current_conn is not None else 0
+            after = _table_row_count(staged_conn, table) if table in staged_tables else 0
+            table_diff = RestoreTableDiff(
+                table=table,
+                before_count=before,
+                after_count=after,
+                delta=after - before,
+            )
+
+            key_col = _TABLE_KEY_COLUMNS.get(table)
+            if key_col is not None:
+                table_diff.key_column = key_col
+                before_keys = (
+                    _table_key_map(current_conn, table, key_col) if current_conn is not None else {}
+                )
+                after_keys = (
+                    _table_key_map(staged_conn, table, key_col) if table in staged_tables else {}
+                )
+                before_set = set(before_keys)
+                after_set = set(after_keys)
+                table_diff.added_keys = sorted(after_set - before_set)
+                table_diff.removed_keys = sorted(before_set - after_set)
+                table_diff.changed_keys = sorted(
+                    k for k in (before_set & after_set) if before_keys[k] != after_keys[k]
+                )
+
+            diff.tables.append(table_diff)
+            diff.total_rows_before += before
+            diff.total_rows_after += after
+
+            if before == 0 and after > 0 and table not in current_tables:
+                diff.tables_added.append(table)
+            elif before > 0 and after == 0 and table not in staged_tables:
+                diff.tables_removed.append(table)
+            elif (
+                before != after
+                or table_diff.added_keys
+                or table_diff.removed_keys
+                or table_diff.changed_keys
+            ):
+                diff.tables_changed.append(table)
+            else:
+                diff.unchanged_tables.append(table)
+
+        if current_conn is not None:
+            current_conn.close()
+        return diff
+    finally:
+        staged_conn.close()
 
 
 # ── Configuration ──────────────────────────────────────────────────────────────
@@ -647,6 +847,8 @@ class StagedRestoreConfig:
         Whether post-restore lease verification calls live API. Default: False.
     staging_dir:
         Directory for temporary staged database files. Default: target database directory.
+    dry_run:
+        If True, stage and compute a privacy-safe state diff without committing.
     """
 
     max_size_bytes: int = 10 * 1024 * 1024
@@ -658,6 +860,7 @@ class StagedRestoreConfig:
     master_password: str | None = None
     api_verify_leases: bool = False
     staging_dir: Path | str | None = None
+    dry_run: bool = False
 
 
 @dataclass
@@ -690,6 +893,10 @@ class StagedRestoreResult:
         Total duration of the restore operation in milliseconds.
     errors:
         List of non-fatal warnings or error messages collected.
+    dry_run:
+        True when the restore was executed in dry-run mode (no commit).
+    state_diff:
+        Privacy-safe state diff produced during dry-run restores.
     """
 
     agent_id: str
@@ -704,6 +911,8 @@ class StagedRestoreResult:
     reconciliation_result: ReconcileResult | None = None
     duration_ms: float = 0.0
     errors: list[str] = field(default_factory=list)
+    dry_run: bool = False
+    state_diff: RestoreStateDiff | None = None
 
 
 class StagedRestoreManager:
@@ -757,6 +966,27 @@ class StagedRestoreManager:
             self._verify_invariants(staged_path, agent_id, result)
             result.invariants_passed = True
             log.info("restore_staged_invariants_passed", agent_id=agent_id)
+
+        # Step 4a: Dry-run — emit privacy-safe state diff and abort before commit
+        if self.config.dry_run:
+            result.dry_run = True
+            result.committed = False
+            try:
+                current_for_diff: Path | None = target_path if target_path.exists() else None
+                result.state_diff = compute_restore_state_diff(current_for_diff, staged_path)
+            finally:
+                staged_path.unlink(missing_ok=True)
+                for ext in ("-wal", "-shm"):
+                    Path(str(staged_path) + ext).unlink(missing_ok=True)
+
+            result.duration_ms = round((time.monotonic() - start_time) * 1000, 2)
+            log.info(
+                "restore_staged_dry_run_complete",
+                agent_id=agent_id,
+                duration_ms=result.duration_ms,
+                tables_changed=len(result.state_diff.tables_changed) if result.state_diff else 0,
+            )
+            return result
 
         # Step 4: Atomic Commit & Bounded Rollback
         await self._commit_and_reconcile(
@@ -1083,6 +1313,44 @@ def perform_staged_restore_sync(
     )
 
 
+
+async def perform_restore_dry_run(
+    target_db_path: Path | str,
+    checkpoint_input: dict[str, Any] | Path | str,
+    agent_id: str,
+    *,
+    config: StagedRestoreConfig | None = None,
+) -> StagedRestoreResult:
+    """Async dry-run restore that returns a privacy-safe state diff without committing."""
+    cfg = config or StagedRestoreConfig()
+    cfg.dry_run = True
+    manager = StagedRestoreManager(config=cfg)
+    return await manager.perform_staged_restore(
+        target_db_path=target_db_path,
+        checkpoint_input=checkpoint_input,
+        agent_id=agent_id,
+        api=None,
+    )
+
+
+def perform_restore_dry_run_sync(
+    target_db_path: Path | str,
+    checkpoint_input: dict[str, Any] | Path | str,
+    agent_id: str,
+    *,
+    config: StagedRestoreConfig | None = None,
+) -> StagedRestoreResult:
+    """Synchronous dry-run restore entry point (CLI / operators)."""
+    return asyncio.run(
+        perform_restore_dry_run(
+            target_db_path=target_db_path,
+            checkpoint_input=checkpoint_input,
+            agent_id=agent_id,
+            config=config,
+        )
+    )
+
+
 def recover_interrupted_restore(target_db_path: Path | str) -> bool:
     """Recover from an interrupted restore process by inspecting the restore journal."""
     target_path = Path(target_db_path).resolve()
@@ -1118,12 +1386,17 @@ __all__ = [
     "PreflightError",
     "ReconcileConfig",
     "ReconcileResult",
+    "RestoreStateDiff",
+    "RestoreTableDiff",
     "RollbackError",
     "StagedRestoreConfig",
     "StagedRestoreError",
     "StagedRestoreManager",
     "StagedRestoreResult",
     "StagingError",
+    "compute_restore_state_diff",
+    "perform_restore_dry_run",
+    "perform_restore_dry_run_sync",
     "perform_staged_restore",
     "perform_staged_restore_sync",
     "reconcile_after_restore",

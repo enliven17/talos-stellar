@@ -67,6 +67,9 @@ assert.equal(typeof sdk.TalosWebhook.verify, "function", "TalosWebhook.verify mi
 assert.equal(typeof sdk.TalosWebhook.parseSignatureHeader, "function", "TalosWebhook.parseSignatureHeader missing");
 assert.equal(typeof sdk.TalosWebhook.timingSafeEqual, "function", "TalosWebhook.timingSafeEqual missing");
 assert.equal(typeof sdk.TalosWebhook.hexToBuf, "function", "TalosWebhook.hexToBuf missing");
+assert.equal(typeof sdk.TalosWebhook.constructEvent, "function", "TalosWebhook.constructEvent missing");
+assert.equal(typeof sdk.verifyWebhook, "function", "verifyWebhook missing");
+assert.equal(typeof sdk.parseWebhookEvent, "function", "parseWebhookEvent missing");
 console.log("  + TalosWebhook static methods present");
 
 // Event stream constructor

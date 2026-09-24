@@ -20,6 +20,8 @@ import {
   parseRetryAfter,
   parseX402Challenge,
   MAX_BODY_BYTES,
+  resolveRetryPolicy,
+  resolveRetryOptions,
 } from "../src/index.js";
 
 describe("TalosClient - Request/Response Behavior", () => {
@@ -955,7 +957,140 @@ describe("Typed SDK Error Hierarchy", () => {
     });
   });
 
+  describe("Configurable retry policy", () => {
+    it("exposes validated defaults via getters (positive / missing)", () => {
+      const c = new TalosClient({ baseUrl: "http://localhost:3000" });
+      const policy = c.getRetryPolicy();
+      expect(policy.maxAttempts).toBe(3);
+      expect(policy.retryMethods).toEqual(["GET", "HEAD", "PUT", "DELETE", "OPTIONS"]);
+      expect(policy.retryStatusCodes).toEqual([429, 500, 502, 503, 504]);
+      expect(policy.baseDelayMs).toBe(100);
+      expect(policy.maxDelayMs).toBe(1000);
+      expect(Object.isFrozen(policy)).toBe(true);
+
+      const typed = c.getRetryOptions();
+      expect(typed.maxAttempts).toBe(1);
+      expect(typed.idempotentOnly).toBe(true);
+      expect(Object.isFrozen(typed)).toBe(true);
+    });
+
+    it("applies custom retryPolicy and normalizes method case", () => {
+      const c = new TalosClient({
+        baseUrl: "http://localhost:3000",
+        retryPolicy: {
+          maxAttempts: 5,
+          baseDelayMs: 50,
+          maxDelayMs: 500,
+          retryMethods: ["get", "post"],
+          retryStatusCodes: [429, 503],
+          jitter: false,
+        },
+      });
+      expect(c.getRetryPolicy()).toMatchObject({
+        maxAttempts: 5,
+        baseDelayMs: 50,
+        maxDelayMs: 500,
+        retryMethods: ["GET", "POST"],
+        retryStatusCodes: [429, 503],
+        jitter: false,
+      });
+    });
+
+    it("disables status-code policy when only typed retry is configured", () => {
+      const c = new TalosClient({
+        baseUrl: "http://localhost:3000",
+        retry: { maxAttempts: 4, baseDelayMs: 0, maxDelayMs: 0, jitter: 0 },
+      });
+      expect(c.getRetryPolicy().maxAttempts).toBe(1);
+      expect(c.getRetryOptions().maxAttempts).toBe(4);
+    });
+
+    it("clamps oversized maxAttempts and treats 0 as disabled", () => {
+      expect(resolveRetryOptions({ maxAttempts: 1000 }).maxAttempts).toBe(8);
+      expect(resolveRetryPolicy({ maxAttempts: 0 }).maxAttempts).toBe(1);
+      expect(resolveRetryOptions({ maxAttempts: -3 }).maxAttempts).toBe(1);
+    });
+
+    it("rejects malformed retryPolicy inputs (negative)", () => {
+      expect(() => resolveRetryPolicy({ baseDelayMs: Number.NaN })).toThrow(TypeError);
+      expect(() => resolveRetryPolicy({ maxDelayMs: Infinity })).toThrow(TypeError);
+      expect(() => resolveRetryPolicy({ baseDelayMs: 200, maxDelayMs: 100 })).toThrow(RangeError);
+      expect(() => resolveRetryPolicy({ retryMethods: [] })).toThrow(TypeError);
+      expect(() => resolveRetryPolicy({ retryStatusCodes: [42] })).toThrow(RangeError);
+      expect(() => resolveRetryPolicy({ jitter: "yes" as unknown as boolean })).toThrow(TypeError);
+      expect(() => new TalosClient({ retryPolicy: { baseDelayMs: -1 } })).toThrow(RangeError);
+    });
+
+    it("rejects malformed typed retry inputs (boundary)", () => {
+      expect(() => resolveRetryOptions({ jitter: 1.5 })).toThrow(RangeError);
+      expect(() => resolveRetryOptions({ jitter: -0.1 })).toThrow(RangeError);
+      expect(() => resolveRetryOptions({ maxRetryAfterMs: -1 })).toThrow(RangeError);
+      expect(() => resolveRetryOptions({ maxAttempts: 2.5 })).toThrow(TypeError);
+      expect(() => resolveRetryOptions({ onRetry: "nope" as unknown as () => void })).toThrow(TypeError);
+      expect(() => resolveRetryOptions(null as unknown as undefined)).toThrow(TypeError);
+    });
+
+    it("retries only configured status codes for custom policy", async () => {
+      vi.mocked(fetch)
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 500,
+          headers: new Headers(),
+          text: async () => " Internal",
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ id: "1", name: "ok" }),
+        } as Response);
+
+      // 500 is NOT in the custom list — should fail immediately.
+      const noRetry = new TalosClient({
+        baseUrl: "http://localhost:3000",
+        retryPolicy: {
+          maxAttempts: 3,
+          baseDelayMs: 0,
+          maxDelayMs: 0,
+          jitter: false,
+          retryStatusCodes: [503],
+          retryMethods: ["GET"],
+        },
+      });
+      const err = await noRetry.getTalos("1").catch((e) => e);
+      expect(err).toBeInstanceOf(TalosServerError);
+      expect(fetch).toHaveBeenCalledTimes(1);
+
+      vi.mocked(fetch).mockReset();
+      vi.mocked(fetch)
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          headers: new Headers(),
+          text: async () => "unavailable",
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ id: "1", name: "ok" }),
+        } as Response);
+
+      const withRetry = new TalosClient({
+        baseUrl: "http://localhost:3000",
+        retryPolicy: {
+          maxAttempts: 3,
+          baseDelayMs: 0,
+          maxDelayMs: 0,
+          jitter: false,
+          retryStatusCodes: [503],
+          retryMethods: ["GET"],
+        },
+      });
+      const result = await withRetry.getTalos("1");
+      expect(result).toEqual({ id: "1", name: "ok" });
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+  });
+
   describe("Bounded retry", () => {
+
     it("retries rate-limited GET until maxAttempts", async () => {
       vi.mocked(fetch).mockResolvedValue({
         ok: false,

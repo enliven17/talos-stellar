@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "name": "backup-restore-ci-fixture",
+  "description": "Deterministic seed + expectations for backup\u2192verify\u2192restore CI drill",
+  "seedFile": "seed.sql",
+  "plaintextFixture": "plaintext-min.json",
+  "passphraseEnv": "BACKUP_PASSPHRASE",
+  "expectedSeedRows": {
+    "tls_talos": 1,
+    "tls_patrons": 1,
+    "tls_revenues": 1
+  },
+  "minTotalRowsAfterSeed": 3,
+  "fixtureTalosId": "dr-test-1",
+  "fixtureTalosName": "DR Test",
+  "localCommands": {
+    "unit": "pnpm --dir web exec vitest run tests/backup-restore-fixture.test.ts tests/backup-crypto.test.ts tests/backup-types.test.ts",
+    "drill": "pnpm --dir web exec tsx scripts/ci-backup-restore-drill.ts"
+  }
+}

@@ -31,8 +31,74 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      # ── Contract artifact cache (#635) ─────────────────────────────────
+      # What is cached: contracts/target/wasm32-unknown-unknown/release —
+      # precisely the wasm build output that every consumer already globs
+      # as *.wasm. No .env, config files, or working trees are cached, and
+      # no secrets are ever cached or logged.
+      #
+      # Cache key: runner OS + rustc fingerprint + strong content hash of
+      # the contract build inputs (sources, manifests, Cargo.lock, cargo/
+      # soroban config) computed once by scripts/ci-contract-cache.sh
+      # key-hash — the single shared definition used by all contract
+      # workflows. Any input change produces a new key → miss → rebuild
+      # (boundary). restore-keys only prefix-match the same OS+toolchain,
+      # so a partial restore degrades to an incremental cargo rebuild,
+      # never a cross-toolchain reuse.
+      #
+      # Behavior matrix (issue #635):
+      #   missing (cold cache) → miss → full rebuild → Save populates cache
+      #   malformed entry      → validate wipes it, ::warning::, rebuild
+      #                         (treated as a miss, never fails the job)
+      #   flaky restore/save   → continue-on-error + ::warning::; the
+      #                         build and verify steps still run
+      #   key inputs missing   → key-hash fails closed with ::error::
+      #                         (refuses a broad key that could go stale)
+      #   cache backend outage → restore degrades to a rebuild; verify
+      #                         fails the job with an explicit ::error::
+      #                         if artifacts end up missing/invalid
+      # The build ALWAYS runs — a cache hit only warms incremental state,
+      # so stale artifacts can never be consumed downstream.
+      #
+      # Local reproduction:
+      #   bash scripts/ci-contract-cache.test.sh
+      - name: Compute contract cache key
+        id: cache-key
+        run: |
+          HASH=$(bash ../scripts/ci-contract-cache.sh key-hash .)
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "toolchain=$(rustc --version | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore contract artifact cache
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: contracts/target/wasm32-unknown-unknown/release
+          key: ${{ runner.os }}-contracts-wasm-${{ steps.cache-key.outputs.toolchain }}-${{ steps.cache-key.outputs.hash }}
+          restore-keys: |
+            ${{ runner.os }}-contracts-wasm-${{ steps.cache-key.outputs.toolchain }}-
+
+      - name: Warn on cache restore failure
+        if: steps.cache-restore.outcome == 'failure'
+        run: echo "::warning::Contract artifact cache restore failed (flaky step or backend error) — continuing with a full rebuild. The cache is an optimization only; artifacts are always built and verified in this job."
+
+      - name: Validate restored contract artifacts
+        run: bash ../scripts/ci-contract-cache.sh validate target/wasm32-unknown-unknown/release
+
       - name: Run contract tests
         run: cargo test
 
       - name: Build Soroban WASM contracts
         run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Verify contract artifacts
+        run: bash ../scripts/ci-contract-cache.sh verify target/wasm32-unknown-unknown/release
+
+      - name: Save contract artifact cache
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        if: steps.cache-restore.outcome == 'success' && steps.cache-restore.outputs.cache-hit != 'true'
+        with:
+          path: contracts/target/wasm32-unknown-unknown/release
+          key: ${{ steps.cache-restore.outputs.cache-primary-key }}
