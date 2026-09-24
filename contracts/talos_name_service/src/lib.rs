@@ -1547,10 +1547,89 @@ mod tests {
     use super::*;
     use soroban_sdk::{
         testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
-        Address, Env, IntoVal, Symbol, TryFromVal,
+        Address, Env, IntoVal, InvokeError, Symbol, TryFromVal,
     };
     use std::string::ToString;
     use talos_registry::{Kernel, Patron, Pulse, TalosRegistry, TalosRegistryClient};
+
+    #[contract]
+    pub struct ReentrantRegistry;
+
+    #[contracttype]
+    #[derive(Clone)]
+    enum ReentrantRegistryKey {
+        NameService,
+        Owner,
+        Name,
+        ReentryBlocked,
+    }
+
+    #[contractimpl]
+    impl ReentrantRegistry {
+        pub fn configure(
+            e: Env,
+            name_service: Address,
+            owner: Address,
+            name: String,
+        ) {
+            e.storage()
+                .instance()
+                .set(&ReentrantRegistryKey::NameService, &name_service);
+            e.storage()
+                .instance()
+                .set(&ReentrantRegistryKey::Owner, &owner);
+            e.storage()
+                .instance()
+                .set(&ReentrantRegistryKey::Name, &name);
+            e.storage()
+                .instance()
+                .set(&ReentrantRegistryKey::ReentryBlocked, &false);
+        }
+
+        pub fn creator_of(e: Env, talos_id: u32) -> Option<Address> {
+            let name_service: Address = e
+                .storage()
+                .instance()
+                .get(&ReentrantRegistryKey::NameService)
+                .unwrap();
+            let owner: Address = e
+                .storage()
+                .instance()
+                .get(&ReentrantRegistryKey::Owner)
+                .unwrap();
+            let name: String = e
+                .storage()
+                .instance()
+                .get(&ReentrantRegistryKey::Name)
+                .unwrap();
+
+            let result = e.try_invoke_contract::<(), InvokeError>(
+                &name_service,
+                &Symbol::new(&e, "register_name"),
+                soroban_sdk::vec![
+                    &e,
+                    owner.clone().into_val(&e),
+                    talos_id.into_val(&e),
+                    name.into_val(&e),
+                ],
+            );
+
+            assert_eq!(result, Err(Ok(InvokeError::Abort)));
+
+            e.storage()
+                .instance()
+                .set(&ReentrantRegistryKey::ReentryBlocked, &true);
+
+            Some(owner)
+        }
+
+        pub fn reentry_blocked(e: Env) -> bool {
+            e.storage()
+                .instance()
+                .get(&ReentrantRegistryKey::ReentryBlocked)
+                .unwrap_or(false)
+        }
+    }
 
     fn setup() -> (
         Env,
@@ -2567,6 +2646,65 @@ mod tests {
     // operations (duplicate name, unauthorized caller, invalid name,
     // cross-contract lookup failure, uninitialized registry) leave storage
     // and events byte-for-byte unchanged.
+
+    #[test]
+    fn cross_contract_reentrancy_is_rejected() {
+        let env = Env::default();
+
+        let name_service_contract = env.register_contract(None, TalosNameService);
+        let reentrant_registry_contract = env.register_contract(None, ReentrantRegistry);
+
+        let name_service_client =
+            TalosNameServiceClient::new(&env, &name_service_contract);
+        let reentrant_registry_client =
+            ReentrantRegistryClient::new(&env, &reentrant_registry_contract);
+
+        let owner = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let talos_id = 42u32;
+        let name = s(&env, "reentrant-name");
+
+        name_service_client.initialize(
+            &reentrant_registry_contract,
+            &admin,
+            &0i128,
+        );
+
+        reentrant_registry_client.configure(
+            &name_service_contract,
+            &owner,
+            &name,
+        );
+
+        let before = snapshot(&name_service_client, &name, talos_id);
+        let events_before = event_count(&env, &name_service_contract);
+
+        name_service_client
+            .mock_all_auths()
+            .register_name(&owner, &talos_id, &name);
+
+        assert!(reentrant_registry_client.reentry_blocked());
+
+        let after = snapshot(&name_service_client, &name, talos_id);
+
+        assert_state_eq(
+            &before,
+            &NameState {
+                resolved: None,
+                name_of_talos: None,
+                available: true,
+                has_name: false,
+            },
+            "state before registration",
+        );
+
+        assert_eq!(after.resolved, Some(talos_id));
+        assert_eq!(after.name_of_talos, Some(name));
+        assert!(!after.available);
+        assert!(after.has_name);
+
+        assert_eq!(event_count(&env, &name_service_contract), events_before + 2);
+    }
 
     struct NameState {
         resolved: Option<u32>,
