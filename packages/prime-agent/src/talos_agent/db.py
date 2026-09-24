@@ -292,6 +292,76 @@ CREATE INDEX IF NOT EXISTS idx_completion_markers_expires_at
     ON completion_markers(expires_at);
         """,
     ),
+    (
+        10,
+        # Secret rotation tables (re-homed after checkpoint migrations claimed 7-9)
+        # plus named rollback checkpoints for safe rotation recovery.
+        """
+CREATE TABLE IF NOT EXISTS secret_versions (
+    scope           TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    version         INTEGER NOT NULL,
+    ciphertext      TEXT NOT NULL,
+    key_id          TEXT NOT NULL,
+    status          TEXT NOT NULL CHECK (status IN ('staged', 'active', 'superseded', 'revoked')),
+    request_id      TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    activated_at    TEXT,
+    revoked_at      TEXT,
+    PRIMARY KEY (scope, name, version),
+    UNIQUE (scope, name, request_id)
+);
+
+CREATE TABLE IF NOT EXISTS secret_heads (
+    scope             TEXT NOT NULL,
+    name              TEXT NOT NULL,
+    active_version    INTEGER NOT NULL,
+    previous_version  INTEGER,
+    generation        INTEGER NOT NULL DEFAULT 1,
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (scope, name)
+);
+
+CREATE TABLE IF NOT EXISTS secret_audit_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id    TEXT NOT NULL UNIQUE,
+    scope       TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    version     INTEGER,
+    event_type  TEXT NOT NULL,
+    outcome     TEXT NOT NULL,
+    actor       TEXT NOT NULL,
+    reason      TEXT,
+    metadata    TEXT NOT NULL DEFAULT '{}',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS secret_rollback_checkpoints (
+    scope              TEXT NOT NULL,
+    name               TEXT NOT NULL,
+    checkpoint_id      TEXT NOT NULL,
+    active_version     INTEGER NOT NULL,
+    previous_version   INTEGER,
+    generation         INTEGER NOT NULL,
+    request_id         TEXT NOT NULL,
+    actor              TEXT NOT NULL,
+    reason             TEXT,
+    status             TEXT NOT NULL CHECK (status IN ('open', 'restored', 'discarded')),
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    restored_at        TEXT,
+    discarded_at       TEXT,
+    PRIMARY KEY (scope, name, checkpoint_id),
+    UNIQUE (scope, name, request_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_secret_versions_status
+    ON secret_versions(scope, name, status);
+CREATE INDEX IF NOT EXISTS idx_secret_audit_lookup
+    ON secret_audit_events(scope, name, id);
+CREATE INDEX IF NOT EXISTS idx_secret_checkpoints_status
+    ON secret_rollback_checkpoints(scope, name, status);
+        """,
+    ),
 ]
 
 
