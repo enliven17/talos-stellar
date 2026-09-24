@@ -84,3 +84,20 @@ export {
   ChaosInjectedError,
   globalChaosInjector,
 } from "./chaos.js";
+
+// ── Runtime compatibility matrix ──────────────────────────────────────────────
+
+export {
+  getRuntimeMatrix,
+  getRuntimeEntry,
+  detectRuntime,
+  probeGlobal,
+  checkRuntimeCompatibility,
+  assertRuntimeCompatibility,
+} from "./compat.js";
+export type {
+  SupportedRuntime,
+  RequiredCapability,
+  RuntimeMatrixEntry,
+  CompatibilityReport,
+} from "./compat.js";
