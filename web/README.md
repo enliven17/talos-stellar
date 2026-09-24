@@ -27,6 +27,12 @@ Pass `limit` (1-100) and the returned `nextCursor` to continue from the next tra
 cd web && pnpm vitest run tests/activity.test.ts tests/activity-pagination.test.ts
 ```
 
+### Security-header regression check
+
+```bash
+pnpm test:security-headers
+```
+
 ## Getting Started
 
 First, run the development server:
@@ -86,7 +92,7 @@ If a versioned deployment causes issues:
 
 1. Revert the code changes to the route handlers while keeping the middleware and version config in place.
 2. Deploy the revert.
-3. If the middleware itself is the issue, remove `src/middleware.ts` and restore the original `src/proxy.ts` — unversioned routes continue to work without the middleware.
+3. If the proxy itself is the issue, revert `src/proxy.ts` and its related configuration. Unversioned routes continue to work without version negotiation.
 
 ## OpenAPI Contract
 
