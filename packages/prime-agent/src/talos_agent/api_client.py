@@ -11,6 +11,10 @@ import httpx
 from talos_agent import metrics
 from talos_agent.config import Settings
 from talos_agent.http import RetryableHTTPError, request_with_retry
+from talos_agent.payments.stellar_retry import (
+    attach_stellar_failure,
+    classify_stellar_failure,
+)
 from talos_agent.tracing import inject_trace_headers, traced_span
 from opentelemetry.trace import SpanKind
 
@@ -339,10 +343,21 @@ class TalosAPIClient:
         )
         if r.status_code in (200, 201):
             return r.json()
+        # Classify the failure at the boundary where the status code is known.
+        # The classification is bounded and privacy-safe (no response text).
+        failure = classify_stellar_failure(status_code=r.status_code)
         try:
-            return r.json()
+            payload = r.json()
         except Exception:
-            return {"error": f"Transfer failed with status {r.status_code}"}
+            payload = None
+        if isinstance(payload, dict):
+            # Additive: preserve any server-provided fields, only fill in the
+            # classification. Existing callers that read ``error`` keep working.
+            for key, value in failure.to_dict().items():
+                payload.setdefault(key, value)
+            payload.setdefault("error", failure.message)
+            return payload
+        return attach_stellar_failure(None, failure)
 
     # ── Jobs ───────────────────────────────────────────────
 
