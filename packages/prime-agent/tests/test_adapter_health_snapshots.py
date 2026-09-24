@@ -30,13 +30,13 @@ import pytest
 from talos_agent.adapters.capability import SandboxedAdapter
 from talos_agent.adapters.discord import DiscordAdapter
 from talos_agent.adapters.health import (
+    _MISSING,
     AdapterState,
     DiscordProbe,
     StellarPaymentProbe,
     TelegramProbe,
     X402PaymentProbe,
     XProbe,
-    _MISSING,
     _call_health_snapshot,
     _snapshot_bool,
     _snapshot_field,

@@ -9,12 +9,12 @@ import respx
 from httpx import Response
 
 from talos_agent.adapters.discord import (
-    DiscordAdapter,
-    DiscordAdapterConfig,
     _COLOR_DEFAULT,
     _COLOR_GTM,
     _COLOR_WARN,
     _DISCORD_API,
+    DiscordAdapter,
+    DiscordAdapterConfig,
 )
 
 
