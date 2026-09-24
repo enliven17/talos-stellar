@@ -609,3 +609,15 @@ Use the templates already included in the repo when filing new work:
 - Pull requests: [`.github/PULL_REQUEST_TEMPLATE.md`](./.github/PULL_REQUEST_TEMPLATE.md)
 
 These templates are meant to capture the runtime, environment, and test details we need to review changes quickly.
+
+### Contributor Metadata Testing
+
+To run the tests for the contributor issue metadata parser, use:
+```bash
+node --test scripts/parse-issue-metadata.test.mjs
+```
+
+To test parsing a markdown file locally:
+```bash
+node scripts/parse-issue-metadata.mjs path/to/markdown.md
+```
