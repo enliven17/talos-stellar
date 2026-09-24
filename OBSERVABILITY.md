@@ -1,5 +1,10 @@
 # Observability Guide
 
+The canonical operational metric definitions, source events, bounded
+dimensions, and fail-closed rules are maintained in
+[docs/operational-metrics.md](docs/operational-metrics.md). Verify the table
+locally with `pnpm metrics:check` before changing an operational signal.
+
 ## Error Tracking (Sentry)
 
 ### Web (Next.js)

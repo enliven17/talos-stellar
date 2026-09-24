@@ -16,6 +16,7 @@
     "test:fixtures": "pnpm --dir contracts test:fixtures",
     "fixtures:gen": "node scripts/generate-registry-fixtures.mjs",
     "fixtures:check": "node scripts/generate-registry-fixtures.mjs --check",
+    "metrics:check": "node scripts/operational-metrics.test.mjs",
     "secrets:check": "bash scripts/secret-scan.sh"
   },
   "dependencies": {

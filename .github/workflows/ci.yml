@@ -25,6 +25,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate operational metrics definitions
+        run: node scripts/operational-metrics.test.mjs
+
       # ── Guard: run the detector's own test suite before it gates CI.
       #    A broken detector must never silently skip package checks.
       - name: Self-test detection script

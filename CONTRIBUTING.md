@@ -396,6 +396,10 @@ Regression tests for the check live in `scripts/secret-scan.test.sh` (`bash scri
 
 ## Database Transaction Retry & Serialization Hardening
 
+For the cross-package, local-stack, release, security, and runtime metric
+definitions used by operators, see [docs/operational-metrics.md](docs/operational-metrics.md).
+Run `pnpm metrics:check` when changing a metric source or definition.
+
 Critical database state transitions (money, token purchases, patron creation, job state transitions, agent genesis) use `withTransactionRetry` from `web/src/db/db-retry.ts` to automatically recover from PostgreSQL serialization conflicts (`40001`), deadlocks (`40P01`), lock timeouts (`55P03`), and transient connection failures.
 
 ### Environment Configuration
