@@ -325,6 +325,50 @@ async def remove_claimed_job(job_id: str) -> None:
                 )
 
 
+async def release_claimed_jobs() -> tuple[int, int]:
+    """Release all locally persisted remote job leases.
+
+    Returns ``(released, failed)``. Failed releases remain persisted so the
+    normal restore reconciliation can retry/verify ownership on the next run.
+    Only aggregate counts are logged to avoid exposing job payloads or proofs.
+    """
+    if _api is None or _db is None:
+        return 0, 0
+
+    try:
+        claims = _db.get_all_claimed_jobs()
+    except Exception as exc:  # pragma: no cover - defensive shutdown path
+        log.warning("job_shutdown_claim_read_failed", error_type=type(exc).__name__)
+        return 0, 1
+
+    released = 0
+    failed = 0
+    for claim in claims:
+        try:
+            response = await _api.release_job(
+                claim["job_id"],
+                claim["fencing_token"],
+            )
+            if response:
+                await remove_claimed_job(claim["job_id"])
+                released += 1
+            else:
+                failed += 1
+        except Exception as exc:  # pragma: no cover - defensive shutdown path
+            failed += 1
+            log.warning(
+                "job_shutdown_claim_release_failed",
+                error_type=type(exc).__name__,
+            )
+
+    log.info(
+        "job_shutdown_claim_release_complete",
+        released=released,
+        failed=failed,
+    )
+    return released, failed
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Provider-side tools — this Talos fulfills incoming x402 jobs
 # ═══════════════════════════════════════════════════════════════════
