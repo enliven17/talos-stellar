@@ -130,6 +130,11 @@ jobs:
         working-directory: web
         run: pnpm test:unit
 
+      - name: "[web] Security-header regression matrix"
+        if: matrix.package == 'web'
+        working-directory: web
+        run: pnpm test:security-headers
+
       # ── SDK: build/typecheck, tests ─────────────────────────────
       - name: "[sdk] Build & typecheck"
         if: matrix.package == 'sdk'

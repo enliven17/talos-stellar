@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
+    "test:security-headers": "vitest run tests/security-headers.test.ts",
     "test:unit": "vitest run tests/health.test.ts tests/*.unit.test.ts tests/sse.test.ts",
     "test:e2e": "vitest run tests/api-e2e.test.ts tests/outbox-e2e.test.ts",
     "test:load": "vitest run tests/load/",
