@@ -15,7 +15,8 @@
     "stack:reset": "bash scripts/local-stack.sh reset",
     "test:fixtures": "pnpm --dir contracts test:fixtures",
     "fixtures:gen": "node scripts/generate-registry-fixtures.mjs",
-    "fixtures:check": "node scripts/generate-registry-fixtures.mjs --check"
+    "fixtures:check": "node scripts/generate-registry-fixtures.mjs --check",
+    "secrets:check": "bash scripts/secret-scan.sh"
   },
   "dependencies": {
     "next": "16.2.2"

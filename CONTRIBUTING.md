@@ -15,6 +15,7 @@ Install these before you start working locally:
 - `uv`
 - Rust stable toolchain and `cargo`
 - Soroban CLI, installed as `stellar` via `cargo install --locked stellar-cli --features opt`
+- [`gitleaks`](https://github.com/gitleaks/gitleaks) secret scanner — `brew install gitleaks`, or download a binary from the [releases page](https://github.com/gitleaks/gitleaks/releases) (required for `pnpm run secrets:check`)
 
 For the Rust contracts, also add the Wasm target:
 
@@ -353,6 +354,9 @@ Deploy commands such as `pnpm --dir contracts run deploy:testnet` and `./deploy.
 | `Browser bundle not built` or missing `packages/sdk/dist/browser/sdk.bundle.js` | SDK build did not produce the expected browser artifact | Run `pnpm --filter @talos-protocol/sdk run build:browser` or the full SDK build. |
 | `ruff` violations | Python formatting or lint rule failures | Run `uv run ruff check src tests` in `packages/prime-agent/` and fix the reported files. |
 | `wasm32-unknown-unknown` target not installed | Rust cannot build Soroban Wasm artifacts | Run `rustup target add wasm32-unknown-unknown`. |
+| `gitleaks is not installed` | The secret scanner is missing from PATH | Install gitleaks (see Prerequisites) and re-run `pnpm run secrets:check`. |
+| `secret-scan: FAILED` with `file:line:rule` | A staged change contains a detected secret | Remove the secret and load it from the environment/secrets manager. Sanctioned false positives get a trailing `# gitleaks:allow` comment. |
+| `unable to load gitleaks config` | `.gitleaks.toml` is missing or malformed | Restore/fix `.gitleaks.toml`; `pnpm run secrets:check` fails closed until the config is valid. |
 | PR preview comment is present but Vercel URL is absent | The repo preview workflow provisions the mock DB; Vercel attaches previews separately | Check Vercel's GitHub integration/status before treating it as an application failure. |
 
 ## Code Style
@@ -368,6 +372,27 @@ Deploy commands such as `pnpm --dir contracts run deploy:testnet` and `./deploy.
   `uv run pytest tests/test_durable_job_effects.py` and follow the
   [durable job effects runbook](./docs/prime-agent-durable-job-effects.md).
 - For Rust, keep formatting standard with `cargo fmt` and validate with `cargo test`
+
+### Secret scanning
+
+Local contribution checks include a [gitleaks](https://github.com/gitleaks/gitleaks) scan of your **staged changes**. The exact command to run before opening a PR is:
+
+```bash
+pnpm run secrets:check
+```
+
+(`pnpm run secrets:check` invokes `bash scripts/secret-scan.sh` — the single source of truth for local secret scanning.)
+
+Behavior:
+
+- **Nothing staged** — the check passes trivially (exit 0).
+- **A secret is detected** — the check fails and prints only `file:line:rule` for each finding. Secret values and line contents are never echoed (output is redacted).
+- **Missing or malformed `.gitleaks.toml`** — the check fails closed with an actionable error; it never reports “no secrets found” in that state.
+- **`gitleaks` not installed or the scanner crashes** — the check fails closed with install/debug instructions (see Prerequisites). It never treats a scanner failure as a clean scan.
+- **Boundary paths** — generated, vendored, build-output, and binary/asset paths are ignored via the explicit allowlist in [`.gitleaks.toml`](./.gitleaks.toml).
+- **Sanctioned false positives** — add a trailing `# gitleaks:allow` comment on that line instead of widening the allowlist.
+
+Regression tests for the check live in `scripts/secret-scan.test.sh` (`bash scripts/secret-scan.test.sh`).
 
 ## Database Transaction Retry & Serialization Hardening
 
@@ -589,7 +614,7 @@ The unified `ci.yml` workflow is an **additional** PR gate, not a replacement.
 1. Create a branch from the latest `main`
 2. Make your changes
 3. Update documentation when setup steps or environment variables change
-4. Run the relevant tests for the area you touched
+4. Run the relevant tests for the area you touched, plus `pnpm run secrets:check` for the local secret scan
 5. Open a pull request using the template in [`.github/PULL_REQUEST_TEMPLATE.md`](./.github/PULL_REQUEST_TEMPLATE.md)
 6. Link the issue in your PR description, for example `Closes #39`
 
