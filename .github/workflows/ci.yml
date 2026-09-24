@@ -112,6 +112,47 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      # ── Contract artifact cache (#635) ─────────────────────────────────
+      # Caches contracts/target/wasm32-unknown-unknown/release (the wasm
+      # build output) keyed by OS + rustc fingerprint + strong content
+      # hash of the contract build inputs from scripts/ci-contract-cache.sh
+      # key-hash. Any input change → new key → miss → rebuild; restore-keys
+      # only prefix-match the same OS+toolchain. Corrupt entries are wiped
+      # and rebuilt (never fail the job); flaky restore/save steps are
+      # non-fatal (continue-on-error + warning); missing key inputs and
+      # missing/invalid artifacts fail closed with an explicit ::error::.
+      # The wasm build always runs, so stale artifacts are never consumed.
+      # Only the build output directory is cached — no secrets or configs.
+      #
+      # Local reproduction:
+      #   bash scripts/ci-contract-cache.test.sh
+      - name: "[contracts] Compute cache key"
+        if: matrix.package == 'contracts'
+        id: cache-key
+        run: |
+          HASH=$(bash scripts/ci-contract-cache.sh key-hash contracts)
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "toolchain=$(rustc --version | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: "[contracts] Restore artifact cache"
+        if: matrix.package == 'contracts'
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: contracts/target/wasm32-unknown-unknown/release
+          key: ${{ runner.os }}-contracts-wasm-${{ steps.cache-key.outputs.toolchain }}-${{ steps.cache-key.outputs.hash }}
+          restore-keys: |
+            ${{ runner.os }}-contracts-wasm-${{ steps.cache-key.outputs.toolchain }}-
+
+      - name: "[contracts] Warn on cache restore failure"
+        if: matrix.package == 'contracts' && steps.cache-restore.outcome == 'failure'
+        run: echo "::warning::Contract artifact cache restore failed (flaky step or backend error) — continuing with a full rebuild. The cache is an optimization only; artifacts are always built and verified in this job."
+
+      - name: "[contracts] Validate restored artifacts"
+        if: matrix.package == 'contracts'
+        run: bash scripts/ci-contract-cache.sh validate contracts/target/wasm32-unknown-unknown/release
+
       # ── Per-package checks ──────────────────────────────────────
 
       # ── Web: typecheck, lint, unit tests ────────────────────────
@@ -162,3 +203,15 @@ jobs:
         if: matrix.package == 'contracts'
         working-directory: contracts
         run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: "[contracts] Verify artifacts"
+        if: matrix.package == 'contracts'
+        run: bash scripts/ci-contract-cache.sh verify contracts/target/wasm32-unknown-unknown/release
+
+      - name: "[contracts] Save artifact cache"
+        if: matrix.package == 'contracts' && steps.cache-restore.outcome == 'success' && steps.cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: contracts/target/wasm32-unknown-unknown/release
+          key: ${{ steps.cache-restore.outputs.cache-primary-key }}

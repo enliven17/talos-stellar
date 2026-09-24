@@ -584,6 +584,26 @@ The following specialized workflows continue to run independently with their own
 
 The unified `ci.yml` workflow is an **additional** PR gate, not a replacement.
 
+### Contract artifact caching
+
+The workflows that build Soroban wasm artifacts (`contracts-ci.yml`, the contracts job in
+`ci.yml`, `release-publish.yml`, and `sbom-provenance.yml`) cache
+`contracts/target/wasm32-unknown-unknown/release` so dependency compilation is not repeated
+on every run. The cache key combines the runner OS, a rustc fingerprint, and a strong
+content hash of the contract build inputs (sources, manifests, `Cargo.lock`, cargo/soroban
+config) computed by `scripts/ci-contract-cache.sh key-hash`. Restored entries are validated
+before use (`validate`) and gated again after the build (`verify`); cold, corrupted, or
+input-changed entries fall back to a full rebuild instead of failing the job or serving
+stale bytes, while ambiguous key inputs and missing/invalid artifacts fail closed with an
+explicit error. Only the build output directory is cached — never `.env` files, configs, or
+secrets.
+
+To validate the cache helpers locally before pushing:
+
+```bash
+bash scripts/ci-contract-cache.test.sh
+```
+
 ## Pull Request Workflow
 
 1. Create a branch from the latest `main`
