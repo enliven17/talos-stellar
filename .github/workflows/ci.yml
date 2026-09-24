@@ -33,6 +33,10 @@ jobs:
       - name: Self-test detection script
         run: bash scripts/ci-detect-changes.test.sh
 
+      # ── Test mock Stellar service fault injection
+      - name: Test mock Stellar fault injection
+        run: node scripts/mock-stellar-fault-injection.test.mjs
+
       # ── Shared env for the detect step. These are workflow-controlled
       #    values, not user input; the script additionally validates them
       #    (format + object existence) before use, and never echoes them.

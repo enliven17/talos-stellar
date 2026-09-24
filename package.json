@@ -16,6 +16,11 @@
     "test:fixtures": "pnpm --dir contracts test:fixtures",
     "fixtures:gen": "node scripts/generate-registry-fixtures.mjs",
     "fixtures:check": "node scripts/generate-registry-fixtures.mjs --check",
+    "metrics:check": "node scripts/operational-metrics.test.mjs",
+    "smoke:fixture:gen": "node scripts/generate-smoke-fixture.mjs",
+    "smoke:fixture:check": "node scripts/generate-smoke-fixture.mjs --check",
+    "secrets:check": "bash scripts/secret-scan.sh",
+    "test:mock-stellar-faults": "node scripts/mock-stellar-fault-injection.test.mjs",
     "migrations:check": "node scripts/check-migration-drift.mjs",
     "migrations:check:strict": "node scripts/check-migration-drift.mjs --strict",
     "test:migration-drift": "bash scripts/check-migration-drift.test.sh"
