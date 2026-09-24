@@ -71,7 +71,7 @@ All public REST endpoints are available at both unversioned (`/api/...`) and ver
 
 ### Version negotiation
 
-The `X-API-Version` response header indicates the effective API version serving the request. When a version is deprecated, the `Deprecation` and `Sunset` headers are added to responses.
+The `X-API-Version` response header indicates the effective API version serving the request. When a version is deprecated, the `Deprecation: true` header is added to every response for that version — including `429` rate-limit rejections, so a retried request still carries the signal. `Sunset` is optional metadata set alongside `Deprecation` only when a removal date has been decided; omitting it does not suppress `Deprecation`.
 
 ### Adding a new API version
 
