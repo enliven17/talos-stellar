@@ -50,6 +50,7 @@ export {
   snapshotHeaders,
   parseRetryAfter,
   parseX402Challenge,
+  redactEventPath,
   MAX_BODY_BYTES,
 } from "./errors.js";
 

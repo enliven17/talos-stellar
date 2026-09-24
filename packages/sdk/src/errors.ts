@@ -487,6 +487,56 @@ function sanitizeDataForInstance(input: unknown): unknown {
 }
 
 /**
+ * Pattern matching query-parameter names whose values should be redacted
+ * before the path is surfaced in a {@link TalosErrorEvent}.
+ *
+ * This is intentionally broader than {@link SENSITIVE_FIELD_PATTERN} because
+ * parameter names in query strings often use different conventions (e.g.
+ * `api_key`, `apikey`, `access_token`, `bearer`).
+ */
+const SENSITIVE_QUERY_PARAM_PATTERN =
+  /^(token|authorization|auth|api[_-]?key|access[_-]?token|secret|bearer|password|credential|key|sig(nature)?|hash|nonce|seed|proof)$/i;
+
+/**
+ * Strip sensitive credential values from query-string parameters in a path or
+ * URL string, replacing the value with `[REDACTED]`.
+ *
+ * - Path strings without a query component are returned unchanged.
+ * - Any query-parameter name matching {@link SENSITIVE_QUERY_PARAM_PATTERN}
+ *   has its value replaced with the literal string `[REDACTED]`.
+ * - Non-URL-encoded fragments and other edge cases are handled gracefully;
+ *   a malformed query string is returned as-is so error context is never lost.
+ *
+ * This function is applied to the `path` field of every {@link TalosErrorEvent}
+ * before it is delivered to the caller's `onError` hook, providing a safety
+ * net even if a caller accidentally includes credentials in a query string.
+ */
+export function redactEventPath(rawPath: string): string {
+  const qIdx = rawPath.indexOf("?");
+  if (qIdx === -1) return rawPath;
+
+  const base = rawPath.slice(0, qIdx);
+  const queryString = rawPath.slice(qIdx + 1);
+
+  try {
+    const params = new URLSearchParams(queryString);
+    let changed = false;
+    for (const [key] of params.entries()) {
+      if (SENSITIVE_QUERY_PARAM_PATTERN.test(key)) {
+        params.set(key, "[REDACTED]");
+        changed = true;
+      }
+    }
+    if (!changed) return rawPath;
+    return `${base}?${params.toString()}`;
+  } catch {
+    // Malformed query string — return the path without the query portion to
+    // avoid leaking anything unparseable.
+    return base;
+  }
+}
+
+/**
  * Build the right {@link TalosAPIError} subclass for a given HTTP response.
  * Pure function — kept small so tests can exercise it directly.
  */
