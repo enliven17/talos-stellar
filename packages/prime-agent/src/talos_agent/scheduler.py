@@ -1267,11 +1267,29 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                         )
                     except Exception:
                         pass
+                # Release browser sessions before cancelling in-flight work so
+                # Stagehand/Chrome cannot outlive the cancelled tasks (#552).
+                try:
+                    from talos_agent.tools.browser import (
+                        cleanup_browser_sessions_on_cancellation,
+                    )
+
+                    await cleanup_browser_sessions_on_cancellation()
+                except Exception:
+                    pass
                 for t in still_running:
                     t.cancel()
                 await asyncio.gather(*drain_tasks, return_exceptions=True)
         else:
             # Immediate cancel when deadline == 0.
+            try:
+                from talos_agent.tools.browser import (
+                    cleanup_browser_sessions_on_cancellation,
+                )
+
+                await cleanup_browser_sessions_on_cancellation()
+            except Exception:
+                pass
             for t in drain_tasks:
                 t.cancel()
             await asyncio.gather(*drain_tasks, return_exceptions=True)
@@ -1308,10 +1326,15 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         except Exception:
             pass
         try:
-            if browser:
-                await asyncio.wait_for(browser.close(), timeout=5)
+            from talos_agent.tools.browser import cleanup_browser_sessions_on_cancellation
+
+            await asyncio.wait_for(cleanup_browser_sessions_on_cancellation(), timeout=5)
         except Exception:
-            pass
+            try:
+                if browser:
+                    await asyncio.wait_for(browser.close(), timeout=5)
+            except Exception:
+                pass
         await api.close()
         db.close()
         # Flush any spans/metrics buffered by the batch processors before exit
