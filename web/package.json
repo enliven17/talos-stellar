@@ -25,7 +25,9 @@
     "env:provision": "tsx src/area/devx/env-cli.ts provision",
     "env:teardown": "tsx src/area/devx/env-cli.ts teardown",
     "test:backup": "vitest run tests/backup-restore-fixture.test.ts tests/backup-crypto.test.ts tests/backup-types.test.ts",
-    "backup:drill": "tsx scripts/ci-backup-restore-drill.ts"
+    "backup:drill": "tsx scripts/ci-backup-restore-drill.ts",
+    "test:property": "vitest run src/area/devx/__tests__/property-schedule.test.ts src/area/devx/__tests__/property-tests.test.ts",
+    "property:nightly": "tsx src/area/devx/run-property-tests.ts"
   },
   "dependencies": {
     "@creit.tech/stellar-wallets-kit": "^2.1.0",
