@@ -336,6 +336,10 @@ Every error also exposes:
 - `code` — stable string discriminator for `switch` / table look-ups.
 - `isRetryable` — hint to the caller.
 - `retryAfterMs?` — server-supplied retry hint, already in milliseconds.
+  Populated from the `Retry-After` response header whenever it is present,
+  on **any** error status (not just 429 — a 503 during a maintenance window
+  is a common real-world source per RFC 9110 §10.2.3), independent of
+  whether that status is otherwise `isRetryable`.
 - `requestId?` — `x-request-id` header for log correlation.
 - `headers` — sanitized snapshot (`x-request-id`, `retry-after`,
   `www-authenticate`, `x-ratelimit-*`).
@@ -471,6 +475,10 @@ This version is **fully backward-compatible**:
   `catch (e) { if (e instanceof TalosAPIError) … }` blocks keep working.
 - New fields (`code`, `isRetryable`, `retryAfterMs`, `requestId`, `headers`,
   `data`) are additive.
+- `retryAfterMs` is now populated for every error status that carries a
+  `Retry-After` header, not only 429 — this can only add a previously-`undefined`
+  value, so it does not change behavior for any existing check of the form
+  `if (error.retryAfterMs) { … }`.
 - Legacy error messages (`"Network error"`, `"Aborted"`, `"Request timeout"`,
   `"Invalid x402 challenge"`) are preserved so existing
   `rejects.toThrow("…")` assertions stay green.

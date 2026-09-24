@@ -549,6 +549,11 @@ export function errorFromResponse(
   const { body, data } = sanitizeBody(rawBody);
   const safeHeaders = snapshotHeaders(headers);
   const requestId = safeHeaders["x-request-id"];
+  // `Retry-After` is valid on any error response (RFC 9110 §10.2.3), not just
+  // 429 — a 503 during a maintenance window is a common real-world source.
+  // Parse it once so every subclass preserves the same structured hint that
+  // `.headers["retry-after"]` already carries in raw form.
+  const retryAfterMs = parseRetryAfter(safeHeaders["retry-after"]);
   const issues = Array.isArray((data as { issues?: unknown[] } | undefined)?.issues)
     ? (((data as { issues: unknown[] }).issues as unknown[]) as unknown[]).filter(
         (x): x is string => typeof x === "string",
@@ -561,43 +566,49 @@ export function errorFromResponse(
         headers: safeHeaders,
         requestId,
         data,
+        retryAfterMs,
       });
     case 401:
       return new TalosAuthenticationError(status, body, path, {
         headers: safeHeaders,
         requestId,
         data,
+        retryAfterMs,
       });
     case 402:
       return new TalosPaymentError(status, body, path, {
         headers: safeHeaders,
         requestId,
         data,
+        retryAfterMs,
       });
     case 403:
       return new TalosForbiddenError(status, body, path, {
         headers: safeHeaders,
         requestId,
         data,
+        retryAfterMs,
       });
     case 404:
       return new TalosNotFoundError(status, body, path, {
         headers: safeHeaders,
         requestId,
         data,
+        retryAfterMs,
       });
     case 409:
       return new TalosConflictError(status, body, path, {
         headers: safeHeaders,
         requestId,
         data,
+        retryAfterMs,
       });
     case 429:
       return new TalosRateLimitError(status, body, path, {
         headers: safeHeaders,
         requestId,
         data,
-        retryAfterMs: parseRetryAfter(safeHeaders["retry-after"]),
+        retryAfterMs,
       });
     case 502:
     case 503:
@@ -606,6 +617,7 @@ export function errorFromResponse(
         headers: safeHeaders,
         requestId,
         data,
+        retryAfterMs,
       });
     default:
       if (status >= 500) {
@@ -613,12 +625,14 @@ export function errorFromResponse(
           headers: safeHeaders,
           requestId,
           data,
+          retryAfterMs,
         });
       }
       return new TalosAPIError(status, body, path, {
         headers: safeHeaders,
         requestId,
         data,
+        retryAfterMs,
       });
   }
 }

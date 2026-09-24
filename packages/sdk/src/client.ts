@@ -643,9 +643,15 @@ export class TalosClient {
     attempt: number,
     retryAfterHeader: string | null,
   ): number {
+    // Delegates to the same canonical parser the typed retry policy uses
+    // (`parseRetryAfter` from errors.ts, imported as `parseRetryAfterHeader`)
+    // so both retry policies agree on what counts as a valid Retry-After
+    // value instead of maintaining two parsers with different edge-case
+    // handling (the previous private copy accepted "Infinity" and
+    // whitespace-only headers as valid delays).
     if (retryAfterHeader) {
-      const headerDelay = this.parseRetryAfter(retryAfterHeader);
-      if (headerDelay !== null) {
+      const headerDelay = parseRetryAfterHeader(retryAfterHeader);
+      if (headerDelay !== undefined) {
         return Math.min(headerDelay, this.retryPolicy.maxDelayMs);
       }
     }
@@ -660,23 +666,6 @@ export class TalosClient {
     }
 
     return Math.floor(this.retryPolicy.random() * delay);
-  }
-
-  private parseRetryAfter(header: string | null): number | null {
-    if (!header) return null;
-    const trimmed = header.trim();
-    const seconds = Number(trimmed);
-    if (!Number.isNaN(seconds)) {
-      return Math.max(0, seconds * 1000);
-    }
-
-    const parsedDate = Date.parse(trimmed);
-    if (!Number.isNaN(parsedDate)) {
-      const delta = parsedDate - Date.now();
-      return delta > 0 ? delta : 0;
-    }
-
-    return null;
   }
 
   private wait(delayMs: number, signal?: AbortSignal): Promise<void> {
