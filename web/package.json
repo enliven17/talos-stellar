@@ -22,6 +22,7 @@
     "db:studio": "drizzle-kit studio",
     "db:seed": "tsx src/db/seed.ts",
     "db:seed-demo": "tsx scripts/seed-demo-agents.ts",
+    "db:reset-test-data": "tsx src/db/reset-test-data.ts",
     "env:provision": "tsx src/area/devx/env-cli.ts provision",
     "env:teardown": "tsx src/area/devx/env-cli.ts teardown",
     "test:backup": "vitest run tests/backup-restore-fixture.test.ts tests/backup-crypto.test.ts tests/backup-types.test.ts",

@@ -144,6 +144,20 @@ pnpm stack:down
 pnpm stack:reset
 ```
 
+`pnpm stack:reset` destroys the stack volumes and re-imports everything. To clear
+local test data without recreating the stack, use the safe reset instead:
+
+```bash
+pnpm stack:reset-data --dry-run    # preview the tables and row counts
+pnpm stack:reset-data --yes        # truncate local test data
+pnpm stack:reset-data --yes --seed # truncate, then re-run db:seed
+```
+
+It only ever targets a loopback database, requires `--yes` to destroy anything,
+and never logs credentials. See
+[docs/local-test-data-reset.md](./docs/local-test-data-reset.md) for the full
+behavior contract. Regression tests for the shell layer: `bash scripts/local-stack.test.sh`.
+
 The stack defaults to the web service and a mock Stellar provider. Add the optional prime-agent service with:
 
 ```bash
@@ -239,9 +253,10 @@ Choose the focused command by area:
 | `web/drizzle/**`, `web/src/db/**`, `web/drizzle.config.ts` | `pnpm --dir web run db:migrate`, then the specific DB test with `pnpm --dir web exec vitest run tests/<name>.test.ts` | `Web Migrations CI` |
 | `web/src/area/devx/**` | `pnpm --dir web exec vitest run src/area/devx/__tests__/runner.test.ts` | `Benchmark CI - regression gates` |
 | API route or library unit tests | `pnpm --dir web exec vitest run tests/<name>.test.ts` | `Deploy Web -> Vercel` |
+| Local test-data reset (`web/src/lib/local-test-data-reset.ts`, `web/src/db/reset-test-data.ts`, `scripts/local-stack.sh`) | `pnpm --dir web exec vitest run tests/local-test-data-reset.unit.test.ts; bash scripts/local-stack.test.sh` | `Deploy Web -> Vercel` |
 | Backup or restore paths | `pnpm --dir web exec vitest run tests/backup-restore-fixture.test.ts tests/backup-crypto.test.ts tests/backup-types.test.ts` | `Web Backups CI` |
 
-Use `pnpm --dir web run test:e2e` only when API route behavior depends on the running app or cross-route state. Use the local stack with `pnpm stack:up` when you need Postgres plus the mock Stellar provider, and clean it up with `pnpm stack:down`. Do not use `pnpm stack:reset` unless you intentionally want to destroy and recreate local stack data.
+Use `pnpm --dir web run test:e2e` only when API route behavior depends on the running app or cross-route state. Use the local stack with `pnpm stack:up` when you need Postgres plus the mock Stellar provider, and clean it up with `pnpm stack:down`. Do not use `pnpm stack:reset` unless you intentionally want to destroy and recreate local stack data; `pnpm stack:reset-data` clears test rows without touching the stack volumes.
 
 ### SDK changes
 
@@ -357,6 +372,11 @@ Deploy commands such as `pnpm --dir contracts run deploy:testnet` and `./deploy.
 | `gitleaks is not installed` | The secret scanner is missing from PATH | Install gitleaks (see Prerequisites) and re-run `pnpm run secrets:check`. |
 | `secret-scan: FAILED` with `file:line:rule` | A staged change contains a detected secret | Remove the secret and load it from the environment/secrets manager. Sanctioned false positives get a trailing `# gitleaks:allow` comment. |
 | `unable to load gitleaks config` | `.gitleaks.toml` is missing or malformed | Restore/fix `.gitleaks.toml`; `pnpm run secrets:check` fails closed until the config is valid. |
+| `Refusing to delete local test data without --yes` | The safe reset guards against accidental truncation | Re-run with `--yes`, or preview with `--dry-run`. |
+| `Refusing to reset database "…" on non-local host "…"` (or `non-local host`) | `DATABASE_URL` points at a hosted database such as Supabase | Use `pnpm stack:reset-data` for the compose stack, or export a loopback `DATABASE_URL`. Remote hosts are refused by design — there is no override flag. |
+| `local-stack: the postgres service is not running` | `pnpm stack:reset-data` was run before the stack came up | `pnpm stack:up`, then retry. The reset CLI is never invoked in this state. |
+| `missing modelled tables` or `No Talos tables found` | The local database is not migrated | `pnpm --dir web run db:migrate`, then retry. |
+| `Could not reach 127.0.0.1:5432` | The local database is unreachable after retries | Check `pnpm stack:logs`; start the stack with `pnpm stack:up`. |
 | PR preview comment is present but Vercel URL is absent | The repo preview workflow provisions the mock DB; Vercel attaches previews separately | Check Vercel's GitHub integration/status before treating it as an application failure. |
 
 ## Code Style
