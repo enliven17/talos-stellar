@@ -360,6 +360,10 @@ export const tlsCommerceJobs = pgTable(
     leaseExpiresAt: timestamp("leaseExpiresAt", { mode: "date", precision: 3 }), // lease TTL
     fencingToken: integer("fencingToken").notNull().default(0), // monotonic counter for stale-worker fencing
 
+    // Mid-flight progress reported by the provider (POST /api/jobs/:id/progress).
+    // Shape: { percent?, stage?, message?, updatedAt, reportedBy }. Nullable = no report yet.
+    progress: jsonb("progress"),
+
     createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
     updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
   },
