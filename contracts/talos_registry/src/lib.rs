@@ -92,6 +92,7 @@ pub struct Talos {
 pub enum AdminAction {
     SetProtocolFee(u32),
     ProposeAdmin(Address),
+    UpgradeContract(soroban_sdk::BytesN<32>),
 }
 
 #[contracttype]
@@ -930,6 +931,9 @@ impl TalosRegistry {
                     .get(&DataKey::ProtocolWallet)
                     .expect("Contract not initialized");
                 Self::propose_admin_internal(&e, current, new_admin.clone());
+            }
+            AdminAction::UpgradeContract(wasm_hash) => {
+                e.deployer().update_current_contract_wasm(wasm_hash.clone());
             }
         }
 
