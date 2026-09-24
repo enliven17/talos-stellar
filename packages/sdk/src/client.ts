@@ -34,6 +34,7 @@ import {
   errorFromResponse,
   parseX402Challenge,
   parseRetryAfter as parseRetryAfterHeader,
+  redactEventPath,
 } from "./errors.js";
 import {
   generateIdempotencyKey,
@@ -450,6 +451,45 @@ export class TalosClient {
     return this.retry;
   }
 
+  /**
+   * Privacy-safe JSON representation. Omits credentials (`Authorization`
+   * header, API key) and other internal state so that `JSON.stringify(client)`
+   * or structured log sinks never accidentally surface secrets.
+   */
+  toJSON(): Record<string, unknown> {
+    // Mask Authorization header so the API key is not exposed.
+    const safeHeaders: Record<string, string> = {};
+    for (const [k, v] of Object.entries(this.headers)) {
+      if (k.toLowerCase() === "authorization") {
+        safeHeaders[k] = "[REDACTED]";
+      } else {
+        safeHeaders[k] = v;
+      }
+    }
+    return {
+      baseUrl: this.baseUrl,
+      headers: safeHeaders,
+      retryPolicy: {
+        maxAttempts: this.retryPolicy.maxAttempts,
+        baseDelayMs: this.retryPolicy.baseDelayMs,
+        maxDelayMs: this.retryPolicy.maxDelayMs,
+        retryMethods: this.retryPolicy.retryMethods,
+        retryStatusCodes: this.retryPolicy.retryStatusCodes,
+        jitter: this.retryPolicy.jitter,
+        // `random` is intentionally omitted — it's a function reference.
+      },
+      retry: {
+        maxAttempts: this.retry.maxAttempts,
+        idempotentOnly: this.retry.idempotentOnly,
+        maxRetryAfterMs: this.retry.maxRetryAfterMs,
+        baseDelayMs: this.retry.baseDelayMs,
+        maxDelayMs: this.retry.maxDelayMs,
+        jitter: this.retry.jitter,
+        // `onRetry` is intentionally omitted — it's a function reference.
+      },
+    };
+  }
+
   /** Resolve the fetch implementation per request. Prefer override; fall back to global. */
   private resolveFetch(): typeof fetch {
     return this.fetchOverride ?? globalThis.fetch;
@@ -687,7 +727,16 @@ export class TalosClient {
   private notifyError(event: TalosErrorEvent): void {
     if (!this.onError) return;
     try {
-      this.onError(event);
+      // Redact any credential values that might be present in query-string
+      // parameters of the path before delivering the event to the caller's
+      // logger hook. This is a defensive safety net; the path passed to
+      // request() does not normally include query strings, but we enforce the
+      // guarantee here so future refactors cannot accidentally introduce leaks.
+      const safeEvent: TalosErrorEvent = {
+        ...event,
+        path: redactEventPath(event.path),
+      };
+      this.onError(safeEvent);
     } catch {
       // Fire-and-forget.
     }

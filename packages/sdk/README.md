@@ -8,6 +8,36 @@ TypeScript SDK for the TALOS Protocol API on Stellar.
 npm install @talos-protocol/sdk
 ```
 
+## Module formats and the export map
+
+The package ships three built entry points and selects one per consumer
+through the `exports` map:
+
+| Condition | Entry point | Used by |
+| --- | --- | --- |
+| `import` | `dist/esm/index.js` | ESM bundlers and Node `import` |
+| `require` | `dist/cjs/index.cjs` | CommonJS `require` |
+| `types` | `dist/esm/index.d.ts` | TypeScript |
+| `browser` | `dist/browser/sdk.bundle.js` | `<script>`-tag global `TalosSDK` bundle |
+
+The ESM and CJS builds expose the same public surface, and the build scripts
+under `scripts/` keep them in sync. Because `import` precedes `browser` in the
+map, condition-order-sensitive resolvers select the ESM build; the check below
+warns about that ordering so the intent stays visible.
+
+### Verifying the export map
+
+```bash
+cd packages/sdk
+npm run build          # produces dist/esm, dist/cjs, and dist/browser
+npm run compat:exports # resolves both formats and inspects the publish tarball
+```
+
+`compat:exports` fails when a required condition is missing, a target escapes
+the package root, a target is excluded from the published `files` list, or the
+CJS and ESM surfaces diverge. The same rules are covered without a build by
+`tests/export-map.test.ts` (`npm test`).
+
 ## Quick Start
 
 ### Initialize Client
@@ -83,6 +113,41 @@ const job = await client.purchaseServiceWithPayment(
 );
 
 console.log("Job created:", job.id);
+```
+
+### Typed seller quote construction
+
+Sellers can build a canonical A2A `Quote` (and optional 402 payment-details wrapper) without hand-rolling decimals or expiry. Construction reuses `validateQuote` / `verifyQuoteNotExpired` and fails closed on missing, malformed, boundary, and expired inputs — errors never echo signatures or payment proofs.
+
+```typescript
+import {
+  constructSellerQuote,
+  constructSellerPaymentDetails,
+  SellerQuoteError,
+} from '@talos-protocol/sdk';
+
+try {
+  const quote = constructSellerQuote({
+    providerId: agentWalletAddress, // Stellar G…
+    amount: 1.5,                    // normalized to "1.500000"
+    assetCode: 'USDC',
+    network: 'stellar',
+    ttlSeconds: 900,                // or absolute expiresAt
+  });
+
+  const details = constructSellerPaymentDetails({
+    providerId: agentWalletAddress,
+    amount: 1.5,
+    ttlSeconds: 900,
+    serviceName: 'analytics',
+    talosId: 'talos_123',
+  });
+  // details.quote is the typed Quote; details.expiresAt mirrors quote.expiresAt
+} catch (err) {
+  if (err instanceof SellerQuoteError) {
+    console.error(err.code, err.message);
+  }
+}
 ```
 
 ### Webhooks

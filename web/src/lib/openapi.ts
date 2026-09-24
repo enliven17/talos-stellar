@@ -100,15 +100,41 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
     schemas: {
       HealthStatus: {
         type: "object",
-        required: ["ok", "checks", "ts"],
+        required: ["ok", "status", "ready", "checks", "ts"],
         properties: {
-          ok: { type: "boolean", description: "True when all dependency checks pass", example: true },
+          ok: {
+            type: "boolean",
+            description: "True when every dependency check passed (fully healthy).",
+            example: true,
+          },
+          status: {
+            type: "string",
+            enum: ["ok", "degraded", "unavailable"],
+            description:
+              "Aggregate readiness severity. `degraded` means only soft dependencies failed (still ready for traffic). `unavailable` means a critical dependency failed (not ready). Never a liveness/process signal.",
+            example: "ok",
+          },
+          ready: {
+            type: "boolean",
+            description: "True when the process should keep receiving traffic (`status` is `ok` or `degraded`).",
+            example: true,
+          },
           checks: {
             type: "object",
             required: ["db", "stellar"],
             properties: {
-              db: { type: "string", enum: ["ok", "error"], example: "ok" },
-              stellar: { type: "string", enum: ["ok", "error"], example: "ok" },
+              db: {
+                type: "string",
+                enum: ["ok", "error"],
+                description: "Critical dependency. Failure → status unavailable (HTTP 503).",
+                example: "ok",
+              },
+              stellar: {
+                type: "string",
+                enum: ["ok", "error"],
+                description: "Soft dependency. Failure alone → status degraded (HTTP 200).",
+                example: "ok",
+              },
             },
           },
           ts: { type: "string", format: "date-time", example: "2026-07-23T19:00:00.000Z" },
@@ -3165,25 +3191,36 @@ A failure here means the process itself is broken; the orchestrator should resta
       get: {
         tags: ["Platform"],
         summary: "Readiness probe",
-        description: `Returns 200 when all dependencies are reachable, 503 when any check fails.
+        description: `Returns 200 when the process should receive traffic, 503 only when a **critical** dependency fails.
+
+Severity model (separates degraded readiness from hard liveness failure):
+- \`status: "ok"\` — all checks pass (HTTP 200, \`ready: true\`)
+- \`status: "degraded"\` — soft dependency failed (HTTP 200, \`ready: true\`); keep traffic, alert operators
+- \`status: "unavailable"\` — critical dependency failed (HTTP 503, \`ready: false\`); remove from LB
 
 Checks run **in parallel** with bounded timeouts:
-- \`db\` — \`SELECT 1\` against Postgres (2 s timeout)
-- \`stellar\` — \`GET\` to Stellar Horizon (\`STELLAR_HORIZON_URL\` env var, or testnet fallback) (3 s timeout)
+- \`db\` (critical) — \`SELECT 1\` against Postgres (2 s timeout)
+- \`stellar\` (soft) — \`GET\` to Stellar Horizon (\`STELLAR_HORIZON_URL\` env var, or testnet fallback) (3 s timeout)
 
 Use for:
-- Kubernetes \`readinessProbe\` — remove the pod from the load-balancer when degraded.
-- UptimeRobot / Better Uptime monitoring on a 1-minute interval.
+- Kubernetes \`readinessProbe\` — remove the pod from the load-balancer only when \`unavailable\`.
+- UptimeRobot / Better Uptime monitoring on a 1-minute interval (alert on \`degraded\` via body, not only HTTP status).
 
-The liveness probe (\`GET /api/health/live\`) is unaffected by dependency failures.`,
+The liveness probe (\`GET /api/health/live\`) is unaffected by dependency failures and must not be used for dependency restarts.`,
         operationId: "getReadiness",
         responses: {
           "200": {
-            description: "All dependencies reachable",
+            description: "Ready for traffic (fully healthy or soft-dependency degraded)",
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/HealthStatus" },
-                example: { ok: true, checks: { db: "ok", stellar: "ok" }, ts: "2026-07-23T19:00:00.000Z" },
+                example: {
+                  ok: true,
+                  status: "ok",
+                  ready: true,
+                  checks: { db: "ok", stellar: "ok" },
+                  ts: "2026-07-23T19:00:00.000Z",
+                },
               },
             },
             headers: {
@@ -3191,11 +3228,17 @@ The liveness probe (\`GET /api/health/live\`) is unaffected by dependency failur
             },
           },
           "503": {
-            description: "One or more dependencies unreachable",
+            description: "Critical dependency unavailable — not ready for traffic",
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/HealthStatus" },
-                example: { ok: false, checks: { db: "error", stellar: "ok" }, ts: "2026-07-23T19:00:00.000Z" },
+                example: {
+                  ok: false,
+                  status: "unavailable",
+                  ready: false,
+                  checks: { db: "error", stellar: "ok" },
+                  ts: "2026-07-23T19:00:00.000Z",
+                },
               },
             },
           },
@@ -3206,11 +3249,12 @@ The liveness probe (\`GET /api/health/live\`) is unaffected by dependency failur
       get: {
         tags: ["Platform"],
         summary: "Health check (legacy alias)",
-        description: "Backward-compatible alias for `GET /api/health/ready`. Existing monitors wired to this URL continue to work. Prefer the explicit sub-paths for new integrations.",
+        description:
+          "Backward-compatible alias for `GET /api/health/ready`. Reports `status` (`ok` | `degraded` | `unavailable`) and `ready` so soft Horizon failures are not treated as hard liveness failures. Prefer the explicit sub-paths for new integrations.",
         operationId: "getHealth",
         responses: {
           "200": {
-            description: "All dependencies reachable",
+            description: "Ready for traffic (healthy or degraded)",
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/HealthStatus" },
@@ -3218,7 +3262,7 @@ The liveness probe (\`GET /api/health/live\`) is unaffected by dependency failur
             },
           },
           "503": {
-            description: "One or more dependencies unreachable",
+            description: "Critical dependency unavailable",
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/HealthStatus" },

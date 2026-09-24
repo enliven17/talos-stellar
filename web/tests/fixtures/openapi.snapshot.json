@@ -89,13 +89,30 @@
         "type": "object",
         "required": [
           "ok",
+          "status",
+          "ready",
           "checks",
           "ts"
         ],
         "properties": {
           "ok": {
             "type": "boolean",
-            "description": "True when all dependency checks pass",
+            "description": "True when every dependency check passed (fully healthy).",
+            "example": true
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "unavailable"
+            ],
+            "description": "Aggregate readiness severity. `degraded` means only soft dependencies failed (still ready for traffic). `unavailable` means a critical dependency failed (not ready). Never a liveness/process signal.",
+            "example": "ok"
+          },
+          "ready": {
+            "type": "boolean",
+            "description": "True when the process should keep receiving traffic (`status` is `ok` or `degraded`).",
             "example": true
           },
           "checks": {
@@ -111,6 +128,7 @@
                   "ok",
                   "error"
                 ],
+                "description": "Critical dependency. Failure → status unavailable (HTTP 503).",
                 "example": "ok"
               },
               "stellar": {
@@ -119,6 +137,7 @@
                   "ok",
                   "error"
                 ],
+                "description": "Soft dependency. Failure alone → status degraded (HTTP 200).",
                 "example": "ok"
               }
             }
@@ -5692,11 +5711,11 @@
           "Platform"
         ],
         "summary": "Readiness probe",
-        "description": "Returns 200 when all dependencies are reachable, 503 when any check fails.\n\nChecks run **in parallel** with bounded timeouts:\n- `db` — `SELECT 1` against Postgres (2 s timeout)\n- `stellar` — `GET` to Stellar Horizon (`STELLAR_HORIZON_URL` env var, or testnet fallback) (3 s timeout)\n\nUse for:\n- Kubernetes `readinessProbe` — remove the pod from the load-balancer when degraded.\n- UptimeRobot / Better Uptime monitoring on a 1-minute interval.\n\nThe liveness probe (`GET /api/health/live`) is unaffected by dependency failures.",
+        "description": "Returns 200 when the process should receive traffic, 503 only when a **critical** dependency fails.\n\nSeverity model (separates degraded readiness from hard liveness failure):\n- `status: \"ok\"` — all checks pass (HTTP 200, `ready: true`)\n- `status: \"degraded\"` — soft dependency failed (HTTP 200, `ready: true`); keep traffic, alert operators\n- `status: \"unavailable\"` — critical dependency failed (HTTP 503, `ready: false`); remove from LB\n\nChecks run **in parallel** with bounded timeouts:\n- `db` (critical) — `SELECT 1` against Postgres (2 s timeout)\n- `stellar` (soft) — `GET` to Stellar Horizon (`STELLAR_HORIZON_URL` env var, or testnet fallback) (3 s timeout)\n\nUse for:\n- Kubernetes `readinessProbe` — remove the pod from the load-balancer only when `unavailable`.\n- UptimeRobot / Better Uptime monitoring on a 1-minute interval (alert on `degraded` via body, not only HTTP status).\n\nThe liveness probe (`GET /api/health/live`) is unaffected by dependency failures and must not be used for dependency restarts.",
         "operationId": "getReadiness",
         "responses": {
           "200": {
-            "description": "All dependencies reachable",
+            "description": "Ready for traffic (fully healthy or soft-dependency degraded)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5704,6 +5723,8 @@
                 },
                 "example": {
                   "ok": true,
+                  "status": "ok",
+                  "ready": true,
                   "checks": {
                     "db": "ok",
                     "stellar": "ok"
@@ -5724,7 +5745,7 @@
             }
           },
           "503": {
-            "description": "One or more dependencies unreachable",
+            "description": "Critical dependency unavailable — not ready for traffic",
             "content": {
               "application/json": {
                 "schema": {
@@ -5732,6 +5753,8 @@
                 },
                 "example": {
                   "ok": false,
+                  "status": "unavailable",
+                  "ready": false,
                   "checks": {
                     "db": "error",
                     "stellar": "ok"
@@ -5750,11 +5773,11 @@
           "Platform"
         ],
         "summary": "Health check (legacy alias)",
-        "description": "Backward-compatible alias for `GET /api/health/ready`. Existing monitors wired to this URL continue to work. Prefer the explicit sub-paths for new integrations.",
+        "description": "Backward-compatible alias for `GET /api/health/ready`. Reports `status` (`ok` | `degraded` | `unavailable`) and `ready` so soft Horizon failures are not treated as hard liveness failures. Prefer the explicit sub-paths for new integrations.",
         "operationId": "getHealth",
         "responses": {
           "200": {
-            "description": "All dependencies reachable",
+            "description": "Ready for traffic (healthy or degraded)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5764,7 +5787,7 @@
             }
           },
           "503": {
-            "description": "One or more dependencies unreachable",
+            "description": "Critical dependency unavailable",
             "content": {
               "application/json": {
                 "schema": {

@@ -72,6 +72,21 @@ assert.equal(typeof sdk.verifyWebhook, "function", "verifyWebhook missing");
 assert.equal(typeof sdk.parseWebhookEvent, "function", "parseWebhookEvent missing");
 console.log("  + TalosWebhook static methods present");
 
+// Typed seller quote construction
+assert.equal(typeof sdk.constructSellerQuote, "function", "constructSellerQuote missing");
+assert.equal(typeof sdk.constructSellerPaymentDetails, "function", "constructSellerPaymentDetails missing");
+assert.equal(typeof sdk.toCanonicalDecimalAmount, "function", "toCanonicalDecimalAmount missing");
+assert.equal(typeof sdk.SellerQuoteError, "function", "SellerQuoteError missing");
+const sampleQuote = sdk.constructSellerQuote({
+  providerId: "G" + "A".repeat(55),
+  amount: 1,
+  ttlSeconds: 120,
+  now: new Date("2099-01-01T00:00:00.000Z"),
+});
+assert.equal(sampleQuote.amount, "1.000000");
+assert.equal(sampleQuote.assetCode, "USDC");
+console.log("  + constructSellerQuote helper OK");
+
 // Event stream constructor
 const stream = new sdk.TalosEventStream("http://example.test", { maxReconnectAttempts: 0 });
 assert.equal(stream.connectionState, "idle");

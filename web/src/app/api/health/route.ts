@@ -5,7 +5,9 @@ import {
   DEFAULT_HORIZON,
   resolveDbTimeoutMs,
   resolveStellarTimeoutMs,
+  summarizeReadiness,
   withTimeout,
+  type HealthChecks,
 } from "./utils";
 
 export const runtime = "nodejs";
@@ -34,10 +36,7 @@ export type DependencyStatus = "ok" | "error";
 /**
  * Readiness check results with one entry per dependency.
  */
-export type HealthChecks = {
-  db: DependencyStatus;
-  stellar: DependencyStatus;
-};
+export type { HealthChecks };
 
 /**
  * Creates a health check handler for Next.js.
@@ -45,17 +44,20 @@ export type HealthChecks = {
  * The `probe` query parameter controls the behavior:
  * - `?probe=live`: liveness probe, always responds 200 as long as the
  *   process is running. It does not touch any dependencies.
- * - no `probe` (or any other value): readiness probe, checks all
- *   dependencies and responds 200 if healthy, or 503 with a `checks`
- *   object identifying which dependencies failed.
+ * - no `probe` (or any other value): readiness probe. Critical dependency
+ *   failures (`db`) yield HTTP 503 / `status: "unavailable"`. Soft
+ *   dependency failures alone (`stellar`) yield HTTP 200 /
+ *   `status: "degraded"` so orchestrators do not treat them as a hard
+ *   liveness / process failure.
  *
  * Dependencies are checked with a hard timeout; the response is always
  * bounded by the configured timeout values and will never hang.
  *
  * @example
  * Liveness: GET /api/health?probe=live -> 200 { ok: true, ts: ... }
- * Readiness healthy: GET /api/health -> 200 { ok: true, checks: { db: "ok", stellar: "ok" }, ts: ... }
- * Readiness degraded: GET /api/health -> 503 { ok: false, checks: { db: "error", stellar: "ok" }, ts: ... }
+ * Healthy: GET /api/health -> 200 { ok: true, status: "ok", ready: true, checks: {...}, ts: ... }
+ * Degraded (Horizon down): GET /api/health -> 200 { ok: false, status: "degraded", ready: true, checks: { db: "ok", stellar: "error" }, ts: ... }
+ * Unavailable (DB down): GET /api/health -> 503 { ok: false, status: "unavailable", ready: false, checks: { db: "error", stellar: "ok" }, ts: ... }
  */
 export function createHealthHandler({
   db,
@@ -75,7 +77,7 @@ export function createHealthHandler({
       );
     }
 
-    // Readiness probe: checks dependencies and returns 503 if any is failing.
+    // Readiness probe: separate degraded (soft) from unavailable (critical).
     const checks: HealthChecks = {
       db: "error",
       stellar: "error",
@@ -99,11 +101,17 @@ export function createHealthHandler({
       }),
     ]);
 
-    const ok = checks.db === "ok" && checks.stellar === "ok";
+    const summary = summarizeReadiness(checks);
 
     return NextResponse.json(
-      { ok, checks, ts: now().toISOString() },
-      { status: ok ? 200 : 503, headers: { "Cache-Control": "no-store" } },
+      {
+        ok: summary.ok,
+        status: summary.status,
+        ready: summary.ready,
+        checks,
+        ts: now().toISOString(),
+      },
+      { status: summary.httpStatus, headers: { "Cache-Control": "no-store" } },
     );
   };
 }

@@ -71,14 +71,16 @@ describe("GET /api/health/ready", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
+    expect(body.status).toBe("ok");
+    expect(body.ready).toBe(true);
     expect(body.checks.db).toBe("ok");
     expect(body.checks.stellar).toBe("ok");
     expect(typeof body.ts).toBe("string");
   });
 
-  // ── Degraded — one dep down ────────────────────────────────────────
+  // ── Critical vs soft dependency failures ───────────────────────────
 
-  it("returns 503 with checks.db=error when DB is down", async () => {
+  it("returns 503 unavailable with checks.db=error when DB is down", async () => {
     mockExecute.mockRejectedValue(new Error("ECONNREFUSED"));
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(null, { status: 200 }),
@@ -89,11 +91,13 @@ describe("GET /api/health/ready", () => {
     expect(res.status).toBe(503);
     const body = await res.json();
     expect(body.ok).toBe(false);
+    expect(body.status).toBe("unavailable");
+    expect(body.ready).toBe(false);
     expect(body.checks.db).toBe("error");
     expect(body.checks.stellar).toBe("ok");
   });
 
-  it("returns 503 with checks.stellar=error when Stellar is unreachable", async () => {
+  it("returns 200 degraded when Stellar is unreachable (soft dependency)", async () => {
     mockExecute.mockResolvedValue([]);
     (fetch as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error("fetch failed"),
@@ -101,14 +105,16 @@ describe("GET /api/health/ready", () => {
 
     const res = await getReady();
 
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(false);
+    expect(body.status).toBe("degraded");
+    expect(body.ready).toBe(true);
     expect(body.checks.db).toBe("ok");
     expect(body.checks.stellar).toBe("error");
   });
 
-  it("returns 503 with checks.stellar=error when Horizon returns non-2xx", async () => {
+  it("returns 200 degraded when Horizon returns non-2xx (soft dependency)", async () => {
     mockExecute.mockResolvedValue([]);
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(null, { status: 503 }),
@@ -116,15 +122,17 @@ describe("GET /api/health/ready", () => {
 
     const res = await getReady();
 
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(false);
+    expect(body.status).toBe("degraded");
+    expect(body.ready).toBe(true);
     expect(body.checks.stellar).toBe("error");
   });
 
-  // ── Unavailable — both deps down ───────────────────────────────────
+  // ── Unavailable — critical path down ───────────────────────────────
 
-  it("returns 503 with both checks=error when all deps are down", async () => {
+  it("returns 503 unavailable with both checks=error when all deps are down", async () => {
     mockExecute.mockRejectedValue(new Error("DB offline"));
     (fetch as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error("network error"),
@@ -135,6 +143,8 @@ describe("GET /api/health/ready", () => {
     expect(res.status).toBe(503);
     const body = await res.json();
     expect(body.ok).toBe(false);
+    expect(body.status).toBe("unavailable");
+    expect(body.ready).toBe(false);
     expect(body.checks.db).toBe("error");
     expect(body.checks.stellar).toBe("error");
   });
@@ -157,7 +167,7 @@ describe("GET /api/health/ready", () => {
     expect(body.checks.stellar).toBe("ok");
   });
 
-  it("returns 503 with checks.stellar=error when Stellar check times out", async () => {
+  it("returns 200 degraded when Stellar check times out", async () => {
     mockExecute.mockResolvedValue([]);
     (fetch as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
 
@@ -165,8 +175,10 @@ describe("GET /api/health/ready", () => {
     vi.advanceTimersByTime(4000);
     const res = await promise;
 
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(200);
     const body = await res.json();
+    expect(body.status).toBe("degraded");
+    expect(body.ready).toBe(true);
     expect(body.checks.db).toBe("ok");
     expect(body.checks.stellar).toBe("error");
   });
@@ -252,11 +264,13 @@ describe("GET /api/health (legacy alias)", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
+    expect(body.status).toBe("ok");
+    expect(body.ready).toBe(true);
     expect(body.checks.db).toBe("ok");
     expect(body.checks.stellar).toBe("ok");
   });
 
-  it("returns 503 when DB is down (same behaviour as /ready)", async () => {
+  it("returns 503 unavailable when DB is down (same behaviour as /ready)", async () => {
     mockExecute.mockRejectedValue(new Error("ECONNREFUSED"));
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(null, { status: 200 }),

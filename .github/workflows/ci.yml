@@ -194,6 +194,11 @@ jobs:
         working-directory: web
         run: pnpm test:unit
 
+      - name: "[web] Payment route coverage"
+        if: matrix.package == 'web' && !cancelled()
+        working-directory: web
+        run: pnpm test:payment-coverage
+
       # ── SDK: build/typecheck, tests ─────────────────────────────
       - name: "[sdk] Build & typecheck"
         if: matrix.package == 'sdk'

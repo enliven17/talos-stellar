@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
+    "test:payment-coverage": "vitest run --config vitest.payment-coverage.config.ts --coverage",
     "test:unit": "vitest run tests/health.test.ts tests/*.unit.test.ts tests/sse.test.ts",
     "test:e2e": "vitest run tests/api-e2e.test.ts tests/outbox-e2e.test.ts",
     "test:load": "vitest run tests/load/",
@@ -25,7 +26,9 @@
     "env:provision": "tsx src/area/devx/env-cli.ts provision",
     "env:teardown": "tsx src/area/devx/env-cli.ts teardown",
     "test:backup": "vitest run tests/backup-restore-fixture.test.ts tests/backup-crypto.test.ts tests/backup-types.test.ts",
-    "backup:drill": "tsx scripts/ci-backup-restore-drill.ts"
+    "backup:drill": "tsx scripts/ci-backup-restore-drill.ts",
+    "test:property": "vitest run src/area/devx/__tests__/property-schedule.test.ts src/area/devx/__tests__/property-tests.test.ts",
+    "property:nightly": "tsx src/area/devx/run-property-tests.ts"
   },
   "dependencies": {
     "@creit.tech/stellar-wallets-kit": "^2.1.0",
@@ -52,6 +55,7 @@
     "@types/pg": "^8.20.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@vitest/coverage-v8": "4.1.4",
     "dotenv": "^17.4.0",
     "drizzle-kit": "^0.31.10",
     "eslint": "^9",

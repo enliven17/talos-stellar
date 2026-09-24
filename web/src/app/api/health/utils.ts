@@ -78,3 +78,60 @@ export function withTimeout<T>(
       );
   });
 }
+
+/**
+ * Readiness severity model.
+ *
+ * - Critical dependencies (`db`): failure → `unavailable` (HTTP 503). The
+ *   process should not receive traffic; this is readiness — not liveness.
+ * - Soft dependencies (`stellar`): failure alone → `degraded` (HTTP 200).
+ *   The process stays in rotation; operators get an explicit degraded signal
+ *   without conflating it with a hard liveness / process failure.
+ * - Liveness (`GET /api/health/live`) never inspects these checks.
+ */
+export type DependencyStatus = "ok" | "error";
+export type ReadinessStatus = "ok" | "degraded" | "unavailable";
+
+export type HealthChecks = {
+  db: DependencyStatus;
+  stellar: DependencyStatus;
+};
+
+export const CRITICAL_DEPENDENCIES = ["db"] as const;
+export const SOFT_DEPENDENCIES = ["stellar"] as const;
+
+export type ReadinessSummary = {
+  /** Aggregate readiness severity. */
+  status: ReadinessStatus;
+  /** True only when every dependency check passed. */
+  ok: boolean;
+  /** True when the process should keep receiving traffic (ok or degraded). */
+  ready: boolean;
+  /** HTTP status for the readiness response. */
+  httpStatus: 200 | 503;
+};
+
+export function summarizeReadiness(checks: HealthChecks): ReadinessSummary {
+  const criticalFailed = CRITICAL_DEPENDENCIES.some(
+    (name) => checks[name] !== "ok",
+  );
+  const softFailed = SOFT_DEPENDENCIES.some((name) => checks[name] !== "ok");
+
+  if (criticalFailed) {
+    return {
+      status: "unavailable",
+      ok: false,
+      ready: false,
+      httpStatus: 503,
+    };
+  }
+  if (softFailed) {
+    return {
+      status: "degraded",
+      ok: false,
+      ready: true,
+      httpStatus: 200,
+    };
+  }
+  return { status: "ok", ok: true, ready: true, httpStatus: 200 };
+}

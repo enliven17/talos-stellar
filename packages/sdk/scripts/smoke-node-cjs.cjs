@@ -97,5 +97,18 @@ assert.equal(stream.connectionState, "idle");
 stream.close();
 console.log("  + TalosEventStream instantiation OK");
 
+// Typed seller quote construction
+assert.equal(typeof sdk.constructSellerQuote, "function");
+assert.equal(typeof sdk.constructSellerPaymentDetails, "function");
+assert.equal(typeof sdk.SellerQuoteError, "function");
+const sampleQuote = sdk.constructSellerQuote({
+  providerId: "G" + "A".repeat(55),
+  amount: 1,
+  ttlSeconds: 120,
+  now: new Date("2099-01-01T00:00:00.000Z"),
+});
+assert.equal(sampleQuote.amount, "1.000000");
+console.log("  + constructSellerQuote helper OK");
+
 console.log("[compat:node-cjs] ALL CHECKS PASSED");
 process.exit(0);

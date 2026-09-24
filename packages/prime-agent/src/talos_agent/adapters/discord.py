@@ -15,6 +15,7 @@ from talos_agent.adapters.capability import (
     DirectHTTPClient,
     SecretProvider,
 )
+from talos_agent.adapters.snapshots import DiscordHealthSnapshot
 from talos_agent.config import resolve_setting_secret
 
 if TYPE_CHECKING:
@@ -108,12 +109,12 @@ class DiscordAdapter(BaseSocialAdapter):
             supports_analytics=bool(self._bot_token and self._channel_id),
         )
 
-    def health_snapshot(self) -> dict[str, bool]:
-        return {
-            "has_webhook": bool(self._webhook_url),
-            "has_token": bool(self._bot_token),
-            "has_channel": bool(self._channel_id),
-        }
+    def health_snapshot(self) -> DiscordHealthSnapshot:
+        return DiscordHealthSnapshot(
+            has_webhook=bool(self._webhook_url),
+            has_token=bool(self._bot_token),
+            has_channel=bool(self._channel_id),
+        )
 
     # ── GTM message formatting ────────────────────────────────
 

@@ -12,6 +12,7 @@ from talos_agent.adapters.capability import (
     DirectHTTPClient,
     SecretProvider,
 )
+from talos_agent.adapters.snapshots import TelegramHealthSnapshot
 from talos_agent.config import resolve_setting_secret
 
 if TYPE_CHECKING:
@@ -74,11 +75,11 @@ class TelegramAdapter(BaseSocialAdapter):
             supports_analytics=False,
         )
 
-    def health_snapshot(self) -> dict[str, bool]:
-        return {
-            "has_token": bool(self._bot_token),
-            "has_chat": bool(self._chat_id),
-        }
+    def health_snapshot(self) -> TelegramHealthSnapshot:
+        return TelegramHealthSnapshot(
+            has_token=bool(self._bot_token),
+            has_chat=bool(self._chat_id),
+        )
 
     def _is_configured(self) -> bool:
         return bool(self._bot_token and self._chat_id)

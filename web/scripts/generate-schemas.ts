@@ -43,6 +43,7 @@ import {
   heartbeatJobSchema,
   releaseJobSchema,
   submitJobResultSchema,
+  reportJobProgressSchema,
   reportRevenueSchema,
   recordDividendSchema,
   updateStatusSchema,
@@ -127,6 +128,11 @@ const schemas = [
     name: "submitJobResult",
     schema: submitJobResultSchema,
     routes: ["POST /api/jobs/:id/result"],
+  },
+  {
+    name: "reportJobProgress",
+    schema: reportJobProgressSchema,
+    routes: ["POST /api/jobs/:id/progress"],
   },
   {
     name: "reportRevenue",

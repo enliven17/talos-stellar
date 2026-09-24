@@ -476,6 +476,33 @@ export const updateApiKeySchema = z.object({
   expiresAt: z.string().datetime().nullable().optional(),
 });
 
+
+// --- Commerce job lease / progress ---
+
+export const claimJobSchema = z.object({
+  ttlSeconds: z.number().int().positive().max(3600).optional(),
+});
+
+export const heartbeatJobSchema = z.object({
+  fencingToken: z.number().int().nonnegative(),
+});
+
+export const releaseJobSchema = z.object({
+  fencingToken: z.number().int().nonnegative(),
+});
+
+export const submitJobResultSchema = z.object({
+  result: z.record(z.string(), z.unknown()),
+  fencingToken: z.number().int().nonnegative().optional(),
+});
+
+export const reportJobProgressSchema = z.object({
+  percent: z.number().min(0).max(100).optional(),
+  stage: z.string().min(1).max(64).optional(),
+  message: z.string().min(1).max(280).optional(),
+  fencingToken: z.number().int().nonnegative().optional(),
+});
+
 /**
  * Maximum request body size accepted by all public write routes (bytes).
  *

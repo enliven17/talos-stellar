@@ -150,6 +150,46 @@ The stack defaults to the web service and a mock Stellar provider. Add the optio
 docker compose --profile agent up -d prime-agent
 ```
 
+#### Deterministic smoke fixture
+
+The local stack's expected shape — ports, health endpoints, and mock marketplace
+agents — is captured in a deterministic fixture at
+`web/tests/fixtures/smoke-fixture.json`. Regenerating it is byte-stable (no
+timestamps, randomness, or network): every run on any machine produces identical
+output, so diffs in review are meaningful.
+
+The exact local command to verify the fixture is canonical and drift-free:
+
+```bash
+pnpm smoke:fixture:check
+```
+
+To regenerate it after intentionally changing the fixture definition in
+`scripts/smoke-fixture.lib.mjs`:
+
+```bash
+pnpm smoke:fixture:gen
+```
+
+Focused tests (positive, negative, boundary, regression, and privacy coverage):
+
+```bash
+pnpm --dir web exec vitest run tests/smoke-fixture.unit.test.ts
+```
+
+Behavior notes:
+
+- **Fail closed** — ambiguous, malformed, or secret-shaped input aborts with a
+  non-zero exit and an explicit, privacy-safe error. Field names that look like
+  secrets (`secret`, `seed`, `private key`, `password`, `api key`, `proof`, …)
+  are rejected outright and their values are never logged or returned.
+- **Placeholder data only** — the fixture never contains real keys, seeds, or
+  payment proofs; agent addresses are deterministic truncated placeholders in
+  the same style as the demo seed.
+- **CI** — `pnpm smoke:fixture:check` is safe to wire into any workflow step;
+  it exits `0` when the committed fixture matches the canonical output and `1`
+  with a regeneration hint otherwise.
+
 ### Web
 
 From the repo root:

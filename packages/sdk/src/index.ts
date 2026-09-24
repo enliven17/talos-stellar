@@ -50,6 +50,7 @@ export {
   snapshotHeaders,
   parseRetryAfter,
   parseX402Challenge,
+  redactEventPath,
   MAX_BODY_BYTES,
 } from "./errors.js";
 
@@ -64,6 +65,19 @@ export * from "./webhooks.js";
 export * from "./a2a-intent.js";
 export * from "./a2a-validation.js";
 export * from "./a2a-operations.js";
+export {
+  DEFAULT_SELLER_QUOTE_TTL_SECONDS,
+  SellerQuoteError,
+  constructSellerQuote,
+  constructSellerPaymentDetails,
+  toCanonicalDecimalAmount,
+} from "./seller-quote.js";
+export type {
+  ConstructSellerQuoteParams,
+  ConstructSellerPaymentDetailsParams,
+  SellerPaymentDetails,
+  SellerQuoteErrorCode,
+} from "./seller-quote.js";
 export {
   TalosEventStream,
   TalosStreamError,
