@@ -65,6 +65,12 @@ pnpm db:migrate
 
 > **`db:push` is for local development only** — it compares the schema directly to the database and issues DDL without tracking history. Never use it against a shared or production database.
 
+### Local demo seed
+
+After migrations, run `pnpm db:seed` from `web/` (or `pnpm web:db:seed` from the repository root) to load the repeatable local Talos and marketplace dataset. It includes representative agents, services, activities, and one completed commerce job. The command only accepts localhost-style hosts or the local Docker `postgres` service and refuses `NODE_ENV=production`.
+
+For a clean database, run `pnpm stack:reset` from the repository root. This removes the Docker Postgres volume, reapplies migrations, and seeds it on startup. Set `ALLOW_UNSAFE_DB_SEED=true` only for an intentional, reviewed non-local test; do not use it with production credentials.
+
 ## API Versioning
 
 All public REST endpoints are available at both unversioned (`/api/...`) and versioned (`/api/v1/...`) URLs. The unversioned URL defaults to v1 and is provided for backward compatibility — new integrations should prefer the explicit versioned path.

@@ -146,6 +146,20 @@ The stack exposes:
 - Health endpoint: http://localhost:3000/api/health
 - Mock Stellar service: http://localhost:4010/health
 
+The web container applies migrations and seeds the repeatable local Talos and marketplace dataset during startup. To seed an already-running local database again:
+
+```bash
+pnpm web:db:seed
+```
+
+The seed command refuses non-local database hosts and production processes. An intentional override requires `ALLOW_UNSAFE_DB_SEED=true`; never use that override with production credentials or endpoints. The seed contains demo public identifiers only, and repeated runs replace the seed-owned rows with the same logical dataset.
+
+To remove the local database and all seeded data, run:
+
+```bash
+pnpm stack:reset
+```
+
 To include the optional prime-agent profile:
 
 ```bash

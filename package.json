@@ -17,7 +17,7 @@
     "fixtures:gen": "node scripts/generate-registry-fixtures.mjs",
     "fixtures:check": "node scripts/generate-registry-fixtures.mjs --check",
     "smoke:fixture:gen": "node scripts/generate-smoke-fixture.mjs",
-    "smoke:fixture:check": "node scripts/generate-smoke-fixture.mjs --check"
+    "smoke:fixture:check": "node scripts/generate-smoke-fixture.mjs --check",
     "secrets:check": "bash scripts/secret-scan.sh"
   },
   "dependencies": {

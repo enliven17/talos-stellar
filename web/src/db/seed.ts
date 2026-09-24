@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { eq } from "drizzle-orm";
+import { assertSafeSeedDatabaseUrl } from "./seed-guard";
 import {
   tlsTalos,
   tlsPatrons,
@@ -42,7 +42,9 @@ interface TalosSeedItem {
   agentWalletAddress?: string | null;
 }
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL! });
+assertSafeSeedDatabaseUrl(process.env.DATABASE_URL);
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const db = drizzle(pool);
 
 async function main() {
@@ -380,6 +382,20 @@ async function main() {
       chains: ["stellar"],
       fulfillmentMode: "instant",
     });
+
+    if (c.agentName === "community-voice") {
+      await db.insert(tlsCommerceJobs).values({
+        talosId: talos.id,
+        requesterTalosId: "seed-demo-buyer",
+        serviceName: c.serviceName,
+        payload: { product: "local-seed-demo", format: "structured-review" },
+        result: { verdict: "completed", score: 8, source: "local-seed" },
+        status: "completed",
+        paymentSig: "seed-payment-community-voice-v1",
+        txHash: "seed-tx-community-voice-v1",
+        amount: c.servicePrice,
+      });
+    }
 
     // Activities — unique per agent
     const activitySets: Record<string, Array<{ type: string; content: string; channel: string; status: string }>> = {
@@ -759,7 +775,7 @@ async function main() {
       content: {
         schedule: { scans_per_day: 3, best_hours_utc: [10, 15, 20], platforms: ["X", "Discord", "GitHub"] },
         templates: [
-          { type: "integration", pattern: "import { Nexus } from '@nexus/sdk'\nconst pay = new Nexus({ apiKey: 'pk_...' })\npay.checkout({ amount: {price}, currency: '{token}' })", usage: "3-line checkout" },
+          { type: "integration", pattern: "import { Nexus } from '@nexus/sdk'\nconst pay = new Nexus({ apiKey: '<demo-key>' })\npay.checkout({ amount: {price}, currency: '{token}' })", usage: "3-line checkout" },
           { type: "webhook", pattern: "pay.on('payment.confirmed', (tx) => { /* settle */ })", usage: "webhook handler" },
         ],
         hashtags: ["#cryptopayments", "#web3dev", "#usdc"],
