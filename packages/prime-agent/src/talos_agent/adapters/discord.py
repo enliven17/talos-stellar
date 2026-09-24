@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -9,7 +10,11 @@ from typing import TYPE_CHECKING
 
 from rich.console import Console
 
-from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
+from talos_agent.adapters.base import (
+    BaseSocialAdapter,
+    ChannelCapabilities,
+    PublishResult,
+)
 from talos_agent.adapters.capability import (
     AdapterHTTPClient,
     DirectHTTPClient,
@@ -39,6 +44,18 @@ class DiscordAdapterConfig:
     guild_id: str = ""
     legacy_webhook_url: str = ""
     legacy_bot_token: str = ""
+    reconnect_enabled: bool = False
+    reconnect_max_attempts: int = 3
+    reconnect_backoff_initial: float = 1.0
+    reconnect_backoff_max: float = 30.0
+
+    def __post_init__(self) -> None:
+        if self.reconnect_max_attempts < 0:
+            raise ValueError("reconnect_max_attempts must be non-negative")
+        if self.reconnect_backoff_initial <= 0 or self.reconnect_backoff_max <= 0:
+            raise ValueError("reconnect_backoff_initial and reconnect_backoff_max must be positive")
+        if self.reconnect_backoff_initial > self.reconnect_backoff_max:
+            raise ValueError("reconnect_backoff_initial must not exceed reconnect_backoff_max")
 
 
 class DiscordAdapter(BaseSocialAdapter):
@@ -68,33 +85,45 @@ class DiscordAdapter(BaseSocialAdapter):
             self._legacy_bot_token = config.legacy_bot_token
             self._channel_id = config.channel_id
             self._guild_id = config.guild_id
+            self._reconnect_enabled = config.reconnect_enabled
+            self._reconnect_max_attempts = config.reconnect_max_attempts
+            self._reconnect_backoff_initial = config.reconnect_backoff_initial
+            self._reconnect_backoff_max = config.reconnect_backoff_max
         else:
             self._settings = config
             self._legacy_webhook_url = config.discord_webhook_url
             self._legacy_bot_token = config.discord_bot_token
             self._channel_id = config.discord_channel_id
             self._guild_id = config.discord_guild_id
+            self._reconnect_enabled = False
+            self._reconnect_max_attempts = 3
+            self._reconnect_backoff_initial = 1.0
+            self._reconnect_backoff_max = 30.0
         self._secrets = secrets
         self._http = http or DirectHTTPClient()
         self._cached_bot_id: str | None = None
+        self._consecutive_failures: int = 0
+        self._last_success_time: float | None = None
 
     @property
     def _webhook_url(self) -> str:
         if self._secrets is not None:
             return self._secrets.get("discord_webhook_url")
-        assert self._settings is not None
-        return resolve_setting_secret(
-            self._settings, "discord_webhook_url", self._legacy_webhook_url
-        )
+        if self._settings is not None:
+            return resolve_setting_secret(
+                self._settings, "discord_webhook_url", self._legacy_webhook_url
+            )
+        return self._legacy_webhook_url
 
     @property
     def _bot_token(self) -> str:
         if self._secrets is not None:
             return self._secrets.get("discord_bot_token")
-        assert self._settings is not None
-        return resolve_setting_secret(
-            self._settings, "discord_bot_token", self._legacy_bot_token
-        )
+        if self._settings is not None:
+            return resolve_setting_secret(
+                self._settings, "discord_bot_token", self._legacy_bot_token
+            )
+        return self._legacy_bot_token
 
     # ── Capabilities ─────────────────────────────────────────
 
@@ -114,6 +143,8 @@ class DiscordAdapter(BaseSocialAdapter):
             has_webhook=bool(self._webhook_url),
             has_token=bool(self._bot_token),
             has_channel=bool(self._channel_id),
+            reconnect_enabled=self._reconnect_enabled,
+            consecutive_failures=self._consecutive_failures,
         )
 
     # ── GTM message formatting ────────────────────────────────
@@ -194,6 +225,8 @@ class DiscordAdapter(BaseSocialAdapter):
         )
 
     async def _webhook_post(self, payload: dict, content: str) -> PublishResult:
+        if self._reconnect_enabled:
+            return await self._webhook_post_with_reconnect(payload, content)
         resp = await self._http.post(f"{self._webhook_url}?wait=true", json=payload)
         if resp.status_code in (200, 204):
             data: dict = resp.json() if resp.content else {}
@@ -215,7 +248,48 @@ class DiscordAdapter(BaseSocialAdapter):
             error=f"Webhook POST failed: HTTP {resp.status_code} — {resp.text[:200]}",
         )
 
+    async def _webhook_post_with_reconnect(self, payload: dict, content: str) -> PublishResult:
+        last_error: str | None = None
+        for attempt in range(self._reconnect_max_attempts + 1):
+            try:
+                resp = await self._http.post(f"{self._webhook_url}?wait=true", json=payload)
+                if resp.status_code in (200, 204):
+                    data: dict = resp.json() if resp.content else {}
+                    msg_id = str(data.get("id", ""))
+                    channel = data.get("channel_id", "")
+                    guild = data.get("guild_id", "@me")
+                    self._consecutive_failures = 0
+                    self._last_success_time = asyncio.get_event_loop().time()
+                    return PublishResult(
+                        status="posted",
+                        channel=self.channel_name,
+                        content=content,
+                        post_id=msg_id,
+                        url=f"https://discord.com/channels/{guild}/{channel}/{msg_id}",
+                        metadata={"method": "webhook", "reconnect_attempts": attempt},
+                    )
+                last_error = f"HTTP {resp.status_code} — {resp.text[:200]}"
+            except Exception as e:  # noqa: BLE001 - catch all for reconnect policy
+                last_error = f"{type(e).__name__}: {str(e)[:200]}"
+
+            if attempt < self._reconnect_max_attempts:
+                delay = min(
+                    self._reconnect_backoff_initial * (2 ** attempt),
+                    self._reconnect_backoff_max,
+                )
+                await asyncio.sleep(delay)
+        
+        self._consecutive_failures += 1
+        return PublishResult(
+            status="failed",
+            channel=self.channel_name,
+            content=content,
+            error=f"Webhook POST failed after {self._reconnect_max_attempts + 1} attempts: {last_error}",
+        )
+
     async def _api_post(self, url: str, payload: dict, content: str) -> PublishResult:
+        if self._reconnect_enabled:
+            return await self._api_post_with_reconnect(url, payload, content)
         resp = await self._http.post(url, headers=self._auth_headers, json=payload)
         if resp.status_code == 200:
             data = resp.json()
@@ -234,6 +308,44 @@ class DiscordAdapter(BaseSocialAdapter):
             channel=self.channel_name,
             content=content,
             error=f"API POST failed: HTTP {resp.status_code} — {resp.text[:200]}",
+        )
+
+    async def _api_post_with_reconnect(self, url: str, payload: dict, content: str) -> PublishResult:
+        last_error: str | None = None
+        for attempt in range(self._reconnect_max_attempts + 1):
+            try:
+                resp = await self._http.post(url, headers=self._auth_headers, json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    msg_id = data.get("id", "")
+                    guild = data.get("guild_id", self._guild_id or "@me")
+                    self._consecutive_failures = 0
+                    self._last_success_time = asyncio.get_event_loop().time()
+                    return PublishResult(
+                        status="posted",
+                        channel=self.channel_name,
+                        content=content,
+                        post_id=msg_id,
+                        url=f"https://discord.com/channels/{guild}/{self._channel_id}/{msg_id}",
+                        metadata={"method": "bot_api", "reconnect_attempts": attempt},
+                    )
+                last_error = f"HTTP {resp.status_code} — {resp.text[:200]}"
+            except Exception as e:  # noqa: BLE001 - catch all for reconnect policy
+                last_error = f"{type(e).__name__}: {str(e)[:200]}"
+
+            if attempt < self._reconnect_max_attempts:
+                delay = min(
+                    self._reconnect_backoff_initial * (2 ** attempt),
+                    self._reconnect_backoff_max,
+                )
+                await asyncio.sleep(delay)
+        
+        self._consecutive_failures += 1
+        return PublishResult(
+            status="failed",
+            channel=self.channel_name,
+            content=content,
+            error=f"API POST failed after {self._reconnect_max_attempts + 1} attempts: {last_error}",
         )
 
     async def reply(self, target_url: str, content: str, **kwargs) -> PublishResult:

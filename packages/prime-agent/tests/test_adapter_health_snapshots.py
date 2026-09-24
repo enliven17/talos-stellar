@@ -85,7 +85,7 @@ def _live_browser():
 class TestSnapshotDataclasses:
     def test_discord_to_dict_round_trips(self):
         snap = DiscordHealthSnapshot(has_webhook=True, has_token=False, has_channel=False)
-        assert snap.to_dict() == {"has_webhook": True, "has_token": False, "has_channel": False}
+        assert snap.to_dict() == {"has_webhook": True, "has_token": False, "has_channel": False, "reconnect_enabled": False, "consecutive_failures": 0}
 
     def test_telegram_to_dict_round_trips(self):
         snap = TelegramHealthSnapshot(has_token=True, has_chat=True)
