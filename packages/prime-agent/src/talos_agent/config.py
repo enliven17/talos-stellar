@@ -146,6 +146,11 @@ class Settings(BaseSettings):
         le=60000,
         validation_alias="TALOS_SECRET_DB_TIMEOUT_MS",
     )
+    secret_store_backend: str = Field(
+        default="sqlite",
+        validation_alias="TALOS_SECRET_STORE_BACKEND",
+        description="Pluggable secret-store backend: sqlite (default) or memory",
+    )
 
     # Third-party adapter capability sandbox (opt-in rollout).
     adapter_sandbox_enabled: bool = Field(

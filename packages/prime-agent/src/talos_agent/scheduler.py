@@ -401,10 +401,11 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         timeout_ms=settings.secret_db_timeout_ms,
     )
     if settings.secret_rotation_enabled:
-        from talos_agent.secret_store import SecretStore, decode_keyring
+        from talos_agent.secret_store import build_secret_store, decode_keyring
 
-        secret_store = SecretStore(
-            db,
+        secret_store = build_secret_store(
+            backend=settings.secret_store_backend,
+            db=db,
             keyring=decode_keyring(settings.secret_keyring),
             active_key_id=settings.secret_active_key_id,
             scope=settings.secret_scope,
