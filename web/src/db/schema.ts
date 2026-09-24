@@ -456,6 +456,82 @@ export const tlsTokenPurchases = pgTable(
   ],
 );
 
+
+// ─── Webhook Subscriptions ────────────────────────────────────────
+//
+// Each row represents an outbound webhook endpoint that a TALOS has configured
+// to receive signed event notifications. The webhook secret is encrypted at rest
+// using AES-256-GCM and is never exposed via the API.
+//
+// Zero-downtime rotation stores the previous ciphertext until
+// previousSecretExpiresAt so deliveries can dual-sign during the grace window.
+
+export const tlsWebhookSubscriptions = pgTable(
+  "tls_webhook_subscriptions",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talos_id").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    url: text("url").notNull(),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    /** Previous secret retained during rotation grace (encrypted). */
+    previousSecretCiphertext: text("previous_secret_ciphertext"),
+    /** When the previous secret stops being dual-signed. */
+    previousSecretExpiresAt: timestamp("previous_secret_expires_at", { mode: "date", precision: 3 }),
+    /** Wall-clock time of the most recent secret rotation. */
+    secretRotatedAt: timestamp("secret_rotated_at", { mode: "date", precision: 3 }),
+    signatureVersion: integer("signature_version").notNull().default(1),
+    eventTypes: text("event_types").array().notNull().default([]),
+    description: text("description"),
+    active: boolean("active").notNull().default(true),
+
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    index("tls_webhook_subscriptions_talos_id_idx").on(t.talosId),
+    index("tls_webhook_subscriptions_previous_expires_idx").on(t.previousSecretExpiresAt),
+  ],
+);
+
+// ─── Webhook Deliveries ────────────────────────────────────────────
+//
+// Records every delivery attempt for a webhook event. Supports retries,
+// dead-letter transitions, and concurrent-safe lease acquisition using the
+// same fencing-token pattern as tls_commerce_jobs.
+
+export const tlsWebhookDeliveries = pgTable(
+  "tls_webhook_deliveries",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    subscriptionId: text("subscription_id").notNull().references(() => tlsWebhookSubscriptions.id, { onDelete: "cascade" }),
+    eventType: text("event_type").notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(5),
+    lastStatusCode: integer("last_status_code"),
+    lastError: text("last_error"),
+    lastAttemptAt: timestamp("last_attempt_at", { mode: "date", precision: 3 }),
+    nextAttemptAt: timestamp("next_attempt_at", { mode: "date", precision: 3 }),
+    completedAt: timestamp("completed_at", { mode: "date", precision: 3 }),
+    responseBody: text("response_body"),
+
+    // Lease fields (same pattern as tls_commerce_jobs)
+    leasedBy: text("leased_by"),
+    leasedAt: timestamp("leased_at", { mode: "date", precision: 3 }),
+    leaseExpiresAt: timestamp("lease_expires_at", { mode: "date", precision: 3 }),
+    fencingToken: integer("fencing_token").notNull().default(0),
+
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tls_webhook_deliveries_sub_id_payload_hash_unique").on(t.subscriptionId, t.payloadHash),
+    index("tls_webhook_deliveries_pending_idx").on(t.nextAttemptAt, t.status)
+      .where(sql`${t.status} = ANY(ARRAY['pending', 'failed'])`),
+  ],
+);
+
+
 // ─── Stellar Transaction Finality Record ─────────────────────────
 //
 // Tracks the settlement lifecycle of every Stellar transaction Talos submits
