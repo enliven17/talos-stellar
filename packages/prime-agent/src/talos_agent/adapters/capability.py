@@ -23,6 +23,7 @@ import httpx
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
 from talos_agent.adapters.diagnostics import safe_adapter_diagnostic_fields
+from talos_agent.adapters.snapshots import AdapterHealthSnapshot
 from talos_agent.circuit_breaker import (
     CircuitBreakerConfig,
     CircuitBreakerRegistry,
@@ -900,7 +901,8 @@ class SandboxedAdapter(BaseSocialAdapter):
     def get_capabilities(self) -> ChannelCapabilities:
         return self.__adapter.get_capabilities()
 
-    def health_snapshot(self) -> dict[str, bool]:
+    def health_snapshot(self) -> AdapterHealthSnapshot | dict[str, bool]:
+        """Forward the wrapped adapter's own snapshot, typed or legacy, unchanged."""
         snapshot = getattr(self.__adapter, "health_snapshot", None)
         return snapshot() if callable(snapshot) else {}
 

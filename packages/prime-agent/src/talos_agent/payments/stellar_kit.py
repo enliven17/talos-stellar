@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 from rich.console import Console
 
+from talos_agent.adapters.snapshots import StellarHealthSnapshot
 from talos_agent.http import request_with_retry
 
 _HORIZON_URL = os.getenv("STELLAR_HORIZON_URL", "https://horizon-testnet.stellar.org")
@@ -41,12 +42,12 @@ class StellarKit:
     def available(self) -> bool:
         return self._initialized
 
-    def health_snapshot(self) -> dict[str, bool]:
+    def health_snapshot(self) -> StellarHealthSnapshot:
         """Return in-process readiness snapshot for health probes (side-effect free)."""
-        return {
-            "has_api": self._api is not None,
-            "initialized": bool(self._initialized),
-        }
+        return StellarHealthSnapshot(
+            has_api=self._api is not None,
+            initialized=bool(self._initialized),
+        )
 
     async def get_balance(self, account_id: str = "") -> dict[str, Any]:
         """Query XLM balance via Horizon (public API)."""
