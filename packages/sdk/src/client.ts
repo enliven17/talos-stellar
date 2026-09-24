@@ -161,6 +161,29 @@ export interface WriteOptions {
   idempotencyKey?: string;
   /** AbortSignal for cancellation. */
   signal?: AbortSignal;
+  /**
+   * Per-request timeout in milliseconds. Overrides the client-level
+   * `timeoutMs` for this single call. `0` disables the timeout for this call
+   * regardless of the client default. Surfaces as `TalosTimeoutError`.
+   */
+  timeoutMs?: number;
+}
+
+/**
+ * Per-call options for read methods (GET / HEAD).
+ *
+ * Mirrors {@link WriteOptions} minus the idempotency key (read methods are
+ * inherently idempotent and never carry an `Idempotency-Key` header).
+ */
+export interface ReadOptions {
+  /** AbortSignal for cancellation. */
+  signal?: AbortSignal;
+  /**
+   * Per-request timeout in milliseconds. Overrides the client-level
+   * `timeoutMs` for this single call. `0` disables the timeout for this call
+   * regardless of the client default. Surfaces as `TalosTimeoutError`.
+   */
+  timeoutMs?: number;
 }
 
 /** Structured event emitted to {@link TalosClientOptions.onError}. */
@@ -177,6 +200,8 @@ type RequestParams = Record<string, string | number | boolean>;
 type RequestOptions = RequestInit & {
   params?: RequestParams;
   idempotencyKey?: string;
+  /** Per-call timeout override in ms. `0` disables; `undefined` falls back to client `timeoutMs`. */
+  timeoutMs?: number;
 };
 
 /** Default typed-retry bounds. `maxAttempts: 1` = off. */
@@ -535,13 +560,23 @@ export class TalosClient {
    * Build a `{ signal, dispose }` pair for the per-request timeout, linked to
    * the caller's signal when present. Returns `null` when no timeout is set.
    * `dispose()` MUST be called once the attempt settles.
+   *
+   * Resolution order (first non-`undefined` value wins):
+   *   1. `callTimeoutMs` — per-call override passed via `WriteOptions` / `ReadOptions`.
+   *   2. `this.timeoutMs`  — client-level default from `TalosClientOptions`.
+   *
+   * A value of `0` explicitly disables the timeout for this call.
    */
   private acquireTimeoutController(
     callerSignal?: AbortSignal,
+    callTimeoutMs?: number,
   ): { signal: AbortSignal; dispose: () => void } | null {
-    if (!this.timeoutMs) return null;
+    // Resolve effective timeout: per-call wins, then client default.
+    const effectiveTimeout = callTimeoutMs !== undefined ? callTimeoutMs : this.timeoutMs;
+    // 0 or falsy — no timeout.
+    if (!effectiveTimeout) return null;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), effectiveTimeout);
     const onCallerAbort = () => controller.abort();
     if (callerSignal?.aborted) controller.abort();
     else callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
@@ -705,7 +740,7 @@ export class TalosClient {
    * synchronously so abort listeners attach before `abort()`.
    */
   private async request<T>(path: string, init?: RequestOptions): Promise<T> {
-    const { params, signal, idempotencyKey, ...requestInit } = init ?? {};
+    const { params, signal, idempotencyKey, timeoutMs: callTimeoutMs, ...requestInit } = init ?? {};
     const callerSignal = signal ?? undefined;
     const method = (requestInit.method ?? "GET").toUpperCase();
     const url = this.buildUrl(path, params);
@@ -735,7 +770,7 @@ export class TalosClient {
         ? await this.applySignature(url, method, baseHeaders, requestInit.body, callerSignal)
         : baseHeaders;
 
-      const timeout = this.acquireTimeoutController(callerSignal);
+      const timeout = this.acquireTimeoutController(callerSignal, callTimeoutMs);
       const effectiveSignal = timeout?.signal ?? callerSignal;
       let delayMs: number | null = null;
       try {
@@ -799,8 +834,8 @@ export class TalosClient {
     path: string,
     options?: CursorRequestOptions,
   ): Promise<CursorPage<T>> {
-    const { signal, ...params } = options ?? {};
-    return this.request(path, { params, signal });
+    const { signal, timeoutMs, ...params } = options ?? {};
+    return this.request(path, { params, signal, timeoutMs });
   }
 
   // ── Talos CRUD ────────────────────────────────────────────
@@ -809,12 +844,12 @@ export class TalosClient {
     return this.requestPage("/api/talos", params);
   }
 
-  async getTalos(id: string): Promise<TalosDetail> {
-    return this.request(`/api/talos/${id}`);
+  async getTalos(id: string, options?: ReadOptions): Promise<TalosDetail> {
+    return this.request(`/api/talos/${id}`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
-  async getTalosMe(): Promise<TalosDetail> {
-    return this.request("/api/talos/me");
+  async getTalosMe(options?: ReadOptions): Promise<TalosDetail> {
+    return this.request("/api/talos/me", { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
   async createTalos(params: CreateTalosParams): Promise<TalosCreated> {
@@ -827,10 +862,11 @@ export class TalosClient {
   // ── Activity ───────────────────────────────────────────────
 
   async listActivities(params?: ActivityPageOptions): Promise<ActivityPage> {
-    const { signal, ...query } = params ?? {};
+    const { signal, timeoutMs, ...query } = params ?? {};
     return this.request<ActivityPage>("/api/activity", {
       params: query,
       signal,
+      timeoutMs,
     });
   }
 
@@ -847,8 +883,8 @@ export class TalosClient {
     });
   }
 
-  async getTalosActivities(talosId: string): Promise<Activity[]> {
-    return this.request(`/api/talos/${talosId}/activity`);
+  async getTalosActivities(talosId: string, options?: ReadOptions): Promise<Activity[]> {
+    return this.request(`/api/talos/${talosId}/activity`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
   // ── Revenue ────────────────────────────────────────────────
@@ -866,8 +902,8 @@ export class TalosClient {
     });
   }
 
-  async getTalosRevenues(talosId: string): Promise<Revenue[]> {
-    return this.request(`/api/talos/${talosId}/revenue`);
+  async getTalosRevenues(talosId: string, options?: ReadOptions): Promise<Revenue[]> {
+    return this.request(`/api/talos/${talosId}/revenue`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
   // ── Approvals ──────────────────────────────────────────────
@@ -885,14 +921,14 @@ export class TalosClient {
     });
   }
 
-  async getApprovals(talosId: string, status?: string): Promise<Approval[]> {
+  async getApprovals(talosId: string, status?: string, options?: ReadOptions): Promise<Approval[]> {
     const params: Record<string, string> = {};
     if (status) params.status = status;
-    return this.request(`/api/talos/${talosId}/approvals`, { params });
+    return this.request(`/api/talos/${talosId}/approvals`, { params, signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
-  async getApproval(talosId: string, approvalId: string): Promise<Approval> {
-    return this.request(`/api/talos/${talosId}/approvals/${approvalId}`);
+  async getApproval(talosId: string, approvalId: string, options?: ReadOptions): Promise<Approval> {
+    return this.request(`/api/talos/${talosId}/approvals/${approvalId}`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
   // ── Status ─────────────────────────────────────────────────
@@ -919,8 +955,8 @@ export class TalosClient {
   async discoverServices(
     params?: DiscoverServicesParams,
   ): Promise<CursorPage<CommerceService>> {
-    const { signal, ...query } = params ?? {};
-    return this.requestPage("/api/services", { ...query, signal });
+    const { signal, timeoutMs, ...query } = params ?? {};
+    return this.requestPage("/api/services", { ...query, signal, timeoutMs });
   }
 
   async purchaseService(
@@ -961,6 +997,7 @@ export class TalosClient {
     const url = `${this.baseUrl}${path}`;
     const body = JSON.stringify({ payload });
     const signal = options?.signal;
+    const callTimeoutMs = options?.timeoutMs;
 
     if (this.chaosInjector) await this.injectChaos();
 
@@ -969,7 +1006,7 @@ export class TalosClient {
     const initialHeaders = this.signer
       ? await this.applySignature(url, "POST", baseHeaders, body, signal)
       : baseHeaders;
-    const timeout = this.acquireTimeoutController(signal);
+    const timeout = this.acquireTimeoutController(signal, callTimeoutMs);
     const effectiveSignal = timeout?.signal ?? signal;
     let res: Response;
     try {
@@ -1039,8 +1076,8 @@ export class TalosClient {
 
   // ── Wallet & Payments ──────────────────────────────────────
 
-  async getWallet(talosId: string): Promise<Wallet> {
-    return this.request(`/api/talos/${talosId}/wallet`);
+  async getWallet(talosId: string, options?: ReadOptions): Promise<Wallet> {
+    return this.request(`/api/talos/${talosId}/wallet`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
   async signPayment(
@@ -1068,8 +1105,8 @@ export class TalosClient {
 
   // ── Jobs ───────────────────────────────────────────────────
 
-  async getPendingJobs(): Promise<CommerceJob[]> {
-    return this.request("/api/jobs/pending");
+  async getPendingJobs(options?: ReadOptions): Promise<CommerceJob[]> {
+    return this.request("/api/jobs/pending", { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
   /**
@@ -1092,8 +1129,8 @@ export class TalosClient {
     });
   }
 
-  async getJobResult(jobId: string): Promise<CommerceJob> {
-    return this.request(`/api/jobs/${jobId}/result`);
+  async getJobResult(jobId: string, options?: ReadOptions): Promise<CommerceJob> {
+    return this.request(`/api/jobs/${jobId}/result`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
   // ── Leaderboard ────────────────────────────────────────────

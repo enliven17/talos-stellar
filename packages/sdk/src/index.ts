@@ -13,6 +13,7 @@ export type {
   ResolvedRetryOptions,
   TalosErrorEvent,
   WriteOptions,
+  ReadOptions,
 } from "./client.js";
 
 // ── Idempotency ───────────────────────────────────────────────────

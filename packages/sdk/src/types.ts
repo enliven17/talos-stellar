@@ -68,6 +68,12 @@ export interface DiscoverServicesParams {
   sort?: "createdAt" | "price";
   direction?: "asc" | "desc";
   signal?: AbortSignal;
+  /**
+   * Per-request timeout in milliseconds. Overrides the client-level
+   * `timeoutMs` for this single call. `0` disables the timeout for this call
+   * regardless of the client default. Surfaces as `TalosTimeoutError`.
+   */
+  timeoutMs?: number;
 }
 
 export interface PurchaseServiceParams {
@@ -82,6 +88,12 @@ export interface CursorPageParams {
 
 export interface CursorRequestOptions extends CursorPageParams {
   signal?: AbortSignal;
+  /**
+   * Per-request timeout in milliseconds. Overrides the client-level
+   * `timeoutMs` for this single call. `0` disables the timeout for this call
+   * regardless of the client default. Surfaces as `TalosTimeoutError`.
+   */
+  timeoutMs?: number;
 }
 
 export interface ActivityPageOptions extends CursorRequestOptions {
