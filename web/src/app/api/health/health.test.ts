@@ -6,7 +6,7 @@
  * bounded timeouts without waiting real time.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // Mock the database module before importing routes that use it.
 vi.mock("@/db", () => ({
@@ -206,5 +206,43 @@ describe("health probes", () => {
       const body = await response.json();
       expect(body.checks).toEqual({ db: "error", stellar: "ok" });
     });
+  });
+});
+
+
+describe("health probe timeout env config", () => {
+  const prevDb = process.env.HEALTH_DB_TIMEOUT_MS;
+  const prevStellar = process.env.HEALTH_STELLAR_TIMEOUT_MS;
+
+  afterEach(() => {
+    if (prevDb === undefined) delete process.env.HEALTH_DB_TIMEOUT_MS;
+    else process.env.HEALTH_DB_TIMEOUT_MS = prevDb;
+    if (prevStellar === undefined) delete process.env.HEALTH_STELLAR_TIMEOUT_MS;
+    else process.env.HEALTH_STELLAR_TIMEOUT_MS = prevStellar;
+  });
+
+  it("uses defaults when env vars are unset", async () => {
+    delete process.env.HEALTH_DB_TIMEOUT_MS;
+    delete process.env.HEALTH_STELLAR_TIMEOUT_MS;
+    const { resolveDbTimeoutMs, resolveStellarTimeoutMs, DEFAULT_DB_TIMEOUT_MS, DEFAULT_STELLAR_TIMEOUT_MS } = await import("./utils");
+    expect(resolveDbTimeoutMs({})).toBe(DEFAULT_DB_TIMEOUT_MS);
+    expect(resolveStellarTimeoutMs({})).toBe(DEFAULT_STELLAR_TIMEOUT_MS);
+  });
+
+  it("honors valid HEALTH_*_TIMEOUT_MS overrides", async () => {
+    const { parseTimeoutMs, resolveDbTimeoutMs, resolveStellarTimeoutMs } = await import("./utils");
+    expect(parseTimeoutMs("1500", 2000)).toBe(1500);
+    expect(resolveDbTimeoutMs({ HEALTH_DB_TIMEOUT_MS: "1500" } as NodeJS.ProcessEnv)).toBe(1500);
+    expect(resolveStellarTimeoutMs({ HEALTH_STELLAR_TIMEOUT_MS: "4500" } as NodeJS.ProcessEnv)).toBe(4500);
+  });
+
+  it("falls back on malformed, zero, and out-of-range values", async () => {
+    const { parseTimeoutMs } = await import("./utils");
+    expect(parseTimeoutMs("nope", 2000)).toBe(2000);
+    expect(parseTimeoutMs("0", 2000)).toBe(2000);
+    expect(parseTimeoutMs("-5", 2000)).toBe(2000);
+    expect(parseTimeoutMs("999999", 2000)).toBe(2000);
+    expect(parseTimeoutMs("12.5", 2000)).toBe(2000);
+    expect(parseTimeoutMs("  ", 2000)).toBe(2000);
   });
 });
