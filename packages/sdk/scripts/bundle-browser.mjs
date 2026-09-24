@@ -46,6 +46,13 @@ async function bundleWithEsbuild() {
       sourcemap: false,
       legalComments: "none",
       allowOverwrite: true,
+      define: {
+        "process.env.NODE_ENV": '"production"',
+        "process.env": "{}",
+      },
+      footer: {
+        js: "if (typeof globalThis !== 'undefined') { globalThis.TalosSDK = TalosSDK; } if (typeof window !== 'undefined') { window.TalosSDK = TalosSDK; }",
+      },
     });
     console.log("[build:browser] bundled via esbuild ->", BUNDLE_OUT);
     return true;
@@ -55,6 +62,60 @@ async function bundleWithEsbuild() {
   }
 }
 
+const EXPORT_REGEX =
+  /^export\s+(default\s+)?(?:(?:const|let|var|class|function|enum|async\s+function)\s+)?([A-Za-z0-9_$]+)/m;
+const REEXPORT_ALL = /^export\s+\*\s+from\s+["']([^"']+)["']/;
+const REEXPORT_NAMED = /^export\s+\{([^}]+)\}\s+from\s+["']([^"']+)["']/;
+const IMPORT_LINE =
+  /^import\s+(?:(?:\{[^}]*\}|\*\s+as\s+[A-Za-z0-9_$]+|[A-Za-z0-9_$]+(?:\s*,\s*\{[^}]*\})?)\s+from\s+)?["']([^"']+)["'];?\s*$/;
+
+function stripImportsExportsForBundle(src) {
+  const lines = src.split(/\r?\n/);
+  const out = [];
+  const deferred = [];
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+
+    if (REEXPORT_ALL.test(line)) continue;
+    if (REEXPORT_NAMED.test(line)) continue;
+    if (IMPORT_LINE.test(line)) continue;
+    if (/^export\s*\{\s*\}\s*;?\s*$/.test(line)) continue;
+
+    if (/^export\s+default\s+/.test(line)) {
+      const rest = line.replace(/^export\s+default\s+/, "");
+      deferred.push("__talos_export('default', (" + rest + "));");
+      continue;
+    }
+
+    const m = EXPORT_REGEX.exec(line);
+    if (m) {
+      const name = m[2];
+      const decl = line.replace(/^export\s+/, "");
+      out.push(decl);
+      if (name) deferred.push(`try { __talos_export('${name}', ${name}); } catch (_) {}`);
+      continue;
+    }
+
+    const namedLocal = /^export\s+\{([^}]+)\}\s*;?\s*$/.exec(line);
+    if (namedLocal) {
+      for (const part of namedLocal[1].split(",")) {
+        const bit = part.trim();
+        if (!bit) continue;
+        const asMatch = /^([A-Za-z0-9_$]+)\s+as\s+([A-Za-z0-9_$]+)$/.exec(bit);
+        if (asMatch) {
+          deferred.push(`try { __talos_export('${asMatch[2]}', ${asMatch[1]}); } catch (_) {}`);
+        } else {
+          deferred.push(`try { __talos_export('${bit}', ${bit}); } catch (_) {}`);
+        }
+      }
+      continue;
+    }
+
+    out.push(line);
+  }
+  return out.join("\n") + "\n" + deferred.join("\n");
+}
+
 function fallbackBundle() {
   if (!existsSync(ESM_DIR)) {
     throw new Error(`ESM dist not found at ${ESM_DIR}. Run build:esm first.`);
@@ -62,7 +123,7 @@ function fallbackBundle() {
   const sources = [];
   for (const f of walk(ESM_DIR).sort()) {
     const rel = f.slice(ESM_DIR.length + 1);
-    sources.push(`// ${rel}\n` + readFileSync(f, "utf8"));
+    sources.push(`// ${rel}\n` + stripImportsExportsForBundle(readFileSync(f, "utf8")));
   }
   // Build a pseudo-module shim: wrap in an IIFE, re-export from the
   // `index.js` entry. This fallback is not a perfect bundler but lets CI

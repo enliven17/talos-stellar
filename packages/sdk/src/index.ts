@@ -93,6 +93,44 @@ export type {
   TalosEventStreamOptions,
   SeenStore,
 } from "./events.js";
+
+// ── Contract event decoding ───────────────────────────────────────────────────
+
+export {
+  decodeContractEvent,
+  decodeContractEvents,
+  isContractEvent,
+  isContractEventFamily,
+  compareEventCursors,
+  ContractEventError,
+  UnknownContractEventError,
+  MalformedContractEventError,
+  UnsupportedContractVersionError,
+  BUILTIN_EVENT_CATALOG,
+  CATALOG_SPEC_VERSION,
+} from "./contract-events.js";
+export type {
+  ScVal,
+  CatalogFieldDescriptor,
+  CatalogEventDescriptor,
+  ContractEventFamily,
+  EventCatalog,
+  RawContractEvent,
+  EventCursor,
+  DecodedContractEventBase,
+  TalosCrtEvent,
+  TalosCrt2Event,
+  PatUpdEvent,
+  RegUpdEvent,
+  PropCrtEvent,
+  VoteEvent,
+  PropStatEvent,
+  EpCmtEvent,
+  DivClmEvent,
+  DecodedContractEvent,
+  DecodeContractEventOptions,
+  BatchDecodeResult,
+} from "./contract-events.js";
 export {
   FaultType,
   ChaosInjector,

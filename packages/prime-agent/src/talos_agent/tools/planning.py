@@ -14,8 +14,10 @@ plan_purchase        — emit a canonical dry-run purchase plan (no writes)
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -640,6 +642,28 @@ async def _fetch_services(category: str, target: str) -> list[dict[str, Any]]:
         return []
 
 
+def _record_planner_cancellation(tool_name: str, phase: str) -> None:
+    """Best-effort durable log of a planner cancellation.
+
+    Never raises — the cancellation itself must not be masked.
+    Privacy: only the tool name and phase are recorded; no secrets,
+    seeds, payment proofs, or sensitive media are logged.
+    """
+    try:
+        if _db is not None:
+            _db.add_activity(
+                "planner_cancelled",
+                f"Planner tool '{tool_name}' cancelled during {phase}",
+                "system",
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    logging.getLogger(__name__).info(
+        "planner_cancelled",
+        extra={"tool": tool_name, "phase": phase},
+    )
+
+
 # ---------------------------------------------------------------------------
 # @tool functions
 # ---------------------------------------------------------------------------
@@ -736,7 +760,11 @@ async def plan_purchase(
         plan_digest           sha256 of canonical plan JSON
         planned_at            ISO-8601 UTC timestamp
     """
-    raw_services = await _fetch_services(category, target_service)
+    try:
+        raw_services = await _fetch_services(category, target_service)
+    except asyncio.CancelledError:
+        _record_planner_cancellation("plan_purchase", "service_fetch")
+        raise
 
     gtm_budget, spent, approval_threshold = _read_budget_context()
     normalizer = ProviderNormalizer()

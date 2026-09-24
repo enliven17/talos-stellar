@@ -17,15 +17,19 @@ compose_a2a_plan  — emit a bounded multi-step A2A composition plan
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from talos_agent.tools.registry import tool
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from talos_agent.api_client import TalosAPIClient
@@ -62,6 +66,21 @@ DEFAULT_MAX_PLANNING_TIME_SECONDS: float = 30.0
 # "strict" - requires exact type match
 # "compatible" - allows compatible types (e.g., number -> string)
 DEFAULT_SCHEMA_STRICTNESS: str = "compatible"
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+
+class PlannerCancelledError(RuntimeError):
+    """Raised when a planner detects that its caller has been cancelled.
+
+    This is distinct from ``asyncio.CancelledError`` because the planner
+    loop is synchronous; the cancellation signal arrives through the
+    ``cancelled`` callback supplied by the async caller.
+    """
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -155,6 +174,9 @@ class CompositionPlan:
     cycles_detected: list[str] = field(default_factory=list)
     duplicates_rejected: list[str] = field(default_factory=list)
     schema_incompatibilities: list[str] = field(default_factory=list)
+    
+    # Cancellation flag — True when planning was interrupted by cancellation
+    cancelled: bool = False
     
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -301,6 +323,7 @@ class CompositionPlanner:
         max_cost_usdc: float = DEFAULT_MAX_COST_USDC,
         max_planning_time_seconds: float = DEFAULT_MAX_PLANNING_TIME_SECONDS,
         schema_strictness: str = DEFAULT_SCHEMA_STRICTNESS,
+        cancelled: Callable[[], bool] | None = None,
     ):
         self.max_depth = max_depth
         self.max_candidates = max_candidates
@@ -308,9 +331,15 @@ class CompositionPlanner:
         self.max_cost_usdc = max_cost_usdc
         self.max_planning_time_seconds = max_planning_time_seconds
         self.schema_strictness = schema_strictness
+        self._cancelled = cancelled
         
         self.validator = SchemaValidator(schema_strictness)
         self.cycle_detector = CycleDetector()
+    
+    def _check_cancelled(self) -> None:
+        """Raise ``PlannerCancelledError`` if the caller has been cancelled."""
+        if self._cancelled is not None and self._cancelled():
+            raise PlannerCancelledError("planner cancelled by caller")
     
     def plan_composition(
         self,
@@ -330,6 +359,7 @@ class CompositionPlanner:
             CompositionPlan with validated steps and bounds.
         """
         start_time = time.time()
+        was_cancelled = False
         
         steps: list[CompositionStep] = []
         cycles_detected: list[str] = []
@@ -344,6 +374,13 @@ class CompositionPlanner:
         current_output_schema: ServiceSchema | None = None
         
         for depth in range(self.max_depth):
+            # Check cancellation before each step
+            try:
+                self._check_cancelled()
+            except PlannerCancelledError:
+                was_cancelled = True
+                break
+            
             # Check planning time bound
             if time.time() - start_time > self.max_planning_time_seconds:
                 break
@@ -427,6 +464,7 @@ class CompositionPlanner:
             schema_incompatibilities=schema_incompatibilities,
             plan_digest=plan_digest,
             planned_at=datetime.now(timezone.utc).isoformat(),
+            cancelled=was_cancelled,
         )
     
     def _find_compatible_candidates(
@@ -699,9 +737,22 @@ async def compose_a2a_plan(
         schema_incompatibilities list of schema issues
         plan_digest              sha256 of canonical plan
         planned_at               ISO-8601 timestamp
+        cancelled                True if planning was interrupted
     """
-    # Fetch services with schemas
-    raw_services = await _fetch_services_with_schemas()
+    # Derive a cancellation predicate from the current asyncio task so the
+    # synchronous planner loop can bail out promptly when the caller is
+    # cancelled (shutdown / deadline / external signal).
+    current_task = asyncio.current_task()
+    cancelled_fn: Callable[[], bool] | None = None
+    if current_task is not None:
+        cancelled_fn = current_task.cancelled
+
+    try:
+        # Fetch services with schemas
+        raw_services = await _fetch_services_with_schemas()
+    except asyncio.CancelledError:
+        _record_planner_cancellation("compose_a2a_plan", "service_fetch")
+        raise
     
     # Read composition settings
     settings = _read_composition_settings()
@@ -736,7 +787,7 @@ async def compose_a2a_plan(
             # Skip malformed services
             continue
     
-    # Create planner and generate composition
+    # Create planner and generate composition, threading cancellation
     planner = CompositionPlanner(
         max_depth=settings["max_depth"],
         max_candidates=settings["max_candidates"],
@@ -744,7 +795,38 @@ async def compose_a2a_plan(
         max_cost_usdc=settings["max_cost_usdc"],
         max_planning_time_seconds=settings["max_planning_time_seconds"],
         schema_strictness=settings["schema_strictness"],
+        cancelled=cancelled_fn,
     )
     
-    plan = planner.plan_composition(services, goal_description)
+    try:
+        plan = planner.plan_composition(services, goal_description)
+    except PlannerCancelledError:
+        _record_planner_cancellation("compose_a2a_plan", "planning_loop")
+        raise asyncio.CancelledError("planner cancelled") from None
+
+    if plan.cancelled:
+        _record_planner_cancellation("compose_a2a_plan", "partial_result")
+
     return plan.to_dict()
+
+
+def _record_planner_cancellation(tool_name: str, phase: str) -> None:
+    """Best-effort durable log of a planner cancellation.
+
+    Never raises — the cancellation itself must not be masked.
+    Privacy: only the tool name and phase are recorded; no secrets,
+    seeds, payment proofs, or sensitive media are logged.
+    """
+    try:
+        if _db is not None:
+            _db.add_activity(
+                "planner_cancelled",
+                f"Planner tool '{tool_name}' cancelled during {phase}",
+                "system",
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info(
+        "planner_cancelled",
+        extra={"tool": tool_name, "phase": phase},
+    )

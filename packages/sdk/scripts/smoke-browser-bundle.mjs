@@ -37,6 +37,7 @@ const context = {
   // require, __dirname, etc. — this catches accidental Node-only usage in the
   // SDK's production code.
   window: windowLike,
+  self: windowLike,
   globalThis: globalThisLike,
   TextEncoder,
   TextDecoder,

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import {
   DEFAULT_SELLER_QUOTE_TTL_SECONDS,
   SellerQuoteError,
@@ -11,6 +11,15 @@ import { verifyQuoteNotExpired, validateQuote } from "../src/a2a-validation.js";
 const PROVIDER =
   "GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW";
 const FIXED_NOW = new Date("2026-06-15T12:00:00.000Z");
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(FIXED_NOW);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("toCanonicalDecimalAmount", () => {
   it("accepts canonical six-digit strings", () => {
