@@ -11,6 +11,10 @@ from talos_agent.db import normalize_playbook_name
 from talos_agent.observability import log
 from talos_agent.payments import USDC_TESTNET_ISSUER
 from talos_agent.payments.x402_signer import X402Signer
+from talos_agent.commerce_quote import (
+    enforce_commerce_quote_expiry,
+    quote_expiry_iso,
+)
 from talos_agent.tools.registry import tool
 
 if TYPE_CHECKING:
@@ -99,8 +103,35 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
 
     # Parse 402 response
     payment_details = response.json()
+    if not isinstance(payment_details, dict):
+        return {
+            "error": "Malformed 402 payment details",
+            "code": "INVALID_QUOTE",
+        }
+
+    # Fail closed on expired / malformed commerce quotes before any signing.
+    # Nested quote.expiresAt (A2A) is preferred; top-level expiresAt accepted.
+    # Legacy price/payee-only 402s without expiry remain allowed (require_expiry=False)
+    # unless a quote object is present — then expiry is mandatory.
+    quote_obj = payment_details.get("quote")
+    expiry_error = enforce_commerce_quote_expiry(
+        payment_details,
+        require_expiry=isinstance(quote_obj, dict),
+    )
+    if expiry_error is not None:
+        return expiry_error
+
     price = payment_details.get("price", 0)
     payee = payment_details.get("payee", "")
+    # Prefer quote.amount when present (canonical A2A decimal) for display/budget.
+    if isinstance(quote_obj, dict) and quote_obj.get("amount") is not None:
+        try:
+            price = float(quote_obj["amount"])
+        except (TypeError, ValueError):
+            return {
+                "error": "Commerce quote amount is malformed",
+                "code": "INVALID_QUOTE",
+            }
     # Check if purchase would exceed GTM budget
     if spent_month + float(price) > gtm_budget:
         return {
@@ -162,8 +193,12 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
 
     job_id = submit_result.get("jobId") or submit_result.get("id", "")
 
-    # Track in local DB
-    _db.add_commerce_job(job_id, talos_id, service_type, payload_dict)
+    # Track in local DB (persist quote expiry in payload for durable audit / restart safety)
+    tracked_payload = dict(payload_dict) if isinstance(payload_dict, dict) else {}
+    expiry_iso = quote_expiry_iso(payment_details)
+    if expiry_iso:
+        tracked_payload.setdefault("_quote_expires_at", expiry_iso)
+    _db.add_commerce_job(job_id, talos_id, service_type, tracked_payload)
 
     # Record spending against GTM budget
     _db.record_spending(
