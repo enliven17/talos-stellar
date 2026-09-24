@@ -11,6 +11,8 @@ import { TimeoutError, withTimeout } from "@/lib/timeout";
 import { fetchReputations } from "@/lib/reputation-ledger";
 import { withDriftDetection } from "@/lib/drift";
 import { internalError } from "@/lib/api-response";
+import { revalidateTag } from "next/cache";
+import { AGENTS_LIST_TAG, agentTag } from "@/lib/cache-tags";
 
 // GET /api/talos — List TALOS entries with cursor-based pagination
 export async function GET(request: NextRequest) {
