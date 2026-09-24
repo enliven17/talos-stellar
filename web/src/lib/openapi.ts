@@ -88,6 +88,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
     { name: "Playbooks", description: "Strategy playbooks marketplace" },
     { name: "Reputation", description: "Provider reputation scoring with confidence, decay, and bounded counterparty influence" },
     { name: "Platform", description: "Global platform data — activity feed, leaderboard, events" },
+    { name: "Admin — Jobs", description: "Operator job-queue management. Requires the `ADMIN_API_KEY` bearer token." },
   ],
   components: {
     securitySchemes: {
@@ -96,8 +97,57 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         scheme: "bearer",
         description: "TALOS API key (`tak_*` or `tlk_*`). Issued at genesis via `POST /api/talos`.",
       },
+      AdminAuth: {
+        type: "http",
+        scheme: "bearer",
+        description: "Operator admin key (`ADMIN_API_KEY` env var). Required for all `/api/admin/*` endpoints. Returns `500` when the env var is not configured, `401` when the header is absent, `403` when the key does not match.",
+      },
     },
     schemas: {
+      AdminJobRecord: {
+        type: "object",
+        required: [
+          "id", "queue", "payload", "status", "priority", "runAt",
+          "attempts", "maxAttempts", "retryClass", "cancelRequested",
+          "createdAt", "updatedAt",
+        ],
+        properties: {
+          id: { type: "string", example: "job_01j0abc123def456" },
+          queue: { type: "string", example: "audit_log_write" },
+          payload: {
+            description: "Job-specific input data. Shape varies by queue.",
+            example: { talosId: "cly1abc", event: "service_purchase" },
+          },
+          status: {
+            type: "string",
+            enum: ["pending", "leased", "completed", "dead_letter", "cancelled"],
+            example: "dead_letter",
+          },
+          priority: { type: "integer", example: 0 },
+          runAt: { type: "string", format: "date-time", example: "2026-09-24T15:00:00.000Z" },
+          leaseId: { type: "string", nullable: true, example: "lease_abc123" },
+          leaseOwner: { type: "string", nullable: true, example: "worker-1" },
+          leaseExpiresAt: { type: "string", format: "date-time", nullable: true },
+          heartbeatAt: { type: "string", format: "date-time", nullable: true },
+          attempts: { type: "integer", example: 3 },
+          maxAttempts: { type: "integer", example: 3 },
+          retryClass: {
+            type: "string",
+            enum: ["transient", "rate_limited", "fatal"],
+            example: "transient",
+          },
+          cancelRequested: { type: "boolean", example: false },
+          idempotencyKey: { type: "string", nullable: true, example: "idem_key_abc" },
+          lastError: { type: "string", nullable: true, example: "Connection timeout" },
+          result: {
+            nullable: true,
+            description: "Job result data once completed, otherwise null.",
+          },
+          createdAt: { type: "string", format: "date-time" },
+          updatedAt: { type: "string", format: "date-time" },
+          completedAt: { type: "string", format: "date-time", nullable: true },
+        },
+      },
       HealthStatus: {
         type: "object",
         required: ["ok", "checks", "ts"],
@@ -3263,6 +3313,258 @@ The client should call \`refetch()\` on any \`update\` or \`approval\` event.`,
             },
           },
           "400": { description: "wallet parameter is required" },
+        },
+      },
+    },
+    "/api/admin/jobs": {
+      get: {
+        tags: ["Admin — Jobs"],
+        summary: "List / filter jobs",
+        description: `Cursor-paginated list of all background jobs, ordered by \`createdAt\` descending.
+Filter by \`status\` and/or \`queue\`. Returns up to 50 records per page (default 20).
+
+**Requires the \`AdminAuth\` bearer token.**`,
+        operationId: "adminListJobs",
+        security: [{ AdminAuth: [] }],
+        parameters: [
+          {
+            name: "status",
+            in: "query",
+            required: false,
+            schema: {
+              type: "string",
+              enum: ["pending", "leased", "completed", "dead_letter", "cancelled"],
+            },
+            description: "Filter to a specific job status.",
+            example: "dead_letter",
+          },
+          {
+            name: "queue",
+            in: "query",
+            required: false,
+            schema: { type: "string" },
+            description: "Filter to a specific queue name.",
+            example: "audit_log_write",
+          },
+          {
+            name: "cursor",
+            in: "query",
+            required: false,
+            schema: { type: "string" },
+            description: "Opaque pagination cursor returned by the previous page.",
+          },
+          {
+            name: "limit",
+            in: "query",
+            required: false,
+            schema: { type: "integer", minimum: 1, maximum: 50, default: 20 },
+            description: "Maximum number of records to return.",
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Paginated list of jobs",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["jobs", "nextCursor"],
+                  properties: {
+                    jobs: {
+                      type: "array",
+                      items: { $ref: "#/components/schemas/AdminJobRecord" },
+                    },
+                    nextCursor: {
+                      type: "string",
+                      nullable: true,
+                      description: "Pass as `cursor` on the next request to advance the page. `null` on the last page.",
+                      example: "eyJpZCI6ImN1cnNvciJ9",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "400": {
+            description: "Invalid `status` filter value",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    error: { type: "string", example: "Invalid status. Must be one of: pending, leased, completed, dead_letter, cancelled" },
+                  },
+                },
+              },
+            },
+          },
+          "401": { description: "Missing `Authorization` header" },
+          "403": { description: "Wrong admin key" },
+          "500": { description: "Server error or `ADMIN_API_KEY` env var not configured" },
+        },
+      },
+    },
+    "/api/admin/jobs/{id}": {
+      get: {
+        tags: ["Admin — Jobs"],
+        summary: "Get a single job",
+        description: `Returns the full \`AdminJobRecord\` for the requested job, including payload, result, lease state, and attempt history. Useful for debugging stuck or dead-lettered jobs.
+
+**Requires the \`AdminAuth\` bearer token.**`,
+        operationId: "adminGetJob",
+        security: [{ AdminAuth: [] }],
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            schema: { type: "string" },
+            description: "Job ID",
+            example: "job_01j0abc123def456",
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Job record",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/AdminJobRecord" },
+              },
+            },
+          },
+          "401": { description: "Missing `Authorization` header" },
+          "403": { description: "Wrong admin key" },
+          "404": {
+            description: "Job not found",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { error: { type: "string", example: "Job not found" } },
+                },
+              },
+            },
+          },
+          "500": { description: "Server error or `ADMIN_API_KEY` env var not configured" },
+        },
+      },
+    },
+    "/api/admin/jobs/{id}/retry": {
+      post: {
+        tags: ["Admin — Jobs"],
+        summary: "Requeue a failed job",
+        description: `Requeues a \`dead_letter\` or \`cancelled\` job: resets \`attempts\` to 0, clears \`lastError\`, and sets \`runAt\` to now.
+
+Returns **409 Conflict** if the job is in any other state (\`pending\`, \`leased\`, \`completed\`) — this prevents double-execution of already-running or completed work.
+
+**Requires the \`AdminAuth\` bearer token.**`,
+        operationId: "adminRetryJob",
+        security: [{ AdminAuth: [] }],
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            schema: { type: "string" },
+            description: "Job ID",
+            example: "job_01j0abc123def456",
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Job requeued successfully — returns the updated record",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/AdminJobRecord" },
+              },
+            },
+          },
+          "401": { description: "Missing `Authorization` header" },
+          "403": { description: "Wrong admin key" },
+          "404": {
+            description: "Job not found",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { error: { type: "string", example: "Job not found" } },
+                },
+              },
+            },
+          },
+          "409": {
+            description: "Job is not in a retryable state",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { error: { type: "string", example: "Job is not in a retryable state (status=completed)" } },
+                },
+              },
+            },
+          },
+          "500": { description: "Server error or `ADMIN_API_KEY` env var not configured" },
+        },
+      },
+    },
+    "/api/admin/jobs/{id}/cancel": {
+      post: {
+        tags: ["Admin — Jobs"],
+        summary: "Cancel a job",
+        description: `Cooperative cancellation of a job:
+
+- **\`pending\`** jobs are cancelled immediately.
+- **\`leased\`** (in-flight) jobs are flagged; the running handler stops on its next \`heartbeat()\` call. Cancellation of running work is best-effort and not instantaneous.
+
+Returns **409 Conflict** for jobs already in a terminal state (\`completed\`, \`dead_letter\`, \`cancelled\`).
+
+**Requires the \`AdminAuth\` bearer token.**`,
+        operationId: "adminCancelJob",
+        security: [{ AdminAuth: [] }],
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            schema: { type: "string" },
+            description: "Job ID",
+            example: "job_01j0abc123def456",
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Job cancelled — returns the updated record",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/AdminJobRecord" },
+              },
+            },
+          },
+          "401": { description: "Missing `Authorization` header" },
+          "403": { description: "Wrong admin key" },
+          "404": {
+            description: "Job not found",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { error: { type: "string", example: "Job not found" } },
+                },
+              },
+            },
+          },
+          "409": {
+            description: "Job is not cancellable (already terminal)",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { error: { type: "string", example: "Job is not cancellable (status=completed)" } },
+                },
+              },
+            },
+          },
+          "500": { description: "Server error or `ADMIN_API_KEY` env var not configured" },
         },
       },
     },
