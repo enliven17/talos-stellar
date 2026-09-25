@@ -125,6 +125,11 @@ jobs:
         working-directory: web
         run: pnpm lint
 
+      - name: "[web] Accessibility checks"
+        if: matrix.package == 'web'
+        working-directory: web
+        run: pnpm test:a11y
+
       - name: "[web] Unit tests"
         if: matrix.package == 'web'
         working-directory: web
