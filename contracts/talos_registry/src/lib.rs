@@ -1617,6 +1617,9 @@ impl TalosRegistry {
 
     /// Batch-touch all Talos records up to a limit (paginated).
     ///
+    /// The sweep is bounded by `limit` and by the renewal age window; use
+    /// [`TalosRegistry::extend_ttl_batch`] to pass explicit bounds.
+    ///
     /// # Authorization
     /// Requires the protocol wallet (admin) to sign.
     pub fn touch_batch(e: Env, start_id: u32, limit: u32) -> (u32, u32) {
@@ -1634,32 +1637,101 @@ impl TalosRegistry {
             .persistent()
             .get(&DataKey::NextTalosId)
             .unwrap_or(1);
-        let current_ledger = e.ledger().sequence();
-        let mut touched = 0u32;
-        let mut skipped = 0u32;
+        let range = start_id..next_id.min(start_id.saturating_add(limit));
+        Self::sweep_talos_ttl(&e, &ttl_manager::TtlBounds::renewal(), range)
+    }
 
-        for id in start_id..next_id.min(start_id.saturating_add(limit)) {
+    /// Batched TTL extension with explicit age and work bounds.
+    ///
+    /// Visits ids `[start_id, min(next_id, start_id + limit))`, clipped to
+    /// [`ttl_manager::DEFAULT_MAX_BATCH_KEYS`] ids per call, and re-writes only
+    /// the records whose age in ledgers falls inside `[min_age, max_age]`.
+    /// Records outside the window are reported as `skipped` in the return value
+    /// and in the `ttl_batch` event; ids with no record are ignored.
+    ///
+    /// Returns `(touched, skipped)`.
+    ///
+    /// # Panics
+    /// - `"Domain is paused"` — when the protocol-config domain is paused.
+    /// - `"Contract not initialized"` — if `initialize` has not been called.
+    /// - `"ttl bounds: ..."` — static diagnostic for malformed bounds
+    ///   (`min_age > max_age`, `max_keys` of 0, or `max_keys` above
+    ///   [`ttl_manager::MAX_BATCH_KEYS`]). Diagnostics are compile-time
+    ///   constants and never embed caller or storage data.
+    ///
+    /// # Authorization
+    /// Requires the protocol wallet (admin) to sign.
+    pub fn extend_ttl_batch(
+        e: Env,
+        start_id: u32,
+        limit: u32,
+        min_age: u32,
+        max_age: u32,
+    ) -> (u32, u32) {
+        pause_control::check_not_paused(&e, PAUSE_PROTOCOL_CONFIG);
+
+        let admin: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::ProtocolWallet)
+            .expect("Contract not initialized");
+        admin.require_auth();
+
+        let next_id: u32 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::NextTalosId)
+            .unwrap_or(1);
+        let bounds =
+            ttl_manager::TtlBounds::new(min_age, max_age, ttl_manager::DEFAULT_MAX_BATCH_KEYS);
+        let range = ttl_manager::bounded_range(start_id, limit, &bounds, next_id)
+            .unwrap_or_else(|err| panic!("{}", err.message()));
+        Self::sweep_talos_ttl(&e, &bounds, range)
+    }
+
+    /// Shared bounded sweep behind `touch_batch` / `extend_ttl_batch`.
+    ///
+    /// Re-writes each Talos in `range` (bumping its Soroban TTL) when its age
+    /// falls inside `bounds`, refreshes the matching `LastTouched` marker,
+    /// emits `ttl_batch`, and returns `(touched, skipped)`. Ids without a
+    /// record are neither touched nor skipped, matching the historical
+    /// behaviour of `touch_batch`.
+    fn sweep_talos_ttl(
+        e: &Env,
+        bounds: &ttl_manager::TtlBounds,
+        range: core::ops::Range<u32>,
+    ) -> (u32, u32) {
+        let current_ledger = e.ledger().sequence();
+        let mut sweep = ttl_manager::BatchSweep::empty();
+
+        for id in range {
             let key = DataKey::Talos(id);
-            if let Some(talos) = e.storage().persistent().get::<_, Talos>(&key) {
-                let last_touched: u32 = e
-                    .storage()
-                    .persistent()
-                    .get(&DataKey::LastTouched(id))
-                    .unwrap_or(0);
-                if ttl_manager::needs_touch(last_touched, current_ledger) {
-                    e.storage().persistent().set(&key, &talos);
-                    e.storage()
-                        .persistent()
-                        .set(&DataKey::LastTouched(id), &current_ledger);
-                    touched += 1;
-                } else {
-                    skipped += 1;
+            let talos: Talos = match e.storage().persistent().get(&key) {
+                Some(talos) => talos,
+                None => {
+                    sweep.record(ttl_manager::EntryOutcome::Absent);
+                    continue;
                 }
+            };
+            let last_touched: u32 = e
+                .storage()
+                .persistent()
+                .get(&DataKey::LastTouched(id))
+                .unwrap_or(0);
+
+            if ttl_manager::should_extend(last_touched, current_ledger, bounds) {
+                e.storage().persistent().set(&key, &talos);
+                e.storage()
+                    .persistent()
+                    .set(&DataKey::LastTouched(id), &current_ledger);
+                sweep.record(ttl_manager::EntryOutcome::Touched);
+            } else {
+                sweep.record(ttl_manager::EntryOutcome::Skipped);
             }
         }
 
-        ttl_manager::emit_ttl_batch(&e, touched + skipped, touched, skipped);
-        (touched, skipped)
+        sweep.emit(e);
+        (sweep.touched, sweep.skipped)
     }
 
     /// Query storage health by comparing entry ages against thresholds.
@@ -1791,7 +1863,7 @@ impl TalosRegistry {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
+        testutils::{Address as _, Events as _, Ledger, MockAuth, MockAuthInvoke},
         Address, Env, IntoVal, Symbol, TryFromVal,
     };
     use std::string::ToString;
@@ -3160,7 +3232,10 @@ mod tests {
             );
 
         assert!(result.is_ok(), "exactly-at-limit metadata must be accepted");
-        let id = result.ok().expect("boundary metadata create must be ok");
+        let id = result
+            .ok()
+            .and_then(|outcome| outcome.ok())
+            .expect("boundary metadata create must be ok");
         let talos = client.get_talos(&id).expect("talos must be stored");
         assert_eq!(talos.name, name);
         assert_eq!(talos.category, category);
@@ -3780,8 +3855,6 @@ mod tests {
     }
 
     // ── Timelock unit tests ──────────────────────────────────────────
-
-    use soroban_sdk::testutils::Ledger as _;
 
     #[test]
     fn timelock_config_defaults_and_updates() {
@@ -4717,6 +4790,297 @@ mod tests {
             client.try_touch_batch(&1, &10).is_err(),
             "touch_batch must require admin auth"
         );
+    }
+
+    // ── Batched TTL extension with bounds ─────────────────────────
+
+    // ── Batched TTL extension with bounds ─────────────────────────
+
+    /// Build an initialized contract with one Talos record at id 1, with the
+    /// ledger already positioned at `sequence_number` so entry ages are exact.
+    ///
+    /// Soroban test mode archives contract code when the ledger jumps by
+    /// millions of ledgers mid-test, so tests age entries by starting the
+    /// environment at the target ledger instead of advancing after setup.
+    fn setup_with_talos_at(
+        sequence_number: u32,
+    ) -> (Env, Address, TalosRegistryClient<'static>, Address) {
+        let env = Env::default();
+        env.ledger()
+            .with_mut(|li| li.sequence_number = sequence_number);
+        let contract_id = env.register_contract(None, TalosRegistry);
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let creator = Address::generate(&env);
+        create_talos_with_auth(&env, &client, &contract_id, &creator, &admin);
+        (env, contract_id, client, admin)
+    }
+
+    /// Invoke `extend_ttl_batch` with the admin's mock authorization.
+    fn extend_ttl_batch_as_admin(
+        env: &Env,
+        contract_id: &Address,
+        client: &TalosRegistryClient<'static>,
+        admin: &Address,
+        start_id: u32,
+        limit: u32,
+        min_age: u32,
+        max_age: u32,
+    ) -> Option<(u32, u32)> {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "extend_ttl_batch",
+                    args: (start_id, limit, min_age, max_age).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_extend_ttl_batch(&start_id, &limit, &min_age, &max_age)
+            .ok()
+            .and_then(|outcome| outcome.ok())
+    }
+
+    /// Positive: an entry past the renewal threshold is re-written.
+    #[test]
+    fn extend_ttl_batch_renews_entries_inside_window() {
+        let (env, contract_id, client, admin) =
+            setup_with_talos_at(ttl_manager::RENEWAL_THRESHOLD + 1);
+
+        let result = extend_ttl_batch_as_admin(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            1,
+            10,
+            ttl_manager::RENEWAL_THRESHOLD,
+            u32::MAX,
+        )
+        .expect("bounded extension must succeed");
+
+        assert_eq!(result, (1, 0));
+    }
+
+    /// Negative: entries younger than `min_age` are reported, never written.
+    #[test]
+    fn extend_ttl_batch_skips_entries_below_min_age() {
+        let (env, contract_id, client, admin) =
+            setup_with_talos_at(ttl_manager::RENEWAL_THRESHOLD - 1);
+
+        let result = extend_ttl_batch_as_admin(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            1,
+            10,
+            ttl_manager::RENEWAL_THRESHOLD,
+            u32::MAX,
+        )
+        .expect("bounded extension must succeed");
+
+        assert_eq!(result, (0, 1));
+    }
+
+    /// Boundary: an entry one ledger past `max_age` falls outside the window.
+    #[test]
+    fn extend_ttl_batch_skips_entries_above_max_age() {
+        let (env, contract_id, client, admin) = setup_with_talos_at(1_001);
+
+        let result = extend_ttl_batch_as_admin(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            1,
+            10,
+            0,
+            1_000, // age is 1_001 → outside the window
+        )
+        .expect("bounded extension must succeed");
+
+        assert_eq!(result, (0, 1));
+    }
+
+    /// Boundary: `limit` caps how many ids are visited — ids beyond the limit
+    /// are not counted at all (neither touched nor skipped).
+    #[test]
+    fn extend_ttl_batch_honours_limit() {
+        let (env, contract_id) = {
+            let env = Env::default();
+            env.ledger()
+                .with_mut(|li| li.sequence_number = ttl_manager::RENEWAL_THRESHOLD + 1);
+            let contract_id = env.register_contract(None, TalosRegistry);
+            (env, contract_id)
+        };
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let creator = Address::generate(&env);
+        create_talos_with_auth(&env, &client, &contract_id, &creator, &admin);
+        create_talos_with_auth(&env, &client, &contract_id, &creator, &admin);
+
+        let result = extend_ttl_batch_as_admin(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            1,
+            1, // only id 1 may be visited
+            ttl_manager::RENEWAL_THRESHOLD,
+            u32::MAX,
+        )
+        .expect("bounded extension must succeed");
+
+        assert_eq!(result, (1, 0), "id 2 must stay outside the sweep");
+    }
+
+    /// Boundary: a zero limit produces an empty sweep without touching state.
+    #[test]
+    fn extend_ttl_batch_zero_limit_is_a_no_op() {
+        let (env, contract_id, client, admin) =
+            setup_with_talos_at(ttl_manager::RENEWAL_THRESHOLD + 1);
+
+        let result = extend_ttl_batch_as_admin(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            1,
+            0,
+            ttl_manager::RENEWAL_THRESHOLD,
+            u32::MAX,
+        )
+        .expect("bounded extension must succeed");
+
+        assert_eq!(result, (0, 0));
+    }
+
+    /// Negative: malformed bounds fail with a static, privacy-safe diagnostic
+    /// before any storage is read or written.
+    #[test]
+    #[should_panic(expected = "ttl bounds: min_age exceeds max_age")]
+    fn extend_ttl_batch_rejects_inverted_window() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "extend_ttl_batch",
+                    args: (1u32, 10u32, 5_000_000u32, 1_000u32).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .extend_ttl_batch(&1, &10, &5_000_000, &1_000);
+    }
+
+    /// Negative: `extend_ttl_batch` is admin-gated exactly like `touch_batch`.
+    #[test]
+    fn extend_ttl_batch_without_auth_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert!(
+            client
+                .try_extend_ttl_batch(&1, &10, &ttl_manager::RENEWAL_THRESHOLD, &u32::MAX)
+                .is_err(),
+            "extend_ttl_batch must require admin auth"
+        );
+    }
+
+    /// The protocol-config pause domain blocks `extend_ttl_batch` before any
+    /// The protocol-config pause domain blocks `extend_ttl_batch` before any
+    /// storage is read.
+    #[test]
+    #[should_panic(expected = "Domain is paused")]
+    fn extend_ttl_batch_is_blocked_while_paused() {
+        let (env, contract_id, client, admin) =
+            setup_with_talos_at(ttl_manager::RENEWAL_THRESHOLD + 1);
+
+        // Registry exposes no domain-id pause entry-point, so seed the shared
+        // `pause-control` status for the protocol-config domain directly.
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(
+                &pause_control::PauseDataKey::PauseStatus(PAUSE_PROTOCOL_CONFIG),
+                &pause_control::PauseStatus {
+                    paused: true,
+                    paused_by: admin.clone(),
+                    paused_at: 0,
+                    expires_at: 0,
+                },
+            );
+        });
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "extend_ttl_batch",
+                    args: (1u32, 10u32, ttl_manager::RENEWAL_THRESHOLD, u32::MAX).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .extend_ttl_batch(&1, &10, &ttl_manager::RENEWAL_THRESHOLD, &u32::MAX);
+    }
+
+    /// Regression: the pre-existing `touch_batch` entry-point keeps skipping
+    /// entries below the renewal threshold and renews them once it is crossed,
+    /// so routing it through the bounded sweep core changes no behaviour.
+    #[test]
+    fn touch_batch_still_skips_then_renews_after_threshold() {
+        let (env, contract_id) = {
+            let env = Env::default();
+            env.ledger()
+                .with_mut(|li| li.sequence_number = ttl_manager::RENEWAL_THRESHOLD - 1);
+            let contract_id = env.register_contract(None, TalosRegistry);
+            (env, contract_id)
+        };
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let creator = Address::generate(&env);
+        create_talos_with_auth(&env, &client, &contract_id, &creator, &admin);
+
+        // age = 1_999_999 → one ledger short of the renewal threshold.
+        let before = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "touch_batch",
+                    args: (1u32, 10u32).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .touch_batch(&1, &10);
+        assert_eq!(before, (0, 1));
+
+        // One more ledger crosses the threshold → the entry is renewed.
+        env.ledger().with_mut(|li| li.sequence_number += 1);
+
+        let after = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "touch_batch",
+                    args: (1u32, 10u32).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .touch_batch(&1, &10);
+        assert_eq!(after, (1, 0));
     }
 
     // --- Wrong signer (impersonation) ---
