@@ -237,7 +237,7 @@ await TalosWebhook.verify({
 #### Troubleshooting
 - **"Missing or invalid timestamp"**: Ensure the `Talos-Signature` header is correctly passed from the request.
 - **"Timestamp outside tolerance zone"**: Check your server's NTP clock synchronization. If events are genuinely delayed, increase `toleranceSeconds`.
-- **"Signature mismatch"**: Ensure you are passing the *raw* request body (unparsed bytes) to the `payload` option. Frameworks like Express often parse JSON automatically; you need to bypass it or capture the raw buffer.
+- **"Signature mismatch"**: Ensure you are passing the *raw* request body (unparsed bytes) to the `payload` option. Frameworks like Express often parse JSON automatically; you need to bypass it or capture the raw buffer. This also surfaces if a `v1=` signature value isn't a well-formed hex string (even length, `0-9a-fA-F` only) — the SDK rejects malformed or non-canonical hex rather than attempting a partial decode.
 
 ### Stellar Helpers
 
