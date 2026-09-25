@@ -381,6 +381,26 @@ Choose the focused command by area:
 
 Deploy commands such as `pnpm --dir contracts run deploy:testnet` and `./deploy.sh testnet` require configured Stellar credentials and network access. Treat failures from missing signers, RPC timeouts, Horizon rate limits, or Soroban testnet availability as deployment-environment issues unless local `cargo test` or Wasm build also fails.
 
+### Runbook changes
+
+Any `*RUNBOOK*.md` (for example [`docs/DR_RUNBOOK.md`](./docs/DR_RUNBOOK.md)) is validated for
+required sections (triggers, verification, recovery, troubleshooting) and for referenced files and
+commands actually existing. See [`OBSERVABILITY.md`](./OBSERVABILITY.md) for the monitoring signals
+those runbooks respond to.
+
+```bash
+node scripts/validate-runbooks.mjs .
+node --test scripts/validate-runbooks.test.mjs
+```
+
+| Changed files | Focused command | CI workflow |
+| --- | --- | --- |
+| `docs/*RUNBOOK*.md`, `*RUNBOOK*.md`, `OBSERVABILITY.md` | `node scripts/validate-runbooks.mjs .` | `Runbook Validation CI` |
+
+The validator fails closed: a runbook missing a required section, a referenced file that no longer
+exists, an unresolvable `pnpm --dir`/`pnpm --filter` script, or an unknown `uv run` binary are all
+errors, and finding zero runbooks at all is treated as an error rather than silently passing.
+
 ### Common failure messages
 
 | Message | Usually means | Next step |

@@ -3454,4 +3454,249 @@ mod tests {
         assert!(!client.is_name_available(&s(&env, "bad-")));
         assert!(!client.is_name_available(&s(&env, "bad--name")));
     }
+    // ── Name collision & rename rules (Issue #619) ──────────────────
+    //
+    // `register_name` doubles as a rename: it replaces the caller's current
+    // name for a talos_id and frees the previous one. These tests pin the two
+    // rules that guard that path — a name owned by another talos is never
+    // adopted, and a rejected rename is a no-op that preserves the previous
+    // registration and emits no events.
+
+    #[test]
+    fn rename_onto_name_owned_by_another_talos_is_rejected() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner_a = Address::generate(&env);
+        let owner_b = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let taken = s(&env, "alpha-name");
+        let own = s(&env, "beta-name");
+
+        let talos_a = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner_a,
+            &protocol_wallet,
+        );
+        let talos_b = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner_b,
+            &protocol_wallet,
+        );
+
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner_a,
+            talos_a,
+            &taken,
+        );
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner_b,
+            talos_b,
+            &own,
+        );
+
+        let incumbent_before = snapshot(&client, &taken, talos_a);
+        let challenger_before = snapshot(&client, &own, talos_b);
+        let events_before = event_count(&env, &contract_id);
+
+        // talos_b tries to adopt talos_a's name. The collision is detected
+        // before the registry lookup, so the auth tree has no sub-invokes.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner_b,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner_b.clone(), talos_b, taken.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_register_name(&owner_b, &talos_b, &taken);
+        assert!(
+            result.is_err(),
+            "renaming onto another talos's name must fail"
+        );
+
+        let incumbent_after = snapshot(&client, &taken, talos_a);
+        let challenger_after = snapshot(&client, &own, talos_b);
+        assert_state_eq(
+            &incumbent_before,
+            &incumbent_after,
+            "incumbent keeps its name after a rejected rename",
+        );
+        assert_state_eq(
+            &challenger_before,
+            &challenger_after,
+            "challenger keeps its previous name",
+        );
+        assert_eq!(client.name_of(&talos_b), Some(own.clone()));
+        assert_eq!(
+            events_before,
+            event_count(&env, &contract_id),
+            "rejected rename must not emit events"
+        );
+    }
+
+    #[test]
+    fn re_registering_same_name_for_same_talos_is_rejected() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name = s(&env, "stable-name");
+
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &name,
+        );
+
+        let before = snapshot(&client, &name, talos_id);
+        let events_before = event_count(&env, &contract_id);
+
+        // Re-registering the identical name is treated as a collision, not a
+        // silent no-op, so callers cannot mistake it for a successful rename.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, name.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &name);
+        assert!(
+            result.is_err(),
+            "re-registering the same name must be rejected"
+        );
+
+        let after = snapshot(&client, &name, talos_id);
+        assert_state_eq(&before, &after, "same-name re-registration is a no-op");
+        assert_eq!(
+            events_before,
+            event_count(&env, &contract_id),
+            "rejected same-name registration must not emit events"
+        );
+    }
+
+    #[test]
+    fn rename_to_invalid_name_preserves_previous_registration() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let kept = s(&env, "kept-name");
+        let invalid = s(&env, "Bad--Name");
+
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &kept,
+        );
+
+        let before = snapshot(&client, &kept, talos_id);
+        let events_before = event_count(&env, &contract_id);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, invalid.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &invalid);
+        assert!(result.is_err(), "renaming to an invalid name must fail");
+
+        let after = snapshot(&client, &kept, talos_id);
+        assert_state_eq(
+            &before,
+            &after,
+            "previous name must survive a rejected rename",
+        );
+        assert_eq!(client.name_of(&talos_id), Some(kept.clone()));
+        assert_eq!(
+            events_before,
+            event_count(&env, &contract_id),
+            "rejected rename must not emit events"
+        );
+    }
+
+    #[test]
+    fn rename_accepts_min_and_max_length_names() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let min_name = s(&env, "abc");
+        let max_name = s(&env, "abcdefghijklmnopqrstuvwxyz012345");
+
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &min_name,
+        );
+        assert_eq!(client.resolve_name(&min_name), Some(talos_id));
+        assert_eq!(client.name_of(&talos_id), Some(min_name.clone()));
+
+        // Renaming to the maximum length still frees the previous name.
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &max_name,
+        );
+        assert_eq!(client.resolve_name(&max_name), Some(talos_id));
+        assert_eq!(client.name_of(&talos_id), Some(max_name.clone()));
+        assert_eq!(client.resolve_name(&min_name), None);
+        assert!(client.is_name_available(&min_name));
+    }
 }

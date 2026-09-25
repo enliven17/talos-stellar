@@ -7,6 +7,9 @@ import { eq, and } from "drizzle-orm";
 import { fulfillInstant } from "@/lib/fulfillment";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER } from "@/lib/stellar-config";
 import { ingestJobToLedger } from "@/lib/reputation-ledger";
+import { applyQuotaHeaders, checkAndIncrementQuota, quotaExceededResponse } from "@/lib/quota";
+
+const IDEMPOTENCY_KEY_MAX_BYTES = 128;
 
 /**
  * POST /api/talos/:id/jobs

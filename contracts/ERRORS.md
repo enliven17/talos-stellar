@@ -66,6 +66,9 @@ These are returned by the `storage_migration` library used by the registry, not 
 | Registry | `Guardian limit reached` | Maximum guardian count reached. |
 | Registry | `Protocol wallet mismatch`; `Amount must be non-negative` | Wallet does not match configuration, or amount is negative. |
 | Registry | `Unsupported event schema major version` | Requested event schema major version is unsupported. |
+| Registry | `Name cannot be empty`; `Name exceeds maximum byte length` | Caller-supplied Talos name is missing or exceeds 64 bytes. |
+| Registry | `Category exceeds maximum byte length`; `Description exceeds maximum byte length` | Talos category (> 32 bytes) or description (> 512 bytes) metadata is too long. |
+| Registry | `Token symbol cannot be empty`; `Token symbol exceeds maximum byte length` | Pulse `token_symbol` is missing or exceeds 12 bytes. |
 | Registry | Migration/rollback rejection diagnostics | Migration helper rejected version ordering, range, or in-progress state. |
 | Governance | `Already initialized` | Initialization already completed. |
 | Governance | `Quorum must be positive`; `Consensus threshold must be 1..10000 bps`; `Voting period must be positive` | Initial or updated configuration is outside bounds. |

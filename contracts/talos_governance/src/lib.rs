@@ -1,4 +1,11 @@
 //! TalosGovernance - Soroban smart contract for token-weighted governance.
+//!
+//! ## What's new in this branch (#606)
+//! - `EventProposalCreated` typed struct — replaces raw tuple publish for prop_crt
+//! - `EventVoteCast` typed struct — replaces raw tuple publish for vote
+//! - `EventProposalStatusChanged` typed struct — replaces raw publish for prop_stat
+//! - All emit helpers now publish their typed struct as the event data
+//! - New event-verification tests decode structs from emitted events
 
 #![no_std]
 
@@ -94,23 +101,90 @@ pub const PAUSE_GOVERNANCE_VOTING: u32 = 8;
 /// Pause domain for governance configuration.
 pub const PAUSE_GOVERNANCE_CONFIG: u32 = 9;
 
-fn emit_proposal_created(env: &Env, proposal_id: u32, talos_id: u32, proposer: Address) {
-    env.events().publish(
-        (symbol_short!("prop_crt"), proposal_id),
-        (talos_id, proposer),
-    );
+// ── Typed Event Fixtures (#606) ──────────────────────────────────────
+//
+// Each struct is decorated with `#[contracttype]` so the Soroban SDK
+// serialises/deserialises it via XDR map encoding.  The structs are
+// published as the event *data* payload; the topics remain lightweight
+// symbol + id tuples for efficient on-chain filtering.
+//
+// Event schema (topics → typed data struct):
+//   prop_crt : (symbol, proposal_id: u32) → EventProposalCreated
+//   vote     : (symbol, proposal_id: u32) → EventVoteCast
+//   prop_stat: (symbol, proposal_id: u32) → EventProposalStatusChanged
+
+/// Emitted when a new governance proposal is created.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventProposalCreated {
+    pub proposal_id: u32,
+    pub talos_id: u32,
+    pub proposer: Address,
+    pub snapshot_ledger: u32,
+    pub end_ledger: u32,
 }
 
-fn emit_vote_cast(env: &Env, proposal_id: u32, voter: Address, choice: VoteChoice, weight: i128) {
-    env.events().publish(
-        (symbol_short!("vote"), proposal_id),
-        (voter, choice, weight),
-    );
+/// Emitted when a voter casts a vote.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventVoteCast {
+    pub proposal_id: u32,
+    pub voter: Address,
+    pub choice: VoteChoice,
+    pub weight: i128,
+}
+
+/// Emitted when a proposal transitions to a terminal status.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventProposalStatusChanged {
+    pub proposal_id: u32,
+    pub status: ProposalStatus,
+}
+
+fn emit_proposal_created(
+    env: &Env,
+    proposal_id: u32,
+    talos_id: u32,
+    proposer: Address,
+    snapshot_ledger: u32,
+    end_ledger: u32,
+) {
+    let payload = EventProposalCreated {
+        proposal_id,
+        talos_id,
+        proposer,
+        snapshot_ledger,
+        end_ledger,
+    };
+    env.events()
+        .publish((symbol_short!("prop_crt"), proposal_id), payload);
+}
+
+fn emit_vote_cast(
+    env: &Env,
+    proposal_id: u32,
+    voter: Address,
+    choice: VoteChoice,
+    weight: i128,
+) {
+    let payload = EventVoteCast {
+        proposal_id,
+        voter,
+        choice,
+        weight,
+    };
+    env.events()
+        .publish((symbol_short!("vote"), proposal_id), payload);
 }
 
 fn emit_proposal_status_changed(env: &Env, proposal_id: u32, status: ProposalStatus) {
+    let payload = EventProposalStatusChanged {
+        proposal_id,
+        status,
+    };
     env.events()
-        .publish((symbol_short!("prop_stat"), proposal_id), status);
+        .publish((symbol_short!("prop_stat"), proposal_id), payload);
 }
 
 // ── Stable interface (v1.0.0) ───────────────────────────────────────
@@ -228,6 +302,7 @@ impl TalosGovernance {
         let current_ledger = env.ledger().sequence();
         let snapshot_ledger = current_ledger.saturating_sub(10);
         let proposal_id = Self::next_proposal_id(env.clone());
+        let end_ledger = current_ledger + config.voting_period_ledgers;
 
         let proposal = Proposal {
             id: proposal_id,
@@ -237,7 +312,7 @@ impl TalosGovernance {
             description,
             snapshot_ledger,
             start_ledger: current_ledger,
-            end_ledger: current_ledger + config.voting_period_ledgers,
+            end_ledger,
             status: ProposalStatus::Active,
             yes_votes: 0,
             no_votes: 0,
@@ -252,7 +327,7 @@ impl TalosGovernance {
             .persistent()
             .set(&DataKey::NextProposalId, &(proposal_id + 1));
 
-        emit_proposal_created(&env, proposal_id, talos_id, proposer);
+        emit_proposal_created(&env, proposal_id, talos_id, proposer, snapshot_ledger, end_ledger);
         proposal_id
     }
 
@@ -717,10 +792,9 @@ impl TalosGovernance {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
+        testutils::{Address as _, Events as _, Ledger, MockAuth, MockAuthInvoke},
         IntoVal,
     };
-    use std::string::ToString;
 
     fn setup() -> (
         Env,
@@ -802,6 +876,152 @@ mod tests {
                 },
             }])
             .cache_token_balance(admin, &ledger, voter, &balance);
+    }
+
+    // ── Typed event fixture tests (#606) ─────────────────────────
+
+    #[test]
+    fn create_proposal_emits_typed_event_proposal_created() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        let events = env.events().all();
+        assert!(!events.is_empty(), "at least one event must be emitted");
+
+        // The prop_crt event is the last event from create_proposal.
+        let (cid, topics, data) = events.last().expect("event missing");
+        assert_eq!(cid, contract_id);
+
+        let topic0: soroban_sdk::Symbol =
+            soroban_sdk::FromVal::from_val(&env, &topics.get(0).unwrap());
+        assert_eq!(topic0, symbol_short!("prop_crt"));
+
+        let topic1_id: u32 = soroban_sdk::FromVal::from_val(&env, &topics.get(1).unwrap());
+        assert_eq!(topic1_id, proposal_id);
+
+        let payload: EventProposalCreated = soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(payload.proposal_id, proposal_id);
+        assert_eq!(payload.talos_id, 7);
+        assert_eq!(payload.proposer, proposer);
+        assert_eq!(payload.snapshot_ledger, 90); // current_ledger(100) - 10
+        assert_eq!(payload.end_ledger, 120);     // current_ledger(100) + voting_period(20)
+    }
+
+    #[test]
+    fn vote_emits_typed_event_vote_cast() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        cache_balance_with_auth(&env, &contract_id, &client, &admin, proposal.snapshot_ledger, &voter, 200);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &voter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "vote",
+                    args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .vote(&voter, &proposal_id, &VoteChoice::Approve);
+
+        let events = env.events().all();
+        // vote event is the last event (vote + potentially status change; vote is last if quorum not yet met)
+        // With 200 weight and quorum 100, quorum is met — so status changed event follows vote.
+        // Find the vote event by topic symbol.
+        let vote_event = events.iter().find(|(cid, topics, _)| {
+            if *cid != contract_id { return false; }
+            if let Some(t0) = topics.get(0) {
+                let s: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &t0);
+                s == symbol_short!("vote")
+            } else { false }
+        });
+        assert!(vote_event.is_some(), "vote event must be emitted");
+
+        let (_, _, data) = vote_event.unwrap();
+        let payload: EventVoteCast = soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(payload.proposal_id, proposal_id);
+        assert_eq!(payload.voter, voter);
+        assert_eq!(payload.choice, VoteChoice::Approve);
+        assert_eq!(payload.weight, 200);
+    }
+
+    #[test]
+    fn finalize_proposal_emits_typed_event_status_changed() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        // Advance ledger past the voting period
+        env.ledger().with_mut(|li| { li.sequence_number = 200; });
+
+        client.finalize_proposal(&proposal_id);
+
+        let events = env.events().all();
+        let stat_event = events.iter().find(|(cid, topics, _)| {
+            if *cid != contract_id { return false; }
+            if let Some(t0) = topics.get(0) {
+                let s: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &t0);
+                s == symbol_short!("prop_stat")
+            } else { false }
+        });
+        assert!(stat_event.is_some(), "prop_stat event must be emitted");
+
+        let (_, topics, data) = stat_event.unwrap();
+        let pid: u32 = soroban_sdk::FromVal::from_val(&env, &topics.get(1).unwrap());
+        assert_eq!(pid, proposal_id);
+
+        let payload: EventProposalStatusChanged = soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(payload.proposal_id, proposal_id);
+        assert_eq!(payload.status, ProposalStatus::Rejected);
+    }
+
+    #[test]
+    fn execute_proposal_emits_typed_event_status_executed() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        cache_balance_with_auth(&env, &contract_id, &client, &admin, proposal.snapshot_ledger, &voter, 200);
+
+        // Vote to reach quorum + approval → Approved
+        client
+            .mock_auths(&[MockAuth {
+                address: &voter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "vote",
+                    args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .vote(&voter, &proposal_id, &VoteChoice::Approve);
+
+        client.execute_proposal(&proposal_id);
+
+        let events = env.events().all();
+        // Find the last prop_stat event (execute emits status = Executed)
+        let stat_events: std::vec::Vec<_> = events.iter().filter(|(cid, topics, _)| {
+            if *cid != contract_id { return false; }
+            if let Some(t0) = topics.get(0) {
+                let s: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &t0);
+                s == symbol_short!("prop_stat")
+            } else { false }
+        }).collect();
+        assert!(!stat_events.is_empty(), "prop_stat event must be emitted");
+
+        let (_, _, data) = stat_events.last().unwrap();
+        let payload: EventProposalStatusChanged = soroban_sdk::FromVal::from_val(&env, data);
+        assert_eq!(payload.status, ProposalStatus::Executed);
     }
 
     #[test]
