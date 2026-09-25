@@ -35,6 +35,7 @@ import {
   parseX402Challenge,
   parseRetryAfter as parseRetryAfterHeader,
   redactEventPath,
+  diagnoseBuyerProof,
 } from "./errors.js";
 import {
   generateIdempotencyKey,
@@ -168,6 +169,15 @@ export interface WriteOptions {
    * regardless of the client default. Surfaces as `TalosTimeoutError`.
    */
   timeoutMs?: number;
+  /**
+   * Optional callback invoked with privacy-safe diagnostics after each x402
+   * buyer-proof exchange when calling {@link TalosClient.purchaseServiceWithPayment}.
+   * Ignored by other methods.
+   *
+   * The callback is invoked fire-and-forget and must not throw. No secrets,
+   * payment headers, or private keys appear in the diagnostic object.
+   */
+  onProofDiagnostic?: import("./types.js").BuyerProofDiagnosticCallback;
 }
 
 /**
@@ -1028,6 +1038,11 @@ export class TalosClient {
    * Pass `options.idempotencyKey` to enable safe retry across the entire
    * 402-challenge-and-retry cycle (the key is sent only on the final POST).
    *
+   * Pass `options.onProofDiagnostic` to receive a privacy-safe diagnostic
+   * snapshot of the proof exchange. The callback is invoked fire-and-forget
+   * and must not throw. No secrets, payment headers, or private keys appear
+   * in the {@link BuyerProofDiagnostics} object.
+   *
    * Errors raised here are typed:
    *   - {@link TalosPaymentError} when the 402 challenge is malformed/missing.
    *   - Any other TalosAPIError subclass for downstream failures.
@@ -1047,6 +1062,25 @@ export class TalosClient {
     const body = JSON.stringify({ payload });
     const signal = options?.signal;
     const callTimeoutMs = options?.timeoutMs;
+    const onProofDiagnostic = options?.onProofDiagnostic;
+
+    /** Fire-and-forget diagnostic emitter — never throws. */
+    const emitDiag = (
+      challenge: Record<string, string> | undefined,
+      stage: import("./types.js").X402ProofStage,
+      opts: {
+        signingSucceeded?: boolean;
+        signingFailureReason?: string;
+        proofResponseStatus?: number;
+      } = {},
+    ): void => {
+      if (!onProofDiagnostic) return;
+      try {
+        onProofDiagnostic(diagnoseBuyerProof(path, challenge, stage, opts));
+      } catch {
+        // Observer must not break the payment flow.
+      }
+    };
 
     if (this.chaosInjector) await this.injectChaos();
 
@@ -1077,6 +1111,7 @@ export class TalosClient {
       if (!authHeader || !authHeader.startsWith("x402")) {
         // Preserve the legacy text so existing
         // `rejects.toThrow("Invalid x402 challenge")` assertions keep passing.
+        emitDiag(undefined, "no_challenge");
         throw new TalosPaymentError(402, "Invalid x402 challenge", path, {
           message: "Invalid x402 challenge",
           headers: { "www-authenticate": authHeader ?? "" },
@@ -1084,34 +1119,70 @@ export class TalosClient {
       }
       const challenge = parseX402Challenge(authHeader);
       if (!challenge) {
+        emitDiag(undefined, "no_challenge");
         throw new TalosPaymentError(402, "Invalid x402 challenge", path, {
           message: "Invalid x402 challenge",
           headers: { "www-authenticate": authHeader },
         });
       }
+
+      emitDiag(challenge, "challenge_parsed");
 
       // 3. Request signature from the Web API. Guard against a non-numeric
       //    price so NaN never reaches the downstream /sign call.
       const amount = parseFloat(challenge.price);
       if (!Number.isFinite(amount)) {
+        emitDiag(challenge, "no_challenge");
         throw new TalosPaymentError(402, "Invalid x402 challenge", path, {
           message: "Invalid x402 challenge",
           headers: { "www-authenticate": authHeader },
         });
       }
-      const signRes = await this.signPayment(buyerTalosId, {
-        payee: challenge.payee,
-        amount,
-        assetCode: challenge.token,
-      });
+
+      emitDiag(challenge, "signing_requested");
+
+      let signRes: import("./types.js").SignedPayment;
+      try {
+        signRes = await this.signPayment(buyerTalosId, {
+          payee: challenge.payee,
+          amount,
+          assetCode: challenge.token,
+        });
+        emitDiag(challenge, "proof_submitted", { signingSucceeded: true });
+      } catch (signErr) {
+        const reason =
+          signErr instanceof Error
+            ? signErr.message
+            : String(signErr ?? "unknown signing error");
+        emitDiag(challenge, "proof_submitted", {
+          signingSucceeded: false,
+          signingFailureReason: reason,
+        });
+        throw signErr;
+      }
 
       // 4. Retry with the X-PAYMENT header (and idempotency key if supplied)
       //    through the regular request helper, so typed errors / retry /
       //    timeout all apply.
-      return this.purchaseService(talosId, {
-        paymentHeader: signRes.paymentHeader,
-        payload,
-      }, options);
+      let job: CommerceJob;
+      try {
+        job = await this.purchaseService(talosId, {
+          paymentHeader: signRes.paymentHeader,
+          payload,
+        }, options);
+        emitDiag(challenge, "proof_accepted", {
+          signingSucceeded: true,
+          proofResponseStatus: 200,
+        });
+        return job;
+      } catch (proofErr) {
+        const status = proofErr instanceof TalosAPIError ? proofErr.status : undefined;
+        emitDiag(challenge, "proof_rejected", {
+          signingSucceeded: true,
+          proofResponseStatus: status,
+        });
+        throw proofErr;
+      }
     }
 
     // Non-402 responses — wrap them through the typed dispatch.

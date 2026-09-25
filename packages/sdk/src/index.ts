@@ -52,6 +52,7 @@ export {
   parseRetryAfter,
   parseX402Challenge,
   redactEventPath,
+  diagnoseBuyerProof,
   MAX_BODY_BYTES,
 } from "./errors.js";
 

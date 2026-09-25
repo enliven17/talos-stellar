@@ -536,6 +536,119 @@ export function redactEventPath(rawPath: string): string {
   }
 }
 
+// ── x402 Buyer Proof Diagnostics ─────────────────────────────────────────────
+
+import type {
+  BuyerProofDiagnostics,
+  X402ProofStage,
+} from "./types.js";
+
+/**
+ * Maximum character length for `signingFailureReason` in proof diagnostics.
+ * Keeps the field from becoming a vector for large raw error payloads.
+ */
+const MAX_SIGNING_FAILURE_REASON_BYTES = 200;
+
+/**
+ * Build a privacy-safe {@link BuyerProofDiagnostics} snapshot from the
+ * components of an x402 buyer-proof exchange. This is a pure function —
+ * it never performs I/O, never logs, and never throws.
+ *
+ * ### What is redacted
+ * - The X-PAYMENT / `paymentHeader` value is **never** included.
+ * - The raw WWW-Authenticate header is **never** included; only the parsed,
+ *   typed `challenge` sub-object is surfaced.
+ * - `signingFailureReason` is truncated to
+ *   {@link MAX_SIGNING_FAILURE_REASON_BYTES} characters.
+ *
+ * ### What is included
+ * - `payee` — Stellar public key (`G…`); not a secret.
+ * - `price` — raw challenge price string.
+ * - `parsedAmount` — the numeric value of `price` (may be `NaN`).
+ * - `signingSucceeded` / `proofResponseStatus` / `stage`.
+ *
+ * @param path - The API path being purchased (credentials in query-params
+ *   are redacted by the caller before passing here; this function does
+ *   not re-apply redactEventPath to avoid double-encoding).
+ * @param challenge - Parsed x402 challenge as returned by
+ *   {@link parseX402Challenge}, or `undefined` when the 402 lacked one.
+ * @param stage - The lifecycle stage reached.
+ * @param opts - Optional extra fields for later lifecycle stages.
+ */
+export function diagnoseBuyerProof(
+  path: string,
+  challenge: Record<string, string> | undefined,
+  stage: X402ProofStage,
+  opts: {
+    signingSucceeded?: boolean;
+    signingFailureReason?: string;
+    proofResponseStatus?: number;
+  } = {},
+): BuyerProofDiagnostics {
+  const capturedAt = new Date().toISOString();
+
+  // Build the safe challenge sub-object, excluding all raw header text.
+  let challengeDiag: BuyerProofDiagnostics["challenge"];
+  let parsedAmount: number | undefined;
+  if (challenge) {
+    challengeDiag = {
+      payee: challenge.payee ?? "",
+      price: challenge.price ?? "",
+      ...(challenge.token !== undefined ? { token: challenge.token } : {}),
+      ...(challenge.network !== undefined ? { network: challenge.network } : {}),
+    };
+    parsedAmount = parseFloat(challenge.price ?? "");
+  }
+
+  const succeeded =
+    stage === "proof_accepted" ||
+    (stage === "proof_submitted" && opts.proofResponseStatus !== undefined && opts.proofResponseStatus < 400);
+
+  // Truncate signing failure reason to prevent large raw error text.
+  const signingFailureReason =
+    opts.signingFailureReason != null
+      ? opts.signingFailureReason.slice(0, MAX_SIGNING_FAILURE_REASON_BYTES)
+      : undefined;
+
+  // Human-readable summary — no secrets, no header values.
+  let summary: string;
+  switch (stage) {
+    case "no_challenge":
+      summary = `x402 proof failed: 402 response did not carry a valid challenge on ${path}`;
+      break;
+    case "challenge_parsed":
+      summary = `x402 challenge parsed (payee=${challengeDiag?.payee ?? "?"}, price=${challengeDiag?.price ?? "?"}) on ${path}`;
+      break;
+    case "signing_requested":
+      summary = `x402 signing requested for ${path}`;
+      break;
+    case "proof_submitted":
+      summary = `x402 proof submitted on ${path} → HTTP ${opts.proofResponseStatus ?? "?"}`;
+      break;
+    case "proof_accepted":
+      summary = `x402 proof accepted on ${path}`;
+      break;
+    case "proof_rejected":
+      summary = `x402 proof rejected on ${path} (HTTP ${opts.proofResponseStatus ?? "?"})`;
+      break;
+    default:
+      summary = `x402 proof exchange stage "${stage as string}" on ${path}`;
+  }
+
+  return {
+    stage,
+    capturedAt,
+    path,
+    ...(challengeDiag !== undefined ? { challenge: challengeDiag } : {}),
+    ...(parsedAmount !== undefined ? { parsedAmount } : {}),
+    ...(opts.signingSucceeded !== undefined ? { signingSucceeded: opts.signingSucceeded } : {}),
+    ...(signingFailureReason !== undefined ? { signingFailureReason } : {}),
+    ...(opts.proofResponseStatus !== undefined ? { proofResponseStatus: opts.proofResponseStatus } : {}),
+    succeeded,
+    summary,
+  };
+}
+
 /**
  * Build the right {@link TalosAPIError} subclass for a given HTTP response.
  * Pure function — kept small so tests can exercise it directly.

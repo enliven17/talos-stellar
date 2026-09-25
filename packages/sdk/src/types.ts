@@ -337,3 +337,82 @@ export interface TransferResponse {
   amount: number;
   txHash: string;
 }
+
+// ── x402 Buyer Proof Diagnostics ─────────────────────────────────
+
+/**
+ * Stage reached in the x402 buyer proof exchange.
+ *
+ * - `"no_challenge"`: The 402 response did not carry a valid x402 challenge.
+ * - `"challenge_parsed"`: Challenge was present and parsed successfully.
+ * - `"signing_requested"`: A sign-payment call was dispatched.
+ * - `"proof_submitted"`: The X-PAYMENT header was attached and the retry sent.
+ * - `"proof_accepted"`: The service accepted the proof (200-range response).
+ * - `"proof_rejected"`: The service rejected the proof (4xx/5xx response).
+ */
+export type X402ProofStage =
+  | "no_challenge"
+  | "challenge_parsed"
+  | "signing_requested"
+  | "proof_submitted"
+  | "proof_accepted"
+  | "proof_rejected";
+
+/**
+ * Privacy-safe diagnostic snapshot of one x402 buyer proof exchange.
+ *
+ * All sensitive material is excluded:
+ *   - `paymentHeader` (X-PAYMENT) is never included.
+ *   - `payee` Stellar address is included as-is (public key, not a secret).
+ *   - Amounts are surfaced as finite numbers only; parse failures surface
+ *     as `NaN`.
+ *
+ * This type is returned by {@link diagnoseBuyerProof} and optionally
+ * delivered to the {@link BuyerProofDiagnosticCallback} during
+ * `purchaseServiceWithPayment`.
+ */
+export interface BuyerProofDiagnostics {
+  /** Stage reached in the proof exchange lifecycle. */
+  stage: X402ProofStage;
+  /** ISO 8601 timestamp when the diagnostic was captured. */
+  capturedAt: string;
+  /** Path being requested (query-string credential params redacted). */
+  path: string;
+  /**
+   * Parsed challenge fields — present when `stage >= "challenge_parsed"`.
+   * The `payee` field is a Stellar public key (safe to surface).
+   * `price` is the raw string from the challenge.
+   * `token` and `network` are optional auxiliary fields.
+   */
+  challenge?: {
+    payee: string;
+    price: string;
+    token?: string;
+    network?: string;
+  };
+  /**
+   * Numeric amount parsed from `challenge.price`.
+   * `NaN` if the challenge price was not a valid finite number.
+   * Present only when `stage >= "challenge_parsed"`.
+   */
+  parsedAmount?: number;
+  /** Whether the payment header was successfully obtained from the signer. */
+  signingSucceeded?: boolean;
+  /**
+   * Reason string if signing failed — truncated to 200 characters to
+   * prevent large raw error messages from leaking through diagnostics.
+   */
+  signingFailureReason?: string;
+  /** HTTP status code returned after submitting the proof (if submitted). */
+  proofResponseStatus?: number;
+  /** Whether the overall exchange was successful. */
+  succeeded: boolean;
+  /** Human-readable summary suitable for debug logs (no sensitive values). */
+  summary: string;
+}
+
+/**
+ * Callback invoked by `purchaseServiceWithPayment` when proof diagnostics
+ * are available. Must not throw; exceptions are silently swallowed.
+ */
+export type BuyerProofDiagnosticCallback = (diag: BuyerProofDiagnostics) => void;
