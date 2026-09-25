@@ -14,6 +14,7 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
   - Patron configuration (creator/investor/treasury shares)
   - Kernel policy management (approval thresholds, GTM budget)
   - Pulse token metadata storage
+  - **Metadata byte limits** (`create_talos`/`update_pulse` reject `name` > 64, `category` > 32, `description` > 512, `Pulse.token_symbol` > 12 bytes; `name` and `token_symbol` must be non-empty)
   - 3% protocol fee to protocol wallet on creation
   - **Two-step admin transfer** (`propose_admin` / `accept_admin` / `cancel_admin_transfer`)
   - **Admin timelocks** (`schedule_action` / `execute_action` / `cancel_action` / `set_timelock_config`)

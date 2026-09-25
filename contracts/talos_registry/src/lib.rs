@@ -321,6 +321,38 @@ fn validate_patron_shares(patron: &Patron) {
     }
 }
 
+/// Validate a Pulse `token_symbol`: it is a required identifier, so it must
+/// be non-empty, and it is byte-bounded by [`MAX_TOKEN_SYMBOL_BYTES`].
+fn validate_token_symbol(token_symbol: &String) {
+    if token_symbol.len() == 0 {
+        panic!("Token symbol cannot be empty");
+    }
+    if token_symbol.len() > MAX_TOKEN_SYMBOL_BYTES {
+        panic!("Token symbol exceeds maximum byte length");
+    }
+}
+
+/// Enforce byte limits on caller-supplied Talos metadata before it is
+/// persisted. `name` and `Pulse.token_symbol` are required identifiers and
+/// must be non-empty; `category` and `description` are descriptive and may
+/// be empty, but are still byte-bounded. Panics are explicit and
+/// privacy-safe — no caller or value data is included.
+fn validate_talos_metadata(name: &String, category: &String, description: &String, pulse: &Pulse) {
+    if name.len() == 0 {
+        panic!("Name cannot be empty");
+    }
+    if name.len() > MAX_NAME_BYTES {
+        panic!("Name exceeds maximum byte length");
+    }
+    if category.len() > MAX_CATEGORY_BYTES {
+        panic!("Category exceeds maximum byte length");
+    }
+    if description.len() > MAX_DESCRIPTION_BYTES {
+        panic!("Description exceeds maximum byte length");
+    }
+    validate_token_symbol(&pulse.token_symbol);
+}
+
 // ── Emergency Pause Helpers ────────────────────────────────────────
 
 fn get_guardians(e: &Env) -> Vec<Address> {
@@ -362,6 +394,22 @@ const MAX_MIN_DELAY: u64 = 2_592_000; // 30 days in seconds
 const MAX_GUARDIAN_PAUSE_SECS: u64 = 604_800; // 7 days — bounds guardian blast radius
 const MAX_ADMIN_PAUSE_SECS: u64 = 2_592_000; // 30 days; 0 (indefinite) is also allowed for admin
 const MAX_GUARDIANS: u32 = 10; // bounds unbounded storage growth
+
+// ── Metadata byte limits ────────────────────────────────────────────
+//
+// Talos metadata is caller-supplied and persisted verbatim, so it is
+// bounded in bytes (not characters) to cap per-entry storage rent and to
+// keep off-chain indexers from having to accept unbounded payloads. The
+// limits are enforced on every write path that carries the field.
+
+/// Maximum byte length of `Talos.name`.
+const MAX_NAME_BYTES: u32 = 64;
+/// Maximum byte length of `Talos.category`.
+const MAX_CATEGORY_BYTES: u32 = 32;
+/// Maximum byte length of `Talos.description`.
+const MAX_DESCRIPTION_BYTES: u32 = 512;
+/// Maximum byte length of `Pulse.token_symbol`.
+const MAX_TOKEN_SYMBOL_BYTES: u32 = 12;
 
 // ── Storage schema migrations (see `storage_migration` crate) ────────
 
@@ -488,6 +536,7 @@ impl TalosRegistry {
         patron.creator_addr.require_auth();
 
         validate_patron_shares(&patron);
+        validate_talos_metadata(&name, &category, &description, &pulse);
 
         // If the registry has been initialized, ensure callers use the configured
         // protocol wallet. This keeps the create_talos ABI backwards compatible
@@ -631,6 +680,8 @@ impl TalosRegistry {
             .expect("Talos not found");
 
         talos.creator.require_auth();
+
+        validate_token_symbol(&pulse.token_symbol);
 
         talos.pulse = pulse;
 
@@ -2441,6 +2492,292 @@ mod tests {
             );
 
         assert!(result.is_err());
+    }
+
+    // ── metadata byte-limit tests ────────────────────────────────────
+
+    /// Build a `String` of exactly `len` repeated `ch` bytes for boundary tests.
+    fn repeated(env: &Env, ch: char, len: usize) -> String {
+        let mut buf = std::string::String::new();
+        for _ in 0..len {
+            buf.push(ch);
+        }
+        String::from_str(env, buf.as_str())
+    }
+
+    /// Attempt `create_talos` with caller-supplied metadata and report whether
+    /// the contract accepted it. Used by the negative/boundary metadata tests.
+    fn metadata_create_is_ok(
+        env: &Env,
+        client: &TalosRegistryClient,
+        contract_id: &Address,
+        creator: &Address,
+        protocol_wallet: &Address,
+        name: &String,
+        category: &String,
+        description: &String,
+        pulse_cfg: &Pulse,
+    ) -> bool {
+        let patron_cfg = patron(env, creator);
+        let kernel_cfg = kernel();
+        client
+            .mock_auths(&[MockAuth {
+                address: creator,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "create_talos",
+                    args: (
+                        name.clone(),
+                        category.clone(),
+                        description.clone(),
+                        patron_cfg.clone(),
+                        kernel_cfg.clone(),
+                        pulse_cfg.clone(),
+                        protocol_wallet.clone(),
+                    )
+                        .into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_talos(
+                name,
+                category,
+                description,
+                &patron_cfg,
+                &kernel_cfg,
+                pulse_cfg,
+                protocol_wallet,
+            )
+            .is_ok()
+    }
+
+    #[test]
+    fn create_talos_at_max_metadata_bytes_is_accepted() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+
+        let name = repeated(&env, 'n', MAX_NAME_BYTES as usize);
+        let category = repeated(&env, 'c', MAX_CATEGORY_BYTES as usize);
+        let description = repeated(&env, 'd', MAX_DESCRIPTION_BYTES as usize);
+        let mut pulse_cfg = pulse(&env);
+        pulse_cfg.token_symbol = repeated(&env, 's', MAX_TOKEN_SYMBOL_BYTES as usize);
+
+        let patron_cfg = patron(&env, &creator);
+        let kernel_cfg = kernel();
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_talos",
+                    args: (
+                        name.clone(),
+                        category.clone(),
+                        description.clone(),
+                        patron_cfg.clone(),
+                        kernel_cfg.clone(),
+                        pulse_cfg.clone(),
+                        protocol_wallet.clone(),
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_talos(
+                &name,
+                &category,
+                &description,
+                &patron_cfg,
+                &kernel_cfg,
+                &pulse_cfg,
+                &protocol_wallet,
+            );
+
+        assert!(result.is_ok(), "exactly-at-limit metadata must be accepted");
+        let id = result.ok().expect("boundary metadata create must be ok");
+        let talos = client.get_talos(&id).expect("talos must be stored");
+        assert_eq!(talos.name, name);
+        assert_eq!(talos.category, category);
+        assert_eq!(talos.description, description);
+        assert_eq!(talos.pulse.token_symbol, pulse_cfg.token_symbol);
+    }
+
+    #[test]
+    fn create_talos_rejects_name_over_max_bytes() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name = repeated(&env, 'n', MAX_NAME_BYTES as usize + 1);
+
+        assert!(!metadata_create_is_ok(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            &protocol_wallet,
+            &name,
+            &s(&env, "Marketing"),
+            &s(&env, "desc"),
+            &pulse(&env),
+        ));
+    }
+
+    #[test]
+    fn create_talos_rejects_empty_name() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+
+        assert!(!metadata_create_is_ok(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            &protocol_wallet,
+            &s(&env, ""),
+            &s(&env, "Marketing"),
+            &s(&env, "desc"),
+            &pulse(&env),
+        ));
+    }
+
+    #[test]
+    fn create_talos_rejects_category_over_max_bytes() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let category = repeated(&env, 'c', MAX_CATEGORY_BYTES as usize + 1);
+
+        assert!(!metadata_create_is_ok(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            &protocol_wallet,
+            &s(&env, "Genesis"),
+            &category,
+            &s(&env, "desc"),
+            &pulse(&env),
+        ));
+    }
+
+    #[test]
+    fn create_talos_rejects_description_over_max_bytes() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let description = repeated(&env, 'd', MAX_DESCRIPTION_BYTES as usize + 1);
+
+        assert!(!metadata_create_is_ok(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            &protocol_wallet,
+            &s(&env, "Genesis"),
+            &s(&env, "Marketing"),
+            &description,
+            &pulse(&env),
+        ));
+    }
+
+    #[test]
+    fn create_talos_rejects_token_symbol_over_max_bytes() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let mut pulse_cfg = pulse(&env);
+        pulse_cfg.token_symbol = repeated(&env, 's', MAX_TOKEN_SYMBOL_BYTES as usize + 1);
+
+        assert!(!metadata_create_is_ok(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            &protocol_wallet,
+            &s(&env, "Genesis"),
+            &s(&env, "Marketing"),
+            &s(&env, "desc"),
+            &pulse_cfg,
+        ));
+    }
+
+    #[test]
+    fn create_talos_rejects_empty_token_symbol() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let mut pulse_cfg = pulse(&env);
+        pulse_cfg.token_symbol = s(&env, "");
+
+        assert!(!metadata_create_is_ok(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            &protocol_wallet,
+            &s(&env, "Genesis"),
+            &s(&env, "Marketing"),
+            &s(&env, "desc"),
+            &pulse_cfg,
+        ));
+    }
+
+    #[test]
+    fn create_talos_allows_empty_optional_metadata() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+
+        // `category` and `description` are descriptive, so empty is allowed;
+        // only the byte ceiling is enforced on them.
+        assert!(metadata_create_is_ok(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            &protocol_wallet,
+            &s(&env, "Genesis"),
+            &s(&env, ""),
+            &s(&env, ""),
+            &pulse(&env),
+        ));
+    }
+
+    #[test]
+    fn update_pulse_rejects_token_symbol_over_max_bytes() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let mut bad_pulse = pulse(&env);
+        bad_pulse.token_symbol = repeated(&env, 's', MAX_TOKEN_SYMBOL_BYTES as usize + 1);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_pulse",
+                    args: (id, bad_pulse.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_pulse(&id, &bad_pulse);
+
+        assert!(result.is_err(), "over-limit token symbol must be rejected");
     }
 
     #[test]
