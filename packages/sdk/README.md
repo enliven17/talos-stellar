@@ -31,12 +31,35 @@ warns about that ordering so the intent stays visible.
 cd packages/sdk
 npm run build          # produces dist/esm, dist/cjs, and dist/browser
 npm run compat:exports # resolves both formats and inspects the publish tarball
-```
-
-`compat:exports` fails when a required condition is missing, a target escapes
+````compat:exports` fails when a required condition is missing, a target escapes
 the package root, a target is excluded from the published `files` list, or the
 CJS and ESM surfaces diverge. The same rules are covered without a build by
 `tests/export-map.test.ts` (`npm test`).
+
+## Browser bundle size budget
+
+The `<script>`-tag bundle (`dist/browser/sdk.bundle.js`) is built with esbuild
+(minified IIFE, `globalThis.TalosSDK`) and is held to a size budget declared
+in `bundle-size.config.json` (raw and gzip byte ceilings). The rules live in
+`scripts/bundle-size-lib.mjs` and are enforced in three places:
+
+| Where | Command | When |
+| --- | --- | --- |
+| Build | `npm run build:browser` | Fails immediately after an over-budget build |
+| Standalone check | `npm run check:bundle-size` | CI (`sdk-compatibility.yml`) and `npm run verify:browser` |
+| Unit tests | `npm test` | Rules and config coherence, no build needed |
+
+Raising a ceiling must be a deliberate change to `bundle-size.config.json` in
+the same PR that grows the bundle, so budget moves are always reviewed. For a
+known, temporary over-budget state, `npm run check:bundle-size --
+--allow-over-budget=<n>` tolerates violations up to `<n>` bytes while still
+warning; it never applies to the next build silently.
+
+The fallback bundler (concatenating `dist/esm` when esbuild was absent) was
+removed: it emitted `export` statements inside an IIFE, which threw
+`SyntaxError: Unexpected token 'export'` on load. esbuild is now a
+devDependency and the only supported bundler; without it, `build:browser`
+fails with an actionable message instead of producing a broken artifact.
 
 ## Quick Start
 

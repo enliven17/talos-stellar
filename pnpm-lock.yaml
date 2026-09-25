@@ -30,6 +30,9 @@ importers:
       '@types/node':
         specifier: ^20.0.0
         version: 20.19.39
+      esbuild:
+        specifier: ^0.27.0
+        version: 0.27.7
       openapi-typescript:
         specifier: ^7.4.3
         version: 7.13.0(typescript@5.9.3)
