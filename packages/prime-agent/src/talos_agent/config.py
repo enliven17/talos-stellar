@@ -102,6 +102,29 @@ class Settings(BaseSettings):
         "checks budgets before allowing further calls.",
     )
 
+        # Backup retention policy (Issue #543) — disabled by default, backward compatible
+    backup_retention_enabled: bool = Field(
+        default=False,
+        description="Prune old local backup artifacts after each successful backup, "
+        "according to backup_retention_max_count / backup_retention_max_age_days. "
+        "When disabled (default), backups accumulate forever (legacy behavior).",
+    )
+    backup_retention_max_count: int = Field(
+        default=10,
+        ge=0,
+        le=100000,
+        description="Maximum number of backup artifacts to keep per agent scope. "
+        "0 means unlimited (age-based pruning only, if enabled).",
+    )
+    backup_retention_max_age_days: int = Field(
+        default=30,
+        ge=0,
+        le=36500,
+        description="Maximum age in days of a backup artifact before it is eligible "
+        "for pruning. 0 means unlimited (count-based pruning only, if enabled).",
+    )
+
+
     # X (Twitter)
     x_username: str = ""
     x_password: str = ""
