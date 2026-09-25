@@ -23,6 +23,12 @@ import httpx
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
 from talos_agent.adapters.diagnostics import safe_adapter_diagnostic_fields
+from talos_agent.adapters.snapshots import AdapterHealthSnapshot
+from talos_agent.circuit_breaker import (
+    CircuitBreakerConfig,
+    CircuitBreakerRegistry,
+    execute_with_retry,
+)
 from talos_agent.observability import log
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
@@ -88,6 +94,8 @@ class NetworkRule:
     def __post_init__(self) -> None:
         normalized_host = _normalize_host(self.host)
         object.__setattr__(self, "host", normalized_host)
+        if not isinstance(self.path_prefix, str):
+            raise ManifestValidationError("network path prefixes must be strings")
         decoded_prefix = _decode_path(self.path_prefix)
         if not self.path_prefix.startswith("/") or ".." in decoded_prefix.split("/"):
             raise ManifestValidationError("network path prefixes must be absolute and traversal-free")
@@ -99,7 +107,11 @@ class NetworkRule:
         if not normalized_methods or not normalized_methods <= _SAFE_METHODS:
             raise ManifestValidationError("network methods contain unsupported values")
         object.__setattr__(self, "methods", normalized_methods)
-        if self.port is not None and not 1 <= self.port <= 65535:
+        if self.port is not None and (
+            isinstance(self.port, bool)
+            or not isinstance(self.port, int)
+            or not 1 <= self.port <= 65535
+        ):
             raise ManifestValidationError("network rule port is out of range")
 
 
@@ -816,6 +828,7 @@ class AdapterSandbox:
         manifests: Mapping[str, AdapterCapabilityManifest],
         db: object,
         secret_resolver: Callable[[str], str],
+        retry_configs: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         self._manifests = dict(manifests)
         self._store = AdapterInvocationStore(db)
@@ -825,6 +838,8 @@ class AdapterSandbox:
             for name, manifest in self._manifests.items()
         }
         self._owner_id = str(uuid.uuid4())
+        self._retry_configs = dict(retry_configs or {})
+        self._breakers = CircuitBreakerRegistry()
 
     def manifest(self, adapter_id: str) -> AdapterCapabilityManifest:
         normalized = adapter_id.lower()
@@ -855,6 +870,10 @@ class AdapterSandbox:
             store=self._store,
             semaphore=self._semaphores[adapter_id],
             owner_id=self._owner_id,
+            breaker=self._breakers.get_or_create(
+                adapter_id,
+                CircuitBreakerConfig.from_mapping(self._retry_configs.get(adapter_id)),
+            ),
         )
 
 
@@ -869,18 +888,21 @@ class SandboxedAdapter(BaseSocialAdapter):
         store: AdapterInvocationStore,
         semaphore: asyncio.Semaphore,
         owner_id: str,
+        breaker: Any,
     ) -> None:
         self.__adapter = adapter
         self.__manifest = manifest
         self.__store = store
         self.__semaphore = semaphore
         self.__owner_id = owner_id
+        self.__breaker = breaker
         self.channel_name = adapter.channel_name
 
     def get_capabilities(self) -> ChannelCapabilities:
         return self.__adapter.get_capabilities()
 
-    def health_snapshot(self) -> dict[str, bool]:
+    def health_snapshot(self) -> AdapterHealthSnapshot | dict[str, bool]:
+        """Forward the wrapped adapter's own snapshot, typed or legacy, unchanged."""
         snapshot = getattr(self.__adapter, "health_snapshot", None)
         return snapshot() if callable(snapshot) else {}
 
@@ -968,9 +990,19 @@ class SandboxedAdapter(BaseSocialAdapter):
             )
             acquired = True
             method = getattr(self.__adapter, operation)
-            result = await asyncio.wait_for(
-                method(*args, **kwargs),
-                timeout=max(0.001, deadline - time.monotonic()),
+
+            async def invoke() -> Any:
+                return await asyncio.wait_for(
+                    method(*args, **kwargs),
+                    timeout=max(0.001, deadline - time.monotonic()),
+                )
+
+            result = await execute_with_retry(
+                invoke,
+                self.__breaker,
+                is_failure=lambda value: (
+                    isinstance(value, PublishResult) and value.status == "failed"
+                ),
             )
             output_bytes, output_items = _output_shape(
                 result.to_dict() if isinstance(result, PublishResult) else result

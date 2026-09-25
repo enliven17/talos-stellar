@@ -146,6 +146,20 @@ The stack exposes:
 - Health endpoint: http://localhost:3000/api/health
 - Mock Stellar service: http://localhost:4010/health
 
+The web container applies migrations and seeds the repeatable local Talos and marketplace dataset during startup. To seed an already-running local database again:
+
+```bash
+pnpm web:db:seed
+```
+
+The seed command refuses non-local database hosts and production processes. An intentional override requires `ALLOW_UNSAFE_DB_SEED=true`; never use that override with production credentials or endpoints. The seed contains demo public identifiers only, and repeated runs replace the seed-owned rows with the same logical dataset.
+
+To remove the local database and all seeded data, run:
+
+```bash
+pnpm stack:reset
+```
+
 To include the optional prime-agent profile:
 
 ```bash
@@ -212,21 +226,30 @@ RTO targets, runbooks, and rollback procedures.
 
 ## Health check
 
-`GET /api/health` — returns `200` when all dependencies are reachable, `503` when any check fails.
+`GET /api/health` (alias of `/api/health/ready`) separates **degraded readiness** from **hard failure**:
+
+- `200` + `status: "ok"` — all dependencies healthy (`ready: true`)
+- `200` + `status: "degraded"` — soft dependency failed (Horizon); keep traffic (`ready: true`)
+- `503` + `status: "unavailable"` — critical dependency failed (DB); remove from LB (`ready: false`)
+
+Liveness (`GET /api/health/live`) never inspects dependencies and must not be used to restart on Horizon/DB blips.
 
 ```jsonc
 // 200 OK
-{ "ok": true,  "checks": { "db": "ok",    "stellar": "ok"    }, "ts": "2026-06-25T12:00:00.000Z" }
+{ "ok": true, "status": "ok", "ready": true, "checks": { "db": "ok", "stellar": "ok" }, "ts": "2026-06-25T12:00:00.000Z" }
 
-// 503 Service Unavailable (Supabase paused)
-{ "ok": false, "checks": { "db": "error", "stellar": "ok"    }, "ts": "..." }
+// 200 Degraded (Horizon down — soft)
+{ "ok": false, "status": "degraded", "ready": true, "checks": { "db": "ok", "stellar": "error" }, "ts": "..." }
+
+// 503 Unavailable (DB down — critical)
+{ "ok": false, "status": "unavailable", "ready": false, "checks": { "db": "error", "stellar": "ok" }, "ts": "..." }
 ```
 
 Probes:
-- **db** — `SELECT 1` against Postgres, 2 s timeout
-- **stellar** — `GET` to Horizon RPC (`STELLAR_HORIZON_URL` or testnet fallback), 3 s timeout
+- **db** (critical) — `SELECT 1` against Postgres, 2 s timeout
+- **stellar** (soft) — `GET` to Horizon RPC (`STELLAR_HORIZON_URL` or testnet fallback), 3 s timeout
 
 Response is always `Cache-Control: no-store`.
 
-**Recommended monitoring** — wire a free [UptimeRobot](https://uptimerobot.com) or [Better Uptime](https://betteruptime.com) monitor to `GET /api/health` on a 1-minute interval. Set an email or Telegram alert on any non-200 response so outages like the 2026-05-22 Supabase pause are caught in seconds, not 30 minutes.
+**Recommended monitoring** — wire a free [UptimeRobot](https://uptimerobot.com) or [Better Uptime](https://betteruptime.com) monitor to `GET /api/health` on a 1-minute interval. Alert on HTTP 503 for outages, and also inspect `status: "degraded"` in the JSON body so Horizon issues are visible without being treated as hard liveness failures.
 

@@ -3010,4 +3010,693 @@ mod tests {
         assert_eq!(after_resolved, Some(talos_id), "resolve_name should remain unaffected by registry switch");
         assert_eq!(after_name_of, Some(name), "name_of should remain unaffected by registry switch");
     }
+
+    // ── Expanded authorization negative tests (#611) ─────────────────
+
+    // --- Missing authorization ---
+
+    /// register_name without mock_auths must be rejected.
+    #[test]
+    fn register_name_without_auth_is_rejected() {
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name = s(&env, "noauth");
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+
+        let result = client.try_register_name(&owner, &talos_id, &name);
+        assert!(result.is_err(), "register_name must require owner auth");
+    }
+
+    /// set_registry_contract without mock_auths must be rejected.
+    #[test]
+    fn set_registry_contract_without_auth_is_rejected() {
+        let (env, _registry_contract, _contract_id, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
+        let new_registry = Address::generate(&env);
+
+        let result = client.try_set_registry_contract(&new_registry);
+        assert!(result.is_err(), "set_registry_contract must require admin auth");
+    }
+
+    /// set_timelock_config without mock_auths must be rejected.
+    #[test]
+    fn ns_set_timelock_config_without_auth_is_rejected() {
+        let (env, _registry_contract, _contract_id, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
+
+        let result = client.try_set_timelock_config(&100, &86400);
+        assert!(result.is_err(), "set_timelock_config must require admin auth");
+    }
+
+    /// schedule_action without mock_auths must be rejected.
+    #[test]
+    fn ns_schedule_action_without_auth_is_rejected() {
+        let (env, _registry_contract, _contract_id, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
+
+        let action = AdminAction::SetRegistryContract(Address::generate(&env));
+        let result = client.try_schedule_action(&action, &0);
+        assert!(result.is_err(), "schedule_action must require admin auth");
+    }
+
+    /// cancel_action without mock_auths must be rejected.
+    #[test]
+    fn ns_cancel_action_without_auth_is_rejected() {
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
+
+        let action = AdminAction::SetRegistryContract(Address::generate(&env));
+        let proposal_id = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "schedule_action",
+                    args: (action.clone(), 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .schedule_action(&action, &0);
+
+        let result = client.try_cancel_action(&proposal_id);
+        assert!(result.is_err(), "cancel_action must require admin auth");
+    }
+
+    // --- Wrong signer (impersonation) ---
+
+    /// A non-owner cannot register_name for a talos they don't own.
+    #[test]
+    fn register_name_for_other_owner_is_rejected() {
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let creator = Address::generate(&env);
+        let imposter = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &creator,
+            &protocol_wallet,
+        );
+
+        let name = s(&env, "stolen");
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &imposter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (imposter.clone(), talos_id, name.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .try_register_name(&imposter, &talos_id, &name);
+        assert!(result.is_err(), "non-owner must not register name");
+    }
+
+    /// A non-admin impersonator cannot set_registry_contract.
+    #[test]
+    fn set_registry_contract_wrong_signer_is_rejected() {
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        let imposter = Address::generate(&env);
+        client.set_admin(&admin);
+
+        let new_registry = Address::generate(&env);
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &imposter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_registry_contract",
+                    args: (new_registry.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_set_registry_contract(&new_registry);
+        assert!(result.is_err(), "non-admin must not change registry contract");
+    }
+
+    /// Non-admin cannot cancel a timelock action.
+    #[test]
+    fn ns_cancel_action_wrong_signer_is_rejected() {
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        let imposter = Address::generate(&env);
+        client.set_admin(&admin);
+
+        let action = AdminAction::SetRegistryContract(Address::generate(&env));
+        let proposal_id = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "schedule_action",
+                    args: (action.clone(), 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .schedule_action(&action, &0);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &imposter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "cancel_action",
+                    args: (proposal_id,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_cancel_action(&proposal_id);
+        assert!(result.is_err(), "non-admin must not cancel actions");
+    }
+
+    // --- Boundary / malformed inputs ---
+
+    /// Name below minimum length (2 chars) must be rejected.
+    #[test]
+    fn register_name_too_short_is_rejected() {
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+
+        let short_name = s(&env, "ab"); // 2 chars — below min of 3
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, short_name.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &short_name);
+        assert!(result.is_err(), "2-char name must be rejected");
+    }
+
+    /// Name at minimum length (3 chars) must be accepted.
+    #[test]
+    fn register_name_at_min_length_is_accepted() {
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+
+        let min_name = s(&env, "abc");
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, min_name.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &min_name);
+        assert!(result.is_ok(), "3-char name must be accepted");
+    }
+
+    /// Name at maximum length (32 chars) must be accepted.
+    #[test]
+    fn register_name_at_max_length_is_accepted() {
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+
+        // exactly 32 lowercase chars
+        let max_name = s(&env, "abcdefghijklmnopqrstuvwxyz123456");
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, max_name.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &max_name);
+        assert!(result.is_ok(), "32-char name must be accepted");
+    }
+
+    /// Name exceeding maximum length (33 chars) must be rejected.
+    #[test]
+    fn register_name_too_long_is_rejected() {
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+
+        // 33 chars
+        let long_name = s(&env, "abcdefghijklmnopqrstuvwxyz1234567");
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, long_name.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &long_name);
+        assert!(result.is_err(), "33-char name must be rejected");
+    }
+
+    /// Timelock grace_period of zero must be rejected.
+    #[test]
+    fn ns_set_timelock_config_zero_grace_period_is_rejected() {
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_timelock_config",
+                    args: (0u64, 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_set_timelock_config(&0, &0);
+        assert!(result.is_err(), "zero grace_period must be rejected");
+    }
+
+    /// Timelock min_delay above MAX must be rejected.
+    #[test]
+    fn ns_set_timelock_config_above_max_min_delay_is_rejected() {
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_timelock_config",
+                    args: (2_592_001u64, 86400u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_set_timelock_config(&2_592_001, &86400);
+        assert!(result.is_err(), "min_delay above MAX must be rejected");
+    }
+
+    // --- Retry scenarios ---
+
+    /// Executing an already-cancelled proposal must fail.
+    #[test]
+    fn ns_execute_cancelled_proposal_is_rejected() {
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
+
+        let action = AdminAction::SetRegistryContract(Address::generate(&env));
+        let proposal_id = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "schedule_action",
+                    args: (action.clone(), 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .schedule_action(&action, &0);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "cancel_action",
+                    args: (proposal_id,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .cancel_action(&proposal_id);
+
+        let result = client.try_execute_action(&proposal_id);
+        assert!(result.is_err(), "executing cancelled proposal must fail");
+    }
+
+    /// Cancelling an already-executed proposal must fail.
+    #[test]
+    fn ns_cancel_executed_proposal_is_rejected() {
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
+
+        let action = AdminAction::SetRegistryContract(Address::generate(&env));
+        let proposal_id = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "schedule_action",
+                    args: (action.clone(), 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .schedule_action(&action, &0);
+
+        client.execute_action(&proposal_id);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "cancel_action",
+                    args: (proposal_id,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_cancel_action(&proposal_id);
+        assert!(result.is_err(), "cancelling executed proposal must fail");
+    }
+
+    /// is_name_available returns false for an invalid name format.
+    #[test]
+    fn is_name_available_returns_false_for_invalid_format() {
+        let (env, _registry_contract, _contract_id, _registry_client, client) = setup();
+        // Invalid names must return false even if not registered
+        assert!(!client.is_name_available(&s(&env, "AB"))); // uppercase + too short
+        assert!(!client.is_name_available(&s(&env, "-bad")));
+        assert!(!client.is_name_available(&s(&env, "bad-")));
+        assert!(!client.is_name_available(&s(&env, "bad--name")));
+    }
+    // ── Name collision & rename rules (Issue #619) ──────────────────
+    //
+    // `register_name` doubles as a rename: it replaces the caller's current
+    // name for a talos_id and frees the previous one. These tests pin the two
+    // rules that guard that path — a name owned by another talos is never
+    // adopted, and a rejected rename is a no-op that preserves the previous
+    // registration and emits no events.
+
+    #[test]
+    fn rename_onto_name_owned_by_another_talos_is_rejected() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner_a = Address::generate(&env);
+        let owner_b = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let taken = s(&env, "alpha-name");
+        let own = s(&env, "beta-name");
+
+        let talos_a = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner_a,
+            &protocol_wallet,
+        );
+        let talos_b = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner_b,
+            &protocol_wallet,
+        );
+
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner_a,
+            talos_a,
+            &taken,
+        );
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner_b,
+            talos_b,
+            &own,
+        );
+
+        let incumbent_before = snapshot(&client, &taken, talos_a);
+        let challenger_before = snapshot(&client, &own, talos_b);
+        let events_before = event_count(&env, &contract_id);
+
+        // talos_b tries to adopt talos_a's name. The collision is detected
+        // before the registry lookup, so the auth tree has no sub-invokes.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner_b,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner_b.clone(), talos_b, taken.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_register_name(&owner_b, &talos_b, &taken);
+        assert!(
+            result.is_err(),
+            "renaming onto another talos's name must fail"
+        );
+
+        let incumbent_after = snapshot(&client, &taken, talos_a);
+        let challenger_after = snapshot(&client, &own, talos_b);
+        assert_state_eq(
+            &incumbent_before,
+            &incumbent_after,
+            "incumbent keeps its name after a rejected rename",
+        );
+        assert_state_eq(
+            &challenger_before,
+            &challenger_after,
+            "challenger keeps its previous name",
+        );
+        assert_eq!(client.name_of(&talos_b), Some(own.clone()));
+        assert_eq!(
+            events_before,
+            event_count(&env, &contract_id),
+            "rejected rename must not emit events"
+        );
+    }
+
+    #[test]
+    fn re_registering_same_name_for_same_talos_is_rejected() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name = s(&env, "stable-name");
+
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &name,
+        );
+
+        let before = snapshot(&client, &name, talos_id);
+        let events_before = event_count(&env, &contract_id);
+
+        // Re-registering the identical name is treated as a collision, not a
+        // silent no-op, so callers cannot mistake it for a successful rename.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, name.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &name);
+        assert!(
+            result.is_err(),
+            "re-registering the same name must be rejected"
+        );
+
+        let after = snapshot(&client, &name, talos_id);
+        assert_state_eq(&before, &after, "same-name re-registration is a no-op");
+        assert_eq!(
+            events_before,
+            event_count(&env, &contract_id),
+            "rejected same-name registration must not emit events"
+        );
+    }
+
+    #[test]
+    fn rename_to_invalid_name_preserves_previous_registration() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let kept = s(&env, "kept-name");
+        let invalid = s(&env, "Bad--Name");
+
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &kept,
+        );
+
+        let before = snapshot(&client, &kept, talos_id);
+        let events_before = event_count(&env, &contract_id);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, invalid.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &invalid);
+        assert!(result.is_err(), "renaming to an invalid name must fail");
+
+        let after = snapshot(&client, &kept, talos_id);
+        assert_state_eq(
+            &before,
+            &after,
+            "previous name must survive a rejected rename",
+        );
+        assert_eq!(client.name_of(&talos_id), Some(kept.clone()));
+        assert_eq!(
+            events_before,
+            event_count(&env, &contract_id),
+            "rejected rename must not emit events"
+        );
+    }
+
+    #[test]
+    fn rename_accepts_min_and_max_length_names() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let min_name = s(&env, "abc");
+        let max_name = s(&env, "abcdefghijklmnopqrstuvwxyz012345");
+
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &min_name,
+        );
+        assert_eq!(client.resolve_name(&min_name), Some(talos_id));
+        assert_eq!(client.name_of(&talos_id), Some(min_name.clone()));
+
+        // Renaming to the maximum length still frees the previous name.
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &max_name,
+        );
+        assert_eq!(client.resolve_name(&max_name), Some(talos_id));
+        assert_eq!(client.name_of(&talos_id), Some(max_name.clone()));
+        assert_eq!(client.resolve_name(&min_name), None);
+        assert!(client.is_name_available(&min_name));
+    }
 }

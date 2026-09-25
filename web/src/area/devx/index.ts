@@ -90,3 +90,29 @@ export type {
   SbomConfig,
   SbomStateTransition,
 } from "./types";
+
+export {
+  loadPropertyScheduleConfig,
+  parseCronExpression,
+  assertKnownSuites,
+  resolvePropertySeed,
+  shouldRunPropertySchedule,
+  describePropertySchedule,
+  PropertyScheduleError,
+  DEFAULT_PROPERTY_CRON,
+  DEFAULT_PROPERTY_TIMEZONE,
+  KNOWN_PROPERTY_SUITES,
+} from "./property-schedule";
+export {
+  allPropertyDefinitions,
+  runPropertySuite,
+  runPropertyTests,
+  writePropertyArtifact,
+} from "./property-tests";
+export type {
+  PropertySuiteName,
+  PropertyScheduleConfig,
+  PropertyCounterexample,
+  PropertySuiteResult,
+  PropertyRunSummary,
+} from "./types";
