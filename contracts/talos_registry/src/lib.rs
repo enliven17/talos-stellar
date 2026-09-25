@@ -18,7 +18,7 @@ mod registry_schema_tests;
 extern crate std;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address, BytesN, Env, String, Symbol, Vec,
 };
 use storage_migration;
 use ttl_manager;
@@ -44,6 +44,12 @@ pub const EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion {
 };
 
 // ── Data Types ──────────────────────────────────────────────────────
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ContractError {
+    InvalidPatronShares = 1,
+}
 
 #[contracttype]
 #[derive(Clone)]
@@ -328,10 +334,13 @@ fn emit_talos_resumed(env: &Env, talos_id: u32, controller: Address) {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-fn validate_patron_shares(patron: &Patron) {
-    let total = patron.creator_share + patron.investor_share + patron.treasury_share;
-    if total != 100 {
-        panic!("Patron shares must sum to 100");
+fn validate_patron_shares(env: &Env, patron: &Patron) {
+    let sum = patron.creator_share
+        .checked_add(patron.investor_share)
+        .and_then(|s| s.checked_add(patron.treasury_share));
+    match sum {
+        Some(100) => {}
+        _ => panic_with_error!(env, ContractError::InvalidPatronShares),
     }
 }
 
@@ -448,7 +457,7 @@ const MAX_ROLLBACK_DEPTH: u32 = 1;
 /// This constant is embedded in the WASM binary at compile time and is
 /// therefore immutable once deployed; it cannot be altered by any admin
 /// call, storage write, or cross-contract invocation.
-pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 3, 0);
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 4, 0);
 
 /// Stable 32-byte interface identifier for TalosRegistry v1.
 ///
@@ -551,7 +560,7 @@ impl TalosRegistry {
         // Require creator authorization
         patron.creator_addr.require_auth();
 
-        validate_patron_shares(&patron);
+        validate_patron_shares(&e, &patron);
         validate_talos_metadata(&name, &category, &description, &pulse);
 
         // If the registry has been initialized, ensure callers use the configured
@@ -655,7 +664,7 @@ impl TalosRegistry {
         // Require creator authorization
         talos.creator.require_auth();
 
-        validate_patron_shares(&patron);
+        validate_patron_shares(&e, &patron);
 
         talos.patron = patron.clone();
 
