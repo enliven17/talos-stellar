@@ -88,6 +88,11 @@ export interface CanonicalRequest {
 }
 
 const encoder = new TextEncoder();
+function compareOrdinal(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
 const SIGNATURE_HEADERS = new Set([
   "authorization",
   "cookie",
@@ -142,12 +147,19 @@ function canonicalUrl(input: string): string {
   let url: URL;
   try {
     url = new URL(input);
-  } catch (cause) {
-    throw new SigningError("INVALID_INPUT", "A request URL must be absolute", false, { cause });
+  } catch {
+    throw new SigningError("INVALID_INPUT", "A request URL must be absolute", false);
+  }
+  if (
+    (url.protocol !== "https:" && url.protocol !== "http:") ||
+    url.username ||
+    url.password
+  ) {
+    throw new SigningError("INVALID_INPUT", "Request URL must use HTTP(S) without embedded credentials", false);
   }
   url.hash = "";
   const entries = [...url.searchParams.entries()].sort(([ak, av], [bk, bv]) =>
-    ak === bk ? av.localeCompare(bv) : ak.localeCompare(bk),
+    ak === bk ? compareOrdinal(av, bv) : compareOrdinal(ak, bk),
   );
   url.search = "";
   for (const [key, value] of entries) url.searchParams.append(key, value);
@@ -159,14 +171,31 @@ function canonicalUrl(input: string): string {
  * safe sorted headers, SHA-256 body digest, timestamp, and nonce.
  */
 export async function canonicalizeRequest(request: CanonicalRequest): Promise<Uint8Array> {
-  const method = request.method.trim().toUpperCase();
-  if (!/^[A-Z]+$/.test(method) || !request.timestamp || !request.nonce) {
+  if (!request || typeof request !== "object") {
+    throw new SigningError("INVALID_INPUT", "A request object is required", false);
+  }
+  const method = typeof request.method === "string" ? request.method.trim().toUpperCase() : "";
+  if (
+    !/^[A-Z]+$/.test(method) ||
+    typeof request.timestamp !== "string" ||
+    !request.timestamp ||
+    /[\r\n]/.test(request.timestamp) ||
+    typeof request.nonce !== "string" ||
+    !request.nonce ||
+    /[\r\n]/.test(request.nonce)
+  ) {
     throw new SigningError("INVALID_INPUT", "Invalid method, timestamp, or nonce", false);
   }
-  const headers = [...new Headers(request.headers).entries()]
+  let requestHeaders: Headers;
+  try {
+    requestHeaders = new Headers(request.headers);
+  } catch {
+    throw new SigningError("INVALID_INPUT", "Invalid request headers", false);
+  }
+  const headers = [...requestHeaders.entries()]
     .map(([key, value]) => [key.toLowerCase(), value.trim().replace(/\s+/g, " ")] as const)
     .filter(([key]) => !SIGNATURE_HEADERS.has(key))
-    .sort(([a], [b]) => a.localeCompare(b))
+    .sort(([a], [b]) => compareOrdinal(a, b))
     .map(([key, value]) => `${key}:${value}`)
     .join("\n");
   const digest = base64Url(await sha256(await bodyBytes(request.body)));

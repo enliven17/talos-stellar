@@ -1,0 +1,41 @@
+title = "talos-stellar local secret scan"
+
+# Extends gitleaks' built-in rules; this file only adds repo-specific allowlists.
+# Invoked exclusively via scripts/secret-scan.sh (pnpm run secrets:check).
+[extend]
+useDefault = true
+
+# ── Boundary allowlist ─────────────────────────────────────────────────────────
+# Explicit, documented exceptions for paths that are generated, vendored, or
+# binary. Each pattern is a Go regex matched against the scanned file path.
+# Sanctioned false positives in hand-written code should use a trailing
+# `# gitleaks:allow` comment on the offending line instead of widening this list.
+
+[[allowlists]]
+description = "lockfiles and vendored dependencies"
+paths = [
+  '''(^|/)pnpm-lock\.yaml$''',
+  '''(^|/)package-lock\.json$''',
+  '''(^|/)yarn\.lock$''',
+  '''(^|/)node_modules/''',
+  '''(^|/)vendor/''',
+]
+
+[[allowlists]]
+description = "build outputs and coverage artifacts"
+paths = [
+  '''(^|/)dist/''',
+  '''(^|/)build/''',
+  '''(^|/)out/''',
+  '''(^|/)target/''',
+  '''(^|/)\.next/''',
+  '''(^|/)coverage/''',
+  '''\.min\.(js|css)$''',
+  '''\.wasm$''',
+]
+
+[[allowlists]]
+description = "binary and media assets"
+paths = [
+  '''\.(png|jpe?g|gif|ico|webp|avif|bmp|svg|woff2?|ttf|eot|otf|mp[34]|wav|ogg|webm|zip|gz|tgz|tar|pdf|sqlite3?)$''',
+]

@@ -43,6 +43,10 @@ _SENSITIVE_LABEL_TOKENS = frozenset(
         "prompt",
         "user_prompt",
         "system_prompt",
+        "seed",
+        "mnemonic",
+        "payment_proof",
+        "proof",
     }
 )
 
@@ -131,6 +135,13 @@ class TelemetryReport:
     policy_deny_count: int = 0
     policy_escalate_count: int = 0
 
+    # ── Restore checksum / reconciliation (last pass) ────────────────
+    restore_checksum: str = ""
+    restore_checksum_algorithm: str = ""
+    restore_checksum_table_count: int = 0
+    restore_checksum_total_rows: int = 0
+    restore_reconciliation: dict = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, Any]:
         """Return a plain dict safe for JSON serialisation.
 
@@ -202,6 +213,7 @@ class TelemetryCollector:
         self._collect_scheduler_tasks(report)
         self._collect_queue_depth(report)
         self._collect_content_performance(report)
+        self._collect_restore_reconciliation(report)
 
         if cb_registry is not None:
             self._collect_circuit_breakers(report, cb_registry)
@@ -332,6 +344,43 @@ class TelemetryCollector:
                 report.policy_escalate_count = m.get("escalate_count", 0)
         except Exception as exc:
             logger.debug("Telemetry: policy engine metrics unavailable: %s", exc)
+
+    # ── Restore checksum / reconciliation ────────────────────────────
+
+    def _collect_restore_reconciliation(self, report: TelemetryReport) -> None:
+        """Attach last restore checksum + reconciliation telemetry if available.
+
+        Sourced from :func:`talos_agent.restore.get_last_reconciliation_telemetry`
+        which is populated by :func:`talos_agent.restore.reconcile_after_restore`.
+        Missing telemetry is a no-op (boundary-safe for agents that have not
+        restored yet).
+        """
+        try:
+            from talos_agent.restore import get_last_reconciliation_telemetry
+
+            telemetry = get_last_reconciliation_telemetry()
+        except Exception as exc:
+            logger.debug("Telemetry: restore reconciliation unavailable: %s", exc)
+            return
+
+        if not telemetry:
+            return
+
+        safe: dict[str, object] = {}
+        for key, value in telemetry.items():
+            safe[str(key)] = _redact_if_sensitive(str(key), value)
+
+        report.restore_reconciliation = safe  # type: ignore[assignment]
+        report.restore_checksum = str(safe.get("checksum") or "")
+        report.restore_checksum_algorithm = str(safe.get("checksum_algorithm") or "")
+        try:
+            report.restore_checksum_table_count = int(safe.get("checksum_table_count") or 0)
+        except (TypeError, ValueError):
+            report.restore_checksum_table_count = 0
+        try:
+            report.restore_checksum_total_rows = int(safe.get("checksum_total_rows") or 0)
+        except (TypeError, ValueError):
+            report.restore_checksum_total_rows = 0
 
     # ── Adapter health (optional) ────────────────────────────────────
 

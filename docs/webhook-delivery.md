@@ -226,3 +226,45 @@ Key metrics available via structured logging (log level and message):
 6. Trigger an event (e.g., approve a pending approval)
 7. Check delivery logs for `webhook_deliveries_created`
 8. Poll for pending deliveries: `GET /api/webhooks/deliveries/pending`
+
+---
+
+## Secret Rotation (Zero Downtime)
+
+Operators can rotate a subscription signing secret without interrupting
+consumers that still verify with the previous secret.
+
+### Flow
+
+1. **Rotate** — `POST /api/webhooks/subscriptions/:id/rotate`
+   - Body: `{ "secret": "<new>" }` **or** `{ "generate": true }`
+   - Optional: `{ "graceSeconds": 86400 }` (default 24h, min 5m, max 30d)
+   - Current ciphertext moves to `previous_secret_ciphertext`
+   - New secret becomes current; `previous_secret_expires_at` is set
+   - When `generate: true`, the plaintext is returned **once** in the response
+2. **Overlap** — Deliveries dual-sign with both secrets:
+   `X-Webhook-Signature: v1=<current>,v1=<previous>,t=<ts>`
+3. **Finalize** (optional, early) — `POST .../rotate` with `{ "finalize": true }`
+   clears the previous secret before grace expiry
+4. **Lazy expiry** — After `previous_secret_expires_at`, previous is ignored even
+   if not explicitly finalized
+
+### Compatibility
+
+- Existing single-signature consumers continue to work (first `v1=` matches)
+- Consumers that already accept `secret: string[]` (SDK) can hold both keys
+- `PATCH /subscriptions/:id` with `{ "secret": "..." }` uses the same rotation path
+- Secrets are never logged; API responses never include ciphertext
+
+### Env
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WEBHOOK_SECRET_ROTATION_GRACE_SECONDS` | `86400` | Default dual-sign overlap |
+
+### Migration
+
+Migration `0019_webhook_secret_rotation.sql` adds:
+- `previous_secret_ciphertext`
+- `previous_secret_expires_at`
+- `secret_rotated_at`

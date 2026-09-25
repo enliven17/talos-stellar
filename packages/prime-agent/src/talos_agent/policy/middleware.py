@@ -152,11 +152,12 @@ class PolicyMiddleware:
         result = self._engine.evaluate(spec)
 
         logger.debug(
-            "Policy evaluation: action=%s decision=%s violated=%d evidence=%s",
+            "Policy evaluation: action=%s decision=%s violated=%d evidence=%s summary=%s",
             action,
             result.decision.value,
             len(result.violated_rules),
             "; ".join(result.evidence) if result.evidence else "(none)",
+            result.trace.summary if result.trace else "(none)",
         )
 
         return result
@@ -212,24 +213,32 @@ class PolicyMiddleware:
             policy_result = self.evaluate_action(tool_name, params)
 
             if policy_result.decision == PolicyDecision.DENY:
-                return {
+                payload = {
                     "error": "Policy denied this action",
                     "policy_decision": "deny",
                     "evidence": list(policy_result.evidence),
                     "result_digest": policy_result.result_digest,
+                    "explanation": policy_result.explain(),
                 }
+                if policy_result.trace is not None:
+                    payload["decision_trace"] = policy_result.trace.to_dict()
+                return payload
 
             if policy_result.decision == PolicyDecision.ESCALATE:
-                return {
+                payload = {
                     "status": "policy_escalation_required",
                     "policy_decision": "escalate",
                     "evidence": list(policy_result.evidence),
                     "result_digest": policy_result.result_digest,
+                    "explanation": policy_result.explain(),
                     "message": (
                         "This action requires approval. Use request_approval "
                         "to escalate to a human operator."
                     ),
                 }
+                if policy_result.trace is not None:
+                    payload["decision_trace"] = policy_result.trace.to_dict()
+                return payload
 
             # APPROVE — proceed normally
             result = tool_fn(*args, **kwargs)

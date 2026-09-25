@@ -18,9 +18,11 @@ receive bytes only after the SDK has canonicalized an HTTP request as
 4. ISO timestamp and per-attempt nonce
 
 Fields are LF-delimited. Credentials (`authorization`, cookies, API keys) and
-signature headers are deliberately excluded. The stable vector is in
-`packages/sdk/tests/signing.test.ts`. Servers should reject timestamps outside
-their clock-skew window and nonce reuse for the same key ID.
+signature headers are deliberately excluded. The published wire-level vectors
+are in `packages/sdk/tests/fixtures/request-signing-vectors.json`; unit and
+compatibility tests verify these bytes. Query and header ordering uses ordinal
+comparison so signatures do not vary by runtime locale. Servers should reject
+timestamps outside their clock-skew window and nonce reuse for the same key ID.
 
 ## Configuration
 

@@ -267,3 +267,39 @@ To disable the benchmark system:
 | Thresholds failing on CI | CI runners are slower | Adjust `BENCHMARK_MEMORY_THRESHOLD_MB` or `BENCHMARK_VARIANCE_THRESHOLD` |
 | Artifact directory missing | Wrong working directory | Set `BENCHMARK_ARTIFACT_DIR` to absolute path |
 | Trend report empty | No prior artifacts | Run benchmarks, then re-run trend analysis |
+
+
+## Nightly Property Tests
+
+Property-based suites live alongside the benchmark framework in `web/src/area/devx/` and exercise invariants over datasets, metrics, thresholds, and the schedule config itself.
+
+### Schedule
+
+- **Cron (UTC):** `27 5 * * *` (single source of truth: `DEFAULT_PROPERTY_CRON` in `property-schedule.ts` and `.github/workflows/property-tests-nightly.yml`)
+- **Workflow:** `.github/workflows/property-tests-nightly.yml` (nightly + `workflow_dispatch` + path-filtered PR/push)
+- **Fail-closed:** malformed cron, empty/unknown suites, and non-finite iteration counts throw `PropertyScheduleError` and exit non-zero — they never silently skip.
+
+### Local commands
+
+```bash
+# Focused unit coverage for schedule + suites
+pnpm --dir web test:property
+
+# Execute the nightly property runner (writes `.property-artifacts/`)
+pnpm --dir web property:nightly
+
+# Useful overrides
+PROPERTY_TEST_ITERATIONS=50 PROPERTY_TEST_SEED=7 PROPERTY_TEST_SUITES=metrics,schedule \
+  pnpm --dir web property:nightly
+```
+
+### Suites
+
+| Suite | Invariants |
+| --- | --- |
+| `datasets` | id charset/length, payload shape, activity enums, Stellar transfer shape, seed determinism |
+| `metrics` | percentile ordering + in-range, mean/median within min/max, empty-input zeros |
+| `thresholds` | fail severity blocks pass; unknown metrics ignored |
+| `schedule` | default cron parse, malformed cron fail-closed, stable daily seed, privacy-safe describe |
+
+Logging goes through `sanitizeForLogging` — secrets, tokens, signatures, and payment proofs are never written to artifacts or logs.

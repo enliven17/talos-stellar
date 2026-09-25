@@ -75,7 +75,7 @@ const rawPost = async (req: NextRequest): Promise<Response> => {
   if (!auth.ok) return auth.error;
 
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "anon";
-  const rl = rateLimit(`ops:backup:${ip}`, RATE_LIMIT);
+  const rl = await rateLimit(`ops:backup:${ip}`, RATE_LIMIT);
   if (!rl.ok) {
     logger.warn(
       { ip, requestId: req.headers.get("x-request-id") ?? null },

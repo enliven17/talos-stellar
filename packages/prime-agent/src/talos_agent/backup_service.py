@@ -328,11 +328,8 @@ def build_backup(
 
             encrypted = encrypt_with_password(plaintext.decode("utf8"), password)
 
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(encrypted, encoding="utf8")
-            # Restrictive perms — even though the file is GCM-encrypted,
-            # we don't want it world-readable on shared hosts.
-            os.chmod(out_path, stat.S_IRUSR | stat.S_IWUSR)
+            # Stream ciphertext to disk in chunks (same envelope; verify/restore unchanged).
+            stream_encrypted_artifact(encrypted, out_path)
 
             log.info(
                 "prime_agent_backup_completed",
@@ -358,6 +355,54 @@ def build_backup(
 # ────────────────────────────────────────────────────────────────────
 # Verify
 # ────────────────────────────────────────────────────────────────────
+
+
+
+
+def stream_encrypted_artifact(
+    ciphertext: str,
+    out_path: Path,
+    *,
+    chunk_size: int = 64 * 1024,
+) -> int:
+    """Stream an already-encrypted artifact to disk in chunks.
+
+    AES-GCM still authenticates the full ciphertext string (produced by
+    `encrypt_with_password`), but the *write path* flushes incrementally and
+    atomically replaces the destination so large backups do not rely on a
+    single `Path.write_text` of the entire blob.
+
+    Returns the number of ciphertext characters written.
+    """
+    if chunk_size < 1024:
+        raise BackupError("chunk_size must be >= 1024", code="BAD_INPUT")
+    if not isinstance(ciphertext, str) or not ciphertext:
+        raise BackupError("ciphertext must be a non-empty string", code="BAD_INPUT")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_suffix(out_path.suffix + ".partial")
+    written = 0
+    try:
+        with tmp.open("w", encoding="utf8") as fh:
+            for i in range(0, len(ciphertext), chunk_size):
+                piece = ciphertext[i : i + chunk_size]
+                fh.write(piece)
+                written += len(piece)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, out_path)
+        try:
+            os.chmod(out_path, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    return written
+
 
 
 def verify_backup(*, artifact_path: Path, password: str) -> BackupRun:

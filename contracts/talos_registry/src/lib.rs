@@ -177,6 +177,8 @@ pub enum DataKey {
     LastTouched(u32),
     Guardians,
     PauseState(PauseDomain),
+    PauseController(u32),
+    ResumeController(u32),
 }
 
 // ── Events ──────────────────────────────────────────────────────────
@@ -195,6 +197,8 @@ pub enum DataKey {
 //   dep_path: (symbol,)                    → (deprecated: String, replacement: String)
 //                                                  Privacy-safe: no caller/tx/value data.
 //                                                  Reasons callers hit a deprecated path.
+//   tls_paus : (symbol, talos_id: u32)     → (controller: Address)
+//   tls_resu : (symbol, talos_id: u32)     → (controller: Address)
 
 fn emit_talos_created(env: &Env, talos_id: u32, creator: Address, name: String, category: String) {
     let topics = (symbol_short!("tls_crt"), creator.clone());
@@ -312,6 +316,16 @@ fn emit_deprecated_call(env: &Env, deprecated: &str, replacement: &str) {
     env.events().publish(topics, (deprecated, replacement));
 }
 
+fn emit_talos_paused(env: &Env, talos_id: u32, controller: Address) {
+    let topics = (symbol_short!("tls_paus"), talos_id);
+    env.events().publish(topics, controller);
+}
+
+fn emit_talos_resumed(env: &Env, talos_id: u32, controller: Address) {
+    let topics = (symbol_short!("tls_resu"), talos_id);
+    env.events().publish(topics, controller);
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 fn validate_patron_shares(patron: &Patron) {
@@ -319,6 +333,38 @@ fn validate_patron_shares(patron: &Patron) {
     if total != 100 {
         panic!("Patron shares must sum to 100");
     }
+}
+
+/// Validate a Pulse `token_symbol`: it is a required identifier, so it must
+/// be non-empty, and it is byte-bounded by [`MAX_TOKEN_SYMBOL_BYTES`].
+fn validate_token_symbol(token_symbol: &String) {
+    if token_symbol.len() == 0 {
+        panic!("Token symbol cannot be empty");
+    }
+    if token_symbol.len() > MAX_TOKEN_SYMBOL_BYTES {
+        panic!("Token symbol exceeds maximum byte length");
+    }
+}
+
+/// Enforce byte limits on caller-supplied Talos metadata before it is
+/// persisted. `name` and `Pulse.token_symbol` are required identifiers and
+/// must be non-empty; `category` and `description` are descriptive and may
+/// be empty, but are still byte-bounded. Panics are explicit and
+/// privacy-safe — no caller or value data is included.
+fn validate_talos_metadata(name: &String, category: &String, description: &String, pulse: &Pulse) {
+    if name.len() == 0 {
+        panic!("Name cannot be empty");
+    }
+    if name.len() > MAX_NAME_BYTES {
+        panic!("Name exceeds maximum byte length");
+    }
+    if category.len() > MAX_CATEGORY_BYTES {
+        panic!("Category exceeds maximum byte length");
+    }
+    if description.len() > MAX_DESCRIPTION_BYTES {
+        panic!("Description exceeds maximum byte length");
+    }
+    validate_token_symbol(&pulse.token_symbol);
 }
 
 // ── Emergency Pause Helpers ────────────────────────────────────────
@@ -362,6 +408,22 @@ const MAX_MIN_DELAY: u64 = 2_592_000; // 30 days in seconds
 const MAX_GUARDIAN_PAUSE_SECS: u64 = 604_800; // 7 days — bounds guardian blast radius
 const MAX_ADMIN_PAUSE_SECS: u64 = 2_592_000; // 30 days; 0 (indefinite) is also allowed for admin
 const MAX_GUARDIANS: u32 = 10; // bounds unbounded storage growth
+
+// ── Metadata byte limits ────────────────────────────────────────────
+//
+// Talos metadata is caller-supplied and persisted verbatim, so it is
+// bounded in bytes (not characters) to cap per-entry storage rent and to
+// keep off-chain indexers from having to accept unbounded payloads. The
+// limits are enforced on every write path that carries the field.
+
+/// Maximum byte length of `Talos.name`.
+const MAX_NAME_BYTES: u32 = 64;
+/// Maximum byte length of `Talos.category`.
+const MAX_CATEGORY_BYTES: u32 = 32;
+/// Maximum byte length of `Talos.description`.
+const MAX_DESCRIPTION_BYTES: u32 = 512;
+/// Maximum byte length of `Pulse.token_symbol`.
+const MAX_TOKEN_SYMBOL_BYTES: u32 = 12;
 
 // ── Storage schema migrations (see `storage_migration` crate) ────────
 
@@ -449,6 +511,8 @@ pub const PAUSE_TALOS_CREATION: u32 = 1;
 pub const PAUSE_TALOS_UPDATE: u32 = 2;
 /// Pause domain for Talos deactivation.
 pub const PAUSE_TALOS_DEACTIVATION: u32 = 3;
+/// Pause domain for Talos activation.
+pub const PAUSE_TALOS_ACTIVATION: u32 = 5;
 /// Pause domain for protocol configuration (fees, admin, timelock).
 pub const PAUSE_PROTOCOL_CONFIG: u32 = 4;
 
@@ -488,6 +552,7 @@ impl TalosRegistry {
         patron.creator_addr.require_auth();
 
         validate_patron_shares(&patron);
+        validate_talos_metadata(&name, &category, &description, &pulse);
 
         // If the registry has been initialized, ensure callers use the configured
         // protocol wallet. This keeps the create_talos ABI backwards compatible
@@ -632,6 +697,8 @@ impl TalosRegistry {
 
         talos.creator.require_auth();
 
+        validate_token_symbol(&pulse.token_symbol);
+
         talos.pulse = pulse;
 
         e.storage()
@@ -640,7 +707,8 @@ impl TalosRegistry {
     }
 
     /// Deactivate a Talos.
-    pub fn deactivate_talos(e: Env, talos_id: u32) {
+    /// Can be called by creator or authorized pause controller.
+    pub fn deactivate_talos(e: Env, talos_id: u32, controller: Address) {
         pause_control::check_not_paused(&e, PAUSE_TALOS_DEACTIVATION);
 
         let mut talos: Talos = e
@@ -649,12 +717,107 @@ impl TalosRegistry {
             .get(&DataKey::Talos(talos_id))
             .expect("Talos not found");
 
-        talos.creator.require_auth();
+        controller.require_auth();
+
+        // Check if caller is creator or authorized pause controller
+        let is_creator = talos.creator == controller;
+        let pause_controller: Option<Address> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::PauseController(talos_id));
+        let is_pause_controller = pause_controller.as_ref() == Some(&controller);
+
+        if !is_creator && !is_pause_controller {
+            panic!("Unauthorized: only creator or pause controller can deactivate");
+        }
+
         talos.active = false;
 
         e.storage()
             .persistent()
             .set(&DataKey::Talos(talos_id), &talos);
+
+        emit_talos_paused(&e, talos_id, controller);
+    }
+
+    /// Activate a Talos.
+    /// Can be called by creator or authorized resume controller.
+    pub fn activate_talos(e: Env, talos_id: u32, controller: Address) {
+        pause_control::check_not_paused(&e, PAUSE_TALOS_ACTIVATION);
+
+        let mut talos: Talos = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Talos(talos_id))
+            .expect("Talos not found");
+
+        controller.require_auth();
+
+        // Check if caller is creator or authorized resume controller
+        let is_creator = talos.creator == controller;
+        let resume_controller: Option<Address> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::ResumeController(talos_id));
+        let is_resume_controller = resume_controller.as_ref() == Some(&controller);
+
+        if !is_creator && !is_resume_controller {
+            panic!("Unauthorized: only creator or resume controller can activate");
+        }
+
+        talos.active = true;
+
+        e.storage()
+            .persistent()
+            .set(&DataKey::Talos(talos_id), &talos);
+
+        emit_talos_resumed(&e, talos_id, controller);
+    }
+
+    /// Set the pause controller for a Talos.
+    /// Only the creator can set this.
+    pub fn set_pause_controller(e: Env, talos_id: u32, pause_controller: Address) {
+        let talos: Talos = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Talos(talos_id))
+            .expect("Talos not found");
+
+        talos.creator.require_auth();
+
+        e.storage()
+            .persistent()
+            .set(&DataKey::PauseController(talos_id), &pause_controller);
+    }
+
+    /// Set the resume controller for a Talos.
+    /// Only the creator can set this.
+    pub fn set_resume_controller(e: Env, talos_id: u32, resume_controller: Address) {
+        let talos: Talos = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Talos(talos_id))
+            .expect("Talos not found");
+
+        talos.creator.require_auth();
+
+        e.storage()
+            .persistent()
+            .set(&DataKey::ResumeController(talos_id), &resume_controller);
+    }
+
+    /// Get the pause controller for a Talos.
+    pub fn get_pause_controller(e: Env, talos_id: u32) -> Option<Address> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::PauseController(talos_id))
+    }
+
+    /// Get the resume controller for a Talos.
+    pub fn get_resume_controller(e: Env, talos_id: u32) -> Option<Address> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::ResumeController(talos_id))
     }
 
     /// Initialize the contract with protocol wallet and fee.
@@ -2328,7 +2491,7 @@ mod tests {
         };
 
         // Non-creator must not be able to update kernel
-        let _imposter = Address::generate(&env);
+        let imposter = Address::generate(&env);
         assert!(client.try_update_kernel(&id, &new_kernel).is_err());
     }
 
@@ -2376,8 +2539,8 @@ mod tests {
         assert!(client.is_active(&id));
 
         // Non-creator can't deactivate
-        let _imposter = Address::generate(&env);
-        assert!(client.try_deactivate_talos(&id).is_err());
+        let imposter = Address::generate(&env);
+        assert!(client.try_deactivate_talos(&id, &imposter).is_err());
 
         // Creator can deactivate
         client
@@ -2386,13 +2549,464 @@ mod tests {
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "deactivate_talos",
-                    args: (id,).into_val(&env),
+                    args: (id, creator.clone()).into_val(&env),
                     sub_invokes: &[],
                 },
             }])
-            .deactivate_talos(&id);
+            .deactivate_talos(&id, &creator);
 
         assert!(!client.is_active(&id));
+    }
+
+    #[test]
+    fn set_pause_controller_requires_creator_auth() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let pause_controller = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        // Non-creator can't set pause controller
+        let _imposter = Address::generate(&env);
+        assert!(client.try_set_pause_controller(&id, &pause_controller).is_err());
+
+        // Creator can set pause controller
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_pause_controller",
+                    args: (id, pause_controller.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_pause_controller(&id, &pause_controller);
+
+        assert_eq!(client.get_pause_controller(&id), Some(pause_controller));
+    }
+
+    #[test]
+    fn set_resume_controller_requires_creator_auth() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let resume_controller = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        // Non-creator can't set resume controller
+        let _imposter = Address::generate(&env);
+        assert!(client.try_set_resume_controller(&id, &resume_controller).is_err());
+
+        // Creator can set resume controller
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_resume_controller",
+                    args: (id, resume_controller.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_resume_controller(&id, &resume_controller);
+
+        assert_eq!(client.get_resume_controller(&id), Some(resume_controller));
+    }
+
+    #[test]
+    fn pause_controller_can_deactivate_talos() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let pause_controller = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        // Set pause controller
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_pause_controller",
+                    args: (id, pause_controller.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_pause_controller(&id, &pause_controller);
+
+        // Pause controller can deactivate
+        client
+            .mock_auths(&[MockAuth {
+                address: &pause_controller,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "deactivate_talos",
+                    args: (id, pause_controller.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .deactivate_talos(&id, &pause_controller);
+
+        assert!(!client.is_active(&id));
+    }
+
+    #[test]
+    fn resume_controller_can_activate_talos() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let resume_controller = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        // Deactivate first
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "deactivate_talos",
+                    args: (id, creator.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .deactivate_talos(&id, &creator);
+
+        assert!(!client.is_active(&id));
+
+        // Set resume controller
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_resume_controller",
+                    args: (id, resume_controller.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_resume_controller(&id, &resume_controller);
+
+        // Resume controller can activate
+        client
+            .mock_auths(&[MockAuth {
+                address: &resume_controller,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "activate_talos",
+                    args: (id, resume_controller.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .activate_talos(&id, &resume_controller);
+
+        assert!(client.is_active(&id));
+    }
+
+    #[test]
+    fn unauthorized_pause_controller_cannot_deactivate() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let pause_controller = Address::generate(&env);
+        let unauthorized = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        // Set pause controller
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_pause_controller",
+                    args: (id, pause_controller.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_pause_controller(&id, &pause_controller);
+
+        // Unauthorized address cannot deactivate
+        assert!(client.try_deactivate_talos(&id, &unauthorized).is_err());
+    }
+
+    #[test]
+    fn unauthorized_resume_controller_cannot_activate() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let resume_controller = Address::generate(&env);
+        let unauthorized = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        // Deactivate first
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "deactivate_talos",
+                    args: (id, creator.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .deactivate_talos(&id, &creator);
+
+        // Set resume controller
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_resume_controller",
+                    args: (id, resume_controller.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_resume_controller(&id, &resume_controller);
+
+        // Unauthorized address cannot activate
+        assert!(client.try_activate_talos(&id, &unauthorized).is_err());
+    }
+
+    #[test]
+    fn pause_controller_cannot_activate_talos() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let pause_controller = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        // Deactivate first
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "deactivate_talos",
+                    args: (id, creator.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .deactivate_talos(&id, &creator);
+
+        // Set pause controller
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_pause_controller",
+                    args: (id, pause_controller.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_pause_controller(&id, &pause_controller);
+
+        // Pause controller cannot activate (only resume controller or creator)
+        assert!(client.try_activate_talos(&id, &pause_controller).is_err());
+    }
+
+    #[test]
+    fn resume_controller_cannot_deactivate_talos() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let resume_controller = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        // Set resume controller
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_resume_controller",
+                    args: (id, resume_controller.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_resume_controller(&id, &resume_controller);
+
+        // Resume controller cannot deactivate (only pause controller or creator)
+        assert!(client.try_deactivate_talos(&id, &resume_controller).is_err());
+    }
+
+    #[test]
+    fn deactivate_talos_emits_pause_event() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "deactivate_talos",
+                    args: (id, creator.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .deactivate_talos(&id, &creator);
+
+        let events = env.events().all();
+        let pause_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(a, _, _)| *a == contract_id)
+            .collect();
+
+        let pause_event = pause_events.iter().find(|(_, topics, _)| {
+            if topics.len() >= 1 {
+                let t0: Symbol = TryFromVal::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+                t0 == symbol_short!("tls_paus")
+            } else {
+                false
+            }
+        });
+
+        assert!(pause_event.is_some(), "Expected tls_paus event to be emitted");
+    }
+
+    #[test]
+    fn activate_talos_emits_resume_event() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        // Deactivate first
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "deactivate_talos",
+                    args: (id, creator.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .deactivate_talos(&id, &creator);
+
+        // Activate
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "activate_talos",
+                    args: (id, creator.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .activate_talos(&id, &creator);
+
+        let events = env.events().all();
+        let resume_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(a, _, _)| *a == contract_id)
+            .collect();
+
+        let resume_event = resume_events.iter().find(|(_, topics, _)| {
+            if topics.len() >= 1 {
+                let t0: Symbol = TryFromVal::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+                t0 == symbol_short!("tls_resu")
+            } else {
+                false
+            }
+        });
+
+        assert!(resume_event.is_some(), "Expected tls_resu event to be emitted");
+    }
+
+    #[test]
+    fn controllers_can_be_updated_by_creator() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let pause_controller1 = Address::generate(&env);
+        let pause_controller2 = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        // Set first pause controller
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_pause_controller",
+                    args: (id, pause_controller1.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_pause_controller(&id, &pause_controller1);
+
+        assert_eq!(client.get_pause_controller(&id), Some(pause_controller1.clone()));
+
+        // Update to second pause controller
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_pause_controller",
+                    args: (id, pause_controller2.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_pause_controller(&id, &pause_controller2);
+
+        assert_eq!(client.get_pause_controller(&id), Some(pause_controller2));
+    }
+
+    #[test]
+    fn creator_can_always_pause_and_resume() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        // Creator can deactivate
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "deactivate_talos",
+                    args: (id, creator.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .deactivate_talos(&id, &creator);
+
+        assert!(!client.is_active(&id));
+
+        // Creator can activate
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "activate_talos",
+                    args: (id, creator.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .activate_talos(&id, &creator);
+
+        assert!(client.is_active(&id));
     }
 
     #[test]
@@ -2441,6 +3055,292 @@ mod tests {
             );
 
         assert!(result.is_err());
+    }
+
+    // ── metadata byte-limit tests ────────────────────────────────────
+
+    /// Build a `String` of exactly `len` repeated `ch` bytes for boundary tests.
+    fn repeated(env: &Env, ch: char, len: usize) -> String {
+        let mut buf = std::string::String::new();
+        for _ in 0..len {
+            buf.push(ch);
+        }
+        String::from_str(env, buf.as_str())
+    }
+
+    /// Attempt `create_talos` with caller-supplied metadata and report whether
+    /// the contract accepted it. Used by the negative/boundary metadata tests.
+    fn metadata_create_is_ok(
+        env: &Env,
+        client: &TalosRegistryClient,
+        contract_id: &Address,
+        creator: &Address,
+        protocol_wallet: &Address,
+        name: &String,
+        category: &String,
+        description: &String,
+        pulse_cfg: &Pulse,
+    ) -> bool {
+        let patron_cfg = patron(env, creator);
+        let kernel_cfg = kernel();
+        client
+            .mock_auths(&[MockAuth {
+                address: creator,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "create_talos",
+                    args: (
+                        name.clone(),
+                        category.clone(),
+                        description.clone(),
+                        patron_cfg.clone(),
+                        kernel_cfg.clone(),
+                        pulse_cfg.clone(),
+                        protocol_wallet.clone(),
+                    )
+                        .into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_talos(
+                name,
+                category,
+                description,
+                &patron_cfg,
+                &kernel_cfg,
+                pulse_cfg,
+                protocol_wallet,
+            )
+            .is_ok()
+    }
+
+    #[test]
+    fn create_talos_at_max_metadata_bytes_is_accepted() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+
+        let name = repeated(&env, 'n', MAX_NAME_BYTES as usize);
+        let category = repeated(&env, 'c', MAX_CATEGORY_BYTES as usize);
+        let description = repeated(&env, 'd', MAX_DESCRIPTION_BYTES as usize);
+        let mut pulse_cfg = pulse(&env);
+        pulse_cfg.token_symbol = repeated(&env, 's', MAX_TOKEN_SYMBOL_BYTES as usize);
+
+        let patron_cfg = patron(&env, &creator);
+        let kernel_cfg = kernel();
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_talos",
+                    args: (
+                        name.clone(),
+                        category.clone(),
+                        description.clone(),
+                        patron_cfg.clone(),
+                        kernel_cfg.clone(),
+                        pulse_cfg.clone(),
+                        protocol_wallet.clone(),
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_talos(
+                &name,
+                &category,
+                &description,
+                &patron_cfg,
+                &kernel_cfg,
+                &pulse_cfg,
+                &protocol_wallet,
+            );
+
+        assert!(result.is_ok(), "exactly-at-limit metadata must be accepted");
+        let id = result.ok().expect("boundary metadata create must be ok");
+        let talos = client.get_talos(&id).expect("talos must be stored");
+        assert_eq!(talos.name, name);
+        assert_eq!(talos.category, category);
+        assert_eq!(talos.description, description);
+        assert_eq!(talos.pulse.token_symbol, pulse_cfg.token_symbol);
+    }
+
+    #[test]
+    fn create_talos_rejects_name_over_max_bytes() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name = repeated(&env, 'n', MAX_NAME_BYTES as usize + 1);
+
+        assert!(!metadata_create_is_ok(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            &protocol_wallet,
+            &name,
+            &s(&env, "Marketing"),
+            &s(&env, "desc"),
+            &pulse(&env),
+        ));
+    }
+
+    #[test]
+    fn create_talos_rejects_empty_name() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+
+        assert!(!metadata_create_is_ok(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            &protocol_wallet,
+            &s(&env, ""),
+            &s(&env, "Marketing"),
+            &s(&env, "desc"),
+            &pulse(&env),
+        ));
+    }
+
+    #[test]
+    fn create_talos_rejects_category_over_max_bytes() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let category = repeated(&env, 'c', MAX_CATEGORY_BYTES as usize + 1);
+
+        assert!(!metadata_create_is_ok(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            &protocol_wallet,
+            &s(&env, "Genesis"),
+            &category,
+            &s(&env, "desc"),
+            &pulse(&env),
+        ));
+    }
+
+    #[test]
+    fn create_talos_rejects_description_over_max_bytes() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let description = repeated(&env, 'd', MAX_DESCRIPTION_BYTES as usize + 1);
+
+        assert!(!metadata_create_is_ok(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            &protocol_wallet,
+            &s(&env, "Genesis"),
+            &s(&env, "Marketing"),
+            &description,
+            &pulse(&env),
+        ));
+    }
+
+    #[test]
+    fn create_talos_rejects_token_symbol_over_max_bytes() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let mut pulse_cfg = pulse(&env);
+        pulse_cfg.token_symbol = repeated(&env, 's', MAX_TOKEN_SYMBOL_BYTES as usize + 1);
+
+        assert!(!metadata_create_is_ok(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            &protocol_wallet,
+            &s(&env, "Genesis"),
+            &s(&env, "Marketing"),
+            &s(&env, "desc"),
+            &pulse_cfg,
+        ));
+    }
+
+    #[test]
+    fn create_talos_rejects_empty_token_symbol() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let mut pulse_cfg = pulse(&env);
+        pulse_cfg.token_symbol = s(&env, "");
+
+        assert!(!metadata_create_is_ok(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            &protocol_wallet,
+            &s(&env, "Genesis"),
+            &s(&env, "Marketing"),
+            &s(&env, "desc"),
+            &pulse_cfg,
+        ));
+    }
+
+    #[test]
+    fn create_talos_allows_empty_optional_metadata() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+
+        // `category` and `description` are descriptive, so empty is allowed;
+        // only the byte ceiling is enforced on them.
+        assert!(metadata_create_is_ok(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            &protocol_wallet,
+            &s(&env, "Genesis"),
+            &s(&env, ""),
+            &s(&env, ""),
+            &pulse(&env),
+        ));
+    }
+
+    #[test]
+    fn update_pulse_rejects_token_symbol_over_max_bytes() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let mut bad_pulse = pulse(&env);
+        bad_pulse.token_symbol = repeated(&env, 's', MAX_TOKEN_SYMBOL_BYTES as usize + 1);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_pulse",
+                    args: (id, bad_pulse.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_pulse(&id, &bad_pulse);
+
+        assert!(result.is_err(), "over-limit token symbol must be rejected");
     }
 
     #[test]
@@ -3550,11 +4450,11 @@ mod tests {
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "deactivate_talos",
-                    args: (id,).into_val(&env),
+                    args: (id, imposter.clone()).into_val(&env),
                     sub_invokes: &[],
                 },
             }])
-            .try_deactivate_talos(&id);
+            .try_deactivate_talos(&id, &imposter);
 
         assert!(res.is_err(), "Unauthorized deactivation must fail");
         assert!(client.is_active(&id), "Talos must remain active after unauthorized deactivation attempt");
@@ -3642,4 +4542,819 @@ mod tests {
         assert!(res_touch.is_err(), "Unauthorized touch_batch must fail");
     }
 
+
+    // ── Expanded authorization negative tests (#611) ─────────────────
+
+    // --- Missing authorization ---
+
+    /// create_talos without any mock_auths must be rejected.
+    #[test]
+    fn create_talos_without_auth_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+
+        let result = client.try_create_talos(
+            &s(&env, "Alpha"),
+            &s(&env, "Marketing"),
+            &s(&env, "desc"),
+            &patron(&env, &creator),
+            &kernel(),
+            &pulse(&env),
+            &protocol_wallet,
+        );
+        assert!(result.is_err(), "create_talos must require creator auth");
+    }
+
+    /// update_patron called without any auth must be rejected.
+    #[test]
+    fn update_patron_without_auth_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let new_patron = Patron {
+            creator_share: 50,
+            investor_share: 30,
+            treasury_share: 20,
+            creator_addr: creator.clone(),
+            investor_addr: Address::generate(&env),
+            treasury_addr: Address::generate(&env),
+        };
+        assert!(client.try_update_patron(&id, &new_patron).is_err());
+    }
+
+    /// update_kernel called without any auth must be rejected.
+    #[test]
+    fn update_kernel_without_auth_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        assert!(
+            client
+                .try_update_kernel(&id, &kernel())
+                .is_err(),
+            "update_kernel must require creator auth"
+        );
+    }
+
+    /// update_pulse called without any auth must be rejected.
+    #[test]
+    fn update_pulse_without_auth_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        assert!(
+            client.try_update_pulse(&id, &pulse(&env)).is_err(),
+            "update_pulse must require creator auth"
+        );
+    }
+
+    /// deactivate_talos called without any auth must be rejected.
+    #[test]
+    fn deactivate_talos_without_auth_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        assert!(
+            client.try_deactivate_talos(&id, &creator).is_err(),
+            "deactivate_talos must require creator auth"
+        );
+    }
+
+    /// set_protocol_fee called without any auth must be rejected.
+    #[test]
+    fn set_protocol_fee_without_auth_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let protocol_wallet = Address::generate(&env);
+        client.initialize(&protocol_wallet);
+
+        assert!(
+            client.try_set_protocol_fee(&500).is_err(),
+            "set_protocol_fee must require admin auth"
+        );
+    }
+
+    /// schedule_action called without any auth must be rejected.
+    #[test]
+    fn schedule_action_without_auth_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let protocol_wallet = Address::generate(&env);
+        client.initialize(&protocol_wallet);
+
+        let action = AdminAction::SetProtocolFee(500);
+        assert!(
+            client.try_schedule_action(&action, &0).is_err(),
+            "schedule_action must require admin auth"
+        );
+    }
+
+    /// cancel_action called without any auth must be rejected.
+    #[test]
+    fn cancel_action_without_auth_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let action = AdminAction::SetProtocolFee(400);
+        let proposal_id = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "schedule_action",
+                    args: (action.clone(), 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .schedule_action(&action, &0);
+
+        // No auth → must fail
+        assert!(
+            client.try_cancel_action(&proposal_id).is_err(),
+            "cancel_action must require admin auth"
+        );
+    }
+
+    /// set_timelock_config called without any auth must be rejected.
+    #[test]
+    fn set_timelock_config_without_auth_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert!(
+            client.try_set_timelock_config(&100, &86400).is_err(),
+            "set_timelock_config must require admin auth"
+        );
+    }
+
+    /// touch_batch called without any auth must be rejected.
+    #[test]
+    fn touch_batch_without_auth_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert!(
+            client.try_touch_batch(&1, &10).is_err(),
+            "touch_batch must require admin auth"
+        );
+    }
+
+    // --- Wrong signer (impersonation) ---
+
+    /// A non-creator cannot update_patron even with their own valid auth.
+    #[test]
+    fn update_patron_wrong_signer_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let imposter = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let new_patron = Patron {
+            creator_share: 40,
+            investor_share: 40,
+            treasury_share: 20,
+            creator_addr: creator.clone(),
+            investor_addr: Address::generate(&env),
+            treasury_addr: Address::generate(&env),
+        };
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &imposter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_patron",
+                    args: (id, new_patron.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_patron(&id, &new_patron);
+        assert!(result.is_err(), "imposter must not update patron");
+    }
+
+    /// A non-admin impersonator cannot set_protocol_fee.
+    #[test]
+    fn set_protocol_fee_wrong_signer_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let imposter = Address::generate(&env);
+        client.initialize(&admin);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &imposter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_protocol_fee",
+                    args: (500u32,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_set_protocol_fee(&500);
+        assert!(result.is_err(), "imposter must not set protocol fee");
+    }
+
+    /// A non-admin cannot schedule_action.
+    #[test]
+    fn schedule_action_wrong_signer_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let imposter = Address::generate(&env);
+        client.initialize(&admin);
+
+        let action = AdminAction::SetProtocolFee(500);
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &imposter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "schedule_action",
+                    args: (action.clone(), 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_schedule_action(&action, &0);
+        assert!(result.is_err(), "non-admin must not schedule actions");
+    }
+
+    /// A non-admin cannot cancel_action.
+    #[test]
+    fn cancel_action_wrong_signer_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let imposter = Address::generate(&env);
+        client.initialize(&admin);
+
+        let action = AdminAction::SetProtocolFee(400);
+        let proposal_id = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "schedule_action",
+                    args: (action.clone(), 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .schedule_action(&action, &0);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &imposter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "cancel_action",
+                    args: (proposal_id,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_cancel_action(&proposal_id);
+        assert!(result.is_err(), "non-admin must not cancel actions");
+    }
+
+    // --- Uninitialized contract (dependency-failure) ---
+
+    /// set_protocol_fee on an uninitialized contract must panic.
+    #[test]
+    fn set_protocol_fee_on_uninit_contract_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        // No initialize() called
+        let imposter = Address::generate(&env);
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &imposter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_protocol_fee",
+                    args: (300u32,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_set_protocol_fee(&300);
+        assert!(result.is_err());
+    }
+
+    /// propose_admin on an uninitialized contract must panic.
+    #[test]
+    fn propose_admin_on_uninit_contract_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let any_addr = Address::generate(&env);
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &any_addr,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "propose_admin",
+                    args: (any_addr.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_propose_admin(&any_addr);
+        assert!(result.is_err());
+    }
+
+    /// accept_admin on an uninitialized contract (no pending) must panic.
+    #[test]
+    fn accept_admin_on_uninit_contract_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let any_addr = Address::generate(&env);
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &any_addr,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_accept_admin();
+        assert!(result.is_err());
+    }
+
+    /// schedule_action on an uninitialized contract must panic.
+    #[test]
+    fn schedule_action_on_uninit_contract_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let any_addr = Address::generate(&env);
+        let action = AdminAction::SetProtocolFee(300);
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &any_addr,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "schedule_action",
+                    args: (action.clone(), 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_schedule_action(&action, &0);
+        assert!(result.is_err());
+    }
+
+    // --- Boundary input validation ---
+
+    /// Protocol fee at the maximum boundary (10 000 bps = 100%) is accepted.
+    #[test]
+    fn set_protocol_fee_at_max_boundary_is_accepted() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_protocol_fee",
+                    args: (10_000u32,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_protocol_fee(&10_000);
+
+        assert_eq!(client.protocol_fee_bps(), Some(10_000));
+    }
+
+    /// Protocol fee above the maximum boundary must be rejected.
+    #[test]
+    fn set_protocol_fee_exceeds_max_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_protocol_fee",
+                    args: (10_001u32,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_set_protocol_fee(&10_001);
+        assert!(result.is_err(), "fee > 10 000 bps must be rejected");
+    }
+
+    /// calculate_protocol_fee with a negative amount must panic.
+    #[test]
+    fn calculate_protocol_fee_negative_amount_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert!(
+            client.try_calculate_protocol_fee(&(-1i128)).is_err(),
+            "negative amount must be rejected"
+        );
+    }
+
+    /// calculate_protocol_fee with zero amount returns zero.
+    #[test]
+    fn calculate_protocol_fee_zero_amount_returns_zero() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert_eq!(client.calculate_protocol_fee(&0), 0);
+    }
+
+    /// Patron shares summing to exactly 100 (boundary) must be accepted.
+    #[test]
+    fn patron_shares_summing_to_100_is_accepted() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+
+        // All-to-creator boundary: 100 + 0 + 0 = 100
+        let boundary_patron = Patron {
+            creator_share: 100,
+            investor_share: 0,
+            treasury_share: 0,
+            creator_addr: creator.clone(),
+            investor_addr: Address::generate(&env),
+            treasury_addr: Address::generate(&env),
+        };
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_talos",
+                    args: (
+                        s(&env, "Edge"),
+                        s(&env, "Sales"),
+                        s(&env, "d"),
+                        boundary_patron.clone(),
+                        kernel(),
+                        pulse(&env),
+                        protocol_wallet.clone(),
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_talos(
+                &s(&env, "Edge"),
+                &s(&env, "Sales"),
+                &s(&env, "d"),
+                &boundary_patron,
+                &kernel(),
+                &pulse(&env),
+                &protocol_wallet,
+            );
+        assert!(result.is_ok(), "shares summing to 100 must be accepted");
+    }
+
+    /// Patron shares summing to 0 must be rejected.
+    #[test]
+    fn patron_shares_summing_to_zero_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+
+        let zero_patron = Patron {
+            creator_share: 0,
+            investor_share: 0,
+            treasury_share: 0,
+            creator_addr: creator.clone(),
+            investor_addr: Address::generate(&env),
+            treasury_addr: Address::generate(&env),
+        };
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_talos",
+                    args: (
+                        s(&env, "Zero"),
+                        s(&env, "Sales"),
+                        s(&env, "d"),
+                        zero_patron.clone(),
+                        kernel(),
+                        pulse(&env),
+                        protocol_wallet.clone(),
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_talos(
+                &s(&env, "Zero"),
+                &s(&env, "Sales"),
+                &s(&env, "d"),
+                &zero_patron,
+                &kernel(),
+                &pulse(&env),
+                &protocol_wallet,
+            );
+        assert!(result.is_err(), "shares summing to 0 must be rejected");
+    }
+
+    /// Timelock min_delay at the maximum allowed value must be accepted.
+    #[test]
+    fn set_timelock_config_at_max_min_delay_is_accepted() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // MAX_MIN_DELAY = 2_592_000
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_timelock_config",
+                    args: (2_592_000u64, 86400u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_timelock_config(&2_592_000, &86400);
+
+        assert_eq!(client.get_timelock_config().min_delay, 2_592_000);
+    }
+
+    /// Timelock min_delay above the maximum must be rejected.
+    #[test]
+    fn set_timelock_config_above_max_min_delay_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_timelock_config",
+                    args: (2_592_001u64, 86400u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_set_timelock_config(&2_592_001, &86400);
+        assert!(result.is_err(), "min_delay above MAX must be rejected");
+    }
+
+    /// Timelock grace_period of zero must be rejected.
+    #[test]
+    fn set_timelock_config_zero_grace_period_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_timelock_config",
+                    args: (0u64, 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_set_timelock_config(&0, &0);
+        assert!(result.is_err(), "grace_period of 0 must be rejected");
+    }
+
+    /// Scheduling an action with delay less than min_delay must be rejected.
+    #[test]
+    fn schedule_action_below_min_delay_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_timelock_config",
+                    args: (3600u64, 86400u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_timelock_config(&3600, &86400);
+
+        let action = AdminAction::SetProtocolFee(200);
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "schedule_action",
+                    args: (action.clone(), 3599u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_schedule_action(&action, &3599);
+        assert!(result.is_err(), "delay < min_delay must be rejected");
+    }
+
+    // --- Retry / double-action scenarios ---
+
+    /// Executing an already-executed proposal must be rejected.
+    #[test]
+    fn execute_already_executed_proposal_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let action = AdminAction::SetProtocolFee(500);
+        let proposal_id = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "schedule_action",
+                    args: (action.clone(), 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .schedule_action(&action, &0);
+
+        client.execute_action(&proposal_id);
+
+        // Second execution must fail
+        assert!(
+            client.try_execute_action(&proposal_id).is_err(),
+            "double execution must be rejected"
+        );
+    }
+
+    /// Cancelling an already-executed proposal must be rejected.
+    #[test]
+    fn cancel_already_executed_proposal_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let action = AdminAction::SetProtocolFee(500);
+        let proposal_id = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "schedule_action",
+                    args: (action.clone(), 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .schedule_action(&action, &0);
+
+        client.execute_action(&proposal_id);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "cancel_action",
+                    args: (proposal_id,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_cancel_action(&proposal_id);
+        assert!(result.is_err(), "cancelling executed proposal must fail");
+    }
+
+    /// Executing a non-existent proposal must be rejected.
+    #[test]
+    fn execute_nonexistent_proposal_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert!(
+            client.try_execute_action(&9999).is_err(),
+            "nonexistent proposal must not execute"
+        );
+    }
+
+    /// Protocol wallet mismatch during create_talos must be rejected.
+    #[test]
+    fn create_talos_protocol_wallet_mismatch_is_rejected() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let wallet_a = Address::generate(&env);
+        let wallet_b = Address::generate(&env);
+
+        // Initialize with wallet_a
+        client.initialize(&wallet_a);
+
+        let p = patron(&env, &creator);
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_talos",
+                    args: (
+                        s(&env, "Mismatch"),
+                        s(&env, "Sales"),
+                        s(&env, "d"),
+                        p.clone(),
+                        kernel(),
+                        pulse(&env),
+                        wallet_b.clone(), // wrong wallet
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_talos(
+                &s(&env, "Mismatch"),
+                &s(&env, "Sales"),
+                &s(&env, "d"),
+                &p,
+                &kernel(),
+                &pulse(&env),
+                &wallet_b,
+            );
+        assert!(result.is_err(), "protocol wallet mismatch must be rejected");
+    }
+
+    /// get_talos, creator_of, is_active on a non-existent ID return sensible defaults.
+    #[test]
+    fn read_queries_on_nonexistent_talos_return_defaults() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+
+        assert!(client.get_talos(&999).is_none());
+        assert!(client.creator_of(&999).is_none());
+        assert!(!client.is_active(&999));
+    }
+
+    /// Operations on deactivated Talos still require creator auth (auth is
+    /// checked before any domain logic).
+    #[test]
+    fn operations_on_deactivated_talos_still_require_auth() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        // Deactivate
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "deactivate_talos",
+                    args: (id, creator.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .deactivate_talos(&id, &creator);
+
+        // Attempting update_kernel on a deactivated talos without auth must fail
+        assert!(client.try_update_kernel(&id, &kernel()).is_err());
+    }
 }

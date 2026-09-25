@@ -1,4 +1,4 @@
-import { getPublicBaseUrl } from "../public-url";
+import { getPublicBaseUrl, getPublicRequestUrl, toSafePublicUrl } from "../public-url";
 import { describe, it, expect, afterEach, vi } from "vitest";
 
 describe("getPublicBaseUrl", () => {
@@ -175,5 +175,47 @@ describe("getPublicBaseUrl", () => {
       host: "localhost:3000"
     });
     expect(getPublicBaseUrl(headers)).toBe("https://safe.example.com");
+  });
+});
+
+
+describe("getPublicRequestUrl / toSafePublicUrl", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("builds a public URL with sensitive query fields redacted", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("TRUSTED_HOSTS", "app.example.com");
+
+    const req = new Request(
+      "https://ignored.internal/api/activity?page=1&apiKey=sk-live&filter=open",
+      { headers: { host: "app.example.com", "x-forwarded-proto": "https" } },
+    );
+
+    const out = getPublicRequestUrl(req);
+    expect(out.startsWith("https://app.example.com/api/activity?")).toBe(true);
+    expect(out).toContain("page=1");
+    expect(out).toContain("filter=open");
+    expect(out).not.toContain("sk-live");
+    expect(out).toContain("[REDACTED]");
+  });
+
+  it("returns only the trusted base when the request URL is malformed", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("TRUSTED_HOSTS", "app.example.com");
+
+    const req = {
+      url: "not-a-url",
+      headers: new Headers({ host: "app.example.com" }),
+    } as unknown as Request;
+
+    expect(getPublicRequestUrl(req)).toBe("https://app.example.com");
+  });
+
+  it("toSafePublicUrl redacts without requiring headers", () => {
+    expect(
+      toSafePublicUrl("https://app.example/callback?token=secret&ok=1"),
+    ).not.toContain("secret");
   });
 });
