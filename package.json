@@ -15,7 +15,12 @@
     "stack:reset": "bash scripts/local-stack.sh reset",
     "test:fixtures": "pnpm --dir contracts test:fixtures",
     "fixtures:gen": "node scripts/generate-registry-fixtures.mjs",
-    "fixtures:check": "node scripts/generate-registry-fixtures.mjs --check"
+    "fixtures:check": "node scripts/generate-registry-fixtures.mjs --check",
+    "metrics:check": "node scripts/operational-metrics.test.mjs",
+    "smoke:fixture:gen": "node scripts/generate-smoke-fixture.mjs",
+    "smoke:fixture:check": "node scripts/generate-smoke-fixture.mjs --check",
+    "secrets:check": "bash scripts/secret-scan.sh",
+    "smoke:chaos": "node scripts/chaos-fixture.mjs"
   },
   "dependencies": {
     "next": "16.2.2"

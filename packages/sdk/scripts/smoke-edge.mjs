@@ -13,10 +13,6 @@
  * Then it asserts the ESM SDK can be evaluated in that restricted environment
  * and its exported classes can be instantiated without touching Node APIs —
  * proving the SDK is safe to load inside an Edge worker.
- *
- * We use `import()` inside a `vm.SourceTextModule` when available (Node 22+),
- * falling back to a string-eval of the ESM files inside the sandboxed
- * globalThis for Node 18/20.
  */
 
 import { strict as assert } from "node:assert";
@@ -36,13 +32,13 @@ console.log("[compat:edge] dist size:", statSync(ESM_ENTRY).size, "bytes (main)"
 
 // Build a browser/edge-like sandbox. Deliberately no Node globals.
 const edgeGlobal = {
-  globalThis: undefined as unknown as typeof globalThis,
+  globalThis: undefined,
   TextEncoder,
   TextDecoder,
   crypto,
-  fetch: (() => {
+  fetch: () => {
     throw new Error("fetch should not be called during edge import smoke test");
-  }) as typeof fetch,
+  },
   setTimeout,
   setInterval,
   clearTimeout,
@@ -105,23 +101,63 @@ const edgeGlobal = {
   WritableStream,
   TransformStream,
   RegExp,
-  Int8Array,
 };
-(edgeGlobal as unknown as Record<string, unknown>).globalThis = edgeGlobal;
-(edgeGlobal as unknown as Record<string, unknown>).self = edgeGlobal;
-(edgeGlobal as unknown as Record<string, unknown>).window = undefined;
-(edgeGlobal as unknown as Record<string, unknown>).top = undefined;
+
+edgeGlobal.globalThis = edgeGlobal;
+edgeGlobal.self = edgeGlobal;
+edgeGlobal.window = undefined;
+edgeGlobal.top = undefined;
+
+// Negative / boundary: Node built-ins must remain unavailable in the sandbox.
+assert.equal(
+  Object.prototype.hasOwnProperty.call(edgeGlobal, "process"),
+  false,
+  "edge sandbox must not expose process",
+);
+assert.equal(
+  Object.prototype.hasOwnProperty.call(edgeGlobal, "Buffer"),
+  false,
+  "edge sandbox must not expose Buffer",
+);
+assert.equal(
+  Object.prototype.hasOwnProperty.call(edgeGlobal, "require"),
+  false,
+  "edge sandbox must not expose require",
+);
+assert.equal(
+  Object.prototype.hasOwnProperty.call(edgeGlobal, "__dirname"),
+  false,
+  "edge sandbox must not expose __dirname",
+);
 
 const ctx = vm.createContext(edgeGlobal, {
   codeGeneration: { strings: false, wasm: true },
 });
 
-// Since we can't actually use Node's real ESM loader into a separate
-// context easily without SourceTextModule (unstable), we execute the
+// Confirm Node globals are not reachable from the sandbox context.
+assert.equal(
+  vm.runInContext("typeof process", ctx),
+  "undefined",
+  "process must be undefined inside edge sandbox",
+);
+assert.equal(
+  vm.runInContext("typeof Buffer", ctx),
+  "undefined",
+  "Buffer must be undefined inside edge sandbox",
+);
+assert.equal(
+  vm.runInContext("typeof require", ctx),
+  "undefined",
+  "require must be undefined inside edge sandbox",
+);
+console.log("[compat:edge] sandbox excludes Node built-ins (process/Buffer/require)");
+
+// Since we can't easily use Node's real ESM loader into a separate
+// context without SourceTextModule (unstable), we execute the
 // concatenated ESM dist files as a script while shimming `export` semantics.
 // This is imperfect for import semantics, but matches what bundlers do and
 // catches any import-time Node API use that would break in Edge.
-const files: string[] = [];
+const files = [];
 (function walk(dir) {
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
@@ -134,30 +170,25 @@ files.sort();
 
 console.log(`[compat:edge] concatenating ${files.length} ESM files`);
 
-// Wrap each source file. We convert ESM export statements into assignments
-// against an __EXPORTS__ object, and convert `import` statements into
-// property accesses against __MODS__ (also concatenated). Then we run the
-// result as a single script in the edge sandbox — again this isn't a full
-// ESM module resolver, but it guarantees no Node import-time APIs fire and
-// all our exported names land on __EXPORTS__ for assertion.
-const EXPORT_REGEX = /^export\s+(default\s+)?(?:(?:const|let|var|class|function|enum|async\s+function)\s+)?([A-Za-z0-9_$]+)/m;
-const REEXPORT_ALL = /^export\s+\*\s+from\s+["']([^"']+)["']/m;
-const REEXPORT_NAMED = /^export\s+\{([^}]+)\}\s+from\s+["']([^"']+)["']/m;
-const IMPORT_LINE = /^import\s+(?:(?:\{[^}]*\}|\*\s+as\s+[A-Za-z0-9_$]+|[A-Za-z0-9_$]+(?:\s*,\s*\{[^}]*\})?)\s+from\s+)?["']([^"']+)["'];?\s*$/m;
+const EXPORT_REGEX =
+  /^export\s+(default\s+)?(?:(?:const|let|var|class|function|enum|async\s+function)\s+)?([A-Za-z0-9_$]+)/m;
+const REEXPORT_ALL = /^export\s+\*\s+from\s+["']([^"']+)["']/;
+const REEXPORT_NAMED = /^export\s+\{([^}]+)\}\s+from\s+["']([^"']+)["']/;
+const IMPORT_LINE =
+  /^import\s+(?:(?:\{[^}]*\}|\*\s+as\s+[A-Za-z0-9_$]+|[A-Za-z0-9_$]+(?:\s*,\s*\{[^}]*\})?)\s+from\s+)?["']([^"']+)["'];?\s*$/;
 
-function stripImportsExports(src: string, srcFile: string): string {
+function stripImportsExports(src) {
   const lines = src.split(/\r?\n/);
-  const out: string[] = [];
+  const out = [];
   for (const raw of lines) {
     const line = raw.trimEnd();
 
-    // Skip `export * from "..."` for compat test (re-exports will just be
-    // concatenated inline since we're merging sources anyway).
+    // Skip re-exports — sources are concatenated inline.
     if (REEXPORT_ALL.test(line)) continue;
     if (REEXPORT_NAMED.test(line)) continue;
     if (IMPORT_LINE.test(line)) continue;
 
-    // `export default X` → `__EXPORTS__.default = X; X`
+    // `export default X` → `__EXPORTS__.default = X`
     if (/^export\s+default\s+/.test(line)) {
       const rest = line.replace(/^export\s+default\s+/, "");
       out.push("__EXPORTS__.default = (" + rest + ");");
@@ -174,19 +205,34 @@ function stripImportsExports(src: string, srcFile: string): string {
       continue;
     }
 
-    // Plain line
+    // `export { a, b as c }` local re-export
+    const namedLocal = /^export\s+\{([^}]+)\}\s*;?\s*$/.exec(line);
+    if (namedLocal) {
+      for (const part of namedLocal[1].split(",")) {
+        const bit = part.trim();
+        if (!bit) continue;
+        const asMatch = /^([A-Za-z0-9_$]+)\s+as\s+([A-Za-z0-9_$]+)$/.exec(bit);
+        if (asMatch) {
+          out.push(`__EXPORTS__.${asMatch[2]} = ${asMatch[1]};`);
+        } else {
+          out.push(`__EXPORTS__.${bit} = ${bit};`);
+        }
+      }
+      continue;
+    }
+
     out.push(line);
   }
   return out.join("\n");
 }
 
-const sources: string[] = [];
+const sources = [];
 sources.push("var __EXPORTS__ = {};");
 for (const f of files) {
   const rel = relative(ESM_DIR, f);
   const raw = readFileSync(f, "utf8");
   sources.push(`\n// ===== ${rel} =====`);
-  sources.push(stripImportsExports(raw, rel));
+  sources.push(stripImportsExports(raw));
 }
 const combined = sources.join("\n") + "\nthis.__EXPORTS__ = __EXPORTS__;";
 
@@ -202,18 +248,15 @@ try {
   process.exit(1);
 }
 
-const sdk = (ctx as unknown as { __EXPORTS__: Record<string, unknown> }).__EXPORTS__;
+const sdk = ctx.__EXPORTS__;
 assert.ok(sdk, "SDK exports not produced in edge sandbox");
 console.log(
   "[compat:edge] exports discovered:",
   Object.keys(sdk).sort().join(", ") || "(none — expected when esbuild fallback is used)",
 );
 
-// We require these exports to be constructable / callable. If they show up
-// as plain `undefined` the concatenation fallback may not have captured
-// re-exports, which is acceptable — but when they ARE present, they must
-// be the right shape.
-function check(name: string, kind: "class" | "function" | "object" | "enum") {
+// When exports ARE present, they must be the right shape.
+function check(name, kind) {
   if (!(name in sdk) || sdk[name] === undefined) {
     console.log("  ? " + name + " not exported (acceptable for fallback concatenation)");
     return;
@@ -244,24 +287,43 @@ check("isValidSecretKey", "function");
 
 // When TalosClient is present, instantiate one and confirm method shape.
 if (typeof sdk.TalosClient === "function") {
-  const client = new (sdk.TalosClient as new (opts?: unknown) => {
-    getTalos: unknown;
-    listTaloses: unknown;
-    createTalos: unknown;
-  })({ baseUrl: "http://example.test", apiKey: "edge" });
+  const client = new sdk.TalosClient({
+    baseUrl: "http://example.test",
+    apiKey: "edge",
+  });
   assert.equal(typeof client.getTalos, "function", "client.getTalos not callable");
   assert.equal(typeof client.listTaloses, "function", "client.listTaloses not callable");
   assert.equal(typeof client.createTalos, "function", "client.createTalos not callable");
+  // Privacy: constructor must not echo apiKey into enumerable/stringified state.
+  const leaked = JSON.stringify(client);
+  assert.ok(
+    !leaked.includes("edge") || !/"apiKey"\s*:/.test(leaked),
+    "TalosClient must not expose apiKey/secrets in JSON serialization",
+  );
   console.log("  + TalosClient instantiation & method shape OK (edge sandbox)");
 }
 
 if (typeof sdk.ChaosInjector === "function") {
-  const inj = new (sdk.ChaosInjector as new (opts?: unknown) => {
-    isEnabled: () => boolean;
-    registerFault: (f: unknown) => void;
-  })({ enabled: false });
+  const inj = new sdk.ChaosInjector({ enabled: false });
   assert.equal(inj.isEnabled(), false);
   console.log("  + ChaosInjector instantiation OK (edge sandbox)");
+}
+
+// Malformed / boundary: constructing with missing baseUrl should be explicit, not silent Node crash.
+if (typeof sdk.TalosClient === "function") {
+  try {
+    // Many clients accept empty opts; ensure it does not throw a Node-only ReferenceError.
+    const soft = new sdk.TalosClient({});
+    assert.ok(soft);
+    console.log("  + TalosClient({}) boundary construct OK");
+  } catch (err) {
+    assert.ok(err instanceof Error, "errors must be Error instances");
+    assert.ok(
+      !/process is not defined|Buffer is not defined|require is not defined/.test(String(err)),
+      "boundary errors must not be Node-global ReferenceErrors",
+    );
+    console.log("  + TalosClient({}) threw explicit Error (acceptable):", err.name);
+  }
 }
 
 console.log("[compat:edge] ALL CHECKS PASSED");

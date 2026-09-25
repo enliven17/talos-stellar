@@ -3,13 +3,29 @@
 from __future__ import annotations
 
 import json
+import re
 from decimal import Decimal
 from pathlib import Path
 
-from pydantic import Field, PrivateAttr
+from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from talos_agent.circuit_breaker import CircuitBreakerConfig
+
 APP_DIR = Path.home() / ".talos-agent"
+
+_CONFIG_SECRET_FIELDS = re.compile(
+    r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|secret|password|private[_-]?key|seed|mnemonic|signature|payment)"
+)
+_CONFIG_SECRET_VALUE = re.compile(r"(?i)(input_value\s*=\s*)(['\"])(.*?)(\2)")
+
+
+def safe_config_error(error: BaseException) -> str:
+    """Return a useful configuration error without exposing secret values."""
+    text = str(error)
+    if _CONFIG_SECRET_FIELDS.search(text):
+        text = _CONFIG_SECRET_VALUE.sub(r"\1'[REDACTED]'", text)
+    return text or "configuration could not be loaded"
 
 
 def _json_config_source() -> dict:
@@ -119,6 +135,30 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # Telegram send queue (opt-in; when disabled the adapter sends directly, as before).
+    # Defaults follow Telegram's documented limits: ~1 msg/s per chat, 20 msgs/min per group.
+    telegram_rate_limit_enabled: bool = Field(
+        default=False, validation_alias="TALOS_TELEGRAM_RATE_LIMIT_ENABLED"
+    )
+    telegram_min_interval_seconds: float = Field(
+        default=1.0, ge=0, le=60, validation_alias="TALOS_TELEGRAM_MIN_INTERVAL_SECONDS"
+    )
+    telegram_max_per_minute: int = Field(
+        default=20, ge=1, le=1000, validation_alias="TALOS_TELEGRAM_MAX_PER_MINUTE"
+    )
+    telegram_queue_max_size: int = Field(
+        default=1000, ge=1, le=100000, validation_alias="TALOS_TELEGRAM_QUEUE_MAX_SIZE"
+    )
+    telegram_queue_max_attempts: int = Field(
+        default=5, ge=1, le=50, validation_alias="TALOS_TELEGRAM_QUEUE_MAX_ATTEMPTS"
+    )
+    telegram_queue_max_age_seconds: float = Field(
+        default=3600.0, ge=1, le=604800, validation_alias="TALOS_TELEGRAM_QUEUE_MAX_AGE_SECONDS"
+    )
+    telegram_queue_drain_interval_seconds: float = Field(
+        default=1.0, ge=0.1, le=60, validation_alias="TALOS_TELEGRAM_QUEUE_DRAIN_INTERVAL_SECONDS"
+    )
+
     # Versioned encrypted secret rotation (opt-in for backward compatibility).
     secret_rotation_enabled: bool = Field(
         default=False, validation_alias="TALOS_SECRET_ROTATION_ENABLED"
@@ -145,6 +185,11 @@ class Settings(BaseSettings):
         ge=1,
         le=60000,
         validation_alias="TALOS_SECRET_DB_TIMEOUT_MS",
+    )
+    secret_store_backend: str = Field(
+        default="sqlite",
+        validation_alias="TALOS_SECRET_STORE_BACKEND",
+        description="Pluggable secret-store backend: sqlite (default) or memory",
     )
 
     # Third-party adapter capability sandbox (opt-in rollout).
@@ -196,6 +241,23 @@ class Settings(BaseSettings):
         le=1000000,
         validation_alias="TALOS_ADAPTER_MAX_INVOCATION_RECORDS",
     )
+    adapter_retry_configs: dict[str, dict] = Field(
+        default_factory=dict,
+        validation_alias="TALOS_ADAPTER_RETRY_CONFIGS",
+        description="Per-adapter retry and circuit breaker settings as JSON",
+    )
+
+    @field_validator("adapter_retry_configs")
+    @classmethod
+    def validate_adapter_retry_configs(cls, value: dict[str, dict]) -> dict[str, dict]:
+        for adapter, config in value.items():
+            if not isinstance(adapter, str) or not adapter or not isinstance(config, dict):
+                raise ValueError("adapter retry configs must map adapter names to objects")
+            try:
+                CircuitBreakerConfig.from_mapping(config)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid retry config for adapter '{adapter}'") from exc
+        return {adapter.lower(): config for adapter, config in value.items()}
 
     # Policy engine (disabled by default — backward compatible)
     policy_engine_enabled: bool = Field(default=False, description="Enable the declarative policy engine for autonomous actions")

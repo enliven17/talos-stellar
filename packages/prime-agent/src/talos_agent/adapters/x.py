@@ -10,6 +10,7 @@ from rich.console import Console
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
 from talos_agent.adapters.capability import SecretProvider
+from talos_agent.adapters.snapshots import XHealthSnapshot
 from talos_agent.config import resolve_setting_secret
 
 if TYPE_CHECKING:
@@ -24,6 +25,28 @@ _HOME_URL = "https://x.com/home"
 _MENTIONS_URL = "https://x.com/notifications/mentions"
 _SEARCH_URL = "https://x.com/search?q={query}&src=typed_query&f=live"
 _PROFILE_URL = "https://x.com/{username}"
+
+
+def sanitize_outbound_x_content(text: str | None, *, max_len: int = _CHAR_LIMIT) -> str:
+    """Sanitize outbound X/Twitter content (issue #553).
+
+    - Rejects None/empty after strip
+    - Strips control chars and credential-like secrets
+    - Bounds length to platform limit
+    """
+    import re as _re
+
+    if text is None:
+        raise ValueError("outbound X content is required")
+    cleaned = "".join(ch for ch in str(text) if ch in "\n\t" or ord(ch) >= 32)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        raise ValueError("outbound X content is empty")
+    if _re.search(r"(?i)(api[_-]?key|secret|password|bearer\s+\S+|ghp_[A-Za-z0-9]+)", cleaned):
+        raise ValueError("outbound X content contains sensitive material")
+    if len(cleaned) > max_len:
+        cleaned = cleaned[: max_len - 1].rstrip() + "…"
+    return cleaned
 
 
 @dataclass(frozen=True)
@@ -78,7 +101,7 @@ class XAdapter(BaseSocialAdapter):
             supports_analytics=True,
         )
 
-    def health_snapshot(self) -> dict[str, bool]:
+    def health_snapshot(self) -> XHealthSnapshot:
         live_check = getattr(self._browser, "is_live", None)
         if callable(live_check):
             browser_live = bool(live_check())
@@ -87,11 +110,11 @@ class XAdapter(BaseSocialAdapter):
             browser_live = bool(
                 stagehand is not None and getattr(stagehand, "page", None) is not None
             )
-        return {
-            "has_username": bool(self._username),
-            "has_password": bool(self._password),
-            "browser_live": browser_live,
-        }
+        return XHealthSnapshot(
+            has_username=bool(self._username),
+            has_password=bool(self._password),
+            browser_live=browser_live,
+        )
 
     # ── Auth ─────────────────────────────────────────────────
 
@@ -183,6 +206,15 @@ class XAdapter(BaseSocialAdapter):
     # ── Publishing ───────────────────────────────────────────
 
     async def post(self, content: str, **kwargs) -> PublishResult:
+        try:
+            content = sanitize_outbound_x_content(content)
+        except ValueError as exc:
+            return PublishResult(
+                status="failed",
+                channel=self.channel_name,
+                content=content or "",
+                error=str(exc),
+            )
         valid, error = self.validate_content(content)
         if not valid:
             return PublishResult(status="failed", channel=self.channel_name, content=content, error=error)
@@ -222,6 +254,7 @@ class XAdapter(BaseSocialAdapter):
         return PublishResult(status="posted", channel=self.channel_name, content=content)
 
     async def reply(self, target_url: str, content: str, **kwargs) -> PublishResult:
+        content = sanitize_outbound_x_content(content)
         await self._ensure_login()
         await self._browser.goto(target_url)
         await asyncio.sleep(2)

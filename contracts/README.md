@@ -14,15 +14,20 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
   - Patron configuration (creator/investor/treasury shares)
   - Kernel policy management (approval thresholds, GTM budget)
   - Pulse token metadata storage
+  - **Metadata byte limits** (`create_talos`/`update_pulse` reject `name` > 64, `category` > 32, `description` > 512, `Pulse.token_symbol` > 12 bytes; `name` and `token_symbol` must be non-empty)
   - 3% protocol fee to protocol wallet on creation
   - **Two-step admin transfer** (`propose_admin` / `accept_admin` / `cancel_admin_transfer`)
   - **Admin timelocks** (`schedule_action` / `execute_action` / `cancel_action` / `set_timelock_config`)
+  - **Separated pause-control roles**: Creator can set dedicated pause and resume controllers for safe delegation
+  - Pause controller can deactivate Talos, resume controller can activate Talos
+  - Creator retains full pause/resume capabilities regardless of controller settings
+  - Enables operators and contributors to safely manage Talos lifecycle without creator intervention
   - **Interface version query** (`version()` — immutable, compile-time constant `(1, 1, 0)`)
   - **Stable interface identifier** (`interface_id()` returns `BytesN<32>` derived from `"TalosRegistry"` + version)
   - **Version negotiation** (`supports_version(maj, min, patch)`)
   - **Capability catalogue** (`interface_features()` returns `Vec<Symbol>`)
   - **Deprecation telemetry** (`dep_path` event emitted before panic when timelock is enabled)
-  - Events: `tls_crt`, `tls_crt2`, `pat_upd`, `fee_chg`, `adm_prp`, `adm_acc`, `adm_cnl`, `tl_sch`, `tl_exec`, `tl_cnl`, `tl_cfg`, `dep_path`
+  - Events: `tls_crt`, `tls_crt2`, `pat_upd`, `fee_chg`, `adm_prp`, `adm_acc`, `adm_cnl`, `tl_sch`, `tl_exec`, `tl_cnl`, `tl_cfg`, `dep_path`, `tls_paus`, `tls_resu`
 
 ### 2. TalosNameService
 
@@ -419,6 +424,8 @@ Both contracts emit typed Soroban events on every meaningful state change. Off-c
 | `dom_paus`| `(symbol_short!("dom_paus"), by: Address)` | `(domain_id: u32, duration: u64)` | `pause_domain` success |
 | `dom_resm`| `(symbol_short!("dom_resm"), by: Address)` | `(domain_id: u32,)` | `unpause_domain` success |
 | `dom_expd`| `(symbol_short!("dom_expd"),)` | `(domain_id: u32,)` | Auto-expiry after duration elapses |
+| `tls_paus` | `(symbol_short!("tls_paus"), talos_id: u32)` | `(controller: Address)` | `deactivate_talos` success |
+| `tls_resu` | `(symbol_short!("tls_resu"), talos_id: u32)` | `(controller: Address)` | `activate_talos` success |
 
 **Filtering examples**
 
@@ -437,6 +444,10 @@ Both contracts emit typed Soroban events on every meaningful state change. Off-c
 
 // A specific proposal executed — filter on topics == ("tl_exec", proposal_id)
 (symbol_short!("tl_exec"), 3u64)
+
+// All pause/resume events for a specific Talos — filter on topics[1] == talos_id
+(symbol_short!("tls_paus"), 42u32)
+(symbol_short!("tls_resu"), 42u32)
 ```
 
 ### TalosNameService
@@ -980,3 +991,5 @@ The test suites live in each contract's `#[cfg(test)] mod tests` block and cover
 ## License
 
 MIT
+
+See [ERRORS.md](./ERRORS.md) for typed error codes, common panic diagnostics, and caller recovery guidance.

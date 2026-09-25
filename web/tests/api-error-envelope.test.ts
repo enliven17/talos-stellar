@@ -8,6 +8,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { NextRequest } from "next/server";
 
 // ─── Unit tests: api-response helpers ────────────────────────────────────────
 
@@ -303,7 +304,7 @@ describe("GET /api/talos/:id", () => {
   it("returns 404 envelope when TALOS is not found", async () => {
     (db.query.tlsTalos.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
 
-    const req = new Request("http://localhost/api/talos/nonexistent");
+    const req = new NextRequest("http://localhost/api/talos/nonexistent");
     const params = Promise.resolve({ id: "nonexistent" });
     const res = await getTalosById(req, { params });
     await assertErrorEnvelope(res, 404, "NOT_FOUND");
@@ -321,7 +322,7 @@ describe("GET /api/talos/:id", () => {
       commerceServices: [],
     });
 
-    const req = new Request("http://localhost/api/talos/t1");
+    const req = new NextRequest("http://localhost/api/talos/t1");
     const params = Promise.resolve({ id: "t1" });
     const res = await getTalosById(req, { params });
     expect(res.status).toBe(200);
@@ -335,7 +336,7 @@ describe("GET /api/talos/:id", () => {
       new Error("db exploded — internal detail"),
     );
 
-    const req = new Request("http://localhost/api/talos/t1");
+    const req = new NextRequest("http://localhost/api/talos/t1");
     const params = Promise.resolve({ id: "t1" });
     const res = await getTalosById(req, { params });
     const body = await assertErrorEnvelope(res, 500, "INTERNAL_ERROR");
@@ -351,7 +352,7 @@ describe("GET /api/talos/check-name", () => {
   });
 
   it("returns { available: false, reason } for short names (no envelope)", async () => {
-    const req = new Request("http://localhost/api/talos/check-name?name=ab") as Parameters<typeof checkName>[0];
+    const req = new NextRequest("http://localhost/api/talos/check-name?name=ab") as Parameters<typeof checkName>[0];
     const res = await checkName(req);
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -363,7 +364,7 @@ describe("GET /api/talos/check-name", () => {
     const selectMock = makeChainMock([{ id: "existing-id" }]);
     (db.select as ReturnType<typeof vi.fn>).mockImplementation(selectMock);
 
-    const req = new Request("http://localhost/api/talos/check-name?name=taken") as Parameters<typeof checkName>[0];
+    const req = new NextRequest("http://localhost/api/talos/check-name?name=taken") as Parameters<typeof checkName>[0];
     const res = await checkName(req);
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -375,7 +376,7 @@ describe("GET /api/talos/check-name", () => {
     (db.select as ReturnType<typeof vi.fn>).mockImplementation(selectMock);
     (isNameAvailableOnChain as ReturnType<typeof vi.fn>).mockResolvedValue(true);
 
-    const req = new Request("http://localhost/api/talos/check-name?name=freename") as Parameters<typeof checkName>[0];
+    const req = new NextRequest("http://localhost/api/talos/check-name?name=freename") as Parameters<typeof checkName>[0];
     const res = await checkName(req);
     expect(res.status).toBe(200);
     const body = await res.json();

@@ -1,4 +1,11 @@
 //! TalosGovernance - Soroban smart contract for token-weighted governance.
+//!
+//! ## What's new in this branch (#606)
+//! - `EventProposalCreated` typed struct — replaces raw tuple publish for prop_crt
+//! - `EventVoteCast` typed struct — replaces raw tuple publish for vote
+//! - `EventProposalStatusChanged` typed struct — replaces raw publish for prop_stat
+//! - All emit helpers now publish their typed struct as the event data
+//! - New event-verification tests decode structs from emitted events
 
 #![no_std]
 
@@ -76,6 +83,10 @@ pub enum DataKey {
     CheckpointCount(Address),
     Delegation(Address),
     LastTouched(u32),
+    /// Monotonic counter for dividend epochs (1-based).
+    NextDividendEpoch,
+    /// Dividend snapshot keyed by epoch number.
+    DividendSnapshot(u32),
 }
 
 #[contracttype]
@@ -83,6 +94,44 @@ pub enum DataKey {
 pub struct Checkpoint {
     pub ledger: u32,
     pub votes: i128,
+}
+
+// ── Dividend Snapshot (#598) ─────────────────────────────────────────
+
+/// Maximum page size for `get_dividend_snapshots_page`.
+pub const DIVIDEND_PAGE_LIMIT: u32 = 50;
+
+/// A point-in-time record of per-token revenue distribution for a Talos.
+///
+/// Each epoch represents one distribution cycle.  `total_usdc` is the gross
+/// USDC distributed; `per_token_usdc` is the amount per Mitos token unit
+/// (both in micro-USDC, i.e. 10⁻⁶ USDC).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DividendSnapshot {
+    /// Monotonically-increasing epoch number (1-based).
+    pub epoch: u32,
+    /// The Talos this dividend belongs to.
+    pub talos_id: u32,
+    /// Total USDC distributed in this epoch (micro-USDC).
+    pub total_usdc: i128,
+    /// Per Mitos token unit (micro-USDC).
+    pub per_token_usdc: i128,
+    /// Ledger at which this snapshot was recorded.
+    pub snapshot_ledger: u32,
+    /// Unix timestamp of the snapshot.
+    pub created_at: u64,
+}
+
+/// Emitted when a new dividend snapshot epoch is recorded.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventDividendSnapshotRecorded {
+    pub epoch: u32,
+    pub talos_id: u32,
+    pub total_usdc: i128,
+    pub per_token_usdc: i128,
+    pub snapshot_ledger: u32,
 }
 
 // ── Pause Domains ───────────────────────────────────────────────────
@@ -94,23 +143,102 @@ pub const PAUSE_GOVERNANCE_VOTING: u32 = 8;
 /// Pause domain for governance configuration.
 pub const PAUSE_GOVERNANCE_CONFIG: u32 = 9;
 
-fn emit_proposal_created(env: &Env, proposal_id: u32, talos_id: u32, proposer: Address) {
-    env.events().publish(
-        (symbol_short!("prop_crt"), proposal_id),
-        (talos_id, proposer),
-    );
+// ── Typed Event Fixtures (#606) ──────────────────────────────────────
+//
+// Each struct is decorated with `#[contracttype]` so the Soroban SDK
+// serialises/deserialises it via XDR map encoding.  The structs are
+// published as the event *data* payload; the topics remain lightweight
+// symbol + id tuples for efficient on-chain filtering.
+//
+// Event schema (topics → typed data struct):
+//   prop_crt : (symbol, proposal_id: u32) → EventProposalCreated
+//   vote     : (symbol, proposal_id: u32) → EventVoteCast
+//   prop_stat: (symbol, proposal_id: u32) → EventProposalStatusChanged
+
+/// Emitted when a new governance proposal is created.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventProposalCreated {
+    pub proposal_id: u32,
+    pub talos_id: u32,
+    pub proposer: Address,
+    pub snapshot_ledger: u32,
+    pub end_ledger: u32,
 }
 
-fn emit_vote_cast(env: &Env, proposal_id: u32, voter: Address, choice: VoteChoice, weight: i128) {
-    env.events().publish(
-        (symbol_short!("vote"), proposal_id),
-        (voter, choice, weight),
-    );
+/// Emitted when a voter casts a vote.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventVoteCast {
+    pub proposal_id: u32,
+    pub voter: Address,
+    pub choice: VoteChoice,
+    pub weight: i128,
+}
+
+/// Emitted when a proposal transitions to a terminal status.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventProposalStatusChanged {
+    pub proposal_id: u32,
+    pub status: ProposalStatus,
+}
+
+fn emit_proposal_created(
+    env: &Env,
+    proposal_id: u32,
+    talos_id: u32,
+    proposer: Address,
+    snapshot_ledger: u32,
+    end_ledger: u32,
+) {
+    let payload = EventProposalCreated {
+        proposal_id,
+        talos_id,
+        proposer,
+        snapshot_ledger,
+        end_ledger,
+    };
+    env.events()
+        .publish((symbol_short!("prop_crt"), proposal_id), payload);
+}
+
+fn emit_vote_cast(
+    env: &Env,
+    proposal_id: u32,
+    voter: Address,
+    choice: VoteChoice,
+    weight: i128,
+) {
+    let payload = EventVoteCast {
+        proposal_id,
+        voter,
+        choice,
+        weight,
+    };
+    env.events()
+        .publish((symbol_short!("vote"), proposal_id), payload);
 }
 
 fn emit_proposal_status_changed(env: &Env, proposal_id: u32, status: ProposalStatus) {
+    let payload = EventProposalStatusChanged {
+        proposal_id,
+        status,
+    };
     env.events()
-        .publish((symbol_short!("prop_stat"), proposal_id), status);
+        .publish((symbol_short!("prop_stat"), proposal_id), payload);
+}
+
+fn emit_dividend_snapshot_recorded(env: &Env, snap: &DividendSnapshot) {
+    let payload = EventDividendSnapshotRecorded {
+        epoch: snap.epoch,
+        talos_id: snap.talos_id,
+        total_usdc: snap.total_usdc,
+        per_token_usdc: snap.per_token_usdc,
+        snapshot_ledger: snap.snapshot_ledger,
+    };
+    env.events()
+        .publish((symbol_short!("div_snap"), snap.epoch), payload);
 }
 
 // ── Stable interface (v1.0.0) ───────────────────────────────────────
@@ -204,6 +332,9 @@ impl TalosGovernance {
         env.storage()
             .persistent()
             .set(&DataKey::NextProposalId, &1u32);
+        env.storage()
+            .persistent()
+            .set(&DataKey::NextDividendEpoch, &1u32);
     }
 
     pub fn create_proposal(
@@ -228,6 +359,7 @@ impl TalosGovernance {
         let current_ledger = env.ledger().sequence();
         let snapshot_ledger = current_ledger.saturating_sub(10);
         let proposal_id = Self::next_proposal_id(env.clone());
+        let end_ledger = current_ledger + config.voting_period_ledgers;
 
         let proposal = Proposal {
             id: proposal_id,
@@ -237,7 +369,7 @@ impl TalosGovernance {
             description,
             snapshot_ledger,
             start_ledger: current_ledger,
-            end_ledger: current_ledger + config.voting_period_ledgers,
+            end_ledger,
             status: ProposalStatus::Active,
             yes_votes: 0,
             no_votes: 0,
@@ -252,7 +384,7 @@ impl TalosGovernance {
             .persistent()
             .set(&DataKey::NextProposalId, &(proposal_id + 1));
 
-        emit_proposal_created(&env, proposal_id, talos_id, proposer);
+        emit_proposal_created(&env, proposal_id, talos_id, proposer, snapshot_ledger, end_ledger);
         proposal_id
     }
 
@@ -377,6 +509,131 @@ impl TalosGovernance {
             panic!("Voting period must be positive");
         }
         env.storage().persistent().set(&DataKey::Config, &config);
+    }
+
+    // ── Dividend Snapshots (#598) ─────────────────────────────────────
+
+    /// Record a new dividend snapshot epoch (admin only).
+    ///
+    /// Each call mints the next sequential epoch and persists the snapshot.
+    /// Both `total_usdc` and `per_token_usdc` must be non-negative (zero is
+    /// allowed for no-distribution epochs).  Returns the assigned epoch number.
+    ///
+    /// # Errors
+    /// - Panics `"Contract not initialized"` when called before `initialize`.
+    /// - Panics `"Unauthorized admin"` when the signer is not the stored admin.
+    /// - Panics `"total_usdc cannot be negative"` / `"per_token_usdc cannot be negative"`.
+    pub fn record_dividend_snapshot(
+        env: Env,
+        admin: Address,
+        talos_id: u32,
+        total_usdc: i128,
+        per_token_usdc: i128,
+    ) -> u32 {
+        Self::require_admin(&env, &admin);
+
+        if total_usdc < 0 {
+            panic!("total_usdc cannot be negative");
+        }
+        if per_token_usdc < 0 {
+            panic!("per_token_usdc cannot be negative");
+        }
+
+        let epoch: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextDividendEpoch)
+            .unwrap_or(1);
+
+        let snapshot = DividendSnapshot {
+            epoch,
+            talos_id,
+            total_usdc,
+            per_token_usdc,
+            snapshot_ledger: env.ledger().sequence(),
+            created_at: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::DividendSnapshot(epoch), &snapshot);
+        env.storage()
+            .persistent()
+            .set(&DataKey::NextDividendEpoch, &(epoch + 1));
+
+        emit_dividend_snapshot_recorded(&env, &snapshot);
+
+        epoch
+    }
+
+    /// Return a single dividend snapshot by epoch number.
+    ///
+    /// Returns `None` when the epoch does not exist.
+    pub fn get_dividend_snapshot(env: Env, epoch: u32) -> Option<DividendSnapshot> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DividendSnapshot(epoch))
+    }
+
+    /// Return a page of dividend snapshots.
+    ///
+    /// `offset` is the 0-based starting epoch index (i.e. the epoch number
+    /// of the first result is `offset + 1`).  `limit` is capped at
+    /// [`DIVIDEND_PAGE_LIMIT`] (50) to bound the host-function cost.
+    ///
+    /// Returns an empty `Vec` when `offset` is beyond the last epoch.
+    ///
+    /// # Examples
+    /// ```text
+    /// // First page of up to 20 snapshots
+    /// get_dividend_snapshots_page(env, 0, 20)
+    /// // Next page
+    /// get_dividend_snapshots_page(env, 20, 20)
+    /// ```
+    pub fn get_dividend_snapshots_page(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<DividendSnapshot> {
+        // Clamp limit to protect host-function budget.
+        let effective_limit = limit.min(DIVIDEND_PAGE_LIMIT);
+
+        let next_epoch: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextDividendEpoch)
+            .unwrap_or(1);
+
+        // Epochs are 1-based: epoch 1 is at offset 0.
+        let first_epoch = offset.saturating_add(1);
+
+        let mut results: Vec<DividendSnapshot> = Vec::new(&env);
+
+        let mut count = 0u32;
+        let mut epoch = first_epoch;
+        while count < effective_limit && epoch < next_epoch {
+            if let Some(snap) = env
+                .storage()
+                .persistent()
+                .get::<_, DividendSnapshot>(&DataKey::DividendSnapshot(epoch))
+            {
+                results.push_back(snap);
+                count += 1;
+            }
+            epoch += 1;
+        }
+
+        results
+    }
+
+    /// Return the total number of recorded dividend epochs.
+    pub fn dividend_epoch_count(env: Env) -> u32 {
+        let next: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextDividendEpoch)
+            .unwrap_or(1);
+        next.saturating_sub(1)
     }
 
     pub fn get_proposal(env: Env, proposal_id: u32) -> Option<Proposal> {
@@ -717,10 +974,9 @@ impl TalosGovernance {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
+        testutils::{Address as _, Events as _, Ledger, MockAuth, MockAuthInvoke},
         IntoVal,
     };
-    use std::string::ToString;
 
     fn setup() -> (
         Env,
@@ -802,6 +1058,152 @@ mod tests {
                 },
             }])
             .cache_token_balance(admin, &ledger, voter, &balance);
+    }
+
+    // ── Typed event fixture tests (#606) ─────────────────────────
+
+    #[test]
+    fn create_proposal_emits_typed_event_proposal_created() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        let events = env.events().all();
+        assert!(!events.is_empty(), "at least one event must be emitted");
+
+        // The prop_crt event is the last event from create_proposal.
+        let (cid, topics, data) = events.last().expect("event missing");
+        assert_eq!(cid, contract_id);
+
+        let topic0: soroban_sdk::Symbol =
+            soroban_sdk::FromVal::from_val(&env, &topics.get(0).unwrap());
+        assert_eq!(topic0, symbol_short!("prop_crt"));
+
+        let topic1_id: u32 = soroban_sdk::FromVal::from_val(&env, &topics.get(1).unwrap());
+        assert_eq!(topic1_id, proposal_id);
+
+        let payload: EventProposalCreated = soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(payload.proposal_id, proposal_id);
+        assert_eq!(payload.talos_id, 7);
+        assert_eq!(payload.proposer, proposer);
+        assert_eq!(payload.snapshot_ledger, 90); // current_ledger(100) - 10
+        assert_eq!(payload.end_ledger, 120);     // current_ledger(100) + voting_period(20)
+    }
+
+    #[test]
+    fn vote_emits_typed_event_vote_cast() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        cache_balance_with_auth(&env, &contract_id, &client, &admin, proposal.snapshot_ledger, &voter, 200);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &voter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "vote",
+                    args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .vote(&voter, &proposal_id, &VoteChoice::Approve);
+
+        let events = env.events().all();
+        // vote event is the last event (vote + potentially status change; vote is last if quorum not yet met)
+        // With 200 weight and quorum 100, quorum is met — so status changed event follows vote.
+        // Find the vote event by topic symbol.
+        let vote_event = events.iter().find(|(cid, topics, _)| {
+            if *cid != contract_id { return false; }
+            if let Some(t0) = topics.get(0) {
+                let s: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &t0);
+                s == symbol_short!("vote")
+            } else { false }
+        });
+        assert!(vote_event.is_some(), "vote event must be emitted");
+
+        let (_, _, data) = vote_event.unwrap();
+        let payload: EventVoteCast = soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(payload.proposal_id, proposal_id);
+        assert_eq!(payload.voter, voter);
+        assert_eq!(payload.choice, VoteChoice::Approve);
+        assert_eq!(payload.weight, 200);
+    }
+
+    #[test]
+    fn finalize_proposal_emits_typed_event_status_changed() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        // Advance ledger past the voting period
+        env.ledger().with_mut(|li| { li.sequence_number = 200; });
+
+        client.finalize_proposal(&proposal_id);
+
+        let events = env.events().all();
+        let stat_event = events.iter().find(|(cid, topics, _)| {
+            if *cid != contract_id { return false; }
+            if let Some(t0) = topics.get(0) {
+                let s: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &t0);
+                s == symbol_short!("prop_stat")
+            } else { false }
+        });
+        assert!(stat_event.is_some(), "prop_stat event must be emitted");
+
+        let (_, topics, data) = stat_event.unwrap();
+        let pid: u32 = soroban_sdk::FromVal::from_val(&env, &topics.get(1).unwrap());
+        assert_eq!(pid, proposal_id);
+
+        let payload: EventProposalStatusChanged = soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(payload.proposal_id, proposal_id);
+        assert_eq!(payload.status, ProposalStatus::Rejected);
+    }
+
+    #[test]
+    fn execute_proposal_emits_typed_event_status_executed() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        cache_balance_with_auth(&env, &contract_id, &client, &admin, proposal.snapshot_ledger, &voter, 200);
+
+        // Vote to reach quorum + approval → Approved
+        client
+            .mock_auths(&[MockAuth {
+                address: &voter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "vote",
+                    args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .vote(&voter, &proposal_id, &VoteChoice::Approve);
+
+        client.execute_proposal(&proposal_id);
+
+        let events = env.events().all();
+        // Find the last prop_stat event (execute emits status = Executed)
+        let stat_events: std::vec::Vec<_> = events.iter().filter(|(cid, topics, _)| {
+            if *cid != contract_id { return false; }
+            if let Some(t0) = topics.get(0) {
+                let s: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &t0);
+                s == symbol_short!("prop_stat")
+            } else { false }
+        }).collect();
+        assert!(!stat_events.is_empty(), "prop_stat event must be emitted");
+
+        let (_, _, data) = stat_events.last().unwrap();
+        let payload: EventProposalStatusChanged = soroban_sdk::FromVal::from_val(&env, data);
+        assert_eq!(payload.status, ProposalStatus::Executed);
     }
 
     #[test]
@@ -1163,5 +1565,378 @@ mod tests {
         }]).try_vote(&bob, &proposal_id, &VoteChoice::Approve);
         
         assert!(res.is_err(), "Bob should not be able to vote with tokens received after snapshot");
+    }
+
+    // ── Expanded authorization negative tests (#611) ─────────────────
+
+    // --- Missing authorization ---
+
+    /// create_proposal without mock_auths must fail.
+    #[test]
+    fn create_proposal_without_auth_is_rejected() {
+        let (env, _contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        let result = client.try_create_proposal(
+            &proposer,
+            &1u32,
+            &s(&env, "title"),
+            &s(&env, "desc"),
+        );
+        assert!(result.is_err(), "create_proposal must require auth");
+    }
+
+    /// vote without mock_auths must fail.
+    #[test]
+    fn vote_without_auth_is_rejected() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        cache_balance_with_auth(&env, &contract_id, &client, &admin, proposal.snapshot_ledger, &voter, 200);
+
+        let result = client.try_vote(&voter, &proposal_id, &VoteChoice::Approve);
+        assert!(result.is_err(), "vote must require auth");
+    }
+
+    /// cache_token_balance without mock_auths must fail.
+    #[test]
+    fn cache_token_balance_without_auth_is_rejected() {
+        let (env, _contract_id, _admin, _pulse, client) = setup();
+        let voter = Address::generate(&env);
+        let result = client.try_cache_token_balance(
+            &Address::generate(&env),
+            &90u32,
+            &voter,
+            &100i128,
+        );
+        assert!(result.is_err(), "cache_token_balance must require auth");
+    }
+
+    /// update_config without mock_auths must fail.
+    #[test]
+    fn update_config_without_auth_is_rejected() {
+        let (env, _contract_id, _admin, pulse, client) = setup();
+        let config = GovernanceConfig {
+            quorum_threshold: 10,
+            consensus_threshold: 5_000,
+            voting_period_ledgers: 20,
+            pulse_token_address: pulse,
+        };
+        let rando = Address::generate(&env);
+        let result = client.try_update_config(&rando, &config);
+        assert!(result.is_err(), "update_config must require auth");
+    }
+
+    // --- Wrong signer ---
+
+    /// Non-admin cannot cache_token_balance even with their own valid auth.
+    #[test]
+    fn cache_token_balance_wrong_signer_is_rejected() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let attacker = Address::generate(&env);
+        let voter = Address::generate(&env);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &attacker,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "cache_token_balance",
+                    args: (attacker.clone(), 90u32, voter.clone(), 100i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_cache_token_balance(&attacker, &90, &voter, &100);
+        assert!(result.is_err(), "non-admin must not cache balances");
+    }
+
+    /// A voter with zero balance must be rejected.
+    #[test]
+    fn vote_with_zero_balance_is_rejected() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+
+        // Cache zero balance
+        cache_balance_with_auth(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            proposal.snapshot_ledger,
+            &voter,
+            0,
+        );
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &voter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "vote",
+                    args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_vote(&voter, &proposal_id, &VoteChoice::Approve);
+        assert!(result.is_err(), "zero-balance voter must be rejected");
+    }
+
+    // --- Dependency / state failure ---
+
+    /// Voting on a non-existent proposal must fail.
+    #[test]
+    fn vote_on_nonexistent_proposal_is_rejected() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let voter = Address::generate(&env);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &voter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "vote",
+                    args: (voter.clone(), 9999u32, VoteChoice::Approve).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_vote(&voter, &9999u32, &VoteChoice::Approve);
+        assert!(result.is_err(), "vote on nonexistent proposal must fail");
+    }
+
+    /// Voting after the end_ledger must fail.
+    #[test]
+    fn vote_after_voting_period_is_rejected() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        cache_balance_with_auth(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            proposal.snapshot_ledger,
+            &voter,
+            50,
+        );
+
+        // Advance ledger past end_ledger
+        env.ledger().with_mut(|li| {
+            li.sequence_number = proposal.end_ledger + 1;
+        });
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &voter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "vote",
+                    args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_vote(&voter, &proposal_id, &VoteChoice::Approve);
+        assert!(result.is_err(), "vote after period end must be rejected");
+    }
+
+    /// finalize_proposal before voting period ends must fail.
+    #[test]
+    fn finalize_before_period_ends_is_rejected() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        // Ledger is still in the middle of the voting period
+        let result = client.try_finalize_proposal(&proposal_id);
+        assert!(result.is_err(), "finalize before end must be rejected");
+    }
+
+    /// execute_proposal on a non-approved proposal must fail.
+    #[test]
+    fn execute_non_approved_proposal_is_rejected() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        // Active → not approved → execute must fail
+        let result = client.try_execute_proposal(&proposal_id);
+        assert!(result.is_err(), "execute on non-approved proposal must fail");
+    }
+
+    /// Proposal creation with empty title must fail.
+    #[test]
+    fn create_proposal_with_empty_title_is_rejected() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &proposer,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_proposal",
+                    args: (proposer.clone(), 1u32, s(&env, ""), s(&env, "desc")).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_proposal(&proposer, &1u32, &s(&env, ""), &s(&env, "desc"));
+        assert!(result.is_err(), "empty title must be rejected");
+    }
+
+    /// Proposal creation with empty description must fail.
+    #[test]
+    fn create_proposal_with_empty_description_is_rejected() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &proposer,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_proposal",
+                    args: (proposer.clone(), 1u32, s(&env, "title"), s(&env, "")).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_proposal(&proposer, &1u32, &s(&env, "title"), &s(&env, ""));
+        assert!(result.is_err(), "empty description must be rejected");
+    }
+
+    /// cache_token_balance with a negative balance must fail.
+    #[test]
+    fn cache_token_balance_negative_is_rejected() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let voter = Address::generate(&env);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "cache_token_balance",
+                    args: (admin.clone(), 90u32, voter.clone(), -1i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_cache_token_balance(&admin, &90u32, &voter, &(-1i128));
+        assert!(result.is_err(), "negative balance cache must be rejected");
+    }
+
+    /// Governance initialization with quorum_threshold = 0 must fail.
+    #[test]
+    fn initialize_with_zero_quorum_is_rejected() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, TalosGovernance);
+        let client = TalosGovernanceClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let pulse = Address::generate(&env);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "initialize",
+                    args: (admin.clone(), pulse.clone(), 0_i128, 5_000_i128, 20_u32).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_initialize(&admin, &pulse, &0_i128, &5_000_i128, &20_u32);
+        assert!(result.is_err(), "zero quorum must be rejected");
+    }
+
+    /// Governance initialization with consensus_threshold = 0 must fail.
+    #[test]
+    fn initialize_with_zero_consensus_threshold_is_rejected() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, TalosGovernance);
+        let client = TalosGovernanceClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let pulse = Address::generate(&env);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "initialize",
+                    args: (admin.clone(), pulse.clone(), 100_i128, 0_i128, 20_u32).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_initialize(&admin, &pulse, &100_i128, &0_i128, &20_u32);
+        assert!(result.is_err(), "zero consensus threshold must be rejected");
+    }
+
+    /// Governance initialization with consensus_threshold > 10_000 must fail.
+    #[test]
+    fn initialize_with_consensus_threshold_above_max_is_rejected() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, TalosGovernance);
+        let client = TalosGovernanceClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let pulse = Address::generate(&env);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "initialize",
+                    args: (admin.clone(), pulse.clone(), 100_i128, 10_001_i128, 20_u32).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_initialize(&admin, &pulse, &100_i128, &10_001_i128, &20_u32);
+        assert!(result.is_err(), "consensus_threshold > 10_000 must be rejected");
+    }
+
+    /// Governance initialization with voting_period_ledgers = 0 must fail.
+    #[test]
+    fn initialize_with_zero_voting_period_is_rejected() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, TalosGovernance);
+        let client = TalosGovernanceClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let pulse = Address::generate(&env);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "initialize",
+                    args: (admin.clone(), pulse.clone(), 100_i128, 5_000_i128, 0_u32).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_initialize(&admin, &pulse, &100_i128, &5_000_i128, &0_u32);
+        assert!(result.is_err(), "zero voting period must be rejected");
+    }
+
+    /// Double-initialization of governance must be rejected.
+    #[test]
+    fn double_initialize_is_rejected() {
+        let (env, contract_id, admin, pulse, client) = setup();
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "initialize",
+                    args: (admin.clone(), pulse.clone(), 100_i128, 5_000_i128, 20_u32).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_initialize(&admin, &pulse, &100_i128, &5_000_i128, &20_u32);
+        assert!(result.is_err(), "double initialization must be rejected");
     }
 }

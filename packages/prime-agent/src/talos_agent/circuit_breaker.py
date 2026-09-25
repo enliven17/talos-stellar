@@ -42,15 +42,22 @@ Usage
 from __future__ import annotations
 
 import json
+import asyncio
 import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field, asdict
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import ClassVar
+from typing import Any, ClassVar, TypeVar
+
+from talos_agent.observability import log as structured_log
 
 from talos_agent.config import APP_DIR
+T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
@@ -111,9 +118,39 @@ class CircuitBreakerConfig:
     window_size: float = 60.0
     """Rolling window size in seconds for failure counting."""
 
+    retry_budget: int = 3
+    """Number of retries permitted for one adapter invocation."""
+
+    backoff_initial: float = 1.0
+    """Initial exponential backoff delay in seconds."""
+
+    backoff_max: float = 30.0
+    """Maximum exponential backoff delay in seconds."""
+
     # ── Pre-built defaults for known providers ────────────────────────────
 
     PROVIDER_DEFAULTS: ClassVar[dict[str, CircuitBreakerConfig]] = {}
+
+    def __post_init__(self) -> None:
+        if self.failure_threshold < 1 or self.half_open_max_probes < 1 or self.success_threshold < 1:
+            raise ValueError("circuit thresholds and probe limits must be at least 1")
+        if self.recovery_timeout <= 0 or self.window_size <= 0:
+            raise ValueError("circuit timeouts must be greater than zero")
+        if self.retry_budget < 0:
+            raise ValueError("retry_budget must not be negative")
+        if self.backoff_initial <= 0 or self.backoff_max <= 0 or self.backoff_initial > self.backoff_max:
+            raise ValueError("backoff_initial must be positive and no greater than backoff_max")
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, Any] | None = None) -> CircuitBreakerConfig:
+        """Build a validated config from user-provided adapter settings."""
+        if values is None:
+            return cls()
+        allowed = {field for field in cls.__dataclass_fields__ if field != "PROVIDER_DEFAULTS"}
+        unknown = set(values) - allowed
+        if unknown:
+            raise ValueError(f"unknown circuit breaker settings: {', '.join(sorted(unknown))}")
+        return cls(**dict(values))
 
     @classmethod
     def for_provider(cls, provider: str) -> CircuitBreakerConfig:
@@ -257,6 +294,7 @@ class ProviderCircuitBreaker:
         self._total_failures: int = 0
         self._total_rejected: int = 0
         self._total_probes: int = 0
+        self._lock = asyncio.Lock()
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -270,29 +308,30 @@ class ProviderCircuitBreaker:
         * If OPEN and recovery_timeout has elapsed, transitions to HALF_OPEN.
         * If HALF_OPEN, increments the probe counter.
         """
-        now = time.monotonic()
+        async with self._lock:
+            now = time.monotonic()
 
-        if self.state == CircuitState.CLOSED:
-            return True
+            if self.state == CircuitState.CLOSED:
+                return True
 
-        if self.state == CircuitState.OPEN:
-            elapsed = now - self._last_state_change
-            if elapsed >= self.config.recovery_timeout:
-                self._transition_to(CircuitState.HALF_OPEN, now)
-                self._half_open_probes_used = 1
+            if self.state == CircuitState.OPEN:
+                elapsed = now - self._last_state_change
+                if elapsed >= self.config.recovery_timeout:
+                    self._transition_to(CircuitState.HALF_OPEN, now)
+                    self._half_open_probes_used = 1
+                    self._total_probes += 1
+                    return True
+                self._total_rejected += 1
+                return False
+
+            # HALF_OPEN — allow up to half_open_max_probes probes.
+            if self._half_open_probes_used < self.config.half_open_max_probes:
+                self._half_open_probes_used += 1
                 self._total_probes += 1
                 return True
+
             self._total_rejected += 1
             return False
-
-        # HALF_OPEN — allow up to half_open_max_probes probes.
-        if self._half_open_probes_used < self.config.half_open_max_probes:
-            self._half_open_probes_used += 1
-            self._total_probes += 1
-            return True
-
-        self._total_rejected += 1
-        return False
 
     async def record_success(self) -> None:
         """Record a successful request.
@@ -302,20 +341,21 @@ class ProviderCircuitBreaker:
           when success_threshold is reached.
         * If CLOSED, prunes the failure window.
         """
-        self._total_successes += 1
+        async with self._lock:
+            self._total_successes += 1
 
-        if self.state == CircuitState.HALF_OPEN:
-            self._consecutive_successes += 1
-            if self._consecutive_successes >= self.config.success_threshold:
-                logger.info(
-                    "Circuit breaker CLOSED for '%s' — recovery confirmed (%d consecutive successes)",
-                    self.provider,
-                    self._consecutive_successes,
-                )
-                self._transition_to(CircuitState.CLOSED)
-                self._failures.clear()
-        elif self.state == CircuitState.CLOSED:
-            self._prune_window()
+            if self.state == CircuitState.HALF_OPEN:
+                self._consecutive_successes += 1
+                if self._consecutive_successes >= self.config.success_threshold:
+                    logger.info(
+                        "Circuit breaker CLOSED for '%s' — recovery confirmed (%d consecutive successes)",
+                        self.provider,
+                        self._consecutive_successes,
+                    )
+                    self._transition_to(CircuitState.CLOSED)
+                    self._failures.clear()
+            elif self.state == CircuitState.CLOSED:
+                self._prune_window()
 
     async def record_failure(self) -> None:
         """Record a failed request.
@@ -325,27 +365,28 @@ class ProviderCircuitBreaker:
         * If HALF_OPEN, transitions back to OPEN.
         * If CLOSED and failure_threshold is met, transitions to OPEN.
         """
-        now = time.monotonic()
-        self._total_failures += 1
-        self._last_failure_time = now
-        self._failures.append(now)
+        async with self._lock:
+            now = time.monotonic()
+            self._total_failures += 1
+            self._last_failure_time = now
+            self._failures.append(now)
 
-        if self.state == CircuitState.HALF_OPEN:
-            logger.warning(
-                "Circuit breaker HALF_OPEN → OPEN for '%s' — probe failed (back to recovery)",
-                self.provider,
-            )
-            self._transition_to(CircuitState.OPEN, now)
-        elif self.state == CircuitState.CLOSED:
-            self._prune_window()
-            if len(self._failures) >= self.config.failure_threshold:
+            if self.state == CircuitState.HALF_OPEN:
                 logger.warning(
-                    "Circuit breaker OPEN for '%s' — %d failures in %.0fs window",
+                    "Circuit breaker HALF_OPEN → OPEN for '%s' — probe failed (back to recovery)",
                     self.provider,
-                    len(self._failures),
-                    self.config.window_size,
                 )
                 self._transition_to(CircuitState.OPEN, now)
+            elif self.state == CircuitState.CLOSED:
+                self._prune_window()
+                if len(self._failures) >= self.config.failure_threshold:
+                    logger.warning(
+                        "Circuit breaker OPEN for '%s' — %d failures in %.0fs window",
+                        self.provider,
+                        len(self._failures),
+                        self.config.window_size,
+                    )
+                    self._transition_to(CircuitState.OPEN, now)
 
     def remaining_cooldown(self) -> float | None:
         """Seconds until OPEN → HALF_OPEN transition, or ``None``."""
@@ -393,8 +434,22 @@ class ProviderCircuitBreaker:
         """Transition to a new state and update timestamps."""
         if now is None:
             now = time.monotonic()
+        previous_state = self.state
+        logger.info(
+            "Circuit breaker '%s': %s → %s",
+            self.provider,
+            self.state.value.upper(),
+            new_state.value.upper(),
+        )
         self.state = new_state
         self._last_state_change = now
+        structured_log.info(
+            "circuit_state_change",
+            adapter=self.provider,
+            previous_state=previous_state.value,
+            state=new_state.value,
+            reason="failure_threshold" if new_state == CircuitState.OPEN else "recovery",
+        )
 
         if new_state == CircuitState.CLOSED:
             self._half_open_probes_used = 0
@@ -570,3 +625,78 @@ class CircuitBreakerRegistry:
 
 # Singleton registry instance
 cb_registry = CircuitBreakerRegistry()
+    def all_metrics(self) -> dict[str, dict]:
+        """Return metrics for all registered breakers."""
+        return {name: br.metrics().to_dict() for name, br in self._breakers.items()}
+
+    def reset_all(self) -> None:
+        """Reset every registered breaker to CLOSED state (for testing)."""
+        for br in self._breakers.values():
+            br._failures.clear()
+            br.state = CircuitState.CLOSED
+            br._half_open_probes_used = 0
+            br._consecutive_successes = 0
+            br._total_successes = 0
+            br._total_failures = 0
+            br._total_rejected = 0
+            br._total_probes = 0
+            br._last_state_change = time.monotonic()
+            br._last_failure_time = 0.0
+
+
+# Module-level singleton — imported by http.py and callers.
+cb_registry: CircuitBreakerRegistry = CircuitBreakerRegistry()
+
+
+async def execute_with_retry(
+    operation: Callable[[], Awaitable[T]],
+    breaker: ProviderCircuitBreaker,
+    *,
+    is_failure: Callable[[T], bool] | None = None,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> T:
+    """Run one adapter operation with its budget and exponential backoff.
+
+    The breaker is admitted once per logical operation. Only the final failed
+    operation consumes a failure, so internal retries do not open the circuit
+    prematurely.
+    """
+    if not await breaker.allow_request():
+        raise CircuitBreakerOpen(
+            breaker.provider, breaker.remaining_cooldown() or 0.0
+        )
+    failure_check = is_failure or (lambda result: False)
+    for attempt in range(breaker.config.retry_budget + 1):
+        try:
+            result = await operation()
+        except Exception:
+            if attempt >= breaker.config.retry_budget:
+                await breaker.record_failure()
+                raise
+        else:
+            if not failure_check(result):
+                await breaker.record_success()
+                return result
+            if attempt >= breaker.config.retry_budget:
+                await breaker.record_failure()
+                return result
+        delay = min(
+            breaker.config.backoff_initial * (2**attempt),
+            breaker.config.backoff_max,
+        )
+        await sleep(delay)
+    raise RuntimeError("unreachable: retry loop exited without result")
+
+
+__all__ = [
+    "CircuitBreakerConfig",
+    "CircuitBreakerError",
+    "CircuitBreakerMetrics",
+    "CircuitBreakerOpen",
+    "CircuitBreakerRegistry",
+    "CircuitState",
+    "ProviderCircuitBreaker",
+    "_resolve_provider_from_url",
+    "cb_registry",
+    "execute_with_retry",
+]
