@@ -609,3 +609,17 @@ Use the templates already included in the repo when filing new work:
 - Pull requests: [`.github/PULL_REQUEST_TEMPLATE.md`](./.github/PULL_REQUEST_TEMPLATE.md)
 
 These templates are meant to capture the runtime, environment, and test details we need to review changes quickly.
+
+## Web Accessibility Checks
+
+Automated accessibility checks run in CI to ensure web UI components and pages meet basic accessibility standards (e.g., WCAG). The checks use `axe-core` and execute against predefined HTML fixtures.
+
+### Local Verification
+
+To run the accessibility checks locally:
+```bash
+pnpm --filter web run test:a11y
+```
+
+> **Note:** If an accessibility check fails, the tooling will fail closed and output generic, privacy-safe error reports. It explicitly suppresses DOM nodes and sensitive payloads in error output to prevent secrets, seeds, or payment proofs from being logged to CI.
+
