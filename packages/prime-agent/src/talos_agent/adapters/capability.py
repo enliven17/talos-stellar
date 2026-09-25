@@ -23,6 +23,12 @@ import httpx
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
 from talos_agent.adapters.diagnostics import safe_adapter_diagnostic_fields
+from talos_agent.adapters.snapshots import AdapterHealthSnapshot
+from talos_agent.circuit_breaker import (
+    CircuitBreakerConfig,
+    CircuitBreakerRegistry,
+    execute_with_retry,
+)
 from talos_agent.observability import log
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
@@ -88,6 +94,8 @@ class NetworkRule:
     def __post_init__(self) -> None:
         normalized_host = _normalize_host(self.host)
         object.__setattr__(self, "host", normalized_host)
+        if not isinstance(self.path_prefix, str):
+            raise ManifestValidationError("network path prefixes must be strings")
         decoded_prefix = _decode_path(self.path_prefix)
         if not self.path_prefix.startswith("/") or ".." in decoded_prefix.split("/"):
             raise ManifestValidationError("network path prefixes must be absolute and traversal-free")
@@ -99,7 +107,11 @@ class NetworkRule:
         if not normalized_methods or not normalized_methods <= _SAFE_METHODS:
             raise ManifestValidationError("network methods contain unsupported values")
         object.__setattr__(self, "methods", normalized_methods)
-        if self.port is not None and not 1 <= self.port <= 65535:
+        if self.port is not None and (
+            isinstance(self.port, bool)
+            or not isinstance(self.port, int)
+            or not 1 <= self.port <= 65535
+        ):
             raise ManifestValidationError("network rule port is out of range")
 
 
@@ -388,6 +400,454 @@ def load_manifests(
         result[adapter_id] = updated_manifest
 
     return result
+
+class CapabilityGuard:
+    """Explicit checks for filesystem and tool capabilities."""
+
+    def __init__(self, manifest: AdapterCapabilityManifest) -> None:
+        self._manifest = manifest
+
+    def authorize_path(self, path: str | Path, *, write: bool = False) -> Path:
+        candidate = Path(path).resolve()
+        roots = (
+            self._manifest.filesystem_write_roots
+            if write
+            else self._manifest.filesystem_read_roots
+        )
+        if any(_is_within(candidate, Path(root)) for root in roots):
+            return candidate
+        _denied(self._manifest.adapter_id, "filesystem_write" if write else "filesystem_read", "path")
+        raise CapabilityDeniedError("adapter filesystem capability denied")
+
+    def authorize_tool(self, name: str) -> str:
+        if name in self._manifest.tools:
+            return name
+        _denied(self._manifest.adapter_id, "tool", name)
+        raise CapabilityDeniedError("adapter tool capability denied")
+
+
+def _is_within(candidate: Path, root: Path) -> bool:
+    try:
+        candidate.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+class AdapterInvocationStore:
+    """Durable admission for externally visible adapter writes."""
+
+    def __init__(self, db: object) -> None:
+        self._conn: sqlite3.Connection = db._conn
+
+    def admit(
+        self,
+        *,
+        operation_id: str,
+        adapter_name: str,
+        operation: str,
+        input_digest: str,
+        owner_id: str,
+        lease_seconds: int,
+        max_records: int,
+    ) -> None:
+        if not _OPERATION_ID_RE.fullmatch(operation_id):
+            raise InvocationConflictError("operation ID is invalid")
+        now = datetime.now(timezone.utc)
+        lease = now + timedelta(seconds=lease_seconds)
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                "SELECT * FROM adapter_invocations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                record_count = self._conn.execute(
+                    "SELECT COUNT(*) FROM adapter_invocations"
+                ).fetchone()[0]
+                if record_count >= max_records:
+                    raise AdapterResourceLimitError(
+                        "adapter invocation record limit exceeded"
+                    )
+                self._conn.execute(
+                    """
+                    INSERT INTO adapter_invocations (
+                        operation_id, adapter_name, operation, input_digest, state,
+                        owner_id, lease_expires_at
+                    ) VALUES (?, ?, ?, ?, 'running', ?, ?)
+                    """,
+                    (
+                        operation_id,
+                        adapter_name,
+                        operation,
+                        input_digest,
+                        owner_id,
+                        lease.isoformat(),
+                    ),
+                )
+                self._conn.commit()
+                return
+            if (
+                row["adapter_name"] != adapter_name
+                or row["operation"] != operation
+                or row["input_digest"] != input_digest
+            ):
+                raise InvocationConflictError("operation ID was already used for different input")
+            if row["state"] == "succeeded":
+                raise DuplicateInvocationError("adapter operation already succeeded")
+            if row["state"] == "indeterminate":
+                raise IndeterminateInvocationError(
+                    "adapter operation outcome is indeterminate; reconcile before retry"
+                )
+            if row["state"] == "running":
+                expiry = datetime.fromisoformat(row["lease_expires_at"])
+                if expiry > now:
+                    raise AdapterBusyError("adapter operation is already running")
+                self._conn.execute(
+                    """
+                    UPDATE adapter_invocations
+                    SET state = 'indeterminate', updated_at = datetime('now')
+                    WHERE operation_id = ?
+                    """,
+                    (operation_id,),
+                )
+                self._conn.commit()
+                raise IndeterminateInvocationError(
+                    "adapter operation lease expired; reconcile before retry"
+                )
+            self._conn.execute(
+                """
+                UPDATE adapter_invocations
+                SET state = 'running', owner_id = ?, lease_expires_at = ?,
+                    attempt_count = attempt_count + 1, updated_at = datetime('now')
+                WHERE operation_id = ? AND state = 'failed'
+                """,
+                (owner_id, lease.isoformat(), operation_id),
+            )
+            self._conn.commit()
+        except sqlite3.OperationalError as exc:
+            if self._conn.in_transaction:
+                self._conn.rollback()
+            raise AdapterBusyError("adapter invocation state is busy") from exc
+        except Exception:
+            if self._conn.in_transaction:
+                self._conn.rollback()
+            raise
+
+    def finish(self, operation_id: str, owner_id: str, state: str) -> None:
+        if state not in {"succeeded", "failed", "indeterminate"}:
+            raise ValueError("invalid invocation terminal state")
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            cursor = self._conn.execute(
+                """
+                UPDATE adapter_invocations
+                SET state = ?, updated_at = datetime('now')
+                WHERE operation_id = ? AND owner_id = ? AND state = 'running'
+                """,
+                (state, operation_id, owner_id),
+            )
+            if cursor.rowcount != 1:
+                raise InvocationConflictError("adapter invocation ownership changed")
+            self._conn.commit()
+        except sqlite3.OperationalError as exc:
+            if self._conn.in_transaction:
+                self._conn.rollback()
+            raise AdapterBusyError("adapter invocation state is busy") from exc
+        except Exception:
+            if self._conn.in_transaction:
+                self._conn.rollback()
+            raise
+
+    def is_running(self, operation_id: str | None, owner_id: str) -> bool:
+        if operation_id is None:
+            return False
+        row = self._conn.execute(
+            "SELECT state, owner_id FROM adapter_invocations WHERE operation_id = ?",
+            (operation_id,),
+        ).fetchone()
+        return bool(row and row["state"] == "running" and row["owner_id"] == owner_id)
+
+
+class AdapterSandbox:
+    """Construct scoped dependencies and wrap adapters with policy enforcement."""
+
+    def __init__(
+        self,
+        *,
+        manifests: Mapping[str, AdapterCapabilityManifest],
+        db: object,
+        secret_resolver: Callable[[str], str],
+        retry_configs: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> None:
+        self._manifests = dict(manifests)
+        self._store = AdapterInvocationStore(db)
+        self._secret_resolver = secret_resolver
+        self._semaphores = {
+            name: asyncio.Semaphore(manifest.limits.max_concurrency)
+            for name, manifest in self._manifests.items()
+        }
+        self._owner_id = str(uuid.uuid4())
+        self._retry_configs = dict(retry_configs or {})
+        self._breakers = CircuitBreakerRegistry()
+
+    def manifest(self, adapter_id: str) -> AdapterCapabilityManifest:
+        normalized = adapter_id.lower()
+        manifest = self._manifests.get(normalized)
+        if manifest is None:
+            _denied(normalized, "manifest", "register")
+            raise CapabilityDeniedError("adapter has no capability manifest")
+        return manifest
+
+    def secrets(self, adapter_id: str) -> ScopedSecretProvider:
+        return ScopedSecretProvider(self.manifest(adapter_id), self._secret_resolver)
+
+    def http(self, adapter_id: str) -> SandboxedHTTPClient:
+        return SandboxedHTTPClient(self.manifest(adapter_id))
+
+    def browser(self, adapter_id: str, browser: object) -> SandboxedBrowser:
+        return SandboxedBrowser(browser, self.manifest(adapter_id))
+
+    def guard(self, adapter_id: str) -> CapabilityGuard:
+        return CapabilityGuard(self.manifest(adapter_id))
+
+    def wrap(self, adapter: BaseSocialAdapter) -> SandboxedAdapter:
+        adapter_id = adapter.channel_name.lower()
+        manifest = self.manifest(adapter_id)
+        return SandboxedAdapter(
+            adapter,
+            manifest=manifest,
+            store=self._store,
+            semaphore=self._semaphores[adapter_id],
+            owner_id=self._owner_id,
+            breaker=self._breakers.get_or_create(
+                adapter_id,
+                CircuitBreakerConfig.from_mapping(self._retry_configs.get(adapter_id)),
+            ),
+        )
+
+
+class SandboxedAdapter(BaseSocialAdapter):
+    """BaseSocialAdapter proxy enforcing a single immutable manifest."""
+
+    def __init__(
+        self,
+        adapter: BaseSocialAdapter,
+        *,
+        manifest: AdapterCapabilityManifest,
+        store: AdapterInvocationStore,
+        semaphore: asyncio.Semaphore,
+        owner_id: str,
+        breaker: Any,
+    ) -> None:
+        self.__adapter = adapter
+        self.__manifest = manifest
+        self.__store = store
+        self.__semaphore = semaphore
+        self.__owner_id = owner_id
+        self.__breaker = breaker
+        self.channel_name = adapter.channel_name
+
+    def get_capabilities(self) -> ChannelCapabilities:
+        return self.__adapter.get_capabilities()
+
+    def health_snapshot(self) -> AdapterHealthSnapshot | dict[str, bool]:
+        """Forward the wrapped adapter's own snapshot, typed or legacy, unchanged."""
+        snapshot = getattr(self.__adapter, "health_snapshot", None)
+        return snapshot() if callable(snapshot) else {}
+
+    async def post(self, content: str, **kwargs: Any) -> PublishResult:
+        return await self._invoke("post", content, kwargs=kwargs, write=True)
+
+    async def reply(self, target_url: str, content: str, **kwargs: Any) -> PublishResult:
+        return await self._invoke(
+            "reply", target_url, content, kwargs=kwargs, write=True
+        )
+
+    async def get_mentions(self, **kwargs: Any) -> list[dict]:
+        return await self._invoke("get_mentions", kwargs=kwargs)
+
+    async def search(self, query: str, **kwargs: Any) -> list[dict]:
+        return await self._invoke("search", query, kwargs=kwargs)
+
+    async def get_post_performance(self, content_snippet: str, **kwargs: Any) -> dict:
+        return await self._invoke(
+            "get_post_performance", content_snippet, kwargs=kwargs
+        )
+
+    async def get_profile_stats(self, **kwargs: Any) -> dict:
+        return await self._invoke("get_profile_stats", kwargs=kwargs)
+
+    async def _invoke(
+        self,
+        operation: str,
+        *args: Any,
+        kwargs: dict[str, Any],
+        write: bool = False,
+    ) -> Any:
+        started = time.monotonic()
+        if operation not in self.__manifest.operations:
+            _denied(self.__manifest.adapter_id, "operation", operation)
+            raise CapabilityDeniedError("adapter operation capability denied")
+        operation_id = kwargs.pop("operation_id", None)
+        if operation_id is not None and not isinstance(operation_id, str):
+            raise InvocationConflictError("operation ID must be a string")
+        if write and operation_id is None:
+            operation_id = str(uuid.uuid4())
+        payload = _safe_json_bytes(
+            {"operation": operation, "args": args, "kwargs": kwargs}
+        )
+        if len(payload) > self.__manifest.limits.max_input_bytes:
+            _resource(self.__manifest.adapter_id, operation, "input")
+            raise AdapterResourceLimitError("adapter input limit exceeded")
+        digest = hashlib.sha256(payload).hexdigest()
+        if write:
+            try:
+                self.__store.admit(
+                    operation_id=operation_id,
+                    adapter_name=self.__manifest.adapter_id,
+                    operation=operation,
+                    input_digest=digest,
+                    owner_id=self.__owner_id,
+                    lease_seconds=self.__manifest.limits.invocation_lease_seconds,
+                    max_records=self.__manifest.limits.max_invocation_records,
+                )
+            except AdapterSandboxError as exc:
+                _invocation_log(
+                    self.__manifest.adapter_id,
+                    operation,
+                    operation_id,
+                    "rejected",
+                    started,
+                    type(exc),
+                )
+                raise
+            _invocation_log(
+                self.__manifest.adapter_id,
+                operation,
+                operation_id,
+                "admitted",
+                started,
+            )
+        budget = _InvocationBudget(self.__manifest, operation, operation_id)
+        token = _BUDGET.set(budget)
+        acquired = False
+        deadline = started + self.__manifest.limits.timeout_seconds
+        try:
+            await asyncio.wait_for(
+                self.__semaphore.acquire(),
+                timeout=max(0.001, deadline - time.monotonic()),
+            )
+            acquired = True
+            method = getattr(self.__adapter, operation)
+
+            async def invoke() -> Any:
+                return await asyncio.wait_for(
+                    method(*args, **kwargs),
+                    timeout=max(0.001, deadline - time.monotonic()),
+                )
+
+            result = await execute_with_retry(
+                invoke,
+                self.__breaker,
+                is_failure=lambda value: (
+                    isinstance(value, PublishResult) and value.status == "failed"
+                ),
+            )
+            output_bytes, output_items = _output_shape(
+                result.to_dict() if isinstance(result, PublishResult) else result
+            )
+            if (
+                output_bytes > self.__manifest.limits.max_output_bytes
+                or output_items > self.__manifest.limits.max_output_items
+            ):
+                _resource(self.__manifest.adapter_id, operation, "output")
+                if write:
+                    state = (
+                        "indeterminate" if budget.external_effect_started else "failed"
+                    )
+                    self.__store.finish(operation_id, self.__owner_id, state)
+                raise AdapterResourceLimitError("adapter output limit exceeded")
+            if isinstance(result, PublishResult) and result.status == "failed":
+                if write:
+                    state = (
+                        "indeterminate" if budget.external_effect_started else "failed"
+                    )
+                    self.__store.finish(operation_id, self.__owner_id, state)
+                    result.metadata = dict(result.metadata)
+                    result.metadata["operation_id"] = operation_id
+                result.error = "adapter operation failed"
+                _invocation_log(
+                    self.__manifest.adapter_id,
+                    operation,
+                    operation_id,
+                    "failed",
+                    started,
+                )
+                return result
+            if write:
+                self.__store.finish(operation_id, self.__owner_id, "succeeded")
+                if isinstance(result, PublishResult):
+                    result.metadata = dict(result.metadata)
+                    result.metadata["operation_id"] = operation_id
+            _invocation_log(
+                self.__manifest.adapter_id,
+                operation,
+                operation_id,
+                "succeeded",
+                started,
+            )
+            return result
+        except asyncio.TimeoutError as exc:
+            if write:
+                state = "indeterminate" if budget.external_effect_started else "failed"
+                self.__store.finish(operation_id, self.__owner_id, state)
+            _invocation_log(
+                self.__manifest.adapter_id,
+                operation,
+                operation_id,
+                "timed_out",
+                started,
+                AdapterTimeoutError,
+            )
+            raise AdapterTimeoutError("adapter invocation timed out") from exc
+        except AdapterSandboxError:
+            if write and self._is_running(operation_id):
+                state = "indeterminate" if budget.external_effect_started else "failed"
+                self.__store.finish(operation_id, self.__owner_id, state)
+            raise
+        except Exception as exc:
+            if write and self._is_running(operation_id):
+                state = "indeterminate" if budget.external_effect_started else "failed"
+                self.__store.finish(operation_id, self.__owner_id, state)
+            _invocation_log(
+                self.__manifest.adapter_id,
+                operation,
+                operation_id,
+                "failed",
+                started,
+                type(exc),
+            )
+            raise AdapterExecutionError("adapter execution failed") from exc
+        finally:
+            if acquired:
+                self.__semaphore.release()
+            _BUDGET.reset(token)
+
+    def _is_running(self, operation_id: str | None) -> bool:
+        return self.__store.is_running(operation_id, self.__owner_id)
+
+
+def _denied(adapter: str, capability: str, target: str) -> None:
+    try:
+        log.warning(
+            "adapter_capability_denied",
+            **safe_adapter_diagnostic_fields(
+                adapter=adapter, capability=capability, target=target, outcome="denied"
+            ),
+        )
+    except Exception:
+        pass
 
 
 def _network_rule_from_json(rule: Any) -> NetworkRule:

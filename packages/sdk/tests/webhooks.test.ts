@@ -1,9 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { TalosWebhook, TalosWebhookError, ReplayStore } from '../src/webhooks.js';
+import {
+  TalosWebhook,
+  TalosWebhookError,
+  ReplayStore,
+  verifyWebhook,
+  parseWebhookEvent,
+} from '../src/webhooks.js';
 
 describe('TalosWebhook', () => {
   const secret = 'my-test-secret';
-  const payload = JSON.stringify({ id: 'evt_123', type: 'activity.created' });
+  const payload = JSON.stringify({ id: 'evt_123', type: 'activity.created', talosId: 'tal_1', data: { channel: 'x' } });
   const eventId = 'evt_123';
   let timestamp: number;
   let signatureHeader: string;
@@ -30,10 +36,27 @@ describe('TalosWebhook', () => {
     return `t=${timestamp},v1=${hexSignature}`;
   }
 
+  async function generatePlatformSignatureHeader(payload: string, timestamp: number, secret: string, version = 1) {
+    const encoder = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      'raw',
+      encoder.encode(secret),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+    const data = encoder.encode(`${version}.${timestamp}.${payload}`);
+    const signature = await crypto.subtle.sign('HMAC', key, data);
+    const hexSignature = Array.from(new Uint8Array(signature))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
+    return `v${version}=${hexSignature},t=${timestamp}`;
+  }
+
   it('verifies a valid signature successfully', async () => {
     await expect(
       TalosWebhook.verify({ payload, signatureHeader, secret })
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ timestamp });
   });
 
   it('throws on missing signature header', async () => {
@@ -73,13 +96,62 @@ describe('TalosWebhook', () => {
 
   it('supports key rotation (array of secrets)', async () => {
     const newSecret = 'new-secret';
-    // Signed with new secret
     const newHeader = await generateSignatureHeader(payload, timestamp, newSecret);
-    
-    // Pass both old and new secret
+
     await expect(
       TalosWebhook.verify({ payload, signatureHeader: newHeader, secret: [secret, newSecret] })
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ timestamp });
+  });
+
+  it('verifies platform X-Webhook-Signature scheme (v.t.payload)', async () => {
+    const platformHeader = await generatePlatformSignatureHeader(payload, timestamp, secret);
+    await expect(
+      TalosWebhook.verify({ payload, signatureHeader: platformHeader, secret })
+    ).resolves.toMatchObject({ timestamp });
+  });
+
+  describe('typed verifyWebhook helper', () => {
+    it('returns a typed event after successful verification', async () => {
+      const event = await verifyWebhook<{ channel: string }>({
+        payload,
+        signatureHeader,
+        secret,
+      });
+      expect(event.id).toBe('evt_123');
+      expect(event.type).toBe('activity.created');
+      expect(event.talosId).toBe('tal_1');
+      expect(event.data).toEqual({ channel: 'x' });
+      expect(event.timestamp).toBe(timestamp);
+    });
+
+    it('constructEvent mirrors verifyWebhook', async () => {
+      const event = await TalosWebhook.constructEvent({
+        payload,
+        signatureHeader,
+        secret,
+      });
+      expect(event.type).toBe('activity.created');
+      expect(event.id).toBe('evt_123');
+    });
+
+    it('rejects malformed JSON without leaking the body', async () => {
+      const badPayload = '{not-json';
+      const header = await generateSignatureHeader(badPayload, timestamp, secret);
+      await expect(
+        verifyWebhook({ payload: badPayload, signatureHeader: header, secret })
+      ).rejects.toMatchObject({ code: 'INVALID_PAYLOAD' });
+    });
+
+    it('parseWebhookEvent handles top-level eventType shape', () => {
+      const parsed = parseWebhookEvent(
+        { eventType: 'revenue.recorded', amount: '10', id: 'evt_9' },
+        123,
+      );
+      expect(parsed.type).toBe('revenue.recorded');
+      expect(parsed.id).toBe('evt_9');
+      expect(parsed.timestamp).toBe(123);
+      expect(parsed.data).toMatchObject({ amount: '10' });
+    });
   });
 
   describe('ReplayStore', () => {
@@ -108,7 +180,7 @@ describe('TalosWebhook', () => {
       };
       await expect(
         TalosWebhook.verify({ payload, signatureHeader, secret, replayStore, eventId, toleranceSeconds: 300 })
-      ).resolves.toBeUndefined();
+      ).resolves.toMatchObject({ timestamp });
       expect(replayStore.has).toHaveBeenCalledWith(eventId);
       expect(replayStore.set).toHaveBeenCalledWith(eventId, 360); // 300 + 60
     });
@@ -122,11 +194,9 @@ describe('TalosWebhook', () => {
         error: vi.fn(),
       };
 
-      // Success
       await TalosWebhook.verify({ payload, signatureHeader, secret, logger, eventId });
       expect(logger.info).toHaveBeenCalledWith('Webhook verification successful', expect.any(Object));
 
-      // Failure
       const badHeader = `t=${timestamp},v1=deadbeef`;
       await expect(
         TalosWebhook.verify({ payload, signatureHeader: badHeader, secret, logger, eventId })

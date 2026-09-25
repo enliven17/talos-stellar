@@ -261,3 +261,22 @@ def test_artifact_not_found_error_is_safe():
     assert "passphrase" not in msg.lower()
     assert "SXXXXXX" not in msg
     assert "ENC::" not in msg
+
+
+def test_stream_encrypted_artifact_roundtrip(tmp_path: Path):
+    from talos_agent.backup_service import stream_encrypted_artifact
+    from talos_agent.crypto import encrypt_with_password, decrypt_with_password
+
+    payload = "hello-stream-" + ("x" * 5000)
+    encrypted = encrypt_with_password(payload, "stream-pass-ok")
+    out = tmp_path / "streamed.enc"
+    written = stream_encrypted_artifact(encrypted, out, chunk_size=1024)
+    assert out.exists()
+    assert written == len(encrypted)
+    assert decrypt_with_password(out.read_text(encoding="utf8"), "stream-pass-ok") == payload
+
+
+def test_stream_encrypted_artifact_rejects_tiny_chunk(tmp_path: Path):
+    from talos_agent.backup_service import stream_encrypted_artifact, BackupError
+    with pytest.raises(BackupError):
+        stream_encrypted_artifact("abc", tmp_path / "x.enc", chunk_size=8)

@@ -57,6 +57,15 @@ describe("getVersionConfig", () => {
     expect(getVersionConfig("99")).toBeUndefined();
     expect(getVersionConfig("v1")).toBeUndefined();
   });
+
+  it("returns undefined for inherited Object.prototype keys (malformed Accept-Version input)", () => {
+    // SUPPORTED_VERSIONS is a plain object; a naive `obj[version]` lookup
+    // would resolve these to truthy, non-ApiVersionConfig values.
+    expect(getVersionConfig("constructor")).toBeUndefined();
+    expect(getVersionConfig("__proto__")).toBeUndefined();
+    expect(getVersionConfig("toString")).toBeUndefined();
+    expect(getVersionConfig("hasOwnProperty")).toBeUndefined();
+  });
 });
 
 describe("negotiateApiVersion", () => {
@@ -82,6 +91,17 @@ describe("negotiateApiVersion", () => {
 
   it("returns default for unknown Accept-Version", () => {
     const result = negotiateApiVersion("/api/talos", "99");
+    expect(result.version).toBe(API_DEFAULT_VERSION);
+  });
+
+  it("returns default for an Accept-Version matching an inherited object key", () => {
+    const result = negotiateApiVersion("/api/talos", "constructor");
+    expect(result.version).toBe(API_DEFAULT_VERSION);
+    expect(result.config).toBe(SUPPORTED_VERSIONS[API_DEFAULT_VERSION]);
+  });
+
+  it("returns default for an empty-string Accept-Version", () => {
+    const result = negotiateApiVersion("/api/talos", "");
     expect(result.version).toBe(API_DEFAULT_VERSION);
   });
 
@@ -148,6 +168,19 @@ describe("addVersionHeaders", () => {
     });
     expect(headers.get("Deprecation")).toBe("true");
     expect(headers.get("Sunset")).toBe("Sat, 01 Jan 2027 00:00:00 GMT");
+  });
+
+  it("adds Deprecation without Sunset when a version is deprecated with no sunset date set", () => {
+    // A missing `sunset` must not silently suppress the Deprecation signal —
+    // sunset is optional metadata layered on top of `deprecated`, not a
+    // second flag that has to also be true.
+    const headers = new Headers();
+    addVersionHeaders(headers, {
+      version: "1",
+      config: { version: "1", deprecated: true },
+    });
+    expect(headers.get("Deprecation")).toBe("true");
+    expect(headers.has("Sunset")).toBe(false);
   });
 });
 

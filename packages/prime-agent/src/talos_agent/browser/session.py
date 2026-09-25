@@ -230,9 +230,65 @@ class BrowserSession:
     async def url(self) -> str:
         return ""
 
-    async def close(self) -> None:
+    async def close(self) -> dict:
+        """End the Stagehand session. Idempotent and privacy-safe.
+
+        Returns a small status dict suitable for operators/tests. Never includes
+        session payloads, cookies, profile paths, or API keys.
+        """
+        if self._closed:
+            return {
+                "status": "already_closed",
+                "session_present": bool(self._session_id),
+            }
+
         self._closed = True
+        session_id = self._session_id
+        ended = False
+        error_type: str | None = None
+
+        if not session_id:
+            # Missing / malformed session — treat as clean so callers can proceed.
+            self._session_id = ""
+            return {
+                "status": "closed",
+                "session_present": False,
+                "ended": False,
+                "reason": "missing_session_id",
+            }
+
         try:
-            await asyncio.to_thread(self._client.sessions.end, self._session_id)
-        except Exception:
-            pass
+            await asyncio.to_thread(self._client.sessions.end, session_id)
+            ended = True
+        except Exception as exc:
+            # Dependency failure (Stagehand down, already-ended, network): still
+            # mark closed locally so cancellation paths cannot leak a live handle.
+            error_type = type(exc).__name__
+            console.print(
+                f"[yellow]Browser session end failed during close "
+                f"({error_type}); marking closed locally.[/yellow]"
+            )
+
+        self._session_id = ""
+        return {
+            "status": "closed",
+            "session_present": True,
+            "ended": ended,
+            "error_type": error_type,
+        }
+
+    async def cleanup_on_cancellation(self) -> dict:
+        """Tear down the browser session after task/job cancellation.
+
+        Safe to call multiple times and from concurrent cancel paths. Errors are
+        explicit and privacy-safe — no secrets, seeds, or media are logged.
+        """
+        if self._closed and not self._session_id:
+            return {
+                "status": "already_cleaned",
+                "closed": True,
+            }
+
+        result = await self.close()
+        result["cleanup"] = "cancellation"
+        return result

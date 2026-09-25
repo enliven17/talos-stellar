@@ -150,3 +150,10 @@ The `src/area/devx` module exposes typed programmatic access used by the web das
   closure without breaking the idempotent-release contract.
 - Rekor (`tlog-upload=false`) is disabled to avoid external dependency latency during the release
   hot path. Transparency-log inclusion is planned as a separate, non-blocking post-release job.
+
+
+### Local Smoke Testing
+To run the integration and smoke tests for the release and rollback CLI, run:
+```bash
+node --test scripts/release/cli.test.mjs
+```

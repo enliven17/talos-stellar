@@ -74,6 +74,10 @@
     {
       "name": "Platform",
       "description": "Global platform data — activity feed, leaderboard, events"
+    },
+    {
+      "name": "Admin — Jobs",
+      "description": "Operator job-queue management. Requires the `ADMIN_API_KEY` bearer token."
     }
   ],
   "components": {
@@ -82,20 +86,164 @@
         "type": "http",
         "scheme": "bearer",
         "description": "TALOS API key (`tak_*` or `tlk_*`). Issued at genesis via `POST /api/talos`."
+      },
+      "AdminAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Operator admin key (`ADMIN_API_KEY` env var). Required for all `/api/admin/*` endpoints. Returns `500` when the env var is not configured, `401` when the header is absent, `403` when the key does not match."
       }
     },
     "schemas": {
+      "AdminJobRecord": {
+        "type": "object",
+        "required": [
+          "id",
+          "queue",
+          "payload",
+          "status",
+          "priority",
+          "runAt",
+          "attempts",
+          "maxAttempts",
+          "retryClass",
+          "cancelRequested",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "job_01j0abc123def456"
+          },
+          "queue": {
+            "type": "string",
+            "example": "audit_log_write"
+          },
+          "payload": {
+            "description": "Job-specific input data. Shape varies by queue.",
+            "example": {
+              "talosId": "cly1abc",
+              "event": "service_purchase"
+            }
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "leased",
+              "completed",
+              "dead_letter",
+              "cancelled"
+            ],
+            "example": "dead_letter"
+          },
+          "priority": {
+            "type": "integer",
+            "example": 0
+          },
+          "runAt": {
+            "type": "string",
+            "format": "date-time",
+            "example": "2026-09-24T15:00:00.000Z"
+          },
+          "leaseId": {
+            "type": "string",
+            "nullable": true,
+            "example": "lease_abc123"
+          },
+          "leaseOwner": {
+            "type": "string",
+            "nullable": true,
+            "example": "worker-1"
+          },
+          "leaseExpiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "heartbeatAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "attempts": {
+            "type": "integer",
+            "example": 3
+          },
+          "maxAttempts": {
+            "type": "integer",
+            "example": 3
+          },
+          "retryClass": {
+            "type": "string",
+            "enum": [
+              "transient",
+              "rate_limited",
+              "fatal"
+            ],
+            "example": "transient"
+          },
+          "cancelRequested": {
+            "type": "boolean",
+            "example": false
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "nullable": true,
+            "example": "idem_key_abc"
+          },
+          "lastError": {
+            "type": "string",
+            "nullable": true,
+            "example": "Connection timeout"
+          },
+          "result": {
+            "nullable": true,
+            "description": "Job result data once completed, otherwise null."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
       "HealthStatus": {
         "type": "object",
         "required": [
           "ok",
+          "status",
+          "ready",
           "checks",
           "ts"
         ],
         "properties": {
           "ok": {
             "type": "boolean",
-            "description": "True when all dependency checks pass",
+            "description": "True when every dependency check passed (fully healthy).",
+            "example": true
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "unavailable"
+            ],
+            "description": "Aggregate readiness severity. `degraded` means only soft dependencies failed (still ready for traffic). `unavailable` means a critical dependency failed (not ready). Never a liveness/process signal.",
+            "example": "ok"
+          },
+          "ready": {
+            "type": "boolean",
+            "description": "True when the process should keep receiving traffic (`status` is `ok` or `degraded`).",
             "example": true
           },
           "checks": {
@@ -111,6 +259,7 @@
                   "ok",
                   "error"
                 ],
+                "description": "Critical dependency. Failure → status unavailable (HTTP 503).",
                 "example": "ok"
               },
               "stellar": {
@@ -119,6 +268,7 @@
                   "ok",
                   "error"
                 ],
+                "description": "Soft dependency. Failure alone → status degraded (HTTP 200).",
                 "example": "ok"
               }
             }
@@ -5692,11 +5842,11 @@
           "Platform"
         ],
         "summary": "Readiness probe",
-        "description": "Returns 200 when all dependencies are reachable, 503 when any check fails.\n\nChecks run **in parallel** with bounded timeouts:\n- `db` — `SELECT 1` against Postgres (2 s timeout)\n- `stellar` — `GET` to Stellar Horizon (`STELLAR_HORIZON_URL` env var, or testnet fallback) (3 s timeout)\n\nUse for:\n- Kubernetes `readinessProbe` — remove the pod from the load-balancer when degraded.\n- UptimeRobot / Better Uptime monitoring on a 1-minute interval.\n\nThe liveness probe (`GET /api/health/live`) is unaffected by dependency failures.",
+        "description": "Returns 200 when the process should receive traffic, 503 only when a **critical** dependency fails.\n\nSeverity model (separates degraded readiness from hard liveness failure):\n- `status: \"ok\"` — all checks pass (HTTP 200, `ready: true`)\n- `status: \"degraded\"` — soft dependency failed (HTTP 200, `ready: true`); keep traffic, alert operators\n- `status: \"unavailable\"` — critical dependency failed (HTTP 503, `ready: false`); remove from LB\n\nChecks run **in parallel** with bounded timeouts:\n- `db` (critical) — `SELECT 1` against Postgres (2 s timeout)\n- `stellar` (soft) — `GET` to Stellar Horizon (`STELLAR_HORIZON_URL` env var, or testnet fallback) (3 s timeout)\n\nUse for:\n- Kubernetes `readinessProbe` — remove the pod from the load-balancer only when `unavailable`.\n- UptimeRobot / Better Uptime monitoring on a 1-minute interval (alert on `degraded` via body, not only HTTP status).\n\nThe liveness probe (`GET /api/health/live`) is unaffected by dependency failures and must not be used for dependency restarts.",
         "operationId": "getReadiness",
         "responses": {
           "200": {
-            "description": "All dependencies reachable",
+            "description": "Ready for traffic (fully healthy or soft-dependency degraded)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5704,6 +5854,8 @@
                 },
                 "example": {
                   "ok": true,
+                  "status": "ok",
+                  "ready": true,
                   "checks": {
                     "db": "ok",
                     "stellar": "ok"
@@ -5724,7 +5876,7 @@
             }
           },
           "503": {
-            "description": "One or more dependencies unreachable",
+            "description": "Critical dependency unavailable — not ready for traffic",
             "content": {
               "application/json": {
                 "schema": {
@@ -5732,6 +5884,8 @@
                 },
                 "example": {
                   "ok": false,
+                  "status": "unavailable",
+                  "ready": false,
                   "checks": {
                     "db": "error",
                     "stellar": "ok"
@@ -5750,11 +5904,11 @@
           "Platform"
         ],
         "summary": "Health check (legacy alias)",
-        "description": "Backward-compatible alias for `GET /api/health/ready`. Existing monitors wired to this URL continue to work. Prefer the explicit sub-paths for new integrations.",
+        "description": "Backward-compatible alias for `GET /api/health/ready`. Reports `status` (`ok` | `degraded` | `unavailable`) and `ready` so soft Horizon failures are not treated as hard liveness failures. Prefer the explicit sub-paths for new integrations.",
         "operationId": "getHealth",
         "responses": {
           "200": {
-            "description": "All dependencies reachable",
+            "description": "Ready for traffic (healthy or degraded)",
             "content": {
               "application/json": {
                 "schema": {
@@ -5764,7 +5918,7 @@
             }
           },
           "503": {
-            "description": "One or more dependencies unreachable",
+            "description": "Critical dependency unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -5809,6 +5963,350 @@
           },
           "400": {
             "description": "wallet parameter is required"
+          }
+        }
+      }
+    },
+    "/api/admin/jobs": {
+      "get": {
+        "tags": [
+          "Admin — Jobs"
+        ],
+        "summary": "List / filter jobs",
+        "description": "Cursor-paginated list of all background jobs, ordered by `createdAt` descending.\nFilter by `status` and/or `queue`. Returns up to 50 records per page (default 20).\n\n**Requires the `AdminAuth` bearer token.**",
+        "operationId": "adminListJobs",
+        "security": [
+          {
+            "AdminAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "leased",
+                "completed",
+                "dead_letter",
+                "cancelled"
+              ]
+            },
+            "description": "Filter to a specific job status.",
+            "example": "dead_letter"
+          },
+          {
+            "name": "queue",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter to a specific queue name.",
+            "example": "audit_log_write"
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Opaque pagination cursor returned by the previous page."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 20
+            },
+            "description": "Maximum number of records to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated list of jobs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "jobs",
+                    "nextCursor"
+                  ],
+                  "properties": {
+                    "jobs": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AdminJobRecord"
+                      }
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Pass as `cursor` on the next request to advance the page. `null` on the last page.",
+                      "example": "eyJpZCI6ImN1cnNvciJ9"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid `status` filter value",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "example": "Invalid status. Must be one of: pending, leased, completed, dead_letter, cancelled"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing `Authorization` header"
+          },
+          "403": {
+            "description": "Wrong admin key"
+          },
+          "500": {
+            "description": "Server error or `ADMIN_API_KEY` env var not configured"
+          }
+        }
+      }
+    },
+    "/api/admin/jobs/{id}": {
+      "get": {
+        "tags": [
+          "Admin — Jobs"
+        ],
+        "summary": "Get a single job",
+        "description": "Returns the full `AdminJobRecord` for the requested job, including payload, result, lease state, and attempt history. Useful for debugging stuck or dead-lettered jobs.\n\n**Requires the `AdminAuth` bearer token.**",
+        "operationId": "adminGetJob",
+        "security": [
+          {
+            "AdminAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Job ID",
+            "example": "job_01j0abc123def456"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job record",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminJobRecord"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing `Authorization` header"
+          },
+          "403": {
+            "description": "Wrong admin key"
+          },
+          "404": {
+            "description": "Job not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "example": "Job not found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server error or `ADMIN_API_KEY` env var not configured"
+          }
+        }
+      }
+    },
+    "/api/admin/jobs/{id}/retry": {
+      "post": {
+        "tags": [
+          "Admin — Jobs"
+        ],
+        "summary": "Requeue a failed job",
+        "description": "Requeues a `dead_letter` or `cancelled` job: resets `attempts` to 0, clears `lastError`, and sets `runAt` to now.\n\nReturns **409 Conflict** if the job is in any other state (`pending`, `leased`, `completed`) — this prevents double-execution of already-running or completed work.\n\n**Requires the `AdminAuth` bearer token.**",
+        "operationId": "adminRetryJob",
+        "security": [
+          {
+            "AdminAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Job ID",
+            "example": "job_01j0abc123def456"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job requeued successfully — returns the updated record",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminJobRecord"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing `Authorization` header"
+          },
+          "403": {
+            "description": "Wrong admin key"
+          },
+          "404": {
+            "description": "Job not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "example": "Job not found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Job is not in a retryable state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "example": "Job is not in a retryable state (status=completed)"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server error or `ADMIN_API_KEY` env var not configured"
+          }
+        }
+      }
+    },
+    "/api/admin/jobs/{id}/cancel": {
+      "post": {
+        "tags": [
+          "Admin — Jobs"
+        ],
+        "summary": "Cancel a job",
+        "description": "Cooperative cancellation of a job:\n\n- **`pending`** jobs are cancelled immediately.\n- **`leased`** (in-flight) jobs are flagged; the running handler stops on its next `heartbeat()` call. Cancellation of running work is best-effort and not instantaneous.\n\nReturns **409 Conflict** for jobs already in a terminal state (`completed`, `dead_letter`, `cancelled`).\n\n**Requires the `AdminAuth` bearer token.**",
+        "operationId": "adminCancelJob",
+        "security": [
+          {
+            "AdminAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Job ID",
+            "example": "job_01j0abc123def456"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job cancelled — returns the updated record",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminJobRecord"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing `Authorization` header"
+          },
+          "403": {
+            "description": "Wrong admin key"
+          },
+          "404": {
+            "description": "Job not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "example": "Job not found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Job is not cancellable (already terminal)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "example": "Job is not cancellable (status=completed)"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server error or `ADMIN_API_KEY` env var not configured"
           }
         }
       }

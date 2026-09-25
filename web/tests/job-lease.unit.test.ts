@@ -42,6 +42,22 @@ vi.mock("@/lib/fulfillment", () => ({
   fulfillInstant: vi.fn(),
 }));
 
+// /result and /pending authenticate via resolveTalosFromRequest (covered by
+// the auth suites); "Bearer tok_<agentId>" resolves to <agentId> here so the
+// select mocks only describe job/talos state. claim/heartbeat/release still
+// resolve the caller with their own select, which the tests mock directly.
+vi.mock("@/lib/auth", () => ({
+  resolveTalosFromRequest: vi.fn(async (request: Request) => {
+    const token = request.headers.get("authorization")?.replace(/^Bearer /, "") ?? "";
+    return { ok: true, talos: { id: token.replace(/^tok_/, "") } };
+  }),
+}));
+
+// Ledger writes are covered by reputation-ledger tests.
+vi.mock("@/lib/reputation-ledger", () => ({
+  ingestJobToLedger: vi.fn().mockResolvedValue(null),
+}));
+
 // ─── Helper: build a chainable select mock ─────────────────────────
 function selectChain(result: any) {
   const chain: any = {
@@ -306,7 +322,6 @@ describe("Job Lease System", () => {
       };
 
       mockDb.select
-        .mockReturnValueOnce(selectChain([{ id: "agent_1" }]))
         .mockReturnValueOnce(selectChain([mockJob]))
         .mockReturnValueOnce(selectChain([{ id: "agent_1", status: "Active" }]));
 
@@ -360,7 +375,6 @@ describe("Job Lease System", () => {
       };
 
       mockDb.select
-        .mockReturnValueOnce(selectChain([{ id: "agent_1" }]))
         .mockReturnValueOnce(selectChain([mockJob]))
         .mockReturnValueOnce(selectChain([{ id: "agent_1", status: "Active" }]));
 
@@ -397,7 +411,6 @@ describe("Job Lease System", () => {
       };
 
       mockDb.select
-        .mockReturnValueOnce(selectChain([{ id: "agent_1" }]))
         .mockReturnValueOnce(selectChain([mockJob]))
         .mockReturnValueOnce(selectChain([{ id: "agent_1", status: "Active" }]));
 

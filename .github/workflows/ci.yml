@@ -25,28 +25,51 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate operational metrics definitions
+        run: node scripts/operational-metrics.test.mjs
+
+      # ── Guard: run the detector's own test suite before it gates CI.
+      #    A broken detector must never silently skip package checks.
+      - name: Self-test detection script
+        run: bash scripts/ci-detect-changes.test.sh
+
+      # ── Shared env for the detect step. These are workflow-controlled
+      #    values, not user input; the script additionally validates them
+      #    (format + object existence) before use, and never echoes them.
       - name: Detect changed packages
         id: changes
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
 
           # ── Determine base/head SHAs ────────────────────────────
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            BASE_SHA="${{ github.event.pull_request.base.sha }}"
-            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
-          elif [[ "${{ github.event_name }}" == "push" ]]; then
-            # push events diff against the previous push.
-            # Use the detection script (it validates SHAs and falls
-            # back to ALL when the base object is missing, e.g. force push).
-            BASE_SHA="${{ github.event.before }}"
-            HEAD_SHA="${{ github.sha }}"
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            BASE_SHA="${PR_BASE_SHA}"
+            HEAD_SHA="${PR_HEAD_SHA}"
+          elif [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            # push events diff against the previous push. The detection
+            # script degrades to ALL when the base object is missing
+            # (e.g. force push or a new branch's first push).
+            BASE_SHA="${PUSH_BEFORE_SHA}"
+            HEAD_SHA="${PUSH_HEAD_SHA}"
           else
-            # workflow_dispatch / unknown events — run all packages.
-            echo "matrix={\"include\":[{\"package\":\"web\"},{\"package\":\"sdk\"},{\"package\":\"prime-agent\"},{\"package\":\"contracts\"}]}" >> "$GITHUB_OUTPUT"
+            # workflow_dispatch / unknown events — run all packages via
+            # the script's --all mode (single source of truth).
+            MATRIX=$(bash scripts/ci-detect-changes.sh --all)
+            echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           # ── Run the detection script ────────────────────────────
+          # The script always exits 0 and prints a usable matrix
+          # (normal, degraded-to-ALL, or empty); failure semantics are
+          # fail-closed, never skip-silently. It validates the SHAs
+          # before use and redacts input values from its diagnostics.
           MATRIX=$(bash scripts/ci-detect-changes.sh "$BASE_SHA" "$HEAD_SHA")
           echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
 
@@ -112,6 +135,47 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      # ── Contract artifact cache (#635) ─────────────────────────────────
+      # Caches contracts/target/wasm32-unknown-unknown/release (the wasm
+      # build output) keyed by OS + rustc fingerprint + strong content
+      # hash of the contract build inputs from scripts/ci-contract-cache.sh
+      # key-hash. Any input change → new key → miss → rebuild; restore-keys
+      # only prefix-match the same OS+toolchain. Corrupt entries are wiped
+      # and rebuilt (never fail the job); flaky restore/save steps are
+      # non-fatal (continue-on-error + warning); missing key inputs and
+      # missing/invalid artifacts fail closed with an explicit ::error::.
+      # The wasm build always runs, so stale artifacts are never consumed.
+      # Only the build output directory is cached — no secrets or configs.
+      #
+      # Local reproduction:
+      #   bash scripts/ci-contract-cache.test.sh
+      - name: "[contracts] Compute cache key"
+        if: matrix.package == 'contracts'
+        id: cache-key
+        run: |
+          HASH=$(bash scripts/ci-contract-cache.sh key-hash contracts)
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "toolchain=$(rustc --version | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: "[contracts] Restore artifact cache"
+        if: matrix.package == 'contracts'
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: contracts/target/wasm32-unknown-unknown/release
+          key: ${{ runner.os }}-contracts-wasm-${{ steps.cache-key.outputs.toolchain }}-${{ steps.cache-key.outputs.hash }}
+          restore-keys: |
+            ${{ runner.os }}-contracts-wasm-${{ steps.cache-key.outputs.toolchain }}-
+
+      - name: "[contracts] Warn on cache restore failure"
+        if: matrix.package == 'contracts' && steps.cache-restore.outcome == 'failure'
+        run: echo "::warning::Contract artifact cache restore failed (flaky step or backend error) — continuing with a full rebuild. The cache is an optimization only; artifacts are always built and verified in this job."
+
+      - name: "[contracts] Validate restored artifacts"
+        if: matrix.package == 'contracts'
+        run: bash scripts/ci-contract-cache.sh validate contracts/target/wasm32-unknown-unknown/release
+
       # ── Per-package checks ──────────────────────────────────────
 
       # ── Web: typecheck, lint, unit tests ────────────────────────
@@ -130,6 +194,11 @@ jobs:
         working-directory: web
         run: pnpm test:unit
 
+      - name: "[web] Payment route coverage"
+        if: matrix.package == 'web' && !cancelled()
+        working-directory: web
+        run: pnpm test:payment-coverage
+
       # ── SDK: build/typecheck, tests ─────────────────────────────
       - name: "[sdk] Build & typecheck"
         if: matrix.package == 'sdk'
@@ -145,12 +214,18 @@ jobs:
       - name: "[prime-agent] Lint"
         if: matrix.package == 'prime-agent'
         working-directory: packages/prime-agent
-        run: uv run ruff check src tests
+        run: uv run ruff check src tests scripts
 
       - name: "[prime-agent] Test"
         if: matrix.package == 'prime-agent'
         working-directory: packages/prime-agent
-        run: uv run pytest tests/ -v
+        run: uv run pytest tests/ -v --cov --cov-report=json --cov-report=term
+
+      # Per-module floors for critical agent modules (issue #638).
+      - name: "[prime-agent] Coverage gate"
+        if: matrix.package == 'prime-agent'
+        working-directory: packages/prime-agent
+        run: uv run python scripts/check-coverage.py coverage.json
 
       # ── Contracts: cargo test, WASM build ───────────────────────
       - name: "[contracts] Test"
@@ -162,3 +237,15 @@ jobs:
         if: matrix.package == 'contracts'
         working-directory: contracts
         run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: "[contracts] Verify artifacts"
+        if: matrix.package == 'contracts'
+        run: bash scripts/ci-contract-cache.sh verify contracts/target/wasm32-unknown-unknown/release
+
+      - name: "[contracts] Save artifact cache"
+        if: matrix.package == 'contracts' && steps.cache-restore.outcome == 'success' && steps.cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: contracts/target/wasm32-unknown-unknown/release
+          key: ${{ steps.cache-restore.outputs.cache-primary-key }}

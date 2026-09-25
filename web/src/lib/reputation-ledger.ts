@@ -2,9 +2,6 @@ import { db } from "@/db";
 import { tlsCommerceJobs, tlsReputationInputs } from "@/db/schema";
 import { eq, inArray, and, sql } from "drizzle-orm";
 import { computeReputation, MAX_JOB_AGE_DAYS, ReputationJobInput, ReputationScore, reputationInputsSchema } from "./reputation";
-import type { PgTransaction } from "drizzle-orm/pg-core";
-import type { ExtractTablesWithRelations } from "drizzle-orm";
-import type { PostgresJsQueryResultHKT } from "drizzle-orm/postgres-js";
 
 // Terminal statuses that should be recorded in the ledger
 export const TERMINAL_JOB_STATUSES = [
@@ -19,19 +16,16 @@ export const TERMINAL_JOB_STATUSES = [
   "refunded",
 ];
 
-// Reusable type for a generic Drizzle postgres transaction
-export type DbTx = PgTransaction<
-  PostgresJsQueryResultHKT,
-  Record<string, never>,
-  ExtractTablesWithRelations<Record<string, never>>
->;
+// The app database handle or a transaction opened from it.
+export type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type DbOrTx = typeof db | DbTx;
 
 /**
  * Idempotently ingests a terminal job into the reputation input ledger.
  * This preserves provenance (txHash, status, counterparties, etc.)
  * without leaking private job payloads or results.
  */
-export async function ingestJobToLedger(jobId: string, tx?: any) {
+export async function ingestJobToLedger(jobId: string, tx?: DbOrTx) {
   const dbOrTx = tx ?? db;
 
   const jobRows = await dbOrTx
@@ -55,18 +49,19 @@ export async function ingestJobToLedger(jobId: string, tx?: any) {
   const payloadStr = job.payload ? JSON.stringify(job.payload) : "{}";
   const resultStr = job.result ? JSON.stringify(job.result) : "{}";
   
-  const payloadObj = typeof job.payload === "object" && job.payload !== null ? job.payload : {};
-  const resultObj = typeof job.result === "object" && job.result !== null ? job.result : {};
+  const payloadObj = (typeof job.payload === "object" && job.payload !== null ? job.payload : {}) as Record<string, unknown>;
+  const resultObj = (typeof job.result === "object" && job.result !== null ? job.result : {}) as Record<string, unknown>;
 
   const hasResult = Object.keys(resultObj).length > 0;
   
   // Extract authoritative signals from the payload/result
   // The exact keys depend on the service contract, but we look for common ones:
   const rawDeadline = payloadObj.deadlineAt || payloadObj.deadline;
-  const deadlineAt = rawDeadline ? new Date(rawDeadline) : null;
+  const deadlineAt =
+    typeof rawDeadline === "string" || typeof rawDeadline === "number" ? new Date(rawDeadline) : null;
   
   // E.g. { refundAmount: "50.00" } or { refund: { amount: "50.00" } }
-  const refundAmount = resultObj.refundAmount?.toString() || null;
+  const refundAmount = resultObj.refundAmount != null ? String(resultObj.refundAmount) || null : null;
 
   const [inserted] = await dbOrTx
     .insert(tlsReputationInputs)
@@ -105,14 +100,14 @@ export async function ingestJobToLedger(jobId: string, tx?: any) {
  * retroactive state corrections.
  */
 export async function rebuildReputationLedger(providerId?: string) {
-  let query = db.select().from(tlsCommerceJobs);
+  let query = db.select().from(tlsCommerceJobs).$dynamic();
 
   if (providerId) {
-    query = query.where(eq(tlsCommerceJobs.talosId, providerId)) as any;
+    query = query.where(eq(tlsCommerceJobs.talosId, providerId));
   }
 
   const jobs = await query;
-  const terminalJobs = jobs.filter((j: any) =>
+  const terminalJobs = jobs.filter((j) =>
     TERMINAL_JOB_STATUSES.includes(j.status)
   );
 

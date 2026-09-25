@@ -11,6 +11,7 @@
  */
 
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -21,6 +22,14 @@ const ESM_ENTRY = resolve(SDK_ROOT, "dist", "esm", "index.js");
 console.log("[compat:node-esm] importing from:", ESM_ENTRY);
 
 const sdk = await import(ESM_ENTRY);
+
+const signingExports = ["REQUEST_SIGNATURE_VERSION", "canonicalizeRequest", "SigningController", "SigningError", "StellarKeypairSigner"];
+for (const name of signingExports) assert.ok(name in sdk, `expected signing export "${name}" missing in ESM bundle`);
+const signingVectors = JSON.parse(readFileSync(resolve(SDK_ROOT, "tests", "fixtures", "request-signing-vectors.json"), "utf8"));
+for (const vector of signingVectors.vectors) {
+  const bytes = await sdk.canonicalizeRequest(vector.request);
+  assert.deepEqual(Array.from(bytes), Array.from(new TextEncoder().encode(vector.canonical)), `signing vector ${vector.name}`);
+}
 
 console.log("[compat:node-esm] exports:", Object.keys(sdk).sort().join(", "));
 
@@ -67,7 +76,25 @@ assert.equal(typeof sdk.TalosWebhook.verify, "function", "TalosWebhook.verify mi
 assert.equal(typeof sdk.TalosWebhook.parseSignatureHeader, "function", "TalosWebhook.parseSignatureHeader missing");
 assert.equal(typeof sdk.TalosWebhook.timingSafeEqual, "function", "TalosWebhook.timingSafeEqual missing");
 assert.equal(typeof sdk.TalosWebhook.hexToBuf, "function", "TalosWebhook.hexToBuf missing");
+assert.equal(typeof sdk.TalosWebhook.constructEvent, "function", "TalosWebhook.constructEvent missing");
+assert.equal(typeof sdk.verifyWebhook, "function", "verifyWebhook missing");
+assert.equal(typeof sdk.parseWebhookEvent, "function", "parseWebhookEvent missing");
 console.log("  + TalosWebhook static methods present");
+
+// Typed seller quote construction
+assert.equal(typeof sdk.constructSellerQuote, "function", "constructSellerQuote missing");
+assert.equal(typeof sdk.constructSellerPaymentDetails, "function", "constructSellerPaymentDetails missing");
+assert.equal(typeof sdk.toCanonicalDecimalAmount, "function", "toCanonicalDecimalAmount missing");
+assert.equal(typeof sdk.SellerQuoteError, "function", "SellerQuoteError missing");
+const sampleQuote = sdk.constructSellerQuote({
+  providerId: "G" + "A".repeat(55),
+  amount: 1,
+  ttlSeconds: 120,
+  now: new Date("2099-01-01T00:00:00.000Z"),
+});
+assert.equal(sampleQuote.amount, "1.000000");
+assert.equal(sampleQuote.assetCode, "USDC");
+console.log("  + constructSellerQuote helper OK");
 
 // Event stream constructor
 const stream = new sdk.TalosEventStream("http://example.test", { maxReconnectAttempts: 0 });

@@ -2,6 +2,10 @@
 
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { AgentAvatar } from "@/components/agent-avatar";
+import {
+  mergeBackgroundRefresh,
+  shouldReplaceRowsOnRefresh,
+} from "@/lib/preserveDashboardState";
 
 // ─── Types ───────────────────────────────────────────────────────
 
@@ -92,20 +96,38 @@ export function ActivityClient({ stats: initialStats, transactions: initialTrans
   // Poll stats + transactions (first page only)
   const refresh = useCallback(async () => {
     try {
-      const isFirstPage = page === 1;
+      const replaceRows = shouldReplaceRowsOnRefresh(page, loading);
       const params = new URLSearchParams(
-        isFirstPage ? { limit: String(PAGE_SIZE) } : { statsOnly: "true" }
+        replaceRows ? { limit: String(PAGE_SIZE) } : { statsOnly: "true" }
       );
       const res = await fetch(`/api/activity?${params}`);
       if (!res.ok) return;
       const data = await res.json();
-      setStats(data.stats);
-      if (isFirstPage) {
-        setTransactions(data.transactions);
-        setNextCursor(data.nextCursor);
+      // Merge through the preserve helper so filter / page / selection stay put.
+      const merged = mergeBackgroundRefresh(
+        {
+          stats,
+          rows: transactions,
+          filter,
+          page,
+          nextCursor,
+          prevCursors,
+          loading,
+        },
+        {
+          stats: data.stats,
+          rows: data.transactions,
+          nextCursor: data.nextCursor,
+        },
+        { replaceRows },
+      );
+      setStats(merged.stats);
+      if (replaceRows) {
+        setTransactions(merged.rows);
+        setNextCursor(merged.nextCursor);
       }
     } catch { /* silent */ }
-  }, [page]);
+  }, [page, loading, stats, transactions, filter, nextCursor, prevCursors]);
 
   useEffect(() => {
     const id = setInterval(refresh, POLL_INTERVAL);
