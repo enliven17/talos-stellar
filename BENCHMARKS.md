@@ -303,3 +303,100 @@ PROPERTY_TEST_ITERATIONS=50 PROPERTY_TEST_SEED=7 PROPERTY_TEST_SUITES=metrics,sc
 | `schedule` | default cron parse, malformed cron fail-closed, stable daily seed, privacy-safe describe |
 
 Logging goes through `sanitizeForLogging` — secrets, tokens, signatures, and payment proofs are never written to artifacts or logs.
+
+---
+
+## Prime-Agent Performance Budget (issue #645)
+
+The prime-agent Python package maintains a **performance regression budget** for
+synchronous hot-path functions.  Unlike the TypeScript benchmark framework above,
+this budget focuses on pure CPU / in-process code paths that must not regress as
+the codebase grows.
+
+### Budgeted hot paths
+
+| Function | Budget (p99) | Rationale |
+|---|---|---|
+| `commerce_quote.parse_iso8601_timestamp` (valid) | 0.10 ms | Called on every 402 payment response |
+| `commerce_quote.parse_iso8601_timestamp` (malformed) | 0.10 ms | Fail-fast path for bad input |
+| `commerce_quote.verify_quote_not_expired` (valid) | 0.10 ms | Per-payment expiry check |
+| `commerce_quote.verify_quote_not_expired` (expired) | 0.10 ms | Per-payment expiry check |
+| `commerce_quote.enforce_commerce_quote_expiry` (valid) | 0.20 ms | Full quote enforcement |
+| `commerce_quote.enforce_commerce_quote_expiry` (missing) | 0.10 ms | Fail-closed on missing expiry |
+| `metrics._normalize_task` (known) | 0.05 ms | Called on every scheduler cycle emission |
+| `metrics._normalize_task` (unknown → sentinel) | 0.05 ms | Cardinality guard |
+| `metrics._normalize_tool` (known) | 0.05 ms | Called on every tool invocation |
+| `metrics._normalize_model` (known) | 0.05 ms | Called on every LLM call |
+| `state_classify.registered_classification` | 0.10 ms | Dict lookup during checkpointing |
+| `state_classify.registered_classifications` (×100) | 1.00 ms | Full dict copy during restore validation |
+| `http._sanitize_response_text` (short, clean) | 0.50 ms | Before every logged response body |
+| `http._sanitize_response_text` (4 KB token-bearing) | 5.00 ms | Regex redaction on large bodies |
+| `PolicyEngine.evaluate` (disabled fast-path) | 0.50 ms | Per-tool call overhead when policy off |
+| `PolicyEngine.evaluate` (single APPROVE rule) | 5.00 ms | Minimal enabled policy evaluation |
+
+### Single source of truth
+
+All ceilings live in `packages/prime-agent/scripts/check-perf-budget.py` in the
+`PERF_BUDGET` list.  Both the standalone script and the pytest suite
+(`tests/test_perf_budget.py`) read from compatible tables so there is no drift.
+CI uses the script's ceilings directly; the pytest suite applies a 3× multiplier
+to absorb slow GitHub Actions runners.
+
+### Local commands
+
+```bash
+# Run with defaults (100 samples, 10 warmup)
+cd packages/prime-agent
+uv run python scripts/check-perf-budget.py
+
+# High-precision measurement (500 samples)
+uv run python scripts/check-perf-budget.py --samples 500 --warmup 20
+
+# Quick smoke run matching CI settings
+uv run python scripts/check-perf-budget.py --samples 50 --warmup 5 --quiet
+
+# Run via pytest (fast subset with 3× CI headroom)
+uv run pytest tests/test_perf_budget.py -v
+```
+
+### CI enforcement
+
+The `performance budget gate` step in `.github/workflows/ci-prime-agent.yml` runs:
+
+```yaml
+- name: Performance budget gate
+  run: uv run python scripts/check-perf-budget.py --samples 50 --warmup 5 --quiet
+  env:
+    OTEL_ENABLED: "false"
+    SENTRY_DSN: ""
+```
+
+The step fails closed: any p99 that exceeds its ceiling causes the workflow to
+fail with an `EXCEEDED` line identifying the function, its actual p99, and the
+overage.
+
+### Adding a new budget entry
+
+1. Add a row to `PERF_BUDGET` in `scripts/check-perf-budget.py` with a
+   `setup` helper that constructs test inputs without secrets or real network
+   calls.
+2. Add a matching test method to the appropriate class in
+   `tests/test_perf_budget.py` (pytest assertion uses 3× the ceiling).
+3. Add a row to the table above in `BENCHMARKS.md`.
+4. Run locally with `--samples 500` to calibrate the ceiling on your hardware;
+   pick a value that is ≥ 5× the measured p99 but tight enough to catch
+   obvious regressions.
+
+### Removing or relaxing a budget entry
+
+- Relaxing: increase the ceiling in `PERF_BUDGET` and the table above; document
+  the reason in the PR description (e.g. "policy engine now loads YAML fixtures
+  at startup").
+- Removing: delete the entry from `PERF_BUDGET`, the test class, and the table
+  above; justify in the PR description.
+
+### Privacy
+
+The script and tests measure only timing — they never log, return, or assert on
+the *output* of the function under test.  Setup helpers never use real secrets,
+seeds, Stellar keys, or payment proofs.
