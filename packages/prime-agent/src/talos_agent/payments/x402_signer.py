@@ -12,6 +12,8 @@ from typing import Any
 
 from rich.console import Console
 
+from talos_agent.adapters.snapshots import X402HealthSnapshot
+
 console = Console()
 
 
@@ -54,13 +56,13 @@ class X402Signer:
     def address(self) -> str | None:
         return self._wallet_address
 
-    def health_snapshot(self) -> dict[str, bool]:
+    def health_snapshot(self) -> X402HealthSnapshot:
         """Return in-process readiness snapshot for health probes (side-effect free)."""
-        return {
-            "has_api": self._api is not None,
-            "initialized": bool(self._initialized),
-            "has_wallet": bool(self._wallet_address),
-        }
+        return X402HealthSnapshot(
+            has_api=self._api is not None,
+            initialized=bool(self._initialized),
+            has_wallet=bool(self._wallet_address),
+        )
 
     async def sign_payment(
         self,

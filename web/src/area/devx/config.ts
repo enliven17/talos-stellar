@@ -102,3 +102,5 @@ export function loadSbomConfig(overrides?: Partial<SbomConfig>): SbomConfig {
 
   return { ...SBOM_DEFAULTS, ...env, ...overrides };
 }
+
+export { loadPropertyScheduleConfig } from "./property-schedule";

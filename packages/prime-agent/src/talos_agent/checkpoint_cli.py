@@ -534,6 +534,11 @@ def ensure_distinct_paths(source_path: Path, output_path: Path) -> None:
     help="Skip invariant checks.",
 )
 @click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Preview restore as a privacy-safe state diff without modifying active state.",
+)
+@click.option(
     "--json",
     "as_json",
     is_flag=True,
@@ -545,6 +550,7 @@ def restore_checkpoint(
     schema_version: int,
     max_size: int,
     no_verify_invariants: bool,
+    dry_run: bool,
     as_json: bool,
 ) -> None:
     """Restore agent state through transactional staging, validation, and rollback safety."""
@@ -575,6 +581,7 @@ def restore_checkpoint(
             allowed_schema_versions={validated_schema_version},
             require_agent_match=True,
             verify_invariants=not no_verify_invariants,
+            dry_run=dry_run,
         )
 
         res = perform_staged_restore_sync(
@@ -590,11 +597,40 @@ def restore_checkpoint(
                 "schema_version": res.schema_version,
                 "tables_restored": res.tables_restored,
                 "committed": res.committed,
+                "dry_run": res.dry_run,
                 "preflight_passed": res.preflight_passed,
                 "invariants_passed": res.invariants_passed,
                 "duration_ms": res.duration_ms,
             }
+            if res.state_diff is not None:
+                output_dict["state_diff"] = res.state_diff.to_dict()
             click.echo(json.dumps(output_dict, indent=2))
+        elif dry_run:
+            click.echo(
+                f"Dry-run restore for agent '{validated_agent_id}' "
+                f"completed in {res.duration_ms}ms (active state unchanged)"
+            )
+            if res.state_diff is None:
+                click.echo("State diff: unavailable")
+            else:
+                click.echo(
+                    f"Rows before={res.state_diff.total_rows_before} "
+                    f"after={res.state_diff.total_rows_after}"
+                )
+                click.echo("Changed tables:")
+                changed = res.state_diff.tables_changed or res.state_diff.tables_added or res.state_diff.tables_removed
+                if changed:
+                    for tbl in changed:
+                        entry = next((t for t in res.state_diff.tables if t.table == tbl), None)
+                        if entry is None:
+                            click.echo(f"  {tbl}")
+                        else:
+                            click.echo(
+                                f"  {tbl}: {entry.before_count} -> {entry.after_count} "
+                                f"(delta={entry.delta:+d})"
+                            )
+                else:
+                    click.echo("  none")
         else:
             click.echo(f"Successfully restored checkpoint for agent '{validated_agent_id}' in {res.duration_ms}ms")
             click.echo("Tables restored:")

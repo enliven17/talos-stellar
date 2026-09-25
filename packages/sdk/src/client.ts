@@ -34,6 +34,8 @@ import {
   errorFromResponse,
   parseX402Challenge,
   parseRetryAfter as parseRetryAfterHeader,
+  redactEventPath,
+  diagnoseBuyerProof,
 } from "./errors.js";
 import {
   generateIdempotencyKey,
@@ -60,27 +62,52 @@ export { generateIdempotencyKey, validateIdempotencyKey, IdempotencyConflictErro
  * with 3 attempts for safe methods (GET/HEAD/PUT/DELETE/OPTIONS) on
  * 429/500/502/503/504. Write methods become eligible for a single call when
  * that call supplies an `idempotencyKey`.
+ *
+ * Pass through {@link TalosClientOptions.retryPolicy}; values are normalized
+ * by {@link resolveRetryPolicy}. Malformed numbers / methods / status codes
+ * throw `TypeError` / `RangeError` at construction time (privacy-safe; no
+ * request payloads are included in the message).
  */
 export interface RetryPolicyOptions {
+  /** Total attempts including the first try. Clamped to 1..8. Default 3. */
   maxAttempts?: number;
+  /** Exponential backoff base delay in ms. Default 100. */
   baseDelayMs?: number;
+  /** Upper bound on computed / Retry-After delay in ms. Default 1000. */
   maxDelayMs?: number;
+  /** HTTP methods eligible for status-code retries (case-insensitive). */
   retryMethods?: string[];
+  /** HTTP status codes that trigger a retry. */
   retryStatusCodes?: number[];
+  /** When true, delay is randomized in `[0, delay]`. Default true. */
   jitter?: boolean;
+  /** Injectable RNG for deterministic tests. Defaults to `Math.random`. */
   random?: () => number;
 }
 
 /** Bounded retry configuration based on typed error retryability. See {@link TalosClientOptions.retry}. */
 export interface RetryOptions {
+  /** Total attempts including the first try. `1` disables. Clamped to 1..8. */
   maxAttempts?: number;
+  /** When true (default), only idempotent calls are auto-retried. */
   idempotentOnly?: boolean;
+  /** Cap on server-supplied Retry-After hints in ms. Default 60_000. */
   maxRetryAfterMs?: number;
+  /** Exponential backoff base delay in ms. Default 500. */
   baseDelayMs?: number;
+  /** Upper bound on computed delay in ms. Default 8_000. */
   maxDelayMs?: number;
+  /** Jitter factor in `[0, 1]`. Default 0.25. */
   jitter?: number;
+  /** Observer invoked before each delayed retry. Must not throw. */
   onRetry?: (event: { attempt: number; error: TalosAPIError; delayMs: number }) => void;
 }
+
+/** Frozen snapshot of the effective status-code retry policy. */
+export type ResolvedRetryPolicy = Readonly<Required<RetryPolicyOptions>>;
+
+/** Frozen snapshot of the effective typed retry policy. */
+export type ResolvedRetryOptions = Readonly<Required<RetryOptions>>;
 
 /**
  * Client configuration. All fields are optional; defaults match the prior
@@ -136,6 +163,38 @@ export interface WriteOptions {
   idempotencyKey?: string;
   /** AbortSignal for cancellation. */
   signal?: AbortSignal;
+  /**
+   * Per-request timeout in milliseconds. Overrides the client-level
+   * `timeoutMs` for this single call. `0` disables the timeout for this call
+   * regardless of the client default. Surfaces as `TalosTimeoutError`.
+   */
+  timeoutMs?: number;
+  /**
+   * Optional callback invoked with privacy-safe diagnostics after each x402
+   * buyer-proof exchange when calling {@link TalosClient.purchaseServiceWithPayment}.
+   * Ignored by other methods.
+   *
+   * The callback is invoked fire-and-forget and must not throw. No secrets,
+   * payment headers, or private keys appear in the diagnostic object.
+   */
+  onProofDiagnostic?: import("./types.js").BuyerProofDiagnosticCallback;
+}
+
+/**
+ * Per-call options for read methods (GET / HEAD).
+ *
+ * Mirrors {@link WriteOptions} minus the idempotency key (read methods are
+ * inherently idempotent and never carry an `Idempotency-Key` header).
+ */
+export interface ReadOptions {
+  /** AbortSignal for cancellation. */
+  signal?: AbortSignal;
+  /**
+   * Per-request timeout in milliseconds. Overrides the client-level
+   * `timeoutMs` for this single call. `0` disables the timeout for this call
+   * regardless of the client default. Surfaces as `TalosTimeoutError`.
+   */
+  timeoutMs?: number;
 }
 
 /** Structured event emitted to {@link TalosClientOptions.onError}. */
@@ -152,6 +211,8 @@ type RequestParams = Record<string, string | number | boolean>;
 type RequestOptions = RequestInit & {
   params?: RequestParams;
   idempotencyKey?: string;
+  /** Per-call timeout override in ms. `0` disables; `undefined` falls back to client `timeoutMs`. */
+  timeoutMs?: number;
 };
 
 /** Default typed-retry bounds. `maxAttempts: 1` = off. */
@@ -167,11 +228,199 @@ const DEFAULT_RETRY: Required<RetryOptions> = {
   },
 };
 
-/** Hard upper bound on attempts for the typed retry policy. */
+/** Default status-code retry policy (active unless exclusively `retry` is set). */
+const DEFAULT_RETRY_POLICY: Required<RetryPolicyOptions> = {
+  maxAttempts: 3,
+  baseDelayMs: 100,
+  maxDelayMs: 1000,
+  retryMethods: ["GET", "HEAD", "PUT", "DELETE", "OPTIONS"],
+  retryStatusCodes: [429, 500, 502, 503, 504],
+  jitter: true,
+  random: Math.random,
+};
+
+/** Hard upper bound on attempts for both retry policies. */
 const MAX_TYPED_RETRY_ATTEMPTS = 8;
 
 /** Methods considered safe to retry without further confirmation from the caller. */
 const IDEMPOTENT_METHODS = new Set(["GET", "HEAD"]);
+
+function assertFiniteNumber(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new TypeError(`${field} must be a finite number`);
+  }
+  return value;
+}
+
+function assertBoolean(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new TypeError(`${field} must be a boolean`);
+  }
+  return value;
+}
+
+function clampAttempts(value: number, field: string): number {
+  if (!Number.isInteger(value)) {
+    throw new TypeError(`${field} must be an integer`);
+  }
+  // Values below 1 mean "disabled" (single attempt). Oversized values are
+  // hard-capped so operators cannot accidentally open an unbounded retry loop.
+  if (value < 1) return 1;
+  return Math.min(value, MAX_TYPED_RETRY_ATTEMPTS);
+}
+
+function normalizeDelayPair(
+  baseDelayMs: number,
+  maxDelayMs: number,
+  prefix: string,
+): { baseDelayMs: number; maxDelayMs: number } {
+  if (baseDelayMs < 0 || maxDelayMs < 0) {
+    throw new RangeError(`${prefix} delays must be >= 0`);
+  }
+  if (baseDelayMs > maxDelayMs) {
+    throw new RangeError(`${prefix}.baseDelayMs must be <= ${prefix}.maxDelayMs`);
+  }
+  return { baseDelayMs, maxDelayMs };
+}
+
+/**
+ * Normalize and validate a status-code {@link RetryPolicyOptions} object.
+ * Missing fields fall back to defaults. Malformed input fails fast.
+ */
+export function resolveRetryPolicy(
+  options: RetryPolicyOptions | undefined = undefined,
+  enabled: boolean = true,
+): ResolvedRetryPolicy {
+  if (options !== undefined && (options === null || typeof options !== "object" || Array.isArray(options))) {
+    throw new TypeError("retryPolicy must be an object when provided");
+  }
+  const src = options ?? {};
+  const maxAttempts = enabled
+    ? clampAttempts(
+        src.maxAttempts === undefined
+          ? DEFAULT_RETRY_POLICY.maxAttempts
+          : assertFiniteNumber(src.maxAttempts, "retryPolicy.maxAttempts"),
+        "retryPolicy.maxAttempts",
+      )
+    : 1;
+
+  const baseDelayMs = assertFiniteNumber(
+    src.baseDelayMs ?? DEFAULT_RETRY_POLICY.baseDelayMs,
+    "retryPolicy.baseDelayMs",
+  );
+  const maxDelayMs = assertFiniteNumber(
+    src.maxDelayMs ?? DEFAULT_RETRY_POLICY.maxDelayMs,
+    "retryPolicy.maxDelayMs",
+  );
+  const delays = normalizeDelayPair(baseDelayMs, maxDelayMs, "retryPolicy");
+
+  let retryMethods: string[];
+  if (src.retryMethods === undefined) {
+    retryMethods = [...DEFAULT_RETRY_POLICY.retryMethods];
+  } else {
+    if (!Array.isArray(src.retryMethods) || src.retryMethods.length === 0) {
+      throw new TypeError("retryPolicy.retryMethods must be a non-empty string array");
+    }
+    retryMethods = src.retryMethods.map((method, index) => {
+      if (typeof method !== "string" || method.trim() === "") {
+        throw new TypeError(`retryPolicy.retryMethods[${index}] must be a non-empty string`);
+      }
+      return method.trim().toUpperCase();
+    });
+  }
+
+  let retryStatusCodes: number[];
+  if (src.retryStatusCodes === undefined) {
+    retryStatusCodes = [...DEFAULT_RETRY_POLICY.retryStatusCodes];
+  } else {
+    if (!Array.isArray(src.retryStatusCodes) || src.retryStatusCodes.length === 0) {
+      throw new TypeError("retryPolicy.retryStatusCodes must be a non-empty number array");
+    }
+    retryStatusCodes = src.retryStatusCodes.map((code, index) => {
+      const n = assertFiniteNumber(code, `retryPolicy.retryStatusCodes[${index}]`);
+      if (!Number.isInteger(n) || n < 100 || n > 599) {
+        throw new RangeError(`retryPolicy.retryStatusCodes[${index}] must be an HTTP status 100-599`);
+      }
+      return n;
+    });
+  }
+
+  const jitter =
+    src.jitter === undefined
+      ? DEFAULT_RETRY_POLICY.jitter
+      : assertBoolean(src.jitter, "retryPolicy.jitter");
+  const random = src.random ?? DEFAULT_RETRY_POLICY.random;
+  if (typeof random !== "function") {
+    throw new TypeError("retryPolicy.random must be a function");
+  }
+
+  return Object.freeze({
+    maxAttempts,
+    baseDelayMs: delays.baseDelayMs,
+    maxDelayMs: delays.maxDelayMs,
+    retryMethods: Object.freeze([...retryMethods]) as string[],
+    retryStatusCodes: Object.freeze([...retryStatusCodes]) as number[],
+    jitter,
+    random,
+  });
+}
+
+/**
+ * Normalize and validate a typed {@link RetryOptions} object.
+ * Missing fields fall back to defaults. Malformed input fails fast.
+ */
+export function resolveRetryOptions(
+  options: RetryOptions | undefined = undefined,
+): ResolvedRetryOptions {
+  if (options !== undefined && (options === null || typeof options !== "object" || Array.isArray(options))) {
+    throw new TypeError("retry must be an object when provided");
+  }
+  const src = options ?? {};
+  const maxAttempts = clampAttempts(
+    src.maxAttempts === undefined
+      ? DEFAULT_RETRY.maxAttempts
+      : assertFiniteNumber(src.maxAttempts, "retry.maxAttempts"),
+    "retry.maxAttempts",
+  );
+  const baseDelayMs = assertFiniteNumber(
+    src.baseDelayMs ?? DEFAULT_RETRY.baseDelayMs,
+    "retry.baseDelayMs",
+  );
+  const maxDelayMs = assertFiniteNumber(
+    src.maxDelayMs ?? DEFAULT_RETRY.maxDelayMs,
+    "retry.maxDelayMs",
+  );
+  const delays = normalizeDelayPair(baseDelayMs, maxDelayMs, "retry");
+  const maxRetryAfterMs = assertFiniteNumber(
+    src.maxRetryAfterMs ?? DEFAULT_RETRY.maxRetryAfterMs,
+    "retry.maxRetryAfterMs",
+  );
+  if (maxRetryAfterMs < 0) {
+    throw new RangeError("retry.maxRetryAfterMs must be >= 0");
+  }
+  const jitter = assertFiniteNumber(src.jitter ?? DEFAULT_RETRY.jitter, "retry.jitter");
+  if (jitter < 0 || jitter > 1) {
+    throw new RangeError("retry.jitter must be between 0 and 1");
+  }
+  const idempotentOnly =
+    src.idempotentOnly === undefined
+      ? DEFAULT_RETRY.idempotentOnly
+      : assertBoolean(src.idempotentOnly, "retry.idempotentOnly");
+  const onRetry = src.onRetry ?? DEFAULT_RETRY.onRetry;
+  if (typeof onRetry !== "function") {
+    throw new TypeError("retry.onRetry must be a function");
+  }
+
+  return Object.freeze({
+    maxAttempts,
+    idempotentOnly,
+    maxRetryAfterMs,
+    baseDelayMs: delays.baseDelayMs,
+    maxDelayMs: delays.maxDelayMs,
+    jitter,
+    onRetry,
+  });
+}
 
 /**
  * Apply jitter to a delay: `delay * (1 - jitter + jitter*random)`.
@@ -205,27 +454,8 @@ export class TalosClient {
     // An explicit `retry` config without `retryPolicy` opts out of the
     // default status-code policy so the two never compound.
     const policyEnabled = options.retryPolicy !== undefined || options.retry === undefined;
-    const normalizedRetryMethods = options.retryPolicy?.retryMethods?.map(
-      (method) => method.toUpperCase(),
-    );
-    this.retryPolicy = {
-      maxAttempts: policyEnabled ? (options.retryPolicy?.maxAttempts ?? 3) : 1,
-      baseDelayMs: options.retryPolicy?.baseDelayMs ?? 100,
-      maxDelayMs: options.retryPolicy?.maxDelayMs ?? 1000,
-      retryMethods: normalizedRetryMethods ?? [
-        "GET",
-        "HEAD",
-        "PUT",
-        "DELETE",
-        "OPTIONS",
-      ],
-      retryStatusCodes: options.retryPolicy?.retryStatusCodes ?? [
-        429, 500, 502, 503, 504,
-      ],
-      jitter: options.retryPolicy?.jitter ?? true,
-      random: options.retryPolicy?.random ?? Math.random,
-    };
-    this.retry = { ...DEFAULT_RETRY, ...(options.retry ?? {}) };
+    this.retryPolicy = resolveRetryPolicy(options.retryPolicy, policyEnabled);
+    this.retry = resolveRetryOptions(options.retry);
     this.timeoutMs = options.timeoutMs;
     this.onError = options.onError;
     this.fetchOverride = options.fetch;
@@ -238,6 +468,61 @@ export class TalosClient {
       this.headers["Authorization"] = `Bearer ${options.apiKey}`;
     }
     if (options.signer) this.signer = new SigningController(options.signer, options.signing);
+  }
+
+  /**
+   * Effective status-code retry policy after validation/normalization.
+   * Returned object is frozen; `random` is the live RNG reference.
+   */
+  getRetryPolicy(): ResolvedRetryPolicy {
+    return this.retryPolicy;
+  }
+
+  /**
+   * Effective typed retry policy after validation/normalization.
+   * Returned object is frozen; `onRetry` is the live observer reference.
+   */
+  getRetryOptions(): ResolvedRetryOptions {
+    return this.retry;
+  }
+
+  /**
+   * Privacy-safe JSON representation. Omits credentials (`Authorization`
+   * header, API key) and other internal state so that `JSON.stringify(client)`
+   * or structured log sinks never accidentally surface secrets.
+   */
+  toJSON(): Record<string, unknown> {
+    // Mask Authorization header so the API key is not exposed.
+    const safeHeaders: Record<string, string> = {};
+    for (const [k, v] of Object.entries(this.headers)) {
+      if (k.toLowerCase() === "authorization") {
+        safeHeaders[k] = "[REDACTED]";
+      } else {
+        safeHeaders[k] = v;
+      }
+    }
+    return {
+      baseUrl: this.baseUrl,
+      headers: safeHeaders,
+      retryPolicy: {
+        maxAttempts: this.retryPolicy.maxAttempts,
+        baseDelayMs: this.retryPolicy.baseDelayMs,
+        maxDelayMs: this.retryPolicy.maxDelayMs,
+        retryMethods: this.retryPolicy.retryMethods,
+        retryStatusCodes: this.retryPolicy.retryStatusCodes,
+        jitter: this.retryPolicy.jitter,
+        // `random` is intentionally omitted — it's a function reference.
+      },
+      retry: {
+        maxAttempts: this.retry.maxAttempts,
+        idempotentOnly: this.retry.idempotentOnly,
+        maxRetryAfterMs: this.retry.maxRetryAfterMs,
+        baseDelayMs: this.retry.baseDelayMs,
+        maxDelayMs: this.retry.maxDelayMs,
+        jitter: this.retry.jitter,
+        // `onRetry` is intentionally omitted — it's a function reference.
+      },
+    };
   }
 
   /** Resolve the fetch implementation per request. Prefer override; fall back to global. */
@@ -325,13 +610,23 @@ export class TalosClient {
    * Build a `{ signal, dispose }` pair for the per-request timeout, linked to
    * the caller's signal when present. Returns `null` when no timeout is set.
    * `dispose()` MUST be called once the attempt settles.
+   *
+   * Resolution order (first non-`undefined` value wins):
+   *   1. `callTimeoutMs` — per-call override passed via `WriteOptions` / `ReadOptions`.
+   *   2. `this.timeoutMs`  — client-level default from `TalosClientOptions`.
+   *
+   * A value of `0` explicitly disables the timeout for this call.
    */
   private acquireTimeoutController(
     callerSignal?: AbortSignal,
+    callTimeoutMs?: number,
   ): { signal: AbortSignal; dispose: () => void } | null {
-    if (!this.timeoutMs) return null;
+    // Resolve effective timeout: per-call wins, then client default.
+    const effectiveTimeout = callTimeoutMs !== undefined ? callTimeoutMs : this.timeoutMs;
+    // 0 or falsy — no timeout.
+    if (!effectiveTimeout) return null;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), effectiveTimeout);
     const onCallerAbort = () => controller.abort();
     if (callerSignal?.aborted) controller.abort();
     else callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
@@ -358,9 +653,15 @@ export class TalosClient {
     attempt: number,
     retryAfterHeader: string | null,
   ): number {
+    // Delegates to the same canonical parser the typed retry policy uses
+    // (`parseRetryAfter` from errors.ts, imported as `parseRetryAfterHeader`)
+    // so both retry policies agree on what counts as a valid Retry-After
+    // value instead of maintaining two parsers with different edge-case
+    // handling (the previous private copy accepted "Infinity" and
+    // whitespace-only headers as valid delays).
     if (retryAfterHeader) {
-      const headerDelay = this.parseRetryAfter(retryAfterHeader);
-      if (headerDelay !== null) {
+      const headerDelay = parseRetryAfterHeader(retryAfterHeader);
+      if (headerDelay !== undefined) {
         return Math.min(headerDelay, this.retryPolicy.maxDelayMs);
       }
     }
@@ -375,23 +676,6 @@ export class TalosClient {
     }
 
     return Math.floor(this.retryPolicy.random() * delay);
-  }
-
-  private parseRetryAfter(header: string | null): number | null {
-    if (!header) return null;
-    const trimmed = header.trim();
-    const seconds = Number(trimmed);
-    if (!Number.isNaN(seconds)) {
-      return Math.max(0, seconds * 1000);
-    }
-
-    const parsedDate = Date.parse(trimmed);
-    if (!Number.isNaN(parsedDate)) {
-      const delta = parsedDate - Date.now();
-      return delta > 0 ? delta : 0;
-    }
-
-    return null;
   }
 
   private wait(delayMs: number, signal?: AbortSignal): Promise<void> {
@@ -477,7 +761,16 @@ export class TalosClient {
   private notifyError(event: TalosErrorEvent): void {
     if (!this.onError) return;
     try {
-      this.onError(event);
+      // Redact any credential values that might be present in query-string
+      // parameters of the path before delivering the event to the caller's
+      // logger hook. This is a defensive safety net; the path passed to
+      // request() does not normally include query strings, but we enforce the
+      // guarantee here so future refactors cannot accidentally introduce leaks.
+      const safeEvent: TalosErrorEvent = {
+        ...event,
+        path: redactEventPath(event.path),
+      };
+      this.onError(safeEvent);
     } catch {
       // Fire-and-forget.
     }
@@ -495,7 +788,7 @@ export class TalosClient {
    * synchronously so abort listeners attach before `abort()`.
    */
   private async request<T>(path: string, init?: RequestOptions): Promise<T> {
-    const { params, signal, idempotencyKey, ...requestInit } = init ?? {};
+    const { params, signal, idempotencyKey, timeoutMs: callTimeoutMs, ...requestInit } = init ?? {};
     const callerSignal = signal ?? undefined;
     const method = (requestInit.method ?? "GET").toUpperCase();
     const url = this.buildUrl(path, params);
@@ -525,7 +818,7 @@ export class TalosClient {
         ? await this.applySignature(url, method, baseHeaders, requestInit.body, callerSignal)
         : baseHeaders;
 
-      const timeout = this.acquireTimeoutController(callerSignal);
+      const timeout = this.acquireTimeoutController(callerSignal, callTimeoutMs);
       const effectiveSignal = timeout?.signal ?? callerSignal;
       let delayMs: number | null = null;
       try {
@@ -589,8 +882,8 @@ export class TalosClient {
     path: string,
     options?: CursorRequestOptions,
   ): Promise<CursorPage<T>> {
-    const { signal, ...params } = options ?? {};
-    return this.request(path, { params, signal });
+    const { signal, timeoutMs, ...params } = options ?? {};
+    return this.request(path, { params, signal, timeoutMs });
   }
 
   // ── Talos CRUD ────────────────────────────────────────────
@@ -599,12 +892,12 @@ export class TalosClient {
     return this.requestPage("/api/talos", params);
   }
 
-  async getTalos(id: string): Promise<TalosDetail> {
-    return this.request(`/api/talos/${id}`);
+  async getTalos(id: string, options?: ReadOptions): Promise<TalosDetail> {
+    return this.request(`/api/talos/${id}`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
-  async getTalosMe(): Promise<TalosDetail> {
-    return this.request("/api/talos/me");
+  async getTalosMe(options?: ReadOptions): Promise<TalosDetail> {
+    return this.request("/api/talos/me", { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
   async createTalos(params: CreateTalosParams): Promise<TalosCreated> {
@@ -617,10 +910,11 @@ export class TalosClient {
   // ── Activity ───────────────────────────────────────────────
 
   async listActivities(params?: ActivityPageOptions): Promise<ActivityPage> {
-    const { signal, ...query } = params ?? {};
+    const { signal, timeoutMs, ...query } = params ?? {};
     return this.request<ActivityPage>("/api/activity", {
       params: query,
       signal,
+      timeoutMs,
     });
   }
 
@@ -637,8 +931,8 @@ export class TalosClient {
     });
   }
 
-  async getTalosActivities(talosId: string): Promise<Activity[]> {
-    return this.request(`/api/talos/${talosId}/activity`);
+  async getTalosActivities(talosId: string, options?: ReadOptions): Promise<Activity[]> {
+    return this.request(`/api/talos/${talosId}/activity`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
   // ── Revenue ────────────────────────────────────────────────
@@ -656,8 +950,8 @@ export class TalosClient {
     });
   }
 
-  async getTalosRevenues(talosId: string): Promise<Revenue[]> {
-    return this.request(`/api/talos/${talosId}/revenue`);
+  async getTalosRevenues(talosId: string, options?: ReadOptions): Promise<Revenue[]> {
+    return this.request(`/api/talos/${talosId}/revenue`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
   // ── Approvals ──────────────────────────────────────────────
@@ -675,14 +969,14 @@ export class TalosClient {
     });
   }
 
-  async getApprovals(talosId: string, status?: string): Promise<Approval[]> {
+  async getApprovals(talosId: string, status?: string, options?: ReadOptions): Promise<Approval[]> {
     const params: Record<string, string> = {};
     if (status) params.status = status;
-    return this.request(`/api/talos/${talosId}/approvals`, { params });
+    return this.request(`/api/talos/${talosId}/approvals`, { params, signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
-  async getApproval(talosId: string, approvalId: string): Promise<Approval> {
-    return this.request(`/api/talos/${talosId}/approvals/${approvalId}`);
+  async getApproval(talosId: string, approvalId: string, options?: ReadOptions): Promise<Approval> {
+    return this.request(`/api/talos/${talosId}/approvals/${approvalId}`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
   // ── Status ─────────────────────────────────────────────────
@@ -709,8 +1003,8 @@ export class TalosClient {
   async discoverServices(
     params?: DiscoverServicesParams,
   ): Promise<CursorPage<CommerceService>> {
-    const { signal, ...query } = params ?? {};
-    return this.requestPage("/api/services", { ...query, signal });
+    const { signal, timeoutMs, ...query } = params ?? {};
+    return this.requestPage("/api/services", { ...query, signal, timeoutMs });
   }
 
   async purchaseService(
@@ -733,6 +1027,11 @@ export class TalosClient {
    * Pass `options.idempotencyKey` to enable safe retry across the entire
    * 402-challenge-and-retry cycle (the key is sent only on the final POST).
    *
+   * Pass `options.onProofDiagnostic` to receive a privacy-safe diagnostic
+   * snapshot of the proof exchange. The callback is invoked fire-and-forget
+   * and must not throw. No secrets, payment headers, or private keys appear
+   * in the {@link BuyerProofDiagnostics} object.
+   *
    * Errors raised here are typed:
    *   - {@link TalosPaymentError} when the 402 challenge is malformed/missing.
    *   - Any other TalosAPIError subclass for downstream failures.
@@ -751,6 +1050,26 @@ export class TalosClient {
     const url = `${this.baseUrl}${path}`;
     const body = JSON.stringify({ payload });
     const signal = options?.signal;
+    const callTimeoutMs = options?.timeoutMs;
+    const onProofDiagnostic = options?.onProofDiagnostic;
+
+    /** Fire-and-forget diagnostic emitter — never throws. */
+    const emitDiag = (
+      challenge: Record<string, string> | undefined,
+      stage: import("./types.js").X402ProofStage,
+      opts: {
+        signingSucceeded?: boolean;
+        signingFailureReason?: string;
+        proofResponseStatus?: number;
+      } = {},
+    ): void => {
+      if (!onProofDiagnostic) return;
+      try {
+        onProofDiagnostic(diagnoseBuyerProof(path, challenge, stage, opts));
+      } catch {
+        // Observer must not break the payment flow.
+      }
+    };
 
     if (this.chaosInjector) await this.injectChaos();
 
@@ -759,7 +1078,7 @@ export class TalosClient {
     const initialHeaders = this.signer
       ? await this.applySignature(url, "POST", baseHeaders, body, signal)
       : baseHeaders;
-    const timeout = this.acquireTimeoutController(signal);
+    const timeout = this.acquireTimeoutController(signal, callTimeoutMs);
     const effectiveSignal = timeout?.signal ?? signal;
     let res: Response;
     try {
@@ -781,6 +1100,7 @@ export class TalosClient {
       if (!authHeader || !authHeader.startsWith("x402")) {
         // Preserve the legacy text so existing
         // `rejects.toThrow("Invalid x402 challenge")` assertions keep passing.
+        emitDiag(undefined, "no_challenge");
         throw new TalosPaymentError(402, "Invalid x402 challenge", path, {
           message: "Invalid x402 challenge",
           headers: { "www-authenticate": authHeader ?? "" },
@@ -788,34 +1108,70 @@ export class TalosClient {
       }
       const challenge = parseX402Challenge(authHeader);
       if (!challenge) {
+        emitDiag(undefined, "no_challenge");
         throw new TalosPaymentError(402, "Invalid x402 challenge", path, {
           message: "Invalid x402 challenge",
           headers: { "www-authenticate": authHeader },
         });
       }
+
+      emitDiag(challenge, "challenge_parsed");
 
       // 3. Request signature from the Web API. Guard against a non-numeric
       //    price so NaN never reaches the downstream /sign call.
       const amount = parseFloat(challenge.price);
       if (!Number.isFinite(amount)) {
+        emitDiag(challenge, "no_challenge");
         throw new TalosPaymentError(402, "Invalid x402 challenge", path, {
           message: "Invalid x402 challenge",
           headers: { "www-authenticate": authHeader },
         });
       }
-      const signRes = await this.signPayment(buyerTalosId, {
-        payee: challenge.payee,
-        amount,
-        assetCode: challenge.token,
-      });
+
+      emitDiag(challenge, "signing_requested");
+
+      let signRes: import("./types.js").SignedPayment;
+      try {
+        signRes = await this.signPayment(buyerTalosId, {
+          payee: challenge.payee,
+          amount,
+          assetCode: challenge.token,
+        });
+        emitDiag(challenge, "proof_submitted", { signingSucceeded: true });
+      } catch (signErr) {
+        const reason =
+          signErr instanceof Error
+            ? signErr.message
+            : String(signErr ?? "unknown signing error");
+        emitDiag(challenge, "proof_submitted", {
+          signingSucceeded: false,
+          signingFailureReason: reason,
+        });
+        throw signErr;
+      }
 
       // 4. Retry with the X-PAYMENT header (and idempotency key if supplied)
       //    through the regular request helper, so typed errors / retry /
       //    timeout all apply.
-      return this.purchaseService(talosId, {
-        paymentHeader: signRes.paymentHeader,
-        payload,
-      }, options);
+      let job: CommerceJob;
+      try {
+        job = await this.purchaseService(talosId, {
+          paymentHeader: signRes.paymentHeader,
+          payload,
+        }, options);
+        emitDiag(challenge, "proof_accepted", {
+          signingSucceeded: true,
+          proofResponseStatus: 200,
+        });
+        return job;
+      } catch (proofErr) {
+        const status = proofErr instanceof TalosAPIError ? proofErr.status : undefined;
+        emitDiag(challenge, "proof_rejected", {
+          signingSucceeded: true,
+          proofResponseStatus: status,
+        });
+        throw proofErr;
+      }
     }
 
     // Non-402 responses — wrap them through the typed dispatch.
@@ -829,8 +1185,8 @@ export class TalosClient {
 
   // ── Wallet & Payments ──────────────────────────────────────
 
-  async getWallet(talosId: string): Promise<Wallet> {
-    return this.request(`/api/talos/${talosId}/wallet`);
+  async getWallet(talosId: string, options?: ReadOptions): Promise<Wallet> {
+    return this.request(`/api/talos/${talosId}/wallet`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
   async signPayment(
@@ -858,8 +1214,8 @@ export class TalosClient {
 
   // ── Jobs ───────────────────────────────────────────────────
 
-  async getPendingJobs(): Promise<CommerceJob[]> {
-    return this.request("/api/jobs/pending");
+  async getPendingJobs(options?: ReadOptions): Promise<CommerceJob[]> {
+    return this.request("/api/jobs/pending", { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
   /**
@@ -882,8 +1238,8 @@ export class TalosClient {
     });
   }
 
-  async getJobResult(jobId: string): Promise<CommerceJob> {
-    return this.request(`/api/jobs/${jobId}/result`);
+  async getJobResult(jobId: string, options?: ReadOptions): Promise<CommerceJob> {
+    return this.request(`/api/jobs/${jobId}/result`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
   // ── Leaderboard ────────────────────────────────────────────

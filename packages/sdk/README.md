@@ -8,6 +8,59 @@ TypeScript SDK for the TALOS Protocol API on Stellar.
 npm install @talos-protocol/sdk
 ```
 
+## Module formats and the export map
+
+The package ships three built entry points and selects one per consumer
+through the `exports` map:
+
+| Condition | Entry point | Used by |
+| --- | --- | --- |
+| `import` | `dist/esm/index.js` | ESM bundlers and Node `import` |
+| `require` | `dist/cjs/index.cjs` | CommonJS `require` |
+| `types` | `dist/esm/index.d.ts` | TypeScript |
+| `browser` | `dist/browser/sdk.bundle.js` | `<script>`-tag global `TalosSDK` bundle |
+
+The ESM and CJS builds expose the same public surface, and the build scripts
+under `scripts/` keep them in sync. Because `import` precedes `browser` in the
+map, condition-order-sensitive resolvers select the ESM build; the check below
+warns about that ordering so the intent stays visible.
+
+### Verifying the export map
+
+```bash
+cd packages/sdk
+npm run build          # produces dist/esm, dist/cjs, and dist/browser
+npm run compat:exports # resolves both formats and inspects the publish tarball
+````compat:exports` fails when a required condition is missing, a target escapes
+the package root, a target is excluded from the published `files` list, or the
+CJS and ESM surfaces diverge. The same rules are covered without a build by
+`tests/export-map.test.ts` (`npm test`).
+
+## Browser bundle size budget
+
+The `<script>`-tag bundle (`dist/browser/sdk.bundle.js`) is built with esbuild
+(minified IIFE, `globalThis.TalosSDK`) and is held to a size budget declared
+in `bundle-size.config.json` (raw and gzip byte ceilings). The rules live in
+`scripts/bundle-size-lib.mjs` and are enforced in three places:
+
+| Where | Command | When |
+| --- | --- | --- |
+| Build | `npm run build:browser` | Fails immediately after an over-budget build |
+| Standalone check | `npm run check:bundle-size` | CI (`sdk-compatibility.yml`) and `npm run verify:browser` |
+| Unit tests | `npm test` | Rules and config coherence, no build needed |
+
+Raising a ceiling must be a deliberate change to `bundle-size.config.json` in
+the same PR that grows the bundle, so budget moves are always reviewed. For a
+known, temporary over-budget state, `npm run check:bundle-size --
+--allow-over-budget=<n>` tolerates violations up to `<n>` bytes while still
+warning; it never applies to the next build silently.
+
+The fallback bundler (concatenating `dist/esm` when esbuild was absent) was
+removed: it emitted `export` statements inside an IIFE, which threw
+`SyntaxError: Unexpected token 'export'` on load. esbuild is now a
+devDependency and the only supported bundler; without it, `build:browser`
+fails with an actionable message instead of producing a broken artifact.
+
 ## Quick Start
 
 ### Initialize Client
@@ -85,6 +138,41 @@ const job = await client.purchaseServiceWithPayment(
 console.log("Job created:", job.id);
 ```
 
+### Typed seller quote construction
+
+Sellers can build a canonical A2A `Quote` (and optional 402 payment-details wrapper) without hand-rolling decimals or expiry. Construction reuses `validateQuote` / `verifyQuoteNotExpired` and fails closed on missing, malformed, boundary, and expired inputs — errors never echo signatures or payment proofs.
+
+```typescript
+import {
+  constructSellerQuote,
+  constructSellerPaymentDetails,
+  SellerQuoteError,
+} from '@talos-protocol/sdk';
+
+try {
+  const quote = constructSellerQuote({
+    providerId: agentWalletAddress, // Stellar G…
+    amount: 1.5,                    // normalized to "1.500000"
+    assetCode: 'USDC',
+    network: 'stellar',
+    ttlSeconds: 900,                // or absolute expiresAt
+  });
+
+  const details = constructSellerPaymentDetails({
+    providerId: agentWalletAddress,
+    amount: 1.5,
+    ttlSeconds: 900,
+    serviceName: 'analytics',
+    talosId: 'talos_123',
+  });
+  // details.quote is the typed Quote; details.expiresAt mirrors quote.expiresAt
+} catch (err) {
+  if (err instanceof SellerQuoteError) {
+    console.error(err.code, err.message);
+  }
+}
+```
+
 ### Webhooks
 
 Talos agents can receive webhooks for various events. To securely process webhooks, you must verify the `Talos-Signature` header.
@@ -92,21 +180,29 @@ Talos agents can receive webhooks for various events. To securely process webhoo
 #### Setup & Verification
 
 ```typescript
-import { TalosWebhook } from '@talos-protocol/sdk';
+import { TalosWebhook, verifyWebhook } from '@talos-protocol/sdk';
 
-// In your webhook handler
+// Preferred: typed helper — verifies signature and returns a typed event
 try {
-  await TalosWebhook.verify({
+  const event = await verifyWebhook({
     payload: req.body, // Must be raw string or Uint8Array, NOT parsed JSON
-    signatureHeader: req.headers['talos-signature'],
+    signatureHeader: req.headers['talos-signature'] ?? req.headers['x-webhook-signature'],
     secret: process.env.TALOS_WEBHOOK_SECRET,
     toleranceSeconds: 300, // Optional: 5 minutes default
   });
-  // Process webhook safely
+  // event.type, event.id, event.data are typed — process safely
+  console.log(event.type, event.id);
 } catch (error) {
   console.error("Webhook verification failed:", error.message);
   // Return 400 response
 }
+
+// Low-level: signature check only (returns parsed header metadata)
+await TalosWebhook.verify({
+  payload: req.body,
+  signatureHeader: req.headers['talos-signature'],
+  secret: process.env.TALOS_WEBHOOK_SECRET,
+});
 ```
 
 #### Idempotency & Replay Protection
@@ -263,6 +359,10 @@ Every error also exposes:
 - `code` — stable string discriminator for `switch` / table look-ups.
 - `isRetryable` — hint to the caller.
 - `retryAfterMs?` — server-supplied retry hint, already in milliseconds.
+  Populated from the `Retry-After` response header whenever it is present,
+  on **any** error status (not just 429 — a 503 during a maintenance window
+  is a common real-world source per RFC 9110 §10.2.3), independent of
+  whether that status is otherwise `isRetryable`.
 - `requestId?` — `x-request-id` header for log correlation.
 - `headers` — sanitized snapshot (`x-request-id`, `retry-after`,
   `www-authenticate`, `x-ratelimit-*`).
@@ -321,14 +421,25 @@ switch (error.code) {
 
 ### Retry, Timeout & Observability
 
-`TalosClientOptions` accepts three additional fields, all optional and
-backward-compatible (defaults preserve previous behavior):
+`TalosClientOptions` accepts optional timeout / retry / observer fields.
+Both `retryPolicy` (status-code) and `retry` (typed-error) are validated at
+construction via `resolveRetryPolicy` / `resolveRetryOptions`: missing fields
+use defaults, malformed values throw privacy-safe `TypeError`/`RangeError`,
+and attempt counts are hard-capped at 8. Inspect the effective policy with
+`client.getRetryPolicy()` and `client.getRetryOptions()`.
 
 ```typescript
 const client = new TalosClient({
   baseUrl: "https://talos-stellar.vercel.app",
   apiKey: process.env.TALOS_KEY!,
   timeoutMs: 30_000,                     // per-request AbortController timeout
+  retryPolicy: {
+    maxAttempts: 3,                      // status-code policy (default on)
+    baseDelayMs: 100,
+    maxDelayMs: 1000,
+    retryMethods: ["GET", "HEAD", "PUT", "DELETE", "OPTIONS"],
+    retryStatusCodes: [429, 500, 502, 503, 504],
+  },
   retry: {
     maxAttempts: 4,                      // initial + 3 retries (default 1 = off)
     idempotentOnly: true,               // POST/PUT/PATCH never auto-retried
@@ -387,6 +498,10 @@ This version is **fully backward-compatible**:
   `catch (e) { if (e instanceof TalosAPIError) … }` blocks keep working.
 - New fields (`code`, `isRetryable`, `retryAfterMs`, `requestId`, `headers`,
   `data`) are additive.
+- `retryAfterMs` is now populated for every error status that carries a
+  `Retry-After` header, not only 429 — this can only add a previously-`undefined`
+  value, so it does not change behavior for any existing check of the form
+  `if (error.retryAfterMs) { … }`.
 - Legacy error messages (`"Network error"`, `"Aborted"`, `"Request timeout"`,
   `"Invalid x402 challenge"`) are preserved so existing
   `rejects.toThrow("…")` assertions stay green.

@@ -79,7 +79,7 @@ const rawGet = async (req: NextRequest): Promise<Response> => {
   if (!auth.ok) return auth.error;
 
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "anon";
-  const rl = rateLimit(`ops:backup-status:${ip}`, RATE_LIMIT);
+  const rl = await rateLimit(`ops:backup-status:${ip}`, RATE_LIMIT);
   if (!rl.ok) return rateLimitResponse(rl);
 
   const url = new URL(req.url);

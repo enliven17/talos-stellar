@@ -15,6 +15,17 @@ agents. When operators put the database on shared storage, SQLite's locking
 semantics remain the source of truth; correctness never depends on a
 process-local cache.
 
+## Pluggable backends
+
+Persistence is pluggable via `TALOS_SECRET_STORE_BACKEND`:
+
+- `sqlite` (default) — durable LocalDB tables; production / shared-storage agents
+- `memory` — process-local store for tests and dependency-free fakes
+
+`SecretStore` keeps encryption, validation, and lifecycle orchestration. Backends
+only own durable rows. Existing `SecretStore(db, ...)` callers continue to work
+and implicitly select the sqlite backend.
+
 ## Data model and encryption
 
 Migration 7 adds:

@@ -24,6 +24,106 @@ _adapter_registry: AdapterRegistry = None  # type: ignore[assignment]
 
 BROWSER_TIMEOUT = 90  # seconds per browser action
 
+# Bound how long cancellation cleanup may block before giving up.
+_CLEANUP_TIMEOUT_SECONDS = 5.0
+
+
+def _reset_adapter_session_state() -> int:
+    """Clear session-dependent adapter flags after browser teardown.
+
+    Returns the number of adapters whose login/session flags were reset.
+    """
+    reset = 0
+    if _adapter_registry is None:
+        return reset
+
+    adapters = []
+    raw = getattr(_adapter_registry, "_adapters", None)
+    if isinstance(raw, dict):
+        adapters = list(raw.values())
+    else:
+        try:
+            for name in _adapter_registry.available_channels():
+                adapter = _adapter_registry.get(name)
+                if adapter is not None:
+                    adapters.append(adapter)
+        except Exception:
+            try:
+                x_adapter = _adapter_registry.get("X")
+            except Exception:
+                x_adapter = None
+            if x_adapter is not None:
+                adapters = [x_adapter]
+
+    for adapter in adapters:
+        if hasattr(adapter, "_logged_in"):
+            adapter._logged_in = False
+            reset += 1
+    return reset
+
+
+async def cleanup_browser_sessions_on_cancellation() -> dict:
+    """Clean up the injected browser session when work is cancelled.
+
+    Idempotent: safe when the browser was never started, already closed, or
+    Stagehand fails during teardown. Never logs secrets or session payloads.
+    """
+    global _browser
+
+    browser = _browser
+    if browser is None:
+        reset = _reset_adapter_session_state()
+        return {
+            "status": "noop",
+            "reason": "no_browser_session",
+            "adapters_reset": reset,
+        }
+
+    close_result: dict = {"status": "unknown"}
+    try:
+        cleanup = getattr(browser, "cleanup_on_cancellation", None)
+        if cleanup is not None:
+            close_result = await asyncio.wait_for(
+                cleanup(), timeout=_CLEANUP_TIMEOUT_SECONDS
+            )
+        else:
+            close_result = await asyncio.wait_for(
+                browser.close(), timeout=_CLEANUP_TIMEOUT_SECONDS
+            )
+            if not isinstance(close_result, dict):
+                close_result = {"status": "closed"}
+    except asyncio.TimeoutError:
+        close_result = {
+            "status": "timeout",
+            "error_type": "TimeoutError",
+            "timeout_seconds": _CLEANUP_TIMEOUT_SECONDS,
+        }
+        # Force local closed flag so callers treat the handle as dead.
+        try:
+            browser._closed = True
+            browser._session_id = ""
+        except Exception:
+            pass
+    except Exception as exc:
+        close_result = {
+            "status": "error",
+            "error_type": type(exc).__name__,
+        }
+        try:
+            browser._closed = True
+            browser._session_id = ""
+        except Exception:
+            pass
+
+    _browser = None
+    reset = _reset_adapter_session_state()
+    console.print("[yellow]Browser session cleaned up after cancellation.[/yellow]")
+    return {
+        "status": "cleaned",
+        "close": close_result,
+        "adapters_reset": reset,
+    }
+
 
 def _browser_safe(fn: Callable) -> Callable:
     """Wrap a browser tool with timeout, error handling, and auto-reconnect."""
