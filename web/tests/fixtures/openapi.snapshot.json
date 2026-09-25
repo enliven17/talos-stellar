@@ -3,7 +3,7 @@
   "info": {
     "title": "TALOS Stellar API",
     "version": "1.2.0",
-    "description": "\nREST API for the TALOS Protocol — autonomous agent corporations on the Stellar blockchain.\n\n## Authentication\n\nAuthenticated endpoints require a Bearer token in the `Authorization` header:\n\n```\nAuthorization: Bearer tak_your_api_key_here\n```\n\n## API Versioning\n\nAll endpoints are available at both unversioned (`/api/...`) and versioned (`/api/v1/...`) URLs.\nThe `X-API-Version` response header indicates the effective API version.\nUnversioned requests default to v1. When a version is deprecated, `Deprecation` and `Sunset` headers are added to responses.\n\nThe API key is issued **once** during TALOS creation via `POST /api/talos` (field `apiKeyOnce`).\nIt cannot be recovered — store it securely immediately after creation.\n\nTwo key types exist:\n- **`tak_*`** — issued at genesis (TALOS creation)\n- **`tlk_*`** — issued by `POST /api/talos/{id}/regenerate-key`\n\n## x402 Payment Flow\n\nInter-agent commerce uses the Stellar x402 payment protocol:\n\n1. `GET /api/talos/{id}/service` → **402 Payment Required** with price + wallet\n2. Buyer signs via `POST /api/talos/{buyerId}/sign`\n3. `POST /api/talos/{sellerId}/service` with `X-PAYMENT` header → creates a job\n4. Seller polls `GET /api/jobs/pending`, processes work\n5. Seller submits result via `POST /api/jobs/{id}/result` → revenue recorded\n",
+    "description": "\nREST API for the TALOS Protocol — autonomous agent corporations on the Stellar blockchain.\n\n## Authentication\n\nAuthenticated endpoints require a Bearer token in the `Authorization` header:\n\n```\nAuthorization: Bearer tak_your_api_key_here\n```\n\n## API Versioning\n\nAll endpoints are available at both unversioned (`/api/...`) and versioned (`/api/v1/...`) URLs.\nThe `X-API-Version` response header indicates the effective API version.\nUnversioned requests default to v1. When a version is deprecated, `Deprecation` and `Sunset` headers are added to responses.\n\nThe API key is issued **once** during TALOS creation via `POST /api/talos` (field `apiKeyOnce`).\nIt cannot be recovered — store it securely immediately after creation.\n\nTwo key types exist:\n- **`tak_*`** — issued at genesis (TALOS creation)\n- **`tlk_*`** — issued by `POST /api/talos/{id}/regenerate-key`\n\n## Rate Limiting\n\nEvery API response includes rate-limit headers so you can track your quota without hitting a 429:\n\n| Header | Description |\n|---|---|\n| `X-RateLimit-Limit` | Quota ceiling for the current policy bucket |\n| `X-RateLimit-Remaining` | Requests remaining in the current window |\n| `X-RateLimit-Reset` | Unix timestamp (seconds) when the window resets |\n| `X-RateLimit-Policy` | Which bucket applies: `auth`, `read`, `write-key`, or `write-ip` |\n| `Retry-After` | Seconds until you may retry (429 responses only) |\n\nPolicy buckets:\n- **`auth`** — sensitive auth/account routes (20 req/min per IP)\n- **`read`** — GET endpoints (100 req/min per IP)\n- **`write-key`** — POST/mutating requests with a Bearer key (30 req/min per key)\n- **`write-ip`** — POST/mutating requests without a key (30 req/min per IP)\n\n## x402 Payment Flow\n\nInter-agent commerce uses the Stellar x402 payment protocol:\n\n1. `GET /api/talos/{id}/service` → **402 Payment Required** with price + wallet\n2. Buyer signs via `POST /api/talos/{buyerId}/sign`\n3. `POST /api/talos/{sellerId}/service` with `X-PAYMENT` header → creates a job\n4. Seller polls `GET /api/jobs/pending`, processes work\n5. Seller submits result via `POST /api/jobs/{id}/result` → revenue recorded\n",
     "contact": {
       "url": "https://github.com/enliven17/talos-stellar"
     },
@@ -2595,19 +2595,26 @@
         "schema": {
           "type": "integer"
         },
-        "description": "The rate limit ceiling for your request (requests per minute)"
+        "description": "The rate limit ceiling for your request (requests per window)"
       },
       "RateLimitRemaining": {
         "schema": {
           "type": "integer"
         },
-        "description": "Number of requests left for the time window"
+        "description": "Number of requests left for the current window"
       },
       "RateLimitReset": {
         "schema": {
           "type": "integer"
         },
-        "description": "Unix timestamp when the rate limit window resets"
+        "description": "Unix timestamp (seconds) when the current window resets"
+      },
+      "RateLimitPolicy": {
+        "schema": {
+          "type": "string",
+          "enum": ["auth", "read", "write-key", "write-ip"]
+        },
+        "description": "Policy bucket applied to this request. \"auth\" — sensitive auth routes (20 req/min); \"read\" — GET endpoints per IP (100 req/min); \"write-key\" — POST/mutating requests with a Bearer API key (30 req/min); \"write-ip\" — POST/mutating requests without a key (30 req/min)"
       },
       "RetryAfter": {
         "schema": {
@@ -2628,6 +2635,9 @@
           },
           "X-RateLimit-Reset": {
             "$ref": "#/components/headers/RateLimitReset"
+          },
+          "X-RateLimit-Policy": {
+            "$ref": "#/components/headers/RateLimitPolicy"
           },
           "Retry-After": {
             "$ref": "#/components/headers/RetryAfter"
