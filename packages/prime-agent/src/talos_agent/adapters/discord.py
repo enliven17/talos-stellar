@@ -17,6 +17,7 @@ from talos_agent.adapters.capability import (
 )
 from talos_agent.adapters.snapshots import DiscordHealthSnapshot
 from talos_agent.config import resolve_setting_secret
+from talos_agent.redact import redact_text as _redact_text
 
 if TYPE_CHECKING:
     from talos_agent.config import Settings
@@ -82,7 +83,8 @@ class DiscordAdapter(BaseSocialAdapter):
     def _webhook_url(self) -> str:
         if self._secrets is not None:
             return self._secrets.get("discord_webhook_url")
-        assert self._settings is not None
+        if self._settings is None:
+            return self._legacy_webhook_url
         return resolve_setting_secret(
             self._settings, "discord_webhook_url", self._legacy_webhook_url
         )
@@ -91,7 +93,8 @@ class DiscordAdapter(BaseSocialAdapter):
     def _bot_token(self) -> str:
         if self._secrets is not None:
             return self._secrets.get("discord_bot_token")
-        assert self._settings is not None
+        if self._settings is None:
+            return self._legacy_bot_token
         return resolve_setting_secret(
             self._settings, "discord_bot_token", self._legacy_bot_token
         )
@@ -212,7 +215,7 @@ class DiscordAdapter(BaseSocialAdapter):
             status="failed",
             channel=self.channel_name,
             content=content,
-            error=f"Webhook POST failed: HTTP {resp.status_code} — {resp.text[:200]}",
+            error=f"Webhook POST failed: HTTP {resp.status_code} — {_redact_text(resp.text[:200])}",
         )
 
     async def _api_post(self, url: str, payload: dict, content: str) -> PublishResult:
@@ -233,7 +236,7 @@ class DiscordAdapter(BaseSocialAdapter):
             status="failed",
             channel=self.channel_name,
             content=content,
-            error=f"API POST failed: HTTP {resp.status_code} — {resp.text[:200]}",
+            error=f"API POST failed: HTTP {resp.status_code} — {_redact_text(resp.text[:200])}",
         )
 
     async def reply(self, target_url: str, content: str, **kwargs) -> PublishResult:
@@ -270,7 +273,7 @@ class DiscordAdapter(BaseSocialAdapter):
             status="failed",
             channel=self.channel_name,
             content=content,
-            error=f"Reply failed: HTTP {resp.status_code} — {resp.text[:200]}",
+            error=f"Reply failed: HTTP {resp.status_code} — {_redact_text(resp.text[:200])}",
         )
 
     # ── Discovery ────────────────────────────────────────────
