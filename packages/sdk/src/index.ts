@@ -16,6 +16,16 @@ export type {
   ReadOptions,
 } from "./client.js";
 
+// ── Pagination ─────────────────────────────────────────────────────
+
+export {
+  AsyncPaginationIterator,
+  createPaginationIterator,
+  PaginationAbortedError,
+  PaginationLimitExceededError,
+} from "./pagination.js";
+export type { AsyncPaginationIteratorOptions } from "./pagination.js";
+
 // ── Idempotency ───────────────────────────────────────────────────
 export {
   generateIdempotencyKey,
