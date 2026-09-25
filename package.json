@@ -19,7 +19,8 @@
     "metrics:check": "node scripts/operational-metrics.test.mjs",
     "smoke:fixture:gen": "node scripts/generate-smoke-fixture.mjs",
     "smoke:fixture:check": "node scripts/generate-smoke-fixture.mjs --check",
-    "secrets:check": "bash scripts/secret-scan.sh"
+    "secrets:check": "bash scripts/secret-scan.sh",
+    "smoke:chaos": "node scripts/chaos-fixture.mjs"
   },
   "dependencies": {
     "next": "16.2.2"
