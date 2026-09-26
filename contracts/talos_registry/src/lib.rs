@@ -1481,6 +1481,35 @@ impl TalosRegistry {
         BytesN::from_array(&e, &INTERFACE_ID)
     }
 
+    /// Return the canonical deployment-manifest digest for this contract.
+    ///
+    /// The digest is computed from the immutable public interface:
+    /// - `INTERFACE_ID`
+    /// - semver `(major, minor, patch)`
+    /// - ordered capability list
+    /// - event schema version
+    ///
+    /// It is intentionally not stored in ledger state so calls remain purely
+    /// read-only while operators can compare deployments deterministically.
+    pub fn deployment_manifest_digest(e: Env) -> BytesN<32> {
+        let mut payload = soroban_sdk::Bytes::new(&e);
+        payload.append(&soroban_sdk::Bytes::from_array(&e, &INTERFACE_ID));
+        payload.extend_from_slice(&CONTRACT_VERSION.0.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.1.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.2.to_be_bytes());
+
+        for feature in features_list() {
+            let bytes = feature.as_bytes();
+            payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            payload.extend_from_slice(bytes);
+        }
+
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.major.to_be_bytes());
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.minor.to_be_bytes());
+
+        e.crypto().sha256(&payload).to_bytes()
+    }
+
     /// Return `true` when the deployed contract semver is at least the
     /// `major.minor.patch` requested by the caller.
     ///
@@ -2030,6 +2059,32 @@ mod tests {
         let client = TalosRegistryClient::new(&env, &contract_id);
         let (maj, min, patch) = client.version();
         assert_eq!((maj, min, patch), CONTRACT_VERSION);
+    }
+
+    #[test]
+    fn deployment_manifest_digest_is_stable_and_canonical() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+
+        let digest = client.deployment_manifest_digest();
+        let again = client.deployment_manifest_digest();
+        assert_eq!(digest, again, "digest must be deterministic");
+
+        let mut payload = soroban_sdk::Bytes::new(&env);
+        payload.append(&soroban_sdk::Bytes::from_array(&env, &INTERFACE_ID));
+        payload.extend_from_slice(&CONTRACT_VERSION.0.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.1.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.2.to_be_bytes());
+        for feature in features_list() {
+            let bytes = feature.as_bytes();
+            payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            payload.extend_from_slice(bytes);
+        }
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.major.to_be_bytes());
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.minor.to_be_bytes());
+
+        let expected = env.crypto().sha256(&payload).to_bytes();
+        assert_eq!(digest, expected);
     }
 
     // ── interface_id() tests ────────────────────────────────────────
@@ -3242,6 +3297,8 @@ mod tests {
 
         assert!(result.is_ok(), "exactly-at-limit metadata must be accepted");
         let id = result
+            .expect("boundary metadata create must be ok")
+            .expect("talos creation should succeed");
             .ok()
             .and_then(|outcome| outcome.ok())
             .expect("boundary metadata create must be ok");

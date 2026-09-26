@@ -495,6 +495,31 @@ impl TalosNameService {
         BytesN::from_array(&e, &INTERFACE_ID)
     }
 
+    /// Return the canonical deployment-manifest digest for this contract.
+    ///
+    /// This additive read-only query re-derives a stable digest from the
+    /// interface ID, semver, capability list, and event schema version. It
+    /// never stores any data in state and therefore remains safe for repeated
+    /// operator verification and compatibility checks.
+    pub fn deployment_manifest_digest(e: Env) -> BytesN<32> {
+        let mut payload = soroban_sdk::Bytes::new(&e);
+        payload.append(&soroban_sdk::Bytes::from_array(&e, &INTERFACE_ID));
+        payload.extend_from_slice(&CONTRACT_VERSION.0.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.1.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.2.to_be_bytes());
+
+        for feature in features_list() {
+            let bytes = feature.as_bytes();
+            payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            payload.extend_from_slice(bytes);
+        }
+
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.major.to_be_bytes());
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.minor.to_be_bytes());
+
+        e.crypto().sha256(&payload).to_bytes()
+    }
+
     /// Return `true` when the deployed semver supports the requested
     /// `(major, minor, patch)` floor. See `version_supports` for the
     /// exact rule.
@@ -1952,6 +1977,31 @@ mod tests {
         assert_eq!((maj, min, patch), CONTRACT_VERSION);
     }
 
+    #[test]
+    fn deployment_manifest_digest_is_stable_and_canonical() {
+        let (env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
+
+        let digest = client.deployment_manifest_digest();
+        let again = client.deployment_manifest_digest();
+        assert_eq!(digest, again, "digest must be deterministic");
+
+        let mut payload = soroban_sdk::Bytes::new(&env);
+        payload.append(&soroban_sdk::Bytes::from_array(&env, &INTERFACE_ID));
+        payload.extend_from_slice(&CONTRACT_VERSION.0.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.1.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.2.to_be_bytes());
+        for feature in features_list() {
+            let bytes = feature.as_bytes();
+            payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            payload.extend_from_slice(bytes);
+        }
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.major.to_be_bytes());
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.minor.to_be_bytes());
+
+        let expected = env.crypto().sha256(&payload).to_bytes();
+        assert_eq!(digest, expected);
+    }
+
     // ── interface_id() + golden vector ───────────────────────────────
 
     #[test]
@@ -2168,23 +2218,23 @@ mod tests {
 
     #[test]
     fn set_registry_contract_emits_dep_path_event_when_timelocked() {
-        let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
-        let admin = Address::generate(&env);
-        client
-            .mock_auths(&[MockAuth {
-                address: &_admin,
-                invoke: &MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "set_admin",
-                    args: (admin.clone(),).into_val(&env),
-                    sub_invokes: &[],
-                },
-            }])
-            .set_admin(&admin);
-
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+        let new_admin = Address::generate(&env);
         client
             .mock_auths(&[MockAuth {
                 address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_admin",
+                    args: (new_admin.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_admin(&new_admin);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &new_admin,
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "set_timelock_config",
@@ -2197,7 +2247,7 @@ mod tests {
         let new_registry = Address::generate(&env);
         let res = client
             .mock_auths(&[MockAuth {
-                address: &admin,
+                address: &new_admin,
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "set_registry_contract",
@@ -3248,6 +3298,7 @@ mod tests {
     /// register_name without mock_auths must be rejected.
     #[test]
     fn register_name_without_auth_is_rejected() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
         let (env, registry_contract, _contract_id, _admin, registry_client, client) = setup();
         let owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
@@ -3268,6 +3319,8 @@ mod tests {
     #[test]
     fn set_registry_contract_without_auth_is_rejected() {
         let (env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
         let new_registry = Address::generate(&env);
 
         let result = client.try_set_registry_contract(&new_registry);
@@ -3277,6 +3330,9 @@ mod tests {
     /// set_timelock_config without mock_auths must be rejected.
     #[test]
     fn ns_set_timelock_config_without_auth_is_rejected() {
+        let (env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
         let (_env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
 
         let result = client.try_set_timelock_config(&100, &86400);
@@ -3287,6 +3343,8 @@ mod tests {
     #[test]
     fn ns_schedule_action_without_auth_is_rejected() {
         let (env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
 
         let action = AdminAction::SetRegistryContract(Address::generate(&env));
         let result = client.try_schedule_action(&action, &0);
@@ -3296,6 +3354,9 @@ mod tests {
     /// cancel_action without mock_auths must be rejected.
     #[test]
     fn ns_cancel_action_without_auth_is_rejected() {
+        let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
         let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
 
         let action = AdminAction::SetRegistryContract(Address::generate(&env));
@@ -3356,6 +3417,7 @@ mod tests {
     #[test]
     fn set_registry_contract_wrong_signer_is_rejected() {
         let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
         let imposter = Address::generate(&env);
 
         let new_registry = Address::generate(&env);
@@ -3376,6 +3438,8 @@ mod tests {
     /// Non-admin cannot cancel a timelock action.
     #[test]
     fn ns_cancel_action_wrong_signer_is_rejected() {
+        let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
         let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
         let imposter = Address::generate(&env);
 
@@ -3549,6 +3613,9 @@ mod tests {
     /// Timelock grace_period of zero must be rejected.
     #[test]
     fn ns_set_timelock_config_zero_grace_period_is_rejected() {
+        let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
         let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
 
         let result = client
@@ -3568,6 +3635,9 @@ mod tests {
     /// Timelock min_delay above MAX must be rejected.
     #[test]
     fn ns_set_timelock_config_above_max_min_delay_is_rejected() {
+        let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
         let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
 
         let result = client
@@ -3589,6 +3659,9 @@ mod tests {
     /// Executing an already-cancelled proposal must fail.
     #[test]
     fn ns_execute_cancelled_proposal_is_rejected() {
+        let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
         let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
 
         let action = AdminAction::SetRegistryContract(Address::generate(&env));
@@ -3623,6 +3696,9 @@ mod tests {
     /// Cancelling an already-executed proposal must fail.
     #[test]
     fn ns_cancel_executed_proposal_is_rejected() {
+        let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
+        client.set_admin(&admin);
         let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
 
         let action = AdminAction::SetRegistryContract(Address::generate(&env));
