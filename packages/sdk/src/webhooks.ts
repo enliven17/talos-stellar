@@ -84,6 +84,13 @@ export interface VerifyWebhookOptions {
   replayStore?: ReplayStore;
   /** The event ID from the payload, required if replayStore is used. */
   eventId?: string;
+  /**
+   * How long (in seconds) to remember processed event IDs in the replay store.
+   * Defaults to `toleranceSeconds + 60` when toleranceSeconds > 0, or 86400
+   * (24 hours) when tolerance is disabled. Must be a positive integer if provided.
+   * Explicit values override the default TTL computation.
+   */
+  replayWindowSeconds?: number;
   /** Optional logger for observability (privacy-safe: does not log payloads or secrets). */
   logger?: Logger;
   /** Optional chaos injector for fault injection during verification. */
@@ -318,6 +325,7 @@ export class TalosWebhook {
       toleranceSeconds = 300,
       replayStore,
       eventId,
+      replayWindowSeconds,
       logger,
       chaosInjector,
     } = options;
@@ -469,7 +477,20 @@ export class TalosWebhook {
           );
         }
 
-        const ttl = toleranceSeconds > 0 ? toleranceSeconds + 60 : 86400;
+        const ttl = replayWindowSeconds !== undefined
+          ? replayWindowSeconds > 0
+            ? replayWindowSeconds
+            : (() => {
+                logger?.error(
+                  "Webhook verification misconfigured: replayWindowSeconds must be a positive integer",
+                  { replayWindowSeconds },
+                );
+                throw new TalosWebhookError(
+                  "replayWindowSeconds must be a positive integer",
+                  "REPLAY_MISCONFIGURED",
+                );
+              })()
+          : toleranceSeconds > 0 ? toleranceSeconds + 60 : 86400;
         if (chaosInjector) {
           await chaosInjector.maybeInjectFault(FaultType.REPLAY_STORE_ERROR);
         }
