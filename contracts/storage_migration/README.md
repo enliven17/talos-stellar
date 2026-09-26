@@ -42,6 +42,13 @@ See [`talos_registry`](../talos_registry/src/lib.rs) (`schema_version`,
   retried with a fix), not to restore prior on-chain state. An operator
   rolling back must confirm the target version's data shape is actually
   compatible with the entry-points that will run against it.
+- **Dry-run.** `dry_run(e, current, from, to)` returns a `MigrationDryRun`
+  describing what a forward migration *would* do, without taking the lock,
+  writing storage, appending history, or emitting events. It mirrors
+  `begin_migration`'s checks in the same order, so `applicable == true`
+  means the real call would succeed and `error` otherwise carries the exact
+  `MigrationError` the real call would return. It is always safe to call,
+  including while another migration holds the lock.
 
 ## Adding a migration step to a contract
 
