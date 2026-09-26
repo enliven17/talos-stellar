@@ -106,6 +106,27 @@ pub struct PauseInfo {
     pub expires_at: Option<u64>,
 }
 
+/// Maximum number of results returned by a single [`TalosNameService::names_page`] call.
+pub const MAX_REVERSE_PAGE_SIZE: u32 = 50;
+
+/// Maximum number of storage keys scanned per [`TalosNameService::names_page`] call.
+///
+/// Bounds ledger-read cost regardless of how sparse the ID space is.
+/// A sparse registry (many IDs with no name) can exhaust the window before
+/// filling the page; callers should detect `next_start == 0` and stop.
+pub const MAX_REVERSE_SCAN_WINDOW: u32 = 500;
+
+/// A page of reverse-lookup results from [`TalosNameService::names_page`].
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamesPage {
+    /// Up to `limit` `(talos_id, name)` pairs in ascending `talos_id` order.
+    pub items: Vec<(u32, String)>,
+    /// Cursor for the next page.  Pass as `start_id` on the next call.
+    /// `0` means there are no more results within the scan window.
+    pub next_start: u32,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -279,7 +300,7 @@ pub const INTERFACE_ID: [u8; 32] = [
     0x65, 0x53, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, // "eService"
     // (major, minor, patch) big-endian u32s
     0x00, 0x00, 0x00, 0x01, // major = 1
-    0x00, 0x00, 0x00, 0x03, // minor = 3
+    0x00, 0x00, 0x00, 0x04, // minor = 4
     0x00, 0x00, 0x00, 0x00, // patch = 0
     // reserved
     0x00, 0x00, 0x00, 0x00,
@@ -312,6 +333,7 @@ pub fn features_list() -> &'static [&'static str] {
         "registry_pointer",  // set_registry_contract — points to TalosRegistry
         "interface_query",   // version / interface_id / supports_version
         "cross_contract",    // invokes creator_of on the configured registry
+        "paginated_reverse_lookup", // names_page — cursor-based reverse scan
     ]
 }
 
@@ -454,7 +476,7 @@ fn validate_name(name: &String) -> bool {
 /// This constant is embedded in the WASM binary at compile time and is
 /// therefore immutable once deployed; it cannot be altered by any admin
 /// call, storage write, or cross-contract invocation.
-pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 3, 0);
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 4, 0);
 
 // ── Pause Domains ───────────────────────────────────────────────────
 
@@ -1150,6 +1172,76 @@ impl TalosNameService {
     /// Returns None if the Talos has no name.
     pub fn name_of(e: Env, talos_id: u32) -> Option<String> {
         e.storage().persistent().get(&DataKey::TalosName(talos_id))
+    }
+
+    /// Paginated reverse-lookup: return a page of `(talos_id, name)` entries.
+    ///
+    /// Scans the reverse mapping `TalosName(id)` for Talos IDs in the
+    /// half-open range `[start_id, start_id + limit)`, collecting only the
+    /// IDs that have a registered name. IDs with no name entry are silently
+    /// skipped and **not** counted against the page size.
+    ///
+    /// # Arguments
+    /// * `start_id` — first Talos ID to include in the scan (inclusive cursor).
+    ///   Pass `1` for the first page, or the `next_start` value from a previous
+    ///   response to continue paging.
+    /// * `limit` — maximum number of results to return per page.
+    ///   Clamped to `[1, MAX_REVERSE_PAGE_SIZE]`; callers that supply a value
+    ///   outside this range receive a page bounded by the clamped limit.
+    ///
+    /// # Returns
+    /// A [`NamesPage`] value with:
+    /// * `items` — up to `limit` `(talos_id, name)` tuples in ascending
+    ///   `talos_id` order.
+    /// * `next_start` — the first ID of the next page, or `0` when the scan
+    ///   reached the end of the range without finding more names.
+    ///
+    /// # Privacy
+    /// This read path accesses only stored name strings (no payment proofs,
+    /// seeds, secrets, or caller data) and emits no events.
+    ///
+    /// # Boundary / missing-data behaviour
+    /// * `start_id == 0` is treated as `1` (IDs begin at 1 by convention).
+    /// * A `start_id` larger than any registered ID returns an empty page with
+    ///   `next_start == 0`.
+    /// * The scan is bounded to `start_id + MAX_REVERSE_SCAN_WINDOW` regardless
+    ///   of `limit`, preventing unbounded ledger reads.
+    pub fn names_page(e: Env, start_id: u32, limit: u32) -> NamesPage {
+        // Clamp start
+        let effective_start = if start_id == 0 { 1u32 } else { start_id };
+
+        // Clamp limit
+        let effective_limit = limit.max(1).min(MAX_REVERSE_PAGE_SIZE);
+
+        let mut items: Vec<(u32, String)> = Vec::new(&e);
+        let mut collected: u32 = 0;
+        let scan_end = effective_start.saturating_add(MAX_REVERSE_SCAN_WINDOW);
+
+        let mut cursor = effective_start;
+        while cursor < scan_end && collected < effective_limit {
+            if let Some(name) = e
+                .storage()
+                .persistent()
+                .get::<_, String>(&DataKey::TalosName(cursor))
+            {
+                items.push_back((cursor, name));
+                collected += 1;
+            }
+            cursor = cursor.saturating_add(1);
+            if cursor == 0 {
+                // u32 overflow guard
+                break;
+            }
+        }
+
+        // Determine next_start: the first id of the next page, or 0 at end.
+        let next_start = if cursor < scan_end && collected == effective_limit {
+            cursor
+        } else {
+            0u32
+        };
+
+        NamesPage { items, next_start }
     }
 
     /// Check if a name is available.
@@ -1901,7 +1993,7 @@ mod tests {
     #[test]
     fn version_returns_compile_time_constant() {
         let (_env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
-        assert_eq!(client.version(), (1u32, 3u32, 0u32));
+        assert_eq!(client.version(), (1u32, 4u32, 0u32));
     }
 
     #[test]
@@ -2569,6 +2661,227 @@ mod tests {
         let (_env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
 
         assert!(client.name_of(&999).is_none());
+    }
+
+    // ── names_page() — paginated reverse lookup ───────────────────────
+
+    #[test]
+    fn names_page_returns_empty_for_empty_registry() {
+        let (_env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
+
+        let page = client.names_page(&1, &10);
+        assert_eq!(page.items.len(), 0);
+        assert_eq!(page.next_start, 0);
+    }
+
+    #[test]
+    fn names_page_returns_registered_names() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name = s(&env, "atlas");
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &name,
+        );
+
+        let page = client.names_page(&1, &10);
+        assert_eq!(page.items.len(), 1);
+        let (id, nm) = page.items.get(0).unwrap();
+        assert_eq!(id, talos_id);
+        assert_eq!(nm, name);
+    }
+
+    #[test]
+    fn names_page_respects_limit() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+
+        // Register 3 Talos names
+        let names = ["nova", "vega", "lens"];
+        let mut ids = Vec::new(&env);
+        for nm in names.iter() {
+            let owner = Address::generate(&env);
+            let pw = Address::generate(&env);
+            let talos_id =
+                create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+            let soroban_name = s(&env, nm);
+            register_name_with_auth(
+                &env,
+                &client,
+                &contract_id,
+                &registry_contract,
+                &owner,
+                talos_id,
+                &soroban_name,
+            );
+            ids.push_back(talos_id);
+        }
+
+        // limit=1 should return exactly one result
+        let page = client.names_page(&1, &1);
+        assert_eq!(page.items.len(), 1);
+        assert!(page.next_start > 0, "next_start should be non-zero when more results exist");
+    }
+
+    #[test]
+    fn names_page_cursor_pagination_covers_all_entries() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+
+        // Register 3 Talos names
+        let names = ["forge", "radar", "solaris"];
+        for nm in names.iter() {
+            let owner = Address::generate(&env);
+            let pw = Address::generate(&env);
+            let talos_id =
+                create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+            let soroban_name = s(&env, nm);
+            register_name_with_auth(
+                &env,
+                &client,
+                &contract_id,
+                &registry_contract,
+                &owner,
+                talos_id,
+                &soroban_name,
+            );
+        }
+
+        // Paginate with limit=1 and collect all pages
+        let mut cursor: u32 = 1;
+        let mut collected: u32 = 0;
+        loop {
+            let page = client.names_page(&cursor, &1);
+            collected += page.items.len();
+            if page.next_start == 0 {
+                break;
+            }
+            cursor = page.next_start;
+            if cursor == 0 {
+                break;
+            }
+        }
+        assert_eq!(collected, 3);
+    }
+
+    #[test]
+    fn names_page_start_id_zero_treated_as_one() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let name = s(&env, "genesis");
+        let talos_id =
+            create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &name,
+        );
+
+        // start_id=0 should return same results as start_id=1
+        let page_zero = client.names_page(&0, &10);
+        let page_one = client.names_page(&1, &10);
+        assert_eq!(page_zero.items.len(), page_one.items.len());
+    }
+
+    #[test]
+    fn names_page_beyond_last_id_returns_empty() {
+        let (_env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
+
+        // Start well past any registered ID
+        let page = client.names_page(&999999, &10);
+        assert_eq!(page.items.len(), 0);
+        assert_eq!(page.next_start, 0);
+    }
+
+    #[test]
+    fn names_page_limit_clamped_to_max() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+
+        // Register a name so the page can return something
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let name = s(&env, "clamptest");
+        let talos_id =
+            create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &name,
+        );
+
+        // A huge limit should behave as MAX_REVERSE_PAGE_SIZE
+        let page = client.names_page(&1, &u32::MAX);
+        assert!(page.items.len() <= MAX_REVERSE_PAGE_SIZE as u32);
+    }
+
+    #[test]
+    fn names_page_skips_ids_without_names() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+
+        // Register 2 names; there will be ID gaps (IDs auto-increment in registry)
+        let owner1 = Address::generate(&env);
+        let pw1 = Address::generate(&env);
+        let talos_id1 =
+            create_talos_with_auth(&env, &registry_client, &registry_contract, &owner1, &pw1);
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner1,
+            talos_id1,
+            &s(&env, "skipgap"),
+        );
+
+        let owner2 = Address::generate(&env);
+        let pw2 = Address::generate(&env);
+        // Create a 2nd Talos but don't register a name for it (gap)
+        let _gap_id =
+            create_talos_with_auth(&env, &registry_client, &registry_contract, &owner2, &pw2);
+
+        let owner3 = Address::generate(&env);
+        let pw3 = Address::generate(&env);
+        let talos_id3 =
+            create_talos_with_auth(&env, &registry_client, &registry_contract, &owner3, &pw3);
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner3,
+            talos_id3,
+            &s(&env, "aftergap"),
+        );
+
+        let page = client.names_page(&1, &50);
+        // Should only return 2 results despite 3 IDs existing
+        assert_eq!(page.items.len(), 2);
+        // Both returned entries must have names
+        for (_, nm) in page.items.iter() {
+            assert!(nm.len() > 0);
+        }
     }
 
     // ── Name Service Timelock unit tests ──────────────────────────────
