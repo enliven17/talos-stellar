@@ -389,16 +389,4 @@ class Settings(BaseSettings):
 
 def ensure_app_dir() -> Path:
     APP_DIR.mkdir(parents=True, exist_ok=True)
-    (APP_DIR / "logs").mkdir(exist_ok=True)
     return APP_DIR
-
-
-def resolve_setting_secret(settings: object, name: str, legacy_value: str | None = None) -> str:
-    """Resolve secrets on real Settings while remaining friendly to test doubles."""
-    resolver = getattr(type(settings), "secret_value", None)
-    if callable(resolver):
-        return resolver(settings, name, legacy_value)
-    if legacy_value is not None:
-        return legacy_value
-    value = getattr(settings, name, "")
-    return value if isinstance(value, str) else ""

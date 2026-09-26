@@ -63,5 +63,4 @@ def setup() -> None:
     _tracing.configure_tracing()
     _metrics.configure_metrics()
 
-
 log = structlog.get_logger()

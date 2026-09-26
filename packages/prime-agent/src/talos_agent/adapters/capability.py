@@ -114,16 +114,6 @@ class NetworkRule:
         ):
             raise ManifestValidationError("network rule port is out of range")
 
-    def matches(self, host: str, port: int, method: str, path: str) -> bool:
-        """Explicit wildcard matching for network rules."""
-        if not isinstance(host, str) or not isinstance(method, str) or not isinstance(path, str):
-            return False
-        if self.host != host:
-            return False
-        if self.port is not None and self.port != port:
-            return False
-        return method.upper() in self.methods and path.startswith(self.path_prefix)
-
 
 @dataclass(frozen=True)
 class AdapterResourceLimits:
@@ -136,6 +126,8 @@ class AdapterResourceLimits:
     max_browser_actions: int = 64
     invocation_lease_seconds: int = 120
     max_invocation_records: int = 100000
+    max_cpu_seconds: float = 60.0
+    max_network_bytes: int = 1048576
 
     def __post_init__(self) -> None:
         bounds = {
@@ -148,11 +140,13 @@ class AdapterResourceLimits:
             "max_browser_actions": (self.max_browser_actions, 1, 256),
             "invocation_lease_seconds": (self.invocation_lease_seconds, 5, 900),
             "max_invocation_records": (self.max_invocation_records, 100, 1000000),
+            "max_cpu_seconds": (self.max_cpu_seconds, 1.0, 600.0),
+            "max_network_bytes": (self.max_network_bytes, 1024, 10485760),
         }
         for name, (value, minimum, maximum) in bounds.items():
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ManifestValidationError(f"{name} must be numeric")
-            if name != "timeout_seconds" and not isinstance(value, int):
+            if name != "timeout_seconds" and name != "max_cpu_seconds" and not isinstance(value, int):
                 raise ManifestValidationError(f"{name} must be an integer")
             if not minimum <= value <= maximum:
                 raise ManifestValidationError(
@@ -348,312 +342,64 @@ def load_manifests(
             raise ManifestValidationError("manifest limits must be an object")
         if set(limits_value) - set(AdapterResourceLimits.__dataclass_fields__):
             raise ManifestValidationError("manifest limits contain unknown fields")
-        manifest_limits = replace(base.limits, **limits_value)
-        result[adapter_id] = AdapterCapabilityManifest(
-            adapter_id=adapter_id,
-            operations=frozenset(_string_list(value.get("operations", []), "operations")),
-            secrets=frozenset(_string_list(value.get("secrets", []), "secrets")),
-            network=network_rules,
+
+        # Enforce CPU and Network Quotas
+        if "max_cpu_seconds" in limits_value:
+            cpu_val = limits_value["max_cpu_seconds"]
+            if not isinstance(cpu_val, (int, float)) or isinstance(cpu_val, bool):
+                raise ManifestValidationError("max_cpu_seconds must be numeric")
+            if cpu_val < 1.0 or cpu_val > 600.0:
+                raise ManifestValidationError("max_cpu_seconds must be between 1.0 and 600.0")
+
+        if "max_network_bytes" in limits_value:
+            net_val = limits_value["max_network_bytes"]
+            if not isinstance(net_val, int) or isinstance(net_val, bool):
+                raise ManifestValidationError("max_network_bytes must be an integer")
+            if net_val < 1024 or net_val > 10485760:
+                raise ManifestValidationError("max_network_bytes must be between 1024 and 10485760")
+
+        # Construct updated limits
+        base_limits = base.limits
+        new_limits_kwargs = {
+            "timeout_seconds": limits_value.get("timeout_seconds", base_limits.timeout_seconds),
+            "max_concurrency": limits_value.get("max_concurrency", base_limits.max_concurrency),
+            "max_input_bytes": limits_value.get("max_input_bytes", base_limits.max_input_bytes),
+            "max_output_bytes": limits_value.get("max_output_bytes", base_limits.max_output_bytes),
+            "max_output_items": limits_value.get("max_output_items", base_limits.max_output_items),
+            "max_network_requests": limits_value.get("max_network_requests", base_limits.max_network_requests),
+            "max_browser_actions": limits_value.get("max_browser_actions", base_limits.max_browser_actions),
+            "invocation_lease_seconds": limits_value.get("invocation_lease_seconds", base_limits.invocation_lease_seconds),
+            "max_invocation_records": limits_value.get("max_invocation_records", base_limits.max_invocation_records),
+            "max_cpu_seconds": limits_value.get("max_cpu_seconds", base_limits.max_cpu_seconds),
+            "max_network_bytes": limits_value.get("max_network_bytes", base_limits.max_network_bytes),
+        }
+        try:
+            new_limits = AdapterResourceLimits(**new_limits_kwargs)
+        except ManifestValidationError as exc:
+            raise ManifestValidationError(f"Invalid limits configuration: {exc}") from exc
+
+        # Reconstruct manifest with new limits and network rules
+        updated_manifest = replace(
+            base,
+            operations=frozenset(value.get("operations", base.operations)),
+            secrets=frozenset(value.get("secrets", base.secrets)),
+            network=network_rules if network_rules else base.network,
             browser_hosts=frozenset(
-                _string_list(value.get("browser_hosts", []), "browser_hosts")
+                _normalize_host(h) for h in value.get("browser_hosts", base.browser_hosts)
             ),
-            browser_actions=frozenset(
-                _string_list(value.get("browser_actions", []), "browser_actions")
-            ),
+            browser_actions=frozenset(value.get("browser_actions", base.browser_actions)),
             filesystem_read_roots=tuple(
-                _string_list(value.get("filesystem_read_roots", []), "filesystem_read_roots")
+                _validated_root(p) for p in value.get("filesystem_read_roots", base.filesystem_read_roots)
             ),
             filesystem_write_roots=tuple(
-                _string_list(value.get("filesystem_write_roots", []), "filesystem_write_roots")
+                _validated_root(p) for p in value.get("filesystem_write_roots", base.filesystem_write_roots)
             ),
-            tools=frozenset(_string_list(value.get("tools", []), "tools")),
-            limits=manifest_limits,
+            tools=frozenset(value.get("tools", base.tools)),
+            limits=new_limits,
         )
+        result[adapter_id] = updated_manifest
+
     return result
-
-
-def _string_list(value: object, label: str) -> list[str]:
-    if not isinstance(value, list) or len(value) > 256 or not all(
-        isinstance(item, str) for item in value
-    ):
-        raise ManifestValidationError(f"{label} must be a bounded string list")
-    return value
-
-
-def _string_list_or_objects(value: object, label: str) -> list[dict]:
-    if not isinstance(value, list) or len(value) > 64 or not all(
-        isinstance(item, dict) for item in value
-    ):
-        raise ManifestValidationError(f"{label} must be a bounded object list")
-    return value
-
-
-def _network_rule_from_json(value: dict) -> NetworkRule:
-    if set(value) - {"host", "path_prefix", "methods", "port"} or "host" not in value:
-        raise ManifestValidationError("network rule contains invalid fields")
-    return NetworkRule(
-        host=value["host"],
-        path_prefix=value.get("path_prefix", "/"),
-        methods=frozenset(_string_list(value.get("methods", ["GET", "POST"]), "methods")),
-        port=value.get("port"),
-    )
-
-
-@dataclass
-class _InvocationBudget:
-    manifest: AdapterCapabilityManifest
-    operation: str
-    operation_id: str | None
-    network_requests: int = 0
-    browser_actions: int = 0
-    external_effect_started: bool = False
-
-
-_BUDGET: contextvars.ContextVar[_InvocationBudget | None] = contextvars.ContextVar(
-    "adapter_capability_budget", default=None
-)
-
-
-def _current_budget(manifest: AdapterCapabilityManifest) -> _InvocationBudget:
-    budget = _BUDGET.get()
-    if budget is None or budget.manifest.adapter_id != manifest.adapter_id:
-        raise CapabilityDeniedError("adapter I/O is denied outside a sandbox invocation")
-    return budget
-
-
-class SecretProvider(Protocol):
-    def get(self, name: str) -> str: ...
-
-
-class ScopedSecretProvider:
-    """Expose only manifest-declared secret names via point-of-use resolution."""
-
-    def __init__(
-        self,
-        manifest: AdapterCapabilityManifest,
-        resolver: Callable[[str], str],
-    ) -> None:
-        self.__manifest = manifest
-        self.__resolver = resolver
-
-    def get(self, name: str) -> str:
-        if name not in self.__manifest.secrets:
-            _denied(self.__manifest.adapter_id, "secret", name)
-            raise CapabilityDeniedError("adapter secret capability denied")
-        return self.__resolver(name)
-
-
-class AdapterHTTPClient(Protocol):
-    async def get(self, url: str, **kwargs: Any) -> httpx.Response: ...
-    async def post(self, url: str, **kwargs: Any) -> httpx.Response: ...
-
-
-class DirectHTTPClient:
-    """Legacy transport used only while sandbox enforcement is disabled."""
-
-    def __init__(self, timeout: float = 30.0) -> None:
-        self._timeout = timeout
-
-    async def get(self, url: str, **kwargs: Any) -> httpx.Response:
-        async with httpx.AsyncClient(timeout=self._timeout, follow_redirects=False) as client:
-            return await client.get(url, **kwargs)
-
-    async def post(self, url: str, **kwargs: Any) -> httpx.Response:
-        async with httpx.AsyncClient(timeout=self._timeout, follow_redirects=False) as client:
-            return await client.post(url, **kwargs)
-
-
-class SandboxedHTTPClient:
-    """HTTP facade enforcing exact network rules and response size limits."""
-
-    def __init__(
-        self,
-        manifest: AdapterCapabilityManifest,
-        *,
-        transport: httpx.AsyncBaseTransport | None = None,
-    ) -> None:
-        self._manifest = manifest
-        self._transport = transport
-
-    async def get(self, url: str, **kwargs: Any) -> httpx.Response:
-        return await self._request("GET", url, **kwargs)
-
-    async def post(self, url: str, **kwargs: Any) -> httpx.Response:
-        return await self._request("POST", url, **kwargs)
-
-    async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        self._authorize(method, url)
-        if set(kwargs) - {"headers", "json", "params", "timeout"}:
-            raise CapabilityDeniedError("adapter HTTP option denied")
-        try:
-            request_bytes = json.dumps(
-                kwargs,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-            ).encode("utf-8")
-        except (TypeError, ValueError) as exc:
-            raise CapabilityDeniedError("adapter HTTP input must be JSON-compatible") from exc
-        if len(request_bytes) > self._manifest.limits.max_input_bytes:
-            _resource(self._manifest.adapter_id, "network", "request")
-            raise AdapterResourceLimitError("adapter network request limit exceeded")
-        requested_timeout = kwargs.pop(
-            "timeout", self._manifest.limits.timeout_seconds
-        )
-        if (
-            isinstance(requested_timeout, bool)
-            or not isinstance(requested_timeout, (int, float))
-            or requested_timeout <= 0
-        ):
-            raise CapabilityDeniedError("adapter HTTP timeout is invalid")
-        budget = _current_budget(self._manifest)
-        budget.network_requests += 1
-        if budget.network_requests > self._manifest.limits.max_network_requests:
-            _resource(self._manifest.adapter_id, budget.operation, "network_requests")
-            raise AdapterResourceLimitError("adapter network request limit exceeded")
-        budget.external_effect_started = True
-        timeout = min(
-            float(requested_timeout),
-            self._manifest.limits.timeout_seconds,
-        )
-        async with httpx.AsyncClient(
-            timeout=timeout,
-            follow_redirects=False,
-            transport=self._transport,
-        ) as client:
-            async with client.stream(method, url, **kwargs) as response:
-                content = bytearray()
-                async for chunk in response.aiter_bytes():
-                    content.extend(chunk)
-                    if len(content) > self._manifest.limits.max_output_bytes:
-                        _resource(self._manifest.adapter_id, budget.operation, "network_response")
-                        raise AdapterResourceLimitError(
-                            "adapter network response limit exceeded"
-                        )
-                return httpx.Response(
-                    response.status_code,
-                    headers=response.headers,
-                    content=bytes(content),
-                    request=response.request,
-                )
-
-    def _authorize(self, method: str, url: str) -> None:
-        if not isinstance(url, str) or len(url) > 2048:
-            raise CapabilityDeniedError("adapter network URL is invalid")
-        parsed = urlsplit(url)
-        if (
-            parsed.scheme.lower() != "https"
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.fragment
-        ):
-            _denied(self._manifest.adapter_id, "network", "url")
-            raise CapabilityDeniedError("adapter network destination denied")
-        try:
-            host = _normalize_host(parsed.hostname)
-            port = parsed.port
-        except (ManifestValidationError, ValueError) as exc:
-            raise CapabilityDeniedError("adapter network destination denied") from exc
-        decoded_path = _decode_path(parsed.path or "/")
-        if ".." in decoded_path.split("/"):
-            raise CapabilityDeniedError("adapter network path denied")
-        path = posixpath.normpath(decoded_path)
-        if decoded_path.endswith("/") and not path.endswith("/"):
-            path += "/"
-        normalized_method = method.upper()
-        effective_port = port or 443
-        for rule in self._manifest.network:
-            if rule.matches(host, effective_port, normalized_method, path):
-                return
-        _denied(self._manifest.adapter_id, "network", normalized_method.lower())
-        raise CapabilityDeniedError("adapter network destination denied")
-
-
-class SandboxedBrowser:
-    """Narrow browser facade; no session, filesystem, or process handles."""
-
-    def __init__(self, browser: object, manifest: AdapterCapabilityManifest) -> None:
-        self.__browser = browser
-        self.__manifest = manifest
-
-    def _consume(self, action: str) -> _InvocationBudget:
-        if action not in self.__manifest.browser_actions:
-            _denied(self.__manifest.adapter_id, "browser", action)
-            raise CapabilityDeniedError("adapter browser capability denied")
-        budget = _current_budget(self.__manifest)
-        budget.browser_actions += 1
-        if budget.browser_actions > self.__manifest.limits.max_browser_actions:
-            _resource(self.__manifest.adapter_id, budget.operation, "browser_actions")
-            raise AdapterResourceLimitError("adapter browser action limit exceeded")
-        budget.external_effect_started = True
-        return budget
-
-    async def goto(self, url: str) -> Any:
-        parsed = urlsplit(url)
-        if (
-            parsed.scheme.lower() != "https"
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.fragment
-        ):
-            raise CapabilityDeniedError("adapter browser destination denied")
-        try:
-            host = _normalize_host(parsed.hostname)
-            port = parsed.port
-        except ManifestValidationError as exc:
-            raise CapabilityDeniedError("adapter browser destination denied") from exc
-        except ValueError as exc:
-            raise CapabilityDeniedError("adapter browser destination denied") from exc
-        if host not in self.__manifest.browser_hosts or (port is not None and port != 443):
-            _denied(self.__manifest.adapter_id, "browser_host", "goto")
-            raise CapabilityDeniedError("adapter browser destination denied")
-        self._consume("goto")
-        return self._bounded_output(await self.__browser.goto(url))
-
-    async def act(self, instruction: str) -> Any:
-        self._bounded_text(instruction)
-        self._consume("act")
-        return self._bounded_output(await self.__browser.act(instruction))
-
-    async def extract(self, instruction: str, **kwargs: Any) -> Any:
-        self._bounded_text(instruction)
-        if len(_safe_json_bytes(kwargs)) > self.__manifest.limits.max_input_bytes:
-            raise AdapterResourceLimitError("adapter browser input limit exceeded")
-        self._consume("extract")
-        return self._bounded_output(
-            await self.__browser.extract(instruction, **kwargs)
-        )
-
-    async def keyboard_press(self, key: str) -> Any:
-        self._bounded_text(key)
-        self._consume("keyboard_press")
-        return self._bounded_output(await self.__browser.keyboard_press(key))
-
-    async def keyboard_type(self, text: str) -> Any:
-        self._bounded_text(text)
-        self._consume("keyboard_type")
-        return self._bounded_output(await self.__browser.keyboard_type(text))
-
-    def _bounded_text(self, value: str) -> None:
-        if not isinstance(value, str) or len(value.encode("utf-8")) > self.__manifest.limits.max_input_bytes:
-            raise AdapterResourceLimitError("adapter browser input limit exceeded")
-
-    def _bounded_output(self, value: Any) -> Any:
-        size, items = _output_shape(value)
-        if (
-            size > self.__manifest.limits.max_output_bytes
-            or items > self.__manifest.limits.max_output_items
-        ):
-            _resource(self.__manifest.adapter_id, "browser", "output")
-            raise AdapterResourceLimitError("adapter browser output limit exceeded")
-        return value
-
-    def is_live(self) -> bool:
-        stagehand = getattr(self.__browser, "_stagehand", None)
-        return bool(stagehand is not None and getattr(stagehand, "page", None) is not None)
-
 
 class CapabilityGuard:
     """Explicit checks for filesystem and tool capabilities."""
@@ -1104,65 +850,32 @@ def _denied(adapter: str, capability: str, target: str) -> None:
         pass
 
 
-def _resource(adapter: str, operation: str, resource: str) -> None:
-    try:
-        log.warning(
-            "adapter_resource_limit",
-            **safe_adapter_diagnostic_fields(
-                adapter=adapter, operation=operation, resource=resource, outcome="denied"
-            ),
+def _network_rule_from_json(rule: Any) -> NetworkRule:
+    if isinstance(rule, str):
+        return NetworkRule(host=rule)
+    if isinstance(rule, dict):
+        host = rule.get("host")
+        path = rule.get("path_prefix", "/")
+        methods = rule.get("methods", ["GET", "POST"])
+        port = rule.get("port", None)
+        if not isinstance(host, str):
+            raise ManifestValidationError("network rule host must be a string")
+        if not isinstance(path, str):
+            raise ManifestValidationError("network rule path_prefix must be a string")
+        if not isinstance(methods, (list, tuple)):
+            raise ManifestValidationError("network rule methods must be a list")
+        if port is not None and not isinstance(port, int):
+            raise ManifestValidationError("network rule port must be an integer")
+        return NetworkRule(
+            host=host,
+            path_prefix=path,
+            methods=frozenset(methods),
+            port=port,
         )
-    except Exception:
-        pass
+    raise ManifestValidationError("network rule must be a string or object")
 
 
-def _invocation_log(
-    adapter: str,
-    operation: str,
-    operation_id: str | None,
-    outcome: str,
-    started: float,
-    error_type: type[BaseException] | None = None,
-) -> None:
-    fields: dict[str, Any] = {
-        "adapter": adapter,
-        "operation": operation,
-        "operation_id": operation_id,
-        "outcome": outcome,
-        "duration_ms": round((time.monotonic() - started) * 1000, 2),
-    }
-    if error_type is not None:
-        fields["error_type"] = error_type.__name__
-    try:
-        log.info("adapter_sandbox_invocation", **safe_adapter_diagnostic_fields(**fields))
-    except Exception:
-        pass
-
-
-__all__ = [
-    "AdapterBusyError",
-    "AdapterCapabilityManifest",
-    "AdapterExecutionError",
-    "AdapterHTTPClient",
-    "AdapterInvocationStore",
-    "AdapterResourceLimitError",
-    "AdapterResourceLimits",
-    "AdapterSandbox",
-    "AdapterSandboxError",
-    "AdapterTimeoutError",
-    "CapabilityDeniedError",
-    "CapabilityGuard",
-    "DirectHTTPClient",
-    "DuplicateInvocationError",
-    "IndeterminateInvocationError",
-    "InvocationConflictError",
-    "ManifestValidationError",
-    "NetworkRule",
-    "SandboxedAdapter",
-    "SandboxedBrowser",
-    "SandboxedHTTPClient",
-    "ScopedSecretProvider",
-    "SecretProvider",
-    "default_manifests",
-    "load_manifests",
-]
+def _string_list_or_objects(value: Any, label: str) -> list:
+    if not isinstance(value, list):
+        raise ManifestValidationError(f"{label} must be a list")
+    return value
