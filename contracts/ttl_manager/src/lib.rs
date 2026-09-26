@@ -678,3 +678,355 @@ mod tests {
         assert_eq!((sweep.total, sweep.touched, sweep.skipped), (0, 0, 0));
     }
 }
+
+// ── TTL near-expiration tests ────────────────────────────────────────────────
+//
+// These tests exercise the boundary between "healthy", "warn", and "critical"
+// states and verify that the helpers behave correctly as an entry approaches
+// its archival deadline.
+//
+// Test matrix
+// ───────────
+// needs_touch / age_ledgers
+//   ├── one ledger below WARN           → should NOT touch
+//   ├── exactly at WARN                 → MUST touch
+//   ├── one ledger above WARN           → MUST touch
+//   ├── exactly at CRITICAL             → MUST touch  +  immediate attention
+//   ├── one ledger below CRITICAL       → MUST touch  (warn zone)
+//   ├── last_touched = current_ledger   → age 0, no touch
+//   ├── last_touched in the future      → saturates to 0, no touch
+//   └── extreme: current = u32::MAX     → age = u32::MAX, must touch
+//
+// KeyHealth::observe
+//   ├── single key at WARN-1            → no warn, no crit
+//   ├── single key at WARN              → warn count increments
+//   ├── single key at WARN+1            → warn count increments
+//   ├── single key at CRIT-1            → warn only
+//   ├── single key at CRIT              → warn + crit
+//   └── progression from healthy → warn → crit over many observations
+//
+// should_extend with custom TtlBounds
+//   ├── age exactly at custom min_age   → included
+//   ├── age exactly at custom max_age   → included
+//   ├── age below custom min_age        → excluded
+//   └── age above custom max_age        → excluded
+//
+// Regression: behaviour is identical whether the caller uses needs_touch or
+// should_extend(bounds = TtlBounds::renewal()) — covered in the existing
+// `renewal_bounds_match_needs_touch` test above.
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod ttl_near_expiration_tests {
+    use super::*;
+
+    // ── needs_touch near WARN_THRESHOLD ───────────────────────────────────────
+
+    #[test]
+    fn needs_touch_one_below_warn() {
+        // age = WARN_THRESHOLD - 1  → must NOT trigger a touch
+        let current = WARN_THRESHOLD - 1;
+        let last_touched = 0;
+        assert!(!needs_touch(last_touched, current),
+            "age {} should not require touch (threshold is {})", current, WARN_THRESHOLD);
+    }
+
+    #[test]
+    fn needs_touch_exactly_at_warn() {
+        // age = WARN_THRESHOLD exactly → touch must trigger
+        let current = WARN_THRESHOLD;
+        let last_touched = 0;
+        assert!(needs_touch(last_touched, current),
+            "age {} (== WARN_THRESHOLD) should require touch", current);
+    }
+
+    #[test]
+    fn needs_touch_one_above_warn() {
+        // age = WARN_THRESHOLD + 1 → touch must trigger
+        let current = WARN_THRESHOLD + 1;
+        let last_touched = 0;
+        assert!(needs_touch(last_touched, current),
+            "age {} should require touch", current);
+    }
+
+    // ── needs_touch near CRITICAL_THRESHOLD ───────────────────────────────────
+
+    #[test]
+    fn needs_touch_one_below_critical() {
+        // age = CRITICAL - 1 → still in the warn zone, touch required
+        let current = CRITICAL_THRESHOLD - 1;
+        let last_touched = 0;
+        assert!(needs_touch(last_touched, current),
+            "age {} (just below CRITICAL) should still require touch", current);
+    }
+
+    #[test]
+    fn needs_touch_exactly_at_critical() {
+        // age = CRITICAL → touch required + immediate attention
+        let current = CRITICAL_THRESHOLD;
+        let last_touched = 0;
+        assert!(needs_touch(last_touched, current),
+            "age {} (== CRITICAL_THRESHOLD) should require touch", current);
+    }
+
+    #[test]
+    fn needs_touch_one_above_critical() {
+        // age = CRITICAL + 1 → archival imminent, touch required
+        let current = CRITICAL_THRESHOLD + 1;
+        let last_touched = 0;
+        assert!(needs_touch(last_touched, current),
+            "age {} (above CRITICAL) should require touch", current);
+    }
+
+    // ── age_ledgers boundary behaviour ────────────────────────────────────────
+
+    #[test]
+    fn age_at_exactly_warn_threshold() {
+        // last_touched = 100, current = 100 + WARN_THRESHOLD
+        let last_touched = 100_u32;
+        let current = last_touched + WARN_THRESHOLD;
+        assert_eq!(age_ledgers(last_touched, current), WARN_THRESHOLD,
+            "age must equal WARN_THRESHOLD exactly");
+    }
+
+    #[test]
+    fn age_at_exactly_critical_threshold() {
+        let last_touched = 50_u32;
+        let current = last_touched + CRITICAL_THRESHOLD;
+        assert_eq!(age_ledgers(last_touched, current), CRITICAL_THRESHOLD,
+            "age must equal CRITICAL_THRESHOLD exactly");
+    }
+
+    #[test]
+    fn age_zero_when_last_touched_equals_current() {
+        let ledger = 5_000_000_u32;
+        assert_eq!(age_ledgers(ledger, ledger), 0,
+            "entry touched in the same ledger must have age 0");
+        assert!(!needs_touch(ledger, ledger),
+            "entry touched this ledger must not require touch");
+    }
+
+    #[test]
+    fn age_saturates_to_zero_for_future_last_touched() {
+        // If last_touched > current_ledger (e.g., clock skew or test data),
+        // age must saturate to 0 rather than wrapping.
+        let last_touched = 3_000_000_u32;
+        let current = 1_000_000_u32;
+        assert_eq!(age_ledgers(last_touched, current), 0,
+            "future last_touched must saturate to age 0");
+        assert!(!needs_touch(last_touched, current),
+            "future last_touched must not require touch");
+    }
+
+    #[test]
+    fn age_at_u32_max_current_ledger() {
+        // Extreme: current = u32::MAX, last_touched = 0 → age = u32::MAX
+        assert_eq!(age_ledgers(0, u32::MAX), u32::MAX,
+            "maximum possible age must be u32::MAX");
+        assert!(needs_touch(0, u32::MAX),
+            "maximum age must require touch");
+    }
+
+    // ── KeyHealth near-expiration observations ────────────────────────────────
+
+    #[test]
+    fn observe_one_ledger_below_warn_is_healthy() {
+        let mut h = KeyHealth::empty();
+        h.observe(WARN_THRESHOLD - 1);
+        assert_eq!(h.keys_below_warn, 0, "age below WARN should not flag warn");
+        assert_eq!(h.keys_below_crit, 0, "age below WARN should not flag crit");
+        assert!(!h.needs_immediate_attention());
+    }
+
+    #[test]
+    fn observe_exactly_at_warn_increments_warn_count() {
+        let mut h = KeyHealth::empty();
+        h.observe(WARN_THRESHOLD);
+        assert_eq!(h.keys_below_warn, 1, "age == WARN_THRESHOLD should flag warn");
+        assert_eq!(h.keys_below_crit, 0, "age == WARN_THRESHOLD should NOT flag crit");
+        assert!(!h.needs_immediate_attention());
+    }
+
+    #[test]
+    fn observe_one_above_warn_is_in_warn_zone() {
+        let mut h = KeyHealth::empty();
+        h.observe(WARN_THRESHOLD + 1);
+        assert_eq!(h.keys_below_warn, 1);
+        assert_eq!(h.keys_below_crit, 0);
+    }
+
+    #[test]
+    fn observe_one_below_critical_is_warn_only() {
+        // age = CRITICAL - 1: in the warn zone but NOT yet critical
+        let mut h = KeyHealth::empty();
+        h.observe(CRITICAL_THRESHOLD - 1);
+        assert_eq!(h.keys_below_warn, 1, "age just below CRITICAL should still flag warn");
+        assert_eq!(h.keys_below_crit, 0, "age just below CRITICAL should NOT flag crit");
+        assert!(!h.needs_immediate_attention());
+    }
+
+    #[test]
+    fn observe_exactly_at_critical_flags_both() {
+        let mut h = KeyHealth::empty();
+        h.observe(CRITICAL_THRESHOLD);
+        assert_eq!(h.keys_below_warn, 1, "age == CRITICAL should flag warn");
+        assert_eq!(h.keys_below_crit, 1, "age == CRITICAL should flag crit");
+        assert!(h.needs_immediate_attention());
+    }
+
+    #[test]
+    fn health_progression_across_thresholds() {
+        // Simulate a scan that captures keys at every distinct health tier.
+        let mut h = KeyHealth::empty();
+
+        // Tier 1: healthy (below WARN)
+        h.observe(100_000);
+        h.observe(1_999_999);
+
+        // Tier 2: warn zone (>= WARN, < CRIT)
+        h.observe(WARN_THRESHOLD);
+        h.observe(WARN_THRESHOLD + 500_000);
+        h.observe(CRITICAL_THRESHOLD - 1);
+
+        // Tier 3: critical zone (>= CRIT)
+        h.observe(CRITICAL_THRESHOLD);
+        h.observe(CRITICAL_THRESHOLD + 100_000);
+
+        assert_eq!(h.total_keys, 7);
+        assert_eq!(h.min_age, 100_000);
+        assert_eq!(h.max_age, CRITICAL_THRESHOLD + 100_000);
+
+        // 5 keys are at or above WARN (tiers 2 + 3)
+        assert_eq!(h.keys_below_warn, 5,
+            "5 keys should be in warn or critical zone");
+        // 2 keys are at or above CRITICAL
+        assert_eq!(h.keys_below_crit, 2,
+            "2 keys should be in critical zone");
+        assert!(h.needs_immediate_attention());
+    }
+
+    // ── should_extend with custom TtlBounds (near-expiration window) ──────────
+
+    #[test]
+    fn should_extend_custom_window_includes_boundary_ages() {
+        // A window that targets only the near-expiration band:
+        // min = WARN, max = CRITICAL (inclusive on both ends).
+        let bounds = TtlBounds::new(WARN_THRESHOLD, CRITICAL_THRESHOLD, DEFAULT_MAX_BATCH_KEYS);
+        assert!(bounds.validate().is_ok());
+
+        // At the lower boundary
+        assert!(should_extend(0, WARN_THRESHOLD, &bounds),
+            "age == WARN_THRESHOLD must be in the near-expiration window");
+
+        // Inside the window
+        assert!(should_extend(0, WARN_THRESHOLD + 1, &bounds));
+        assert!(should_extend(0, CRITICAL_THRESHOLD - 1, &bounds));
+
+        // At the upper boundary
+        assert!(should_extend(0, CRITICAL_THRESHOLD, &bounds),
+            "age == CRITICAL_THRESHOLD must be in the near-expiration window");
+    }
+
+    #[test]
+    fn should_extend_custom_window_excludes_outside_ages() {
+        let bounds = TtlBounds::new(WARN_THRESHOLD, CRITICAL_THRESHOLD, DEFAULT_MAX_BATCH_KEYS);
+
+        // One ledger below the window
+        assert!(!should_extend(0, WARN_THRESHOLD - 1, &bounds),
+            "age one below WARN should be outside the window");
+
+        // One ledger above the window
+        assert!(!should_extend(0, CRITICAL_THRESHOLD + 1, &bounds),
+            "age one above CRITICAL should be outside the window");
+    }
+
+    // ── Regression: near-expiration does not affect healthy entries ───────────
+
+    #[test]
+    fn healthy_entry_is_never_touched_by_renewal_bounds() {
+        // An entry touched 1 000 000 ledgers ago (well under WARN) must
+        // not be selected by the default renewal sweep.
+        let bounds = TtlBounds::renewal();
+        let last_touched = 500_000_u32;
+        let current = last_touched + 1_000_000;
+        assert!(!should_extend(last_touched, current, &bounds),
+            "healthy entry should not be touched by default renewal bounds");
+    }
+
+    #[test]
+    fn near_expiration_entry_is_always_touched_by_renewal_bounds() {
+        // An entry that has not been touched for WARN_THRESHOLD ledgers must
+        // be selected by the default renewal sweep.
+        let bounds = TtlBounds::renewal();
+        let last_touched = 0_u32;
+        let current = WARN_THRESHOLD;
+        assert!(should_extend(last_touched, current, &bounds),
+            "near-expiration entry must be touched by default renewal bounds");
+    }
+
+    // ── BatchSweep near-expiration scenarios ──────────────────────────────────
+
+    #[test]
+    fn batch_sweep_all_near_expiration_all_touched() {
+        // Simulate a sweep that finds only near-expiration entries.
+        let mut sweep = BatchSweep::empty();
+        for _ in 0..5 {
+            sweep.record(EntryOutcome::Touched);
+        }
+        assert_eq!(sweep.total, 5);
+        assert_eq!(sweep.touched, 5);
+        assert_eq!(sweep.skipped, 0);
+    }
+
+    #[test]
+    fn batch_sweep_mixed_near_expiration_and_healthy() {
+        // Simulate a sweep where some entries are healthy (skipped) and
+        // some are near-expiration (touched).
+        let mut sweep = BatchSweep::empty();
+
+        // 3 near-expiration → touched
+        for _ in 0..3 {
+            sweep.record(EntryOutcome::Touched);
+        }
+        // 2 healthy → skipped (outside the age window)
+        for _ in 0..2 {
+            sweep.record(EntryOutcome::Skipped);
+        }
+        // 1 absent → not counted
+        sweep.record(EntryOutcome::Absent);
+
+        assert_eq!(sweep.total, 5, "total counts only existing entries");
+        assert_eq!(sweep.touched, 3);
+        assert_eq!(sweep.skipped, 2);
+    }
+
+    #[test]
+    fn batch_sweep_single_critical_entry_is_counted() {
+        // Verify that a single critical entry flowing through the sweep
+        // produces a non-zero touched count in the accumulator.
+        let mut sweep = BatchSweep::empty();
+        sweep.record(EntryOutcome::Touched);
+        assert_eq!(sweep.touched, 1);
+        assert!(sweep.total > 0, "a critical touch must be counted in total");
+    }
+
+    // ── BoundsError messages are privacy-safe ─────────────────────────────────
+
+    #[test]
+    fn bounds_errors_contain_no_caller_data() {
+        // The BoundsError messages are compile-time constants and must not
+        // embed any run-time values (ages, ids, storage data).
+        let messages = [
+            BoundsError::InvertedAgeWindow.message(),
+            BoundsError::ZeroMaxKeys.message(),
+            BoundsError::MaxKeysTooLarge.message(),
+        ];
+        for msg in messages {
+            // Each message must be a non-empty static string.
+            assert!(!msg.is_empty(), "BoundsError message must not be empty");
+            // Must not contain any numeric values from the test inputs.
+            assert!(!msg.contains("5_000"),
+                "BoundsError message must not embed caller values");
+        }
+    }
+}
