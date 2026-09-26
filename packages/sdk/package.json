@@ -22,6 +22,8 @@
     "build:cjs": "tsc -p tsconfig.cjs.json && node scripts/rename-cjs.mjs",
     "build:browser": "node scripts/bundle-browser.mjs",
     "check:bundle-size": "node scripts/check-browser-bundle-size.mjs",
+    "fixtures:gen": "node scripts/generate-chaos-fixtures.mjs",
+    "fixtures:check": "node scripts/generate-chaos-fixtures.mjs --check",
     "dev": "tsc --watch",
     "test": "vitest run",
     "generate:types": "openapi-typescript \"../../web/tests/fixtures/openapi.snapshot.json\" -o \"src/generated-types.ts\"",

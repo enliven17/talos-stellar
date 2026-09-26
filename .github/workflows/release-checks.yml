@@ -1,0 +1,91 @@
+name: Release Checks
+
+# Validates that every pull request carries a Conventional Commits-conforming
+# title so that the release machinery (scripts/release/classify.mjs and
+# cli.mjs) can classify it correctly, and that the release script test suite
+# itself continues to pass.
+#
+# Runs on every PR targeting main (or on workflow_dispatch for ad-hoc
+# debugging). Does NOT require secrets or checkout tokens beyond the default
+# GITHUB_TOKEN (read-only, scoped to this repo). Never logs sensitive values.
+#
+# Local reproduction:
+#   node --test scripts/release/*.test.mjs
+#   PR_TITLE="feat(sdk): add client" node scripts/release/check-release-note.mjs
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr_title:
+        description: 'PR title to validate (for manual testing)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-script-tests:
+    name: Release script tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run release script test suite
+        run: node --test scripts/release/*.test.mjs
+
+  check-pr-title:
+    name: Check PR title (Conventional Commits)
+    runs-on: ubuntu-latest
+    # Only meaningful on real pull_request events; skip on manual dispatch
+    # unless an override title was provided.
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && inputs.pr_title != '')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check PR title conforms to Conventional Commits
+        env:
+          # Use the override input when triggered manually; otherwise use the
+          # real PR title from the pull_request event.
+          PR_TITLE: >-
+            ${{
+              github.event_name == 'workflow_dispatch'
+              && inputs.pr_title
+              || github.event.pull_request.title
+            }}
+        run: node scripts/release/check-release-note.mjs
+
+      - name: Classify PR commits (informational)
+        # Collects each commit subject on the PR and pipes them through
+        # check-release-note.mjs. Non-CC commits are noted but do not fail
+        # the job — the PR title is the authoritative classification signal.
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          # Newline-separated list of commit subjects on this PR.
+          PR_COMMITS: ${{ join(github.event.pull_request.commits, '\n') }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+        run: node scripts/release/check-release-note.mjs
+        continue-on-error: true

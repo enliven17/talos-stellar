@@ -1,0 +1,237 @@
+name: OpenAPI & SDK Drift
+
+# Drift gate for generated OpenAPI snapshot and SDK types — resolves #633.
+#
+# Validates that:
+#   1. The committed OpenAPI snapshot (web/tests/fixtures/openapi.snapshot.json)
+#      is structurally correct (valid OpenAPI 3.x, non-empty paths, no secrets).
+#   2. The existing web OpenAPI snapshot test (pnpm test:openapi) still passes.
+#   3. The SDK generated types (packages/sdk/src/generated-types.ts) are in sync
+#      with the committed OpenAPI snapshot — run `pnpm generate:types` if not.
+#   4. The existing SDK types CI check still passes.
+#
+# All checks are offline-first: no running server or database is required.
+# Fails closed on ambiguous input (missing file, empty file, parse errors).
+#
+# Local reproduction:
+#   node scripts/check-openapi-sdk-drift.mjs
+#   node --test scripts/check-openapi-sdk-drift.test.mjs
+#   cd web && pnpm test:openapi
+#   cd packages/sdk && pnpm generate:types && git diff --exit-code src/generated-types.ts
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "web/src/app/api/**"
+      - "web/src/lib/openapi.ts"
+      - "web/tests/openapi-snapshot.test.ts"
+      - "web/tests/fixtures/openapi.snapshot.json"
+      - "web/scripts/write-openapi-snapshot.ts"
+      - "packages/sdk/src/generated-types.ts"
+      - "packages/sdk/package.json"
+      - "scripts/check-openapi-sdk-drift.mjs"
+      - "scripts/check-openapi-sdk-drift.test.mjs"
+      - ".github/workflows/openapi-sdk-drift.yml"
+  push:
+    branches: [main]
+    paths:
+      - "web/src/app/api/**"
+      - "web/src/lib/openapi.ts"
+      - "web/tests/openapi-snapshot.test.ts"
+      - "web/tests/fixtures/openapi.snapshot.json"
+      - "web/scripts/write-openapi-snapshot.ts"
+      - "packages/sdk/src/generated-types.ts"
+      - "packages/sdk/package.json"
+      - "scripts/check-openapi-sdk-drift.mjs"
+      - "scripts/check-openapi-sdk-drift.test.mjs"
+      - ".github/workflows/openapi-sdk-drift.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openapi-sdk-drift-${{ github.event_name }}-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Unit tests for the drift check script itself ───────────────────────────
+  test-drift-script:
+    name: Drift script unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run drift check unit tests
+        run: node --test scripts/check-openapi-sdk-drift.test.mjs
+
+  # ── OpenAPI snapshot structural check ─────────────────────────────────────
+  openapi-snapshot:
+    name: OpenAPI snapshot structural check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: test-drift-script
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+
+      - name: Run OpenAPI snapshot vitest
+        # Verifies the committed snapshot matches what the route would return
+        run: pnpm test:openapi
+        working-directory: web
+
+      - name: Run structural drift check (snapshot only)
+        # Additional structural validation: valid OpenAPI 3.x, non-empty paths, no secrets
+        run: node scripts/check-openapi-sdk-drift.mjs --skip-types
+
+      - name: Output drift report on failure
+        if: failure()
+        run: |
+          node scripts/check-openapi-sdk-drift.mjs --skip-types --json | tee openapi-drift-report.json || true
+          node -e "
+            const fs=require('fs');
+            try {
+              const r=JSON.parse(fs.readFileSync('openapi-drift-report.json','utf8'));
+              for (const c of (r.checks||[])) {
+                for (const err of (c.errors||[])) {
+                  const safe=err.replace(/[^\x20-\x7e\n]/g,'?').split('\n')[0];
+                  process.stdout.write('::error title=OpenAPI Drift::'+safe+'\n');
+                }
+              }
+            } catch { /* ignore */ }
+          "
+
+  # ── SDK types drift check ─────────────────────────────────────────────────
+  sdk-types-drift:
+    name: SDK generated-types drift check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: test-drift-script
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run SDK types generation
+        id: generate
+        run: pnpm generate:types
+        working-directory: packages/sdk
+
+      - name: Check for drift in generated-types.ts
+        # Fail if the regenerated file differs from the committed version.
+        run: |
+          if git diff --exit-code packages/sdk/src/generated-types.ts; then
+            echo "✓ SDK generated-types.ts is up to date with the OpenAPI snapshot"
+          else
+            echo "✗ SDK generated-types.ts is out of sync with web/tests/fixtures/openapi.snapshot.json"
+            echo ""
+            echo "To fix:"
+            echo "  cd packages/sdk && pnpm generate:types"
+            echo "  git add packages/sdk/src/generated-types.ts"
+            echo "  git commit -m 'chore(sdk): regenerate types from updated OpenAPI snapshot'"
+            echo ""
+            git diff packages/sdk/src/generated-types.ts
+            exit 1
+          fi
+
+      - name: Run structural drift check (all checks)
+        # Cross-validates the script heuristics against the real committed files
+        run: node scripts/check-openapi-sdk-drift.mjs
+
+      - name: Output drift report on failure
+        if: failure()
+        run: |
+          node scripts/check-openapi-sdk-drift.mjs --json | tee sdk-drift-report.json || true
+          node -e "
+            const fs=require('fs');
+            try {
+              const r=JSON.parse(fs.readFileSync('sdk-drift-report.json','utf8'));
+              for (const c of (r.checks||[])) {
+                for (const err of (c.errors||[])) {
+                  const safe=err.replace(/[^\x20-\x7e\n]/g,'?').split('\n')[0];
+                  process.stdout.write('::error title=SDK Types Drift::'+safe+'\n');
+                }
+              }
+            } catch { /* ignore */ }
+          "
+
+  # ── Summary ───────────────────────────────────────────────────────────────
+  summary:
+    name: OpenAPI & SDK Drift Summary
+    needs: [test-drift-script, openapi-snapshot, sdk-types-drift]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Write job summary
+        shell: bash
+        run: |
+          echo "## OpenAPI & SDK Drift Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Job | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Drift script tests | ${{ needs.test-drift-script.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| OpenAPI snapshot | ${{ needs.openapi-snapshot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SDK types drift | ${{ needs.sdk-types-drift.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Run locally:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "node scripts/check-openapi-sdk-drift.mjs" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if any drift check failed
+        if: >
+          needs.test-drift-script.result == 'failure' ||
+          needs.openapi-snapshot.result == 'failure' ||
+          needs.sdk-types-drift.result == 'failure'
+        run: |
+          echo "::error::One or more OpenAPI/SDK drift checks failed."
+          echo "Fix the errors printed above, then re-run:"
+          echo "  node scripts/check-openapi-sdk-drift.mjs"
+          exit 1

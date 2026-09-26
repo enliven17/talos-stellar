@@ -186,6 +186,62 @@ describe('TalosWebhook', () => {
     });
   });
 
+  describe('hexToBuf strictness (ambiguous encoding rejection)', () => {
+    it('decodes a well-formed hex string', () => {
+      expect(TalosWebhook.hexToBuf('deadbeef')).toEqual(
+        new Uint8Array([0xde, 0xad, 0xbe, 0xef]),
+      );
+    });
+
+    it('accepts uppercase and mixed-case hex as equivalent to lowercase', () => {
+      expect(TalosWebhook.hexToBuf('DEADBEEF')).toEqual(TalosWebhook.hexToBuf('deadbeef'));
+      expect(TalosWebhook.hexToBuf('DeAdBeEf')).toEqual(TalosWebhook.hexToBuf('deadbeef'));
+    });
+
+    it('rejects an empty string', () => {
+      expect(TalosWebhook.hexToBuf('')).toBeNull();
+    });
+
+    it('rejects odd-length input', () => {
+      expect(TalosWebhook.hexToBuf('abc')).toBeNull();
+    });
+
+    it('rejects non-hex characters instead of partially parsing them', () => {
+      // Previously parseInt('1g', 16) === 1, so this silently decoded to a
+      // single 0x01 byte instead of being rejected as malformed.
+      expect(TalosWebhook.hexToBuf('1g')).toBeNull();
+      expect(TalosWebhook.hexToBuf('zz')).toBeNull();
+    });
+
+    it('rejects embedded whitespace instead of coercing it away', () => {
+      // parseInt(' 1', 16) === 1 and parseInt('1 ', 16) === 1, which used to
+      // let whitespace-padded values decode ambiguously to the same byte as
+      // their trimmed form.
+      expect(TalosWebhook.hexToBuf(' 1')).toBeNull();
+      expect(TalosWebhook.hexToBuf('1 ')).toBeNull();
+      expect(TalosWebhook.hexToBuf('de ad be ef')).toBeNull();
+    });
+
+    it('rejects a leading 0x prefix instead of interpreting it as radix notation', () => {
+      // parseInt('0x', 16) is NaN, but a longer string like '0x1a' would be
+      // silently reinterpreted by parseInt's own prefix handling.
+      expect(TalosWebhook.hexToBuf('0x1a')).toBeNull();
+      expect(TalosWebhook.hexToBuf('0X1a')).toBeNull();
+    });
+
+    it('rejects a signed (+/-) value instead of coercing off the sign', () => {
+      expect(TalosWebhook.hexToBuf('+1234')).toBeNull();
+      expect(TalosWebhook.hexToBuf('-1234')).toBeNull();
+    });
+
+    it('rejects malformed v1 signatures end-to-end instead of misverifying them', async () => {
+      const badHeader = `t=${timestamp},v1=1g${'a'.repeat(62)}`;
+      await expect(
+        TalosWebhook.verify({ payload, signatureHeader: badHeader, secret }),
+      ).rejects.toThrow('No valid signatures found');
+    });
+  });
+
   describe('Logger', () => {
     it('logs failures and successes without exposing sensitive data', async () => {
       const logger = {

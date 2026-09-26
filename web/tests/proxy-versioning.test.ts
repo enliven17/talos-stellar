@@ -86,4 +86,19 @@ describe("proxy — version headers on the 429 rate-limit path", () => {
     expect(res.status).toBe(429);
     expect(res.headers.get("X-API-Version")).toBe("1");
   });
+
+  it("carries both X-API-Version and X-RateLimit-Policy on a 429", async () => {
+    rateLimitMock.mockResolvedValue({
+      ok: false,
+      limit: 100,
+      remaining: 0,
+      resetAt: Date.now() + 60_000,
+    });
+
+    const res = await proxy(makeRequest("/api/talos"));
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get("X-API-Version")).toBe("1");
+    expect(res.headers.get("X-RateLimit-Policy")).toBe("read");
+  });
 });

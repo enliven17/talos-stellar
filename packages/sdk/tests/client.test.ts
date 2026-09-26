@@ -22,6 +22,9 @@ import {
   MAX_BODY_BYTES,
   resolveRetryPolicy,
   resolveRetryOptions,
+  resolveNetworkConfig,
+  normalizeNetworkId,
+  NETWORK_PASSPHRASES,
 } from "../src/index.js";
 
 describe("TalosClient - Request/Response Behavior", () => {
@@ -1117,6 +1120,80 @@ describe("Typed SDK Error Hierarchy", () => {
       expect(() => resolveRetryOptions({ maxAttempts: 2.5 })).toThrow(TypeError);
       expect(() => resolveRetryOptions({ onRetry: "nope" as unknown as () => void })).toThrow(TypeError);
       expect(() => resolveRetryOptions(null as unknown as undefined)).toThrow(TypeError);
+    });
+
+    it("validates network and passphrase at construction", () => {
+      expect(new TalosClient({}).getNetworkConfig()).toBeUndefined();
+
+      const byNetwork = new TalosClient({ network: "testnet" });
+      expect(byNetwork.getNetworkConfig()).toEqual({
+        network: "testnet",
+        networkPassphrase: NETWORK_PASSPHRASES.testnet,
+      });
+
+      const byAlias = resolveNetworkConfig({ network: "stellar:mainnet" });
+      expect(byAlias).toEqual({
+        network: "public",
+        networkPassphrase: NETWORK_PASSPHRASES.public,
+      });
+
+      const byPassphrase = resolveNetworkConfig({
+        networkPassphrase: NETWORK_PASSPHRASES.futurenet,
+      });
+      expect(byPassphrase?.network).toBe("futurenet");
+
+      const matched = new TalosClient({
+        network: "testnet",
+        networkPassphrase: NETWORK_PASSPHRASES.testnet,
+      });
+      expect(matched.getNetworkConfig()?.network).toBe("testnet");
+
+      // Positive boundary: normalize known aliases
+      expect(normalizeNetworkId("PUBLIC")).toBe("public");
+      expect(normalizeNetworkId("stellar:testnet")).toBe("testnet");
+
+      // Negative / malformed
+      expect(() => resolveNetworkConfig({ network: "" })).toThrow(RangeError);
+      expect(() => resolveNetworkConfig({ network: "local" })).toThrow(RangeError);
+      expect(() => resolveNetworkConfig({ network: 1 as unknown as string })).toThrow(TypeError);
+      expect(() => resolveNetworkConfig({ networkPassphrase: "" })).toThrow(RangeError);
+      expect(() =>
+        resolveNetworkConfig({ networkPassphrase: "Not A Real Passphrase" }),
+      ).toThrow(RangeError);
+      expect(() =>
+        resolveNetworkConfig({
+          network: "testnet",
+          networkPassphrase: NETWORK_PASSPHRASES.public,
+        }),
+      ).toThrow(RangeError);
+      expect(() => new TalosClient({ network: "bogus" })).toThrow(RangeError);
+
+      // Regression: unbound clients still construct without network options
+      expect(() => new TalosClient({ baseUrl: "http://localhost:3000" })).not.toThrow();
+    });
+
+    it("rejects x402 challenges that disagree with the bound network", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: false,
+        status: 402,
+        headers: {
+          get: (name: string) =>
+            name.toLowerCase() === "www-authenticate"
+              ? 'x402 price="0.50", payee="GABC", token="USDC", network="stellar:public"'
+              : null,
+        },
+        text: async () => "",
+      } as unknown as Response);
+
+      const c = new TalosClient({
+        baseUrl: "http://localhost:3000",
+        network: "testnet",
+      });
+      const err = await c
+        .purchaseServiceWithPayment("seller", "buyer", {})
+        .catch((e) => e);
+      expect(err).toBeInstanceOf(TalosPaymentError);
+      expect(String(err.message)).toMatch(/network/i);
     });
 
     it("retries only configured status codes for custom policy", async () => {
