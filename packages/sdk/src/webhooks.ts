@@ -80,6 +80,19 @@ export interface VerifyWebhookOptions {
   secret: string | string[];
   /** Allowed deviation in seconds between the current time and webhook timestamp. Default 300 (5 minutes). */
   toleranceSeconds?: number;
+  /**
+   * How long (in seconds) a processed event ID is retained in the replay store.
+   * Must be >= `toleranceSeconds` — if it were shorter, a dedup entry could
+   * expire while the original timestamp is still within the acceptance window,
+   * allowing a replay attack.
+   *
+   * When omitted, defaults to `toleranceSeconds + 60` (or 86400 when
+   * `toleranceSeconds` is 0) to preserve backward-compatible behaviour.
+   *
+   * Passing a value shorter than `toleranceSeconds` throws
+   * {@link TalosWebhookError} with code `REPLAY_MISCONFIGURED`.
+   */
+  replayWindowSeconds?: number;
   /** Optional store to prevent replay attacks by recording processed event IDs. */
   replayStore?: ReplayStore;
   /** The event ID from the payload, required if replayStore is used. */
@@ -316,11 +329,41 @@ export class TalosWebhook {
       signatureHeader,
       secret,
       toleranceSeconds = 300,
+      replayWindowSeconds,
       replayStore,
       eventId,
       logger,
       chaosInjector,
     } = options;
+
+    // Replay-window guard: replayWindowSeconds must cover the full tolerance
+    // window, otherwise a dedup entry can expire while the timestamp is still
+    // accepted, opening a replay attack vector.
+    if (replayWindowSeconds !== undefined) {
+      if (
+        !Number.isFinite(replayWindowSeconds) ||
+        replayWindowSeconds < 0
+      ) {
+        logger?.error(
+          "Webhook verification misconfigured: replayWindowSeconds must be a non-negative finite number",
+          { replayWindowSeconds },
+        );
+        throw new TalosWebhookError(
+          "replayWindowSeconds must be a non-negative finite number",
+          "REPLAY_MISCONFIGURED",
+        );
+      }
+      if (toleranceSeconds > 0 && replayWindowSeconds < toleranceSeconds) {
+        logger?.error(
+          "Webhook verification misconfigured: replayWindowSeconds is shorter than toleranceSeconds",
+          { replayWindowSeconds, toleranceSeconds },
+        );
+        throw new TalosWebhookError(
+          `replayWindowSeconds (${replayWindowSeconds}) must be >= toleranceSeconds (${toleranceSeconds}) to prevent replay attacks after dedup entry expiry`,
+          "REPLAY_MISCONFIGURED",
+        );
+      }
+    }
 
     if (!signatureHeader) {
       logger?.warn("Webhook verification failed: Missing signature header", {
@@ -469,7 +512,12 @@ export class TalosWebhook {
           );
         }
 
-        const ttl = toleranceSeconds > 0 ? toleranceSeconds + 60 : 86400;
+        const ttl =
+          replayWindowSeconds !== undefined
+            ? replayWindowSeconds
+            : toleranceSeconds > 0
+              ? toleranceSeconds + 60
+              : 86400;
         if (chaosInjector) {
           await chaosInjector.maybeInjectFault(FaultType.REPLAY_STORE_ERROR);
         }
