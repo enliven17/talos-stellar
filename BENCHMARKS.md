@@ -31,8 +31,7 @@ pnpm bench:suite sdk        # SDK call benchmarks
 pnpm bench:suite contract   # Contract-adjacent workflow benchmarks
 
 # Set environment overrides
-BENCHMARK_RUNS=50 BENCHMARK_VARIANCE_THRESHOLD=0.2 pnpm bench:suite api
-```
+BENCHMARK_RUNS=50 BENCHMARK_VARIANCE_THRESHOLD=0.2 BENCHMARK_PERFORMANCE_BUDGET_MS=4000 BENCHMARK_P99_THRESHOLD_MS=8000 pnpm bench:suite api
 
 ## Benchmark Suites
 
@@ -119,6 +118,8 @@ All configuration is defined in the `BenchmarkConfig` interface. Values are load
 | `BENCHMARK_TIMEOUT_MS` | 30000 | Per-benchmark timeout |
 | `BENCHMARK_DATASET_SIZE` | 1000 | Dataset size for generators |
 | `BENCHMARK_VARIANCE_THRESHOLD` | 0.15 | Max acceptable coefficient of variation (warn) |
+| `BENCHMARK_PERFORMANCE_BUDGET_MS` | 5000 | Mean latency regression budget (fail) |
+| `BENCHMARK_P99_THRESHOLD_MS` | 10000 | p99 latency regression budget (fail) |
 | `BENCHMARK_MEMORY_THRESHOLD_MB` | 512 | Peak memory threshold (fail) |
 | `BENCHMARK_CPU_THRESHOLD_PCT` | 80 | Peak CPU threshold (warn) |
 | `BENCHMARK_ARTIFACT_DIR` | `.benchmarks` | Output directory for artifact files |
@@ -172,6 +173,8 @@ Benchmark thresholds control pass/fail gates. Built-in rules:
 | Metric | Default | Severity | Comparator |
 |---|---|---|---|
 | `variance` | 0.15 | warn | gt |
+| `meanDurationMs` | 5000 | fail | gt |
+| `p99` | 10000 | fail | gt |
 | `peakMemoryMb` | 512 | fail | gt |
 | `peakCpuPercent` | 80 | warn | gt |
 
@@ -245,7 +248,7 @@ A dedicated CI workflow (`.github/workflows/benchmark-ci.yml`) runs on every pus
 To run benchmarks locally as CI does:
 
 ```bash
-CI=true BENCHMARK_RUNS=20 BENCHMARK_WARMUP_RUNS=3 pnpm bench:suite api
+CI=true BENCHMARK_RUNS=20 BENCHMARK_WARMUP_RUNS=3 BENCHMARK_PERFORMANCE_BUDGET_MS=5000 BENCHMARK_P99_THRESHOLD_MS=10000 pnpm bench:suite api
 ```
 
 When `CI=true`:
