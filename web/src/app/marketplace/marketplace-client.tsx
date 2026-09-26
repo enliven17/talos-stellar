@@ -51,10 +51,10 @@ export const SORT_OPTIONS = [
 ] as const;
 
 // ---------------------------------------------------------------------------
-// URL ↔ filter helpers
+// URL ↔ filter helpers (exported for unit tests)
 // ---------------------------------------------------------------------------
 
-function buildApiUrl(params: {
+export function buildApiUrl(params: {
   category: string;
   minPrice: string;
   maxPrice: string;
@@ -76,7 +76,7 @@ function buildApiUrl(params: {
   return `/api/services?${sp.toString()}`;
 }
 
-function buildPageUrl(params: {
+export function buildPageUrl(params: {
   category: string;
   minPrice: string;
   maxPrice: string;

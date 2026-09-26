@@ -2,7 +2,7 @@
  * Shared price range parser for marketplace API endpoints.
  *
  * Rules:
- * - Absent → undefined (no constraint applied).
+ * - Absent or empty string → undefined (no constraint applied).
  * - Non-numeric, negative, or NaN → 400 with a clear message.
  * - minPrice > maxPrice → 400 explaining the reversed range.
  * - minPrice === maxPrice → valid (single-price filter).
@@ -71,7 +71,7 @@ type SingleResult =
   | { ok: false; response: Response };
 
 function parseSinglePrice(raw: string | null, param: string): SingleResult {
-  if (raw === null) return { ok: true, value: undefined };
+  if (raw === null || raw === "") return { ok: true, value: undefined };
 
   const n = Number(raw);
   if (!Number.isFinite(n) || n < 0) {
