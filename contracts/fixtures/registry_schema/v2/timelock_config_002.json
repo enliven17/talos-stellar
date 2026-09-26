@@ -11,6 +11,8 @@
   },
   "value": {
     "grace_period": 604800,
-    "min_delay": 0
+    "min_delay": 0,
+    "max_delay": 604800,
+    "extension_window": 86400
   }
 }
