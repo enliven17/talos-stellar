@@ -20,6 +20,7 @@
     "smoke:fixture:gen": "node scripts/generate-smoke-fixture.mjs",
     "smoke:fixture:check": "node scripts/generate-smoke-fixture.mjs --check",
     "secrets:check": "bash scripts/secret-scan.sh",
+    "smoke:chaos": "node scripts/chaos-fixture.mjs",
     "test:mock-stellar-faults": "node scripts/mock-stellar-fault-injection.test.mjs",
     "migrations:check": "node scripts/check-migration-drift.mjs",
     "migrations:check:strict": "node scripts/check-migration-drift.mjs --strict",
