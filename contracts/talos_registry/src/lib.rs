@@ -469,7 +469,7 @@ pub const INTERFACE_ID: [u8; 32] = [
     0x54, 0x61, 0x6C, 0x6F, 0x73, 0x52, 0x65, 0x67, // "TalosReg"
     0x69, 0x73, 0x74, 0x72, 0x79, 0x00, 0x00, 0x00, // "istry" + zero pads
     0x00, 0x00, 0x00, 0x01, // major = 1
-    0x00, 0x00, 0x00, 0x03, // minor = 3
+    0x00, 0x00, 0x00, 0x04, // minor = 4  (tracks CONTRACT_VERSION)
     0x00, 0x00, 0x00, 0x00, // patch = 0
     0x00, 0x00, 0x00, 0x00,
 ];
@@ -1983,7 +1983,8 @@ mod tests {
     fn version_returns_compile_time_constant() {
         let (env, contract_id) = setup();
         let client = TalosRegistryClient::new(&env, &contract_id);
-        assert_eq!(client.version(), (1u32, 3u32, 0u32));
+        // Tracks CONTRACT_VERSION — if this fails, update CONTRACT_VERSION to match.
+        assert_eq!(client.version(), (1u32, 4u32, 0u32));
     }
 
     #[test]
@@ -5729,5 +5730,172 @@ mod tests {
 
         // Attempting update_kernel on a deactivated talos without auth must fail
         assert!(client.try_update_kernel(&id, &kernel()).is_err());
+    }
+
+    // ── #608 event-schema compatibility tests ─────────────────────────────
+    //
+    // Verify tls_crt / tls_crt2 event schema per EVENTS.md §3.
+    // create_talos_emits_tls_crt_event (above) already covers the happy-path
+    // positive decode. These tests add: schema-version field, ordering guarantee,
+    // cross-event consistency, rejection (no event), and multiple sequential
+    // creations.
+
+    #[test]
+    fn event_schema_version_constant_is_stable() {
+        // The EVENT_SCHEMA_VERSION constant must be major=1, minor=0 per EVENTS.md.
+        assert_eq!(EVENT_SCHEMA_VERSION.major, 1u32);
+        assert_eq!(EVENT_SCHEMA_VERSION.minor, 0u32);
+    }
+
+    #[test]
+    fn tls_crt2_data_version_field_equals_one() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &pw);
+
+        // tls_crt2 is the second event (index 1)
+        let (_, _, data2) = env.events().all().get(1).unwrap();
+        let (version, ev_id, _, _): (u32, u32, String, String) =
+            TryFromVal::try_from_val(&env, &data2).unwrap();
+        assert_eq!(version, 1u32, "tls_crt2 data[0] (schema version) must equal 1");
+        assert_eq!(ev_id, id);
+    }
+
+    #[test]
+    fn tls_crt_precedes_tls_crt2_in_same_transaction() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let pw = Address::generate(&env);
+        create_talos_with_auth(&env, &client, &contract_id, &creator, &pw);
+
+        let events = env.events().all();
+        let mut crt_idx: Option<u32> = None;
+        let mut crt2_idx: Option<u32> = None;
+        for i in 0..events.len() {
+            let (_, topics, _) = events.get(i).unwrap();
+            let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &topics.get(0).unwrap());
+            if let Ok(sym) = sym {
+                if sym == symbol_short!("tls_crt") { crt_idx = Some(i); }
+                else if sym == symbol_short!("tls_crt2") { crt2_idx = Some(i); }
+            }
+        }
+        let ci = crt_idx.expect("tls_crt must be emitted");
+        let c2i = crt2_idx.expect("tls_crt2 must be emitted");
+        assert!(ci < c2i, "tls_crt (idx {ci}) must precede tls_crt2 (idx {c2i})");
+    }
+
+    #[test]
+    fn tls_crt_and_tls_crt2_carry_consistent_talos_id_name_category() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let pw = Address::generate(&env);
+        create_talos_with_auth(&env, &client, &contract_id, &creator, &pw);
+
+        let events = env.events().all();
+        let (_, _, data1) = events.get(0).unwrap();
+        let (_, _, data2) = events.get(1).unwrap();
+
+        let (id1, name1, cat1): (u32, String, String) =
+            TryFromVal::try_from_val(&env, &data1).unwrap();
+        let (_, id2, name2, cat2): (u32, u32, String, String) =
+            TryFromVal::try_from_val(&env, &data2).unwrap();
+
+        assert_eq!(id1, id2,   "talos_id must match across tls_crt and tls_crt2");
+        assert_eq!(name1, name2, "name must match across tls_crt and tls_crt2");
+        assert_eq!(cat1, cat2,  "category must match across tls_crt and tls_crt2");
+    }
+
+    #[test]
+    fn no_tls_crt_event_on_invalid_patron_shares() {
+        // patron shares summing to != 100 must be rejected; no event emitted.
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let pw = Address::generate(&env);
+
+        let bad_patron = Patron {
+            creator_share: 50,
+            investor_share: 50,
+            treasury_share: 50, // sum = 150
+            creator_addr: creator.clone(),
+            investor_addr: Address::generate(&env),
+            treasury_addr: Address::generate(&env),
+        };
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_talos",
+                    args: (
+                        s(&env, "fail"), s(&env, "Cat"), s(&env, "desc"),
+                        bad_patron.clone(), kernel(), pulse(&env), pw.clone(),
+                    ).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_talos(
+                &s(&env, "fail"), &s(&env, "Cat"), &s(&env, "desc"),
+                &bad_patron, &kernel(), &pulse(&env), &pw,
+            );
+        assert!(res.is_err(), "invalid patron shares must be rejected");
+
+        // Confirm no tls_crt or tls_crt2 events were emitted
+        for i in 0..env.events().all().len() {
+            let (_, topics, _) = env.events().all().get(i).unwrap();
+            let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &topics.get(0).unwrap());
+            if let Ok(sym) = sym {
+                assert_ne!(sym, symbol_short!("tls_crt"),  "tls_crt must not emit on failure");
+                assert_ne!(sym, symbol_short!("tls_crt2"), "tls_crt2 must not emit on failure");
+            }
+        }
+    }
+
+    #[test]
+    fn tls_crt_emitted_for_each_sequential_creation_with_monotone_ids() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator1 = Address::generate(&env);
+        let creator2 = Address::generate(&env);
+        let pw = Address::generate(&env);
+
+        let id1 = create_talos_with_auth(&env, &client, &contract_id, &creator1, &pw);
+        let id2 = create_talos_with_auth(&env, &client, &contract_id, &creator2, &pw);
+        assert!(id2 > id1, "IDs must be monotonically increasing");
+
+        // Collect talos_ids from all tls_crt events
+        let events = env.events().all();
+        let mut crt_ids: std::vec::Vec<u32> = std::vec::Vec::new();
+        for i in 0..events.len() {
+            let (_, topics, data) = events.get(i).unwrap();
+            let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &topics.get(0).unwrap());
+            if let Ok(sym) = sym {
+                if sym == symbol_short!("tls_crt") {
+                    let (ev_id, _, _): (u32, String, String) =
+                        TryFromVal::try_from_val(&env, &data).unwrap();
+                    crt_ids.push(ev_id);
+                }
+            }
+        }
+        assert_eq!(crt_ids.len(), 2, "two tls_crt events must be emitted");
+        assert_eq!(crt_ids[0], id1);
+        assert_eq!(crt_ids[1], id2);
+    }
+
+    #[test]
+    fn tls_crt_topic_creator_matches_patron_creator_addr() {
+        // topics[1] of tls_crt must be the creator address used in the Patron.
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let pw = Address::generate(&env);
+        create_talos_with_auth(&env, &client, &contract_id, &creator, &pw);
+
+        let (_, topics, _) = env.events().all().get(0).unwrap();
+        assert_topic_address(&env, &topics, 1, &creator);
     }
 }
