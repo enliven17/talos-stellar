@@ -49,6 +49,11 @@ const requiredClasses = [
   "ChaosInjector",
   "ChaosInjectedError",
   "globalChaosInjector",
+  "REQUEST_SIGNATURE_VERSION",
+  "canonicalizeRequest",
+  "SigningController",
+  "SigningError",
+  "StellarKeypairSigner",
 ];
 for (const name of requiredClasses) {
   assert.ok(name in sdk, `expected export "${name}" missing in CJS bundle`);
@@ -79,6 +84,35 @@ assert.equal(chaos.isEnabled(), false);
 assert.equal(chaos.hasFault(sdk.FaultType.DB_CONNECTION_FAIL), true);
 console.log("  + ChaosInjector instantiation & registration OK");
 
+// Deterministic chaos fixtures (CJS surface)
+assert.ok(Array.isArray(sdk.CHAOS_SCENARIOS) && sdk.CHAOS_SCENARIOS.length > 0, "CHAOS_SCENARIOS missing/empty");
+assert.equal(typeof sdk.planChaosScenario, "function");
+assert.equal(typeof sdk.replayChaosScenario, "function");
+assert.equal(typeof sdk.buildChaosFixtureBundle, "function");
+assert.equal(typeof sdk.createSeededRandom, "function");
+assert.equal(typeof sdk.faultEffect, "function");
+async () => {};
+(async () => {
+  const scenario = sdk.getChaosScenario("api-timeout-delay-then-throw");
+  assert.ok(scenario, "chaos scenario lookup failed");
+  const plan = sdk.planChaosScenario(scenario);
+  assert.equal(plan.calls[0].outcome, "injected-delay-then-throw");
+  const replay = await sdk.replayChaosScenario(scenario);
+  assert.deepEqual(
+    replay.calls.map((c) => c.outcome),
+    plan.calls.map((c) => c.outcome),
+    "chaos replay diverged from plan",
+  );
+  assert.throws(
+    () => new sdk.ChaosInjector({}).registerFault({ type: "NETWORK_GREMLIN", probability: 0.5 }),
+    TypeError,
+  );
+  console.log("  + deterministic chaos fixtures (plan/replay) OK");
+})().catch((error) => {
+  console.error("[compat:node-cjs] chaos fixture check failed", error);
+  process.exitCode = 1;
+});
+
 assert.equal(typeof sdk.generateKeypair, "function");
 assert.equal(typeof sdk.isValidPublicKey, "function");
 const kp = sdk.generateKeypair();
@@ -97,5 +131,26 @@ assert.equal(stream.connectionState, "idle");
 stream.close();
 console.log("  + TalosEventStream instantiation OK");
 
-console.log("[compat:node-cjs] ALL CHECKS PASSED");
-process.exit(0);
+// Typed seller quote construction
+assert.equal(typeof sdk.constructSellerQuote, "function");
+assert.equal(typeof sdk.constructSellerPaymentDetails, "function");
+assert.equal(typeof sdk.SellerQuoteError, "function");
+const sampleQuote = sdk.constructSellerQuote({
+  providerId: "G" + "A".repeat(55),
+  amount: 1,
+  ttlSeconds: 120,
+  now: new Date("2099-01-01T00:00:00.000Z"),
+});
+assert.equal(sampleQuote.amount, "1.000000");
+console.log("  + constructSellerQuote helper OK");
+
+const signingVectors = JSON.parse(fs.readFileSync(path.join(SDK_ROOT, "tests", "fixtures", "request-signing-vectors.json"), "utf8"));
+Promise.all(signingVectors.vectors.map(async (vector) => {
+  const bytes = await sdk.canonicalizeRequest(vector.request);
+  assert.deepEqual(Array.from(bytes), Array.from(new TextEncoder().encode(vector.canonical)), "signing vector " + vector.name);
+})).then(() => {
+  console.log("[compat:node-cjs] ALL CHECKS PASSED");
+}).catch((error) => {
+  console.error("[compat:node-cjs] request-signing vector failed", error);
+  process.exitCode = 1;
+});

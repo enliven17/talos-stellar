@@ -4,6 +4,7 @@ import { tlsTalos, tlsApprovals, tlsPatrons } from "@/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { recordApprovalOnChain, verifyStellarSignature } from "@/lib/stellar";
 import { emitWebhookEvent } from "@/lib/webhooks/delivery";
+import { withTraceContext } from "@/lib/tracing";
 
 // PATCH /api/talos/:id/approvals/:approvalId — Approve/reject
 async function handlePatch(

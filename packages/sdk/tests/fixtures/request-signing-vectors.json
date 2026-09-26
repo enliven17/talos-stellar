@@ -1,0 +1,38 @@
+{
+  "format": "talos-request-signing-vectors",
+  "version": "talos-request-v1",
+  "vectors": [
+    {
+      "name": "empty-body-query-header-normalization",
+      "request": {
+        "method": "get",
+        "url": "https://example.test/v1/jobs?z=2&a=1#ignored",
+        "headers": {
+          "X-Zeta": "  one   two ",
+          "Authorization": "Bearer redacted-vector-value",
+          "Accept": "application/json"
+        },
+        "timestamp": "2026-01-02T03:04:05.000Z",
+        "nonce": "vector-1"
+      },
+      "canonical": "talos-request-v1\nGET\nhttps://example.test/v1/jobs?a=1&z=2\naccept:application/json\nx-zeta:one two\n47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU\n2026-01-02T03:04:05.000Z\nvector-1"
+    },
+    {
+      "name": "body-duplicate-query-and-excluded-signature-headers",
+      "request": {
+        "method": "post",
+        "url": "https://API.example.test/v1/payments?z=2&a=hello%20world&a=first&Z=last#ignored",
+        "headers": {
+          "X-Client": " payments   v1 ",
+          "Content-Type": "application/json",
+          "Authorization": "Bearer redacted-vector-value",
+          "X-Talos-Signature": "redacted-vector-signature"
+        },
+        "body": "{\"b\":2,\"a\":1}",
+        "timestamp": "2026-01-02T03:04:05.000Z",
+        "nonce": "00000000-0000-4000-8000-000000000001"
+      },
+      "canonical": "talos-request-v1\nPOST\nhttps://api.example.test/v1/payments?Z=last&a=first&a=hello+world&z=2\ncontent-type:application/json\nx-client:payments v1\nP7dUUyJccyp2t4meoglt2hRVGJyJgXI5cyGC9z_loJ8\n2026-01-02T03:04:05.000Z\n00000000-0000-4000-8000-000000000001"
+    }
+  ]
+}

@@ -188,6 +188,44 @@ _MIGRATIONS.append(
    ```
 3. Deploy. The database will automatically upgrade on startup.
 
+## Coverage Enforcement (issue #638)
+
+Critical agent modules — payments, crypto/secrets, durability (checkpoint/
+restore/db), scheduling, policy engine, and network resilience — carry a hard
+**per-module** coverage floor. Thresholds live in one place:
+`COVERAGE_FLOORS` in [`scripts/check-coverage.py`](./scripts/check-coverage.py).
+The global `fail_under` backstop lives in `[tool.coverage.report]` in
+`pyproject.toml`.
+
+### Exact local commands
+
+```bash
+cd packages/prime-agent
+
+# 1. Run the suite with coverage enabled (produces coverage.json)
+uv run pytest tests/ --cov --cov-report=json --cov-report=term
+
+# 2. Run the per-module gate (same command CI runs)
+uv run python scripts/check-coverage.py coverage.json
+```
+
+The gate exits `0` when every critical module is at or above its floor and `1`
+with an explicit per-module failure list otherwise. It also fails closed on a
+missing, malformed, or unexpected-format report instead of silently passing.
+
+### Raising the floor / adding a module
+
+1. Improve tests for the module until its reported percentage meets the new
+   floor.
+2. Update (or add) the entry in `COVERAGE_FLOORS` in
+   `scripts/check-coverage.py`.
+3. Re-run both commands above.
+
+Non-critical modules are covered by the global `fail_under` backstop in
+`pyproject.toml` rather than a per-module floor, so unrelated low-coverage code
+does not block unrelated work. When a module becomes load-bearing (money,
+identity, durability), add it to `COVERAGE_FLOORS`.
+
 ## Deployment
 
 ### Running the Docker Container

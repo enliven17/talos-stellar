@@ -51,7 +51,7 @@ function buildPaginatedResponse<T>(items: T[], limit: number): { data: T[]; next
   const page = hasMore ? items.slice(0, limit) : items;
   const lastItem = page[page.length - 1];
   const nextCursor = hasMore && lastItem
-    ? `${Date.now()}|${(lastItem as any).id ?? ""}`
+    ? `${Date.now()}|${(lastItem as { id?: string }).id ?? ""}`
     : null;
   return { data: page, nextCursor };
 }

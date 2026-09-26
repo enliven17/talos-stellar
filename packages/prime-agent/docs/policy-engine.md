@@ -151,6 +151,25 @@ export POLICY_ENGINE_ENABLED=false
 The engine is backwards-compatible: when disabled, all actions proceed as
 before.  Inline checks in individual tools continue to operate independently.
 
+
+## Decision traces
+
+Every evaluation returns a privacy-safe `PolicyDecisionTrace` on
+`PolicyResult.trace`.  Use it to explain *why* an action was approved,
+escalated, or denied:
+
+```python
+result = engine.evaluate(spec)
+print(result.explain())          # multi-line human summary
+print(result.trace.summary)      # one-line operator summary
+print(result.trace.to_dict())    # structured audit payload
+```
+
+Traces include per-rule and per-condition steps.  Secret-shaped fields
+(`api_key`, `seed`, `token`, `payment_proof`, etc.) are redacted as
+`[redacted]` and never logged or returned in cleartext.  BLOCKER
+short-circuits still emit the full trace up to the denying rule.
+
 ## Observability
 
 The engine exposes counters via `engine.metrics`:

@@ -328,11 +328,8 @@ def build_backup(
 
             encrypted = encrypt_with_password(plaintext.decode("utf8"), password)
 
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(encrypted, encoding="utf8")
-            # Restrictive perms — even though the file is GCM-encrypted,
-            # we don't want it world-readable on shared hosts.
-            os.chmod(out_path, stat.S_IRUSR | stat.S_IWUSR)
+            # Stream ciphertext to disk in chunks (same envelope; verify/restore unchanged).
+            stream_encrypted_artifact(encrypted, out_path)
 
             log.info(
                 "prime_agent_backup_completed",
@@ -356,8 +353,159 @@ def build_backup(
 
 
 # ────────────────────────────────────────────────────────────────────
+# Retention (Issue #543)
+# ────────────────────────────────────────────────────────────────────
+
+
+def default_backup_dir() -> Path:
+    """Where the CLI's `backup` command writes artifacts by default."""
+    return APP_DIR / "backups"
+
+
+def prune_backups(
+    *,
+    directory: Path,
+    max_count: int = 0,
+    max_age_days: int = 0,
+    pattern: str = "*.enc",
+    now: datetime | None = None,
+) -> list[Path]:
+    """Delete old backup artifacts in `directory` per a configurable policy.
+
+    Policy (OR semantics — matches common retention-tool conventions such
+    as logrotate's maxage/rotate):
+        - A file is deleted if it is older than `max_age_days` (age limit)
+          OR if it falls outside the newest `max_count` files (count limit).
+        - `max_count=0` disables the count limit; `max_age_days=0` disables
+          the age limit. If both are 0, nothing is pruned (safe no-op —
+          matches `backup_retention_enabled=False` being the default).
+
+    Scope-safe by construction:
+        - Only files matching `pattern` (default "*.enc", the artifact
+          extension written by `stream_encrypted_artifact`) are candidates.
+          `.partial` staging files and `.pre-restore` restore backups never
+          match, so they are never touched.
+        - Non-recursive: only `directory`'s direct children are considered.
+
+    Ordering:
+        - Files are ranked newest-first by mtime (not by parsing the
+          timestamped filename), so pruning is correct even if an artifact
+          was renamed or copied in from elsewhere.
+
+    Failure handling:
+        - Pruning is best-effort cleanup, not a correctness-critical path.
+          A file that can't be deleted (permission error, or removed by a
+          concurrent process between listing and unlink) is logged and
+          skipped rather than raising — it must never fail or block the
+          backup that just succeeded.
+
+    Returns the list of paths actually deleted, in the order deleted.
+    """
+    if max_count < 0:
+        raise BackupError("max_count must be >= 0", code="BAD_INPUT")
+    if max_age_days < 0:
+        raise BackupError("max_age_days must be >= 0", code="BAD_INPUT")
+
+    if max_count == 0 and max_age_days == 0:
+        return []
+
+    if not directory.exists():
+        return []
+
+    reference_time = now or datetime.now(timezone.utc)
+    candidates = [p for p in directory.glob(pattern) if p.is_file()]
+    # Newest first, by mtime.
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    to_delete: list[Path] = []
+
+    if max_count > 0 and len(candidates) > max_count:
+        to_delete.extend(candidates[max_count:])
+
+    if max_age_days > 0:
+        cutoff = reference_time.timestamp() - (max_age_days * 86400)
+        for p in candidates:
+            if p in to_delete:
+                continue
+            if p.stat().st_mtime < cutoff:
+                to_delete.append(p)
+
+    deleted: list[Path] = []
+    for p in to_delete:
+        try:
+            p.unlink()
+        except OSError as exc:
+            log.info(
+                "prime_agent_backup_prune_skip",
+                file=str(p),
+                error=str(exc),
+            )
+            continue
+        deleted.append(p)
+
+    if deleted:
+        log.info(
+            "prime_agent_backup_prune_completed",
+            directory=str(directory),
+            deleted_count=len(deleted),
+            kept_count=len(candidates) - len(deleted),
+            max_count=max_count,
+            max_age_days=max_age_days,
+        )
+
+    return deleted
+
+# ────────────────────────────────────────────────────────────────────
 # Verify
 # ────────────────────────────────────────────────────────────────────
+
+
+
+
+def stream_encrypted_artifact(
+    ciphertext: str,
+    out_path: Path,
+    *,
+    chunk_size: int = 64 * 1024,
+) -> int:
+    """Stream an already-encrypted artifact to disk in chunks.
+
+    AES-GCM still authenticates the full ciphertext string (produced by
+    `encrypt_with_password`), but the *write path* flushes incrementally and
+    atomically replaces the destination so large backups do not rely on a
+    single `Path.write_text` of the entire blob.
+
+    Returns the number of ciphertext characters written.
+    """
+    if chunk_size < 1024:
+        raise BackupError("chunk_size must be >= 1024", code="BAD_INPUT")
+    if not isinstance(ciphertext, str) or not ciphertext:
+        raise BackupError("ciphertext must be a non-empty string", code="BAD_INPUT")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_suffix(out_path.suffix + ".partial")
+    written = 0
+    try:
+        with tmp.open("w", encoding="utf8") as fh:
+            for i in range(0, len(ciphertext), chunk_size):
+                piece = ciphertext[i : i + chunk_size]
+                fh.write(piece)
+                written += len(piece)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, out_path)
+        try:
+            os.chmod(out_path, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    return written
+
 
 
 def verify_backup(*, artifact_path: Path, password: str) -> BackupRun:
@@ -603,4 +751,6 @@ __all__ = [
     "restore_backup",
     "trigger_web_backup",
     "collect_agent_files",
+    "default_backup_dir",
+    "prune_backups",
 ]

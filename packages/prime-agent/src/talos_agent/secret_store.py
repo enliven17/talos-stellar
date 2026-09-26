@@ -1,8 +1,10 @@
 """Versioned encrypted secret storage with transactional activation.
 
 Plaintext exists only in caller memory and is never persisted or included in
-logs/audit events. SQLite transactions provide cross-process compare-and-swap
-semantics; no correctness decision relies on process-local state.
+logs/audit events. Persistence is delegated to a pluggable ``SecretStoreBackend``
+(``sqlite`` by default, ``memory`` for tests/fakes). SQLite transactions provide
+cross-process compare-and-swap semantics; no correctness decision relies on
+process-local state when using the sqlite backend.
 """
 
 from __future__ import annotations
@@ -12,13 +14,18 @@ import binascii
 import json
 import re
 import sqlite3
-import uuid
 from dataclasses import dataclass
 from typing import Mapping
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from talos_agent.observability import log
+from talos_agent.secret_store_backends import (
+    BackendBusyError,
+    SecretStoreBackend,
+    SecretVersionRecord,
+    create_secret_store_backend,
+)
 
 _ENVELOPE_PREFIX = "TALOS-SECRET::1::"
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
@@ -113,7 +120,7 @@ class SecretStore:
 
     def __init__(
         self,
-        db,
+        db=None,
         *,
         keyring: Mapping[str, bytes],
         active_key_id: str,
@@ -121,9 +128,13 @@ class SecretStore:
         max_value_bytes: int = 65536,
         dual_read: bool = True,
         legacy_fallback: bool = True,
+        backend: SecretStoreBackend | None = None,
     ) -> None:
-        self._db = db
-        self._conn: sqlite3.Connection = db._conn
+        if backend is None:
+            if db is None:
+                raise SecretConfigurationError("secret store requires db or backend")
+            backend = create_secret_store_backend("sqlite", db=db)
+        self._backend = backend
         self._keyring = dict(keyring)
         self._active_key_id = active_key_id
         self._scope = self._validate_identifier(scope, "scope")
@@ -132,6 +143,10 @@ class SecretStore:
         self._legacy_fallback = legacy_fallback
         if active_key_id not in self._keyring:
             raise SecretConfigurationError("active secret key ID is missing from the keyring")
+
+    @property
+    def backend_kind(self) -> str:
+        return getattr(self._backend, "kind", "unknown")
 
     @staticmethod
     def _validate_identifier(value: str, label: str) -> str:
@@ -176,17 +191,17 @@ class SecretStore:
         )
         return _ENVELOPE_PREFIX + base64.urlsafe_b64encode(nonce + ciphertext).decode("ascii")
 
-    def _decrypt(self, row: sqlite3.Row) -> str:
-        key_id = row["key_id"]
+    def _decrypt(self, row: SecretVersionRecord) -> str:
+        key_id = row.key_id
         key = self._keyring.get(key_id)
         if key is None:
             raise SecretDecryptionError("encryption key is unavailable")
-        envelope = row["ciphertext"]
+        envelope = row.ciphertext
         if not isinstance(envelope, str) or not envelope.startswith(_ENVELOPE_PREFIX):
             raise SecretDecryptionError("unsupported encrypted envelope")
         try:
             raw = base64.b64decode(
-                envelope[len(_ENVELOPE_PREFIX):],
+                envelope[len(_ENVELOPE_PREFIX) :],
                 altchars=b"-_",
                 validate=True,
             )
@@ -195,7 +210,7 @@ class SecretStore:
             plaintext = AESGCM(key).decrypt(
                 raw[:12],
                 raw[12:],
-                self._aad(row["name"], row["version"], key_id),
+                self._aad(row.name, row.version, key_id),
             )
             return plaintext.decode("utf-8")
         except Exception as exc:
@@ -219,23 +234,15 @@ class SecretStore:
         safe_metadata = json.dumps(dict(metadata or {}), sort_keys=True)
         if len(safe_metadata.encode("utf-8")) > 2048:
             raise SecretValidationError("audit metadata exceeds 2048-byte limit")
-        self._conn.execute(
-            """
-            INSERT INTO secret_audit_events
-                (event_id, scope, name, version, event_type, outcome, actor, reason, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(uuid.uuid4()),
-                self._scope,
-                name,
-                version,
-                event_type,
-                outcome,
-                actor,
-                reason,
-                safe_metadata,
-            ),
+        self._backend.insert_audit(
+            scope=self._scope,
+            name=name,
+            version=version,
+            event_type=event_type,
+            outcome=outcome,
+            actor=actor,
+            reason=reason,
+            metadata=safe_metadata,
         )
 
     def _transition_log(
@@ -247,6 +254,7 @@ class SecretStore:
             "secret_version": version,
             "transition": transition,
             "outcome": outcome,
+            "backend": self.backend_kind,
         }
         try:
             if error is not None:
@@ -257,6 +265,14 @@ class SecretStore:
         except Exception:
             # Logging must never change a committed secret transition.
             pass
+
+    @staticmethod
+    def _map_busy(exc: Exception) -> Exception | None:
+        if isinstance(exc, BackendBusyError):
+            return SecretBusyError("secret store is busy; retry the idempotent operation")
+        if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower():
+            return SecretBusyError("secret store is busy; retry the idempotent operation")
+        return None
 
     def stage(
         self,
@@ -273,31 +289,21 @@ class SecretStore:
         if not isinstance(request_id, str) or not _REQUEST_ID_RE.fullmatch(request_id):
             raise SecretValidationError("request ID must be a safe identifier of at most 128 characters")
         try:
-            self._conn.execute("BEGIN IMMEDIATE")
-            existing = self._conn.execute(
-                """
-                SELECT name, version, status, created_at, activated_at, revoked_at
-                FROM secret_versions WHERE scope = ? AND name = ? AND request_id = ?
-                """,
-                (self._scope, name, request_id),
-            ).fetchone()
+            self._backend.begin_immediate()
+            existing = self._backend.get_version_by_request_id(self._scope, name, request_id)
             if existing:
-                self._conn.commit()
-                return SecretVersion(**dict(existing))
-            row = self._conn.execute(
-                "SELECT COALESCE(MAX(version), 0) + 1 AS version "
-                "FROM secret_versions WHERE scope = ? AND name = ?",
-                (self._scope, name),
-            ).fetchone()
-            version = int(row["version"])
+                self._backend.commit()
+                return self._public_version(existing)
+            version = self._backend.next_version_number(self._scope, name)
             ciphertext = self._encrypt(name, version, plaintext)
-            self._conn.execute(
-                """
-                INSERT INTO secret_versions
-                    (scope, name, version, ciphertext, key_id, status, request_id)
-                VALUES (?, ?, ?, ?, ?, 'staged', ?)
-                """,
-                (self._scope, name, version, ciphertext, self._active_key_id, request_id),
+            self._backend.insert_version(
+                scope=self._scope,
+                name=name,
+                version=version,
+                ciphertext=ciphertext,
+                key_id=self._active_key_id,
+                status="staged",
+                request_id=request_id,
             )
             self._audit(
                 name=name,
@@ -307,31 +313,24 @@ class SecretStore:
                 actor=actor,
                 reason=reason,
             )
-            result_row = self._conn.execute(
-                """
-                SELECT name, version, status, created_at, activated_at, revoked_at
-                FROM secret_versions WHERE scope = ? AND name = ? AND version = ?
-                """,
-                (self._scope, name, version),
-            ).fetchone()
-            self._conn.commit()
-            result = SecretVersion(**dict(result_row))
+            result_row = self._backend.get_version(self._scope, name, version)
+            assert result_row is not None
+            self._backend.commit()
+            result = self._public_version(result_row)
             self._transition_log(name, version, "stage", "success")
             return result
         except Exception as exc:
-            self._conn.rollback()
+            self._backend.rollback()
             self._transition_log(name, None, "stage", "failure", exc)
-            if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower():
-                raise SecretBusyError("secret store is busy; retry the idempotent operation") from exc
+            busy = self._map_busy(exc)
+            if busy is not None:
+                raise busy from exc
             raise
 
     def current_version(self, name: str) -> int | None:
         name = self._validate_identifier(name, "secret name")
-        row = self._conn.execute(
-            "SELECT active_version FROM secret_heads WHERE scope = ? AND name = ?",
-            (self._scope, name),
-        ).fetchone()
-        return int(row["active_version"]) if row else None
+        head = self._backend.get_head(self._scope, name)
+        return int(head.active_version) if head else None
 
     def activate(
         self,
@@ -348,61 +347,45 @@ class SecretStore:
         if version < 1:
             raise SecretValidationError("version must be positive")
         try:
-            self._conn.execute("BEGIN IMMEDIATE")
-            head = self._conn.execute(
-                "SELECT active_version, generation FROM secret_heads WHERE scope = ? AND name = ?",
-                (self._scope, name),
-            ).fetchone()
-            actual = int(head["active_version"]) if head else None
+            self._backend.begin_immediate()
+            head = self._backend.get_head(self._scope, name)
+            actual = int(head.active_version) if head else None
             if actual == version:
-                self._conn.commit()
-                row = self._get_version_row(name, version)
+                self._backend.commit()
+                row = self._require_version(name, version)
                 return self._public_version(row)
             if actual != expected_active_version:
                 raise SecretConflictError(
                     f"active version changed: expected {expected_active_version}, found {actual}"
                 )
-            target = self._get_version_row(name, version)
-            if target["status"] not in _ACTIVATABLE:
+            target = self._require_version(name, version)
+            if target.status not in _ACTIVATABLE:
                 raise SecretConflictError(
-                    f"version {version} cannot be activated from state {target['status']}"
+                    f"version {version} cannot be activated from state {target.status}"
                 )
             # Prove the target can be decrypted before changing the head.
             self._decrypt(target)
             if actual is not None:
-                self._conn.execute(
-                    """
-                    UPDATE secret_versions SET status = 'superseded'
-                    WHERE scope = ? AND name = ? AND version = ? AND status = 'active'
-                    """,
-                    (self._scope, name, actual),
+                self._backend.set_version_status(
+                    self._scope, name, actual, "superseded"
                 )
-            self._conn.execute(
-                """
-                UPDATE secret_versions
-                SET status = 'active', activated_at = datetime('now'), revoked_at = NULL
-                WHERE scope = ? AND name = ? AND version = ?
-                """,
-                (self._scope, name, version),
+            self._backend.set_version_status(
+                self._scope,
+                name,
+                version,
+                "active",
+                set_activated=True,
+                clear_revoked=True,
             )
             if head:
-                self._conn.execute(
-                    """
-                    UPDATE secret_heads
-                    SET active_version = ?, previous_version = ?, generation = generation + 1,
-                        updated_at = datetime('now')
-                    WHERE scope = ? AND name = ?
-                    """,
-                    (version, actual, self._scope, name),
+                self._backend.update_head(
+                    self._scope,
+                    name,
+                    active_version=version,
+                    previous_version=actual,
                 )
             else:
-                self._conn.execute(
-                    """
-                    INSERT INTO secret_heads (scope, name, active_version, previous_version)
-                    VALUES (?, ?, ?, NULL)
-                    """,
-                    (self._scope, name, version),
-                )
+                self._backend.insert_head(self._scope, name, version)
             self._audit(
                 name=name,
                 version=version,
@@ -412,16 +395,17 @@ class SecretStore:
                 reason=reason,
                 metadata={"previous_version": actual},
             )
-            row = self._get_version_row(name, version)
-            self._conn.commit()
+            row = self._require_version(name, version)
+            self._backend.commit()
             result = self._public_version(row)
             self._transition_log(name, version, event_type, "success")
             return result
         except Exception as exc:
-            self._conn.rollback()
+            self._backend.rollback()
             self._transition_log(name, version, event_type, "failure", exc)
-            if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower():
-                raise SecretBusyError("secret store is busy; retry the idempotent operation") from exc
+            busy = self._map_busy(exc)
+            if busy is not None:
+                raise busy from exc
             raise
 
     def recover(
@@ -453,34 +437,20 @@ class SecretStore:
         """Revoke a non-active version. Active revocation is deliberately rejected."""
         name = self._validate_identifier(name, "secret name")
         try:
-            self._conn.execute("BEGIN IMMEDIATE")
-            row = self._get_version_row(name, version)
-            if row["status"] == "revoked":
-                self._conn.commit()
+            self._backend.begin_immediate()
+            row = self._require_version(name, version)
+            if row.status == "revoked":
+                self._backend.commit()
                 return self._public_version(row)
-            head = self._conn.execute(
-                "SELECT active_version FROM secret_heads WHERE scope = ? AND name = ?",
-                (self._scope, name),
-            ).fetchone()
-            if head and int(head["active_version"]) == version:
+            head = self._backend.get_head(self._scope, name)
+            if head and int(head.active_version) == version:
                 raise ActiveSecretRevocationError(
                     "cannot revoke the active version; activate or recover another version first"
                 )
-            self._conn.execute(
-                """
-                UPDATE secret_versions
-                SET status = 'revoked', revoked_at = datetime('now')
-                WHERE scope = ? AND name = ? AND version = ?
-                """,
-                (self._scope, name, version),
+            self._backend.set_version_status(
+                self._scope, name, version, "revoked", set_revoked=True
             )
-            self._conn.execute(
-                """
-                UPDATE secret_heads SET previous_version = NULL, updated_at = datetime('now')
-                WHERE scope = ? AND name = ? AND previous_version = ?
-                """,
-                (self._scope, name, version),
-            )
+            self._backend.clear_previous_if(self._scope, name, version)
             self._audit(
                 name=name,
                 version=version,
@@ -489,63 +459,51 @@ class SecretStore:
                 actor=actor,
                 reason=reason,
             )
-            updated = self._get_version_row(name, version)
-            self._conn.commit()
+            updated = self._require_version(name, version)
+            self._backend.commit()
             result = self._public_version(updated)
             self._transition_log(name, version, "revoke", "success")
             return result
         except Exception as exc:
-            self._conn.rollback()
+            self._backend.rollback()
             self._transition_log(name, version, "revoke", "failure", exc)
-            if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower():
-                raise SecretBusyError("secret store is busy; retry the idempotent operation") from exc
+            busy = self._map_busy(exc)
+            if busy is not None:
+                raise busy from exc
             raise
 
-    def _get_version_row(self, name: str, version: int) -> sqlite3.Row:
-        row = self._conn.execute(
-            """
-            SELECT name, version, status, created_at, activated_at, revoked_at,
-                   ciphertext, key_id
-            FROM secret_versions WHERE scope = ? AND name = ? AND version = ?
-            """,
-            (self._scope, name, version),
-        ).fetchone()
+    def _require_version(self, name: str, version: int) -> SecretVersionRecord:
+        row = self._backend.get_version(self._scope, name, version)
         if not row:
             raise SecretNotFoundError(f"secret version {version} does not exist")
         return row
 
     @staticmethod
-    def _public_version(row: sqlite3.Row) -> SecretVersion:
+    def _public_version(row: SecretVersionRecord) -> SecretVersion:
         return SecretVersion(
-            name=row["name"],
-            version=int(row["version"]),
-            status=row["status"],
-            created_at=row["created_at"],
-            activated_at=row["activated_at"],
-            revoked_at=row["revoked_at"],
+            name=row.name,
+            version=int(row.version),
+            status=row.status,
+            created_at=row.created_at,
+            activated_at=row.activated_at,
+            revoked_at=row.revoked_at,
         )
 
     def resolve(self, name: str, legacy_value: str = "") -> SecretResolution:
         """Resolve active -> previous -> legacy according to rollout configuration."""
         name = self._validate_identifier(name, "secret name")
-        head = self._conn.execute(
-            """
-            SELECT active_version, previous_version
-            FROM secret_heads WHERE scope = ? AND name = ?
-            """,
-            (self._scope, name),
-        ).fetchone()
+        head = self._backend.get_head(self._scope, name)
         candidates: list[tuple[str, int]] = []
         if head:
-            candidates.append(("active", int(head["active_version"])))
-            if self._dual_read and head["previous_version"] is not None:
-                candidates.append(("previous", int(head["previous_version"])))
+            candidates.append(("active", int(head.active_version)))
+            if self._dual_read and head.previous_version is not None:
+                candidates.append(("previous", int(head.previous_version)))
 
         last_error: Exception | None = None
         for source, version in candidates:
             try:
-                row = self._get_version_row(name, version)
-                if row["status"] == "revoked":
+                row = self._require_version(name, version)
+                if row.status == "revoked":
                     continue
                 return SecretResolution(self._decrypt(row), source, version)
             except (SecretNotFoundError, SecretDecryptionError) as exc:
@@ -558,6 +516,7 @@ class SecretStore:
                     source=source,
                     outcome="fallback",
                     error_type=type(exc).__name__,
+                    backend=self.backend_kind,
                 )
         if self._legacy_fallback and legacy_value:
             return SecretResolution(legacy_value, "legacy", None)
@@ -567,27 +526,40 @@ class SecretStore:
 
     def list_versions(self, name: str) -> list[SecretVersion]:
         name = self._validate_identifier(name, "secret name")
-        rows = self._conn.execute(
-            """
-            SELECT name, version, status, created_at, activated_at, revoked_at
-            FROM secret_versions WHERE scope = ? AND name = ? ORDER BY version DESC
-            """,
-            (self._scope, name),
-        ).fetchall()
-        return [SecretVersion(**dict(row)) for row in rows]
+        rows = self._backend.list_versions(self._scope, name)
+        return [self._public_version(row) for row in rows]
 
     def audit_events(self, name: str, limit: int = 50) -> list[dict]:
         name = self._validate_identifier(name, "secret name")
         bounded_limit = min(max(limit, 1), 500)
-        rows = self._conn.execute(
-            """
-            SELECT event_id, name, version, event_type, outcome, actor, reason, metadata, created_at
-            FROM secret_audit_events
-            WHERE scope = ? AND name = ? ORDER BY id DESC LIMIT ?
-            """,
-            (self._scope, name, bounded_limit),
-        ).fetchall()
-        return [dict(row) for row in rows]
+        return self._backend.list_audit(self._scope, name, bounded_limit)
+
+
+def build_secret_store(
+    *,
+    backend: str | SecretStoreBackend = "sqlite",
+    db=None,
+    keyring: Mapping[str, bytes],
+    active_key_id: str,
+    scope: str = "default",
+    max_value_bytes: int = 65536,
+    dual_read: bool = True,
+    legacy_fallback: bool = True,
+) -> SecretStore:
+    """Construct a ``SecretStore`` with an explicit backend kind or instance."""
+    if isinstance(backend, SecretStoreBackend):
+        resolved = backend
+    else:
+        resolved = create_secret_store_backend(backend, db=db)
+    return SecretStore(
+        backend=resolved,
+        keyring=keyring,
+        active_key_id=active_key_id,
+        scope=scope,
+        max_value_bytes=max_value_bytes,
+        dual_read=dual_read,
+        legacy_fallback=legacy_fallback,
+    )
 
 
 __all__ = [
@@ -602,5 +574,6 @@ __all__ = [
     "SecretStoreError",
     "SecretValidationError",
     "SecretVersion",
+    "build_secret_store",
     "decode_keyring",
 ]
