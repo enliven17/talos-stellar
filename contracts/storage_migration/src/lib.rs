@@ -76,13 +76,16 @@ pub struct MigrationDryRun {
     pub target_version: u32,
     /// Number of ordered steps the plan would apply (`0` when up to date).
     pub steps: u32,
-    /// `true` when the contract is already at `target_version`.
+    /// `true` when the contract is already at `target_version`. An up-to-date
+    /// plan is a successful no-op: `steps == 0`, `applicable == true`, and
+    /// `error == None`.
     pub up_to_date: bool,
     /// `true` when a migration currently holds the lock, so applying the
     /// plan would be rejected with [`MigrationError::MigrationInProgress`].
     pub locked: bool,
     /// `true` when the plan is safe to apply: not locked, forward-only, and
-    /// starting exactly at the stored version.
+    /// starting exactly at the stored version. An up-to-date plan is
+    /// applicable with zero steps.
     pub applicable: bool,
     /// `None` when `applicable`; otherwise the reason the plan would fail.
     pub error: Option<MigrationError>,
@@ -213,6 +216,23 @@ pub fn dry_run(
     let stored_current = schema_version(e).unwrap_or(current);
     let locked = is_locked(e);
 
+    // Already at the target: the plan is a no-op, not a failure. Report it as
+    // applicable with zero steps so callers can treat "up to date" as success
+    // rather than as a `NotForward` rejection.
+    let up_to_date = stored_current == to;
+
+    if up_to_date {
+        return MigrationDryRun {
+            current_version: stored_current,
+            target_version: to,
+            steps: 0,
+            up_to_date: true,
+            locked,
+            applicable: true,
+            error: None,
+        };
+    }
+
     // Mirror `begin_migration`'s checks in the same order so the dry-run
     // predicts the real outcome rather than a stricter or looser one.
     let error = if stored_current != current {
@@ -230,13 +250,11 @@ pub fn dry_run(
         }
     };
 
-    let up_to_date = stored_current == to;
-
     MigrationDryRun {
         current_version: stored_current,
         target_version: to,
-        steps: if up_to_date { 0 } else { 1 },
-        up_to_date,
+        steps: 1,
+        up_to_date: false,
         locked,
         applicable: error.is_none(),
         error,
@@ -829,8 +847,35 @@ mod tests {
 
             assert!(plan.up_to_date);
             assert_eq!(plan.steps, 0);
-            assert!(!plan.applicable);
-            assert_eq!(plan.error, Some(MigrationError::NotForward));
+            assert!(plan.applicable);
+            assert_eq!(plan.error, None);
+            assert_eq!(plan.current_version, 2);
+            assert_eq!(plan.target_version, 2);
+        });
+    }
+
+    #[test]
+    fn dry_run_up_to_date_is_a_noop_even_while_locked() {
+        let env = Env::default();
+        let contract_id = soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 2);
+            begin_migration(&env, 2, 2, 3).expect("begin");
+
+            // Already at the target: nothing to apply, so the plan is a
+            // successful no-op rather than a lock rejection.
+            let plan = dry_run(&env, 2, 2, 2);
+
+            assert!(plan.up_to_date);
+            assert_eq!(plan.steps, 0);
+            assert!(plan.applicable);
+            assert_eq!(plan.error, None);
+            assert!(plan.locked);
+
+            // Still read-only: the real migration keeps its lock.
+            assert!(is_locked(&env));
+            assert_eq!(schema_version(&env), Some(2));
         });
     }
 

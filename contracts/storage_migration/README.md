@@ -47,8 +47,11 @@ See [`talos_registry`](../talos_registry/src/lib.rs) (`schema_version`,
   writing storage, appending history, or emitting events. It mirrors
   `begin_migration`'s checks in the same order, so `applicable == true`
   means the real call would succeed and `error` otherwise carries the exact
-  `MigrationError` the real call would return. It is always safe to call,
-  including while another migration holds the lock.
+  `MigrationError` the real call would return. When the contract is already
+  at `to`, the plan is reported as an up-to-date no-op (`steps == 0`,
+  `applicable == true`, `error == None`) rather than a `NotForward`
+  rejection, so callers can treat "nothing to do" as success. It is always
+  safe to call, including while another migration holds the lock.
 
 ## Adding a migration step to a contract
 
