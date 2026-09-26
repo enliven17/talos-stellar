@@ -527,6 +527,11 @@ export const releaseJobSchema = z.object({
   fencingToken: z.number().int().nonnegative(),
 });
 
+export const extendLeaseSchema = z.object({
+  fencingToken: z.number().int().nonnegative(),
+  extendSeconds: z.number().int().min(1).max(3600),
+});
+
 export const submitJobResultSchema = z.object({
   result: z.record(z.string(), z.unknown()),
   fencingToken: z.number().int().nonnegative().optional(),
