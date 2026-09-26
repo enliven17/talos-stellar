@@ -367,3 +367,24 @@ When deploying this application on Vercel, make sure the following Stellar envir
 - `NEXT_PUBLIC_STELLAR_WALLET_NETWORK`: Wallet network setting (e.g. `testnet`).
 - `NEXT_PUBLIC_TALOS_CREATION_XLM`: XLM required for Talos creation.
 - `NEXT_PUBLIC_STELLAR_USDC_ISSUER`: USDC token issuer public key.
+
+### Stellar asset config validation
+
+The network and USDC issuer are validated as a pair when the server boots
+(`src/instrumentation.ts`) and whenever `src/lib/stellar-config.ts` is loaded.
+Invalid configuration throws a `StellarConfigError` that names the offending
+variables (values are never printed in full), so a bad deploy fails fast
+instead of sending payments to the wrong asset.
+
+| Rule | Error code |
+| --- | --- |
+| `STELLAR_NETWORK` / `NEXT_PUBLIC_STELLAR_NETWORK` must be exactly `testnet` or `mainnet` | `invalid_network` |
+| Both network variables must match when both are set | `network_conflict` |
+| Issuer must be a valid Stellar account ID (`G…`, valid checksum) | `invalid_issuer` |
+| Both issuer variables must match when both are set | `issuer_conflict` |
+| Issuer must not be the canonical USDC issuer of the *other* network | `issuer_network_mismatch` |
+| On mainnet, a non-Circle issuer requires `STELLAR_ALLOW_CUSTOM_USDC_ISSUER=true` (or `NEXT_PUBLIC_STELLAR_ALLOW_CUSTOM_USDC_ISSUER=true`) | `unrecognized_mainnet_issuer` |
+
+Unset or empty values keep the previous defaults (`testnet` and Circle's
+issuer for the resolved network), so existing deployments with a consistent
+config need no changes. Custom issuers remain allowed on testnet.

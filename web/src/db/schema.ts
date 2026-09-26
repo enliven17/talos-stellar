@@ -795,6 +795,77 @@ export const tlsReputationInputs = pgTable(
   ],
 );
 
+// ─── Background Jobs (Durable Execution Queue) ────────────────────
+//
+// Postgres-backed durable job queue for slow/retryable web-side work.
+// Leasing uses `SELECT ... FOR UPDATE SKIP LOCKED` (see src/lib/jobs/store.ts)
+// so multiple app instances can safely pull from the same queue without a
+// broker. Status lifecycle:
+//
+//   pending → leased → completed
+//                    ↘ pending (transient failure, runAt pushed out)
+//                    ↘ dead_letter (retries exhausted / fatal error)
+//   pending|leased → cancelled (cooperative — handler observes cancelRequested)
+//
+// A lease is a (leaseId, leaseExpiresAt) pair. Workers extend it via
+// heartbeat while processing; if a worker dies mid-job the lease simply
+// expires and the reaper returns the row to pending (or dead_letter once
+// maxAttempts is exhausted) — no separate crash-recovery path needed.
+
+export const tlsJobs = pgTable(
+  "tls_jobs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+
+    // Job type — maps to a handler registered in src/lib/jobs/registry.ts
+    queue: text("queue").notNull(),
+    payload: jsonb("payload").notNull().default({}),
+
+    // pending | leased | completed | dead_letter | cancelled
+    status: text("status").notNull().default("pending"),
+    priority: integer("priority").notNull().default(0),
+
+    // Earliest time this job is eligible to be leased (supports delayed retry)
+    runAt: timestamp("runAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+
+    // Lease ownership — leaseId is a random token so a reaped-and-relaunched
+    // lease can never be mistaken for the original by a slow worker.
+    leaseId: text("leaseId"),
+    leaseOwner: text("leaseOwner"),
+    leaseExpiresAt: timestamp("leaseExpiresAt", { mode: "date", precision: 3 }),
+    heartbeatAt: timestamp("heartbeatAt", { mode: "date", precision: 3 }),
+
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("maxAttempts").notNull().default(8),
+
+    // transient | rate_limited | fatal — see src/lib/jobs/retry.ts
+    retryClass: text("retryClass").notNull().default("transient"),
+
+    // Cooperative cancellation — handler polls this via the heartbeat() call
+    cancelRequested: boolean("cancelRequested").notNull().default(false),
+
+    // Caller-supplied dedupe key, scoped per queue. Nullable — most jobs don't need one.
+    idempotencyKey: text("idempotencyKey"),
+
+    // Sanitized, truncated error message from the most recent failed attempt.
+    // Never store raw payloads/secrets here — see src/lib/jobs/metrics.ts.
+    lastError: text("lastError"),
+    result: jsonb("result"),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+    completedAt: timestamp("completedAt", { mode: "date", precision: 3 }),
+  },
+  (t) => [
+    index("tls_jobs_status_runAt_idx").on(t.status, t.runAt),
+    index("tls_jobs_queue_status_idx").on(t.queue, t.status),
+    index("tls_jobs_leaseExpiresAt_idx").on(t.leaseExpiresAt),
+    uniqueIndex("tls_jobs_queue_idempotencyKey_unique")
+      .on(t.queue, t.idempotencyKey)
+      .where(sql`"idempotencyKey" IS NOT NULL`),
+  ],
+);
+
 // ─── Transactional Outbox (Domain Events) ──────────────────────────
 //
 // Written atomically (same db.transaction) alongside the domain mutation
@@ -845,6 +916,88 @@ export const tlsOutboxEvents = pgTable(
     uniqueIndex("tls_outbox_events_eventType_dedupeKey_unique")
       .on(t.eventType, t.dedupeKey)
       .where(sql`"dedupeKey" IS NOT NULL`),
+  ],
+);
+
+// ─── Quota Configuration ─────────────────────────────────────────
+//
+// One row per (talosId, resource) defining the limit and reset window.
+// A NULL talosId row is the platform default applied when no agent-specific
+// override exists.
+//
+// resources: activity_writes | job_writes | revenue_writes | sse_connections
+// windowSize: hourly | daily | monthly
+
+export const tlsQuotaConfigs = pgTable(
+  "tls_quota_configs",
+  {
+    // NULL = platform default; non-NULL = per-agent override
+    talosId: text("talosId").references(() => tlsTalos.id, { onDelete: "cascade" }),
+
+    resource: text("resource").notNull(),
+    maxCount: integer("maxCount").notNull().default(1000),
+    windowSize: text("windowSize").notNull().default("daily"),
+    enabled: boolean("enabled").notNull().default(true),
+    notes: text("notes"),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+  },
+  // Composite PK: (talosId, resource) — PostgreSQL allows multiple NULL talosId
+  // rows, so platform-level defaults coexist without collision.
+);
+
+// ─── Quota Usage ─────────────────────────────────────────────────
+//
+// Atomic per-window usage counter. Incremented via INSERT … ON CONFLICT
+// DO UPDATE to prevent double-counting under concurrency.
+
+export const tlsQuotaUsage = pgTable(
+  "tls_quota_usage",
+  {
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    resource: text("resource").notNull(),
+
+    // UTC-floored window start timestamp (hour / day / month)
+    windowStart: timestamp("windowStart", { mode: "date", precision: 3 }).notNull(),
+
+    count: integer("count").notNull().default(0),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().defaultNow().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    index("tls_quota_usage_talosId_resource_idx").on(t.talosId, t.resource),
+  ],
+);
+
+// ─── Backup Runs (DR audit trail) ──────────────────────────────────
+
+export const tlsBackupRuns = pgTable(
+  "tls_backup_runs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    op: text("op").notNull(),                    // 'backup' | 'restore' | 'verify'
+    scope: text("scope").notNull(),              // 'system' | 'config'
+    talosId: text("talosId"),
+    agentId: text("agentId"),
+    status: text("status").notNull().default("pending"), // 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+    triggeredBy: text("triggeredBy"),             // 'cli' | 'api' | 'ci' | 'cron' (free-form, privacy-safe)
+
+    artifactPath: text("artifactPath"),
+    encryption: text("encryption"),              // e.g. 'AES-256-GCM#PBKDF2-SHA256#200000'
+    sizeBytes: bigint("sizeBytes", { mode: "number" }),
+    sha256: text("sha256"),
+    durationMs: integer("durationMs"),
+
+    errorMessage: text("errorMessage"),          // sanitised: no secrets/keys/payloads
+    metadata: jsonb("metadata"),                 // { rowCounts, signalVersion, ... } — privacy-safe only
+
+    startedAt: timestamp("startedAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    finishedAt: timestamp("finishedAt", { mode: "date", precision: 3 }),
+  },
+  (t) => [
+    index("tls_backup_runs_status_idx").on(t.status),
+    index("tls_backup_runs_startedAt_idx").on(t.startedAt),
+    index("tls_backup_runs_op_status_idx").on(t.op, t.status),
   ],
 );
 

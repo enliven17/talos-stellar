@@ -102,3 +102,26 @@ jobs:
         with:
           path: contracts/target/wasm32-unknown-unknown/release
           key: ${{ steps.cache-restore.outputs.cache-primary-key }}
+
+  coverage:
+    name: Rust coverage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate LCOV coverage
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+      - name: Publish coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: talos-contracts-rust-coverage
+          path: contracts/lcov.info
+          if-no-files-found: error
+          retention-days: 14

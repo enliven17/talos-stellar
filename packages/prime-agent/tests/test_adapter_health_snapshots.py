@@ -30,13 +30,13 @@ import pytest
 from talos_agent.adapters.capability import SandboxedAdapter
 from talos_agent.adapters.discord import DiscordAdapter
 from talos_agent.adapters.health import (
+    _MISSING,
     AdapterState,
     DiscordProbe,
     StellarPaymentProbe,
     TelegramProbe,
     X402PaymentProbe,
     XProbe,
-    _MISSING,
     _call_health_snapshot,
     _snapshot_bool,
     _snapshot_field,
@@ -85,7 +85,7 @@ def _live_browser():
 class TestSnapshotDataclasses:
     def test_discord_to_dict_round_trips(self):
         snap = DiscordHealthSnapshot(has_webhook=True, has_token=False, has_channel=False)
-        assert snap.to_dict() == {"has_webhook": True, "has_token": False, "has_channel": False}
+        assert snap.to_dict() == {"has_webhook": True, "has_token": False, "has_channel": False, "reconnect_enabled": False, "consecutive_failures": 0}
 
     def test_telegram_to_dict_round_trips(self):
         snap = TelegramHealthSnapshot(has_token=True, has_chat=True)

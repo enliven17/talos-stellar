@@ -933,6 +933,28 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             except asyncio.TimeoutError:
                 pass
 
+    telegram_queue_worker = None
+    if settings.telegram_rate_limit_enabled:
+        from talos_agent.adapters.telegram_queue import (
+            TelegramQueueConfig,
+            TelegramQueueWorker,
+            TelegramSendQueue,
+        )
+        from talos_agent.tools import publishing as _publishing_tools
+
+        telegram_queue_worker = TelegramQueueWorker(
+            TelegramSendQueue(db, TelegramQueueConfig.from_settings(settings)),
+            # Read lazily: build_all_tools replaces the registry after browser recovery.
+            lambda: _publishing_tools._adapter_registry,
+            idle_interval=settings.telegram_queue_drain_interval_seconds,
+        )
+
+    async def telegram_queue_task():
+        """Drain the durable Telegram send queue at the paced rate."""
+        if telegram_queue_worker is None:
+            return
+        await telegram_queue_worker.run(shutdown_event)
+
     async def job_effect_dispatch_task():
         """Recover and dispatch durable provider-job effects."""
         if job_effect_dispatcher is None:
@@ -1224,6 +1246,8 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         tasks.append(
             asyncio.create_task(job_effect_dispatch_task(), name="job_effect_dispatch")
         )
+    if telegram_queue_worker is not None:
+        tasks.append(asyncio.create_task(telegram_queue_task(), name="telegram_queue"))
 
     try:
         await shutdown_event.wait()

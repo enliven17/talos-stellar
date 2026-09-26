@@ -146,6 +146,65 @@ The stack exposes:
 - Health endpoint: http://localhost:3000/api/health
 - Mock Stellar service: http://localhost:4010/health
 
+## Mock Stellar Service Fault Injection
+
+The mock Stellar service supports fault injection for testing error handling, retry logic, and resilience. This feature is disabled by default and can be enabled via environment variables.
+
+### Environment Variables
+
+Set these variables in `docker-compose.yml` or via command line:
+
+```bash
+FAULT_INJECTION_ENABLED=true        # Enable fault injection (default: false)
+FAULT_LATENCY_MS=500               # Add latency to responses in milliseconds (default: 0)
+FAULT_ERROR_RATE=0.5               # Rate of 5xx errors (0.0-1.0, default: 0)
+FAULT_TIMEOUT_RATE=0.1             # Rate of timeouts (no response) (0.0-1.0, default: 0)
+FAULT_MALFORMED_RATE=0.2           # Rate of malformed JSON responses (0.0-1.0, default: 0)
+```
+
+### Usage Examples
+
+```bash
+# Set environment variables before starting the stack
+export FAULT_INJECTION_ENABLED=true
+export FAULT_LATENCY_MS=500
+pnpm stack:up
+
+# Or set directly in docker-compose.yml under mock-stellar environment section
+# Then restart the service
+docker compose restart mock-stellar
+
+# Test with multiple fault types
+export FAULT_INJECTION_ENABLED=true
+export FAULT_LATENCY_MS=200
+export FAULT_ERROR_RATE=0.1
+export FAULT_TIMEOUT_RATE=0.05
+pnpm stack:up
+```
+
+### Testing
+
+Run the fault injection test suite:
+
+```bash
+pnpm test:mock-stellar-faults
+```
+
+This test covers:
+- Positive cases: fault injection when enabled
+- Negative cases: no faults when disabled
+- Boundary cases: zero rates, maximum rates (1.0)
+- Regression cases: existing endpoints still work correctly
+- Privacy safety: no sensitive data logged
+
+### Privacy & Safety
+
+Fault injection logging is privacy-safe:
+- Only fault types and rates are logged (no request bodies, secrets, or sensitive data)
+- Fault injection is disabled by default
+- Must be explicitly enabled via environment variables
+- Designed for local development and testing environments only
+
 The web container applies migrations and seeds the repeatable local Talos and marketplace dataset during startup. To seed an already-running local database again:
 
 ```bash

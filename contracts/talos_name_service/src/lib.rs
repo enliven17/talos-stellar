@@ -1202,6 +1202,13 @@ impl TalosNameService {
     }
 
     /// Batch-touch admin keys plus name records for talos IDs (admin only).
+    ///
+    /// The name-record sweep is bounded by the renewal age window; use
+    /// [`TalosNameService::extend_ttl_batch`] to pass explicit bounds and a
+    /// per-call key cap.
+    ///
+    /// # Authorization
+    /// Requires the admin to sign.
     pub fn touch_all_ttl(e: Env, max_talos_id: u32) -> u32 {
         pause_control::check_not_paused(&e, PAUSE_NAME_CONFIG);
 
@@ -1212,9 +1219,10 @@ impl TalosNameService {
             .expect("Admin not configured");
         admin.require_auth();
 
-        let current_ledger = e.ledger().sequence();
         let mut touched = 0u32;
 
+        // Administrative keys carry no age marker, so they are refreshed
+        // unconditionally (historical behaviour).
         if let Some(addr) = e.storage().persistent().get::<_, Address>(&DataKey::Admin) {
             e.storage().persistent().set(&DataKey::Admin, &addr);
             touched += 1;
@@ -1230,35 +1238,119 @@ impl TalosNameService {
             touched += 1;
         }
 
-        for tid in 1..=max_talos_id {
-            if let Some(name) = e
+        let sweep = Self::sweep_name_records(
+            &e,
+            &ttl_manager::TtlBounds::renewal(),
+            1..max_talos_id.saturating_add(1),
+        );
+        touched += sweep.touched;
+
+        ttl_manager::emit_ttl_batch(&e, touched, touched, 0);
+        touched
+    }
+
+    /// Batched TTL extension with explicit age and work bounds.
+    ///
+    /// Sweeps name records for talos ids `[1, min(max_talos_id, 1 + limit))`,
+    /// clipped to [`ttl_manager::DEFAULT_MAX_BATCH_KEYS`] ids per call, and
+    /// re-writes only the records whose age in ledgers falls inside
+    /// `[min_age, max_age]`. Records outside the window are reported as
+    /// `skipped`; ids without a name record are ignored.
+    ///
+    /// The two administrative keys (`Admin`, `RegistryContract`) have no age
+    /// marker and stay on [`TalosNameService::touch_all_ttl`], which refreshes
+    /// them unconditionally.
+    ///
+    /// Returns `(touched, skipped)`.
+    ///
+    /// # Panics
+    /// - `"Domain is paused"` — when the name-config domain is paused.
+    /// - `"Admin not configured"` — if `initialize` has not been called.
+    /// - `"ttl bounds: ..."` — static diagnostic for malformed bounds
+    ///   (`min_age > max_age`, `max_keys` of 0, or `max_keys` above
+    ///   [`ttl_manager::MAX_BATCH_KEYS`]). Diagnostics are compile-time
+    ///   constants and never embed caller or storage data.
+    ///
+    /// # Authorization
+    /// Requires the admin to sign.
+    pub fn extend_ttl_batch(
+        e: Env,
+        max_talos_id: u32,
+        limit: u32,
+        min_age: u32,
+        max_age: u32,
+    ) -> (u32, u32) {
+        pause_control::check_not_paused(&e, PAUSE_NAME_CONFIG);
+
+        let admin: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Admin not configured");
+        admin.require_auth();
+
+        let bounds =
+            ttl_manager::TtlBounds::new(min_age, max_age, ttl_manager::DEFAULT_MAX_BATCH_KEYS);
+        let range = ttl_manager::bounded_range(1, limit, &bounds, max_talos_id.saturating_add(1))
+            .unwrap_or_else(|err| panic!("{}", err.message()));
+
+        let sweep = Self::sweep_name_records(&e, &bounds, range);
+        sweep.emit(&e);
+        (sweep.touched, sweep.skipped)
+    }
+
+    /// Shared bounded sweep behind `touch_all_ttl` / `extend_ttl_batch`.
+    ///
+    /// Re-writes the forward and reverse mapping for every talos id in `range`
+    /// whose age falls inside `bounds`, refreshes the `LastTouched` marker, and
+    /// returns the accumulator. Ids without a name record are neither touched
+    /// nor skipped. Callers emit their own `ttl_batch` event: `touch_all_ttl`
+    /// keeps its historical `(touched, touched, 0)` payload, while
+    /// `extend_ttl_batch` reports `(total, touched, skipped)`.
+    fn sweep_name_records(
+        e: &Env,
+        bounds: &ttl_manager::TtlBounds,
+        range: core::ops::Range<u32>,
+    ) -> ttl_manager::BatchSweep {
+        let current_ledger = e.ledger().sequence();
+        let mut sweep = ttl_manager::BatchSweep::empty();
+
+        for tid in range {
+            let name: String = match e
                 .storage()
                 .persistent()
                 .get::<_, String>(&DataKey::TalosName(tid))
             {
-                let last_touched: u32 = e
-                    .storage()
-                    .persistent()
-                    .get(&DataKey::LastTouched(tid))
-                    .unwrap_or(0);
-                if ttl_manager::needs_touch(last_touched, current_ledger) {
-                    let name_key = DataKey::NameRecord(name.clone());
-                    if let Some(rec_id) = e.storage().persistent().get::<_, u32>(&name_key) {
-                        e.storage().persistent().set(&name_key, &rec_id);
-                    }
-                    e.storage()
-                        .persistent()
-                        .set(&DataKey::TalosName(tid), &name);
-                    e.storage()
-                        .persistent()
-                        .set(&DataKey::LastTouched(tid), &current_ledger);
-                    touched += 1;
+                Some(name) => name,
+                None => {
+                    sweep.record(ttl_manager::EntryOutcome::Absent);
+                    continue;
                 }
+            };
+            let last_touched: u32 = e
+                .storage()
+                .persistent()
+                .get(&DataKey::LastTouched(tid))
+                .unwrap_or(0);
+
+            if ttl_manager::should_extend(last_touched, current_ledger, bounds) {
+                let name_key = DataKey::NameRecord(name.clone());
+                if let Some(rec_id) = e.storage().persistent().get::<_, u32>(&name_key) {
+                    e.storage().persistent().set(&name_key, &rec_id);
+                }
+                e.storage()
+                    .persistent()
+                    .set(&DataKey::TalosName(tid), &name);
+                e.storage()
+                    .persistent()
+                    .set(&DataKey::LastTouched(tid), &current_ledger);
+                sweep.record(ttl_manager::EntryOutcome::Touched);
+            } else {
+                sweep.record(ttl_manager::EntryOutcome::Skipped);
             }
         }
 
-        ttl_manager::emit_ttl_batch(&e, touched, touched, 0);
-        touched
+        sweep
     }
 
     /// Query storage health by scanning name records for tracked talos IDs.
@@ -1547,10 +1639,89 @@ mod tests {
     use super::*;
     use soroban_sdk::{
         testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
-        Address, Env, IntoVal, Symbol, TryFromVal,
+        Address, Env, IntoVal, InvokeError, Symbol, TryFromVal,
     };
     use std::string::ToString;
     use talos_registry::{Kernel, Patron, Pulse, TalosRegistry, TalosRegistryClient};
+
+    #[contract]
+    pub struct ReentrantRegistry;
+
+    #[contracttype]
+    #[derive(Clone)]
+    enum ReentrantRegistryKey {
+        NameService,
+        Owner,
+        Name,
+        ReentryBlocked,
+    }
+
+    #[contractimpl]
+    impl ReentrantRegistry {
+        pub fn configure(
+            e: Env,
+            name_service: Address,
+            owner: Address,
+            name: String,
+        ) {
+            e.storage()
+                .instance()
+                .set(&ReentrantRegistryKey::NameService, &name_service);
+            e.storage()
+                .instance()
+                .set(&ReentrantRegistryKey::Owner, &owner);
+            e.storage()
+                .instance()
+                .set(&ReentrantRegistryKey::Name, &name);
+            e.storage()
+                .instance()
+                .set(&ReentrantRegistryKey::ReentryBlocked, &false);
+        }
+
+        pub fn creator_of(e: Env, talos_id: u32) -> Option<Address> {
+            let name_service: Address = e
+                .storage()
+                .instance()
+                .get(&ReentrantRegistryKey::NameService)
+                .unwrap();
+            let owner: Address = e
+                .storage()
+                .instance()
+                .get(&ReentrantRegistryKey::Owner)
+                .unwrap();
+            let name: String = e
+                .storage()
+                .instance()
+                .get(&ReentrantRegistryKey::Name)
+                .unwrap();
+
+            let result = e.try_invoke_contract::<(), InvokeError>(
+                &name_service,
+                &Symbol::new(&e, "register_name"),
+                soroban_sdk::vec![
+                    &e,
+                    owner.clone().into_val(&e),
+                    talos_id.into_val(&e),
+                    name.into_val(&e),
+                ],
+            );
+
+            assert_eq!(result, Err(Ok(InvokeError::Abort)));
+
+            e.storage()
+                .instance()
+                .set(&ReentrantRegistryKey::ReentryBlocked, &true);
+
+            Some(owner)
+        }
+
+        pub fn reentry_blocked(e: Env) -> bool {
+            e.storage()
+                .instance()
+                .get(&ReentrantRegistryKey::ReentryBlocked)
+                .unwrap_or(false)
+        }
+    }
 
     fn setup() -> (
         Env,
@@ -2568,6 +2739,65 @@ mod tests {
     // cross-contract lookup failure, uninitialized registry) leave storage
     // and events byte-for-byte unchanged.
 
+    #[test]
+    fn cross_contract_reentrancy_is_rejected() {
+        let env = Env::default();
+
+        let name_service_contract = env.register_contract(None, TalosNameService);
+        let reentrant_registry_contract = env.register_contract(None, ReentrantRegistry);
+
+        let name_service_client =
+            TalosNameServiceClient::new(&env, &name_service_contract);
+        let reentrant_registry_client =
+            ReentrantRegistryClient::new(&env, &reentrant_registry_contract);
+
+        let owner = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let talos_id = 42u32;
+        let name = s(&env, "reentrant-name");
+
+        name_service_client.initialize(
+            &reentrant_registry_contract,
+            &admin,
+            &0i128,
+        );
+
+        reentrant_registry_client.configure(
+            &name_service_contract,
+            &owner,
+            &name,
+        );
+
+        let before = snapshot(&name_service_client, &name, talos_id);
+        let events_before = event_count(&env, &name_service_contract);
+
+        name_service_client
+            .mock_all_auths()
+            .register_name(&owner, &talos_id, &name);
+
+        assert!(reentrant_registry_client.reentry_blocked());
+
+        let after = snapshot(&name_service_client, &name, talos_id);
+
+        assert_state_eq(
+            &before,
+            &NameState {
+                resolved: None,
+                name_of_talos: None,
+                available: true,
+                has_name: false,
+            },
+            "state before registration",
+        );
+
+        assert_eq!(after.resolved, Some(talos_id));
+        assert_eq!(after.name_of_talos, Some(name));
+        assert!(!after.available);
+        assert!(after.has_name);
+
+        assert_eq!(event_count(&env, &name_service_contract), events_before + 2);
+    }
+
     struct NameState {
         resolved: Option<u32>,
         name_of_talos: Option<String>,
@@ -3018,7 +3248,7 @@ mod tests {
     /// register_name without mock_auths must be rejected.
     #[test]
     fn register_name_without_auth_is_rejected() {
-        let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let (env, registry_contract, _contract_id, _admin, registry_client, client) = setup();
         let owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         let name = s(&env, "noauth");
@@ -3037,9 +3267,7 @@ mod tests {
     /// set_registry_contract without mock_auths must be rejected.
     #[test]
     fn set_registry_contract_without_auth_is_rejected() {
-        let (env, _registry_contract, _contract_id, _registry_client, client) = setup();
-        let admin = Address::generate(&env);
-        client.set_admin(&admin);
+        let (env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
         let new_registry = Address::generate(&env);
 
         let result = client.try_set_registry_contract(&new_registry);
@@ -3049,9 +3277,7 @@ mod tests {
     /// set_timelock_config without mock_auths must be rejected.
     #[test]
     fn ns_set_timelock_config_without_auth_is_rejected() {
-        let (env, _registry_contract, _contract_id, _registry_client, client) = setup();
-        let admin = Address::generate(&env);
-        client.set_admin(&admin);
+        let (_env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
 
         let result = client.try_set_timelock_config(&100, &86400);
         assert!(result.is_err(), "set_timelock_config must require admin auth");
@@ -3060,9 +3286,7 @@ mod tests {
     /// schedule_action without mock_auths must be rejected.
     #[test]
     fn ns_schedule_action_without_auth_is_rejected() {
-        let (env, _registry_contract, _contract_id, _registry_client, client) = setup();
-        let admin = Address::generate(&env);
-        client.set_admin(&admin);
+        let (env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
 
         let action = AdminAction::SetRegistryContract(Address::generate(&env));
         let result = client.try_schedule_action(&action, &0);
@@ -3072,9 +3296,7 @@ mod tests {
     /// cancel_action without mock_auths must be rejected.
     #[test]
     fn ns_cancel_action_without_auth_is_rejected() {
-        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
-        let admin = Address::generate(&env);
-        client.set_admin(&admin);
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
 
         let action = AdminAction::SetRegistryContract(Address::generate(&env));
         let proposal_id = client
@@ -3098,7 +3320,7 @@ mod tests {
     /// A non-owner cannot register_name for a talos they don't own.
     #[test]
     fn register_name_for_other_owner_is_rejected() {
-        let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
         let creator = Address::generate(&env);
         let imposter = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
@@ -3133,10 +3355,8 @@ mod tests {
     /// A non-admin impersonator cannot set_registry_contract.
     #[test]
     fn set_registry_contract_wrong_signer_is_rejected() {
-        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
-        let admin = Address::generate(&env);
+        let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
         let imposter = Address::generate(&env);
-        client.set_admin(&admin);
 
         let new_registry = Address::generate(&env);
         let result = client
@@ -3156,10 +3376,8 @@ mod tests {
     /// Non-admin cannot cancel a timelock action.
     #[test]
     fn ns_cancel_action_wrong_signer_is_rejected() {
-        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
-        let admin = Address::generate(&env);
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
         let imposter = Address::generate(&env);
-        client.set_admin(&admin);
 
         let action = AdminAction::SetRegistryContract(Address::generate(&env));
         let proposal_id = client
@@ -3193,7 +3411,7 @@ mod tests {
     /// Name below minimum length (2 chars) must be rejected.
     #[test]
     fn register_name_too_short_is_rejected() {
-        let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
         let owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         let talos_id = create_talos_with_auth(
@@ -3227,7 +3445,7 @@ mod tests {
     /// Name at minimum length (3 chars) must be accepted.
     #[test]
     fn register_name_at_min_length_is_accepted() {
-        let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
         let owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         let talos_id = create_talos_with_auth(
@@ -3261,7 +3479,7 @@ mod tests {
     /// Name at maximum length (32 chars) must be accepted.
     #[test]
     fn register_name_at_max_length_is_accepted() {
-        let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
         let owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         let talos_id = create_talos_with_auth(
@@ -3296,7 +3514,7 @@ mod tests {
     /// Name exceeding maximum length (33 chars) must be rejected.
     #[test]
     fn register_name_too_long_is_rejected() {
-        let (env, registry_contract, contract_id, registry_client, client) = setup();
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
         let owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         let talos_id = create_talos_with_auth(
@@ -3331,9 +3549,7 @@ mod tests {
     /// Timelock grace_period of zero must be rejected.
     #[test]
     fn ns_set_timelock_config_zero_grace_period_is_rejected() {
-        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
-        let admin = Address::generate(&env);
-        client.set_admin(&admin);
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
 
         let result = client
             .mock_auths(&[MockAuth {
@@ -3352,9 +3568,7 @@ mod tests {
     /// Timelock min_delay above MAX must be rejected.
     #[test]
     fn ns_set_timelock_config_above_max_min_delay_is_rejected() {
-        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
-        let admin = Address::generate(&env);
-        client.set_admin(&admin);
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
 
         let result = client
             .mock_auths(&[MockAuth {
@@ -3375,9 +3589,7 @@ mod tests {
     /// Executing an already-cancelled proposal must fail.
     #[test]
     fn ns_execute_cancelled_proposal_is_rejected() {
-        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
-        let admin = Address::generate(&env);
-        client.set_admin(&admin);
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
 
         let action = AdminAction::SetRegistryContract(Address::generate(&env));
         let proposal_id = client
@@ -3411,9 +3623,7 @@ mod tests {
     /// Cancelling an already-executed proposal must fail.
     #[test]
     fn ns_cancel_executed_proposal_is_rejected() {
-        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
-        let admin = Address::generate(&env);
-        client.set_admin(&admin);
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
 
         let action = AdminAction::SetRegistryContract(Address::generate(&env));
         let proposal_id = client
@@ -3447,11 +3657,592 @@ mod tests {
     /// is_name_available returns false for an invalid name format.
     #[test]
     fn is_name_available_returns_false_for_invalid_format() {
-        let (env, _registry_contract, _contract_id, _registry_client, client) = setup();
+        let (env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
         // Invalid names must return false even if not registered
         assert!(!client.is_name_available(&s(&env, "AB"))); // uppercase + too short
         assert!(!client.is_name_available(&s(&env, "-bad")));
         assert!(!client.is_name_available(&s(&env, "bad-")));
         assert!(!client.is_name_available(&s(&env, "bad--name")));
+    }
+
+    // ── Batched TTL extension with bounds ─────────────────────────
+
+    /// Build the standard fixture with the ledger already positioned at
+    /// `sequence_number` so name-record ages are exact.
+    ///
+    /// Soroban test mode archives contract code when the ledger jumps by
+    /// millions of ledgers mid-test, so tests age entries by starting the
+    /// environment at the target ledger instead of advancing after setup.
+    fn setup_at(
+        sequence_number: u32,
+    ) -> (
+        Env,
+        Address,
+        Address,
+        Address,
+        TalosRegistryClient<'static>,
+        TalosNameServiceClient<'static>,
+    ) {
+        let env = Env::default();
+        env.ledger()
+            .with_mut(|li| li.sequence_number = sequence_number);
+        let registry_contract = env.register_contract(None, TalosRegistry);
+        let name_service_contract = env.register_contract(None, TalosNameService);
+        let name_service_client = TalosNameServiceClient::new(&env, &name_service_contract);
+        let admin = Address::generate(&env);
+        name_service_client.initialize(&registry_contract, &admin, &0i128);
+        let registry_client = TalosRegistryClient::new(&env, &registry_contract);
+        (
+            env,
+            registry_contract,
+            name_service_contract,
+            admin,
+            registry_client,
+            name_service_client,
+        )
+    }
+
+    /// Register one talos + name so the sweep has a record to evaluate.
+    fn register_one_name(
+        env: &Env,
+        contract_id: &Address,
+        registry_contract: &Address,
+        client: &TalosNameServiceClient<'static>,
+        registry_client: &TalosRegistryClient<'static>,
+    ) -> u32 {
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let talos_id = create_talos_with_auth(
+            env,
+            registry_client,
+            registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+        let name = s(env, "batched");
+        register_name_with_auth(
+            env,
+            client,
+            contract_id,
+            registry_contract,
+            &owner,
+            talos_id,
+            &name,
+        );
+        talos_id
+    }
+
+    /// Invoke `extend_ttl_batch` with the admin's mock authorization.
+    fn extend_ttl_batch_as_admin(
+        env: &Env,
+        contract_id: &Address,
+        client: &TalosNameServiceClient<'static>,
+        admin: &Address,
+        max_talos_id: u32,
+        limit: u32,
+        min_age: u32,
+        max_age: u32,
+    ) -> Option<(u32, u32)> {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "extend_ttl_batch",
+                    args: (max_talos_id, limit, min_age, max_age).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_extend_ttl_batch(&max_talos_id, &limit, &min_age, &max_age)
+            .ok()
+            .and_then(|outcome| outcome.ok())
+    }
+
+    /// Positive: a name record past the renewal threshold is re-written.
+    #[test]
+    fn extend_ttl_batch_renews_name_records_inside_window() {
+        let (env, registry_contract, contract_id, admin, registry_client, client) =
+            setup_at(ttl_manager::RENEWAL_THRESHOLD + 1);
+        register_one_name(
+            &env,
+            &contract_id,
+            &registry_contract,
+            &client,
+            &registry_client,
+        );
+
+        let result = extend_ttl_batch_as_admin(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            10,
+            10,
+            ttl_manager::RENEWAL_THRESHOLD,
+            u32::MAX,
+        )
+        .expect("bounded extension must succeed");
+
+        assert_eq!(result, (1, 0));
+    }
+
+    /// Negative: records younger than `min_age` are reported, never written.
+    #[test]
+    fn extend_ttl_batch_skips_records_below_min_age() {
+        let (env, registry_contract, contract_id, admin, registry_client, client) =
+            setup_at(ttl_manager::RENEWAL_THRESHOLD - 1);
+        register_one_name(
+            &env,
+            &contract_id,
+            &registry_contract,
+            &client,
+            &registry_client,
+        );
+
+        let result = extend_ttl_batch_as_admin(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            10,
+            10,
+            ttl_manager::RENEWAL_THRESHOLD,
+            u32::MAX,
+        )
+        .expect("bounded extension must succeed");
+
+        assert_eq!(result, (0, 1));
+    }
+
+    /// Boundary: a zero limit produces an empty sweep without touching state.
+    #[test]
+    fn extend_ttl_batch_zero_limit_is_a_no_op() {
+        let (env, registry_contract, contract_id, admin, registry_client, client) =
+            setup_at(ttl_manager::RENEWAL_THRESHOLD + 1);
+        register_one_name(
+            &env,
+            &contract_id,
+            &registry_contract,
+            &client,
+            &registry_client,
+        );
+
+        let result = extend_ttl_batch_as_admin(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            10,
+            0,
+            ttl_manager::RENEWAL_THRESHOLD,
+            u32::MAX,
+        )
+        .expect("bounded extension must succeed");
+
+        assert_eq!(result, (0, 0));
+    }
+
+    /// Boundary: `limit` caps how many talos ids are visited — records beyond
+    /// the limit are not counted at all (neither touched nor skipped).
+    #[test]
+    fn extend_ttl_batch_honours_limit() {
+        let (env, registry_contract, contract_id, admin, registry_client, client) =
+            setup_at(ttl_manager::RENEWAL_THRESHOLD + 1);
+        register_one_name(
+            &env,
+            &contract_id,
+            &registry_contract,
+            &client,
+            &registry_client,
+        );
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let second_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            second_id,
+            &s(&env, "second"),
+        );
+        assert_eq!(second_id, 2);
+
+        let result = extend_ttl_batch_as_admin(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            10,
+            1, // only talos id 1 may be visited
+            ttl_manager::RENEWAL_THRESHOLD,
+            u32::MAX,
+        )
+        .expect("bounded extension must succeed");
+
+        assert_eq!(result, (1, 0), "talos 2 must stay outside the sweep");
+    }
+
+    /// Negative: malformed bounds fail with a static, privacy-safe diagnostic
+    /// before any storage is read or written.
+    #[test]
+    #[should_panic(expected = "ttl bounds: min_age exceeds max_age")]
+    fn extend_ttl_batch_rejects_inverted_window() {
+        let (_env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "extend_ttl_batch",
+                    args: (10u32, 10u32, 5_000_000u32, 1_000u32).into_val(&_env),
+                    sub_invokes: &[],
+                },
+            }])
+            .extend_ttl_batch(&10, &10, &5_000_000, &1_000);
+    }
+
+    /// Negative: `extend_ttl_batch` is admin-gated exactly like `touch_all_ttl`.
+    #[test]
+    fn extend_ttl_batch_without_auth_is_rejected() {
+        let (_env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
+
+        assert!(
+            client
+                .try_extend_ttl_batch(&10, &10, &0, &u32::MAX)
+                .is_err(),
+            "extend_ttl_batch must require admin auth"
+        );
+    }
+
+    /// The name-config pause domain blocks `extend_ttl_batch`.
+    #[test]
+    #[should_panic(expected = "Domain is paused")]
+    fn extend_ttl_batch_is_blocked_while_paused() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause_domain",
+                    args: (PAUSE_NAME_CONFIG, 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .pause_domain(&PAUSE_NAME_CONFIG, &0);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "extend_ttl_batch",
+                    args: (10u32, 10u32, 0u32, u32::MAX).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .extend_ttl_batch(&10, &10, &0, &u32::MAX);
+    }
+
+    /// Regression: `touch_all_ttl` still refreshes the two administrative keys
+    /// unconditionally and renews name records only past the renewal threshold,
+    /// so routing records through the bounded sweep core changes no behaviour.
+    #[test]
+    fn touch_all_ttl_keeps_admin_keys_and_threshold_semantics() {
+        let (env, registry_contract, contract_id, admin, registry_client, client) =
+            setup_at(ttl_manager::RENEWAL_THRESHOLD - 1);
+        register_one_name(
+            &env,
+            &contract_id,
+            &registry_contract,
+            &client,
+            &registry_client,
+        );
+
+        // Administrative keys are always refreshed; the name record is one
+        // ledger short of the renewal threshold.
+        let before = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "touch_all_ttl",
+                    args: (10u32,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .touch_all_ttl(&10);
+        assert_eq!(before, 2);
+
+        // One more ledger crosses the threshold → the record is renewed too.
+        env.ledger().with_mut(|li| li.sequence_number += 1);
+
+        let after = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "touch_all_ttl",
+                    args: (10u32,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .touch_all_ttl(&10);
+        assert_eq!(after, 3);
+    }
+    // ── Name collision & rename rules (Issue #619) ──────────────────
+    //
+    // `register_name` doubles as a rename: it replaces the caller's current
+    // name for a talos_id and frees the previous one. These tests pin the two
+    // rules that guard that path — a name owned by another talos is never
+    // adopted, and a rejected rename is a no-op that preserves the previous
+    // registration and emits no events.
+
+    #[test]
+    fn rename_onto_name_owned_by_another_talos_is_rejected() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner_a = Address::generate(&env);
+        let owner_b = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let taken = s(&env, "alpha-name");
+        let own = s(&env, "beta-name");
+
+        let talos_a = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner_a,
+            &protocol_wallet,
+        );
+        let talos_b = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner_b,
+            &protocol_wallet,
+        );
+
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner_a,
+            talos_a,
+            &taken,
+        );
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner_b,
+            talos_b,
+            &own,
+        );
+
+        let incumbent_before = snapshot(&client, &taken, talos_a);
+        let challenger_before = snapshot(&client, &own, talos_b);
+        let events_before = event_count(&env, &contract_id);
+
+        // talos_b tries to adopt talos_a's name. The collision is detected
+        // before the registry lookup, so the auth tree has no sub-invokes.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner_b,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner_b.clone(), talos_b, taken.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_register_name(&owner_b, &talos_b, &taken);
+        assert!(
+            result.is_err(),
+            "renaming onto another talos's name must fail"
+        );
+
+        let incumbent_after = snapshot(&client, &taken, talos_a);
+        let challenger_after = snapshot(&client, &own, talos_b);
+        assert_state_eq(
+            &incumbent_before,
+            &incumbent_after,
+            "incumbent keeps its name after a rejected rename",
+        );
+        assert_state_eq(
+            &challenger_before,
+            &challenger_after,
+            "challenger keeps its previous name",
+        );
+        assert_eq!(client.name_of(&talos_b), Some(own.clone()));
+        assert_eq!(
+            events_before,
+            event_count(&env, &contract_id),
+            "rejected rename must not emit events"
+        );
+    }
+
+    #[test]
+    fn re_registering_same_name_for_same_talos_is_rejected() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name = s(&env, "stable-name");
+
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &name,
+        );
+
+        let before = snapshot(&client, &name, talos_id);
+        let events_before = event_count(&env, &contract_id);
+
+        // Re-registering the identical name is treated as a collision, not a
+        // silent no-op, so callers cannot mistake it for a successful rename.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, name.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &name);
+        assert!(
+            result.is_err(),
+            "re-registering the same name must be rejected"
+        );
+
+        let after = snapshot(&client, &name, talos_id);
+        assert_state_eq(&before, &after, "same-name re-registration is a no-op");
+        assert_eq!(
+            events_before,
+            event_count(&env, &contract_id),
+            "rejected same-name registration must not emit events"
+        );
+    }
+
+    #[test]
+    fn rename_to_invalid_name_preserves_previous_registration() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let kept = s(&env, "kept-name");
+        let invalid = s(&env, "Bad--Name");
+
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &kept,
+        );
+
+        let before = snapshot(&client, &kept, talos_id);
+        let events_before = event_count(&env, &contract_id);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, invalid.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &invalid);
+        assert!(result.is_err(), "renaming to an invalid name must fail");
+
+        let after = snapshot(&client, &kept, talos_id);
+        assert_state_eq(
+            &before,
+            &after,
+            "previous name must survive a rejected rename",
+        );
+        assert_eq!(client.name_of(&talos_id), Some(kept.clone()));
+        assert_eq!(
+            events_before,
+            event_count(&env, &contract_id),
+            "rejected rename must not emit events"
+        );
+    }
+
+    #[test]
+    fn rename_accepts_min_and_max_length_names() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let min_name = s(&env, "abc");
+        let max_name = s(&env, "abcdefghijklmnopqrstuvwxyz012345");
+
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &min_name,
+        );
+        assert_eq!(client.resolve_name(&min_name), Some(talos_id));
+        assert_eq!(client.name_of(&talos_id), Some(min_name.clone()));
+
+        // Renaming to the maximum length still frees the previous name.
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &max_name,
+        );
+        assert_eq!(client.resolve_name(&max_name), Some(talos_id));
+        assert_eq!(client.name_of(&talos_id), Some(max_name.clone()));
+        assert_eq!(client.resolve_name(&min_name), None);
+        assert!(client.is_name_available(&min_name));
     }
 }

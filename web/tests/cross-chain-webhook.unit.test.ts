@@ -22,6 +22,11 @@ vi.mock("@/lib/fulfillment", () => ({
   fulfillInstant: mocks.fulfillInstant,
 }));
 
+// The ledger write has its own tests; here it only needs to succeed.
+vi.mock("@/lib/reputation-ledger", () => ({
+  ingestJobToLedger: vi.fn().mockResolvedValue(null),
+}));
+
 const { mockDb, fulfillInstant } = mocks;
 
 const mockSelectChain = (result: unknown) => {

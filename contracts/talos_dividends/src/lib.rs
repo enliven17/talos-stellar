@@ -52,7 +52,7 @@
 //!
 //! ## Version
 //!
-//! `CONTRACT_VERSION = (1, 0, 0)`
+//! `CONTRACT_VERSION = (1, 1, 0)`
 
 #![no_std]
 
@@ -100,6 +100,8 @@ pub enum ContractError {
     AccountingOverflow = 14,
     /// The epoch has already been recovered; cannot recover twice.
     AlreadyRecovered = 15,
+    /// Supplied patron shares do not sum to 100%.
+    InvalidPatronShares = 16,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
@@ -187,7 +189,7 @@ const MIN_EPOCH_AMOUNT: i128 = 1;
 /// - **major** — incompatible ABI change
 /// - **minor** — backwards-compatible new entry-point or field
 /// - **patch** — bug-fix with no observable ABI change
-pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 0, 0);
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 1, 0);
 
 // ── Events ───────────────────────────────────────────────────────────────────
 //
@@ -440,7 +442,7 @@ impl TalosDividends {
             .and_then(|s| s.checked_add(treasury_share))
             .ok_or(ContractError::Overflow)?;
         if share_sum != 100 {
-            return Err(ContractError::NotAPatron);
+            return Err(ContractError::InvalidPatronShares);
         }
 
         // Resolve claimant role from supplied patron addresses.
@@ -953,6 +955,48 @@ mod tests {
 
         let res = do_claim(&env, &contract_id, &client, &outsider, talos_id, epoch_id, &creator, &investor, &treasury);
         assert_eq!(res, Err(ContractError::NotAPatron));
+    }
+
+    #[test]
+    fn claim_with_invalid_shares_returns_error() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "claim_dividend",
+                    args: (
+                        creator.clone(),
+                        talos_id,
+                        epoch_id,
+                        creator.clone(),
+                        creator.clone(),
+                        creator.clone(),
+                        50u32, // creator_share
+                        30u32, // investor_share
+                        30u32, // treasury_share (sums to 110)
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_claim_dividend(
+                &creator,
+                &talos_id,
+                &epoch_id,
+                &creator,
+                &creator,
+                &creator,
+                &50u32,
+                &30u32,
+                &30u32,
+            );
+        assert_eq!(res, Err(Ok(ContractError::InvalidPatronShares)));
     }
 
     #[test]

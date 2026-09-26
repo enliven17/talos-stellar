@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsPatrons, tlsCommerceServices } from "@/db/schema";
-import { and, desc, eq, lt, or, sql } from "drizzle-orm";
+import { and, desc, eq, ilike, lt, or, sql, type SQLWrapper } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { createAgentKeypair, fundTestnetAccount, verifyStellarSignature } from "@/lib/stellar";
 import { createTalosSchema, parseBody } from "@/lib/schemas";
@@ -10,20 +10,130 @@ import { parseLimit } from "@/lib/parse-limit";
 import { TimeoutError, withTimeout } from "@/lib/timeout";
 import { fetchReputations } from "@/lib/reputation-ledger";
 import { withDriftDetection } from "@/lib/drift";
-import { internalError } from "@/lib/api-response";
+import { badRequest, forbidden, internalError } from "@/lib/api-response";
+import { revalidateTag } from "next/cache";
+import { AGENTS_LIST_TAG, agentTag } from "@/lib/cache-tags";
+import {
+  buildMarketplaceOrderBy,
+  DIRECTORY_SORT_FIELDS,
+  isDefaultMarketplaceSort,
+  parseDirectoryCategoryFilter,
+  parseDirectoryStatusFilter,
+  parseMarketplaceSort,
+  type DirectorySortField,
+} from "@/lib/marketplace-sort";
+
+export type TalosCursor = {
+  createdAt: string;
+  id: string;
+};
+
+export function encodeTalosCursor(cursor: TalosCursor): string {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+export function decodeTalosCursor(raw: string | null): TalosCursor | null {
+  if (raw === null) return null;
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(raw, 'base64url').toString('utf8'),
+    ) as Partial<TalosCursor>;
+    const date = new Date(parsed.createdAt ?? '');
+    if (
+      typeof parsed.createdAt !== 'string' ||
+      Number.isNaN(date.getTime()) ||
+      typeof parsed.id !== 'string' ||
+      parsed.id.length === 0
+    ) {
+      return null;
+    }
+    return { createdAt: date.toISOString(), id: parsed.id };
+  } catch {
+    return null;
+  }
+}
 
 // GET /api/talos — List TALOS entries with cursor-based pagination
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
-    const cursor = searchParams.get("cursor");
+    const rawCursor = searchParams.get("cursor");
+    const cursor = decodeTalosCursor(rawCursor);
+    if (searchParams.has("cursor") && !cursor) {
+      return Response.json(
+        { error: "cursor must be a valid agent cursor" },
+        { status: 400 },
+      );
+    }
     const parsedLimit = parseLimit(searchParams.get("limit"), 50, 100);
     if (!parsedLimit.ok) return parsedLimit.response;
     const limit = parsedLimit.limit;
 
-    const minScore = searchParams.has("minScore") ? Number(searchParams.get("minScore")) : undefined;
-    const minConfidence = searchParams.has("minConfidence") ? Number(searchParams.get("minConfidence")) : undefined;
+    // -----------------------------------------------------------------------
+    // Sort validation
+    // -----------------------------------------------------------------------
+    const parsedSort = parseMarketplaceSort(
+      searchParams.get("sort"),
+      searchParams.get("direction"),
+      { allowedFields: DIRECTORY_SORT_FIELDS, fieldLabel: "createdAt, name" },
+    );
+    if (!parsedSort.ok) return parsedSort.response;
+    const sort = parsedSort.sort;
+
+    // Cursor pagination is only compatible with the default createdAt desc sort.
+    if (cursor && !isDefaultMarketplaceSort(sort)) {
+      return Response.json(
+        {
+          error:
+            "cursor pagination is only supported with the default createdAt desc sort",
+        },
+        { status: 400 },
+      );
+    }
+
+    // -----------------------------------------------------------------------
+    // Filter validation
+    // -----------------------------------------------------------------------
+    const parsedStatus = parseDirectoryStatusFilter(searchParams.get("status"));
+    if (!parsedStatus.ok) return parsedStatus.response;
+    const statusFilter = parsedStatus.status;
+
+    const parsedCategory = parseDirectoryCategoryFilter(searchParams.get("category"));
+    if (!parsedCategory.ok) return parsedCategory.response;
+    const categoryFilter = parsedCategory.category;
+
+    // -----------------------------------------------------------------------
+    // Numeric filter validation
+    // -----------------------------------------------------------------------
+    const rawMinScore = searchParams.get("minScore");
+    const rawMinConfidence = searchParams.get("minConfidence");
+
+    const minScore = searchParams.has("minScore") ? Number(rawMinScore) : undefined;
+    const minConfidence = searchParams.has("minConfidence") ? Number(rawMinConfidence) : undefined;
+
+    if (minScore !== undefined && !Number.isFinite(minScore)) {
+      return Response.json(
+        { error: "minScore must be a finite number" },
+        { status: 400 },
+      );
+    }
+    if (minConfidence !== undefined && !Number.isFinite(minConfidence)) {
+      return Response.json(
+        { error: "minConfidence must be a finite number" },
+        { status: 400 },
+      );
+    }
+
     const allowColdStart = searchParams.get("allowColdStart") === "true";
+
+    // -----------------------------------------------------------------------
+    // Sort columns mapping
+    // -----------------------------------------------------------------------
+    const sortColumns: Record<DirectorySortField, SQLWrapper> = {
+      createdAt: tlsTalos.createdAt,
+      name: tlsTalos.name,
+    };
+    const orderBy = buildMarketplaceOrderBy(sort, sortColumns, tlsTalos.id);
 
     // Add timeout for patron count query
     const patronCountQuery = db
@@ -36,26 +146,33 @@ export async function GET(request: NextRequest) {
       .as("patronCount");
 
     const patronCount = patronCountQuery;
-    let currentCursor = cursor;
+    let currentCursor: TalosCursor | null = cursor;
     const accumulated: Array<Record<string, unknown>> = [];
     let exhausted = false;
 
     // Loop until we fulfill the limit or exhaust the DB
     while (accumulated.length < limit && !exhausted) {
       const conditions = [];
+
+      // Apply status filter (defaults to excluding "Deleted" if no filter provided)
+      if (statusFilter !== null) {
+        conditions.push(eq(tlsTalos.status, statusFilter));
+      }
+
+      // Apply category filter
+      if (categoryFilter !== null) {
+        conditions.push(ilike(tlsTalos.category, categoryFilter));
+      }
+
       if (currentCursor) {
-        const [cursorDate, cursorId] = currentCursor.split("|");
-        if (cursorDate && cursorId) {
-          conditions.push(
-            or(
-              lt(tlsTalos.createdAt, new Date(cursorDate)),
-              and(
-                eq(tlsTalos.createdAt, new Date(cursorDate)),
-                lt(tlsTalos.id, cursorId),
-              ),
-            )!,
-          );
-        }
+        const cursorCondition = or(
+          lt(tlsTalos.createdAt, new Date(currentCursor.createdAt)),
+          and(
+            eq(tlsTalos.createdAt, new Date(currentCursor.createdAt)),
+            lt(tlsTalos.id, currentCursor.id),
+          ),
+        );
+        if (cursorCondition) conditions.push(cursorCondition);
       }
 
       let entries;
@@ -95,7 +212,7 @@ export async function GET(request: NextRequest) {
           .from(tlsTalos)
           .leftJoin(patronCount, eq(tlsTalos.id, patronCount.talosId))
           .where(conditions.length > 0 ? and(...conditions) : undefined)
-          .orderBy(desc(tlsTalos.createdAt), desc(tlsTalos.id))
+          .orderBy(...orderBy)
           .limit(limit * 2), // fetch chunk
           10_000,
           "Talos list query timeout",
@@ -144,17 +261,22 @@ export async function GET(request: NextRequest) {
         if (valid) {
           accumulated.push({ ...entry, patrons: entry.patrons ?? 0 });
           if (accumulated.length === limit) {
-            currentCursor = `${entry.createdAt.toISOString()}|${entry.id}`;
+            currentCursor = { createdAt: entry.createdAt.toISOString(), id: entry.id };
             break;
           }
         }
-        currentCursor = `${entry.createdAt.toISOString()}|${entry.id}`;
+        currentCursor = { createdAt: entry.createdAt.toISOString(), id: entry.id };
       }
     }
 
-    const nextCursor = (exhausted && accumulated.length < limit) ? null : currentCursor;
+    const nextCursorEncoded =
+      exhausted && accumulated.length < limit
+        ? null
+        : currentCursor
+          ? encodeTalosCursor(currentCursor)
+          : null;
 
-    return Response.json({ data: accumulated, nextCursor });
+    return Response.json({ data: accumulated, nextCursor: nextCursorEncoded });
   } catch {
     return internalError(request);
   }

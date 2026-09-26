@@ -90,12 +90,14 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
       limit: p.limit,
       windowMs: p.windowMs,
     });
+    result.policy = p.name;
   } else if (method === "GET") {
     const p = RATE_LIMIT_POLICIES.read;
     result = await rateLimit(`${p.keyPrefix}:${ip}`, {
       limit: p.limit,
       windowMs: p.windowMs,
     });
+    result.policy = p.name;
   } else if (method === "POST" && apiKey) {
     const p = RATE_LIMIT_POLICIES.writeKey;
     // Hash the API key so raw secrets never reach the shared store.
@@ -108,12 +110,14 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
       limit: p.limit,
       windowMs: p.windowMs,
     });
+    result.policy = p.name;
   } else {
     const p = RATE_LIMIT_POLICIES.writeIp;
     result = await rateLimit(`${p.keyPrefix}:${ip}`, {
       limit: p.limit,
       windowMs: p.windowMs,
     });
+    result.policy = p.name;
   }
 
   if (!result.ok) {

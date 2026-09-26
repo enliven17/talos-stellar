@@ -191,7 +191,7 @@ for (const entry of schemas) {
   // zodToJsonSchema wraps in { definitions: { <name>: ... } } when name is given
   // Extract the actual schema object
   const extracted =
-    (jsonSchema as Record<string, unknown>).definitions?.[entry.name] ??
+    (jsonSchema as { definitions?: Record<string, unknown> }).definitions?.[entry.name] ??
     jsonSchema;
 
   const fileName = `${entry.name}.json`;
