@@ -44,6 +44,7 @@ pub const EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion {
 pub enum AdminAction {
     SetRegistryContract(Address),
     SetAdmin(Address),
+    UpgradeContract(soroban_sdk::BytesN<32>),
 }
 
 #[contracttype]
@@ -894,6 +895,9 @@ impl TalosNameService {
             }
             AdminAction::SetAdmin(new_admin) => {
                 e.storage().persistent().set(&DataKey::Admin, new_admin);
+            }
+            AdminAction::UpgradeContract(wasm_hash) => {
+                e.deployer().update_current_contract_wasm(wasm_hash.clone());
             }
         }
 
