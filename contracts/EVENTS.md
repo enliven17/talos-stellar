@@ -1,6 +1,6 @@
 # Talos Contract Event Indexing Specification
 
-**Spec version:** 1.1.0
+**Spec version:** 1.2.0
 **Applies to:** talos_registry, talos_governance, talos_name_service, talos_dividends
 
 ## 1. Event envelope
@@ -14,7 +14,8 @@ Every Soroban event an indexer receives has:
 | data | Val (tuple) | positional, see per-event tables below |
 | ledger_sequence | u32 | from the RPC/Horizon envelope, not the event itself |
 | tx_hash | Hash | from the envelope |
-| event_index_in_tx | u32 | from the envelope |
+| tx_index_in_ledger | u32 | zero-based transaction position from the envelope |
+| event_index_in_tx | u32 | zero-based event position from the envelope |
 
 ## 1.1. Topic positions and data decoding rules
 
@@ -26,12 +27,9 @@ Every Soroban event an indexer receives has:
 - **`data` is a positional tuple** decoded strictly left-to-right using the
   per-event `data` column below. Field order is part of the stable contract:
   it is never reordered except under a breaking (major) version bump per §4.
-- **Decoded JSON shape.** The canonical fixtures (`contracts/fixtures/`)
-  represent each event as `{ event, contract, ledger_sequence, topics, data }`
-  where `topics` and `data` are objects keyed by the field names in the
-  catalog. Addresses stay as `G…`/`C…` strings, symbols stay as strings,
+- **Decoded JSON shape.** The canonical fixtures (`contracts/fixtures/`) retain the raw envelope cursor fields `ledger_sequence`, `tx_index_in_ledger`, and `event_index_in_tx`. The helper returns decoded fields with the parsed cursor so consumers can sort and paginate by the full tuple. Addresses stay as `G…`/`C…` strings, symbols stay as strings,
   and `u32`/`u64`/`i128` are numbers. The `event-query` helper decodes a raw
-  event to exactly this shape and rejects anything that does not match.
+  event and rejects anything that does not match.
 - **Malformed payloads** (empty topics, `topics[0]` not a symbol, wrong topic
   type, wrong data arity, wrong data type) are rejected by the helper rather
   than silently mis-decoded.
@@ -39,7 +37,15 @@ Every Soroban event an indexer receives has:
 ## 2. Ordering guarantees
 
 Indexers MUST treat `(ledger_sequence, tx_index_in_ledger, event_index_in_tx)`
-as the canonical cursor. Events are strictly monotonic on this tuple and
+as the canonical cursor. `tx_index_in_ledger` and `event_index_in_tx` are
+zero-based positions supplied by the Soroban event envelope. They represent
+ledger transaction order and event publication order within a transaction,
+including events from nested contract invocations. An operation that publishes
+multiple compatibility events keeps that order stable: `tls_crt` precedes
+`tls_crt2`, and `name_reg` precedes `name_reg2`.
+
+Consumers MUST sort and paginate by the full cursor, not response arrival order,
+topic, contract, or fixture-file order. Events are strictly monotonic on this tuple and
 never reordered within a ledger. On restart, an indexer resumes from the
 last committed cursor and replays forward — this is safe because processing
 is idempotent per cursor (see §4).

@@ -6,6 +6,7 @@ import { verifyAgentApiKey } from "@/lib/auth";
 import { emitWebhookEvent } from "@/lib/webhooks/delivery";
 import { parseAnalyticsLimit } from "@/lib/analytics-limits";
 import { withTraceContext } from "@/lib/tracing";
+import { checkAndIncrementQuota, quotaExceededResponse } from "@/lib/quota";
 
 // GET /api/talos/:id/revenue — Get revenue history
 export async function GET(

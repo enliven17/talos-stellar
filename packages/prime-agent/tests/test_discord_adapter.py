@@ -9,11 +9,12 @@ import respx
 from httpx import Response
 
 from talos_agent.adapters.discord import (
-    DiscordAdapter,
     _COLOR_DEFAULT,
     _COLOR_GTM,
     _COLOR_WARN,
     _DISCORD_API,
+    DiscordAdapter,
+    DiscordAdapterConfig,
 )
 
 
@@ -314,3 +315,194 @@ class TestGetProfileStats:
         adapter = DiscordAdapter(_make_settings())
         stats = await adapter.get_profile_stats()
         assert "error" in stats
+
+
+# ── Reconnect Policy ───────────────────────────────────────────────────────────
+
+class TestReconnectPolicy:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_webhook_reconnect_succeeds_on_second_attempt(self):
+        config = DiscordAdapterConfig(
+            channel_id="",
+            guild_id="",
+            legacy_webhook_url="https://discord.com/api/webhooks/1/tok",
+            legacy_bot_token="",
+            reconnect_enabled=True,
+            reconnect_max_attempts=3,
+            reconnect_backoff_initial=0.1,
+            reconnect_backoff_max=1.0,
+        )
+        adapter = DiscordAdapter(config)
+        
+        call_count = 0
+        def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return Response(503, json={"message": "Service Unavailable"})
+            return Response(200, json={"id": "999", "channel_id": "chan1", "guild_id": "guild1"})
+        
+        respx.post("https://discord.com/api/webhooks/1/tok").mock(side_effect=side_effect)
+        result = await adapter.post("Test content")
+        
+        assert result.status == "posted"
+        assert result.post_id == "999"
+        assert result.metadata["reconnect_attempts"] == 1
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_webhook_reconnect_fails_after_max_attempts(self):
+        config = DiscordAdapterConfig(
+            channel_id="",
+            guild_id="",
+            legacy_webhook_url="https://discord.com/api/webhooks/1/tok",
+            legacy_bot_token="",
+            reconnect_enabled=True,
+            reconnect_max_attempts=2,
+            reconnect_backoff_initial=0.1,
+            reconnect_backoff_max=1.0,
+        )
+        adapter = DiscordAdapter(config)
+        
+        respx.post("https://discord.com/api/webhooks/1/tok").mock(
+            return_value=Response(503, json={"message": "Service Unavailable"})
+        )
+        result = await adapter.post("Test content")
+        
+        assert result.status == "failed"
+        assert "after 3 attempts" in result.error
+        assert adapter._consecutive_failures == 1
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_webhook_reconnect_disabled_backward_compatible(self):
+        config = DiscordAdapterConfig(
+            channel_id="",
+            guild_id="",
+            legacy_webhook_url="https://discord.com/api/webhooks/1/tok",
+            legacy_bot_token="",
+            reconnect_enabled=False,
+        )
+        adapter = DiscordAdapter(config)
+        
+        respx.post("https://discord.com/api/webhooks/1/tok").mock(
+            return_value=Response(503, json={"message": "Service Unavailable"})
+        )
+        result = await adapter.post("Test content")
+        
+        assert result.status == "failed"
+        assert "after 3 attempts" not in result.error
+        assert "503" in result.error
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_api_reconnect_succeeds_on_second_attempt(self):
+        config = DiscordAdapterConfig(
+            channel_id="42",
+            guild_id="gld",
+            legacy_webhook_url="",
+            legacy_bot_token="tok",
+            reconnect_enabled=True,
+            reconnect_max_attempts=3,
+            reconnect_backoff_initial=0.1,
+            reconnect_backoff_max=1.0,
+        )
+        adapter = DiscordAdapter(config)
+        
+        call_count = 0
+        def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return Response(502, json={"message": "Bad Gateway"})
+            return Response(200, json={"id": "777", "guild_id": "gld"})
+        
+        respx.post(f"{_DISCORD_API}/channels/42/messages").mock(side_effect=side_effect)
+        result = await adapter.post("Test content")
+        
+        assert result.status == "posted"
+        assert result.post_id == "777"
+        assert result.metadata["reconnect_attempts"] == 1
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_reconnect_resets_on_success(self):
+        config = DiscordAdapterConfig(
+            channel_id="",
+            guild_id="",
+            legacy_webhook_url="https://discord.com/api/webhooks/1/tok",
+            legacy_bot_token="",
+            reconnect_enabled=True,
+            reconnect_max_attempts=2,
+            reconnect_backoff_initial=0.1,
+            reconnect_backoff_max=1.0,
+        )
+        adapter = DiscordAdapter(config)
+        
+        respx.post("https://discord.com/api/webhooks/1/tok").mock(
+            return_value=Response(200, json={"id": "999", "channel_id": "chan1", "guild_id": "guild1"})
+        )
+        
+        await adapter.post("Success")
+        assert adapter._consecutive_failures == 0
+        
+        respx.post("https://discord.com/api/webhooks/1/tok").mock(
+            return_value=Response(503, json={"message": "Service Unavailable"})
+        )
+        result = await adapter.post("Failure")
+        assert result.status == "failed"
+        assert adapter._consecutive_failures == 1
+
+    def test_config_validation_rejects_negative_max_attempts(self):
+        with pytest.raises(ValueError, match="reconnect_max_attempts must be non-negative"):
+            DiscordAdapterConfig(
+                channel_id="",
+                guild_id="",
+                legacy_webhook_url="",
+                legacy_bot_token="",
+                reconnect_max_attempts=-1,
+            )
+
+    def test_config_validation_rejects_invalid_backoff(self):
+        with pytest.raises(ValueError, match="reconnect_backoff_initial and reconnect_backoff_max must be positive"):
+            DiscordAdapterConfig(
+                channel_id="",
+                guild_id="",
+                legacy_webhook_url="",
+                legacy_bot_token="",
+                reconnect_backoff_initial=0,
+            )
+
+    def test_config_validation_rejects_backoff_initial_exceeding_max(self):
+        with pytest.raises(ValueError, match="reconnect_backoff_initial must not exceed reconnect_backoff_max"):
+            DiscordAdapterConfig(
+                channel_id="",
+                guild_id="",
+                legacy_webhook_url="",
+                legacy_bot_token="",
+                reconnect_backoff_initial=10.0,
+                reconnect_backoff_max=5.0,
+            )
+
+    def test_config_default_values(self):
+        config = DiscordAdapterConfig()
+        assert config.reconnect_enabled is False
+        assert config.reconnect_max_attempts == 3
+        assert config.reconnect_backoff_initial == 1.0
+        assert config.reconnect_backoff_max == 30.0
+
+    def test_health_snapshot_includes_reconnect_state(self):
+        config = DiscordAdapterConfig(
+            channel_id="42",
+            guild_id="gld",
+            legacy_webhook_url="https://discord.com/api/webhooks/1/tok",
+            legacy_bot_token="tok",
+            reconnect_enabled=True,
+        )
+        adapter = DiscordAdapter(config)
+        snapshot = adapter.health_snapshot()
+        
+        assert snapshot.reconnect_enabled is True
+        assert snapshot.consecutive_failures == 0

@@ -11,6 +11,7 @@ from talos_agent.circuit_breaker import (
     CircuitState,
     ProviderCircuitBreaker,
     cb_registry,
+    execute_with_retry,
 )
 
 __version__ = "0.1.0"
@@ -24,4 +25,5 @@ __all__ = [
     "CircuitState",
     "ProviderCircuitBreaker",
     "cb_registry",
+    "execute_with_retry",
 ]

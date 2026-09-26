@@ -11,6 +11,7 @@
  */
 
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -21,6 +22,14 @@ const ESM_ENTRY = resolve(SDK_ROOT, "dist", "esm", "index.js");
 console.log("[compat:node-esm] importing from:", ESM_ENTRY);
 
 const sdk = await import(ESM_ENTRY);
+
+const signingExports = ["REQUEST_SIGNATURE_VERSION", "canonicalizeRequest", "SigningController", "SigningError", "StellarKeypairSigner"];
+for (const name of signingExports) assert.ok(name in sdk, `expected signing export "${name}" missing in ESM bundle`);
+const signingVectors = JSON.parse(readFileSync(resolve(SDK_ROOT, "tests", "fixtures", "request-signing-vectors.json"), "utf8"));
+for (const vector of signingVectors.vectors) {
+  const bytes = await sdk.canonicalizeRequest(vector.request);
+  assert.deepEqual(Array.from(bytes), Array.from(new TextEncoder().encode(vector.canonical)), `signing vector ${vector.name}`);
+}
 
 console.log("[compat:node-esm] exports:", Object.keys(sdk).sort().join(", "));
 
@@ -53,6 +62,36 @@ assert.equal(chaos.isEnabled(), false);
 assert.equal(chaos.hasFault(sdk.FaultType.NETWORK_DROP), true);
 console.log("  + ChaosInjector instantiation & registration OK");
 
+// Deterministic chaos fixtures: plan + replay a registered scenario end to end.
+assert.ok(Array.isArray(sdk.CHAOS_SCENARIOS) && sdk.CHAOS_SCENARIOS.length > 0, "CHAOS_SCENARIOS missing/empty");
+assert.equal(typeof sdk.planChaosScenario, "function", "planChaosScenario missing");
+assert.equal(typeof sdk.replayChaosScenario, "function", "replayChaosScenario missing");
+assert.equal(typeof sdk.buildChaosFixtureBundle, "function", "buildChaosFixtureBundle missing");
+assert.equal(typeof sdk.createSeededRandom, "function", "createSeededRandom missing");
+assert.equal(typeof sdk.faultEffect, "function", "faultEffect missing");
+{
+  const scenario = sdk.getChaosScenario("api-timeout-delay-then-throw");
+  assert.ok(scenario, "chaos scenario lookup failed");
+  const plan = sdk.planChaosScenario(scenario);
+  assert.equal(plan.calls[0].outcome, "injected-delay-then-throw", "chaos plan outcome drifted");
+  const replay = await sdk.replayChaosScenario(scenario);
+  assert.deepEqual(
+    replay.calls.map((c) => c.outcome),
+    plan.calls.map((c) => c.outcome),
+    "chaos replay diverged from plan",
+  );
+  // Boundary: malformed fault configs must fail loudly, never register silently.
+  assert.throws(
+    () => new sdk.ChaosInjector({}).registerFault({ type: "NETWORK_GREMLIN", probability: 0.5 }),
+    TypeError,
+    "unknown fault type must throw TypeError",
+  );
+  const seededA = sdk.createSeededRandom(42);
+  const seededB = sdk.createSeededRandom(42);
+  assert.deepEqual(Array.from({ length: 8 }, seededA), Array.from({ length: 8 }, seededB), "seeded PRNG not deterministic");
+  console.log("  + deterministic chaos fixtures (plan/replay/PRNG) OK");
+}
+
 // Helpers
 assert.equal(typeof sdk.generateKeypair, "function", "generateKeypair not exported");
 assert.equal(typeof sdk.isValidPublicKey, "function", "isValidPublicKey not exported");
@@ -67,7 +106,25 @@ assert.equal(typeof sdk.TalosWebhook.verify, "function", "TalosWebhook.verify mi
 assert.equal(typeof sdk.TalosWebhook.parseSignatureHeader, "function", "TalosWebhook.parseSignatureHeader missing");
 assert.equal(typeof sdk.TalosWebhook.timingSafeEqual, "function", "TalosWebhook.timingSafeEqual missing");
 assert.equal(typeof sdk.TalosWebhook.hexToBuf, "function", "TalosWebhook.hexToBuf missing");
+assert.equal(typeof sdk.TalosWebhook.constructEvent, "function", "TalosWebhook.constructEvent missing");
+assert.equal(typeof sdk.verifyWebhook, "function", "verifyWebhook missing");
+assert.equal(typeof sdk.parseWebhookEvent, "function", "parseWebhookEvent missing");
 console.log("  + TalosWebhook static methods present");
+
+// Typed seller quote construction
+assert.equal(typeof sdk.constructSellerQuote, "function", "constructSellerQuote missing");
+assert.equal(typeof sdk.constructSellerPaymentDetails, "function", "constructSellerPaymentDetails missing");
+assert.equal(typeof sdk.toCanonicalDecimalAmount, "function", "toCanonicalDecimalAmount missing");
+assert.equal(typeof sdk.SellerQuoteError, "function", "SellerQuoteError missing");
+const sampleQuote = sdk.constructSellerQuote({
+  providerId: "G" + "A".repeat(55),
+  amount: 1,
+  ttlSeconds: 120,
+  now: new Date("2099-01-01T00:00:00.000Z"),
+});
+assert.equal(sampleQuote.amount, "1.000000");
+assert.equal(sampleQuote.assetCode, "USDC");
+console.log("  + constructSellerQuote helper OK");
 
 // Event stream constructor
 const stream = new sdk.TalosEventStream("http://example.test", { maxReconnectAttempts: 0 });

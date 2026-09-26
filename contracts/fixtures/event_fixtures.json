@@ -1,5 +1,5 @@
 {
-  "spec_version": "1.1.0",
+  "spec_version": "1.2.0",
   "format": "talos-event-fixtures",
   "description": "Canonical, versioned event-query fixtures for indexers consuming Talos Soroban contract events by topic and ledger range. Consumers load this JSON directly (TypeScript, Python, Rust). Any change that alters decoding MUST bump spec_version and follow the versioning rules in contracts/EVENTS.md.",
   "bounds": {
@@ -129,6 +129,7 @@
       "event": "tls_crt",
       "contract": "talos_registry",
       "ledger_sequence": 100000,
+      "tx_index_in_ledger": 0,
       "tx_hash": "a1b2c3d4e5f60718293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f60",
       "event_index_in_tx": 0,
       "topics": [
@@ -154,6 +155,7 @@
       "event": "tls_crt2",
       "contract": "talos_registry",
       "ledger_sequence": 100000,
+      "tx_index_in_ledger": 0,
       "tx_hash": "a1b2c3d4e5f60718293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f60",
       "event_index_in_tx": 1,
       "topics": [
@@ -180,6 +182,7 @@
       "event": "pat_upd",
       "contract": "talos_registry",
       "ledger_sequence": 100010,
+      "tx_index_in_ledger": 0,
       "tx_hash": "b2c3d4e5f60718293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f6071",
       "event_index_in_tx": 1,
       "topics": [
@@ -205,6 +208,7 @@
       "event": "reg_upd",
       "contract": "talos_name_service",
       "ledger_sequence": 100020,
+      "tx_index_in_ledger": 0,
       "tx_hash": "c3d4e5f60718293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f60712",
       "event_index_in_tx": 0,
       "topics": [
@@ -228,6 +232,7 @@
       "event": "prop_crt",
       "contract": "talos_governance",
       "ledger_sequence": 100100,
+      "tx_index_in_ledger": 0,
       "tx_hash": "d4e5f60718293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f607123",
       "event_index_in_tx": 0,
       "topics": [
@@ -252,6 +257,7 @@
       "event": "vote",
       "contract": "talos_governance",
       "ledger_sequence": 100110,
+      "tx_index_in_ledger": 0,
       "tx_hash": "e5f60718293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f6071234",
       "event_index_in_tx": 0,
       "topics": [
@@ -277,6 +283,7 @@
       "event": "prop_stat",
       "contract": "talos_governance",
       "ledger_sequence": 100120,
+      "tx_index_in_ledger": 0,
       "tx_hash": "f60718293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f60712345",
       "event_index_in_tx": 0,
       "topics": [
@@ -300,6 +307,7 @@
       "event": "ep_cmt",
       "contract": "talos_dividends",
       "ledger_sequence": 100200,
+      "tx_index_in_ledger": 0,
       "tx_hash": "0718293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f607123456",
       "event_index_in_tx": 0,
       "topics": [
@@ -325,6 +333,7 @@
       "event": "div_clm",
       "contract": "talos_dividends",
       "ledger_sequence": 100210,
+      "tx_index_in_ledger": 0,
       "tx_hash": "18293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f6071234567",
       "event_index_in_tx": 0,
       "topics": [
@@ -367,7 +376,7 @@
   "malformed": [
     {
       "id": "malformed.no_topics",
-      "reason": "topics array is empty — topic[0] must be the event symbol",
+      "reason": "topics array is empty - topic[0] must be the event symbol",
       "fixture": {
         "id": "malformed.no_topics.fixture",
         "family": "creation",
