@@ -48,7 +48,7 @@ describe("single param present", () => {
 // ---------------------------------------------------------------------------
 
 describe("valid value shapes", () => {
-  const cases: Array<[string, string, number, number]> = [
+  const cases: Array<[string, string, string, number]> = [
     ["integer strings",        "1",    "100",  1   ],
     ["decimal strings",        "1.50", "9.99", 1.5 ],
     ["zero min",               "0",    "10",   0   ],

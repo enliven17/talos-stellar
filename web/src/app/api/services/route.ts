@@ -1,8 +1,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsCommerceServices } from "@/db/schema";
-import { and, eq, gte, ilike, lt, lte, ne, or, type SQL, type SQLWrapper } from "drizzle-orm";
-import { and, arrayContains, eq, ilike, lt, ne, or, type SQL, type SQLWrapper } from "drizzle-orm";
+import { and, arrayContains, eq, gte, ilike, lt, lte, ne, or, type SQL, type SQLWrapper } from "drizzle-orm";
 import { parseLimit } from "@/lib/parse-limit";
 import {
   buildMarketplaceOrderBy,
@@ -262,6 +261,8 @@ function buildConditions(
 
   if (maxPrice !== undefined) {
     conditions.push(lte(tlsCommerceServices.price, String(maxPrice)));
+  }
+
   if (network) {
     // `chains` lists supported payment networks for the service.
     conditions.push(arrayContains(tlsCommerceServices.chains, [network]));
