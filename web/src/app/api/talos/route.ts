@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsPatrons, tlsCommerceServices } from "@/db/schema";
-import { and, desc, eq, lt, or, sql } from "drizzle-orm";
+import { and, desc, eq, ilike, lt, or, sql, type SQLWrapper } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { createAgentKeypair, fundTestnetAccount, verifyStellarSignature } from "@/lib/stellar";
 import { createTalosSchema, parseBody } from "@/lib/schemas";
@@ -13,6 +13,15 @@ import { withDriftDetection } from "@/lib/drift";
 import { badRequest, forbidden, internalError } from "@/lib/api-response";
 import { revalidateTag } from "next/cache";
 import { AGENTS_LIST_TAG, agentTag } from "@/lib/cache-tags";
+import {
+  buildMarketplaceOrderBy,
+  DIRECTORY_SORT_FIELDS,
+  isDefaultMarketplaceSort,
+  parseDirectoryCategoryFilter,
+  parseDirectoryStatusFilter,
+  parseMarketplaceSort,
+  type DirectorySortField,
+} from "@/lib/marketplace-sort";
 
 // GET /api/talos — List TALOS entries with cursor-based pagination
 export async function GET(request: NextRequest) {
@@ -23,9 +32,71 @@ export async function GET(request: NextRequest) {
     if (!parsedLimit.ok) return parsedLimit.response;
     const limit = parsedLimit.limit;
 
-    const minScore = searchParams.has("minScore") ? Number(searchParams.get("minScore")) : undefined;
-    const minConfidence = searchParams.has("minConfidence") ? Number(searchParams.get("minConfidence")) : undefined;
+    // -----------------------------------------------------------------------
+    // Sort validation
+    // -----------------------------------------------------------------------
+    const parsedSort = parseMarketplaceSort(
+      searchParams.get("sort"),
+      searchParams.get("direction"),
+      { allowedFields: DIRECTORY_SORT_FIELDS, fieldLabel: "createdAt, name" },
+    );
+    if (!parsedSort.ok) return parsedSort.response;
+    const sort = parsedSort.sort;
+
+    // Cursor pagination is only compatible with the default createdAt desc sort.
+    if (cursor && !isDefaultMarketplaceSort(sort)) {
+      return Response.json(
+        {
+          error:
+            "cursor pagination is only supported with the default createdAt desc sort",
+        },
+        { status: 400 },
+      );
+    }
+
+    // -----------------------------------------------------------------------
+    // Filter validation
+    // -----------------------------------------------------------------------
+    const parsedStatus = parseDirectoryStatusFilter(searchParams.get("status"));
+    if (!parsedStatus.ok) return parsedStatus.response;
+    const statusFilter = parsedStatus.status;
+
+    const parsedCategory = parseDirectoryCategoryFilter(searchParams.get("category"));
+    if (!parsedCategory.ok) return parsedCategory.response;
+    const categoryFilter = parsedCategory.category;
+
+    // -----------------------------------------------------------------------
+    // Numeric filter validation
+    // -----------------------------------------------------------------------
+    const rawMinScore = searchParams.get("minScore");
+    const rawMinConfidence = searchParams.get("minConfidence");
+
+    const minScore = searchParams.has("minScore") ? Number(rawMinScore) : undefined;
+    const minConfidence = searchParams.has("minConfidence") ? Number(rawMinConfidence) : undefined;
+
+    if (minScore !== undefined && !Number.isFinite(minScore)) {
+      return Response.json(
+        { error: "minScore must be a finite number" },
+        { status: 400 },
+      );
+    }
+    if (minConfidence !== undefined && !Number.isFinite(minConfidence)) {
+      return Response.json(
+        { error: "minConfidence must be a finite number" },
+        { status: 400 },
+      );
+    }
+
     const allowColdStart = searchParams.get("allowColdStart") === "true";
+
+    // -----------------------------------------------------------------------
+    // Sort columns mapping
+    // -----------------------------------------------------------------------
+    const sortColumns: Record<DirectorySortField, SQLWrapper> = {
+      createdAt: tlsTalos.createdAt,
+      name: tlsTalos.name,
+    };
+    const orderBy = buildMarketplaceOrderBy(sort, sortColumns, tlsTalos.id);
 
     // Add timeout for patron count query
     const patronCountQuery = db
@@ -45,6 +116,17 @@ export async function GET(request: NextRequest) {
     // Loop until we fulfill the limit or exhaust the DB
     while (accumulated.length < limit && !exhausted) {
       const conditions = [];
+
+      // Apply status filter (defaults to excluding "Deleted" if no filter provided)
+      if (statusFilter !== null) {
+        conditions.push(eq(tlsTalos.status, statusFilter));
+      }
+
+      // Apply category filter
+      if (categoryFilter !== null) {
+        conditions.push(ilike(tlsTalos.category, categoryFilter));
+      }
+
       if (currentCursor) {
         const [cursorDate, cursorId] = currentCursor.split("|");
         if (cursorDate && cursorId) {
@@ -97,7 +179,7 @@ export async function GET(request: NextRequest) {
           .from(tlsTalos)
           .leftJoin(patronCount, eq(tlsTalos.id, patronCount.talosId))
           .where(conditions.length > 0 ? and(...conditions) : undefined)
-          .orderBy(desc(tlsTalos.createdAt), desc(tlsTalos.id))
+          .orderBy(...orderBy)
           .limit(limit * 2), // fetch chunk
           10_000,
           "Talos list query timeout",
