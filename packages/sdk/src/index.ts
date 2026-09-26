@@ -168,3 +168,13 @@ export type {
   SignerCapabilities,
   StellarKeypairSignerOptions,
 } from "./signing.js";
+
+// ── Generated types provenance ────────────────────────────────────────────────
+export {
+  GENERATED_TYPES_PROVENANCE,
+  GENERATED_TYPES_TOOL,
+  GENERATED_TYPES_TOOL_VERSION,
+  GENERATED_TYPES_SOURCE,
+  GENERATED_TYPES_PACKAGE,
+} from "./provenance.js";
+export type { GeneratedTypesProvenance } from "./provenance.js";
