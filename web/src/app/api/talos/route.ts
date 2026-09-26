@@ -14,11 +14,48 @@ import { badRequest, forbidden, internalError } from "@/lib/api-response";
 import { revalidateTag } from "next/cache";
 import { AGENTS_LIST_TAG, agentTag } from "@/lib/cache-tags";
 
+export type TalosCursor = {
+  createdAt: string;
+  id: string;
+};
+
+export function encodeTalosCursor(cursor: TalosCursor): string {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+export function decodeTalosCursor(raw: string | null): TalosCursor | null {
+  if (raw === null) return null;
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(raw, 'base64url').toString('utf8'),
+    ) as Partial<TalosCursor>;
+    const date = new Date(parsed.createdAt ?? '');
+    if (
+      typeof parsed.createdAt !== 'string' ||
+      Number.isNaN(date.getTime()) ||
+      typeof parsed.id !== 'string' ||
+      parsed.id.length === 0
+    ) {
+      return null;
+    }
+    return { createdAt: date.toISOString(), id: parsed.id };
+  } catch {
+    return null;
+  }
+}
+
 // GET /api/talos — List TALOS entries with cursor-based pagination
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
-    const cursor = searchParams.get("cursor");
+    const rawCursor = searchParams.get("cursor");
+    const cursor = decodeTalosCursor(rawCursor);
+    if (searchParams.has("cursor") && !cursor) {
+      return Response.json(
+        { error: "cursor must be a valid agent cursor" },
+        { status: 400 },
+      );
+    }
     const parsedLimit = parseLimit(searchParams.get("limit"), 50, 100);
     if (!parsedLimit.ok) return parsedLimit.response;
     const limit = parsedLimit.limit;
@@ -38,7 +75,7 @@ export async function GET(request: NextRequest) {
       .as("patronCount");
 
     const patronCount = patronCountQuery;
-    let currentCursor = cursor;
+    let currentCursor: TalosCursor | null = cursor;
     const accumulated: Array<Record<string, unknown>> = [];
     let exhausted = false;
 
@@ -46,18 +83,14 @@ export async function GET(request: NextRequest) {
     while (accumulated.length < limit && !exhausted) {
       const conditions = [];
       if (currentCursor) {
-        const [cursorDate, cursorId] = currentCursor.split("|");
-        if (cursorDate && cursorId) {
-          conditions.push(
-            or(
-              lt(tlsTalos.createdAt, new Date(cursorDate)),
-              and(
-                eq(tlsTalos.createdAt, new Date(cursorDate)),
-                lt(tlsTalos.id, cursorId),
-              ),
-            )!,
-          );
-        }
+        const cursorCondition = or(
+          lt(tlsTalos.createdAt, new Date(currentCursor.createdAt)),
+          and(
+            eq(tlsTalos.createdAt, new Date(currentCursor.createdAt)),
+            lt(tlsTalos.id, currentCursor.id),
+          ),
+        );
+        if (cursorCondition) conditions.push(cursorCondition);
       }
 
       let entries;
@@ -146,17 +179,22 @@ export async function GET(request: NextRequest) {
         if (valid) {
           accumulated.push({ ...entry, patrons: entry.patrons ?? 0 });
           if (accumulated.length === limit) {
-            currentCursor = `${entry.createdAt.toISOString()}|${entry.id}`;
+            currentCursor = { createdAt: entry.createdAt.toISOString(), id: entry.id };
             break;
           }
         }
-        currentCursor = `${entry.createdAt.toISOString()}|${entry.id}`;
+        currentCursor = { createdAt: entry.createdAt.toISOString(), id: entry.id };
       }
     }
 
-    const nextCursor = (exhausted && accumulated.length < limit) ? null : currentCursor;
+    const nextCursorEncoded =
+      exhausted && accumulated.length < limit
+        ? null
+        : currentCursor
+          ? encodeTalosCursor(currentCursor)
+          : null;
 
-    return Response.json({ data: accumulated, nextCursor });
+    return Response.json({ data: accumulated, nextCursor: nextCursorEncoded });
   } catch {
     return internalError(request);
   }
