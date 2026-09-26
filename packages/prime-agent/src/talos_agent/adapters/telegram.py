@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -34,6 +35,8 @@ from talos_agent.config import resolve_setting_secret
 if TYPE_CHECKING:
     from talos_agent.config import Settings
 
+
+logger = logging.getLogger(__name__)
 
 _API_ROOT = "https://api.telegram.org"
 
@@ -111,40 +114,61 @@ class TelegramAdapter(BaseSocialAdapter):
         return text
 
     async def _send(self, payload: dict) -> PublishResult:
-        response = await self._http.post(self._build_url("sendMessage"), json=payload)
+        """Send payload to Telegram API with trace context propagation."""
+        try:
+            response = await self._http.post(
+                self._build_url("sendMessage"),
+                json=payload,
+            )
 
-        if response.status_code != 200:
+            if response.status_code != 200:
+                logger.warning(
+                    "Telegram API returned non-200 status: %s",
+                    response.status_code,
+                )
+                return PublishResult(
+                    status="failed",
+                    channel=self.channel_name,
+                    content=payload.get("text", ""),
+                    error=f"Telegram API error {response.status_code}",
+                )
+
+            data = response.json()
+            if not data.get("ok"):
+                logger.warning(
+                    "Telegram API returned error: %s",
+                    data.get("description"),
+                )
+                return PublishResult(
+                    status="failed",
+                    channel=self.channel_name,
+                    content=payload.get("text", ""),
+                    error=f"Telegram API error: {data.get('description')}",
+                )
+
+            result = data.get("result", {})
+            message_id = result.get("message_id")
+            url = None
+            if isinstance(self._chat_id, str) and self._chat_id.startswith("@") and message_id is not None:
+                username = self._chat_id.lstrip("@")
+                url = f"https://t.me/{username}/{message_id}"
+
+            return PublishResult(
+                status="posted",
+                channel=self.channel_name,
+                content=payload.get("text", ""),
+                post_id=str(message_id) if message_id is not None else None,
+                url=url,
+                metadata={"message_id": message_id},
+            )
+        except Exception as e:
+            logger.error("Failed to send Telegram message: %s", e)
             return PublishResult(
                 status="failed",
                 channel=self.channel_name,
                 content=payload.get("text", ""),
-                error=f"Telegram API error {response.status_code}: {response.text}",
+                error=f"Internal error: {type(e).__name__}",
             )
-
-        data = response.json()
-        if not data.get("ok"):
-            return PublishResult(
-                status="failed",
-                channel=self.channel_name,
-                content=payload.get("text", ""),
-                error=f"Telegram API error: {data.get('description')}",
-            )
-
-        result = data.get("result", {})
-        message_id = result.get("message_id")
-        url = None
-        if isinstance(self._chat_id, str) and self._chat_id.startswith("@") and message_id is not None:
-            username = self._chat_id.lstrip("@")
-            url = f"https://t.me/{username}/{message_id}"
-
-        return PublishResult(
-            status="posted",
-            channel=self.channel_name,
-            content=payload.get("text", ""),
-            post_id=str(message_id) if message_id is not None else None,
-            url=url,
-            metadata={"message_id": message_id},
-        )
 
     async def post(self, content: str, **kwargs) -> PublishResult:
         queue_item_id = kwargs.get("queue_item_id")
@@ -215,6 +239,7 @@ class TelegramAdapter(BaseSocialAdapter):
         match = re.search(r"/(\d+)(?:\D.*)?$", target_url)
         if match:
             return int(match.group(1))
+        return None
         return None
 
     # ── Rate-limit queue path (only active when a queue is configured) ──

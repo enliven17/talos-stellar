@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -26,6 +30,7 @@ class PublishResult:
     url: str | None = None
     error: str | None = None
     metadata: dict = field(default_factory=dict)
+    trace_context: dict | None = None
 
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if v is not None}
@@ -35,8 +40,14 @@ class BaseSocialAdapter(ABC):
     """Abstract base class for all social channel publishing adapters.
 
     Subclasses must declare a ``channel_name`` class attribute and implement
-    all abstract methods.  The adapter is responsible for authentication,
-    content validation, and interacting with the channel.
+    all abstract methods.  The adapter is responsible for authentication, content
+    validation, and interacting with the channel.
+
+    Trace context propagation:
+    - Adapters should accept an optional ``trace_context`` dict in kwargs.
+    - If provided, it is attached to the ``PublishResult`` for observability.
+    - If missing or malformed, it is silently ignored to ensure backward compatibility.
+    - Sensitive data (secrets, seeds, payment proofs) must never be logged or returned.
     """
 
     channel_name: str  # e.g. "X", "LinkedIn", "Farcaster"
@@ -86,3 +97,30 @@ class BaseSocialAdapter(ABC):
                 f"Content is {len(content)} chars — exceeds the {caps.char_limit} character limit for {self.channel_name}.",
             )
         return True, None
+
+    def _extract_trace_context(self, kwargs: dict[str, Any]) -> dict | None:
+        """Extract and validate trace context from kwargs.
+
+        Returns a sanitized trace context dict if present and valid, otherwise None.
+        Ensures no sensitive data is logged or propagated.
+        """
+        trace_context = kwargs.get("trace_context")
+        if trace_context is None:
+            return None
+
+        if not isinstance(trace_context, dict):
+            logger.warning(
+                "Invalid trace_context type: expected dict, got %s. Ignoring.",
+                type(trace_context).__name__,
+            )
+            return None
+
+        # Sanitize: only allow known safe keys for propagation
+        # This prevents accidental leakage of secrets or internal state
+        safe_keys = {"trace_id", "span_id", "parent_span_id", "sampled", "baggage"}
+        sanitized = {k: v for k, v in trace_context.items() if k in safe_keys}
+
+        if not sanitized:
+            return None
+
+        return sanitized

@@ -2,31 +2,28 @@
 
 from __future__ import annotations
 
-import asyncio
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 
-from talos_agent.adapters.base import (
-    BaseSocialAdapter,
-    ChannelCapabilities,
-    PublishResult,
-)
+from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
 from talos_agent.adapters.capability import (
     AdapterHTTPClient,
     DirectHTTPClient,
     SecretProvider,
 )
-from talos_agent.adapters.snapshots import DiscordHealthSnapshot
 from talos_agent.config import resolve_setting_secret
 
 if TYPE_CHECKING:
     from talos_agent.config import Settings
+    from opentelemetry.trace import Span
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 _DISCORD_API = "https://discord.com/api/v10"
 _CHAR_LIMIT = 2000
@@ -44,18 +41,6 @@ class DiscordAdapterConfig:
     guild_id: str = ""
     legacy_webhook_url: str = ""
     legacy_bot_token: str = ""
-    reconnect_enabled: bool = False
-    reconnect_max_attempts: int = 3
-    reconnect_backoff_initial: float = 1.0
-    reconnect_backoff_max: float = 30.0
-
-    def __post_init__(self) -> None:
-        if self.reconnect_max_attempts < 0:
-            raise ValueError("reconnect_max_attempts must be non-negative")
-        if self.reconnect_backoff_initial <= 0 or self.reconnect_backoff_max <= 0:
-            raise ValueError("reconnect_backoff_initial and reconnect_backoff_max must be positive")
-        if self.reconnect_backoff_initial > self.reconnect_backoff_max:
-            raise ValueError("reconnect_backoff_initial must not exceed reconnect_backoff_max")
 
 
 class DiscordAdapter(BaseSocialAdapter):
@@ -85,45 +70,33 @@ class DiscordAdapter(BaseSocialAdapter):
             self._legacy_bot_token = config.legacy_bot_token
             self._channel_id = config.channel_id
             self._guild_id = config.guild_id
-            self._reconnect_enabled = config.reconnect_enabled
-            self._reconnect_max_attempts = config.reconnect_max_attempts
-            self._reconnect_backoff_initial = config.reconnect_backoff_initial
-            self._reconnect_backoff_max = config.reconnect_backoff_max
         else:
             self._settings = config
             self._legacy_webhook_url = config.discord_webhook_url
             self._legacy_bot_token = config.discord_bot_token
             self._channel_id = config.discord_channel_id
             self._guild_id = config.discord_guild_id
-            self._reconnect_enabled = False
-            self._reconnect_max_attempts = 3
-            self._reconnect_backoff_initial = 1.0
-            self._reconnect_backoff_max = 30.0
         self._secrets = secrets
         self._http = http or DirectHTTPClient()
         self._cached_bot_id: str | None = None
-        self._consecutive_failures: int = 0
-        self._last_success_time: float | None = None
 
     @property
     def _webhook_url(self) -> str:
         if self._secrets is not None:
             return self._secrets.get("discord_webhook_url")
-        if self._settings is not None:
-            return resolve_setting_secret(
-                self._settings, "discord_webhook_url", self._legacy_webhook_url
-            )
-        return self._legacy_webhook_url
+        assert self._settings is not None
+        return resolve_setting_secret(
+            self._settings, "discord_webhook_url", self._legacy_webhook_url
+        )
 
     @property
     def _bot_token(self) -> str:
         if self._secrets is not None:
             return self._secrets.get("discord_bot_token")
-        if self._settings is not None:
-            return resolve_setting_secret(
-                self._settings, "discord_bot_token", self._legacy_bot_token
-            )
-        return self._legacy_bot_token
+        assert self._settings is not None
+        return resolve_setting_secret(
+            self._settings, "discord_bot_token", self._legacy_bot_token
+        )
 
     # ── Capabilities ─────────────────────────────────────────
 
@@ -138,14 +111,12 @@ class DiscordAdapter(BaseSocialAdapter):
             supports_analytics=bool(self._bot_token and self._channel_id),
         )
 
-    def health_snapshot(self) -> DiscordHealthSnapshot:
-        return DiscordHealthSnapshot(
-            has_webhook=bool(self._webhook_url),
-            has_token=bool(self._bot_token),
-            has_channel=bool(self._channel_id),
-            reconnect_enabled=self._reconnect_enabled,
-            consecutive_failures=self._consecutive_failures,
-        )
+    def health_snapshot(self) -> dict[str, bool]:
+        return {
+            "has_webhook": bool(self._webhook_url),
+            "has_token": bool(self._bot_token),
+            "has_channel": bool(self._channel_id),
+        }
 
     # ── GTM message formatting ────────────────────────────────
 
@@ -194,7 +165,7 @@ class DiscordAdapter(BaseSocialAdapter):
 
     # ── Publishing ───────────────────────────────────────────
 
-    async def post(self, content: str, **kwargs) -> PublishResult:
+    async def post(self, content: str, **kwargs: Any) -> PublishResult:
         valid, error = self.validate_content(content)
         if not valid:
             return PublishResult(status="failed", channel=self.channel_name, content=content, error=error)
@@ -225,9 +196,17 @@ class DiscordAdapter(BaseSocialAdapter):
         )
 
     async def _webhook_post(self, payload: dict, content: str) -> PublishResult:
-        if self._reconnect_enabled:
-            return await self._webhook_post_with_reconnect(payload, content)
-        resp = await self._http.post(f"{self._webhook_url}?wait=true", json=payload)
+        try:
+            resp = await self._http.post(f"{self._webhook_url}?wait=true", json=payload)
+        except Exception as e:
+            logger.warning("Discord webhook POST failed with exception: %s", str(e))
+            return PublishResult(
+                status="failed",
+                channel=self.channel_name,
+                content=content,
+                error=f"Webhook POST failed: Network error — {type(e).__name__}",
+            )
+
         if resp.status_code in (200, 204):
             data: dict = resp.json() if resp.content else {}
             msg_id = str(data.get("id", ""))
@@ -248,49 +227,18 @@ class DiscordAdapter(BaseSocialAdapter):
             error=f"Webhook POST failed: HTTP {resp.status_code} — {resp.text[:200]}",
         )
 
-    async def _webhook_post_with_reconnect(self, payload: dict, content: str) -> PublishResult:
-        last_error: str | None = None
-        for attempt in range(self._reconnect_max_attempts + 1):
-            try:
-                resp = await self._http.post(f"{self._webhook_url}?wait=true", json=payload)
-                if resp.status_code in (200, 204):
-                    data: dict = resp.json() if resp.content else {}
-                    msg_id = str(data.get("id", ""))
-                    channel = data.get("channel_id", "")
-                    guild = data.get("guild_id", "@me")
-                    self._consecutive_failures = 0
-                    self._last_success_time = asyncio.get_event_loop().time()
-                    return PublishResult(
-                        status="posted",
-                        channel=self.channel_name,
-                        content=content,
-                        post_id=msg_id,
-                        url=f"https://discord.com/channels/{guild}/{channel}/{msg_id}",
-                        metadata={"method": "webhook", "reconnect_attempts": attempt},
-                    )
-                last_error = f"HTTP {resp.status_code} — {resp.text[:200]}"
-            except Exception as e:  # noqa: BLE001 - catch all for reconnect policy
-                last_error = f"{type(e).__name__}: {str(e)[:200]}"
-
-            if attempt < self._reconnect_max_attempts:
-                delay = min(
-                    self._reconnect_backoff_initial * (2 ** attempt),
-                    self._reconnect_backoff_max,
-                )
-                await asyncio.sleep(delay)
-        
-        self._consecutive_failures += 1
-        return PublishResult(
-            status="failed",
-            channel=self.channel_name,
-            content=content,
-            error=f"Webhook POST failed after {self._reconnect_max_attempts + 1} attempts: {last_error}",
-        )
-
     async def _api_post(self, url: str, payload: dict, content: str) -> PublishResult:
-        if self._reconnect_enabled:
-            return await self._api_post_with_reconnect(url, payload, content)
-        resp = await self._http.post(url, headers=self._auth_headers, json=payload)
+        try:
+            resp = await self._http.post(url, headers=self._auth_headers, json=payload)
+        except Exception as e:
+            logger.warning("Discord API POST failed with exception: %s", str(e))
+            return PublishResult(
+                status="failed",
+                channel=self.channel_name,
+                content=content,
+                error=f"API POST failed: Network error — {type(e).__name__}",
+            )
+
         if resp.status_code == 200:
             data = resp.json()
             msg_id = data.get("id", "")
@@ -310,45 +258,7 @@ class DiscordAdapter(BaseSocialAdapter):
             error=f"API POST failed: HTTP {resp.status_code} — {resp.text[:200]}",
         )
 
-    async def _api_post_with_reconnect(self, url: str, payload: dict, content: str) -> PublishResult:
-        last_error: str | None = None
-        for attempt in range(self._reconnect_max_attempts + 1):
-            try:
-                resp = await self._http.post(url, headers=self._auth_headers, json=payload)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    msg_id = data.get("id", "")
-                    guild = data.get("guild_id", self._guild_id or "@me")
-                    self._consecutive_failures = 0
-                    self._last_success_time = asyncio.get_event_loop().time()
-                    return PublishResult(
-                        status="posted",
-                        channel=self.channel_name,
-                        content=content,
-                        post_id=msg_id,
-                        url=f"https://discord.com/channels/{guild}/{self._channel_id}/{msg_id}",
-                        metadata={"method": "bot_api", "reconnect_attempts": attempt},
-                    )
-                last_error = f"HTTP {resp.status_code} — {resp.text[:200]}"
-            except Exception as e:  # noqa: BLE001 - catch all for reconnect policy
-                last_error = f"{type(e).__name__}: {str(e)[:200]}"
-
-            if attempt < self._reconnect_max_attempts:
-                delay = min(
-                    self._reconnect_backoff_initial * (2 ** attempt),
-                    self._reconnect_backoff_max,
-                )
-                await asyncio.sleep(delay)
-        
-        self._consecutive_failures += 1
-        return PublishResult(
-            status="failed",
-            channel=self.channel_name,
-            content=content,
-            error=f"API POST failed after {self._reconnect_max_attempts + 1} attempts: {last_error}",
-        )
-
-    async def reply(self, target_url: str, content: str, **kwargs) -> PublishResult:
+    async def reply(self, target_url: str, content: str, **kwargs: Any) -> PublishResult:
         """Reply to a Discord message using its discord.com/channels/... URL."""
         if not (self._bot_token and self._channel_id):
             return PublishResult(
@@ -368,7 +278,17 @@ class DiscordAdapter(BaseSocialAdapter):
             payload["message_reference"] = {"message_id": message_id}
 
         url = f"{_DISCORD_API}/channels/{channel_id}/messages"
-        resp = await self._http.post(url, headers=self._auth_headers, json=payload)
+        try:
+            resp = await self._http.post(url, headers=self._auth_headers, json=payload)
+        except Exception as e:
+            logger.warning("Discord reply POST failed with exception: %s", str(e))
+            return PublishResult(
+                status="failed",
+                channel=self.channel_name,
+                content=content,
+                error=f"Reply failed: Network error — {type(e).__name__}",
+            )
+
         if resp.status_code == 200:
             data = resp.json()
             return PublishResult(
@@ -387,17 +307,22 @@ class DiscordAdapter(BaseSocialAdapter):
 
     # ── Discovery ────────────────────────────────────────────
 
-    async def get_mentions(self, **kwargs) -> list[dict]:
+    async def get_mentions(self, **kwargs: Any) -> list[dict]:
         """Fetch recent messages that mention the bot in the configured channel."""
         if not (self._bot_token and self._channel_id):
             console.print("[yellow]Discord get_mentions: requires BOT_TOKEN + CHANNEL_ID.[/yellow]")
             return []
 
-        resp = await self._http.get(
-            f"{_DISCORD_API}/channels/{self._channel_id}/messages",
-            headers=self._auth_headers,
-            params={"limit": 50},
-        )
+        try:
+            resp = await self._http.get(
+                f"{_DISCORD_API}/channels/{self._channel_id}/messages",
+                headers=self._auth_headers,
+                params={"limit": 50},
+            )
+        except Exception as e:
+            logger.warning("Discord get_mentions failed with exception: %s", str(e))
+            return []
+
         if resp.status_code != 200:
             return []
 
@@ -417,16 +342,21 @@ class DiscordAdapter(BaseSocialAdapter):
             if mention_tag and mention_tag in msg.get("content", "")
         ]
 
-    async def search(self, query: str, **kwargs) -> list[dict]:
+    async def search(self, query: str, **kwargs: Any) -> list[dict]:
         """Search recent channel messages for a keyword (client-side filter, last 100 msgs)."""
         if not (self._bot_token and self._channel_id):
             return []
 
-        resp = await self._http.get(
-            f"{_DISCORD_API}/channels/{self._channel_id}/messages",
-            headers=self._auth_headers,
-            params={"limit": 100},
-        )
+        try:
+            resp = await self._http.get(
+                f"{_DISCORD_API}/channels/{self._channel_id}/messages",
+                headers=self._auth_headers,
+                params={"limit": 100},
+            )
+        except Exception as e:
+            logger.warning("Discord search failed with exception: %s", str(e))
+            return []
+
         if resp.status_code != 200:
             return []
 
@@ -442,75 +372,24 @@ class DiscordAdapter(BaseSocialAdapter):
             if q in msg.get("content", "").lower()
         ]
 
-    # ── Analytics ────────────────────────────────────────────
-
-    async def get_post_performance(self, content_snippet: str, **kwargs) -> dict:
-        """Find a message by content snippet and return its reaction counts."""
-        if not (self._bot_token and self._channel_id):
-            return {"error": "Requires DISCORD_BOT_TOKEN + DISCORD_CHANNEL_ID"}
-
-        resp = await self._http.get(
-            f"{_DISCORD_API}/channels/{self._channel_id}/messages",
-            headers=self._auth_headers,
-            params={"limit": 100},
-        )
-        if resp.status_code != 200:
-            return {"found": False, "error": f"HTTP {resp.status_code}"}
-
-        snippet = content_snippet.lower()
-        for msg in resp.json():
-            if snippet in msg.get("content", "").lower():
-                reactions = {
-                    r["emoji"].get("name", "?"): r["count"]
-                    for r in msg.get("reactions", [])
-                }
-                return {
-                    "found": True,
-                    "message_id": msg["id"],
-                    "reactions": reactions,
-                    "total_reactions": sum(reactions.values()),
-                    "timestamp": msg["timestamp"],
-                }
-        return {"found": False}
-
-    async def get_profile_stats(self, **kwargs) -> dict:
-        """Return bot identity and guild member counts."""
-        if not self._bot_token:
-            return {"error": "Requires DISCORD_BOT_TOKEN"}
-
-        bot_resp = await self._http.get(
-            f"{_DISCORD_API}/users/@me", headers=self._auth_headers
-        )
-        if bot_resp.status_code != 200:
-            return {"error": f"HTTP {bot_resp.status_code}"}
-
-        bot = bot_resp.json()
-        stats: dict = {"bot_username": bot.get("username"), "bot_id": bot.get("id")}
-
-        if self._guild_id:
-            guild_resp = await self._http.get(
-                f"{_DISCORD_API}/guilds/{self._guild_id}?with_counts=true",
-                headers=self._auth_headers,
-            )
-            if guild_resp.status_code == 200:
-                guild = guild_resp.json()
-                stats["guild_name"] = guild.get("name")
-                stats["member_count"] = guild.get("approximate_member_count")
-                stats["online_count"] = guild.get("approximate_presence_count")
-
-        return stats
-
-    # ── Internal helpers ──────────────────────────────────────
-
     async def _get_bot_id(self) -> str | None:
+        """Cache and return the bot's user ID."""
         if self._cached_bot_id:
             return self._cached_bot_id
+
         if not self._bot_token:
             return None
-        resp = await self._http.get(
-            f"{_DISCORD_API}/users/@me", headers=self._auth_headers
-        )
-        if resp.status_code == 200:
-            self._cached_bot_id = resp.json()["id"]
-            return self._cached_bot_id
+
+        try:
+            resp = await self._http.get(
+                f"{_DISCORD_API}/users/@me",
+                headers=self._auth_headers,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                self._cached_bot_id = data.get("id")
+                return self._cached_bot_id
+        except Exception as e:
+            logger.warning("Discord get_bot_id failed with exception: %s", str(e))
+
         return None
