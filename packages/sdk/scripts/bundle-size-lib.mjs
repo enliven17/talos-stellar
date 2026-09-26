@@ -17,7 +17,7 @@
 
 /** Default budget, kept in sync with bundle-size.config.json. */
 export const DEFAULT_BUDGET = Object.freeze({
-  maxRawBytes: 1_100_000,
+  maxRawBytes: 1_110_000,
   maxGzipBytes: 310_000,
 });
 

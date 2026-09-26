@@ -62,6 +62,75 @@ pub struct MigrationRecord {
     pub rolled_back: bool,
 }
 
+/// Outcome of a storage-migration dry-run.
+///
+/// A dry-run is a read-only simulation: it reports what a forward migration
+/// *would* do from the contract's current schema version without taking the
+/// migration lock, writing storage, appending history, or emitting events.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MigrationDryRun {
+    /// Schema version currently stored on-chain.
+    pub current_version: u32,
+    /// Version the contract would end up at if the plan were applied.
+    pub target_version: u32,
+    /// Number of ordered steps the plan would apply (`0` when up to date).
+    pub steps: u32,
+    /// `true` when the contract is already at `target_version`. An up-to-date
+    /// plan is a successful no-op: `steps == 0`, `applicable == true`, and
+    /// `error == None`.
+    pub up_to_date: bool,
+    /// `true` when a migration currently holds the lock, so applying the
+    /// plan would be rejected with [`MigrationError::MigrationInProgress`].
+    pub locked: bool,
+    /// `true` when the plan is safe to apply: not locked, forward-only, and
+    /// starting exactly at the stored version. An up-to-date plan is
+    /// applicable with zero steps.
+    pub applicable: bool,
+    /// `None` when `applicable`; otherwise the numeric code of the
+    /// [`MigrationError`] the real call would return.
+    ///
+    /// The code is stored as a `u32` rather than the enum itself because
+    /// `#[contracterror]` enums are not `#[contracttype]`-compatible values.
+    /// Use [`MigrationDryRun::error`] to read it back as a typed
+    /// [`MigrationError`].
+    pub error_code: Option<u32>,
+}
+
+impl MigrationDryRun {
+    /// The typed reason the plan would fail, or `None` when `applicable`.
+    ///
+    /// Unknown codes (which cannot be produced by this crate) map to `None`
+    /// rather than panicking, so decoding is total and privacy-safe.
+    pub fn error(&self) -> Option<MigrationError> {
+        match self.error_code {
+            Some(code) => MigrationError::from_code(code),
+            None => None,
+        }
+    }
+}
+
+impl MigrationError {
+    /// Decode a numeric discriminant back into a [`MigrationError`].
+    ///
+    /// Returns `None` for codes that do not correspond to a known variant.
+    pub fn from_code(code: u32) -> Option<MigrationError> {
+        match code {
+            1 => Some(MigrationError::NotForward),
+            2 => Some(MigrationError::OutOfOrder),
+            3 => Some(MigrationError::MigrationInProgress),
+            4 => Some(MigrationError::RollbackNotAllowed),
+            5 => Some(MigrationError::RollbackTooDeep),
+            _ => None,
+        }
+    }
+
+    /// The stable numeric discriminant of this error.
+    pub fn code(self) -> u32 {
+        self as u32
+    }
+}
+
 // ── Events ──────────────────────────────────────────────────────────
 
 fn emit_schema_migrated(
@@ -164,6 +233,72 @@ pub fn validate_rollback(
     }
 
     Ok(())
+}
+
+/// Simulate a forward migration without mutating any state.
+///
+/// `current` is the caller's view of the stored schema version and is used
+/// only as the baseline for an uninitialized contract, exactly like
+/// [`begin_migration`]. The stored version is authoritative once the
+/// framework has been initialized.
+///
+/// The dry-run never takes the migration lock, never writes storage, never
+/// appends history, and never emits events, so it is always safe to call —
+/// including while another migration is in progress. It reports the same
+/// rejection [`begin_migration`] would produce, so callers can pre-flight an
+/// upgrade before committing to it.
+pub fn dry_run(
+    e: &Env,
+    current: u32,
+    from: u32,
+    to: u32,
+) -> MigrationDryRun {
+    let stored_current = schema_version(e).unwrap_or(current);
+    let locked = is_locked(e);
+
+    // Already at the target: the plan is a no-op, not a failure. Report it as
+    // applicable with zero steps so callers can treat "up to date" as success
+    // rather than as a `NotForward` rejection.
+    let up_to_date = stored_current == to;
+
+    if up_to_date {
+        return MigrationDryRun {
+            current_version: stored_current,
+            target_version: to,
+            steps: 0,
+            up_to_date: true,
+            locked,
+            applicable: true,
+            error_code: None,
+        };
+    }
+
+    // Mirror `begin_migration`'s checks in the same order so the dry-run
+    // predicts the real outcome rather than a stricter or looser one.
+    let error = if stored_current != current {
+        Some(MigrationError::OutOfOrder)
+    } else {
+        match validate_forward_step(stored_current, from, to) {
+            Err(err) => Some(err),
+            Ok(()) => {
+                if locked {
+                    Some(MigrationError::MigrationInProgress)
+                } else {
+                    None
+                }
+            }
+        }
+    };
+
+    MigrationDryRun {
+        current_version: stored_current,
+        target_version: to,
+        steps: 1,
+        up_to_date: false,
+        locked,
+        applicable: error.is_none(),
+        error_code: error.map(MigrationError::code),
+    }
 }
 
 // ── Public API ──────────────────────────────────────────────────────
@@ -711,5 +846,201 @@ mod tests {
                 Some(3)
             );
         });
+    }
+
+    // ── Dry-run tests ───────────────────────────────────────────────
+
+    #[test]
+    fn dry_run_reports_applicable_plan_without_mutating_state() {
+        let env = Env::default();
+        let contract_id = soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 1);
+
+            let plan = dry_run(&env, 1, 1, 2);
+
+            assert_eq!(plan.current_version, 1);
+            assert_eq!(plan.target_version, 2);
+            assert_eq!(plan.steps, 1);
+            assert!(!plan.up_to_date);
+            assert!(!plan.locked);
+            assert!(plan.applicable);
+            assert_eq!(plan.error(), None);
+
+            // Read-only: version, lock, and history are untouched.
+            assert_eq!(schema_version(&env), Some(1));
+            assert!(!is_locked(&env));
+            assert_eq!(migration_history_len(&env), 1);
+        });
+    }
+
+    #[test]
+    fn dry_run_reports_up_to_date_when_already_at_target() {
+        let env = Env::default();
+        let contract_id = soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 2);
+
+            let plan = dry_run(&env, 2, 2, 2);
+
+            assert!(plan.up_to_date);
+            assert_eq!(plan.steps, 0);
+            assert!(plan.applicable);
+            assert_eq!(plan.error(), None);
+            assert_eq!(plan.current_version, 2);
+            assert_eq!(plan.target_version, 2);
+        });
+    }
+
+    #[test]
+    fn dry_run_up_to_date_is_a_noop_even_while_locked() {
+        let env = Env::default();
+        let contract_id = soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 2);
+            begin_migration(&env, 2, 2, 3).expect("begin");
+
+            // Already at the target: nothing to apply, so the plan is a
+            // successful no-op rather than a lock rejection.
+            let plan = dry_run(&env, 2, 2, 2);
+
+            assert!(plan.up_to_date);
+            assert_eq!(plan.steps, 0);
+            assert!(plan.applicable);
+            assert_eq!(plan.error(), None);
+            assert!(plan.locked);
+
+            // Still read-only: the real migration keeps its lock.
+            assert!(is_locked(&env));
+            assert_eq!(schema_version(&env), Some(2));
+        });
+    }
+
+    #[test]
+    fn dry_run_rejects_non_forward_target() {
+        let env = Env::default();
+        let contract_id = soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 2);
+
+            let plan = dry_run(&env, 2, 2, 1);
+
+            assert!(!plan.applicable);
+            assert_eq!(plan.error(), Some(MigrationError::NotForward));
+            assert_eq!(schema_version(&env), Some(2));
+        });
+    }
+
+    #[test]
+    fn dry_run_rejects_out_of_order_current() {
+        let env = Env::default();
+        let contract_id = soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 2);
+
+            // Caller believes it is at 1 but storage says 2.
+            let plan = dry_run(&env, 1, 1, 2);
+
+            assert!(!plan.applicable);
+            assert_eq!(plan.error(), Some(MigrationError::OutOfOrder));
+            assert_eq!(plan.current_version, 2);
+        });
+    }
+
+    #[test]
+    fn dry_run_reports_locked_without_clearing_the_lock() {
+        let env = Env::default();
+        let contract_id = soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 1);
+            begin_migration(&env, 1, 1, 2).expect("begin");
+
+            let plan = dry_run(&env, 1, 1, 2);
+
+            assert!(plan.locked);
+            assert!(!plan.applicable);
+            assert_eq!(plan.error(), Some(MigrationError::MigrationInProgress));
+
+            // The dry-run must not release the lock held by the real migration.
+            assert!(is_locked(&env));
+            assert_eq!(schema_version(&env), Some(1));
+        });
+    }
+
+    #[test]
+    fn dry_run_uses_caller_baseline_for_uninitialized_contract() {
+        let env = Env::default();
+        let contract_id = soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let plan = dry_run(&env, 1, 1, 2);
+
+            assert_eq!(plan.current_version, 1);
+            assert!(plan.applicable);
+            assert_eq!(plan.error(), None);
+
+            // Still uninitialized: the dry-run wrote nothing.
+            assert_eq!(schema_version(&env), None);
+            assert_eq!(migration_history_len(&env), 0);
+        });
+    }
+
+    #[test]
+    fn dry_run_matches_begin_migration_outcome() {
+        let env = Env::default();
+        let contract_id = soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 1);
+
+            let plan = dry_run(&env, 1, 1, 2);
+            assert!(plan.applicable);
+
+            // Applying the same plan must succeed, proving the dry-run is not
+            // stricter or looser than the real path.
+            assert_eq!(begin_migration(&env, 1, 1, 2), Ok(()));
+            complete_migration(&env, 1, 2);
+            assert_eq!(schema_version(&env), Some(2));
+        });
+    }
+
+    #[test]
+    fn dry_run_error_code_round_trips_to_typed_error() {
+        let env = Env::default();
+        let contract_id = soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 2);
+
+            let plan = dry_run(&env, 2, 2, 1);
+
+            // The wire representation is a stable numeric code...
+            assert_eq!(plan.error_code, Some(MigrationError::NotForward.code()));
+            // ...and decodes back to the typed error for callers.
+            assert_eq!(plan.error(), Some(MigrationError::NotForward));
+        });
+    }
+
+    #[test]
+    fn migration_error_code_round_trips_for_every_variant() {
+        for err in [
+            MigrationError::NotForward,
+            MigrationError::OutOfOrder,
+            MigrationError::MigrationInProgress,
+            MigrationError::RollbackNotAllowed,
+            MigrationError::RollbackTooDeep,
+        ] {
+            assert_eq!(MigrationError::from_code(err.code()), Some(err));
+        }
+
+        // Unknown codes decode to `None` instead of panicking.
+        assert_eq!(MigrationError::from_code(0), None);
+        assert_eq!(MigrationError::from_code(99), None);
     }
 }

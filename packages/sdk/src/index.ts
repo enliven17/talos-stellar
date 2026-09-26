@@ -94,12 +94,77 @@ export type {
   TalosEventStreamOptions,
   SeenStore,
 } from "./events.js";
+
+// ── Contract event decoding ───────────────────────────────────────────────────
+
+export {
+  decodeContractEvent,
+  decodeContractEvents,
+  isContractEvent,
+  isContractEventFamily,
+  compareEventCursors,
+  ContractEventError,
+  UnknownContractEventError,
+  MalformedContractEventError,
+  UnsupportedContractVersionError,
+  BUILTIN_EVENT_CATALOG,
+  CATALOG_SPEC_VERSION,
+} from "./contract-events.js";
+export type {
+  ScVal,
+  CatalogFieldDescriptor,
+  CatalogEventDescriptor,
+  ContractEventFamily,
+  EventCatalog,
+  RawContractEvent,
+  EventCursor,
+  DecodedContractEventBase,
+  TalosCrtEvent,
+  TalosCrt2Event,
+  PatUpdEvent,
+  RegUpdEvent,
+  PropCrtEvent,
+  VoteEvent,
+  PropStatEvent,
+  EpCmtEvent,
+  DivClmEvent,
+  DecodedContractEvent,
+  DecodeContractEventOptions,
+  BatchDecodeResult,
+} from "./contract-events.js";
 export {
   FaultType,
   ChaosInjector,
   ChaosInjectedError,
   globalChaosInjector,
+  assertValidFaultConfig,
+  faultEffect,
 } from "./chaos.js";
+export type { FaultConfig, FaultEffect } from "./chaos.js";
+
+// ── Deterministic chaos transport fixtures ────────────────────────────────────
+
+export {
+  CHAOS_SCENARIOS,
+  createSeededRandom,
+  planChaosScenario,
+  replayChaosScenario,
+  buildChaosFixtureBundle,
+  getChaosScenario,
+  assertValidChaosScenario,
+} from "./chaos-fixtures.js";
+export type {
+  ChaosScenarioSpec,
+  ChaosCallOutcome,
+  ChaosCallPlan,
+  ChaosPlan,
+  PlannedFault,
+  ReplayChaosScenarioOptions,
+  ChaosReplayCall,
+  ChaosReplayResult,
+  SerializedChaosScenario,
+  ChaosFixtureBundle,
+} from "./chaos-fixtures.js";
 
 // ── Runtime compatibility matrix ──────────────────────────────────────────────
 
@@ -117,6 +182,22 @@ export type {
   RuntimeMatrixEntry,
   CompatibilityReport,
 } from "./compat.js";
+
+// ── Persistent SeenStore (SQLite-backed) ────────────────────────────────────
+//
+// Node-only (requires node:sqlite ≥22 or better-sqlite3).  Browser consumers
+// should continue using InMemorySeenStore.
+export {
+  SqliteSeenStore,
+  SqliteSeenStoreError,
+  resolveSqliteAdapter,
+} from "./seen-store-sqlite.js";
+export type {
+  SqliteAdapter,
+  SqliteStatement,
+  SqliteSeenStoreOptions,
+  SqliteSeenStoreErrorCode,
+} from "./seen-store-sqlite.js";
 
 // Request signing
 export {
@@ -141,3 +222,13 @@ export type {
   SignerCapabilities,
   StellarKeypairSignerOptions,
 } from "./signing.js";
+
+// ── Generated types provenance ────────────────────────────────────────────────
+export {
+  GENERATED_TYPES_PROVENANCE,
+  GENERATED_TYPES_TOOL,
+  GENERATED_TYPES_TOOL_VERSION,
+  GENERATED_TYPES_SOURCE,
+  GENERATED_TYPES_PACKAGE,
+} from "./provenance.js";
+export type { GeneratedTypesProvenance } from "./provenance.js";

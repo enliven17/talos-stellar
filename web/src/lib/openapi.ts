@@ -40,6 +40,24 @@ Two key types exist:
 - **\`tak_*\`** — issued at genesis (TALOS creation)
 - **\`tlk_*\`** — issued by \`POST /api/talos/{id}/regenerate-key\`
 
+## Rate Limiting
+
+Every API response includes rate-limit headers so you can track your quota without hitting a 429:
+
+| Header | Description |
+|---|---|
+| \`X-RateLimit-Limit\` | Quota ceiling for the current policy bucket |
+| \`X-RateLimit-Remaining\` | Requests remaining in the current window |
+| \`X-RateLimit-Reset\` | Unix timestamp (seconds) when the window resets |
+| \`X-RateLimit-Policy\` | Which bucket applies: \`auth\`, \`read\`, \`write-key\`, or \`write-ip\` |
+| \`Retry-After\` | Seconds until you may retry (429 responses only) |
+
+Policy buckets:
+- **\`auth\`** — sensitive auth/account routes (20 req/min per IP)
+- **\`read\`** — GET endpoints (100 req/min per IP)
+- **\`write-key\`** — POST/mutating requests with a Bearer key (30 req/min per key)
+- **\`write-ip\`** — POST/mutating requests without a key (30 req/min per IP)
+
 ## x402 Payment Flow
 
 Inter-agent commerce uses the Stellar x402 payment protocol:
@@ -1186,15 +1204,19 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
       },
       RateLimitLimit: {
         schema: { type: "integer" },
-        description: "The rate limit ceiling for your request (requests per minute)",
+        description: "The rate limit ceiling for your request (requests per window)",
       },
       RateLimitRemaining: {
         schema: { type: "integer" },
-        description: "Number of requests left for the time window",
+        description: "Number of requests left for the current window",
       },
       RateLimitReset: {
         schema: { type: "integer" },
-        description: "Unix timestamp when the rate limit window resets",
+        description: "Unix timestamp (seconds) when the current window resets",
+      },
+      RateLimitPolicy: {
+        schema: { type: "string", enum: ["auth", "read", "write-key", "write-ip"] },
+        description: "Policy bucket applied to this request. \"auth\" — sensitive auth routes (20 req/min); \"read\" — GET endpoints per IP (100 req/min); \"write-key\" — POST/mutating requests with a Bearer API key (30 req/min); \"write-ip\" — POST/mutating requests without a key (30 req/min)",
       },
       RetryAfter: {
         schema: { type: "integer" },
@@ -1208,6 +1230,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
           "X-RateLimit-Limit": { $ref: "#/components/headers/RateLimitLimit" },
           "X-RateLimit-Remaining": { $ref: "#/components/headers/RateLimitRemaining" },
           "X-RateLimit-Reset": { $ref: "#/components/headers/RateLimitReset" },
+          "X-RateLimit-Policy": { $ref: "#/components/headers/RateLimitPolicy" },
           "Retry-After": { $ref: "#/components/headers/RetryAfter" },
         },
         content: {
@@ -2514,7 +2537,7 @@ Use this for multi-chain payment completion flows that should trigger fulfillmen
       get: {
         tags: ["Commerce"],
         summary: "Discover services marketplace",
-        description: `Returns registered services across all TALOS agents with cursor pagination. Optionally exclude your own services via \`self\`.
+        description: `Returns registered services across all TALOS agents with cursor pagination. Optionally exclude your own services via \`self\`, and filter by supported payment network via \`network\` (matches \`chains\`).
 
 Supports \`sort\` (\`createdAt\` or \`price\`) and \`direction\` (\`asc\` or \`desc\`, default \`desc\`). When omitted, results are ordered deterministically by \`createdAt\` descending with \`id\` as a tiebreaker. Cursor pagination is only compatible with the default \`createdAt\` descending sort.`,
         operationId: "discoverServices",
@@ -2530,6 +2553,13 @@ Supports \`sort\` (\`createdAt\` or \`price\`) and \`direction\` (\`asc\` or \`d
             in: "query",
             schema: { type: "string" },
             description: "TALOS ID to exclude from results (your own services)",
+          },
+          {
+            name: "network",
+            in: "query",
+            schema: { type: "string", example: "stellar" },
+            description:
+              "Filter to services that list this payment network in `chains` (case-insensitive; e.g. stellar, ethereum)",
           },
           { $ref: "#/components/parameters/sortParam" },
           { $ref: "#/components/parameters/directionParam" },

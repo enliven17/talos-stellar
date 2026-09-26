@@ -6,7 +6,7 @@ import pytest
 import respx
 from httpx import Response
 
-from talos_agent.api_client import TalosAPIClient
+from talos_agent.api_client import PaginatedPage, PaginationError, TalosAPIClient
 from talos_agent.config import Settings
 
 
@@ -151,6 +151,156 @@ class TestApprovalFlow:
         result = await api_client.get_approval("test-talos-id", "approval-456")
         assert result is not None
         assert result["status"] == "approved"
+
+
+class TestCursorPagination:
+    """Cursor helpers consume the existing collection endpoint contracts."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_get_approvals_page_preserves_page_metadata(self, api_client: TalosAPIClient):
+        route = respx.get("http://test.local/api/talos/test-talos-id/approvals").mock(
+            return_value=Response(
+                200,
+                json={"approvals": [{"id": "a1"}, {"id": "a2"}], "nextCursor": "cursor-2"},
+            )
+        )
+
+        page = await api_client.get_approvals_page(
+            "test-talos-id", status="pending", page_size=2
+        )
+
+        assert page == PaginatedPage(items=[{"id": "a1"}, {"id": "a2"}], next_cursor="cursor-2")
+        assert route.calls[0].request.url.params == {"status": "pending", "limit": "2"}
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_get_all_approvals_aggregates_pages_in_order(self, api_client: TalosAPIClient):
+        route = respx.get("http://test.local/api/talos/test-talos-id/approvals").mock(
+            side_effect=[
+                Response(200, json={"approvals": [{"id": "a1"}, {"id": "a2"}], "nextCursor": "cursor-2"}),
+                Response(200, json={"approvals": [{"id": "a3"}], "nextCursor": None}),
+            ]
+        )
+
+        approvals = await api_client.get_all_approvals("test-talos-id", page_size=2)
+
+        assert [approval["id"] for approval in approvals] == ["a1", "a2", "a3"]
+        assert len(route.calls) == 2
+        assert route.calls[1].request.url.params == {"limit": "2", "cursor": "cursor-2"}
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_empty_first_page_and_legacy_list_terminate(self, api_client: TalosAPIClient):
+        respx.get("http://test.local/api/talos/test-talos-id/approvals").mock(
+            return_value=Response(200, json={"approvals": [], "nextCursor": None})
+        )
+        assert await api_client.get_approvals("test-talos-id") == []
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_empty_final_page_is_consumed(self, api_client: TalosAPIClient):
+        respx.get("http://test.local/api/talos/test-talos-id/approvals").mock(
+            side_effect=[
+                Response(200, json={"approvals": [{"id": "a1"}], "nextCursor": "cursor-2"}),
+                Response(200, json={"approvals": [], "nextCursor": None}),
+            ]
+        )
+        assert await api_client.get_all_approvals("test-talos-id") == [{"id": "a1"}]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_discover_all_services_traverses_api_data_pages(self, api_client: TalosAPIClient):
+        respx.get("http://test.local/api/services").mock(
+            side_effect=[
+                Response(200, json={"data": [{"talosId": "t1"}], "nextCursor": "cursor-2"}),
+                Response(200, json={"data": [{"talosId": "t2"}], "nextCursor": None}),
+            ]
+        )
+
+        services = await api_client.discover_all_services(category="Marketing", page_size=1)
+
+        assert [service["talosId"] for service in services] == ["t1", "t2"]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_rejects_malformed_or_missing_pagination_metadata(self, api_client: TalosAPIClient):
+        route = respx.get("http://test.local/api/talos/test-talos-id/approvals").mock(
+            side_effect=[
+                Response(200, json={"approvals": [{"id": "a1"}]}),
+                Response(200, json={"approvals": [], "nextCursor": ""}),
+            ]
+        )
+
+        with pytest.raises(PaginationError, match="missing required fields"):
+            await api_client.get_approvals_page("test-talos-id")
+        with pytest.raises(PaginationError, match="invalid next cursor"):
+            await api_client.get_approvals_page("test-talos-id")
+        assert len(route.calls) == 2
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_rejects_repeated_cursor_and_duplicate_records(self, api_client: TalosAPIClient):
+        respx.get("http://test.local/api/talos/test-talos-id/approvals").mock(
+            side_effect=[
+                Response(200, json={"approvals": [{"id": "a1"}], "nextCursor": "cursor-2"}),
+                Response(200, json={"approvals": [{"id": "a1"}], "nextCursor": "cursor-2"}),
+            ]
+        )
+
+        with pytest.raises(PaginationError, match="duplicate item"):
+            await api_client.get_all_approvals("test-talos-id")
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_rejects_repeated_cursor_before_an_unbounded_request(
+        self, api_client: TalosAPIClient
+    ):
+        respx.get("http://test.local/api/talos/test-talos-id/approvals").mock(
+            side_effect=[
+                Response(200, json={"approvals": [{"id": "a1"}], "nextCursor": "cursor-2"}),
+                Response(200, json={"approvals": [{"id": "a2"}], "nextCursor": "cursor-2"}),
+            ]
+        )
+
+        with pytest.raises(PaginationError, match="repeated a cursor"):
+            await api_client.get_all_approvals("test-talos-id")
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_page_count_is_bounded(self, api_client: TalosAPIClient):
+        respx.get("http://test.local/api/talos/test-talos-id/approvals").mock(
+            return_value=Response(
+                200, json={"approvals": [{"id": "a1"}], "nextCursor": "cursor-2"}
+            )
+        )
+
+        with pytest.raises(PaginationError, match="maximum page count"):
+            await api_client.get_all_approvals("test-talos-id", max_pages=1)
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_api_failure_is_explicit_and_non_retryable(self, api_client: TalosAPIClient):
+        route = respx.get("http://test.local/api/talos/test-talos-id/approvals").mock(
+            return_value=Response(400, json={"error": "bad cursor"})
+        )
+
+        with pytest.raises(PaginationError, match="status 400"):
+            await api_client.get_all_approvals("test-talos-id")
+        assert len(route.calls) == 1
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_retryable_page_failure_uses_existing_retry_policy(self, api_client: TalosAPIClient):
+        route = respx.get("http://test.local/api/talos/test-talos-id/approvals").mock(
+            side_effect=[
+                Response(429, json={"error": "rate limited"}),
+                Response(200, json={"approvals": [{"id": "a1"}], "nextCursor": None}),
+            ]
+        )
+
+        assert await api_client.get_all_approvals("test-talos-id") == [{"id": "a1"}]
+        assert len(route.calls) == 2
 
 
 class TestWalletOperations:

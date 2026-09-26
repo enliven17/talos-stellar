@@ -29,6 +29,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=7.0",
     "respx>=0.21",
     "ruff>=0.8",
 ]
@@ -38,6 +39,35 @@ talos-agent = "talos_agent.cli:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+# ─── Coverage enforcement (issue #638) ────────────────────────────────
+# Critical agent modules carry a hard per-module floor via
+# `scripts/check-coverage.py`, which reads the SAME config (single source of
+# truth). Global fail_under stays off: unrelated low-value modules must not
+# gate contributors while critical ones are still enforced per-module.
+[tool.coverage.run]
+source = ["src/talos_agent"]
+branch = true
+omit = [
+    # Re-export surface only.
+    "src/talos_agent/__init__.py",
+    "src/talos_agent/__main__.py",
+    # Thin process entry points; exercised by deployment, not unit tests.
+    "src/talos_agent/cli.py",
+    "src/talos_agent/checkpoint_cli.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+precision = 1
+skip_empty = true
+# Coverage below this anywhere fails `pytest --cov` outright — a global
+# backstop beneath the per-module floors enforced by scripts/check-coverage.py.
+fail_under = 30
+
+[tool.coverage.json]
+output = "coverage.json"
+prettyprint = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
