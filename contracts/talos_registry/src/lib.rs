@@ -235,7 +235,7 @@ const MAX_MIN_DELAY: u64 = 2_592_000; // 30 days in seconds
 /// This constant is embedded in the WASM binary at compile time and is
 /// therefore immutable once deployed; it cannot be altered by any admin
 /// call, storage write, or cross-contract invocation.
-pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 2, 0);
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 3, 0);
 
 // ── Contract ────────────────────────────────────────────────────────
 
@@ -821,6 +821,42 @@ impl TalosRegistry {
         amount * fee_bps as i128 / MAX_PROTOCOL_FEE_BPS as i128
     }
 
+    /// Compute dividend split amounts for a given total `amount` and `Patron`.
+    ///
+    /// Shares are applied as integer percentages (out of 100).  Any remainder
+    /// produced by integer-division truncation is added to `creator_amount`
+    /// so that the three returned values always sum exactly to `amount`.
+    ///
+    /// # Arguments
+    /// * `e`      - Soroban environment (required by the contractimpl ABI)
+    /// * `amount` - Total amount to distribute; must be ≥ 0
+    /// * `patron` - Patron configuration holding the three share percentages
+    ///
+    /// # Returns
+    /// `(creator_amount, investor_amount, treasury_amount)` where
+    /// `creator_amount + investor_amount + treasury_amount == amount`.
+    ///
+    /// # Panics
+    /// Panics with `"Amount must be non-negative"` if `amount < 0`.
+    pub fn compute_dividend_amounts(
+        _e: Env,
+        amount: i128,
+        patron: Patron,
+    ) -> (i128, i128, i128) {
+        if amount < 0 {
+            panic!("Amount must be non-negative");
+        }
+
+        let creator_amount = amount * patron.creator_share as i128 / 100;
+        let investor_amount = amount * patron.investor_share as i128 / 100;
+        let treasury_amount = amount * patron.treasury_share as i128 / 100;
+
+        // Any truncation remainder goes to the creator.
+        let remainder = amount - creator_amount - investor_amount - treasury_amount;
+
+        (creator_amount + remainder, investor_amount, treasury_amount)
+    }
+
     // ── Storage TTL Management ───────────────────────────────────
 
     /// Touch a Talos record to reset its Soroban storage TTL.
@@ -1030,7 +1066,7 @@ mod tests {
     fn version_returns_compile_time_constant() {
         let (env, contract_id) = setup();
         let client = TalosRegistryClient::new(&env, &contract_id);
-        assert_eq!(client.version(), (1u32, 2u32, 0u32));
+        assert_eq!(client.version(), (1u32, 3u32, 0u32));
     }
 
     #[test]
@@ -2174,5 +2210,187 @@ mod tests {
             }])
             .try_propose_admin(&new_admin);
         assert!(res_prop.is_err());
+    }
+
+    // ── compute_dividend_amounts tests ──────────────────────────────────
+
+    /// Build a Patron with the given share triple and freshly generated addresses.
+    fn patron_with_shares(env: &Env, creator_share: u32, investor_share: u32, treasury_share: u32) -> Patron {
+        Patron {
+            creator_share,
+            investor_share,
+            treasury_share,
+            creator_addr: Address::generate(env),
+            investor_addr: Address::generate(env),
+            treasury_addr: Address::generate(env),
+        }
+    }
+
+    /// 60/25/15 split of 100 → each bucket receives its exact integer percentage
+    /// and all three sum back to the original amount.
+    #[test]
+    fn dividend_amounts_sum_to_total() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let p = patron_with_shares(&env, 60, 25, 15);
+
+        let (c, i, t) = client.compute_dividend_amounts(&100, &p);
+
+        assert_eq!(c, 60);
+        assert_eq!(i, 25);
+        assert_eq!(t, 15);
+        assert_eq!(c + i + t, 100);
+    }
+
+    /// With a 34/33/33 split and amount=100 the amounts are exact and still
+    /// sum to 100 — the remainder (100 - 34 - 33 - 33 = 0) is absorbed by
+    /// the creator bucket without any visible change here.
+    /// Using 1/3-ish shares and amount=10 exposes truncation: 10*33/100 = 3,
+    /// so creator gets 10 - 3 - 3 = 4 (the truncation remainder lands there).
+    #[test]
+    fn dividend_amounts_remainder_goes_to_creator() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+
+        // 33/33/33 split of 10 — each raw share = 10*33/100 = 3 (truncates),
+        // total assigned without remainder = 9, so remainder = 1 → creator.
+        let p = patron_with_shares(&env, 33, 33, 33);
+        let (c, i, t) = client.compute_dividend_amounts(&10, &p);
+
+        assert_eq!(i, 3);  // 10 * 33 / 100 = 3
+        assert_eq!(t, 3);  // 10 * 33 / 100 = 3
+        assert_eq!(c, 4);  // gets the 1-unit remainder
+        assert_eq!(c + i + t, 10);
+    }
+
+    /// Zero amount always produces three zero buckets.
+    #[test]
+    fn dividend_amounts_zero_is_zero() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let p = patron_with_shares(&env, 60, 25, 15);
+
+        let (c, i, t) = client.compute_dividend_amounts(&0, &p);
+
+        assert_eq!(c, 0);
+        assert_eq!(i, 0);
+        assert_eq!(t, 0);
+    }
+
+    /// Amount of 1 with a split that gives all shares < 1% each means
+    /// the entire unit lands in the creator bucket.
+    #[test]
+    fn dividend_amounts_single_unit() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        // 50/30/20 — each share < 1 when amount == 1, so all go to creator.
+        let p = patron_with_shares(&env, 50, 30, 20);
+
+        let (c, i, t) = client.compute_dividend_amounts(&1, &p);
+
+        // 1 * 50 / 100 = 0, 1 * 30 / 100 = 0, 1 * 20 / 100 = 0, remainder = 1 → creator
+        assert_eq!(c, 1);
+        assert_eq!(i, 0);
+        assert_eq!(t, 0);
+        assert_eq!(c + i + t, 1);
+    }
+
+    /// Large amount (near i128 mid-range) must not overflow and must still
+    /// sum exactly to the original amount.
+    #[test]
+    fn dividend_amounts_large_amount_no_overflow() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let p = patron_with_shares(&env, 60, 25, 15);
+
+        // 10^18 — representative of a USDC amount in stroops.
+        let amount: i128 = 1_000_000_000_000_000_000;
+        let (c, i, t) = client.compute_dividend_amounts(&amount, &p);
+
+        assert_eq!(c + i + t, amount);
+        assert_eq!(c, 600_000_000_000_000_000);
+        assert_eq!(i, 250_000_000_000_000_000);
+        assert_eq!(t, 150_000_000_000_000_000);
+    }
+
+    /// Negative amount must panic with the expected message.
+    #[test]
+    #[should_panic(expected = "Amount must be non-negative")]
+    fn dividend_amounts_rejects_negative() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let p = patron_with_shares(&env, 60, 25, 15);
+
+        client.compute_dividend_amounts(&-1, &p);
+    }
+
+    /// 100/0/0 split — creator receives the entire amount.
+    #[test]
+    fn dividend_amounts_all_creator_100_0_0() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let p = patron_with_shares(&env, 100, 0, 0);
+        let amount: i128 = 999_999;
+
+        let (c, i, t) = client.compute_dividend_amounts(&amount, &p);
+
+        assert_eq!(c, amount);
+        assert_eq!(i, 0);
+        assert_eq!(t, 0);
+    }
+
+    /// 33/33/34 split (common "even thirds" pattern): with amount=99 each
+    /// raw share is 99*33/100=32 for investor and treasury, and creator
+    /// gets the remainder so the sum is still 99.
+    #[test]
+    fn dividend_amounts_even_thirds_33_33_34() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        // creator=34, investor=33, treasury=33 (total=100)
+        let p = patron_with_shares(&env, 34, 33, 33);
+        let amount: i128 = 99;
+
+        let (c, i, t) = client.compute_dividend_amounts(&amount, &p);
+
+        // 99 * 33 / 100 = 32 (truncated)
+        assert_eq!(i, 32);
+        assert_eq!(t, 32);
+        // creator raw = 99*34/100 = 33, remainder = 99-33-32-32 = 2 → 33+2 = 35
+        assert_eq!(c, 35);
+        assert_eq!(c + i + t, 99);
+    }
+
+    /// Odd prime total amount exercises truncation on non-round numbers.
+    #[test]
+    fn dividend_amounts_odd_prime_total_amount() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let p = patron_with_shares(&env, 60, 25, 15);
+        let amount: i128 = 97; // prime
+
+        let (c, i, t) = client.compute_dividend_amounts(&amount, &p);
+
+        // 97*60/100 = 58, 97*25/100 = 24, 97*15/100 = 14 → sum = 96 → remainder 1 → creator
+        assert_eq!(i, 24);
+        assert_eq!(t, 14);
+        assert_eq!(c, 59); // 58 + 1 remainder
+        assert_eq!(c + i + t, 97);
+    }
+
+    /// With amount=1 and any multi-party split, the single unit goes to the creator.
+    #[test]
+    fn dividend_amounts_one_satoshi_goes_to_creator() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        // Use the default patron helper (60/25/15)
+        let creator = Address::generate(&env);
+        let p = patron(&env, &creator);
+
+        let (c, i, t) = client.compute_dividend_amounts(&1, &p);
+
+        assert_eq!(c, 1);
+        assert_eq!(i, 0);
+        assert_eq!(t, 0);
+        assert_eq!(c + i + t, 1);
     }
 }
