@@ -87,8 +87,48 @@ pub struct MigrationDryRun {
     /// starting exactly at the stored version. An up-to-date plan is
     /// applicable with zero steps.
     pub applicable: bool,
-    /// `None` when `applicable`; otherwise the reason the plan would fail.
-    pub error: Option<MigrationError>,
+    /// `None` when `applicable`; otherwise the numeric code of the
+    /// [`MigrationError`] the real call would return.
+    ///
+    /// The code is stored as a `u32` rather than the enum itself because
+    /// `#[contracterror]` enums are not `#[contracttype]`-compatible values.
+    /// Use [`MigrationDryRun::error`] to read it back as a typed
+    /// [`MigrationError`].
+    pub error_code: Option<u32>,
+}
+
+impl MigrationDryRun {
+    /// The typed reason the plan would fail, or `None` when `applicable`.
+    ///
+    /// Unknown codes (which cannot be produced by this crate) map to `None`
+    /// rather than panicking, so decoding is total and privacy-safe.
+    pub fn error(&self) -> Option<MigrationError> {
+        match self.error_code {
+            Some(code) => MigrationError::from_code(code),
+            None => None,
+        }
+    }
+}
+
+impl MigrationError {
+    /// Decode a numeric discriminant back into a [`MigrationError`].
+    ///
+    /// Returns `None` for codes that do not correspond to a known variant.
+    pub fn from_code(code: u32) -> Option<MigrationError> {
+        match code {
+            1 => Some(MigrationError::NotForward),
+            2 => Some(MigrationError::OutOfOrder),
+            3 => Some(MigrationError::MigrationInProgress),
+            4 => Some(MigrationError::RollbackNotAllowed),
+            5 => Some(MigrationError::RollbackTooDeep),
+            _ => None,
+        }
+    }
+
+    /// The stable numeric discriminant of this error.
+    pub fn code(self) -> u32 {
+        self as u32
+    }
 }
 
 // ── Events ──────────────────────────────────────────────────────────
@@ -229,7 +269,7 @@ pub fn dry_run(
             up_to_date: true,
             locked,
             applicable: true,
-            error: None,
+            error_code: None,
         };
     }
 
@@ -257,7 +297,7 @@ pub fn dry_run(
         up_to_date: false,
         locked,
         applicable: error.is_none(),
-        error,
+        error_code: error.map(MigrationError::code),
     }
 }
 
@@ -826,7 +866,7 @@ mod tests {
             assert!(!plan.up_to_date);
             assert!(!plan.locked);
             assert!(plan.applicable);
-            assert_eq!(plan.error, None);
+            assert_eq!(plan.error(), None);
 
             // Read-only: version, lock, and history are untouched.
             assert_eq!(schema_version(&env), Some(1));
@@ -848,7 +888,7 @@ mod tests {
             assert!(plan.up_to_date);
             assert_eq!(plan.steps, 0);
             assert!(plan.applicable);
-            assert_eq!(plan.error, None);
+            assert_eq!(plan.error(), None);
             assert_eq!(plan.current_version, 2);
             assert_eq!(plan.target_version, 2);
         });
@@ -870,7 +910,7 @@ mod tests {
             assert!(plan.up_to_date);
             assert_eq!(plan.steps, 0);
             assert!(plan.applicable);
-            assert_eq!(plan.error, None);
+            assert_eq!(plan.error(), None);
             assert!(plan.locked);
 
             // Still read-only: the real migration keeps its lock.
@@ -890,7 +930,7 @@ mod tests {
             let plan = dry_run(&env, 2, 2, 1);
 
             assert!(!plan.applicable);
-            assert_eq!(plan.error, Some(MigrationError::NotForward));
+            assert_eq!(plan.error(), Some(MigrationError::NotForward));
             assert_eq!(schema_version(&env), Some(2));
         });
     }
@@ -907,7 +947,7 @@ mod tests {
             let plan = dry_run(&env, 1, 1, 2);
 
             assert!(!plan.applicable);
-            assert_eq!(plan.error, Some(MigrationError::OutOfOrder));
+            assert_eq!(plan.error(), Some(MigrationError::OutOfOrder));
             assert_eq!(plan.current_version, 2);
         });
     }
@@ -925,7 +965,7 @@ mod tests {
 
             assert!(plan.locked);
             assert!(!plan.applicable);
-            assert_eq!(plan.error, Some(MigrationError::MigrationInProgress));
+            assert_eq!(plan.error(), Some(MigrationError::MigrationInProgress));
 
             // The dry-run must not release the lock held by the real migration.
             assert!(is_locked(&env));
@@ -943,7 +983,7 @@ mod tests {
 
             assert_eq!(plan.current_version, 1);
             assert!(plan.applicable);
-            assert_eq!(plan.error, None);
+            assert_eq!(plan.error(), None);
 
             // Still uninitialized: the dry-run wrote nothing.
             assert_eq!(schema_version(&env), None);
@@ -968,5 +1008,39 @@ mod tests {
             complete_migration(&env, 1, 2);
             assert_eq!(schema_version(&env), Some(2));
         });
+    }
+
+    #[test]
+    fn dry_run_error_code_round_trips_to_typed_error() {
+        let env = Env::default();
+        let contract_id = soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 2);
+
+            let plan = dry_run(&env, 2, 2, 1);
+
+            // The wire representation is a stable numeric code...
+            assert_eq!(plan.error_code, Some(MigrationError::NotForward.code()));
+            // ...and decodes back to the typed error for callers.
+            assert_eq!(plan.error(), Some(MigrationError::NotForward));
+        });
+    }
+
+    #[test]
+    fn migration_error_code_round_trips_for_every_variant() {
+        for err in [
+            MigrationError::NotForward,
+            MigrationError::OutOfOrder,
+            MigrationError::MigrationInProgress,
+            MigrationError::RollbackNotAllowed,
+            MigrationError::RollbackTooDeep,
+        ] {
+            assert_eq!(MigrationError::from_code(err.code()), Some(err));
+        }
+
+        // Unknown codes decode to `None` instead of panicking.
+        assert_eq!(MigrationError::from_code(0), None);
+        assert_eq!(MigrationError::from_code(99), None);
     }
 }
