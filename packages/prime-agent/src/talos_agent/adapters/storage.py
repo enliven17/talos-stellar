@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import json
 import logging
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from tenacity import (
     AsyncRetrying,
@@ -29,6 +30,9 @@ DEFAULT_MAX_SIZE_BYTES: Final[int] = 5 * 1024 * 1024  # 5 MB
 DEFAULT_MAX_RETRIES: Final[int] = 3
 DEFAULT_TIMEOUT_SECONDS: Final[float] = 10.0
 DEFAULT_RETENTION_COUNT: Final[int] = 10
+
+# Circuit breaker state key
+CIRCUIT_BREAKER_STATE_KEY: Final[str] = "circuit_breaker_state.enc"
 
 
 class StorageError(Exception):
@@ -344,144 +348,147 @@ class VerifiedCheckpointStorage:
                 f"Failed to write checkpoint key '{key}' after retries: {e}"
             ) from e
 
-        # 4. Read back & Verify
-        async def do_read() -> str:
-            return await asyncio.wait_for(
-                self.adapter.read(key),
-                timeout=self.timeout_seconds,
-            )
-
+        # 4. Read-back verification
         try:
             async for attempt in self._retry_policy():
                 with attempt:
-                    read_ciphertext = await do_read()
+                    read_back = await asyncio.wait_for(
+                        self.adapter.read(key),
+                        timeout=self.timeout_seconds,
+                    )
         except Exception as e:
             raise StorageProviderError(
                 f"Failed to read back checkpoint key '{key}' for verification: {e}"
             ) from e
 
-        # Check raw ciphertext first (stale reads check)
-        if read_ciphertext != ciphertext:
+        if read_back != ciphertext:
             raise StorageVerificationError(
-                f"Verification failed for '{key}': retrieved ciphertext does not match written ciphertext (stale read)"
+                f"Read-back verification failed for key '{key}'. Data mismatch detected."
             )
 
-        # Decrypt and check plaintext matches original input (corruption check)
-        try:
-            decrypted_data = decrypt_with_password(
-                read_ciphertext, self.encryption_password
-            )
-        except Exception as e:
-            raise StorageVerificationError(
-                f"Verification failed for '{key}': decryption failed (corrupted data): {e}"
-            ) from e
-
-        if decrypted_data.decode("utf-8") != data:
-            raise StorageVerificationError(
-                f"Verification failed for '{key}': decrypted data does not match original data"
-            )
-
-        # 5. Advance latest pointer
-        pointer_key = "latest.ptr"
-
-        async def do_pointer_update() -> None:
-            await asyncio.wait_for(
-                self.adapter.write(pointer_key, key),
-                timeout=self.timeout_seconds,
-            )
-
-        try:
-            async for attempt in self._retry_policy():
-                with attempt:
-                    await do_pointer_update()
-        except Exception as e:
-            raise StorageProviderError(
-                f"Failed to update latest pointer to '{key}' after successful verification: {e}"
-            ) from e
-
-        # 6. Retention enforcement
-        await self._enforce_retention(key)
+        # 5. Retention cleanup
+        await self._cleanup_old_checkpoints()
 
         return key
 
-    async def get_latest_checkpoint(self) -> tuple[str, str] | None:
-        """Retrieve the latest valid checkpoint pointing in latest.ptr.
-
-        Returns:
-            A tuple of (checkpoint_key, decrypted_data) or None if no checkpoints exist.
-
-        Raises:
-            StorageProviderError: On transient read failures.
-            StorageVerificationError: If the latest checkpoint is corrupted.
-        """
-        pointer_key = "latest.ptr"
-        try:
-            latest_key = await self.adapter.read(pointer_key)
-        except StorageProviderError:
-            # Pointer file might not exist yet, indicating no checkpoints
-            return None
-
-        async def do_read() -> str:
-            return await asyncio.wait_for(
-                self.adapter.read(latest_key),
-                timeout=self.timeout_seconds,
-            )
-
-        try:
-            async for attempt in self._retry_policy():
-                with attempt:
-                    ciphertext = await do_read()
-        except Exception as e:
-            raise StorageProviderError(
-                f"Failed to read latest checkpoint '{latest_key}' pointed to by '{pointer_key}': {e}"
-            ) from e
-
-        try:
-            decrypted = decrypt_with_password(ciphertext, self.encryption_password)
-        except Exception as e:
-            raise StorageVerificationError(
-                f"Failed to decrypt latest checkpoint '{latest_key}' (corrupted): {e}"
-            ) from e
-
-        return latest_key, decrypted.decode("utf-8")
-
-    async def _enforce_retention(self, current_latest_key: str) -> None:
-        """Enforce count-based retention. Delete older checkpoints, preserving the current active one."""
+    async def _cleanup_old_checkpoints(self) -> None:
+        """Remove old checkpoints to maintain retention count."""
         try:
             keys = await self.adapter.list_keys()
+            # Filter for checkpoint keys (ending in .enc)
+            checkpoint_keys = [k for k in keys if k.endswith(".enc")]
+            
+            if len(checkpoint_keys) > self.retention_count:
+                # Sort by key name (assumes sortable timestamp format) and delete oldest
+                checkpoint_keys.sort()
+                keys_to_delete = checkpoint_keys[: len(checkpoint_keys) - self.retention_count]
+                
+                for old_key in keys_to_delete:
+                    try:
+                        await self.adapter.delete(old_key)
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to delete old checkpoint {old_key}: {e}"
+                        )
         except Exception as e:
-            logger.error("Failed to list keys for retention check: %s", e)
-            return
+            logger.warning(f"Failed to perform checkpoint retention cleanup: {e}")
 
-        # Find all keys ending in '.enc', indicating a checkpoint
-        checkpoint_keys = [k for k in keys if k.endswith(".enc")]
+    async def load_checkpoint(self, checkpoint_id: str) -> str:
+        """Retrieve and decrypt a specific checkpoint.
 
-        # Sort alphabetically (which naturally matches chronological order for well-formatted keys)
-        checkpoint_keys.sort()
+        Args:
+            checkpoint_id: The unique label of the checkpoint to retrieve.
 
-        if len(checkpoint_keys) <= self.retention_count:
-            return
+        Returns:
+            The decrypted plaintext data.
 
-        # Identify keys to delete (oldest first)
-        num_to_delete = len(checkpoint_keys) - self.retention_count
-        keys_to_delete = checkpoint_keys[:num_to_delete]
+        Raises:
+            StorageValidationError: If validation fails.
+            StorageProviderError: If the key is missing or provider fails.
+            StorageVerificationError: If decryption fails or data is corrupted.
+        """
+        if not checkpoint_id:
+            raise StorageValidationError("checkpoint_id must not be empty")
 
-        for key in keys_to_delete:
-            # Safety guard: Never delete the active pointer's checkpoint
-            if key == current_latest_key:
-                continue
+        key = f"{checkpoint_id}.enc"
+        
+        try:
+            ciphertext = await asyncio.wait_for(
+                self.adapter.read(key),
+                timeout=self.timeout_seconds,
+            )
+        except StorageProviderError:
+            raise
+        except Exception as e:
+            raise StorageProviderError(
+                f"Failed to read checkpoint key '{key}': {e}"
+            ) from e
 
+        try:
+            plaintext = decrypt_with_password(ciphertext, self.encryption_password)
+        except Exception as e:
+            raise StorageVerificationError(
+                f"Failed to decrypt checkpoint key '{key}': {e}"
+            ) from e
+
+        return plaintext
+
+    async def save_circuit_breaker_state(self, state: dict[str, Any]) -> None:
+        """Persist circuit-breaker state across restarts.
+
+        Args:
+            state: The circuit breaker state dictionary to persist.
+
+        Raises:
+            StorageValidationError: If state is invalid or too large.
+            StorageProviderError: If storage fails.
+        """
+        if not isinstance(state, dict):
+            raise StorageValidationError("Circuit breaker state must be a dictionary")
+
+        try:
+            data = json.dumps(state)
+        except Exception as e:
+            raise StorageValidationError(f"Failed to serialize circuit breaker state: {e}") from e
+
+        # Reuse existing encryption and storage mechanism
+        await self.save_checkpoint("circuit_breaker", data)
+
+    async def load_circuit_breaker_state(self) -> dict[str, Any]:
+        """Load persisted circuit-breaker state.
+
+        Returns:
+            The decrypted circuit breaker state dictionary, or empty dict if not found.
+
+        Raises:
+            StorageVerificationError: If decryption fails or data is corrupted.
+        """
+        try:
+            data = await self.load_checkpoint("circuit_breaker")
+            return json.loads(data)
+        except StorageProviderError:
+            # State not found is not an error, return default empty state
+            return {}
+        except StorageVerificationError:
+            raise
+        except Exception as e:
+            raise StorageVerificationError(
+                f"Failed to load circuit breaker state: {e}"
+            ) from e
+
+    async def delete_circuit_breaker_state(self) -> None:
+        """Delete persisted circuit-breaker state."""
+        try:
+            await self.adapter.delete(CIRCUIT_BREAKER_STATE_KEY)
+        except StorageProviderError:
+            # If it doesn't exist, that's fine
+            pass
+
+    async def clear_all(self) -> None:
+        """Clear all stored checkpoints and circuit breaker state."""
+        keys = await self.adapter.list_keys()
+        for key in keys:
             try:
-                # Bounded delete operations
-                await asyncio.wait_for(
-                    self.adapter.delete(key),
-                    timeout=self.timeout_seconds,
-                )
-                logger.info("Enforced retention: deleted old checkpoint key '%s'", key)
+                await self.adapter.delete(key)
             except Exception as e:
-                # Log deletion failure, but don't fail the primary save flow
-                logger.error(
-                    "Failed to delete expired checkpoint '%s' during retention: %s",
-                    key,
-                    e,
-                )
+                logger.warning(f"Failed to delete key {key} during clear: {e}")

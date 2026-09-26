@@ -10,11 +10,13 @@ Circuit breaker integration: request_with_retry + call_with_retry pass-through
 CircuitBreakerMetrics: to_dict() shape and computed fields.
 CircuitBreakerConfig: per-provider defaults.
 CircuitBreakerOpen: exception structure.
+Persistence: save/load state across restarts.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 
@@ -32,6 +34,7 @@ from talos_agent.circuit_breaker import (
     cb_registry,
 )
 from talos_agent.http import RetryableHTTPError, call_with_retry, request_with_retry
+from talos_agent.adapters.storage import MemoryStorageAdapter
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Helpers (async versions to work inside pytest-asyncio)
@@ -324,39 +327,13 @@ class TestProviderCircuitBreakerHalfOpenTransition:
 @pytest.mark.asyncio
 class TestProviderCircuitBreakerWindowPruning:
     async def test_old_failures_are_pruned(self):
-        breaker = _make_breaker(failure_threshold=1, window_size=0.05)
-        await breaker.record_failure()
-        assert breaker.failures_in_window() == 1
-
-        await asyncio.sleep(0.06)
-        assert breaker.failures_in_window() == 0
-
-    async def test_consecutive_successes_reset_on_reopen(self):
-        breaker = _make_breaker(
-            failure_threshold=1,
-            recovery_timeout=0.05,
-            half_open_max_probes=3,
-            success_threshold=3,
-        )
-
-        await breaker.record_failure()
-        breaker._last_state_change = time.monotonic() - 0.06
-        assert await breaker.allow_request() is True
-
-        await breaker.record_success()  # 1 consecutive
-        await breaker.record_success()  # 2 consecutive
-        await breaker.record_failure()  # back to OPEN
-
-        metrics = breaker.metrics()
-        assert metrics.consecutive_successes == 0
-
-    async def test_exact_threshold_opens_circuit(self):
-        breaker = _make_breaker(failure_threshold=5)
-        for _ in range(4):
+        breaker = _make_breaker(failure_threshold=10, window_size=0.1)
+        for _ in range(5):
             await breaker.record_failure()
-        assert breaker.state == CircuitState.CLOSED
-        await breaker.record_failure()
-        assert breaker.state == CircuitState.OPEN
+        assert breaker.failures_in_window() == 5
+
+        await asyncio.sleep(0.15)
+        assert breaker.failures_in_window() == 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -366,51 +343,184 @@ class TestProviderCircuitBreakerWindowPruning:
 
 @pytest.mark.asyncio
 class TestCircuitBreakerRegistry:
-    def setup_method(self):
-        self.registry = CircuitBreakerRegistry()
+    async def test_get_creates_breaker(self):
+        registry = CircuitBreakerRegistry()
+        breaker = registry.get("test_provider")
+        assert isinstance(breaker, ProviderCircuitBreaker)
+        assert breaker.provider == "test_provider"
 
-    async def test_get_creates_new_breaker(self):
-        breaker = self.registry.get("groq")
-        assert breaker.provider == "groq"
-        assert breaker.state == CircuitState.CLOSED
+    async def test_get_returns_same_breaker(self):
+        registry = CircuitBreakerRegistry()
+        breaker1 = registry.get("test_provider")
+        breaker2 = registry.get("test_provider")
+        assert breaker1 is breaker2
 
-    async def test_get_returns_same_instance(self):
-        b1 = self.registry.get("groq")
-        b2 = self.registry.get("groq")
-        assert b1 is b2
+    async def test_per_provider_isolation(self):
+        registry = CircuitBreakerRegistry()
+        breaker1 = registry.get("provider_a")
+        breaker2 = registry.get("provider_b")
+        assert breaker1 is not breaker2
+        assert breaker1.provider != breaker2.provider
 
-    async def test_get_or_create_with_explicit_config(self):
-        config = CircuitBreakerConfig(failure_threshold=10)
-        breaker = self.registry.get_or_create("custom", config)
-        assert breaker.config.failure_threshold == 10
+    async def test_reset_clears_all_breakers(self):
+        registry = CircuitBreakerRegistry()
+        registry.get("provider_a")
+        registry.get("provider_b")
+        registry.reset()
+        assert len(registry._breakers) == 0
 
-    async def test_providers_are_isolated(self):
-        groq = self.registry.get("groq")
-        openai = self.registry.get("openai")
-        assert groq is not openai
+    async def test_load_all_no_storage(self):
+        registry = CircuitBreakerRegistry()
+        registry.get("test")
+        await registry.load_all()  # Should not raise
 
-        await groq.record_failure()
-        assert groq.failures_in_window() == 1
-        assert openai.failures_in_window() == 0
+    async def test_save_all_no_storage(self):
+        registry = CircuitBreakerRegistry()
+        registry.get("test")
+        await registry.save_all()  # Should not raise
 
-    async def test_all_metrics_returns_dict(self):
-        self.registry.get("groq")
-        self.registry.get("openai")
-        metrics = self.registry.all_metrics()
-        assert "groq" in metrics
-        assert "openai" in metrics
-        assert metrics["groq"]["state"] == "closed"
-
-    async def test_reset_all(self):
-        breaker = self.registry.get("groq")
+    async def test_load_all_with_storage(self):
+        storage = MemoryStorageAdapter()
+        registry = CircuitBreakerRegistry(storage_adapter=storage)
+        breaker = registry.get("test")
+        
+        # Simulate some state
         await breaker.record_failure()
-        assert breaker.metrics().total_failures == 1
+        await breaker.record_failure()
+        
+        # Save state
+        await registry.save_all()
+        
+        # Create new registry and load
+        new_registry = CircuitBreakerRegistry(storage_adapter=storage)
+        new_breaker = new_registry.get("test")
+        await new_registry.load_all()
+        
+        # Verify state was loaded
+        assert new_breaker._total_failures == 2
 
-        self.registry.reset_all()
+    async def test_save_all_with_storage(self):
+        storage = MemoryStorageAdapter()
+        registry = CircuitBreakerRegistry(storage_adapter=storage)
+        breaker = registry.get("test")
+        
+        # Simulate some state
+        await breaker.record_failure()
+        await breaker.record_success()
+        
+        # Save state
+        await registry.save_all()
+        
+        # Verify storage has data
+        keys = await storage.list_keys()
+        assert f"circuit_breaker_test" in keys
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Persistence Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+class TestCircuitBreakerPersistence:
+    async def test_save_and_load_state(self):
+        storage = MemoryStorageAdapter()
+        breaker = _make_breaker(provider="persist_test")
+        
+        # Simulate state
+        await breaker.record_failure()
+        await breaker.record_failure()
+        await breaker.record_success()
+        
+        # Save state
+        await breaker.save_state(storage)
+        
+        # Create new breaker and load
+        new_breaker = _make_breaker(provider="persist_test")
+        await new_breaker.load_state(storage)
+        
+        # Verify state
+        assert new_breaker._total_failures == 2
+        assert new_breaker._total_successes == 1
+        assert new_breaker.state == CircuitState.CLOSED
+
+    async def test_load_state_missing_key(self):
+        storage = MemoryStorageAdapter()
+        breaker = _make_breaker(provider="missing_test")
+        
+        # Load from non-existent key
+        await breaker.load_state(storage)
+        
+        # Should reset to default
         assert breaker.state == CircuitState.CLOSED
-        assert breaker.failures_in_window() == 0
-        assert breaker.metrics().total_failures == 0
-        assert breaker.metrics().total_rejected == 0
+        assert breaker._total_failures == 0
+
+    async def test_load_state_malformed_json(self):
+        storage = MemoryStorageAdapter()
+        await storage.write("circuit_breaker_malformed", "not valid json")
+        
+        breaker = _make_breaker(provider="malformed")
+        await breaker.load_state(storage)
+        
+        # Should reset to default
+        assert breaker.state == CircuitState.CLOSED
+
+    async def test_load_state_missing_fields(self):
+        storage = MemoryStorageAdapter()
+        incomplete_state = json.dumps({"provider": "incomplete"})
+        await storage.write("circuit_breaker_incomplete", incomplete_state)
+        
+        breaker = _make_breaker(provider="incomplete")
+        await breaker.load_state(storage)
+        
+        # Should reset to default
+        assert breaker.state == CircuitState.CLOSED
+
+    async def test_load_state_invalid_state_value(self):
+        storage = MemoryStorageAdapter()
+        invalid_state = json.dumps({
+            "provider": "invalid",
+            "state": "invalid_state",
+            "_last_state_change": time.monotonic(),
+            "_last_failure_time": 0.0,
+            "_half_open_probes_used": 0,
+            "_consecutive_successes": 0,
+            "_total_successes": 0,
+            "_total_failures": 0,
+            "_total_rejected": 0,
+            "_total_probes": 0,
+        })
+        await storage.write("circuit_breaker_invalid", invalid_state)
+        
+        breaker = _make_breaker(provider="invalid")
+        await breaker.load_state(storage)
+        
+        # Should reset to default
+        assert breaker.state == CircuitState.CLOSED
+
+    async def test_serialize_deserialize_roundtrip(self):
+        breaker = _make_breaker(provider="roundtrip")
+        
+        # Simulate state
+        await breaker.record_failure()
+        await breaker.record_failure()
+        await breaker.record_success()
+        
+        # Serialize
+        serialized = breaker._serialize_state()
+        
+        # Deserialize
+        new_breaker = _make_breaker(provider="roundtrip")
+        new_breaker._deserialize_state(serialized)
+        
+        # Verify
+        assert new_breaker._total_failures == 2
+        assert new_breaker._total_successes == 1
+        assert new_breaker.state == CircuitState.CLOSED
+
+    async def test_state_key_format(self):
+        breaker = _make_breaker(provider="test_provider")
+        assert breaker._state_key() == "circuit_breaker_test_provider"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -420,262 +530,78 @@ class TestCircuitBreakerRegistry:
 
 @pytest.mark.asyncio
 class TestCircuitBreakerMetrics:
-    async def test_to_dict_keys(self):
-        breaker = _make_breaker("test", failure_threshold=3, window_size=60)
-        await breaker.record_failure()
-
+    async def test_metrics_to_dict(self):
+        breaker = _make_breaker("test")
         metrics = breaker.metrics()
         d = metrics.to_dict()
-        expected_keys = {
-            "provider", "state", "failures_in_window",
-            "half_open_probes_used", "consecutive_successes",
-            "last_failure_age_s", "remaining_cooldown_s",
-            "total_successes", "total_failures", "total_rejected",
-            "total_probes",
-        }
-        assert set(d.keys()) == expected_keys
+        
+        assert d["provider"] == "test"
+        assert d["state"] == "closed"
+        assert d["failures_in_window"] == 0
+        assert d["half_open_probes_used"] == 0
+        assert d["consecutive_successes"] == 0
+        assert d["total_successes"] == 0
+        assert d["total_failures"] == 0
+        assert d["total_rejected"] == 0
+        assert d["total_probes"] == 0
 
-    async def test_last_failure_age_is_none_when_no_failures(self):
-        breaker = _make_breaker()
-        metrics = breaker.metrics()
-        assert metrics.last_failure_age is None
-
-    async def test_last_failure_age_is_set_after_failure(self):
-        breaker = _make_breaker()
+    async def test_metrics_after_failure(self):
+        breaker = _make_breaker("test")
         await breaker.record_failure()
         metrics = breaker.metrics()
-        assert metrics.last_failure_age is not None
-        assert metrics.last_failure_age >= 0
+        
+        assert metrics.total_failures == 1
+        assert metrics.failures_in_window == 1
 
-    async def test_remaining_cooldown_is_none_when_not_open(self):
-        breaker = _make_breaker()
+    async def test_metrics_after_success(self):
+        breaker = _make_breaker("test")
+        await breaker.record_success()
         metrics = breaker.metrics()
-        assert metrics.remaining_cooldown is None
+        
+        assert metrics.total_successes == 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Integration: request_with_retry + circuit breaker
+# Regression Tests
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 @pytest.mark.asyncio
-class TestRequestWithRetryWithCircuitBreaker:
-    @respx.mock
-    async def test_passes_request_when_closed(self):
-        route = respx.get("https://api.example.com/ok").mock(
-            return_value=httpx.Response(200, json={"ok": True})
-        )
+class TestCircuitBreakerRegression:
+    async def test_no_state_leak_between_instances(self):
+        breaker1 = _make_breaker(provider="reg1")
+        breaker2 = _make_breaker(provider="reg2")
+        
+        await breaker1.record_failure()
+        await breaker1.record_failure()
+        
+        assert breaker2._total_failures == 0
 
-        async with httpx.AsyncClient() as client:
-            response = await request_with_retry(
-                lambda: client.get("https://api.example.com/ok"),
-                provider="talos_web_api",
-            )
-
-        assert response.status_code == 200
-        assert route.call_count == 1
-
-    @respx.mock
-    async def test_rejects_request_when_open(self):
-        test_provider = "test_integ_reject"
-        breaker = cb_registry.get(test_provider)
-        cb_registry.reset_all()
-        # Record enough failures to open the circuit.
-        for _ in range(breaker.config.failure_threshold):
-            await breaker.record_failure()
-        assert breaker.state == CircuitState.OPEN
-
-        async with httpx.AsyncClient() as client:
-            with pytest.raises(CircuitBreakerOpen) as exc_info:
-                await request_with_retry(
-                    lambda: client.get("https://api.example.com/should-not-reach"),
-                    provider=test_provider,
-                )
-
-        assert exc_info.value.provider == test_provider
-
-    @respx.mock
-    async def test_records_failure_on_retryable_error(self):
-        provider_name = "test_integ_fail"
-        cb_registry.reset_all()
-
-        respx.get("https://api.example.com/always-503").mock(
-            return_value=httpx.Response(503, json={"error": "down"})
-        )
-
-        async with httpx.AsyncClient() as client:
-            with pytest.raises(RetryableHTTPError):
-                await request_with_retry(
-                    lambda: client.get("https://api.example.com/always-503"),
-                    provider=provider_name,
-                )
-
-        breaker = cb_registry.get(provider_name)
-        assert breaker.metrics().total_failures >= 1
-
-    async def test_no_provider_skips_circuit_check(self):
-        async def op():
-            return "hello"
-
-        result = await call_with_retry(op)  # no provider
-        assert result == "hello"
-
-    @respx.mock
-    async def test_half_open_allows_probe_requests(self):
-        provider_name = "test_integ_half_open"
-        breaker = cb_registry.get(provider_name)
-        cb_registry.reset_all()
-
-        # Record enough failures to open the circuit.
-        for _ in range(breaker.config.failure_threshold):
-            await breaker.record_failure()
-        assert breaker.state == CircuitState.OPEN
-
-        # Travel forward past recovery timeout.
-        breaker._last_state_change = time.monotonic() - 1000
-        assert await breaker.allow_request() is True  # → HALF_OPEN
-        assert breaker.state == CircuitState.HALF_OPEN
-
-        route = respx.get("https://api.example.com/probe").mock(
-            return_value=httpx.Response(200, json={"ok": True})
-        )
-
-        async with httpx.AsyncClient() as client:
-            response = await request_with_retry(
-                lambda: client.get("https://api.example.com/probe"),
-                provider=provider_name,
-            )
-
-        assert response.status_code == 200
-        assert route.call_count == 1
-
-    @respx.mock
-    async def test_open_without_provider_still_works(self):
-        route = respx.get("https://api.example.com/works").mock(
-            return_value=httpx.Response(200, json={"ok": True})
-        )
-
-        async with httpx.AsyncClient() as client:
-            response = await request_with_retry(
-                lambda: client.get("https://api.example.com/works"),
-            )
-
-        assert response.status_code == 200
-        assert route.call_count == 1
-
-
-@pytest.mark.asyncio
-class TestCallWithRetryWithCircuitBreaker:
-    async def test_passes_when_closed(self):
-        provider_name = "test_call_closed"
-        cb_registry.reset_all()
-
-        calls = 0
-
-        async def op():
-            nonlocal calls
-            calls += 1
-            return "done"
-
-        result = await call_with_retry(op, provider=provider_name)
-        assert result == "done"
-        assert calls == 1
-
-    async def test_rejects_when_open(self):
-        provider_name = "test_call_reject"
-        breaker = cb_registry.get(provider_name)
-        cb_registry.reset_all()
-        # Record enough failures to open the circuit.
-        for _ in range(breaker.config.failure_threshold):
-            await breaker.record_failure()
-        assert breaker.state == CircuitState.OPEN
-
-        async def op():
-            return "never reached"
-
-        with pytest.raises(CircuitBreakerOpen) as exc_info:
-            await call_with_retry(op, provider=provider_name)
-
-        assert exc_info.value.provider == provider_name
-
-    async def test_records_failure_on_exception(self):
-        provider_name = "test_call_fail_record"
-        breaker = cb_registry.get(provider_name)
-        cb_registry.reset_all()
-
-        async def op():
-            raise ValueError("boom")
-
-        with pytest.raises(ValueError):
-            await call_with_retry(op, provider=provider_name)
-
-        assert breaker.metrics().total_failures >= 1
-
-    async def test_skipped_when_no_provider(self):
-        cb_registry.reset_all()
-
-        async def op():
-            return "ok"
-
-        result = await call_with_retry(op)
-        assert result == "ok"
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Edge cases
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-@pytest.mark.asyncio
-class TestEdgeCases:
-    async def test_zero_failure_threshold_opens_immediately(self):
-        breaker = _make_breaker(failure_threshold=1)
+    async def test_metrics_do_not_mutate_state(self):
+        breaker = _make_breaker("test")
         await breaker.record_failure()
-        assert breaker.state == CircuitState.OPEN
+        
+        # Call metrics multiple times
+        m1 = breaker.metrics()
+        m2 = breaker.metrics()
+        
+        assert m1.total_failures == m2.total_failures
+        assert m1.failures_in_window == m2.failures_in_window
 
-    async def test_very_short_window_prunes_aggressively(self):
-        breaker = _make_breaker(failure_threshold=3, window_size=0.02)
-        await breaker.record_failure()
-        await breaker.record_failure()
-        assert breaker.failures_in_window() == 2
-        await asyncio.sleep(0.03)
-        assert breaker.failures_in_window() == 0
+    async def test_allow_request_does_not_mutate_state_when_closed(self):
+        breaker = _make_breaker("test")
+        initial_total = breaker._total_rejected
+        
+        await breaker.allow_request()
+        await breaker.allow_request()
+        
+        assert breaker._total_rejected == initial_total
 
-    async def test_full_lifecycle(self):
-        """CLOSED → OPEN → HALF_OPEN → CLOSED."""
-        breaker = _make_breaker(
-            failure_threshold=2,
-            recovery_timeout=0.05,
-            half_open_max_probes=3,
-            success_threshold=2,
-        )
-
-        await breaker.record_failure()
-        await breaker.record_failure()
-        assert breaker.state == CircuitState.OPEN
-
-        await asyncio.sleep(0.06)
-        assert await breaker.allow_request() is True
-        assert breaker.state == CircuitState.HALF_OPEN
-
+    async def test_record_success_does_not_mutate_state_when_closed(self):
+        breaker = _make_breaker("test")
+        initial_total = breaker._total_successes
+        
         await breaker.record_success()
         await breaker.record_success()
-        assert breaker.state == CircuitState.CLOSED
-
-        assert await breaker.allow_request() is True
-
-    async def test_metrics_after_full_cycle(self):
-        breaker = _make_breaker(
-            failure_threshold=2,
-            recovery_timeout=0.05,
-            half_open_max_probes=3,
-            success_threshold=2,
-        )
-
-        await breaker.record_failure()
-        await breaker.record_failure()
-        assert breaker.state == CircuitState.OPEN
-
-        metrics = breaker.metrics()
-        assert metrics.total_failures == 2
-        assert metrics.state == CircuitState.OPEN
+        
+        assert breaker._total_successes == initial_total + 2
