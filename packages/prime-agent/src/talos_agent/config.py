@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from decimal import Decimal
 from pathlib import Path
 
@@ -12,6 +13,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from talos_agent.circuit_breaker import CircuitBreakerConfig
 
 APP_DIR = Path.home() / ".talos-agent"
+
+_CONFIG_SECRET_FIELDS = re.compile(
+    r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|secret|password|private[_-]?key|seed|mnemonic|signature|payment)"
+)
+_CONFIG_SECRET_VALUE = re.compile(r"(?i)(input_value\s*=\s*)(['\"])(.*?)(\2)")
+
+
+def safe_config_error(error: BaseException) -> str:
+    """Return a useful configuration error without exposing secret values."""
+    text = str(error)
+    if _CONFIG_SECRET_FIELDS.search(text):
+        text = _CONFIG_SECRET_VALUE.sub(r"\1'[REDACTED]'", text)
+    return text or "configuration could not be loaded"
 
 
 def _json_config_source() -> dict:
@@ -101,6 +115,29 @@ class Settings(BaseSettings):
         "When enabled, the UsageTracker records token counts, costs, and "
         "checks budgets before allowing further calls.",
     )
+
+        # Backup retention policy (Issue #543) — disabled by default, backward compatible
+    backup_retention_enabled: bool = Field(
+        default=False,
+        description="Prune old local backup artifacts after each successful backup, "
+        "according to backup_retention_max_count / backup_retention_max_age_days. "
+        "When disabled (default), backups accumulate forever (legacy behavior).",
+    )
+    backup_retention_max_count: int = Field(
+        default=10,
+        ge=0,
+        le=100000,
+        description="Maximum number of backup artifacts to keep per agent scope. "
+        "0 means unlimited (age-based pruning only, if enabled).",
+    )
+    backup_retention_max_age_days: int = Field(
+        default=30,
+        ge=0,
+        le=36500,
+        description="Maximum age in days of a backup artifact before it is eligible "
+        "for pruning. 0 means unlimited (count-based pruning only, if enabled).",
+    )
+
 
     # X (Twitter)
     x_username: str = ""

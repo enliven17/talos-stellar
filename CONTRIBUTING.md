@@ -731,6 +731,19 @@ see [`RELEASES.md`](./RELEASES.md). You don't need to do anything for this beyon
 [Conventional Commits](https://www.conventionalcommits.org/) subjects (`feat: ...`, `fix: ...`,
 etc.) in your PRs; version bumps are computed from those.
 
+Every PR title is automatically checked by the
+[`Release Checks`](.github/workflows/release-checks.yml) CI workflow. To
+validate your PR title locally before pushing:
+
+```bash
+PR_TITLE="feat(sdk): add payments resource" \
+  node scripts/release/check-release-note.mjs
+```
+
+The check fails (exit 1) when the title does not follow Conventional Commits
+format. Rename the PR and re-push to fix it. See [`RELEASES.md`](./RELEASES.md)
+for the full format reference and local reproduction steps.
+
 ## Issue and PR Templates
 
 Use the templates already included in the repo when filing new work:

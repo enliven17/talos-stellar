@@ -97,6 +97,9 @@ export interface ParsedSignature {
   signatures: Array<{ version: number; hex: string }>;
 }
 
+/** Matches only a well-formed hex string: no whitespace, sign, or `0x` prefix. */
+const HEX_PATTERN = /^[0-9a-fA-F]+$/;
+
 function payloadToString(payload: string | Uint8Array): string {
   if (typeof payload === "string") return payload;
   return new TextDecoder().decode(payload);
@@ -234,15 +237,24 @@ export class TalosWebhook {
   }
 
   /**
-   * Helper to decode hex string to Uint8Array.
+   * Helper to decode a hex string to a `Uint8Array`.
+   *
+   * Strict by design: a signed payload has exactly one valid byte-level
+   * decoding, so any input that is not itself an unambiguous hex encoding
+   * (even length, `[0-9a-fA-F]` only) is rejected outright rather than
+   * partially parsed. `parseInt` is deliberately not used to convert each
+   * byte pair because it tolerates leading whitespace, `+`/`-` signs, and
+   * `0x`-prefixed substrings, and it stops at the first invalid character
+   * instead of failing — any of which would let distinct, non-canonical
+   * header strings silently decode to bytes that shouldn't be treated as a
+   * valid signature.
    */
   static hexToBuf(hex: string): Uint8Array | null {
-    if (hex.length % 2 !== 0) return null;
+    if (hex.length === 0 || hex.length % 2 !== 0) return null;
+    if (!HEX_PATTERN.test(hex)) return null;
     const arr = new Uint8Array(hex.length / 2);
     for (let i = 0; i < hex.length; i += 2) {
-      const byte = parseInt(hex.substring(i, i + 2), 16);
-      if (Number.isNaN(byte)) return null;
-      arr[i / 2] = byte;
+      arr[i / 2] = parseInt(hex.substring(i, i + 2), 16);
     }
     return arr;
   }

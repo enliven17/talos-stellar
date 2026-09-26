@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsCommerceServices } from "@/db/schema";
 import { and, eq, gte, ilike, lt, lte, ne, or, type SQL, type SQLWrapper } from "drizzle-orm";
+import { and, arrayContains, eq, ilike, lt, ne, or, type SQL, type SQLWrapper } from "drizzle-orm";
 import { parseLimit } from "@/lib/parse-limit";
 import {
   buildMarketplaceOrderBy,
@@ -63,11 +64,51 @@ export function decodeServiceCursor(raw: string | null): ServiceCursor | null {
   }
 }
 
+
+/** Normalize / validate `network` query param (supported payment chain). */
+export function parseServiceNetwork(
+  raw: string | null,
+): { ok: true; network: string | null } | { ok: false; response: Response } {
+  if (raw === null) {
+    return { ok: true, network: null };
+  }
+
+  const network = raw.trim().toLowerCase();
+  if (network.length === 0) {
+    return {
+      ok: false,
+      response: Response.json(
+        { error: "network must be a non-empty payment network identifier" },
+        { status: 400 },
+      ),
+    };
+  }
+
+  // Reject obviously malformed values (whitespace already trimmed; keep identifiers short).
+  if (network.length > 64 || !/^[a-z0-9][a-z0-9_-]*$/.test(network)) {
+    return {
+      ok: false,
+      response: Response.json(
+        {
+          error:
+            "network must be a lowercase alphanumeric payment network id (e.g. stellar, ethereum)",
+        },
+        { status: 400 },
+      ),
+    };
+  }
+
+  return { ok: true, network };
+}
+
 async function handleGet(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const category = searchParams.get("category");
     const selfId = searchParams.get("self");
+    const parsedNetwork = parseServiceNetwork(searchParams.get("network"));
+    if (!parsedNetwork.ok) return parsedNetwork.response;
+    const network = parsedNetwork.network;
     const rawCursor = searchParams.get("cursor");
     const cursor = decodeServiceCursor(rawCursor);
     if (searchParams.has("cursor") && !cursor) {
@@ -136,6 +177,7 @@ async function handleGet(request: NextRequest) {
         selfId,
         minPrice,
         maxPrice,
+        network,
       );
 
       const services = await fetchServicesBatch(
@@ -202,6 +244,7 @@ function buildConditions(
   selfId: string | null,
   minPrice: number | undefined,
   maxPrice: number | undefined,
+  network: string | null,
 ) {
   const conditions = [eq(tlsTalos.status, "Active")];
 
@@ -219,6 +262,9 @@ function buildConditions(
 
   if (maxPrice !== undefined) {
     conditions.push(lte(tlsCommerceServices.price, String(maxPrice)));
+  if (network) {
+    // `chains` lists supported payment networks for the service.
+    conditions.push(arrayContains(tlsCommerceServices.chains, [network]));
   }
 
   if (cursor) {

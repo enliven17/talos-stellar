@@ -33,6 +33,10 @@ jobs:
       - name: Self-test detection script
         run: bash scripts/ci-detect-changes.test.sh
 
+      # ── Test mock Stellar service fault injection
+      - name: Test mock Stellar fault injection
+        run: node scripts/mock-stellar-fault-injection.test.mjs
+
       # ── Shared env for the detect step. These are workflow-controlled
       #    values, not user input; the script additionally validates them
       #    (format + object existence) before use, and never echoes them.
@@ -214,12 +218,18 @@ jobs:
       - name: "[prime-agent] Lint"
         if: matrix.package == 'prime-agent'
         working-directory: packages/prime-agent
-        run: uv run ruff check src tests
+        run: uv run ruff check src tests scripts
 
       - name: "[prime-agent] Test"
         if: matrix.package == 'prime-agent'
         working-directory: packages/prime-agent
-        run: uv run pytest tests/ -v
+        run: uv run pytest tests/ -v --cov --cov-report=json --cov-report=term
+
+      # Per-module floors for critical agent modules (issue #638).
+      - name: "[prime-agent] Coverage gate"
+        if: matrix.package == 'prime-agent'
+        working-directory: packages/prime-agent
+        run: uv run python scripts/check-coverage.py coverage.json
 
       # ── Contracts: cargo test, WASM build ───────────────────────
       - name: "[contracts] Test"

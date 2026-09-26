@@ -13,7 +13,7 @@
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SDK_ROOT = resolve(__dirname, "..");
@@ -21,7 +21,7 @@ const ESM_ENTRY = resolve(SDK_ROOT, "dist", "esm", "index.js");
 
 console.log("[compat:node-esm] importing from:", ESM_ENTRY);
 
-const sdk = await import(ESM_ENTRY);
+const sdk = await import(pathToFileURL(ESM_ENTRY).href);
 
 const signingExports = ["REQUEST_SIGNATURE_VERSION", "canonicalizeRequest", "SigningController", "SigningError", "StellarKeypairSigner"];
 for (const name of signingExports) assert.ok(name in sdk, `expected signing export "${name}" missing in ESM bundle`);
@@ -62,6 +62,36 @@ assert.equal(chaos.isEnabled(), false);
 assert.equal(chaos.hasFault(sdk.FaultType.NETWORK_DROP), true);
 console.log("  + ChaosInjector instantiation & registration OK");
 
+// Deterministic chaos fixtures: plan + replay a registered scenario end to end.
+assert.ok(Array.isArray(sdk.CHAOS_SCENARIOS) && sdk.CHAOS_SCENARIOS.length > 0, "CHAOS_SCENARIOS missing/empty");
+assert.equal(typeof sdk.planChaosScenario, "function", "planChaosScenario missing");
+assert.equal(typeof sdk.replayChaosScenario, "function", "replayChaosScenario missing");
+assert.equal(typeof sdk.buildChaosFixtureBundle, "function", "buildChaosFixtureBundle missing");
+assert.equal(typeof sdk.createSeededRandom, "function", "createSeededRandom missing");
+assert.equal(typeof sdk.faultEffect, "function", "faultEffect missing");
+{
+  const scenario = sdk.getChaosScenario("api-timeout-delay-then-throw");
+  assert.ok(scenario, "chaos scenario lookup failed");
+  const plan = sdk.planChaosScenario(scenario);
+  assert.equal(plan.calls[0].outcome, "injected-delay-then-throw", "chaos plan outcome drifted");
+  const replay = await sdk.replayChaosScenario(scenario);
+  assert.deepEqual(
+    replay.calls.map((c) => c.outcome),
+    plan.calls.map((c) => c.outcome),
+    "chaos replay diverged from plan",
+  );
+  // Boundary: malformed fault configs must fail loudly, never register silently.
+  assert.throws(
+    () => new sdk.ChaosInjector({}).registerFault({ type: "NETWORK_GREMLIN", probability: 0.5 }),
+    TypeError,
+    "unknown fault type must throw TypeError",
+  );
+  const seededA = sdk.createSeededRandom(42);
+  const seededB = sdk.createSeededRandom(42);
+  assert.deepEqual(Array.from({ length: 8 }, seededA), Array.from({ length: 8 }, seededB), "seeded PRNG not deterministic");
+  console.log("  + deterministic chaos fixtures (plan/replay/PRNG) OK");
+}
+
 // Helpers
 assert.equal(typeof sdk.generateKeypair, "function", "generateKeypair not exported");
 assert.equal(typeof sdk.isValidPublicKey, "function", "isValidPublicKey not exported");
@@ -101,6 +131,35 @@ const stream = new sdk.TalosEventStream("http://example.test", { maxReconnectAtt
 assert.equal(stream.connectionState, "idle");
 stream.close();
 console.log("  + TalosEventStream instantiation OK");
+
+// Typed contract event decoding
+assert.equal(typeof sdk.decodeContractEvent, "function", "decodeContractEvent missing");
+assert.equal(typeof sdk.decodeContractEvents, "function", "decodeContractEvents missing");
+assert.equal(typeof sdk.isContractEvent, "function", "isContractEvent missing");
+assert.equal(typeof sdk.isContractEventFamily, "function", "isContractEventFamily missing");
+assert.equal(typeof sdk.compareEventCursors, "function", "compareEventCursors missing");
+assert.equal(typeof sdk.ContractEventError, "function", "ContractEventError missing");
+assert.equal(typeof sdk.UnknownContractEventError, "function", "UnknownContractEventError missing");
+assert.equal(typeof sdk.MalformedContractEventError, "function", "MalformedContractEventError missing");
+assert.equal(typeof sdk.UnsupportedContractVersionError, "function", "UnsupportedContractVersionError missing");
+assert.ok(sdk.BUILTIN_EVENT_CATALOG, "BUILTIN_EVENT_CATALOG missing");
+assert.equal(typeof sdk.CATALOG_SPEC_VERSION, "string", "CATALOG_SPEC_VERSION missing");
+const sampleDecoded = sdk.decodeContractEvent({
+  contract: "talos_registry",
+  topics: [
+    { type: "symbol", value: "tls_crt" },
+    { type: "address", value: "GDC2TFRPZ3SJJYE2GDOIVHVGU3J7RZ7WCDIGKNZC4OY4CCIY7JK5JGYZ" },
+  ],
+  data: [
+    { type: "u32", value: 1 },
+    { type: "string", value: "Genesis" },
+    { type: "string", value: "Marketing" },
+  ],
+  ledger_sequence: 100000,
+});
+assert.equal(sampleDecoded.event, "tls_crt");
+assert.equal(sampleDecoded.family, "creation");
+console.log("  + decodeContractEvent check OK");
 
 console.log("[compat:node-esm] ALL CHECKS PASSED");
 process.exit(0);

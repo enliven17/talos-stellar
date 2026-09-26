@@ -114,6 +114,16 @@ class NetworkRule:
         ):
             raise ManifestValidationError("network rule port is out of range")
 
+    def matches(self, host: str, port: int, method: str, path: str) -> bool:
+        """Explicit wildcard matching for network rules."""
+        if not isinstance(host, str) or not isinstance(method, str) or not isinstance(path, str):
+            return False
+        if self.host != host:
+            return False
+        if self.port is not None and self.port != port:
+            return False
+        return method.upper() in self.methods and path.startswith(self.path_prefix)
+
 
 @dataclass(frozen=True)
 class AdapterResourceLimits:
@@ -552,15 +562,9 @@ class SandboxedHTTPClient:
         if decoded_path.endswith("/") and not path.endswith("/"):
             path += "/"
         normalized_method = method.upper()
+        effective_port = port or 443
         for rule in self._manifest.network:
-            effective_port = port or 443
-            rule_port = rule.port or 443
-            if (
-                host == rule.host
-                and effective_port == rule_port
-                and normalized_method in rule.methods
-                and path.startswith(rule.path_prefix)
-            ):
+            if rule.matches(host, effective_port, normalized_method, path):
                 return
         _denied(self._manifest.adapter_id, "network", normalized_method.lower())
         raise CapabilityDeniedError("adapter network destination denied")

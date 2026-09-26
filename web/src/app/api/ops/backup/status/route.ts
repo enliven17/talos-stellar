@@ -18,7 +18,7 @@ import { timingSafeEqual } from "crypto";
 import { db } from "@/db";
 import { tlsBackupRuns } from "@/db/schema";
 import { isBackupDisabled, opsAdminSecret } from "@/lib/backup-config";
-import { rateLimit, rateLimitResponse } from "@/lib/rate-limit";
+import { applyRateLimitHeaders, rateLimit, rateLimitResponse } from "@/lib/rate-limit";
 import { withRequestId } from "@/lib/with-request-id";
 import { logger } from "@/lib/logger";
 import { BackupStatusQuerySchema, sanitizeErrorMessage } from "@/lib/backup-types";
@@ -80,6 +80,7 @@ const rawGet = async (req: NextRequest): Promise<Response> => {
 
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "anon";
   const rl = await rateLimit(`ops:backup-status:${ip}`, RATE_LIMIT);
+  rl.policy = "ops-backup-status";
   if (!rl.ok) return rateLimitResponse(rl);
 
   const url = new URL(req.url);
@@ -89,9 +90,12 @@ const rawGet = async (req: NextRequest): Promise<Response> => {
     limit: url.searchParams.get("limit") ?? undefined,
   });
   if (!q.success) {
-    return Response.json(
-      { error: "Validation failed", issues: q.error.issues.map((i) => i.message) },
-      { status: 400 },
+    return applyRateLimitHeaders(
+      Response.json(
+        { error: "Validation failed", issues: q.error.issues.map((i) => i.message) },
+        { status: 400 },
+      ),
+      rl,
     );
   }
   const { scope, op, limit } = q.data;
@@ -130,25 +134,31 @@ const rawGet = async (req: NextRequest): Promise<Response> => {
       .where(where);
     const totals = totalsRow[0] ?? { total: 0, successes: 0, failures: 0 };
 
-    return Response.json({
-      ok: true,
-      metrics: {
-        total: Number(totals.total),
-        successes: Number(totals.successes),
-        failures: Number(totals.failures),
-        lastSuccess: lastSuccess[0] ? redactedRun(lastSuccess[0]) : null,
-        lastFailure: lastFailure[0] ? redactedRun(lastFailure[0]) : null,
-      },
-      recent: recent.map(redactedRun),
-    });
+    return applyRateLimitHeaders(
+      Response.json({
+        ok: true,
+        metrics: {
+          total: Number(totals.total),
+          successes: Number(totals.successes),
+          failures: Number(totals.failures),
+          lastSuccess: lastSuccess[0] ? redactedRun(lastSuccess[0]) : null,
+          lastFailure: lastFailure[0] ? redactedRun(lastFailure[0]) : null,
+        },
+        recent: recent.map(redactedRun),
+      }),
+      rl,
+    );
   } catch (err) {
     logger.error(
       { err: sanitizeErrorMessage(err), requestId: req.headers.get("x-request-id") ?? null },
       "ops backup status failed",
     );
-    return Response.json(
-      { error: "Failed to read backup status", details: sanitizeErrorMessage(err) },
-      { status: 500 },
+    return applyRateLimitHeaders(
+      Response.json(
+        { error: "Failed to read backup status", details: sanitizeErrorMessage(err) },
+        { status: 500 },
+      ),
+      rl,
     );
   }
 };

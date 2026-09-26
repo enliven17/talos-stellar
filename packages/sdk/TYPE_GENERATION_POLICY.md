@@ -62,3 +62,21 @@ The hand-written types in `src/types.ts` are preserved and used by the client. T
 - A fallback for future use if needed
 
 The client ergonomics are preserved through the hand-written `TalosClient` class and its associated types.
+
+## Runtime Provenance
+
+The SDK exports runtime-accessible provenance constants from `src/provenance.ts`:
+
+```typescript
+import { GENERATED_TYPES_PROVENANCE } from "@talos-protocol/sdk";
+
+console.log(GENERATED_TYPES_PROVENANCE);
+// {
+//   tool: "openapi-typescript",
+//   toolVersion: "^7.4.3",
+//   source: "web/tests/fixtures/openapi.snapshot.json",
+//   pkg: "@talos-protocol/sdk"
+// }
+```
+
+Update `src/provenance.ts` whenever the generation tool, version, or source path changes.
