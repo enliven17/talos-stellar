@@ -19,6 +19,8 @@ const DEFAULT_RULES: ThresholdRule[] = [
 export function loadThresholdRules(config: BenchmarkConfig): ThresholdRule[] {
   const rules: ThresholdRule[] = [
     { metric: "variance", threshold: config.varianceThreshold, severity: "warn", comparator: "gt" },
+    { metric: "meanDurationMs", threshold: config.performanceBudgetMs ?? 5_000, severity: "fail", comparator: "gt" },
+    { metric: "p99", threshold: config.p99ThresholdMs ?? 10_000, severity: "fail", comparator: "gt" },
     { metric: "peakMemoryMb", threshold: config.memoryThresholdMb, severity: "fail", comparator: "gt" },
     { metric: "peakCpuPercent", threshold: config.cpuThresholdPercent, severity: "warn", comparator: "gt" },
   ];
@@ -26,7 +28,9 @@ export function loadThresholdRules(config: BenchmarkConfig): ThresholdRule[] {
   if (process.env.BENCHMARK_THRESHOLD_RULES) {
     try {
       const extra = JSON.parse(process.env.BENCHMARK_THRESHOLD_RULES) as ThresholdRule[];
-      rules.push(...extra);
+      if (Array.isArray(extra)) {
+        rules.push(...extra.filter((rule) => rule && typeof rule.metric === "string" && Number.isFinite(rule.threshold)));
+      }
     } catch {
       // ignore invalid env override
     }

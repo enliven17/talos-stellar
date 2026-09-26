@@ -672,6 +672,29 @@ impl TalosGovernance {
         BytesN::from_array(&e, &INTERFACE_ID)
     }
 
+    /// Return the canonical deployment-manifest digest for the contract.
+    ///
+    /// The digest is rebuilt from the immutable interface values so operators can
+    /// compare deployments without adding any ledger-backed source of truth.
+    pub fn deployment_manifest_digest(e: Env) -> BytesN<32> {
+        let mut payload = soroban_sdk::Bytes::new(&e);
+        payload.append(&soroban_sdk::Bytes::from_array(&e, &INTERFACE_ID));
+        payload.extend_from_slice(&CONTRACT_VERSION.0.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.1.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.2.to_be_bytes());
+
+        for feature in features_list() {
+            let bytes = feature.as_bytes();
+            payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            payload.extend_from_slice(bytes);
+        }
+
+        payload.extend_from_slice(&1u32.to_be_bytes());
+        payload.extend_from_slice(&0u32.to_be_bytes());
+
+        e.crypto().sha256(&payload).to_bytes()
+    }
+
     /// Return `true` when the deployed semver supports the requested
     /// `(major, minor, patch)` floor — see `version_supports`.
     pub fn supports_version(e: Env, major: u32, minor: u32, patch: u32) -> bool {
@@ -1503,6 +1526,32 @@ mod tests {
             }])
             .touch_all_ttl();
         assert_eq!(after, (2, 0));
+    }
+
+    #[test]
+    fn deployment_manifest_digest_is_stable_and_canonical() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+
+        let digest = client.deployment_manifest_digest();
+        let again = client.deployment_manifest_digest();
+        assert_eq!(digest, again, "digest must be deterministic");
+
+        let mut payload = soroban_sdk::Bytes::new(&env);
+        payload.append(&soroban_sdk::Bytes::from_array(&env, &INTERFACE_ID));
+        payload.extend_from_slice(&CONTRACT_VERSION.0.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.1.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.2.to_be_bytes());
+        for feature in features_list() {
+            let bytes = feature.as_bytes();
+            payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            payload.extend_from_slice(bytes);
+        }
+        payload.extend_from_slice(&1u32.to_be_bytes());
+        payload.extend_from_slice(&0u32.to_be_bytes());
+
+        let expected = env.crypto().sha256(&payload).to_bytes();
+        assert_eq!(digest, expected);
+        let _ = contract_id;
     }
 
     #[test]
