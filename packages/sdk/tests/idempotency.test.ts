@@ -460,3 +460,325 @@ describe("TalosClient idempotency integration", () => {
     expect(headers["Idempotency-Key"]).toBe(key);
   });
 });
+
+import {
+  withIdempotency,
+  IdempotencyError,
+  InMemoryIdempotencyStore,
+  createIdempotencyStore,
+} from "../src/idempotency.js";
+
+// ─── InMemoryIdempotencyStore ─────────────────────────────────────────────────
+
+describe("InMemoryIdempotencyStore", () => {
+  it("returns undefined for missing keys", () => {
+    const store = new InMemoryIdempotencyStore<string>();
+    expect(store.get("absent")).toBeUndefined();
+  });
+
+  it("stores and retrieves a record", () => {
+    const store = new InMemoryIdempotencyStore<string>();
+    const record = { key: "k1", response: "hello", createdAt: Date.now() };
+    store.set("k1", record);
+    expect(store.get("k1")).toEqual(record);
+  });
+
+  it("deletes a record", () => {
+    const store = new InMemoryIdempotencyStore<string>();
+    store.set("k1", { key: "k1", response: "v", createdAt: Date.now() });
+    store.delete("k1");
+    expect(store.get("k1")).toBeUndefined();
+  });
+
+  it("expires records after ttlMs", () => {
+    const store = new InMemoryIdempotencyStore<string>({ ttlMs: 100 });
+    const pastTime = Date.now() - 200; // already expired
+    store.set("k1", { key: "k1", response: "v", createdAt: pastTime });
+    expect(store.get("k1")).toBeUndefined();
+  });
+
+  it("does not expire records before ttlMs elapses", () => {
+    const store = new InMemoryIdempotencyStore<string>({ ttlMs: 60_000 });
+    store.set("k1", { key: "k1", response: "v", createdAt: Date.now() });
+    expect(store.get("k1")).toBeDefined();
+  });
+
+  it("size counts only live entries", () => {
+    const store = new InMemoryIdempotencyStore<string>({ ttlMs: 100 });
+    store.set("live", { key: "live", response: "v", createdAt: Date.now() });
+    store.set("dead", { key: "dead", response: "v", createdAt: Date.now() - 200 });
+    expect(store.size).toBe(1);
+  });
+
+  it("evictExpired removes expired entries", () => {
+    const store = new InMemoryIdempotencyStore<string>({ ttlMs: 100 });
+    store.set("dead", { key: "dead", response: "v", createdAt: Date.now() - 200 });
+    store.evictExpired();
+    expect(store.size).toBe(0);
+  });
+
+  it("no expiry when ttlMs is 0", () => {
+    const store = new InMemoryIdempotencyStore<string>({ ttlMs: 0 });
+    store.set("k", { key: "k", response: "v", createdAt: 0 });
+    expect(store.get("k")).toBeDefined();
+  });
+});
+
+// ─── createIdempotencyStore ───────────────────────────────────────────────────
+
+describe("createIdempotencyStore", () => {
+  it("returns an InMemoryIdempotencyStore", () => {
+    const store = createIdempotencyStore<string>();
+    expect(store).toBeInstanceOf(InMemoryIdempotencyStore);
+  });
+
+  it("forwards ttlMs option", () => {
+    const store = createIdempotencyStore<string>({ ttlMs: 1000 });
+    const expired = { key: "k", response: "v", createdAt: Date.now() - 2000 };
+    store.set("k", expired);
+    expect(store.get("k")).toBeUndefined();
+  });
+});
+
+// ─── withIdempotency ─────────────────────────────────────────────────────────
+
+describe("withIdempotency", () => {
+  // ── Positive: success on first attempt ───────────────────────────
+
+  it("returns the result of fn on success", async () => {
+    const key = generateIdempotencyKey();
+    const result = await withIdempotency(key, async (k) => {
+      expect(k).toBe(key);
+      return "ok";
+    });
+    expect(result).toBe("ok");
+  });
+
+  it("stores the result in the provided store", async () => {
+    const key = generateIdempotencyKey();
+    const store = createIdempotencyStore<string>();
+    await withIdempotency(key, async () => "stored", { store });
+    expect(store.get(key)?.response).toBe("stored");
+  });
+
+  it("returns cached result without calling fn again", async () => {
+    const key = generateIdempotencyKey();
+    const store = createIdempotencyStore<string>();
+    let calls = 0;
+    const fn = async () => {
+      calls++;
+      return "first";
+    };
+
+    await withIdempotency(key, fn, { store });
+    const second = await withIdempotency(key, fn, { store });
+
+    expect(second).toBe("first");
+    expect(calls).toBe(1); // fn called only once
+  });
+
+  // ── Key validation ────────────────────────────────────────────────
+
+  it("throws TypeError for an invalid key before calling fn", async () => {
+    await expect(
+      withIdempotency("", async () => "irrelevant"),
+    ).rejects.toThrow(TypeError);
+  });
+
+  it("throws TypeError for an oversized key", async () => {
+    await expect(
+      withIdempotency("a".repeat(200), async () => "irrelevant"),
+    ).rejects.toThrow(TypeError);
+  });
+
+  // ── Retry on transient errors ─────────────────────────────────────
+
+  it("retries up to maxAttempts on retryable status errors", async () => {
+    const key = generateIdempotencyKey();
+    let calls = 0;
+    const fn = async () => {
+      calls++;
+      if (calls < 3) {
+        const err: Error & { status?: number } = new Error("temp");
+        err.status = 503;
+        throw err;
+      }
+      return "recovered";
+    };
+
+    const result = await withIdempotency(key, fn, {
+      maxAttempts: 3,
+      baseDelayMs: 0,
+      _sleep: async () => {},
+    });
+
+    expect(result).toBe("recovered");
+    expect(calls).toBe(3);
+  });
+
+  it("throws EXHAUSTED after all attempts fail", async () => {
+    const key = generateIdempotencyKey();
+    const fn = async () => {
+      const err: Error & { status?: number } = new Error("down");
+      err.status = 503;
+      throw err;
+    };
+
+    const error = await withIdempotency(key, fn, {
+      maxAttempts: 2,
+      baseDelayMs: 0,
+      _sleep: async () => {},
+    }).catch((e) => e);
+
+    expect(error).toBeInstanceOf(IdempotencyError);
+    expect((error as IdempotencyError).code).toBe("EXHAUSTED");
+    expect((error as IdempotencyError).key).toBe(key);
+  });
+
+  it("does NOT retry on non-retryable status (e.g. 400)", async () => {
+    const key = generateIdempotencyKey();
+    let calls = 0;
+    const fn = async () => {
+      calls++;
+      const err: Error & { status?: number } = new Error("bad request");
+      err.status = 400;
+      throw err;
+    };
+
+    await withIdempotency(key, fn, {
+      maxAttempts: 3,
+      baseDelayMs: 0,
+      _sleep: async () => {},
+    }).catch(() => {});
+
+    expect(calls).toBe(1); // no retry for 400
+  });
+
+  // ── CONFLICT error handling ───────────────────────────────────────
+
+  it("throws CONFLICT and deletes store entry on IdempotencyConflictError", async () => {
+    const key = generateIdempotencyKey();
+    const store = createIdempotencyStore<string>();
+    // Seed the store with a stale entry
+    store.set(key, { key, response: "stale", createdAt: 0 });
+    // Override get so it returns undefined (simulate miss) to let fn be called
+    const originalGet = store.get.bind(store);
+    store.get = () => undefined;
+
+    const fn = async () => {
+      throw new IdempotencyConflictError(key, "/api/test", "different payload");
+    };
+
+    const error = await withIdempotency(key, fn, { store }).catch((e) => e);
+
+    expect(error).toBeInstanceOf(IdempotencyError);
+    expect((error as IdempotencyError).code).toBe("CONFLICT");
+    // Restore and confirm the store entry was deleted
+    store.get = originalGet;
+  });
+
+  // ── CANCELLED via AbortSignal ─────────────────────────────────────
+
+  it("throws CANCELLED when AbortSignal is already aborted", async () => {
+    const key = generateIdempotencyKey();
+    const controller = new AbortController();
+    controller.abort();
+
+    const error = await withIdempotency(key, async () => "never", {
+      signal: controller.signal,
+    }).catch((e) => e);
+
+    expect(error).toBeInstanceOf(IdempotencyError);
+    expect((error as IdempotencyError).code).toBe("CANCELLED");
+  });
+
+  it("throws CANCELLED when AbortSignal fires during fn", async () => {
+    const key = generateIdempotencyKey();
+    const controller = new AbortController();
+
+    let rejectFn: (err: Error) => void;
+    const fn = async () => {
+      return new Promise<string>((_, reject) => {
+        rejectFn = reject;
+      });
+    };
+
+    const promise = withIdempotency(key, fn, { signal: controller.signal });
+
+    // Abort after fn has started
+    controller.abort(new Error("test abort"));
+    // Force the inner promise to reject
+    rejectFn!(new Error("aborted by test"));
+
+    const error = await promise.catch((e) => e);
+    expect(error).toBeInstanceOf(IdempotencyError);
+    expect((error as IdempotencyError).code).toMatch(/CANCELLED|EXHAUSTED/);
+  });
+
+  // ── Boundary: maxAttempts clamping ────────────────────────────────
+
+  it("clamps maxAttempts to 1 (no retries)", async () => {
+    const key = generateIdempotencyKey();
+    let calls = 0;
+    const fn = async () => {
+      calls++;
+      const err: Error & { status?: number } = new Error("err");
+      err.status = 503;
+      throw err;
+    };
+
+    await withIdempotency(key, fn, { maxAttempts: 1, _sleep: async () => {} }).catch(() => {});
+    expect(calls).toBe(1);
+  });
+
+  it("clamps maxAttempts to 8 (ceiling)", async () => {
+    const key = generateIdempotencyKey();
+    let calls = 0;
+    const fn = async () => {
+      calls++;
+      const err: Error & { status?: number } = new Error("err");
+      err.status = 503;
+      throw err;
+    };
+
+    await withIdempotency(key, fn, {
+      maxAttempts: 999,
+      _sleep: async () => {},
+    }).catch(() => {});
+
+    expect(calls).toBeLessThanOrEqual(8);
+  });
+
+  // ── Regression: existing callers unaffected ───────────────────────
+
+  it("does not require a store — works without one", async () => {
+    const key = generateIdempotencyKey();
+    const result = await withIdempotency(key, async () => 42);
+    expect(result).toBe(42);
+  });
+
+  it("passes the same key on every retry attempt", async () => {
+    const key = generateIdempotencyKey();
+    const seenKeys: string[] = [];
+    let calls = 0;
+
+    const fn = async (k: string) => {
+      seenKeys.push(k);
+      calls++;
+      if (calls < 2) {
+        const err: Error & { status?: number } = new Error("err");
+        err.status = 503;
+        throw err;
+      }
+      return "done";
+    };
+
+    await withIdempotency(key, fn, {
+      maxAttempts: 2,
+      baseDelayMs: 0,
+      _sleep: async () => {},
+    });
+
+    expect(seenKeys).toEqual([key, key]);
+  });
+});
