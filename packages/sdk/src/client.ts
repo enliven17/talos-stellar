@@ -28,6 +28,13 @@ import type {
   ActivityPageOptions,
 } from "./types.js";
 import {
+  AsyncPaginationIterator,
+  createPaginationIterator,
+  PaginationAbortedError,
+  PaginationLimitExceededError,
+  type AsyncPaginationIteratorOptions,
+} from "./pagination.js";
+import {
   TalosAPIError,
   TalosPaymentError,
   classifyTransportError,
@@ -923,6 +930,24 @@ export class TalosClient {
     return this.requestPage("/api/talos", params);
   }
 
+  /**
+   * Async iterator for paginated Talos list.
+   *
+   * @example
+   * ```ts
+   * for await (const talos of client.paginateTaloses({ limit: 50 })) {
+   *   console.log(talos.name);
+   * }
+   * ```
+   */
+  paginateTaloses(options?: AsyncPaginationIteratorOptions & CursorRequestOptions): AsyncPaginationIterator<Talos> {
+    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
+    return createPaginationIterator<Talos>(
+      (opts) => this.listTaloses({ ...cursorOptions, ...opts }),
+      { maxPages, signal, timeoutMs },
+    );
+  }
+
   async getTalos(id: string, options?: ReadOptions): Promise<TalosDetail> {
     return this.request(`/api/talos/${id}`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
@@ -1039,6 +1064,24 @@ export class TalosClient {
   ): Promise<CursorPage<CommerceService>> {
     const { signal, timeoutMs, ...query } = params ?? {};
     return this.requestPage("/api/services", { ...query, signal, timeoutMs });
+  }
+
+  /**
+   * Async iterator for paginated service discovery.
+   *
+   * @example
+   * ```ts
+   * for await (const service of client.paginateServices({ category: "Marketing" })) {
+   *   console.log(service.serviceName, service.price);
+   * }
+   * ```
+   */
+  paginateServices(options?: AsyncPaginationIteratorOptions & DiscoverServicesParams): AsyncPaginationIterator<CommerceService> {
+    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
+    return createPaginationIterator<CommerceService>(
+      (opts) => this.discoverServices({ ...cursorOptions, ...opts }),
+      { maxPages, signal, timeoutMs },
+    );
   }
 
   async purchaseService(
@@ -1307,6 +1350,24 @@ export class TalosClient {
     return this.requestPage("/api/leaderboard", params);
   }
 
+  /**
+   * Async iterator for paginated leaderboard.
+   *
+   * @example
+   * ```ts
+   * for await (const entry of client.paginateLeaderboard({ limit: 50 })) {
+   *   console.log(entry.name, entry.totalRevenue);
+   * }
+   * ```
+   */
+  paginateLeaderboard(options?: AsyncPaginationIteratorOptions & CursorRequestOptions): AsyncPaginationIterator<LeaderboardEntry> {
+    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
+    return createPaginationIterator<LeaderboardEntry>(
+      (opts) => this.getLeaderboard({ ...cursorOptions, ...opts }),
+      { maxPages, signal, timeoutMs },
+    );
+  }
+
   // ── Playbooks ──────────────────────────────────────────────
 
   async listPlaybooks(
@@ -1319,6 +1380,30 @@ export class TalosClient {
     } & CursorRequestOptions,
   ): Promise<CursorPage<Playbook>> {
     return this.requestPage("/api/playbooks", params);
+  }
+
+  /**
+   * Async iterator for paginated playbooks.
+   *
+   * @example
+   * ```ts
+   * for await (const playbook of client.paginatePlaybooks({ category: "Marketing" })) {
+   *   console.log(playbook.title, playbook.price);
+   * }
+   * ```
+   */
+  paginatePlaybooks(options?: AsyncPaginationIteratorOptions & {
+    category?: string;
+    channel?: string;
+    search?: string;
+    sort?: "createdAt" | "price" | "title";
+    direction?: "asc" | "desc";
+  } & CursorRequestOptions): AsyncPaginationIterator<Playbook> {
+    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
+    return createPaginationIterator<Playbook>(
+      (opts) => this.listPlaybooks({ ...cursorOptions, ...opts }),
+      { maxPages, signal, timeoutMs },
+    );
   }
 
   async createPlaybook(

@@ -16,13 +16,35 @@ export type {
   ReadOptions,
 } from "./client.js";
 
+// ── Pagination ─────────────────────────────────────────────────────
+
+export {
+  AsyncPaginationIterator,
+  createPaginationIterator,
+  PaginationAbortedError,
+  PaginationLimitExceededError,
+} from "./pagination.js";
+export type { AsyncPaginationIteratorOptions } from "./pagination.js";
+
 // ── Idempotency ───────────────────────────────────────────────────
 export {
   generateIdempotencyKey,
   validateIdempotencyKey,
   IdempotencyConflictError,
   isUuidV4,
+  isPayloadConflict,
   IDEMPOTENCY_KEY_MAX_BYTES,
+  // Client-side idempotency helpers
+  InMemoryIdempotencyStore,
+  createIdempotencyStore,
+  withIdempotency,
+  IdempotencyError,
+} from "./idempotency.js";
+export type {
+  IdempotencyRecord,
+  IdempotencyStore,
+  WithIdempotencyOptions,
+  IdempotencyErrorCode,
 } from "./idempotency.js";
 
 // ── Errors (typed hierarchy) ──────────────────────────────────────
