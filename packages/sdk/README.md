@@ -31,12 +31,35 @@ warns about that ordering so the intent stays visible.
 cd packages/sdk
 npm run build          # produces dist/esm, dist/cjs, and dist/browser
 npm run compat:exports # resolves both formats and inspects the publish tarball
-```
-
-`compat:exports` fails when a required condition is missing, a target escapes
+````compat:exports` fails when a required condition is missing, a target escapes
 the package root, a target is excluded from the published `files` list, or the
 CJS and ESM surfaces diverge. The same rules are covered without a build by
 `tests/export-map.test.ts` (`npm test`).
+
+## Browser bundle size budget
+
+The `<script>`-tag bundle (`dist/browser/sdk.bundle.js`) is built with esbuild
+(minified IIFE, `globalThis.TalosSDK`) and is held to a size budget declared
+in `bundle-size.config.json` (raw and gzip byte ceilings). The rules live in
+`scripts/bundle-size-lib.mjs` and are enforced in three places:
+
+| Where | Command | When |
+| --- | --- | --- |
+| Build | `npm run build:browser` | Fails immediately after an over-budget build |
+| Standalone check | `npm run check:bundle-size` | CI (`sdk-compatibility.yml`) and `npm run verify:browser` |
+| Unit tests | `npm test` | Rules and config coherence, no build needed |
+
+Raising a ceiling must be a deliberate change to `bundle-size.config.json` in
+the same PR that grows the bundle, so budget moves are always reviewed. For a
+known, temporary over-budget state, `npm run check:bundle-size --
+--allow-over-budget=<n>` tolerates violations up to `<n>` bytes while still
+warning; it never applies to the next build silently.
+
+The fallback bundler (concatenating `dist/esm` when esbuild was absent) was
+removed: it emitted `export` statements inside an IIFE, which threw
+`SyntaxError: Unexpected token 'export'` on load. esbuild is now a
+devDependency and the only supported bundler; without it, `build:browser`
+fails with an actionable message instead of producing a broken artifact.
 
 ## Quick Start
 
@@ -214,12 +237,17 @@ await TalosWebhook.verify({
 #### Troubleshooting
 - **"Missing or invalid timestamp"**: Ensure the `Talos-Signature` header is correctly passed from the request.
 - **"Timestamp outside tolerance zone"**: Check your server's NTP clock synchronization. If events are genuinely delayed, increase `toleranceSeconds`.
-- **"Signature mismatch"**: Ensure you are passing the *raw* request body (unparsed bytes) to the `payload` option. Frameworks like Express often parse JSON automatically; you need to bypass it or capture the raw buffer.
+- **"Signature mismatch"**: Ensure you are passing the *raw* request body (unparsed bytes) to the `payload` option. Frameworks like Express often parse JSON automatically; you need to bypass it or capture the raw buffer. This also surfaces if a `v1=` signature value isn't a well-formed hex string (even length, `0-9a-fA-F` only) — the SDK rejects malformed or non-canonical hex rather than attempting a partial decode.
 
 ### Stellar Helpers
 
 ```typescript
-import { generateKeypair, isValidPublicKey } from '@talos-protocol/sdk';
+import {
+  generateKeypair,
+  isValidPublicKey,
+  resolveNetworkConfig,
+  NETWORK_PASSPHRASES,
+} from '@talos-protocol/sdk';
 
 const { publicKey, secret } = generateKeypair();
 console.log("New Stellar Address:", publicKey);
@@ -227,7 +255,17 @@ console.log("New Stellar Address:", publicKey);
 if (isValidPublicKey(publicKey)) {
   console.log("Address is valid!");
 }
+
+// Bind the client to a known Stellar network (optional; omit for unbound).
+const network = resolveNetworkConfig({ network: "testnet" });
+// → { network: "testnet", networkPassphrase: NETWORK_PASSPHRASES.testnet }
 ```
+
+`TalosClient` accepts optional `network` / `networkPassphrase`. Either alone is
+enough; when both are set they must agree. Unknown ids, unrecognized passphrases,
+and mismatched pairs fail fast with privacy-safe `TypeError` / `RangeError`.
+Inspect the binding with `client.getNetworkConfig()`. When bound, x402 purchase
+challenges whose `network` field disagrees are rejected.
 
 ### Pluggable request signing
 
@@ -284,6 +322,56 @@ npm test
 
 Tests are implemented using Vitest and mock the global fetch function to avoid real network calls, ensuring fast and reliable test execution.
 
+### Deterministic chaos transport fixtures
+
+The `ChaosInjector` capability is safe to use in tests and CI because its
+behavior is pinned by a registry of named, reproducible scenarios with
+committed wire-level fixtures.
+
+```typescript
+import {
+  getChaosScenario,
+  planChaosScenario,
+  replayChaosScenario,
+  createSeededRandom,
+  ChaosInjector,
+  FaultType,
+} from '@talos-protocol/sdk';
+
+// Inspect the deterministic plan for a scenario (pure, no injection).
+const scenario = getChaosScenario('api-timeout-delay-then-throw')!;
+const plan = planChaosScenario(scenario);
+console.log(plan.calls[0].outcome); // "injected-delay-then-throw"
+
+// Replay it against a real injector — delays are instant by default.
+const result = await replayChaosScenario(scenario);
+console.log(result.totalDelayMs); // 100
+
+// Bring the same determinism to your own chaos setups.
+const injector = new ChaosInjector({ random: createSeededRandom(42) });
+injector.registerFault({ type: FaultType.NETWORK_DROP, probability: 0.5 });
+```
+
+Behavioral contract:
+
+- **Deterministic** — the same seed always produces the same injection
+  pattern, on any machine, Node version, or CI runner. The PRNG is pure JS
+  (`mulberry32`), so it works in Node, edge runtimes, and browsers alike.
+- **Explicit errors** — malformed fault configs fail loudly at registration
+  time with `TypeError`/`RangeError` (unknown fault types, non-finite or
+  out-of-range probabilities, negative durations). Previously these registered
+  silently and never fired.
+- **Boundary-pinned** — committed scenarios pin that probability `0` never
+  injects, `1` always injects, and a draw exactly equal to the probability
+  does **not** inject (strict `r < p`).
+- **Privacy-safe** — plans, replays, and the committed fixture
+  (`tests/fixtures/chaos-scenarios.json`) contain scenario names, seeds,
+  draws, and outcome labels only. Fault messages, request payloads,
+  credentials, and payment proofs are never logged, serialized, or returned.
+
+Keep the fixture in sync: `npm run fixtures:gen` regenerates it from the built
+ESM dist and `npm run fixtures:check` (wired into CI) fails on drift.
+
 ## API Reference
 
 ### Talos Management
@@ -336,6 +424,10 @@ Every error also exposes:
 - `code` — stable string discriminator for `switch` / table look-ups.
 - `isRetryable` — hint to the caller.
 - `retryAfterMs?` — server-supplied retry hint, already in milliseconds.
+  Populated from the `Retry-After` response header whenever it is present,
+  on **any** error status (not just 429 — a 503 during a maintenance window
+  is a common real-world source per RFC 9110 §10.2.3), independent of
+  whether that status is otherwise `isRetryable`.
 - `requestId?` — `x-request-id` header for log correlation.
 - `headers` — sanitized snapshot (`x-request-id`, `retry-after`,
   `www-authenticate`, `x-ratelimit-*`).
@@ -405,6 +497,8 @@ and attempt counts are hard-capped at 8. Inspect the effective policy with
 const client = new TalosClient({
   baseUrl: "https://talos-stellar.vercel.app",
   apiKey: process.env.TALOS_KEY!,
+  network: "testnet",                    // optional Stellar network binding
+  // networkPassphrase: NETWORK_PASSPHRASES.testnet,
   timeoutMs: 30_000,                     // per-request AbortController timeout
   retryPolicy: {
     maxAttempts: 3,                      // status-code policy (default on)
@@ -471,6 +565,10 @@ This version is **fully backward-compatible**:
   `catch (e) { if (e instanceof TalosAPIError) … }` blocks keep working.
 - New fields (`code`, `isRetryable`, `retryAfterMs`, `requestId`, `headers`,
   `data`) are additive.
+- `retryAfterMs` is now populated for every error status that carries a
+  `Retry-After` header, not only 429 — this can only add a previously-`undefined`
+  value, so it does not change behavior for any existing check of the form
+  `if (error.retryAfterMs) { … }`.
 - Legacy error messages (`"Network error"`, `"Aborted"`, `"Request timeout"`,
   `"Invalid x402 challenge"`) are preserved so existing
   `rejects.toThrow("…")` assertions stay green.

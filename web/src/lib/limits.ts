@@ -38,6 +38,9 @@ export const ACTIVITY_MAX_LIMIT = 100;
 export const LEADERBOARD_DEFAULT_LIMIT = 50;
 export const LEADERBOARD_MAX_LIMIT = 100;
 
+/** Upper bound on opaque base64 pagination cursors; real cursors are far shorter. */
+export const MAX_CURSOR_LENGTH = 512;
+
 export const PROPOSALS_DEFAULT_LIMIT = 50;
 export const PROPOSALS_MAX_LIMIT = 100;
 

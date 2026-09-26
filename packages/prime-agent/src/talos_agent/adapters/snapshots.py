@@ -33,8 +33,10 @@ class DiscordHealthSnapshot:
     has_webhook: bool
     has_token: bool
     has_channel: bool
+    reconnect_enabled: bool = False
+    consecutive_failures: int = 0
 
-    def to_dict(self) -> dict[str, bool]:
+    def to_dict(self) -> dict[str, bool | int]:
         return asdict(self)
 
 

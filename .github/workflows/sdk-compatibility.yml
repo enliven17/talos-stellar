@@ -279,6 +279,14 @@ jobs:
           }
           test -s packages/sdk/dist/browser/sdk.bundle.js
           echo "Bundle exists, size: $(wc -c < packages/sdk/dist/browser/sdk.bundle.js)"
+      - name: Enforce browser bundle size budget
+        shell: bash
+        run: |
+          if [ -f pnpm-workspace.yaml ] && command -v pnpm >/dev/null 2>&1; then
+            pnpm --filter @talos-protocol/sdk check:bundle-size
+          else
+            (cd packages/sdk && npm run check:bundle-size)
+          fi
       - name: Run browser-bundle sandbox smoke test
         shell: bash
         run: |

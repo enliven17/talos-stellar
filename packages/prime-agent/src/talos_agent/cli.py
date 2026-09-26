@@ -16,7 +16,7 @@ from rich.console import Console
 
 from talos_agent import __version__
 from talos_agent.checkpoint_cli import checkpoint
-from talos_agent.config import APP_DIR, Settings, ensure_app_dir
+from talos_agent.config import APP_DIR, Settings, ensure_app_dir, safe_config_error
 
 console = Console()
 
@@ -68,7 +68,7 @@ def start(talos_id: str | None, env_file: str):
                     dec = decrypt_with_password(value, master_key)
                     os.environ.setdefault(key, dec)
                 except Exception as e:
-                    console.print(f"[red]Error decrypting {key}:[/red] {e}")
+                    console.print(f"[red]Error decrypting {key}:[/red] {safe_config_error(e)}")
                     sys.exit(1)
             else:
                 os.environ.setdefault(key, value)
@@ -76,7 +76,11 @@ def start(talos_id: str | None, env_file: str):
     kwargs: dict = {"_env_file": env_file}
     if talos_id:
         kwargs["talos_id"] = talos_id
-    settings = Settings(**kwargs)
+    try:
+        settings = Settings(**kwargs)
+    except Exception as exc:
+        console.print(f"[red]Configuration error:[/red] {safe_config_error(exc)}")
+        raise click.exceptions.Exit(1) from None
 
     all_keys = settings.get_all_api_keys()
     if not all_keys:
@@ -431,8 +435,25 @@ def backup(output, agent_id, passphrase, web_endpoint, web_api_url, ops_token):
     console.print(f"  scope:         {run.scope}")
     console.print(f"  files:         {len(run.files)}")
     console.print(f"  row_count:     {run.manifest.get('rowCountTotal', 0)}")
-    console.print(f"  duration_s:    {elapsed:.2f}")
+    console.print(f"  duration_s:    {elapsed:.2f}")    
+    settings = Settings()
+    if settings.backup_retention_enabled:
+        from talos_agent.backup_service import prune_backups
 
+        try:
+            deleted = prune_backups(
+                directory=out.parent,
+                max_count=settings.backup_retention_max_count,
+                max_age_days=settings.backup_retention_max_age_days,
+            )
+        except BackupError as exc:
+            # Retention is best-effort cleanup; the backup itself already
+            # succeeded above, so a policy misconfiguration must not turn
+            # into a failed `backup` command. Report and continue.
+            console.print(f"[yellow]Retention pruning skipped:[/yellow] {exc}")
+        else:
+            if deleted:
+                console.print(f"  pruned:        {len(deleted)} old backup(s) removed")
     if web_endpoint:
         import asyncio
         import os

@@ -22,6 +22,9 @@ import {
   MAX_BODY_BYTES,
   resolveRetryPolicy,
   resolveRetryOptions,
+  resolveNetworkConfig,
+  normalizeNetworkId,
+  NETWORK_PASSPHRASES,
 } from "../src/index.js";
 
 describe("TalosClient - Request/Response Behavior", () => {
@@ -604,6 +607,53 @@ it("should fetch one activity page with typed cursor response", async () => {
       expect(fetch).toHaveBeenCalledTimes(2);
     });
 
+    it("falls back to exponential backoff when Retry-After is whitespace-only (status-code retry policy)", async () => {
+      // Regression: the status-code retry policy used to have its own
+      // private Retry-After parser that treated `Number("")` (whitespace
+      // trims to empty string) as a valid 0ms delay instead of rejecting
+      // it, which would have retried immediately with no backoff at all.
+      // It now shares the canonical parser with the typed retry policy, so
+      // a malformed header falls through to exponential backoff like any
+      // other unparseable value.
+      const timedClient = new TalosClient({
+        baseUrl: "http://localhost:3000",
+        apiKey: "test-key",
+        retryPolicy: {
+          maxAttempts: 2,
+          baseDelayMs: 50,
+          maxDelayMs: 1000,
+          jitter: false,
+        },
+      });
+
+      const mockData = { id: "1", name: "Talos 1" };
+      vi.mocked(fetch)
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 429,
+          headers: new Headers({ "Retry-After": "   " }),
+          text: async () => "Too Many Requests",
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => mockData,
+        } as Response);
+
+      vi.useFakeTimers();
+      const resultPromise = timedClient.getTalos("1");
+      // With the private parser this used to resolve as soon as any
+      // (even zero-duration) timer tick ran; the fixed behavior requires
+      // the full exponential-backoff delay (baseDelayMs=50ms) to elapse.
+      await vi.advanceTimersByTimeAsync(49);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      const result = await resultPromise;
+      vi.useRealTimers();
+
+      expect(result).toEqual(mockData);
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
     it("should not retry unsafe POST requests by default", async () => {
       vi.mocked(fetch).mockResolvedValue({
         ok: false,
@@ -857,6 +907,48 @@ describe("Typed SDK Error Hierarchy", () => {
       const err = await c.getTalos("1").catch((e) => e);
       expect(err).toBeInstanceOf(TalosServerRetryableError);
       expect((err as TalosAPIError).isRetryable).toBe(true);
+      // No Retry-After header on this response — must not be invented.
+      expect((err as TalosAPIError).retryAfterMs).toBeUndefined();
+    });
+
+    it("503 with Retry-After preserves retryAfterMs (not just 429)", async () => {
+      // Retry-After is valid on any error response (RFC 9110 §10.2.3) — a
+      // maintenance-window 503 is a common real-world source. Regression
+      // test: previously only the 429 branch of errorFromResponse parsed
+      // this header into the structured `retryAfterMs` field.
+      vi.mocked(fetch).mockResolvedValue({
+        ok: false,
+        status: 503,
+        headers: new Headers({ "Retry-After": "120" }),
+        text: async () => "Service unavailable",
+      } as Response);
+      // maxAttempts: 1 — this test asserts metadata population, not retry
+      // timing (retry behavior with Retry-After is covered separately).
+      const c = new TalosClient({
+        baseUrl: "http://localhost:3000",
+        retryPolicy: { maxAttempts: 1 },
+      });
+      const err = await c.getTalos("1").catch((e) => e);
+      expect(err).toBeInstanceOf(TalosServerRetryableError);
+      expect((err as TalosAPIError).retryAfterMs).toBe(120_000);
+      // The raw header is still available too — both forms stay in sync.
+      expect((err as TalosAPIError).headers["retry-after"]).toBe("120");
+    });
+
+    it("400 with Retry-After still preserves retryAfterMs even though the status is not retryable", async () => {
+      // retryAfterMs is metadata about the header, independent of whether
+      // the SDK will actually retry this status code.
+      vi.mocked(fetch).mockResolvedValue({
+        ok: false,
+        status: 400,
+        headers: new Headers({ "Retry-After": "5" }),
+        text: async () => JSON.stringify({ error: "bad request" }),
+      } as Response);
+      const c = new TalosClient({ baseUrl: "http://localhost:3000" });
+      const err = await c.getTalos("1").catch((e) => e);
+      expect(err).toBeInstanceOf(TalosValidationError);
+      expect((err as TalosAPIError).retryAfterMs).toBe(5_000);
+      expect((err as TalosAPIError).isRetryable).toBe(false);
     });
   });
 
@@ -1028,6 +1120,80 @@ describe("Typed SDK Error Hierarchy", () => {
       expect(() => resolveRetryOptions({ maxAttempts: 2.5 })).toThrow(TypeError);
       expect(() => resolveRetryOptions({ onRetry: "nope" as unknown as () => void })).toThrow(TypeError);
       expect(() => resolveRetryOptions(null as unknown as undefined)).toThrow(TypeError);
+    });
+
+    it("validates network and passphrase at construction", () => {
+      expect(new TalosClient({}).getNetworkConfig()).toBeUndefined();
+
+      const byNetwork = new TalosClient({ network: "testnet" });
+      expect(byNetwork.getNetworkConfig()).toEqual({
+        network: "testnet",
+        networkPassphrase: NETWORK_PASSPHRASES.testnet,
+      });
+
+      const byAlias = resolveNetworkConfig({ network: "stellar:mainnet" });
+      expect(byAlias).toEqual({
+        network: "public",
+        networkPassphrase: NETWORK_PASSPHRASES.public,
+      });
+
+      const byPassphrase = resolveNetworkConfig({
+        networkPassphrase: NETWORK_PASSPHRASES.futurenet,
+      });
+      expect(byPassphrase?.network).toBe("futurenet");
+
+      const matched = new TalosClient({
+        network: "testnet",
+        networkPassphrase: NETWORK_PASSPHRASES.testnet,
+      });
+      expect(matched.getNetworkConfig()?.network).toBe("testnet");
+
+      // Positive boundary: normalize known aliases
+      expect(normalizeNetworkId("PUBLIC")).toBe("public");
+      expect(normalizeNetworkId("stellar:testnet")).toBe("testnet");
+
+      // Negative / malformed
+      expect(() => resolveNetworkConfig({ network: "" })).toThrow(RangeError);
+      expect(() => resolveNetworkConfig({ network: "local" })).toThrow(RangeError);
+      expect(() => resolveNetworkConfig({ network: 1 as unknown as string })).toThrow(TypeError);
+      expect(() => resolveNetworkConfig({ networkPassphrase: "" })).toThrow(RangeError);
+      expect(() =>
+        resolveNetworkConfig({ networkPassphrase: "Not A Real Passphrase" }),
+      ).toThrow(RangeError);
+      expect(() =>
+        resolveNetworkConfig({
+          network: "testnet",
+          networkPassphrase: NETWORK_PASSPHRASES.public,
+        }),
+      ).toThrow(RangeError);
+      expect(() => new TalosClient({ network: "bogus" })).toThrow(RangeError);
+
+      // Regression: unbound clients still construct without network options
+      expect(() => new TalosClient({ baseUrl: "http://localhost:3000" })).not.toThrow();
+    });
+
+    it("rejects x402 challenges that disagree with the bound network", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: false,
+        status: 402,
+        headers: {
+          get: (name: string) =>
+            name.toLowerCase() === "www-authenticate"
+              ? 'x402 price="0.50", payee="GABC", token="USDC", network="stellar:public"'
+              : null,
+        },
+        text: async () => "",
+      } as unknown as Response);
+
+      const c = new TalosClient({
+        baseUrl: "http://localhost:3000",
+        network: "testnet",
+      });
+      const err = await c
+        .purchaseServiceWithPayment("seller", "buyer", {})
+        .catch((e) => e);
+      expect(err).toBeInstanceOf(TalosPaymentError);
+      expect(String(err.message)).toMatch(/network/i);
     });
 
     it("retries only configured status codes for custom policy", async () => {
@@ -1264,6 +1430,41 @@ describe("Typed SDK Error Hierarchy", () => {
       expect(ms).toBeLessThanOrEqual(10_000);
       expect(parseRetryAfter(undefined)).toBeUndefined();
       expect(parseRetryAfter("not-a-number")).toBeUndefined();
+    });
+
+    it("parseRetryAfter rejects malformed/boundary values instead of inventing a delay", () => {
+      // Whitespace-only and "Infinity" both coerce to non-NaN under a naive
+      // `Number(x)` check — the canonical parser must reject them explicitly.
+      expect(parseRetryAfter("")).toBeUndefined();
+      expect(parseRetryAfter("   ")).toBeUndefined();
+      expect(parseRetryAfter("Infinity")).toBeUndefined();
+      expect(parseRetryAfter("-Infinity")).toBeUndefined();
+      expect(parseRetryAfter("NaN")).toBeUndefined();
+      expect(parseRetryAfter("1e3")).toBeUndefined();
+      expect(parseRetryAfter(null)).toBeUndefined();
+    });
+
+    it("errorFromResponse preserves retryAfterMs for any status that carries Retry-After, not just 429", () => {
+      const withHeader = errorFromResponse(
+        503,
+        "/x",
+        "",
+        new Headers({ "Retry-After": "45" }),
+      );
+      expect(withHeader.retryAfterMs).toBe(45_000);
+
+      const withoutHeader = errorFromResponse(503, "/x", "", new Headers());
+      expect(withoutHeader.retryAfterMs).toBeUndefined();
+
+      // Malformed header on an otherwise-unretried status: still surfaced as
+      // undefined, never as a bogus number.
+      const malformed = errorFromResponse(
+        404,
+        "/x",
+        "",
+        new Headers({ "Retry-After": "not-a-valid-value" }),
+      );
+      expect(malformed.retryAfterMs).toBeUndefined();
     });
 
     it("parseX402Challenge returns structured fields", () => {

@@ -376,6 +376,42 @@ CREATE INDEX IF NOT EXISTS idx_job_effect_replay_audit_job
     ON job_effect_replay_audit(owner_talos_id, job_id, created_at);
         """,
     ),
+    (
+        11,
+        # Durable Telegram send queue. Stores message text and chat target only:
+        # never bot tokens, request URLs, or raw Telegram error bodies.
+        # Times are UTC epoch seconds (REAL) so ordering never depends on text formats.
+        """
+CREATE TABLE IF NOT EXISTS telegram_send_queue (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    dedupe_key          TEXT UNIQUE,
+    chat_id             TEXT NOT NULL,
+    kind                TEXT NOT NULL CHECK (kind IN ('post', 'reply')),
+    text                TEXT NOT NULL,
+    reply_to_message_id INTEGER,
+    state               TEXT NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending', 'sending', 'sent', 'failed', 'indeterminate')),
+    attempt_count       INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at     REAL NOT NULL,
+    last_attempt_at     REAL,
+    lease_expires_at    REAL,
+    message_id          INTEGER,
+    last_error_code     TEXT,
+    created_at          REAL NOT NULL,
+    updated_at          REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS telegram_rate_state (
+    chat_id       TEXT PRIMARY KEY,
+    blocked_until REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_telegram_send_queue_state
+    ON telegram_send_queue(state, id);
+CREATE INDEX IF NOT EXISTS idx_telegram_send_queue_attempts
+    ON telegram_send_queue(chat_id, last_attempt_at);
+        """,
+    ),
 ]
 
 

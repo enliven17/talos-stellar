@@ -87,7 +87,7 @@ def test_migration_creates_durable_job_and_audit_tables(tmp_path: Path):
         "job_effect_outbox",
         "job_effect_replay_audit",
     }.issubset(tables)
-    assert version == _MIGRATIONS[-1][0] == 10
+    assert version == _MIGRATIONS[-1][0] >= 10
     db.close()
 
 
@@ -105,7 +105,9 @@ def test_migration_10_upgrades_v9_without_losing_existing_data(
 ):
     path = tmp_path / "upgrade-v9.db"
     original = list(db_module._MIGRATIONS)
-    monkeypatch.setattr(db_module, "_MIGRATIONS", original[:-1])
+    monkeypatch.setattr(
+        db_module, "_MIGRATIONS", [m for m in original if m[0] <= 9]
+    )
     old = LocalDB(path=path)
     old.add_activity("existing", "keep-me", "test")
     old.close()
@@ -113,7 +115,7 @@ def test_migration_10_upgrades_v9_without_losing_existing_data(
     monkeypatch.setattr(db_module, "_MIGRATIONS", original)
     upgraded = LocalDB(path=path)
 
-    assert upgraded._conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert upgraded._conn.execute("PRAGMA user_version").fetchone()[0] == original[-1][0]
     assert (
         upgraded._conn.execute(
             "SELECT content FROM activity_log WHERE type = 'existing'"

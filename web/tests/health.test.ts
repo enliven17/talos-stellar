@@ -172,7 +172,9 @@ describe("GET /api/health/ready", () => {
     (fetch as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
 
     const promise = getReady();
-    vi.advanceTimersByTime(4000);
+    // Async variant lets the already-resolved DB check settle before the
+    // 2 s DB timer fires; the sync variant would time it out spuriously.
+    await vi.advanceTimersByTimeAsync(4000);
     const res = await promise;
 
     expect(res.status).toBe(200);
@@ -239,7 +241,10 @@ describe("GET /api/health/ready", () => {
 
 // ─── Backward-compat alias /api/health ───────────────────────────────────────
 
-import { GET as getLegacy } from "@/app/api/health/route";
+import { NextRequest } from "next/server";
+import { GET as getLegacyHandler } from "@/app/api/health/route";
+
+const getLegacy = () => getLegacyHandler(new NextRequest("http://localhost/api/health"));
 
 describe("GET /api/health (legacy alias)", () => {
   beforeEach(() => {

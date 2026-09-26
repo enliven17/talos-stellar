@@ -33,13 +33,17 @@ const source = readFileSync(BUNDLE_PATH, "utf8");
 const windowLike = {};
 const globalThisLike = windowLike;
 const context = {
-  // Mimic a browser's globals. We deliberately do NOT expose Buffer, process,
-  // require, __dirname, etc. — this catches accidental Node-only usage in the
-  // SDK's production code.
+  // Mimic a browser's globals. We deliberately do NOT expose Buffer, require,
+  // __dirname, etc. — this catches accidental Node-only usage in the SDK's
+  // production code. `self` and `window` are real browser globals the bundle
+  // is allowed to use; `process` is shimmed inside the bundle itself (see
+  // scripts/bundle-browser.mjs) and must NOT be provided here.
   window: windowLike,
   globalThis: globalThisLike,
+  self: windowLike,
   TextEncoder,
   TextDecoder,
+  btoa,
   crypto,
   fetch: () => {
     throw new Error("fetch should not be called during import-time smoke test");
@@ -100,33 +104,59 @@ try {
   process.exit(1);
 }
 
-// Fallback bundle exposes window.TalosSDK; check both.
+// Fallback bundles exposed window.TalosSDK; the esbuild IIFE declares
+// `var TalosSDK`, which in a real browser lands on `window` (and here on the
+// sandbox global object). Check both, preferring the global.
 const sdk =
+  (context.TalosSDK) ||
   (context.globalThis && context.globalThis.TalosSDK) ||
   (context.window && context.window.TalosSDK);
 
 assert.ok(sdk, "TalosSDK not attached to global/window after loading bundle");
 console.log("[compat:browser-bundle] TalosSDK attached to global scope");
+if (typeof sdk.canonicalizeRequest === "function") {
+  const vectors = JSON.parse(readFileSync(resolve(SDK_ROOT, "tests", "fixtures", "request-signing-vectors.json"), "utf8"));
+  for (const vector of vectors.vectors) {
+    const bytes = await sdk.canonicalizeRequest(vector.request);
+    assert.deepEqual(Array.from(bytes), Array.from(new TextEncoder().encode(vector.canonical)), `signing vector ${vector.name}`);
+  }
+}
 console.log(
   "  exports keys:",
   Object.keys(sdk).sort().join(", "),
 );
 
-// The fallback concatenation bundle may not produce real re-exports; for the
-// CI compatibility gate we at least require that:
-//   a) the file loads inside a browser-like sandbox without Node globals,
-//   b) TalosSDK global is truthy,
-//   c) the bundle file is non-empty.
-//
-// When esbuild was used we additionally assert exports line up.
+// The esbuild bundle must expose the real public surface on the global, not
+// just load: require the essential entry-point classes and a non-empty
+// export set, so a bundle that silently exports nothing fails here.
 const keys = Object.keys(sdk);
-if (keys.length > 0) {
-  const essentials = ["TalosClient", "TalosWebhook"];
-  for (const k of essentials) {
-    if (k in sdk) {
-      console.log("  + " + k + " present on TalosSDK");
-    }
-  }
+assert.ok(
+  keys.length > 0,
+  "TalosSDK exposes no exports — the bundle built but did not attach the public surface",
+);
+const essentials = ["TalosClient", "TalosWebhook"];
+for (const k of essentials) {
+  assert.ok(
+    k in sdk,
+    `TalosSDK is missing required export "${k}" (got ${keys.length} exports)`,
+  );
+  console.log("  + " + k + " present on TalosSDK");
+}
+
+// Deterministic chaos fixtures: pure JS, no Node globals needed.
+if (typeof sdk.planChaosScenario === "function") {
+  const scenario = sdk.getChaosScenario("always-injects-unit-probability");
+  assert.ok(scenario, "chaos scenario lookup failed in browser bundle");
+  const plan = sdk.planChaosScenario(scenario);
+  assert.equal(plan.calls[0].outcome, "injected-throw", "chaos plan outcome drifted in browser bundle");
+  const drawA = sdk.createSeededRandom(7);
+  const drawB = sdk.createSeededRandom(7);
+  assert.deepEqual(
+    Array.from({ length: 4 }, () => drawA()),
+    Array.from({ length: 4 }, () => drawB()),
+    "seeded PRNG not deterministic in browser bundle",
+  );
+  console.log("  + deterministic chaos fixtures OK (browser bundle)");
 }
 
 console.log("[compat:browser-bundle] ALL CHECKS PASSED");

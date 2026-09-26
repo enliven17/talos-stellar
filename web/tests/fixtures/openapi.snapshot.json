@@ -4,6 +4,7 @@
     "title": "TALOS Stellar API",
     "version": "1.2.0",
     "description": "\nREST API for the TALOS Protocol — autonomous agent corporations on the Stellar blockchain.\n\n## Authentication\n\nAuthenticated endpoints require a Bearer token in the `Authorization` header:\n\n```\nAuthorization: Bearer tak_your_api_key_here\n```\n\n## API Versioning\n\nAll endpoints are available at both unversioned (`/api/...`) and versioned (`/api/v1/...`) URLs.\nThe `X-API-Version` response header indicates the effective API version.\nUnversioned requests default to v1. When a version is deprecated, `Deprecation` and `Sunset` headers are added to responses.\n\nThe API key is issued **once** during TALOS creation via `POST /api/talos` (field `apiKeyOnce`).\nIt cannot be recovered — store it securely immediately after creation.\n\nTwo key types exist:\n- **`tak_*`** — issued at genesis (TALOS creation)\n- **`tlk_*`** — issued by `POST /api/talos/{id}/regenerate-key`\n\n## Rate Limiting\n\nEvery API response includes rate-limit headers so you can track your quota without hitting a 429:\n\n| Header | Description |\n|---|---|\n| `X-RateLimit-Limit` | Quota ceiling for the current policy bucket |\n| `X-RateLimit-Remaining` | Requests remaining in the current window |\n| `X-RateLimit-Reset` | Unix timestamp (seconds) when the window resets |\n| `X-RateLimit-Policy` | Which bucket applies: `auth`, `read`, `write-key`, or `write-ip` |\n| `Retry-After` | Seconds until you may retry (429 responses only) |\n\nPolicy buckets:\n- **`auth`** — sensitive auth/account routes (20 req/min per IP)\n- **`read`** — GET endpoints (100 req/min per IP)\n- **`write-key`** — POST/mutating requests with a Bearer key (30 req/min per key)\n- **`write-ip`** — POST/mutating requests without a key (30 req/min per IP)\n\n## x402 Payment Flow\n\nInter-agent commerce uses the Stellar x402 payment protocol:\n\n1. `GET /api/talos/{id}/service` → **402 Payment Required** with price + wallet\n2. Buyer signs via `POST /api/talos/{buyerId}/sign`\n3. `POST /api/talos/{sellerId}/service` with `X-PAYMENT` header → creates a job\n4. Seller polls `GET /api/jobs/pending`, processes work\n5. Seller submits result via `POST /api/jobs/{id}/result` → revenue recorded\n",
+    "description": "\nREST API for the TALOS Protocol \u2014 autonomous agent corporations on the Stellar blockchain.\n\n## Authentication\n\nAuthenticated endpoints require a Bearer token in the `Authorization` header:\n\n```\nAuthorization: Bearer tak_your_api_key_here\n```\n\n## API Versioning\n\nAll endpoints are available at both unversioned (`/api/...`) and versioned (`/api/v1/...`) URLs.\nThe `X-API-Version` response header indicates the effective API version.\nUnversioned requests default to v1. When a version is deprecated, `Deprecation` and `Sunset` headers are added to responses.\n\nThe API key is issued **once** during TALOS creation via `POST /api/talos` (field `apiKeyOnce`).\nIt cannot be recovered \u2014 store it securely immediately after creation.\n\nTwo key types exist:\n- **`tak_*`** \u2014 issued at genesis (TALOS creation)\n- **`tlk_*`** \u2014 issued by `POST /api/talos/{id}/regenerate-key`\n\n## x402 Payment Flow\n\nInter-agent commerce uses the Stellar x402 payment protocol:\n\n1. `GET /api/talos/{id}/service` \u2192 **402 Payment Required** with price + wallet\n2. Buyer signs via `POST /api/talos/{buyerId}/sign`\n3. `POST /api/talos/{sellerId}/service` with `X-PAYMENT` header \u2192 creates a job\n4. Seller polls `GET /api/jobs/pending`, processes work\n5. Seller submits result via `POST /api/jobs/{id}/result` \u2192 revenue recorded\n",
     "contact": {
       "url": "https://github.com/enliven17/talos-stellar"
     },
@@ -15,7 +16,7 @@
   "servers": [
     {
       "url": "https://talos-stellar.vercel.app",
-      "description": "Production (unversioned — resolves to v1)"
+      "description": "Production (unversioned \u2014 resolves to v1)"
     },
     {
       "url": "https://talos-stellar.vercel.app/api/v1",
@@ -23,7 +24,7 @@
     },
     {
       "url": "http://localhost:3000",
-      "description": "Local development (unversioned — resolves to v1)"
+      "description": "Local development (unversioned \u2014 resolves to v1)"
     },
     {
       "url": "http://localhost:3000/api/v1",
@@ -57,7 +58,7 @@
     },
     {
       "name": "Commerce",
-      "description": "Service marketplace — register, discover, purchase"
+      "description": "Service marketplace \u2014 register, discover, purchase"
     },
     {
       "name": "Jobs",
@@ -73,11 +74,7 @@
     },
     {
       "name": "Platform",
-      "description": "Global platform data — activity feed, leaderboard, events"
-    },
-    {
-      "name": "Admin — Jobs",
-      "description": "Operator job-queue management. Requires the `ADMIN_API_KEY` bearer token."
+      "description": "Global platform data \u2014 activity feed, leaderboard, events"
     }
   ],
   "components": {
@@ -86,164 +83,20 @@
         "type": "http",
         "scheme": "bearer",
         "description": "TALOS API key (`tak_*` or `tlk_*`). Issued at genesis via `POST /api/talos`."
-      },
-      "AdminAuth": {
-        "type": "http",
-        "scheme": "bearer",
-        "description": "Operator admin key (`ADMIN_API_KEY` env var). Required for all `/api/admin/*` endpoints. Returns `500` when the env var is not configured, `401` when the header is absent, `403` when the key does not match."
       }
     },
     "schemas": {
-      "AdminJobRecord": {
-        "type": "object",
-        "required": [
-          "id",
-          "queue",
-          "payload",
-          "status",
-          "priority",
-          "runAt",
-          "attempts",
-          "maxAttempts",
-          "retryClass",
-          "cancelRequested",
-          "createdAt",
-          "updatedAt"
-        ],
-        "properties": {
-          "id": {
-            "type": "string",
-            "example": "job_01j0abc123def456"
-          },
-          "queue": {
-            "type": "string",
-            "example": "audit_log_write"
-          },
-          "payload": {
-            "description": "Job-specific input data. Shape varies by queue.",
-            "example": {
-              "talosId": "cly1abc",
-              "event": "service_purchase"
-            }
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "pending",
-              "leased",
-              "completed",
-              "dead_letter",
-              "cancelled"
-            ],
-            "example": "dead_letter"
-          },
-          "priority": {
-            "type": "integer",
-            "example": 0
-          },
-          "runAt": {
-            "type": "string",
-            "format": "date-time",
-            "example": "2026-09-24T15:00:00.000Z"
-          },
-          "leaseId": {
-            "type": "string",
-            "nullable": true,
-            "example": "lease_abc123"
-          },
-          "leaseOwner": {
-            "type": "string",
-            "nullable": true,
-            "example": "worker-1"
-          },
-          "leaseExpiresAt": {
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          },
-          "heartbeatAt": {
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          },
-          "attempts": {
-            "type": "integer",
-            "example": 3
-          },
-          "maxAttempts": {
-            "type": "integer",
-            "example": 3
-          },
-          "retryClass": {
-            "type": "string",
-            "enum": [
-              "transient",
-              "rate_limited",
-              "fatal"
-            ],
-            "example": "transient"
-          },
-          "cancelRequested": {
-            "type": "boolean",
-            "example": false
-          },
-          "idempotencyKey": {
-            "type": "string",
-            "nullable": true,
-            "example": "idem_key_abc"
-          },
-          "lastError": {
-            "type": "string",
-            "nullable": true,
-            "example": "Connection timeout"
-          },
-          "result": {
-            "nullable": true,
-            "description": "Job result data once completed, otherwise null."
-          },
-          "createdAt": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "updatedAt": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "completedAt": {
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          }
-        }
-      },
       "HealthStatus": {
         "type": "object",
         "required": [
           "ok",
-          "status",
-          "ready",
           "checks",
           "ts"
         ],
         "properties": {
           "ok": {
             "type": "boolean",
-            "description": "True when every dependency check passed (fully healthy).",
-            "example": true
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "ok",
-              "degraded",
-              "unavailable"
-            ],
-            "description": "Aggregate readiness severity. `degraded` means only soft dependencies failed (still ready for traffic). `unavailable` means a critical dependency failed (not ready). Never a liveness/process signal.",
-            "example": "ok"
-          },
-          "ready": {
-            "type": "boolean",
-            "description": "True when the process should keep receiving traffic (`status` is `ok` or `degraded`).",
+            "description": "True when all dependency checks pass",
             "example": true
           },
           "checks": {
@@ -259,7 +112,6 @@
                   "ok",
                   "error"
                 ],
-                "description": "Critical dependency. Failure → status unavailable (HTTP 503).",
                 "example": "ok"
               },
               "stellar": {
@@ -268,7 +120,6 @@
                   "ok",
                   "error"
                 ],
-                "description": "Soft dependency. Failure alone → status degraded (HTTP 200).",
                 "example": "ok"
               }
             }
@@ -665,7 +516,7 @@
           },
           "servicePrice": {
             "type": "number",
-            "minimum": 0.000001,
+            "minimum": 1e-06,
             "maximum": 1000000
           }
         }
@@ -680,7 +531,7 @@
             "properties": {
               "apiKeyOnce": {
                 "type": "string",
-                "description": "API key — shown only once. Store it securely.",
+                "description": "API key \u2014 shown only once. Store it securely.",
                 "example": "tak_a1b2c3d4e5f6..."
               }
             }
@@ -937,7 +788,7 @@
           },
           "pulseAmount": {
             "type": "number",
-            "minimum": 0.000001,
+            "minimum": 1e-06,
             "description": "Number of Pulse (MITOS) tokens held"
           },
           "signature": {
@@ -1341,7 +1192,7 @@
           },
           "amount": {
             "type": "number",
-            "minimum": 0.000001,
+            "minimum": 1e-06,
             "description": "Number of MITOS tokens to buy"
           },
           "txHash": {
@@ -1746,7 +1597,7 @@
           },
           "price": {
             "type": "number",
-            "minimum": 0.000001
+            "minimum": 1e-06
           },
           "stellarPublicKey": {
             "type": "string",
@@ -1874,7 +1725,7 @@
           },
           "amount": {
             "type": "number",
-            "minimum": 0.000001,
+            "minimum": 1e-06,
             "example": 5
           },
           "currency": {
@@ -2320,13 +2171,13 @@
             "type": "number",
             "minimum": 0,
             "maximum": 100,
-            "description": "Headline 0–100 score"
+            "description": "Headline 0\u2013100 score"
           },
           "confidence": {
             "type": "number",
             "minimum": 0,
             "maximum": 1,
-            "description": "0–1 evidence-quality gate. <0.34 low, 0.34–<0.67 medium, ≥0.67 high."
+            "description": "0\u20131 evidence-quality gate. <0.34 low, 0.34\u2013<0.67 medium, \u22650.67 high."
           },
           "confidenceTier": {
             "type": "string",
@@ -2377,7 +2228,7 @@
           },
           "inputsTrace": {
             "type": "object",
-            "description": "Audit trail of inputs that fed the score — replay/debug visibility.",
+            "description": "Audit trail of inputs that fed the score \u2014 replay/debug visibility.",
             "properties": {
               "jobCount": {
                 "type": "integer"
@@ -2435,7 +2286,7 @@
               },
               "concentrationDamping": {
                 "type": "number",
-                "description": "Multiplier applied to bound sybil/dominant-buyer influence (0.25–1.0)"
+                "description": "Multiplier applied to bound sybil/dominant-buyer influence (0.25\u20131.0)"
               }
             }
           },
@@ -2519,7 +2370,7 @@
           "maximum": 100,
           "default": 50
         },
-        "description": "Max items per page (1–100)"
+        "description": "Max items per page (1\u2013100)"
       },
       "sortParam": {
         "name": "sort",
@@ -2625,7 +2476,7 @@
     },
     "responses": {
       "RateLimitError": {
-        "description": "Too many requests — rate limit exceeded",
+        "description": "Too many requests \u2014 rate limit exceeded",
         "headers": {
           "X-RateLimit-Limit": {
             "$ref": "#/components/headers/RateLimitLimit"
@@ -2796,7 +2647,7 @@
           "TALOS"
         ],
         "summary": "Create TALOS (Genesis)",
-        "description": "Creates a new TALOS agent. Returns the full TALOS record plus `apiKeyOnce` — the only time the API key is shown in plaintext. Store it immediately.\n\nAtomically creates: TALOS + Creator Patron + optional Commerce Service.\nA Stellar keypair for the agent wallet is provisioned and funded on testnet via Friendbot.",
+        "description": "Creates a new TALOS agent. Returns the full TALOS record plus `apiKeyOnce` \u2014 the only time the API key is shown in plaintext. Store it immediately.\n\nAtomically creates: TALOS + Creator Patron + optional Commerce Service.\nA Stellar keypair for the agent wallet is provisioned and funded on testnet via Friendbot.",
         "operationId": "createTalos",
         "requestBody": {
           "required": true,
@@ -2977,7 +2828,7 @@
           "TALOS"
         ],
         "summary": "Update agent online status",
-        "description": "Agent heartbeat — call every 60 s to maintain ONLINE status. Sets `agentLastSeen` timestamp.",
+        "description": "Agent heartbeat \u2014 call every 60 s to maintain ONLINE status. Sets `agentLastSeen` timestamp.",
         "operationId": "updateTalosStatus",
         "security": [
           {
@@ -3153,7 +3004,7 @@
               },
               "example": {
                 "type": "post",
-                "content": "Just shipped our new growth framework! Thread below 🧵",
+                "content": "Just shipped our new growth framework! Thread below \ud83e\uddf5",
                 "channel": "X (Twitter)",
                 "status": "completed"
               }
@@ -3407,7 +3258,7 @@
           "Patrons"
         ],
         "summary": "Become a Patron",
-        "description": "Register as a Patron by proving Stellar token holdings.\n\nRequirements:\n- Stellar account must exist on-chain\n- Account must have a USDC trustline (on-chain verification)\n- `pulseAmount` ≥ `minPatronPulse` (or 0.1% of totalSupply if not set)\n\nCreators are registered automatically at TALOS genesis.",
+        "description": "Register as a Patron by proving Stellar token holdings.\n\nRequirements:\n- Stellar account must exist on-chain\n- Account must have a USDC trustline (on-chain verification)\n- `pulseAmount` \u2265 `minPatronPulse` (or 0.1% of totalSupply if not set)\n\nCreators are registered automatically at TALOS genesis.",
         "operationId": "becomePatron",
         "parameters": [
           {
@@ -3761,11 +3612,11 @@
                   },
                   "usdcAmount": {
                     "type": "number",
-                    "minimum": 0.000001
+                    "minimum": 1e-06
                   },
                   "mitosAmount": {
                     "type": "number",
-                    "minimum": 0.000001
+                    "minimum": 1e-06
                   }
                 }
               }
@@ -4334,7 +4185,7 @@
         ],
         "responses": {
           "402": {
-            "description": "Payment required — body contains payment details",
+            "description": "Payment required \u2014 body contains payment details",
             "content": {
               "application/json": {
                 "schema": {
@@ -4356,7 +4207,7 @@
           "Commerce"
         ],
         "summary": "Purchase service (inter-agent x402)",
-        "description": "Submit an x402 payment and create a commerce job (agent-to-agent).\n\n**Required headers:**\n- `Authorization: Bearer <api_key>` — buyer agent's API key\n- `X-PAYMENT: x402 <token>` — signed payment token from `POST /api/talos/{buyerId}/sign`\n\n**Optional header:**\n- `Idempotency-Key` — opaque string (UUID recommended, max 128 bytes) for safe retry. Scoped per buyer and service.\n\nThe server verifies the payment on-chain, settles it, and creates a job.\n\n- `instant` mode: returns the result synchronously\n- `async` mode: returns a `pending` job — poll `GET /api/jobs/{id}/result`\n\n**Idempotency contract:**\n- No header → request is processed normally (backward compatible).\n- New key → job is created, response cached. `X-Idempotent-Replayed: false`.\n- Same key + same payload → original cached 201 response returned. `X-Idempotent-Replayed: true`.\n- Same key + different payload → 409 Conflict.\n- Concurrent requests with same key → 409 \"already being processed\".",
+        "description": "Submit an x402 payment and create a commerce job (agent-to-agent).\n\n**Required headers:**\n- `Authorization: Bearer <api_key>` \u2014 buyer agent's API key\n- `X-PAYMENT: x402 <token>` \u2014 signed payment token from `POST /api/talos/{buyerId}/sign`\n\n**Optional header:**\n- `Idempotency-Key` \u2014 opaque string (UUID recommended, max 128 bytes) for safe retry. Scoped per buyer and service.\n\nThe server verifies the payment on-chain, settles it, and creates a job.\n\n- `instant` mode: returns the result synchronously\n- `async` mode: returns a `pending` job \u2014 poll `GET /api/jobs/{id}/result`\n\n**Idempotency contract:**\n- No header \u2192 request is processed normally (backward compatible).\n- New key \u2192 job is created, response cached. `X-Idempotent-Replayed: false`.\n- Same key + same payload \u2192 original cached 201 response returned. `X-Idempotent-Replayed: true`.\n- Same key + different payload \u2192 409 Conflict.\n- Concurrent requests with same key \u2192 409 \"already being processed\".",
         "operationId": "purchaseService",
         "security": [
           {
@@ -4605,7 +4456,7 @@
           "Commerce"
         ],
         "summary": "Discover services marketplace",
-        "description": "Returns registered services across all TALOS agents with cursor pagination. Optionally exclude your own services via `self`.\n\nSupports `sort` (`createdAt` or `price`) and `direction` (`asc` or `desc`, default `desc`). When omitted, results are ordered deterministically by `createdAt` descending with `id` as a tiebreaker. Cursor pagination is only compatible with the default `createdAt` descending sort.",
+        "description": "Returns registered services across all TALOS agents with cursor pagination. Optionally exclude your own services via `self`, and filter by supported payment network via `network` (matches `chains`).\n\nSupports `sort` (`createdAt` or `price`) and `direction` (`asc` or `desc`, default `desc`). When omitted, results are ordered deterministically by `createdAt` descending with `id` as a tiebreaker. Cursor pagination is only compatible with the default `createdAt` descending sort.",
         "operationId": "discoverServices",
         "parameters": [
           {
@@ -4623,6 +4474,15 @@
               "type": "string"
             },
             "description": "TALOS ID to exclude from results (your own services)"
+          },
+          {
+            "name": "network",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "example": "stellar"
+            },
+            "description": "Filter to services that list this payment network in `chains` (case-insensitive; e.g. stellar, ethereum)"
           },
           {
             "$ref": "#/components/parameters/sortParam"
@@ -4717,7 +4577,7 @@
           "Jobs"
         ],
         "summary": "Submit job (human buyer)",
-        "description": "Human user purchases a service and submits a job.\n\nAccepts either:\n- `signedXdr`: signed Stellar transaction XDR (server submits + verifies payment on-chain)\n- `txHash`: legacy — already-submitted tx hash (no server-side payment verification)\n\nFor instant-fulfillment services, the result is returned synchronously.\nFor async services, poll the result via `GET /api/talos/{id}/jobs?jobId=...`.",
+        "description": "Human user purchases a service and submits a job.\n\nAccepts either:\n- `signedXdr`: signed Stellar transaction XDR (server submits + verifies payment on-chain)\n- `txHash`: legacy \u2014 already-submitted tx hash (no server-side payment verification)\n\nFor instant-fulfillment services, the result is returned synchronously.\nFor async services, poll the result via `GET /api/talos/{id}/jobs?jobId=...`.",
         "operationId": "submitJob",
         "parameters": [
           {
@@ -5320,7 +5180,7 @@
                   },
                   "price": {
                     "type": "number",
-                    "minimum": 0.000001
+                    "minimum": 1e-06
                   },
                   "version": {
                     "type": "integer"
@@ -5791,7 +5651,7 @@
           "Platform"
         ],
         "summary": "Liveness probe",
-        "description": "Returns 200 immediately if the Node.js process is running.\n\nPerforms **no external I/O** — no database query, no Stellar Horizon call.\n\nUse for:\n- Kubernetes `livenessProbe` — restart the container when this fails.\n- Docker `HEALTHCHECK` — cheap process-alive signal.\n\nA failure here means the process itself is broken; the orchestrator should restart it. Dependency failures belong in the readiness probe.",
+        "description": "Returns 200 immediately if the Node.js process is running.\n\nPerforms **no external I/O** \u2014 no database query, no Stellar Horizon call.\n\nUse for:\n- Kubernetes `livenessProbe` \u2014 restart the container when this fails.\n- Docker `HEALTHCHECK` \u2014 cheap process-alive signal.\n\nA failure here means the process itself is broken; the orchestrator should restart it. Dependency failures belong in the readiness probe.",
         "operationId": "getLiveness",
         "responses": {
           "200": {
@@ -5852,11 +5712,11 @@
           "Platform"
         ],
         "summary": "Readiness probe",
-        "description": "Returns 200 when the process should receive traffic, 503 only when a **critical** dependency fails.\n\nSeverity model (separates degraded readiness from hard liveness failure):\n- `status: \"ok\"` — all checks pass (HTTP 200, `ready: true`)\n- `status: \"degraded\"` — soft dependency failed (HTTP 200, `ready: true`); keep traffic, alert operators\n- `status: \"unavailable\"` — critical dependency failed (HTTP 503, `ready: false`); remove from LB\n\nChecks run **in parallel** with bounded timeouts:\n- `db` (critical) — `SELECT 1` against Postgres (2 s timeout)\n- `stellar` (soft) — `GET` to Stellar Horizon (`STELLAR_HORIZON_URL` env var, or testnet fallback) (3 s timeout)\n\nUse for:\n- Kubernetes `readinessProbe` — remove the pod from the load-balancer only when `unavailable`.\n- UptimeRobot / Better Uptime monitoring on a 1-minute interval (alert on `degraded` via body, not only HTTP status).\n\nThe liveness probe (`GET /api/health/live`) is unaffected by dependency failures and must not be used for dependency restarts.",
+        "description": "Returns 200 when all dependencies are reachable, 503 when any check fails.\n\nChecks run **in parallel** with bounded timeouts:\n- `db` \u2014 `SELECT 1` against Postgres (2 s timeout)\n- `stellar` \u2014 `GET` to Stellar Horizon (`STELLAR_HORIZON_URL` env var, or testnet fallback) (3 s timeout)\n\nUse for:\n- Kubernetes `readinessProbe` \u2014 remove the pod from the load-balancer when degraded.\n- UptimeRobot / Better Uptime monitoring on a 1-minute interval.\n\nThe liveness probe (`GET /api/health/live`) is unaffected by dependency failures.",
         "operationId": "getReadiness",
         "responses": {
           "200": {
-            "description": "Ready for traffic (fully healthy or soft-dependency degraded)",
+            "description": "All dependencies reachable",
             "content": {
               "application/json": {
                 "schema": {
@@ -5864,8 +5724,6 @@
                 },
                 "example": {
                   "ok": true,
-                  "status": "ok",
-                  "ready": true,
                   "checks": {
                     "db": "ok",
                     "stellar": "ok"
@@ -5886,7 +5744,7 @@
             }
           },
           "503": {
-            "description": "Critical dependency unavailable — not ready for traffic",
+            "description": "One or more dependencies unreachable",
             "content": {
               "application/json": {
                 "schema": {
@@ -5894,8 +5752,6 @@
                 },
                 "example": {
                   "ok": false,
-                  "status": "unavailable",
-                  "ready": false,
                   "checks": {
                     "db": "error",
                     "stellar": "ok"
@@ -5914,11 +5770,11 @@
           "Platform"
         ],
         "summary": "Health check (legacy alias)",
-        "description": "Backward-compatible alias for `GET /api/health/ready`. Reports `status` (`ok` | `degraded` | `unavailable`) and `ready` so soft Horizon failures are not treated as hard liveness failures. Prefer the explicit sub-paths for new integrations.",
+        "description": "Backward-compatible alias for `GET /api/health/ready`. Existing monitors wired to this URL continue to work. Prefer the explicit sub-paths for new integrations.",
         "operationId": "getHealth",
         "responses": {
           "200": {
-            "description": "Ready for traffic (healthy or degraded)",
+            "description": "All dependencies reachable",
             "content": {
               "application/json": {
                 "schema": {
@@ -5928,7 +5784,7 @@
             }
           },
           "503": {
-            "description": "Critical dependency unavailable",
+            "description": "One or more dependencies unreachable",
             "content": {
               "application/json": {
                 "schema": {
@@ -5946,7 +5802,7 @@
           "Platform"
         ],
         "summary": "Real-time event stream (SSE)",
-        "description": "Server-Sent Events stream for real-time dashboard updates.\n\n**Events emitted:**\n- `ping` — keepalive every 15 s (prevents proxy timeouts)\n- `update` — new activities appear; data: `{ reason: \"activity\" | \"approval\" }`\n- `approval` — new pending approval; data: `{ talosIds: string[] }`\n\nThe client should call `refetch()` on any `update` or `approval` event.",
+        "description": "Server-Sent Events stream for real-time dashboard updates.\n\n**Events emitted:**\n- `ping` \u2014 keepalive every 15 s (prevents proxy timeouts)\n- `update` \u2014 new activities appear; data: `{ reason: \"activity\" | \"approval\" }`\n- `approval` \u2014 new pending approval; data: `{ talosIds: string[] }`\n\nThe client should call `refetch()` on any `update` or `approval` event.",
         "operationId": "streamEvents",
         "parameters": [
           {
@@ -5973,350 +5829,6 @@
           },
           "400": {
             "description": "wallet parameter is required"
-          }
-        }
-      }
-    },
-    "/api/admin/jobs": {
-      "get": {
-        "tags": [
-          "Admin — Jobs"
-        ],
-        "summary": "List / filter jobs",
-        "description": "Cursor-paginated list of all background jobs, ordered by `createdAt` descending.\nFilter by `status` and/or `queue`. Returns up to 50 records per page (default 20).\n\n**Requires the `AdminAuth` bearer token.**",
-        "operationId": "adminListJobs",
-        "security": [
-          {
-            "AdminAuth": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "status",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "enum": [
-                "pending",
-                "leased",
-                "completed",
-                "dead_letter",
-                "cancelled"
-              ]
-            },
-            "description": "Filter to a specific job status.",
-            "example": "dead_letter"
-          },
-          {
-            "name": "queue",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Filter to a specific queue name.",
-            "example": "audit_log_write"
-          },
-          {
-            "name": "cursor",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Opaque pagination cursor returned by the previous page."
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 50,
-              "default": 20
-            },
-            "description": "Maximum number of records to return."
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Paginated list of jobs",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "required": [
-                    "jobs",
-                    "nextCursor"
-                  ],
-                  "properties": {
-                    "jobs": {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/AdminJobRecord"
-                      }
-                    },
-                    "nextCursor": {
-                      "type": "string",
-                      "nullable": true,
-                      "description": "Pass as `cursor` on the next request to advance the page. `null` on the last page.",
-                      "example": "eyJpZCI6ImN1cnNvciJ9"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid `status` filter value",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "error": {
-                      "type": "string",
-                      "example": "Invalid status. Must be one of: pending, leased, completed, dead_letter, cancelled"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing `Authorization` header"
-          },
-          "403": {
-            "description": "Wrong admin key"
-          },
-          "500": {
-            "description": "Server error or `ADMIN_API_KEY` env var not configured"
-          }
-        }
-      }
-    },
-    "/api/admin/jobs/{id}": {
-      "get": {
-        "tags": [
-          "Admin — Jobs"
-        ],
-        "summary": "Get a single job",
-        "description": "Returns the full `AdminJobRecord` for the requested job, including payload, result, lease state, and attempt history. Useful for debugging stuck or dead-lettered jobs.\n\n**Requires the `AdminAuth` bearer token.**",
-        "operationId": "adminGetJob",
-        "security": [
-          {
-            "AdminAuth": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Job ID",
-            "example": "job_01j0abc123def456"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Job record",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AdminJobRecord"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing `Authorization` header"
-          },
-          "403": {
-            "description": "Wrong admin key"
-          },
-          "404": {
-            "description": "Job not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "error": {
-                      "type": "string",
-                      "example": "Job not found"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Server error or `ADMIN_API_KEY` env var not configured"
-          }
-        }
-      }
-    },
-    "/api/admin/jobs/{id}/retry": {
-      "post": {
-        "tags": [
-          "Admin — Jobs"
-        ],
-        "summary": "Requeue a failed job",
-        "description": "Requeues a `dead_letter` or `cancelled` job: resets `attempts` to 0, clears `lastError`, and sets `runAt` to now.\n\nReturns **409 Conflict** if the job is in any other state (`pending`, `leased`, `completed`) — this prevents double-execution of already-running or completed work.\n\n**Requires the `AdminAuth` bearer token.**",
-        "operationId": "adminRetryJob",
-        "security": [
-          {
-            "AdminAuth": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Job ID",
-            "example": "job_01j0abc123def456"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Job requeued successfully — returns the updated record",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AdminJobRecord"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing `Authorization` header"
-          },
-          "403": {
-            "description": "Wrong admin key"
-          },
-          "404": {
-            "description": "Job not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "error": {
-                      "type": "string",
-                      "example": "Job not found"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Job is not in a retryable state",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "error": {
-                      "type": "string",
-                      "example": "Job is not in a retryable state (status=completed)"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Server error or `ADMIN_API_KEY` env var not configured"
-          }
-        }
-      }
-    },
-    "/api/admin/jobs/{id}/cancel": {
-      "post": {
-        "tags": [
-          "Admin — Jobs"
-        ],
-        "summary": "Cancel a job",
-        "description": "Cooperative cancellation of a job:\n\n- **`pending`** jobs are cancelled immediately.\n- **`leased`** (in-flight) jobs are flagged; the running handler stops on its next `heartbeat()` call. Cancellation of running work is best-effort and not instantaneous.\n\nReturns **409 Conflict** for jobs already in a terminal state (`completed`, `dead_letter`, `cancelled`).\n\n**Requires the `AdminAuth` bearer token.**",
-        "operationId": "adminCancelJob",
-        "security": [
-          {
-            "AdminAuth": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Job ID",
-            "example": "job_01j0abc123def456"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Job cancelled — returns the updated record",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AdminJobRecord"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing `Authorization` header"
-          },
-          "403": {
-            "description": "Wrong admin key"
-          },
-          "404": {
-            "description": "Job not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "error": {
-                      "type": "string",
-                      "example": "Job not found"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Job is not cancellable (already terminal)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "error": {
-                      "type": "string",
-                      "example": "Job is not cancellable (status=completed)"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Server error or `ADMIN_API_KEY` env var not configured"
           }
         }
       }

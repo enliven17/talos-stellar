@@ -42,13 +42,13 @@ export function parseTimeoutMs(
 }
 
 export function resolveDbTimeoutMs(
-  env: NodeJS.ProcessEnv = process.env,
+  env: Record<string, string | undefined> = process.env,
 ): number {
   return parseTimeoutMs(env.HEALTH_DB_TIMEOUT_MS, DEFAULT_DB_TIMEOUT_MS);
 }
 
 export function resolveStellarTimeoutMs(
-  env: NodeJS.ProcessEnv = process.env,
+  env: Record<string, string | undefined> = process.env,
 ): number {
   return parseTimeoutMs(env.HEALTH_STELLAR_TIMEOUT_MS, DEFAULT_STELLAR_TIMEOUT_MS);
 }
