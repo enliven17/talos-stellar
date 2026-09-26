@@ -3,6 +3,11 @@
 The Prime Agent never holds Stellar private keys. All on-chain operations
 (balance queries, token transfers, dividends) go through the Talos Web
 server, which uses Stellar SDK server-side or reads from Horizon.
+
+Failures are classified with :mod:`talos_agent.payments.stellar_retry` so that
+callers and operators can decide deterministically whether a transaction is
+safe to retry.  The returned classification is privacy-safe: no exception
+text, seeds, payment proofs, or response bodies are ever surfaced.
 """
 
 from __future__ import annotations
@@ -15,6 +20,11 @@ from rich.console import Console
 
 from talos_agent.adapters.snapshots import StellarHealthSnapshot
 from talos_agent.http import request_with_retry
+from talos_agent.payments.stellar_retry import (
+    attach_stellar_failure,
+    classify_stellar_failure,
+    classify_stellar_result,
+)
 
 _HORIZON_URL = os.getenv("STELLAR_HORIZON_URL", "https://horizon-testnet.stellar.org")
 
@@ -69,9 +79,15 @@ class StellarKit:
                     if xlm_balance:
                         return {"balance_xlm": float(xlm_balance["balance"]), "account": acct}
                     return {"balance_xlm": 0, "account": acct}
-            return {"error": "Horizon query failed"}
-        except Exception as e:
-            return {"error": f"Balance query failed: {e}"}
+            return attach_stellar_failure(
+                None,
+                classify_stellar_failure(status_code=r.status_code),
+            )
+        except Exception as exc:
+            return attach_stellar_failure(
+                None,
+                classify_stellar_failure(exc=exc),
+            )
 
     async def get_token_balance(self, account_id: str, token_id: str) -> dict[str, Any]:
         """Query Stellar asset balance via Horizon."""
@@ -87,18 +103,37 @@ class StellarKit:
                     token_balance = next((b for b in balances if b.get("asset_code") == token_id), None)
                     balance = float(token_balance["balance"]) if token_balance else 0
                     return {"balance": balance, "token_id": token_id, "account": account_id}
-            return {"error": "Horizon query failed"}
-        except Exception as e:
-            return {"error": f"Token balance query failed: {e}"}
+            return attach_stellar_failure(
+                None,
+                classify_stellar_failure(status_code=r.status_code),
+            )
+        except Exception as exc:
+            return attach_stellar_failure(
+                None,
+                classify_stellar_failure(exc=exc),
+            )
 
     async def transfer_xlm(self, to_account: str, amount: float) -> dict[str, Any]:
-        """Request XLM transfer via Web API (Web handles signing)."""
+        """Request XLM transfer via Web API (Web handles signing).
+
+        On failure the returned dict carries ``error`` plus the bounded
+        classification fields (``failure_class``, ``failure_code``,
+        ``retryable``, ``indeterminate``, ``terminal``).  On success it keeps
+        the historical ``{"status": "submitted", ...}`` shape.
+        """
         try:
             result = await self._api.request_transfer(
                 to_account=to_account, amount=amount, currency="XLM"
             )
-            if result:
-                return {"status": "submitted", "to": to_account, "amount": amount}
-            return {"error": "Transfer request failed"}
-        except Exception as e:
-            return {"error": f"Transfer failed: {e}"}
+        except Exception as exc:
+            return attach_stellar_failure(None, classify_stellar_failure(exc=exc))
+
+        failure = classify_stellar_result(result)
+        if failure is not None:
+            return attach_stellar_failure(result, failure)
+
+        if result:
+            return {"status": "submitted", "to": to_account, "amount": amount}
+
+        # Empty response with no error payload — surface an unclassified failure.
+        return attach_stellar_failure(None, classify_stellar_failure())

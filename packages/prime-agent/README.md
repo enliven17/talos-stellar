@@ -252,3 +252,16 @@ Before enabling it, read the
 The runbook documents the exact external idempotency boundary, configuration,
 migration, structured operational events, metadata-only replay inspection,
 recovery procedure, known limitations, and rollback steps.
+
+## Stellar transaction retry failures
+
+Stellar transfer failures are classified as `retryable`, `rate_limited`,
+`indeterminate`, `permanent`, or `unknown` so callers and operators can decide
+whether a transaction is safe to retry. The classification is privacy-safe —
+no seeds, payment proofs, or raw upstream text are logged or returned — and is
+surfaced through the existing payment proxy and tool results.
+
+See the
+[Stellar retry failure runbook](../../docs/prime-agent-stellar-retry-failures.md)
+for the input → class mapping, privacy guarantees, compatibility notes, and
+how to consume the classification.

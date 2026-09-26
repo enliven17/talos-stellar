@@ -22,6 +22,10 @@ if TYPE_CHECKING:
 
 from talos_agent.circuit_breaker import cb_registry
 from talos_agent.observability import log, setup as setup_observability
+from talos_agent.payments.stellar_retry import (
+    classify_stellar_failure,
+    classify_stellar_result,
+)
 from talos_agent.tracing import (
     force_flush as force_flush_tracing,
     shutdown_tracing,
@@ -109,6 +113,10 @@ async def run_loan_repayment(
         "repaid": 0,
         "warnings": 0,
         "errors": 0,
+        # Bounded, privacy-safe failure classification counts (see
+        # talos_agent.payments.stellar_retry) so operators can tell a
+        # transient outage from a terminal input error at a glance.
+        "failure_classes": {},
     }
 
     if not loans_due:
@@ -190,6 +198,13 @@ async def run_loan_repayment(
                 "defi",
             )
             result["errors"] += 1
+            # Classify so the operator-facing summary distinguishes a
+            # transient outage (retryable) from a terminal failure.
+            failure = classify_stellar_result(transfer_result) or classify_stellar_failure()
+            classes = result["failure_classes"]
+            classes[failure.classification.value] = (
+                classes.get(failure.classification.value, 0) + 1
+            )
             continue
 
         db.record_repayment(loan_id, repay_amount, tx_hash=transfer_result.get("tx_hash"))
