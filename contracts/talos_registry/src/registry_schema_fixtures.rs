@@ -17,6 +17,10 @@ use std::vec::Vec as StdVec;
 use std::format;
 #[cfg(not(target_arch = "wasm32"))]
 use std::string::ToString;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::{
+    MAX_CATEGORY_BYTES, MAX_DESCRIPTION_BYTES, MAX_NAME_BYTES, MAX_TOKEN_SYMBOL_BYTES,
+};
 
 // --- Error type with actionable hints -----------------------------------
 
@@ -321,6 +325,48 @@ pub fn validate_talos(t: &FixtureTalos, file: &str) -> Result<(), FixtureError> 
         return Err(FixtureError::InvalidValue {
             field: "name".to_string(),
             reason: "must be non-empty".to_string(),
+            file: file.to_string(),
+        });
+    }
+    // Fixtures must satisfy the same metadata byte limits the contract enforces
+    // on `create_talos`/`update_pulse`, so generated vectors cannot encode
+    // values the registry would reject.
+    if t.name.len() > MAX_NAME_BYTES as usize {
+        return Err(FixtureError::InvalidValue {
+            field: "name".to_string(),
+            reason: format!("must be <= {} bytes, got {}", MAX_NAME_BYTES, t.name.len()),
+            file: file.to_string(),
+        });
+    }
+    if t.category.len() > MAX_CATEGORY_BYTES as usize {
+        return Err(FixtureError::InvalidValue {
+            field: "category".to_string(),
+            reason: format!("must be <= {} bytes, got {}", MAX_CATEGORY_BYTES, t.category.len()),
+            file: file.to_string(),
+        });
+    }
+    if t.description.len() > MAX_DESCRIPTION_BYTES as usize {
+        return Err(FixtureError::InvalidValue {
+            field: "description".to_string(),
+            reason: format!("must be <= {} bytes, got {}", MAX_DESCRIPTION_BYTES, t.description.len()),
+            file: file.to_string(),
+        });
+    }
+    if t.pulse.token_symbol.is_empty() {
+        return Err(FixtureError::InvalidValue {
+            field: "pulse.token_symbol".to_string(),
+            reason: "must be non-empty".to_string(),
+            file: file.to_string(),
+        });
+    }
+    if t.pulse.token_symbol.len() > MAX_TOKEN_SYMBOL_BYTES as usize {
+        return Err(FixtureError::InvalidValue {
+            field: "pulse.token_symbol".to_string(),
+            reason: format!(
+                "must be <= {} bytes, got {}",
+                MAX_TOKEN_SYMBOL_BYTES,
+                t.pulse.token_symbol.len()
+            ),
             file: file.to_string(),
         });
     }

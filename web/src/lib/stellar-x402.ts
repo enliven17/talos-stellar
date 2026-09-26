@@ -8,6 +8,7 @@
  *   Mainnet: https://channels.openzeppelin.com/x402
  */
 
+import { Keypair, Transaction, TransactionBuilder, type xdr } from "@stellar/stellar-sdk";
 import { USDC_ISSUER } from "./stellar-config";
 
 const X402_FACILITATOR_URL =
@@ -135,25 +136,25 @@ export function verifyX402PaymentOffline(
   expectedAmount: string,
   expectedTo: string,
 ): VerifyX402Result {
-  let tx;
+  let tx: Transaction;
   const networkPassphrase =
     process.env.STELLAR_NETWORK === "mainnet"
       ? "Public Global Stellar Network ; September 2015"
       : "Test SDF Network ; September 2015";
 
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { TransactionBuilder, Operation } = require("@stellar/stellar-sdk");
-
   try {
-    tx = TransactionBuilder.fromXDR(paymentToken, networkPassphrase);
+    const parsed = TransactionBuilder.fromXDR(paymentToken, networkPassphrase);
+    if (!(parsed instanceof Transaction)) {
+      return { valid: false, errorCategory: "malformed-xdr", errorMessage: "Fee-bump transactions are not accepted as payment tokens" };
+    }
+    tx = parsed;
   } catch (err: unknown) {
     return { valid: false, errorCategory: "malformed-xdr", errorMessage: `Failed to parse XDR: ${err instanceof Error ? err.message : String(err)}` };
   }
 
   // Verify transaction signature against the configured network
-  const { Keypair } = require("@stellar/stellar-sdk");
   const hash = tx.hash();
-  const hasValidSignature = tx.signatures.some((sig: any) => {
+  const hasValidSignature = tx.signatures.some((sig: xdr.DecoratedSignature) => {
     try {
       return Keypair.fromPublicKey(tx.source).verify(hash, sig.signature());
     } catch {

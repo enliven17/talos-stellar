@@ -60,7 +60,7 @@ export async function POST(
     const newApiKey = `tlk_${randomBytes(24).toString("hex")}`;
 
     // Atomic transaction: invalidate old key, set new key, write audit log
-    await db.transaction(async (tx: any) => {
+    await db.transaction(async (tx) => {
       await tx
         .update(tlsTalos)
         .set({ apiKey: newApiKey })

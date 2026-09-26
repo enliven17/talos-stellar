@@ -1,0 +1,657 @@
+{
+  "generatedBy": "packages/sdk/scripts/generate-chaos-fixtures.mjs",
+  "scenarios": [
+    {
+      "calls": [
+        "NETWORK_DROP",
+        "NETWORK_DROP",
+        "NETWORK_DROP"
+      ],
+      "description": "Boundary: probability 0 never injects, whatever the PRNG draws.",
+      "enabled": true,
+      "faults": [
+        {
+          "durationMs": null,
+          "probability": 0,
+          "type": "NETWORK_DROP"
+        }
+      ],
+      "name": "never-injects-zero-probability",
+      "plan": {
+        "calls": [
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 0,
+            "injected": false,
+            "outcome": "no-op",
+            "probability": 0,
+            "randomValue": 0.6270739405881613
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 1,
+            "injected": false,
+            "outcome": "no-op",
+            "probability": 0,
+            "randomValue": 0.002735721180215478
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 2,
+            "injected": false,
+            "outcome": "no-op",
+            "probability": 0,
+            "randomValue": 0.5274470399599522
+          }
+        ],
+        "enabled": true,
+        "faults": [
+          {
+            "durationMs": null,
+            "probability": 0,
+            "type": "NETWORK_DROP"
+          }
+        ],
+        "injectedCount": 0,
+        "scenario": "never-injects-zero-probability",
+        "seed": 1
+      },
+      "scriptedRandom": null,
+      "seed": 1
+    },
+    {
+      "calls": [
+        "NETWORK_DROP",
+        "NETWORK_DROP",
+        "NETWORK_DROP"
+      ],
+      "description": "Boundary: probability 1 always injects, whatever the PRNG draws.",
+      "enabled": true,
+      "faults": [
+        {
+          "durationMs": null,
+          "probability": 1,
+          "type": "NETWORK_DROP"
+        }
+      ],
+      "name": "always-injects-unit-probability",
+      "plan": {
+        "calls": [
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 0,
+            "injected": true,
+            "outcome": "injected-throw",
+            "probability": 1,
+            "randomValue": 0.25
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 1,
+            "injected": true,
+            "outcome": "injected-throw",
+            "probability": 1,
+            "randomValue": 0.5
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 2,
+            "injected": true,
+            "outcome": "injected-throw",
+            "probability": 1,
+            "randomValue": 0.75
+          }
+        ],
+        "enabled": true,
+        "faults": [
+          {
+            "durationMs": null,
+            "probability": 1,
+            "type": "NETWORK_DROP"
+          }
+        ],
+        "injectedCount": 3,
+        "scenario": "always-injects-unit-probability",
+        "seed": null
+      },
+      "scriptedRandom": [
+        0.25,
+        0.5,
+        0.75
+      ],
+      "seed": null
+    },
+    {
+      "calls": [
+        "NETWORK_DROP",
+        "NETWORK_DROP",
+        "NETWORK_DROP"
+      ],
+      "description": "Boundary: a draw exactly equal to the probability does NOT inject (strict r < p); just below it does.",
+      "enabled": true,
+      "faults": [
+        {
+          "durationMs": null,
+          "probability": 0.5,
+          "type": "NETWORK_DROP"
+        }
+      ],
+      "name": "probability-boundary-half-excluded",
+      "plan": {
+        "calls": [
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 0,
+            "injected": false,
+            "outcome": "no-op",
+            "probability": 0.5,
+            "randomValue": 0.5
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 1,
+            "injected": true,
+            "outcome": "injected-throw",
+            "probability": 0.5,
+            "randomValue": 0.4999999999
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 2,
+            "injected": false,
+            "outcome": "no-op",
+            "probability": 0.5,
+            "randomValue": 0.5
+          }
+        ],
+        "enabled": true,
+        "faults": [
+          {
+            "durationMs": null,
+            "probability": 0.5,
+            "type": "NETWORK_DROP"
+          }
+        ],
+        "injectedCount": 1,
+        "scenario": "probability-boundary-half-excluded",
+        "seed": null
+      },
+      "scriptedRandom": [
+        0.5,
+        0.4999999999,
+        0.5
+      ],
+      "seed": null
+    },
+    {
+      "calls": [
+        "NETWORK_DELAY",
+        "NETWORK_DROP",
+        "NETWORK_DELAY"
+      ],
+      "description": "Positive: delay faults settle after durationMs; drop faults reject; interleaved calls each take one PRNG draw.",
+      "enabled": true,
+      "faults": [
+        {
+          "durationMs": 250,
+          "probability": 1,
+          "type": "NETWORK_DELAY"
+        },
+        {
+          "durationMs": null,
+          "probability": 1,
+          "type": "NETWORK_DROP"
+        }
+      ],
+      "name": "mixed-delay-then-drop",
+      "plan": {
+        "calls": [
+          {
+            "faultType": "NETWORK_DELAY",
+            "index": 0,
+            "injected": true,
+            "outcome": "injected-delay",
+            "probability": 1,
+            "randomValue": 0
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 1,
+            "injected": true,
+            "outcome": "injected-throw",
+            "probability": 1,
+            "randomValue": 0
+          },
+          {
+            "faultType": "NETWORK_DELAY",
+            "index": 2,
+            "injected": true,
+            "outcome": "injected-delay",
+            "probability": 1,
+            "randomValue": 0
+          }
+        ],
+        "enabled": true,
+        "faults": [
+          {
+            "durationMs": 250,
+            "probability": 1,
+            "type": "NETWORK_DELAY"
+          },
+          {
+            "durationMs": null,
+            "probability": 1,
+            "type": "NETWORK_DROP"
+          }
+        ],
+        "injectedCount": 3,
+        "scenario": "mixed-delay-then-drop",
+        "seed": null
+      },
+      "scriptedRandom": [
+        0,
+        0,
+        0
+      ],
+      "seed": null
+    },
+    {
+      "calls": [
+        "API_TIMEOUT"
+      ],
+      "description": "Positive: API_TIMEOUT delays for durationMs and then rejects — the retry-eligible timeout shape.",
+      "enabled": true,
+      "faults": [
+        {
+          "durationMs": 100,
+          "probability": 1,
+          "type": "API_TIMEOUT"
+        }
+      ],
+      "name": "api-timeout-delay-then-throw",
+      "plan": {
+        "calls": [
+          {
+            "faultType": "API_TIMEOUT",
+            "index": 0,
+            "injected": true,
+            "outcome": "injected-delay-then-throw",
+            "probability": 1,
+            "randomValue": 0
+          }
+        ],
+        "enabled": true,
+        "faults": [
+          {
+            "durationMs": 100,
+            "probability": 1,
+            "type": "API_TIMEOUT"
+          }
+        ],
+        "injectedCount": 1,
+        "scenario": "api-timeout-delay-then-throw",
+        "seed": null
+      },
+      "scriptedRandom": [
+        0
+      ],
+      "seed": null
+    },
+    {
+      "calls": [
+        "REPLAY_STORE_ERROR",
+        "REPLAY_STORE_ERROR"
+      ],
+      "description": "Dependency failure: REPLAY_STORE_ERROR rejects on every draw below probability, simulating a lost replay store.",
+      "enabled": true,
+      "faults": [
+        {
+          "durationMs": null,
+          "probability": 1,
+          "type": "REPLAY_STORE_ERROR"
+        }
+      ],
+      "name": "dependency-failure-replay-store",
+      "plan": {
+        "calls": [
+          {
+            "faultType": "REPLAY_STORE_ERROR",
+            "index": 0,
+            "injected": true,
+            "outcome": "injected-throw",
+            "probability": 1,
+            "randomValue": 0.1
+          },
+          {
+            "faultType": "REPLAY_STORE_ERROR",
+            "index": 1,
+            "injected": true,
+            "outcome": "injected-throw",
+            "probability": 1,
+            "randomValue": 0.9
+          }
+        ],
+        "enabled": true,
+        "faults": [
+          {
+            "durationMs": null,
+            "probability": 1,
+            "type": "REPLAY_STORE_ERROR"
+          }
+        ],
+        "injectedCount": 2,
+        "scenario": "dependency-failure-replay-store",
+        "seed": null
+      },
+      "scriptedRandom": [
+        0.1,
+        0.9
+      ],
+      "seed": null
+    },
+    {
+      "calls": [
+        "NETWORK_DROP",
+        "NETWORK_DROP",
+        "NETWORK_DROP",
+        "NETWORK_DROP",
+        "NETWORK_DROP"
+      ],
+      "description": "Retry: a transient drop fires inside a bounded retry window and the window recovers — the shape auto-retry policies must absorb.",
+      "enabled": true,
+      "faults": [
+        {
+          "durationMs": null,
+          "probability": 0.5,
+          "type": "NETWORK_DROP"
+        }
+      ],
+      "name": "retry-window-transient-drop",
+      "plan": {
+        "calls": [
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 0,
+            "injected": false,
+            "outcome": "no-op",
+            "probability": 0.5,
+            "randomValue": 0.7
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 1,
+            "injected": true,
+            "outcome": "injected-throw",
+            "probability": 0.5,
+            "randomValue": 0.2
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 2,
+            "injected": false,
+            "outcome": "no-op",
+            "probability": 0.5,
+            "randomValue": 0.8
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 3,
+            "injected": true,
+            "outcome": "injected-throw",
+            "probability": 0.5,
+            "randomValue": 0.2
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 4,
+            "injected": false,
+            "outcome": "no-op",
+            "probability": 0.5,
+            "randomValue": 0.6
+          }
+        ],
+        "enabled": true,
+        "faults": [
+          {
+            "durationMs": null,
+            "probability": 0.5,
+            "type": "NETWORK_DROP"
+          }
+        ],
+        "injectedCount": 2,
+        "scenario": "retry-window-transient-drop",
+        "seed": null
+      },
+      "scriptedRandom": [
+        0.7,
+        0.2,
+        0.8,
+        0.2,
+        0.6
+      ],
+      "seed": null
+    },
+    {
+      "calls": [
+        "NETWORK_DROP"
+      ],
+      "description": "Missing-input behavior: a disabled injector is a total no-op — the PRNG is never even consulted.",
+      "enabled": false,
+      "faults": [
+        {
+          "durationMs": null,
+          "probability": 1,
+          "type": "NETWORK_DROP"
+        }
+      ],
+      "name": "disabled-injector-no-op",
+      "plan": {
+        "calls": [
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 0,
+            "injected": false,
+            "outcome": "no-op",
+            "probability": 1,
+            "randomValue": null
+          }
+        ],
+        "enabled": false,
+        "faults": [
+          {
+            "durationMs": null,
+            "probability": 1,
+            "type": "NETWORK_DROP"
+          }
+        ],
+        "injectedCount": 0,
+        "scenario": "disabled-injector-no-op",
+        "seed": 7
+      },
+      "scriptedRandom": null,
+      "seed": 7
+    },
+    {
+      "calls": [
+        "NETWORK_DELAY"
+      ],
+      "description": "Boundary: durationMs 0 is a valid delay fault — it records an injection and delays zero milliseconds.",
+      "enabled": true,
+      "faults": [
+        {
+          "durationMs": 0,
+          "probability": 1,
+          "type": "NETWORK_DELAY"
+        }
+      ],
+      "name": "zero-duration-delay-boundary",
+      "plan": {
+        "calls": [
+          {
+            "faultType": "NETWORK_DELAY",
+            "index": 0,
+            "injected": true,
+            "outcome": "injected-delay",
+            "probability": 1,
+            "randomValue": 0
+          }
+        ],
+        "enabled": true,
+        "faults": [
+          {
+            "durationMs": 0,
+            "probability": 1,
+            "type": "NETWORK_DELAY"
+          }
+        ],
+        "injectedCount": 1,
+        "scenario": "zero-duration-delay-boundary",
+        "seed": null
+      },
+      "scriptedRandom": [
+        0
+      ],
+      "seed": null
+    },
+    {
+      "calls": [
+        "NETWORK_DROP",
+        "NETWORK_DROP",
+        "NETWORK_DROP",
+        "NETWORK_DROP",
+        "NETWORK_DROP",
+        "NETWORK_DROP",
+        "NETWORK_DROP",
+        "NETWORK_DROP",
+        "NETWORK_DROP",
+        "NETWORK_DROP",
+        "NETWORK_DROP",
+        "NETWORK_DROP"
+      ],
+      "description": "Regression: the same seed always produces the same draw sequence and therefore the same injection pattern.",
+      "enabled": true,
+      "faults": [
+        {
+          "durationMs": null,
+          "probability": 0.75,
+          "type": "NETWORK_DROP"
+        }
+      ],
+      "name": "seeded-stream-reproducibility",
+      "plan": {
+        "calls": [
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 0,
+            "injected": true,
+            "outcome": "injected-throw",
+            "probability": 0.75,
+            "randomValue": 0.6270739405881613
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 1,
+            "injected": true,
+            "outcome": "injected-throw",
+            "probability": 0.75,
+            "randomValue": 0.002735721180215478
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 2,
+            "injected": true,
+            "outcome": "injected-throw",
+            "probability": 0.75,
+            "randomValue": 0.5274470399599522
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 3,
+            "injected": false,
+            "outcome": "no-op",
+            "probability": 0.75,
+            "randomValue": 0.9810509674716741
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 4,
+            "injected": false,
+            "outcome": "no-op",
+            "probability": 0.75,
+            "randomValue": 0.9683778982143849
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 5,
+            "injected": true,
+            "outcome": "injected-throw",
+            "probability": 0.75,
+            "randomValue": 0.281103502959013
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 6,
+            "injected": true,
+            "outcome": "injected-throw",
+            "probability": 0.75,
+            "randomValue": 0.6128388606011868
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 7,
+            "injected": true,
+            "outcome": "injected-throw",
+            "probability": 0.75,
+            "randomValue": 0.7207431411370635
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 8,
+            "injected": true,
+            "outcome": "injected-throw",
+            "probability": 0.75,
+            "randomValue": 0.425796952098608
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 9,
+            "injected": false,
+            "outcome": "no-op",
+            "probability": 0.75,
+            "randomValue": 0.9948229456786066
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 10,
+            "injected": true,
+            "outcome": "injected-throw",
+            "probability": 0.75,
+            "randomValue": 0.45527112716808915
+          },
+          {
+            "faultType": "NETWORK_DROP",
+            "index": 11,
+            "injected": true,
+            "outcome": "injected-throw",
+            "probability": 0.75,
+            "randomValue": 0.48878831742331386
+          }
+        ],
+        "enabled": true,
+        "faults": [
+          {
+            "durationMs": null,
+            "probability": 0.75,
+            "type": "NETWORK_DROP"
+          }
+        ],
+        "injectedCount": 9,
+        "scenario": "seeded-stream-reproducibility",
+        "seed": 1
+      },
+      "scriptedRandom": null,
+      "seed": 1
+    }
+  ],
+  "version": 1
+}
