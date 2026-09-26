@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -15,6 +16,19 @@ from talos_agent.tracing import inject_trace_headers, traced_span
 from opentelemetry.trace import SpanKind
 
 _NO_KEY = object()
+_MAX_PAGINATION_PAGES = 1_000
+
+
+class PaginationError(ValueError):
+    """Raised when a paginated API response cannot be consumed safely."""
+
+
+@dataclass(frozen=True)
+class PaginatedPage:
+    """One cursor-based API page, preserving the server response order."""
+
+    items: list[dict[str, Any]]
+    next_cursor: str | None
 
 
 class TalosAPIClient:
@@ -103,6 +117,98 @@ class TalosAPIClient:
     async def _patch(self, url: str, **kwargs: Any) -> httpx.Response:
         return await request_with_retry(lambda: self._client.patch(url, **kwargs), provider="talos_web_api")
 
+    async def _get_cursor_page(
+        self,
+        url: str,
+        *,
+        item_key: str,
+        params: dict[str, Any] | None = None,
+        cursor: str | None = None,
+        page_size: int | None = None,
+    ) -> PaginatedPage:
+        """Fetch and validate one cursor-based page from a collection endpoint."""
+        query = dict(params or {})
+        if cursor is not None:
+            query["cursor"] = cursor
+        if page_size is not None:
+            query["limit"] = page_size
+
+        response = await self._get(url, params=query)
+        if response.status_code != 200:
+            raise PaginationError(f"pagination request failed with status {response.status_code}")
+
+        try:
+            payload = response.json()
+        except (TypeError, ValueError) as exc:
+            raise PaginationError("pagination response was not valid JSON") from exc
+
+        # Older deployments returned a bare list.  It is a complete, single page
+        # and remains supported by the existing list methods.
+        if isinstance(payload, list):
+            items = payload
+            next_cursor = None
+        elif isinstance(payload, dict):
+            if item_key not in payload or "nextCursor" not in payload:
+                raise PaginationError("pagination response is missing required fields")
+            items = payload[item_key]
+            next_cursor = payload["nextCursor"]
+        else:
+            raise PaginationError("pagination response has an unexpected shape")
+
+        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+            raise PaginationError("pagination response contains invalid items")
+        if next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor):
+            raise PaginationError("pagination response contains an invalid next cursor")
+        return PaginatedPage(items=items, next_cursor=next_cursor)
+
+    async def _get_all_cursor_pages(
+        self,
+        url: str,
+        *,
+        item_key: str,
+        params: dict[str, Any] | None = None,
+        page_size: int | None = None,
+        max_pages: int = _MAX_PAGINATION_PAGES,
+    ) -> list[dict[str, Any]]:
+        """Traverse cursor pages with bounds, loop detection, and de-duplication."""
+        if not isinstance(max_pages, int) or isinstance(max_pages, bool) or max_pages < 1:
+            raise ValueError("max_pages must be a positive integer")
+
+        items: list[dict[str, Any]] = []
+        seen_cursors: set[str] = set()
+        seen_items: set[str] = set()
+        cursor: str | None = None
+
+        for _ in range(max_pages):
+            page = await self._get_cursor_page(
+                url,
+                item_key=item_key,
+                params=params,
+                cursor=cursor,
+                page_size=page_size,
+            )
+            for item in page.items:
+                # API list records have IDs; talosId is the stable identifier on
+                # marketplace records.  Reject a duplicate rather than silently
+                # returning it twice when a continuation regresses.
+                identifier = item.get("id", item.get("talosId"))
+                if not isinstance(identifier, str) or not identifier:
+                    raise PaginationError("pagination item is missing a stable identifier")
+                if identifier in seen_items:
+                    raise PaginationError("pagination response contains a duplicate item")
+                seen_items.add(identifier)
+                items.append(item)
+
+            next_cursor = page.next_cursor
+            if next_cursor is None:
+                return items
+            if next_cursor in seen_cursors or next_cursor == cursor:
+                raise PaginationError("pagination response repeated a cursor")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
+        raise PaginationError("pagination exceeded the maximum page count")
+
     # ── Talos Config ──────────────────────────────────────
 
     async def get_talos(self, talos_id: str) -> dict | None:
@@ -189,15 +295,49 @@ class TalosAPIClient:
             return r.json()
         return None
 
-    async def get_approvals(self, talos_id: str, status: str | None = None) -> list[dict]:
+    async def get_approvals_page(
+        self,
+        talos_id: str,
+        status: str | None = None,
+        *,
+        cursor: str | None = None,
+        page_size: int | None = None,
+    ) -> PaginatedPage:
+        """Get one approvals page using the API's opaque cursor."""
         params: dict[str, Any] = {}
         if status:
             params["status"] = status
-        r = await self._get(f"/api/talos/{talos_id}/approvals", params=params)
-        if r.status_code == 200:
-            data = r.json()
-            return data if isinstance(data, list) else data.get("approvals", [])
-        return []
+        return await self._get_cursor_page(
+            f"/api/talos/{talos_id}/approvals",
+            item_key="approvals",
+            params=params,
+            cursor=cursor,
+            page_size=page_size,
+        )
+
+    async def get_all_approvals(
+        self,
+        talos_id: str,
+        status: str | None = None,
+        *,
+        page_size: int | None = None,
+        max_pages: int = _MAX_PAGINATION_PAGES,
+    ) -> list[dict[str, Any]]:
+        """Get all approvals in API order, stopping at the final cursor."""
+        params: dict[str, Any] = {}
+        if status:
+            params["status"] = status
+        return await self._get_all_cursor_pages(
+            f"/api/talos/{talos_id}/approvals",
+            item_key="approvals",
+            params=params,
+            page_size=page_size,
+            max_pages=max_pages,
+        )
+
+    async def get_approvals(self, talos_id: str, status: str | None = None) -> list[dict]:
+        """Compatibility wrapper returning all approval pages as one list."""
+        return await self.get_all_approvals(talos_id, status)
 
     async def get_approval(self, talos_id: str, approval_id: str) -> dict | None:
         r = await self._get(f"/api/talos/{talos_id}/approvals/{approval_id}")
@@ -277,19 +417,55 @@ class TalosAPIClient:
         except Exception:
             return {"error": f"Commerce submission failed with status {r.status_code}"}
 
-    async def discover_services(
-        self, category: str | None = None, target: str | None = None
-    ) -> list[dict]:
+    async def discover_services_page(
+        self,
+        category: str | None = None,
+        target: str | None = None,
+        *,
+        cursor: str | None = None,
+        page_size: int | None = None,
+    ) -> PaginatedPage:
+        """Get one marketplace-services page using the API's opaque cursor."""
         params: dict[str, Any] = {"self": self._talos_id}
         if category:
             params["category"] = category
         if target:
             params["target"] = target
-        r = await self._get("/api/services", params=params)
-        if r.status_code == 200:
-            data = r.json()
-            return data if isinstance(data, list) else data.get("data", [])
-        return []
+        return await self._get_cursor_page(
+            "/api/services",
+            item_key="data",
+            params=params,
+            cursor=cursor,
+            page_size=page_size,
+        )
+
+    async def discover_all_services(
+        self,
+        category: str | None = None,
+        target: str | None = None,
+        *,
+        page_size: int | None = None,
+        max_pages: int = _MAX_PAGINATION_PAGES,
+    ) -> list[dict[str, Any]]:
+        """Get all marketplace services in API order, stopping at the final cursor."""
+        params: dict[str, Any] = {"self": self._talos_id}
+        if category:
+            params["category"] = category
+        if target:
+            params["target"] = target
+        return await self._get_all_cursor_pages(
+            "/api/services",
+            item_key="data",
+            params=params,
+            page_size=page_size,
+            max_pages=max_pages,
+        )
+
+    async def discover_services(
+        self, category: str | None = None, target: str | None = None
+    ) -> list[dict]:
+        """Compatibility wrapper returning all marketplace pages as one list."""
+        return await self.discover_all_services(category, target)
 
     async def register_service(
         self,
