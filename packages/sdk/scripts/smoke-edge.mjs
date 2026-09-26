@@ -180,6 +180,7 @@ const IMPORT_LINE =
 function stripImportsExports(src) {
   const lines = src.split(/\r?\n/);
   const out = [];
+  const deferred = [];
   for (const raw of lines) {
     const line = raw.trimEnd();
 
@@ -187,11 +188,12 @@ function stripImportsExports(src) {
     if (REEXPORT_ALL.test(line)) continue;
     if (REEXPORT_NAMED.test(line)) continue;
     if (IMPORT_LINE.test(line)) continue;
+    if (/^export\s*\{\s*\}\s*;?\s*$/.test(line)) continue;
 
     // `export default X` → `__EXPORTS__.default = X`
     if (/^export\s+default\s+/.test(line)) {
       const rest = line.replace(/^export\s+default\s+/, "");
-      out.push("__EXPORTS__.default = (" + rest + ");");
+      deferred.push("__EXPORTS__.default = (" + rest + ");");
       continue;
     }
 
@@ -201,7 +203,7 @@ function stripImportsExports(src) {
       const name = m[2];
       const decl = line.replace(/^export\s+/, "");
       out.push(decl);
-      if (name) out.push(`__EXPORTS__.${name} = ${name};`);
+      if (name) deferred.push(`try { __EXPORTS__.${name} = ${name}; } catch (_) {}`);
       continue;
     }
 
@@ -213,9 +215,9 @@ function stripImportsExports(src) {
         if (!bit) continue;
         const asMatch = /^([A-Za-z0-9_$]+)\s+as\s+([A-Za-z0-9_$]+)$/.exec(bit);
         if (asMatch) {
-          out.push(`__EXPORTS__.${asMatch[2]} = ${asMatch[1]};`);
+          deferred.push(`try { __EXPORTS__.${asMatch[2]} = ${asMatch[1]}; } catch (_) {}`);
         } else {
-          out.push(`__EXPORTS__.${bit} = ${bit};`);
+          deferred.push(`try { __EXPORTS__.${bit} = ${bit}; } catch (_) {}`);
         }
       }
       continue;
@@ -223,7 +225,7 @@ function stripImportsExports(src) {
 
     out.push(line);
   }
-  return out.join("\n");
+  return out.join("\n") + "\n" + deferred.join("\n");
 }
 
 const sources = [];
