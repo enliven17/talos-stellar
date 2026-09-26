@@ -145,6 +145,22 @@ export type {
   CompatibilityReport,
 } from "./compat.js";
 
+// ── Persistent SeenStore (SQLite-backed) ────────────────────────────────────
+//
+// Node-only (requires node:sqlite ≥22 or better-sqlite3).  Browser consumers
+// should continue using InMemorySeenStore.
+export {
+  SqliteSeenStore,
+  SqliteSeenStoreError,
+  resolveSqliteAdapter,
+} from "./seen-store-sqlite.js";
+export type {
+  SqliteAdapter,
+  SqliteStatement,
+  SqliteSeenStoreOptions,
+  SqliteSeenStoreErrorCode,
+} from "./seen-store-sqlite.js";
+
 // Request signing
 export {
   REQUEST_SIGNATURE_VERSION,
