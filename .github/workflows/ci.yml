@@ -76,6 +76,38 @@ jobs:
           # before use and redacts input values from its diagnostics.
           MATRIX=$(bash scripts/ci-detect-changes.sh "$BASE_SHA" "$HEAD_SHA")
           echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
+  dependency-license-report:
+    name: Dependency license report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate dependency license report
+        run: pnpm licenses:report
+
+      - name: Upload dependency license report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-license-report
+          path: dist/licenses
+          if-no-files-found: error
+          retention-days: 30
 
   # ─────────────────────────────────────────────────────────────────
   # Job 2: Run checks for each affected package.

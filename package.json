@@ -24,7 +24,9 @@
     "test:mock-stellar-faults": "node scripts/mock-stellar-fault-injection.test.mjs",
     "migrations:check": "node scripts/check-migration-drift.mjs",
     "migrations:check:strict": "node scripts/check-migration-drift.mjs --strict",
-    "test:migration-drift": "bash scripts/check-migration-drift.test.sh"
+    "test:migration-drift": "bash scripts/check-migration-drift.test.sh",
+    "licenses:report": "node scripts/generate-license-report.mjs",
+    "licenses:test": "node --test scripts/generate-license-report.test.mjs"
   },
   "dependencies": {
     "next": "16.2.2"
