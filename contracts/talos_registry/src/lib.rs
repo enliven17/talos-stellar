@@ -344,6 +344,93 @@ fn validate_patron_shares(env: &Env, patron: &Patron) {
     }
 }
 
+/// Canonicalize a registry name: trim leading/trailing ASCII whitespace then
+/// convert to lowercase.  Returns the canonical form as a new [`String`].
+///
+/// Canonicalization happens **before** validation so that callers supplying
+/// `"Vega"`, `" vega "`, or `"VEGA"` all resolve to the same stored name
+/// `"vega"`.  The contract stores and emits only the canonical form; the
+/// original caller-supplied value is never persisted.
+///
+/// The returned value is valid iff [`validate_name_canonical`] returns `Ok`.
+///
+/// # Panics
+/// Never — this helper only transforms bytes and produces a new `String`.
+pub fn canonicalize_name(env: &Env, name: &String) -> String {
+    let len = name.len() as usize;
+    // MAX_NAME_BYTES is 64 — safe stack allocation.
+    let mut buf = [0u8; MAX_NAME_BYTES as usize];
+    if len == 0 || len > MAX_NAME_BYTES as usize {
+        // Return as-is; validate_name_canonical will reject it.
+        return name.clone();
+    }
+    name.copy_into_slice(&mut buf[..len]);
+
+    // Trim leading ASCII spaces
+    let mut start = 0usize;
+    while start < len && buf[start] == b' ' {
+        start += 1;
+    }
+    // Trim trailing ASCII spaces
+    let mut end = len;
+    while end > start && buf[end - 1] == b' ' {
+        end -= 1;
+    }
+
+    // Lowercase in-place over the trimmed slice
+    for b in buf[start..end].iter_mut() {
+        if b.is_ascii_uppercase() {
+            *b = b.to_ascii_lowercase();
+        }
+    }
+
+    String::from_bytes(env, &buf[start..end])
+}
+
+/// Validate that a name is in canonical form.
+///
+/// Rules (same as the name service):
+/// - 3..=32 bytes (after canonicalization)
+/// - Only lowercase ASCII alphanumerics and hyphens (`[a-z0-9-]`)
+/// - Must not start or end with `'-'`
+/// - Must not contain consecutive `'--'`
+///
+/// # Panics
+/// Panics with an explicit, privacy-safe error message if any rule is violated.
+pub fn validate_name_canonical(name: &String) {
+    let len = name.len() as usize;
+    if len < 3 {
+        panic!("Name is too short: minimum 3 characters");
+    }
+    if len > 32 {
+        panic!("Name is too long: maximum 32 characters");
+    }
+    let mut buf = [0u8; 32];
+    name.copy_into_slice(&mut buf[..len]);
+
+    if buf[0] == b'-' {
+        panic!("Name must not start with a hyphen");
+    }
+    if buf[len - 1] == b'-' {
+        panic!("Name must not end with a hyphen");
+    }
+
+    let mut prev_hyphen = false;
+    for i in 0..len {
+        let b = buf[i];
+        if b.is_ascii_lowercase() || b.is_ascii_digit() {
+            prev_hyphen = false;
+        } else if b == b'-' {
+            if prev_hyphen {
+                panic!("Name must not contain consecutive hyphens");
+            }
+            prev_hyphen = true;
+        } else {
+            panic!("Name must contain only lowercase alphanumeric characters and hyphens");
+        }
+    }
+}
+
 /// Validate a Pulse `token_symbol`: it is a required identifier, so it must
 /// be non-empty, and it is byte-bounded by [`MAX_TOKEN_SYMBOL_BYTES`].
 fn validate_token_symbol(token_symbol: &String) {
@@ -355,18 +442,19 @@ fn validate_token_symbol(token_symbol: &String) {
     }
 }
 
-/// Enforce byte limits on caller-supplied Talos metadata before it is
-/// persisted. `name` and `Pulse.token_symbol` are required identifiers and
-/// must be non-empty; `category` and `description` are descriptive and may
-/// be empty, but are still byte-bounded. Panics are explicit and
-/// privacy-safe — no caller or value data is included.
+/// Enforce byte limits and canonical form on caller-supplied Talos metadata
+/// before it is persisted.
+///
+/// `name` must already be in canonical form (call [`canonicalize_name`] first)
+/// and is validated by [`validate_name_canonical`].  `Pulse.token_symbol` is a
+/// required identifier and must be non-empty; `category` and `description` are
+/// descriptive and may be empty, but are still byte-bounded.
+///
+/// Panics are explicit and privacy-safe — no caller or value data is included.
 fn validate_talos_metadata(name: &String, category: &String, description: &String, pulse: &Pulse) {
-    if name.len() == 0 {
-        panic!("Name cannot be empty");
-    }
-    if name.len() > MAX_NAME_BYTES {
-        panic!("Name exceeds maximum byte length");
-    }
+    // Canonical name validation: 3–32 lowercase-alphanumeric-or-hyphen,
+    // no leading/trailing/consecutive hyphens.
+    validate_name_canonical(name);
     if category.len() > MAX_CATEGORY_BYTES {
         panic!("Category exceeds maximum byte length");
     }
@@ -469,7 +557,7 @@ pub const INTERFACE_ID: [u8; 32] = [
     0x54, 0x61, 0x6C, 0x6F, 0x73, 0x52, 0x65, 0x67, // "TalosReg"
     0x69, 0x73, 0x74, 0x72, 0x79, 0x00, 0x00, 0x00, // "istry" + zero pads
     0x00, 0x00, 0x00, 0x01, // major = 1
-    0x00, 0x00, 0x00, 0x03, // minor = 3
+    0x00, 0x00, 0x00, 0x04, // minor = 4
     0x00, 0x00, 0x00, 0x00, // patch = 0
     0x00, 0x00, 0x00, 0x00,
 ];
@@ -559,6 +647,11 @@ impl TalosRegistry {
 
         // Require creator authorization
         patron.creator_addr.require_auth();
+
+        // Canonicalize name: trim whitespace and lowercase before any validation
+        // or storage. Callers may supply "Vega", " vega ", "VEGA" — all become
+        // the stored canonical form "vega".
+        let name = canonicalize_name(&e, &name);
 
         validate_patron_shares(&e, &patron);
         validate_talos_metadata(&name, &category, &description, &pulse);
@@ -1940,7 +2033,7 @@ mod tests {
         creator: &Address,
         protocol_wallet: &Address,
     ) -> u32 {
-        let name = s(env, "Genesis");
+        let name = s(env, "genesis");
         let category = s(env, "Marketing");
         let description = s(env, "Autonomous marketing agent");
         let patron = patron(env, creator);
@@ -1983,7 +2076,7 @@ mod tests {
     fn version_returns_compile_time_constant() {
         let (env, contract_id) = setup();
         let client = TalosRegistryClient::new(&env, &contract_id);
-        assert_eq!(client.version(), (1u32, 3u32, 0u32));
+        assert_eq!(client.version(), (1u32, 4u32, 0u32));
     }
 
     #[test]
@@ -2324,7 +2417,7 @@ mod tests {
 
         let talos = client.get_talos(&id).expect("talos should be stored");
         assert_eq!(talos.id, id);
-        assert_eq!(talos.name, s(&env, "Genesis"));
+        assert_eq!(talos.name, s(&env, "genesis"));
         assert_eq!(talos.category, s(&env, "Marketing"));
         assert_eq!(talos.creator, creator);
         assert!(talos.active);
@@ -2452,7 +2545,7 @@ mod tests {
         let (got_id1, got_name1, got_cat1): (u32, String, String) =
             TryFromVal::try_from_val(&env, &data1).unwrap();
         assert_eq!(got_id1, id);
-        assert_eq!(got_name1, s(&env, "Genesis"));
+        assert_eq!(got_name1, s(&env, "genesis"));
         assert_eq!(got_cat1, s(&env, "Marketing"));
 
         // Assert tls_crt2
@@ -2466,7 +2559,7 @@ mod tests {
             TryFromVal::try_from_val(&env, &data2).unwrap();
         assert_eq!(got_version2, 1);
         assert_eq!(got_id2, id);
-        assert_eq!(got_name2, s(&env, "Genesis"));
+        assert_eq!(got_name2, s(&env, "genesis"));
         assert_eq!(got_cat2, s(&env, "Marketing"));
     }
 
@@ -3202,7 +3295,11 @@ mod tests {
         let creator = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
 
-        let name = repeated(&env, 'n', MAX_NAME_BYTES as usize);
+        // Names are now validated in canonical form: max 32 chars.
+        // (MAX_NAME_BYTES is 64 for the raw storage limit, but the canonical
+        // name validator enforces 3–32 chars with lowercase-alphanumeric-hyphen
+        // rules. We use the canonical boundary here.)
+        let name = repeated(&env, 'n', 32usize);
         let category = repeated(&env, 'c', MAX_CATEGORY_BYTES as usize);
         let description = repeated(&env, 'd', MAX_DESCRIPTION_BYTES as usize);
         let mut pulse_cfg = pulse(&env);
@@ -3307,7 +3404,7 @@ mod tests {
             &contract_id,
             &creator,
             &protocol_wallet,
-            &s(&env, "Genesis"),
+            &s(&env, "genesis"),
             &category,
             &s(&env, "desc"),
             &pulse(&env),
