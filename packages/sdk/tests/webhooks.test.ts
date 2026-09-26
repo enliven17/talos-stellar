@@ -184,6 +184,109 @@ describe('TalosWebhook', () => {
       expect(replayStore.has).toHaveBeenCalledWith(eventId);
       expect(replayStore.set).toHaveBeenCalledWith(eventId, 360); // 300 + 60
     });
+
+    describe('replayWindowSeconds', () => {
+      it('uses replayWindowSeconds as TTL when provided', async () => {
+        const replayStore: ReplayStore = {
+          has: vi.fn().mockResolvedValue(false),
+          set: vi.fn().mockResolvedValue(undefined),
+        };
+        await TalosWebhook.verify({
+          payload,
+          signatureHeader,
+          secret,
+          replayStore,
+          eventId,
+          toleranceSeconds: 300,
+          replayWindowSeconds: 600,
+        });
+        expect(replayStore.set).toHaveBeenCalledWith(eventId, 600);
+      });
+
+      it('falls back to toleranceSeconds+60 when replayWindowSeconds is absent', async () => {
+        const replayStore: ReplayStore = {
+          has: vi.fn().mockResolvedValue(false),
+          set: vi.fn().mockResolvedValue(undefined),
+        };
+        await TalosWebhook.verify({
+          payload,
+          signatureHeader,
+          secret,
+          replayStore,
+          eventId,
+          toleranceSeconds: 300,
+          // no replayWindowSeconds
+        });
+        expect(replayStore.set).toHaveBeenCalledWith(eventId, 360); // 300 + 60
+      });
+
+      it('falls back to 86400 when toleranceSeconds is 0 and replayWindowSeconds is absent', async () => {
+        // Need a fresh signature with toleranceSeconds: 0 (no tolerance check)
+        const ts = Math.floor(Date.now() / 1000);
+        const header = await (async () => {
+          const encoder = new TextEncoder();
+          const key = await crypto.subtle.importKey(
+            'raw', encoder.encode(secret),
+            { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+          );
+          const data = encoder.encode(`${ts}.${payload}`);
+          const sig = await crypto.subtle.sign('HMAC', key, data);
+          const hex = Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
+          return `t=${ts},v1=${hex}`;
+        })();
+
+        const replayStore: ReplayStore = {
+          has: vi.fn().mockResolvedValue(false),
+          set: vi.fn().mockResolvedValue(undefined),
+        };
+        await TalosWebhook.verify({
+          payload,
+          signatureHeader: header,
+          secret,
+          replayStore,
+          eventId,
+          toleranceSeconds: 0,
+          // no replayWindowSeconds
+        });
+        expect(replayStore.set).toHaveBeenCalledWith(eventId, 86400);
+      });
+
+      it('throws REPLAY_MISCONFIGURED for non-positive replayWindowSeconds', async () => {
+        const replayStore: ReplayStore = {
+          has: vi.fn().mockResolvedValue(false),
+          set: vi.fn().mockResolvedValue(undefined),
+        };
+        const err = await TalosWebhook.verify({
+          payload,
+          signatureHeader,
+          secret,
+          replayStore,
+          eventId,
+          replayWindowSeconds: 0,
+        }).catch((e: unknown) => e);
+
+        expect(err).toBeInstanceOf(TalosWebhookError);
+        expect((err as TalosWebhookError).code).toBe('REPLAY_MISCONFIGURED');
+        expect((err as TalosWebhookError).message).toMatch(/must be a positive integer/);
+      });
+
+      it('throws REPLAY_MISCONFIGURED for negative replayWindowSeconds', async () => {
+        const replayStore: ReplayStore = {
+          has: vi.fn().mockResolvedValue(false),
+          set: vi.fn().mockResolvedValue(undefined),
+        };
+        await expect(
+          TalosWebhook.verify({
+            payload,
+            signatureHeader,
+            secret,
+            replayStore,
+            eventId,
+            replayWindowSeconds: -60,
+          }),
+        ).rejects.toMatchObject({ code: 'REPLAY_MISCONFIGURED' });
+      });
+    });
   });
 
   describe('hexToBuf strictness (ambiguous encoding rejection)', () => {
