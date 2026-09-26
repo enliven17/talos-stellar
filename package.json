@@ -18,7 +18,11 @@
     "fixtures:check": "node scripts/generate-registry-fixtures.mjs --check",
     "migrations:check": "node scripts/check-migration-drift.mjs",
     "migrations:check:strict": "node scripts/check-migration-drift.mjs --strict",
-    "test:migration-drift": "bash scripts/check-migration-drift.test.sh"
+    "test:migration-drift": "bash scripts/check-migration-drift.test.sh",
+    "sbom:verify": "node scripts/verify-sbom.mjs",
+    "test:sbom-verify": "node --test scripts/verify-sbom.test.mjs",
+    "openapi:drift": "node scripts/check-openapi-sdk-drift.mjs",
+    "test:openapi-drift": "node --test scripts/check-openapi-sdk-drift.test.mjs"
   },
   "dependencies": {
     "next": "16.2.2"
