@@ -92,6 +92,95 @@ assert.equal(typeof sdk.faultEffect, "function", "faultEffect missing");
   console.log("  + deterministic chaos fixtures (plan/replay/PRNG) OK");
 }
 
+// ── Idempotency helpers ──────────────────────────────────────────────────────
+{
+  const idempotencyExports = [
+    "generateIdempotencyKey",
+    "validateIdempotencyKey",
+    "isUuidV4",
+    "isPayloadConflict",
+    "IDEMPOTENCY_KEY_MAX_BYTES",
+    "IdempotencyConflictError",
+    "IdempotencyError",
+    "InMemoryIdempotencyStore",
+    "createIdempotencyStore",
+    "withIdempotency",
+  ];
+  for (const name of idempotencyExports) {
+    assert.ok(name in sdk, `expected idempotency export "${name}" missing in ESM bundle`);
+  }
+
+  // generateIdempotencyKey returns a valid UUID v4
+  const key = sdk.generateIdempotencyKey();
+  assert.equal(typeof key, "string", "generateIdempotencyKey must return a string");
+  assert.ok(sdk.isUuidV4(key), `generated key "${key}" is not a valid UUID v4`);
+
+  // validateIdempotencyKey accepts valid keys and rejects empty/oversized ones
+  assert.doesNotThrow(() => sdk.validateIdempotencyKey(key), "validateIdempotencyKey should not throw for a valid key");
+  assert.throws(
+    () => sdk.validateIdempotencyKey(""),
+    TypeError,
+    "validateIdempotencyKey should throw TypeError for empty string",
+  );
+  assert.throws(
+    () => sdk.validateIdempotencyKey("a".repeat(200)),
+    TypeError,
+    "validateIdempotencyKey should throw TypeError for oversized key",
+  );
+
+  // IDEMPOTENCY_KEY_MAX_BYTES must be 128
+  assert.equal(sdk.IDEMPOTENCY_KEY_MAX_BYTES, 128, "IDEMPOTENCY_KEY_MAX_BYTES must be 128");
+
+  // isPayloadConflict: stable wire-format detection
+  assert.equal(sdk.isPayloadConflict("different payload"), true, "isPayloadConflict should match 'different payload'");
+  assert.equal(sdk.isPayloadConflict("already being processed"), false, "isPayloadConflict should not match in-flight body");
+
+  // IdempotencyConflictError constructor and property shape
+  const conflictErr = new sdk.IdempotencyConflictError("test-key", "/api/test", "body");
+  assert.equal(conflictErr.name, "IdempotencyConflictError");
+  assert.equal(conflictErr.status, 409);
+  assert.equal(conflictErr.conflictingKey, "test-key");
+  assert.equal(conflictErr.path, "/api/test");
+  assert.ok(conflictErr instanceof Error, "IdempotencyConflictError must extend Error");
+
+  // InMemoryIdempotencyStore round-trip
+  const store = new sdk.InMemoryIdempotencyStore({ ttlMs: 60_000 });
+  const record = { key, response: "test-response", createdAt: Date.now() };
+  store.set(key, record);
+  assert.deepEqual(store.get(key), record, "InMemoryIdempotencyStore get() should return stored record");
+  store.delete(key);
+  assert.equal(store.get(key), undefined, "InMemoryIdempotencyStore delete() should remove entry");
+
+  // createIdempotencyStore factory
+  const storeFromFactory = sdk.createIdempotencyStore({ ttlMs: 30_000 });
+  assert.ok(storeFromFactory instanceof sdk.InMemoryIdempotencyStore, "createIdempotencyStore must return InMemoryIdempotencyStore");
+
+  // withIdempotency: success path
+  const result = await sdk.withIdempotency(key, async (k) => `result-${k}`);
+  assert.equal(result, `result-${key}`, "withIdempotency should return fn result");
+
+  // withIdempotency: EXHAUSTED error
+  const exhaustedKey = sdk.generateIdempotencyKey();
+  let exhaustedError = null;
+  try {
+    await sdk.withIdempotency(
+      exhaustedKey,
+      async () => {
+        const err = new Error("down");
+        err.status = 503;
+        throw err;
+      },
+      { maxAttempts: 1, baseDelayMs: 0 },
+    );
+  } catch (err) {
+    exhaustedError = err;
+  }
+  assert.ok(exhaustedError instanceof sdk.IdempotencyError, "withIdempotency should throw IdempotencyError after exhausting attempts");
+  assert.equal(exhaustedError.code, "EXHAUSTED", "error code should be EXHAUSTED");
+
+  console.log("  + idempotency helpers OK (key generation, validation, store, withIdempotency, errors)");
+}
+
 // Helpers
 assert.equal(typeof sdk.generateKeypair, "function", "generateKeypair not exported");
 assert.equal(typeof sdk.isValidPublicKey, "function", "isValidPublicKey not exported");
