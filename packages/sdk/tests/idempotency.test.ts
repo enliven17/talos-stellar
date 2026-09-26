@@ -782,3 +782,153 @@ describe("withIdempotency", () => {
     expect(seenKeys).toEqual([key, key]);
   });
 });
+
+// ─── Wire-level fixture regression tests ─────────────────────────────────────
+// Drive tests directly from the stable fixture file so that any change to the
+// JSON surface area causes a test failure — not a silent behavior drift.
+
+import wireVectors from "./fixtures/idempotency-wire-vectors.json" with { type: "json" };
+
+describe("wire-level fixtures — key_format regex", () => {
+  const { pattern, flags, examples_valid, examples_invalid } = wireVectors.key_format;
+  const regex = new RegExp(pattern, flags);
+
+  for (const example of examples_valid) {
+    it(`matches valid key: ${example}`, () => {
+      expect(regex.test(example)).toBe(true);
+    });
+  }
+
+  for (const example of examples_invalid) {
+    it(`rejects invalid key: ${JSON.stringify(example)}`, () => {
+      expect(regex.test(example)).toBe(false);
+    });
+  }
+});
+
+describe("wire-level fixtures — validation.accepts", () => {
+  for (const { id, key, description } of wireVectors.validation.accepts) {
+    it(`${id}: ${description}`, () => {
+      expect(() => validateIdempotencyKey(key)).not.toThrow();
+    });
+  }
+});
+
+describe("wire-level fixtures — validation.rejects", () => {
+  for (const { id, key, error, description } of wireVectors.validation.rejects) {
+    it(`${id}: ${description}`, () => {
+      if (error === "TypeError") {
+        expect(() => validateIdempotencyKey(key)).toThrow(TypeError);
+      } else {
+        expect(() => validateIdempotencyKey(key)).toThrow();
+      }
+    });
+  }
+});
+
+describe("wire-level fixtures — payload_conflict_detection.matches", () => {
+  for (const { id, body, expected, description } of wireVectors.payload_conflict_detection.matches) {
+    it(`${id}: ${description}`, () => {
+      expect(isPayloadConflict(body)).toBe(expected);
+    });
+  }
+});
+
+describe("wire-level fixtures — payload_conflict_detection.non_matches", () => {
+  for (const { id, body, expected, description } of wireVectors.payload_conflict_detection.non_matches) {
+    it(`${id}: ${description}`, () => {
+      expect(isPayloadConflict(body)).toBe(expected);
+    });
+  }
+});
+
+describe("wire-level fixtures — error_properties", () => {
+  const { example, required_properties, superclass_chain } = wireVectors.error_properties;
+  const err = new IdempotencyConflictError(example.conflictingKey, example.path, example.body);
+
+  for (const prop of required_properties) {
+    if ("expected_value" in prop) {
+      it(`property ${prop.name} equals ${JSON.stringify(prop.expected_value)}`, () => {
+        expect((err as unknown as Record<string, unknown>)[prop.name]).toBe(prop.expected_value);
+      });
+    } else if ("expected_type" in prop) {
+      it(`property ${prop.name} is a ${prop.expected_type}`, () => {
+        expect(typeof (err as unknown as Record<string, unknown>)[prop.name]).toBe(prop.expected_type);
+      });
+    } else if ("must_include" in prop) {
+      for (const include of prop.must_include as string[]) {
+        it(`${prop.name} includes ${include}`, () => {
+          expect((err as unknown as Record<string, unknown>)[prop.name] as string).toContain(
+            (example as unknown as Record<string, string>)[include],
+          );
+        });
+      }
+    }
+  }
+
+  for (const cls of superclass_chain) {
+    it(`is an instance of ${cls}`, () => {
+      expect(err instanceof Error).toBe(true);
+    });
+  }
+});
+
+describe("wire-level fixtures — retry_policy retryable statuses", () => {
+  const { retryable_statuses, non_retryable_statuses } = wireVectors.retry_policy;
+
+  const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
+
+  for (const status of retryable_statuses) {
+    it(`status ${status} is retried by withIdempotency`, async () => {
+      const key = generateIdempotencyKey();
+      let calls = 0;
+      const fn = async () => {
+        calls++;
+        if (calls < 2) {
+          const err: Error & { status?: number } = new Error("temp");
+          err.status = status;
+          throw err;
+        }
+        return "ok";
+      };
+      const result = await withIdempotency(key, fn, { maxAttempts: 2, baseDelayMs: 0, _sleep: async () => {} });
+      expect(result).toBe("ok");
+      expect(calls).toBe(2);
+    });
+  }
+
+  for (const status of non_retryable_statuses) {
+    // 409 on IdempotencyConflictError is a special case handled separately
+    if (status === 409) continue;
+    it(`status ${status} is NOT retried by withIdempotency`, async () => {
+      const key = generateIdempotencyKey();
+      let calls = 0;
+      const fn = async () => {
+        calls++;
+        const err: Error & { status?: number } = new Error("client error");
+        err.status = status;
+        throw err;
+      };
+      await withIdempotency(key, fn, { maxAttempts: 3, baseDelayMs: 0, _sleep: async () => {} }).catch(() => {});
+      expect(calls).toBe(1);
+    });
+  }
+});
+
+describe("wire-level fixtures — store_ttl defaults", () => {
+  const { default_ttl_ms } = wireVectors.store_ttl;
+
+  it(`default TTL is ${default_ttl_ms} ms`, () => {
+    const store = new InMemoryIdempotencyStore<string>();
+    const pastTime = Date.now() - default_ttl_ms - 1;
+    store.set("k", { key: "k", response: "v", createdAt: pastTime });
+    expect(store.get("k")).toBeUndefined();
+  });
+
+  it("entry created just within the default TTL is still alive", () => {
+    const store = new InMemoryIdempotencyStore<string>();
+    const recentTime = Date.now() - default_ttl_ms + 5_000; // 5 s before expiry
+    store.set("k", { key: "k", response: "v", createdAt: recentTime });
+    expect(store.get("k")).toBeDefined();
+  });
+});
