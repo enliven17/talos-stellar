@@ -709,6 +709,30 @@ export class TalosClient {
     return Math.floor(this.retryPolicy.random() * delay);
   }
 
+  private parseRetryAfter(header: string | null): number | null {
+    if (!header) return null;
+    const trimmed = header.trim();
+    if (trimmed.length === 0) {
+      return null;
+    }
+    if (trimmed.length > 1024) {
+      return null;
+    }
+
+    const seconds = Number(trimmed);
+    if (!Number.isNaN(seconds)) {
+      return Math.max(0, seconds * 1000);
+    }
+
+    const parsedDate = Date.parse(trimmed);
+    if (!Number.isNaN(parsedDate)) {
+      const delta = parsedDate - Date.now();
+      return delta > 0 ? delta : 0;
+    }
+
+    return null;
+  }
+
   private wait(delayMs: number, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) {
       return Promise.reject(new Error("Request aborted"));
@@ -738,6 +762,15 @@ export class TalosClient {
     if (!configured || configured <= 1) return 1;
     if (this.retry.idempotentOnly && !idempotent) return 1;
     return Math.max(1, Math.min(configured, MAX_TYPED_RETRY_ATTEMPTS));
+  }
+
+  /**
+   * Detect whether the client is operating in a legacy environment lacking
+   * modern web features (e.g., `AbortController`, `crypto.randomUUID`).
+   * Returns `true` if the environment is modern, `false` otherwise.
+   */
+  private isModernEnvironment(): boolean {
+    return typeof AbortController !== "undefined" && typeof globalThis.crypto?.randomUUID === "function";
   }
 
   /**
@@ -823,6 +856,14 @@ export class TalosClient {
     const callerSignal = signal ?? undefined;
     const method = (requestInit.method ?? "GET").toUpperCase();
     const url = this.buildUrl(path, params);
+    if (!this.isModernEnvironment()) {
+      throw new TalosAPIError(
+        501,
+        "Client requires a modern environment with AbortController and crypto.randomUUID",
+        path,
+      );
+    }
+
 
     const extraHeaders: Record<string, string> = {};
     if (idempotencyKey !== undefined) {

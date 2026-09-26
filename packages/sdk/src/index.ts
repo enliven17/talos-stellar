@@ -1,19 +1,12 @@
 // ── Client ────────────────────────────────────────────────────────
 
-export {
-  TalosClient,
-  resolveRetryPolicy,
-  resolveRetryOptions,
-} from "./client.js";
+export { TalosClient } from "./client.js";
 export type {
   TalosClientOptions,
   RetryOptions,
   RetryPolicyOptions,
-  ResolvedRetryPolicy,
-  ResolvedRetryOptions,
   TalosErrorEvent,
   WriteOptions,
-  ReadOptions,
 } from "./client.js";
 
 // ── Idempotency ───────────────────────────────────────────────────
@@ -51,10 +44,19 @@ export {
   snapshotHeaders,
   parseRetryAfter,
   parseX402Challenge,
-  redactEventPath,
-  diagnoseBuyerProof,
   MAX_BODY_BYTES,
 } from "./errors.js";
+
+// ── Feature Detection ─────────────────────────────────────────────
+//
+// Provides backwards-compatible feature detection for SDK capabilities.
+// This allows consumers to safely check for the presence of specific
+// features without breaking on older versions or environments.
+export {
+  detectFeature,
+  FeatureFlags,
+  FeatureStatus,
+} from "./features.js";
 
 // ── Domain types ──────────────────────────────────────────────────
 
@@ -67,19 +69,6 @@ export * from "./webhooks.js";
 export * from "./a2a-intent.js";
 export * from "./a2a-validation.js";
 export * from "./a2a-operations.js";
-export {
-  DEFAULT_SELLER_QUOTE_TTL_SECONDS,
-  SellerQuoteError,
-  constructSellerQuote,
-  constructSellerPaymentDetails,
-  toCanonicalDecimalAmount,
-} from "./seller-quote.js";
-export type {
-  ConstructSellerQuoteParams,
-  ConstructSellerPaymentDetailsParams,
-  SellerPaymentDetails,
-  SellerQuoteErrorCode,
-} from "./seller-quote.js";
 export {
   TalosEventStream,
   TalosStreamError,
@@ -99,72 +88,4 @@ export {
   ChaosInjector,
   ChaosInjectedError,
   globalChaosInjector,
-  assertValidFaultConfig,
-  faultEffect,
 } from "./chaos.js";
-export type { FaultConfig, FaultEffect } from "./chaos.js";
-
-// ── Deterministic chaos transport fixtures ────────────────────────────────────
-
-export {
-  CHAOS_SCENARIOS,
-  createSeededRandom,
-  planChaosScenario,
-  replayChaosScenario,
-  buildChaosFixtureBundle,
-  getChaosScenario,
-  assertValidChaosScenario,
-} from "./chaos-fixtures.js";
-export type {
-  ChaosScenarioSpec,
-  ChaosCallOutcome,
-  ChaosCallPlan,
-  ChaosPlan,
-  PlannedFault,
-  ReplayChaosScenarioOptions,
-  ChaosReplayCall,
-  ChaosReplayResult,
-  SerializedChaosScenario,
-  ChaosFixtureBundle,
-} from "./chaos-fixtures.js";
-
-// ── Runtime compatibility matrix ──────────────────────────────────────────────
-
-export {
-  getRuntimeMatrix,
-  getRuntimeEntry,
-  detectRuntime,
-  probeGlobal,
-  checkRuntimeCompatibility,
-  assertRuntimeCompatibility,
-} from "./compat.js";
-export type {
-  SupportedRuntime,
-  RequiredCapability,
-  RuntimeMatrixEntry,
-  CompatibilityReport,
-} from "./compat.js";
-
-// Request signing
-export {
-  REQUEST_SIGNATURE_VERSION,
-  SigningController,
-  SigningError,
-  StellarKeypairSigner,
-  canonicalizeRequest,
-  detectSignerCapability,
-  encodeSignature,
-} from "./signing.js";
-export type {
-  CanonicalRequest,
-  RequestSigner,
-  SignatureResult,
-  SignOptions,
-  SigningCapability,
-  SigningControllerOptions,
-  SigningErrorCode,
-  SigningEvent,
-  SigningPayload,
-  SignerCapabilities,
-  StellarKeypairSignerOptions,
-} from "./signing.js";
