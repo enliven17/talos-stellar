@@ -432,6 +432,7 @@ jobs:
               });
             }
 
+            const startedOnRaw = '${{ github.event.head_commit.timestamp }}';
             const pred={
               '_type': 'https://in-toto.io/Statement/v1',
               subject: subjects,
@@ -464,7 +465,7 @@ jobs:
                   builder: { id: 'https://github.com/actions/runner/github-hosted' },
                   metadata: {
                     invocationId: '${{ github.run_id }}-${{ github.run_attempt }}',
-                    startedOn: '${{ github.event.head_commit.timestamp || new Date().toISOString() }}',
+                    startedOn: startedOnRaw || new Date().toISOString(),
                     completedOn: new Date().toISOString()
                   }
                 }
@@ -1024,7 +1025,7 @@ jobs:
             ];
             const wasms=fs.readdirSync('contracts/target/wasm32-unknown-unknown/release').filter(f=>f.endsWith('.wasm'));
             for (const w of wasms) subjects.push({name:w,digest:{sha256:sha256('contracts/target/wasm32-unknown-unknown/release/'+w)}});
-            const pred={'_type':'https://in-toto.io/Statement/v1',subject,
+            const pred={'_type':'https://in-toto.io/Statement/v1',subject: subjects,
               predicateType:'https://slsa.dev/provenance/v1',
               predicate:{buildDefinition:{
                 buildType:'https://github.com/slsa-framework/slsa-github-generator/generic@v1',
@@ -1032,7 +1033,7 @@ jobs:
                   source:{uri:'git+https://github.com/${{ github.repository }}@${{ github.ref }}',digest:{sha1:'${{ github.sha }}'}}},
                 resolvedDependencies:[{uri:'git+https://github.com/${{ github.repository }}',digest:{sha1:'${{ github.sha }}'}}]},
                 runDetails:{builder:{id:'https://github.com/actions/runner/github-hosted'},
-                  metadata:{invocationId:'${{ github.run_id }}-${{ github.run_attempt }}',completedOn:new Date().toISOString()}}}};
+                  metadata:{invocationId:'${{ github.run_id }}-${{ github.run_attempt }}',startedOn:new Date().toISOString(),completedOn:new Date().toISOString()}}}};
             fs.writeFileSync('${BASE}.intoto.jsonl', JSON.stringify(pred)+'\n');
           "
           echo "provenance-file=${BASE}.intoto.jsonl" >> "$GITHUB_OUTPUT"
@@ -1252,7 +1253,7 @@ jobs:
               {name:path.basename('${{ steps.cyclonedx.outputs.cdx-json }}'),digest:{sha256:sha256('${{ steps.cyclonedx.outputs.cdx-json }}')}},
               {name:path.basename('${{ steps.spdx.outputs.spdx-file }}'),digest:{sha256:sha256('${{ steps.spdx.outputs.spdx-file }}')}}
             ];
-            const pred={'_type':'https://in-toto.io/Statement/v1',subjects,
+            const pred={'_type':'https://in-toto.io/Statement/v1',subject: subjects,
               predicateType:'https://slsa.dev/provenance/v1',
               predicate:{buildDefinition:{
                 buildType:'https://github.com/slsa-framework/slsa-github-generator/generic@v1',
@@ -1260,7 +1261,7 @@ jobs:
                   source:{uri:'git+https://github.com/${{ github.repository }}@${{ github.ref }}',digest:{sha1:'${{ github.sha }}'}}},
                 resolvedDependencies:[{uri:'git+https://github.com/${{ github.repository }}',digest:{sha1:'${{ github.sha }}'}}]},
                 runDetails:{builder:{id:'https://github.com/actions/runner/github-hosted'},
-                  metadata:{invocationId:'${{ github.run_id }}-${{ github.run_attempt }}',completedOn:new Date().toISOString()}}}};
+                  metadata:{invocationId:'${{ github.run_id }}-${{ github.run_attempt }}',startedOn:new Date().toISOString(),completedOn:new Date().toISOString()}}}};
             fs.writeFileSync('${BASE}.intoto.jsonl', JSON.stringify(pred)+'\n');
           "
           echo "provenance-file=${BASE}.intoto.jsonl" >> "$GITHUB_OUTPUT"

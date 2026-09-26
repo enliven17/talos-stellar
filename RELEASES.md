@@ -120,10 +120,10 @@ Every component release automatically attaches:
 |------------|---------|---------|
 | CycloneDX SBOM | `talos-<component>-<tag>-<ts>.cdx.json` | Machine-readable dependency inventory (JSON, CycloneDX 1.6) |
 | SPDX SBOM | `talos-<component>-<tag>-<ts>.spdx` | SPDX 2.3 tag-value inventory (SPDX license scanner compatible) |
-| SLSA provenance | `talos-<component>-<tag>-<ts>.intoto.jsonl` | in-toto v1 statement + SLSA v1 predicate (level L3 aspiration) |
+| SLSA provenance | `talos-<component>-<tag>-<ts>.intoto.jsonl` | in-toto v1 statement + SLSA v1 predicate (level L3 aspiration). Covers SBOM subjects and (for contracts) WASM artifacts. |
 | Cosign keyless signatures | `<artifact>.<ext>.sig` + `<artifact>.<ext>.pem` for each attachment | OIDC-keyless Fulcio-issued signature + signing certificate |
 
-Generation happens in [`.github/workflows/sbom-provenance.yml`](.github/workflows/sbom-provenance.yml), called as a reusable workflow from the release pipeline. Each SBOM is signed with OIDC keyless cosign (issuer `https://token.actions.githubusercontent.com`, workflow identity bound to `.github/workflows/(release-publish|sbom-provenance).yml`).
+Generation happens in [`.github/workflows/sbom-provenance.yml`](.github/workflows/sbom-provenance.yml), called as a reusable workflow from the release pipeline. Each SBOM is signed with OIDC keyless cosign (issuer `https://token.actions.githubusercontent.com`, workflow identity bound to `.github/workflows/(release-publish|sbom-provenance).yml`). The SLSA provenance metadata is generated as in-toto v1 statements with SLSA v1 predicates covering the SBOM subjects and (for contracts) WASM artifacts.
 
 ### Verification
 
