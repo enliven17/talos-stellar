@@ -522,3 +522,54 @@ pub fn fixture_path_for_test(relative: &str) -> StdString {
     // Helper for error messages – not a filesystem read, just echo
     relative.to_string()
 }
+
+// --- Host-side name canonicalization (mirrors the contract's canonicalize_name) ----
+
+/// Canonicalize a registry name on the host (test) side.
+///
+/// Trims leading/trailing ASCII whitespace and converts to lowercase.
+/// This mirrors the `canonicalize_name` function in `lib.rs` exactly so that
+/// fixture tests and unit tests can assert on the output without an `Env`.
+///
+/// # Examples
+/// ```
+/// assert_eq!(canonicalize_name_host("Vega"), "vega");
+/// assert_eq!(canonicalize_name_host("  ATLAS  "), "atlas");
+/// assert_eq!(canonicalize_name_host("my-Agent"), "my-agent");
+/// ```
+#[cfg(not(target_arch = "wasm32"))]
+pub fn canonicalize_name_host(name: &str) -> StdString {
+    name.trim_matches(' ').to_ascii_lowercase()
+}
+
+/// Validate that a name is in canonical form (host side).
+///
+/// Rules:
+/// - 3..=32 bytes
+/// - Only lowercase ASCII alphanumerics and hyphens (`[a-z0-9-]`)
+/// - Must not start or end with `'-'`
+/// - Must not contain consecutive `'--'`
+///
+/// Returns `Ok(())` for a valid canonical name, `Err(reason)` otherwise.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn validate_name_canonical_host(name: &str) -> Result<(), StdString> {
+    if name.len() < 3 {
+        return Err(format!("too short ({} chars, minimum 3)", name.len()));
+    }
+    if name.len() > 32 {
+        return Err(format!("too long ({} chars, maximum 32)", name.len()));
+    }
+    if name.starts_with('-') {
+        return Err("must not start with a hyphen".to_string());
+    }
+    if name.ends_with('-') {
+        return Err("must not end with a hyphen".to_string());
+    }
+    if name.contains("--") {
+        return Err("must not contain consecutive hyphens".to_string());
+    }
+    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        return Err("must contain only lowercase alphanumeric characters and hyphens".to_string());
+    }
+    Ok(())
+}

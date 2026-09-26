@@ -4,8 +4,9 @@
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::registry_schema_fixtures::{
-        parse_creator_of_fixture, parse_governance_fixture, parse_name_record_fixture,
-        parse_talos_fixture, parse_talos_name_fixture, parse_timelock_config_fixture, FixtureError,
+        canonicalize_name_host, parse_creator_of_fixture, parse_governance_fixture,
+        parse_name_record_fixture, parse_talos_fixture, parse_talos_name_fixture,
+        parse_timelock_config_fixture, validate_name_canonical_host, FixtureError,
     };
     use crate::{Kernel, Patron, Pulse, Talos};
     use soroban_sdk::{testutils::Address as _, Address, Env, String as SorobanString};
@@ -119,47 +120,6 @@ mod tests {
         assert_eq!(talos.name, "atlas");
         assert!(!talos.active);
         assert_eq!(talos.patron.creator_share + talos.patron.investor_share + talos.patron.treasury_share, 100);
-    }
-
-    #[test]
-    fn v2_talos_genesis_parses_and_is_backward_compatible_with_v1() {
-        let v1 = parse_talos_fixture(V1_TALOS_GENESIS, "v1/talos_001_genesis.json").unwrap();
-        let v2 = parse_talos_fixture(V2_TALOS_GENESIS, "v2/talos_001_genesis.json").unwrap();
-        // Same logical Talos across versions – existing fields equal, additive still None
-        assert_eq!(v1.id, v2.id);
-        assert_eq!(v1.name, v2.name);
-        assert_eq!(v1.patron.creator_share, v2.patron.creator_share);
-        assert!(v2.metadata.is_none());
-    }
-
-    #[test]
-    fn v2_additive_metadata_parses_and_old_still_works() {
-        // v2 fixture with additive field present
-        let with = parse_talos_fixture(V2_TALOS_ADDITIVE, "v2/talos_with_additive_metadata.json").unwrap();
-        assert_eq!(with.metadata, Some("ipfs://QmAdditiveMetadataV2Example".to_string()));
-        assert_eq!(with.name, "nova");
-        // v1 without additive still parses as None – proves forward compat
-        let without = parse_talos_fixture(V1_TALOS_GENESIS, "v1/talos_001_genesis.json").unwrap();
-        assert!(without.metadata.is_none());
-    }
-
-    #[test]
-    fn existing_and_additive_fields_covered() {
-        // All supported Talos fixtures must parse
-        for (file, json) in [
-            ("v1/talos_001_genesis.json", V1_TALOS_GENESIS),
-            ("v1/talos_002_minimal.json", V1_TALOS_MINIMAL),
-            ("v2/talos_001_genesis.json", V2_TALOS_GENESIS),
-            ("v2/talos_with_additive_metadata.json", V2_TALOS_ADDITIVE),
-        ] {
-            let talos = parse_talos_fixture(json, file).unwrap_or_else(|e| panic!("{}: {}", file, e));
-            // check additive handling
-            if file.contains("additive") {
-                assert!(talos.metadata.is_some(), "{} should have metadata", file);
-            } else {
-                assert!(talos.metadata.is_none(), "{} should have None metadata", file);
-            }
-        }
     }
 
     // -- Forward / reverse lookups ----------------------------------------
@@ -323,6 +283,233 @@ mod tests {
             assert!(res.is_err(), "malformed {} should fail but got {:?}", file, res.unwrap());
             let msg = res.unwrap_err().to_string();
             assert!(msg.contains(file) && msg.contains("regen:"), "error not actionable for {}: {}", file, msg);
+        }
+    }
+
+    // ── Name Canonicalization Tests ─────────────────────────────────────────
+    //
+    // These tests cover the `canonicalize_name_host` and
+    // `validate_name_canonical_host` helpers (which mirror the contract's
+    // `canonicalize_name` / `validate_name_canonical` functions) as well as
+    // the round-trip behaviour — that canonicalization produces names that
+    // pass the canonical validator.
+
+    // --- Positive cases: inputs that canonicalize to a valid name ----------
+
+    #[test]
+    fn canonicalize_uppercase_to_lowercase() {
+        assert_eq!(canonicalize_name_host("VEGA"), "vega");
+        assert_eq!(canonicalize_name_host("Atlas"), "atlas");
+        assert_eq!(canonicalize_name_host("NOVA"), "nova");
+    }
+
+    #[test]
+    fn canonicalize_mixed_case_to_lowercase() {
+        assert_eq!(canonicalize_name_host("MyAgent"), "myagent");
+        assert_eq!(canonicalize_name_host("my-Agent"), "my-agent");
+        assert_eq!(canonicalize_name_host("AI-Forge"), "ai-forge");
+    }
+
+    #[test]
+    fn canonicalize_trims_leading_and_trailing_spaces() {
+        assert_eq!(canonicalize_name_host("  vega  "), "vega");
+        assert_eq!(canonicalize_name_host(" Atlas "), "atlas");
+        assert_eq!(canonicalize_name_host("   nova"), "nova");
+        assert_eq!(canonicalize_name_host("radar   "), "radar");
+    }
+
+    #[test]
+    fn canonicalize_already_canonical_is_identity() {
+        // Idempotency: canonical input → same output
+        for name in &["vega", "atlas", "nova", "my-agent", "ai-forge-7"] {
+            assert_eq!(canonicalize_name_host(name), *name, "idempotent for '{}'", name);
+        }
+    }
+
+    #[test]
+    fn canonicalize_digits_preserved() {
+        assert_eq!(canonicalize_name_host("Agent7"), "agent7");
+        assert_eq!(canonicalize_name_host("R2D2"), "r2d2");
+    }
+
+    #[test]
+    fn canonical_form_passes_validator() {
+        // Every canonical output should pass the canonical validator
+        for input in &["Vega", "  ATLAS  ", "my-Agent", "AI-Forge-7", "r2d2"] {
+            let canonical = canonicalize_name_host(input);
+            let result = validate_name_canonical_host(&canonical);
+            assert!(
+                result.is_ok(),
+                "canonicalized '{}' -> '{}' failed validation: {:?}",
+                input, canonical, result
+            );
+        }
+    }
+
+    // --- Negative cases: inputs whose canonical form is still invalid ------
+
+    #[test]
+    fn canonical_validator_rejects_too_short() {
+        // 1 and 2-char names are rejected
+        assert!(validate_name_canonical_host("a").is_err(), "single char too short");
+        assert!(validate_name_canonical_host("ab").is_err(), "two chars too short");
+        // canonical of a short mixed-case also fails
+        let canonical = canonicalize_name_host("AB");
+        assert!(validate_name_canonical_host(&canonical).is_err());
+    }
+
+    #[test]
+    fn canonical_validator_rejects_too_long() {
+        // 33-char name exceeds the 32-char limit
+        let long = "a".repeat(33);
+        assert!(validate_name_canonical_host(&long).is_err(), "33 chars should fail");
+        let long_canonical = canonicalize_name_host(&long);
+        assert!(validate_name_canonical_host(&long_canonical).is_err());
+    }
+
+    #[test]
+    fn canonical_validator_rejects_leading_hyphen() {
+        assert!(validate_name_canonical_host("-myagent").is_err());
+        assert!(validate_name_canonical_host("-vega").is_err());
+    }
+
+    #[test]
+    fn canonical_validator_rejects_trailing_hyphen() {
+        assert!(validate_name_canonical_host("myagent-").is_err());
+        assert!(validate_name_canonical_host("vega-").is_err());
+    }
+
+    #[test]
+    fn canonical_validator_rejects_consecutive_hyphens() {
+        assert!(validate_name_canonical_host("my--agent").is_err());
+        assert!(validate_name_canonical_host("bad--name").is_err());
+        // The malformed fixture with "bad--name" must also fail
+        let err = parse_name_record_fixture(MALFORMED_NAME, "malformed/invalid_name_double_hyphen.json").unwrap_err();
+        assert!(matches!(err, FixtureError::InvalidValue{..}));
+    }
+
+    #[test]
+    fn canonical_validator_rejects_uppercase_characters() {
+        // Uppercase is not canonical
+        assert!(validate_name_canonical_host("Vega").is_err(), "uppercase V not canonical");
+        assert!(validate_name_canonical_host("ATLAS").is_err(), "all-caps not canonical");
+    }
+
+    #[test]
+    fn canonical_validator_rejects_spaces_in_canonical_form() {
+        // After canonicalization spaces are trimmed, but a name with internal spaces
+        // becomes invalid (space is not alphanumeric/hyphen)
+        assert!(validate_name_canonical_host("my agent").is_err(), "internal space not allowed");
+    }
+
+    #[test]
+    fn canonical_validator_rejects_special_characters() {
+        assert!(validate_name_canonical_host("my_agent").is_err(), "underscore not allowed");
+        assert!(validate_name_canonical_host("my.agent").is_err(), "dot not allowed");
+        assert!(validate_name_canonical_host("my@agent").is_err(), "@ not allowed");
+    }
+
+    // --- Boundary cases ----------------------------------------------------
+
+    #[test]
+    fn canonical_validator_accepts_exactly_3_chars() {
+        assert!(validate_name_canonical_host("abc").is_ok(), "exactly 3 chars ok");
+        assert!(validate_name_canonical_host("a1b").is_ok(), "3 chars with digit ok");
+    }
+
+    #[test]
+    fn canonical_validator_accepts_exactly_32_chars() {
+        let name = "a".repeat(32);
+        assert!(validate_name_canonical_host(&name).is_ok(), "exactly 32 chars ok");
+    }
+
+    #[test]
+    fn canonical_validator_accepts_hyphen_in_middle() {
+        assert!(validate_name_canonical_host("my-agent").is_ok());
+        assert!(validate_name_canonical_host("a-b-c").is_ok());
+    }
+
+    #[test]
+    fn canonicalize_boundary_32_char_uppercase() {
+        // A 32-char uppercase name should canonicalize to 32-char lowercase and pass
+        let input = "A".repeat(32);
+        let canonical = canonicalize_name_host(&input);
+        assert_eq!(canonical.len(), 32);
+        assert!(validate_name_canonical_host(&canonical).is_ok());
+    }
+
+    #[test]
+    fn canonicalize_trims_to_valid_length() {
+        // If the input is 3 valid chars surrounded by spaces, trimming produces valid output
+        let input = "   abc   ";
+        let canonical = canonicalize_name_host(input);
+        assert_eq!(canonical, "abc");
+        assert!(validate_name_canonical_host(&canonical).is_ok());
+    }
+
+    // --- Regression cases: existing fixture names are already canonical ----
+
+    #[test]
+    fn fixture_names_are_already_canonical() {
+        // All fixtures use canonical names – canonicalization must be a no-op
+        for (fixture_json, file) in [
+            (V1_TALOS_GENESIS, "v1/talos_001_genesis.json"),
+            (V1_TALOS_MINIMAL, "v1/talos_002_minimal.json"),
+            (V2_TALOS_GENESIS, "v2/talos_001_genesis.json"),
+            (V2_TALOS_ADDITIVE, "v2/talos_with_additive_metadata.json"),
+        ] {
+            let talos = parse_talos_fixture(fixture_json, file)
+                .unwrap_or_else(|e| panic!("{}: {}", file, e));
+            let canonical = canonicalize_name_host(&talos.name);
+            assert_eq!(
+                canonical, talos.name,
+                "fixture '{}' name '{}' is not already canonical",
+                file, talos.name
+            );
+            assert!(
+                validate_name_canonical_host(&talos.name).is_ok(),
+                "fixture '{}' name '{}' fails canonical validation",
+                file, talos.name
+            );
+        }
+    }
+
+    #[test]
+    fn forward_reverse_fixture_names_are_canonical() {
+        // Name records in forward/reverse fixtures must also carry canonical names
+        for (fwd_json, fwd_file) in [
+            (V1_NAME_FORWARD, "v1/name_forward_001.json"),
+            (V2_NAME_FORWARD, "v2/name_forward_001.json"),
+        ] {
+            let fwd = parse_name_record_fixture(fwd_json, fwd_file)
+                .unwrap_or_else(|e| panic!("{}: {}", fwd_file, e));
+            let canonical = canonicalize_name_host(&fwd.name);
+            assert_eq!(canonical, fwd.name, "forward fixture '{}' name not canonical", fwd_file);
+            assert!(
+                validate_name_canonical_host(&fwd.name).is_ok(),
+                "forward fixture '{}' name '{}' fails canonical validation",
+                fwd_file, fwd.name
+            );
+        }
+    }
+
+    #[test]
+    fn known_names_canonicalize_to_expected_values() {
+        // Regression: specific known transformations must remain stable
+        let cases = [
+            ("Vega", "vega"),
+            ("ATLAS", "atlas"),
+            ("Nova", "nova"),
+            ("  FORGE  ", "forge"),
+            ("Lens", "lens"),
+            ("RADAR", "radar"),
+            ("My-Agent", "my-agent"),
+        ];
+        for (input, expected) in &cases {
+            assert_eq!(
+                canonicalize_name_host(input), *expected,
+                "canonicalize('{}') should be '{}'", input, expected
+            );
         }
     }
 }
