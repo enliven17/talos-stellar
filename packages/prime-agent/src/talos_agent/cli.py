@@ -18,7 +18,7 @@ from rich.console import Console
 
 from talos_agent import __version__
 from talos_agent.checkpoint_cli import checkpoint
-from talos_agent.config import APP_DIR, Settings, ensure_app_dir
+from talos_agent.config import APP_DIR, Settings, ensure_app_dir, safe_config_error
 
 console = Console()
 
@@ -70,7 +70,7 @@ def start(talos_id: str | None, env_file: str):
                     dec = decrypt_with_password(value, master_key)
                     os.environ.setdefault(key, dec)
                 except Exception as e:
-                    console.print(f"[red]Error decrypting {key}:[/red] {e}")
+                    console.print(f"[red]Error decrypting {key}:[/red] {safe_config_error(e)}")
                     sys.exit(1)
             else:
                 os.environ.setdefault(key, value)
@@ -78,7 +78,11 @@ def start(talos_id: str | None, env_file: str):
     kwargs: dict = {"_env_file": env_file}
     if talos_id:
         kwargs["talos_id"] = talos_id
-    settings = Settings(**kwargs)
+    try:
+        settings = Settings(**kwargs)
+    except Exception as exc:
+        console.print(f"[red]Configuration error:[/red] {safe_config_error(exc)}")
+        raise click.exceptions.Exit(1) from None
 
     all_keys = settings.get_all_api_keys()
     if not all_keys:
@@ -263,6 +267,49 @@ def inspect_jobs(
             db.close()
 
 
+
+@jobs.command(name="audit")
+@click.option("--talos-id", required=True, help="Talos scope whose audit trail may be inspected")
+@click.option("--db-path", default=None, type=click.Path(dir_okay=False))
+@click.option("--effect-id", default=None, help="Filter audit trail to one effect")
+@click.option("--job-id", default=None, help="Filter audit trail to one job")
+@click.option("--limit", default=50, type=click.IntRange(1, 200))
+@click.option("--json", "as_json", is_flag=True, help="Emit metadata as JSON")
+def audit_jobs(
+    talos_id: str,
+    db_path: str | None,
+    effect_id: str | None,
+    job_id: str | None,
+    limit: int,
+    as_json: bool,
+):
+    """List durable effect replay audit entries (metadata only)."""
+    from talos_agent.job_effects import JobEffectError
+
+    db = None
+    try:
+        db, store = _job_store(db_path, talos_id)
+        rows = store.audit_trail(effect_id=effect_id, job_id=job_id, limit=limit)
+        if as_json:
+            console.print_json(json.dumps({"audit": rows, "count": len(rows)}))
+            return
+        if not rows:
+            console.print("[dim]No matching replay audit entries.[/dim]")
+            return
+        for row in rows:
+            console.print(
+                f"{row['created_at']} {row['action']} effect={row['effect_id']} "
+                f"job={row['job_id']} {row['from_state'] or '-'}->{row['to_state']} "
+                f"attempts={row['attempt_count']} actor={row['actor']} "
+                f"error={row['error_code'] or '-'}"
+            )
+    except JobEffectError as exc:
+        raise click.ClickException(f"{exc.code}: {exc}") from exc
+    finally:
+        if db is not None:
+            db.close()
+
+
 @jobs.command(name="retry")
 @click.argument("effect_id")
 @click.option("--talos-id", required=True, help="Talos scope that owns the effect")
@@ -390,8 +437,25 @@ def backup(output, agent_id, passphrase, web_endpoint, web_api_url, ops_token):
     console.print(f"  scope:         {run.scope}")
     console.print(f"  files:         {len(run.files)}")
     console.print(f"  row_count:     {run.manifest.get('rowCountTotal', 0)}")
-    console.print(f"  duration_s:    {elapsed:.2f}")
+    console.print(f"  duration_s:    {elapsed:.2f}")    
+    settings = Settings()
+    if settings.backup_retention_enabled:
+        from talos_agent.backup_service import prune_backups
 
+        try:
+            deleted = prune_backups(
+                directory=out.parent,
+                max_count=settings.backup_retention_max_count,
+                max_age_days=settings.backup_retention_max_age_days,
+            )
+        except BackupError as exc:
+            # Retention is best-effort cleanup; the backup itself already
+            # succeeded above, so a policy misconfiguration must not turn
+            # into a failed `backup` command. Report and continue.
+            console.print(f"[yellow]Retention pruning skipped:[/yellow] {exc}")
+        else:
+            if deleted:
+                console.print(f"  pruned:        {len(deleted)} old backup(s) removed")
     if web_endpoint:
         import asyncio
         import os
@@ -992,3 +1056,87 @@ def checkpoint_discard(
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
     console.print_json(data=asdict(result))
+
+
+@main.command(name="wal-health")
+@click.option("--db", "db_path", default=None, help="Path to SQLite DB (default: agent local DB).")
+@click.option("--agent-id", default=None, help="Resolve per-agent DB path when --db is omitted.")
+@click.option("--json", "json_output", is_flag=True, help="Output raw JSON instead of a formatted summary.")
+@click.option("--no-checkpoint", is_flag=True, help="Skip PRAGMA wal_checkpoint(PASSIVE).")
+@click.option("--no-quick-check", is_flag=True, help="Skip PRAGMA quick_check.")
+def wal_health_cmd(db_path, agent_id, json_output, no_checkpoint, no_quick_check):
+    """Show SQLite WAL health diagnostics for the agent database.
+
+    Reports journal mode, WAL/SHM sidecar sizes, checkpoint progress, and a
+    quick integrity probe. Output is privacy-safe — no row payloads, secrets,
+    seeds, or payment proofs are included.
+    """
+    from pathlib import Path as _Path
+
+    from talos_agent.db import LocalDB, get_db_path
+    from talos_agent.wal_health import collect_wal_health
+
+    ensure_app_dir()
+
+    path = _Path(db_path).resolve() if db_path else get_db_path(agent_id)
+    db = None
+    try:
+        if path.exists():
+            db = LocalDB(path=path)
+            report = db.wal_health(
+                run_checkpoint=not no_checkpoint,
+                run_quick_check=not no_quick_check,
+            )
+        else:
+            report = collect_wal_health(
+                path,
+                run_checkpoint=not no_checkpoint,
+                run_quick_check=not no_quick_check,
+            )
+    finally:
+        if db is not None:
+            db.close()
+
+    if json_output:
+        console.print(report.to_json())
+        return
+
+    color = {
+        "healthy": "green",
+        "degraded": "yellow",
+        "missing": "dim",
+        "error": "red",
+    }.get(report.state.value, "dim")
+
+    console.print(
+        f"[bold]SQLite WAL Health:[/bold] [{color}]{report.state.value.upper()}[/{color}]"
+    )
+    console.print(f"  Database:   {report.db_basename}")
+    console.print(f"  Checked at: {report.checked_at.isoformat()}")
+    console.print(f"  Detail:     {report.detail}")
+    console.print()
+    console.print("[bold]Pragmas[/bold]")
+    console.print(f"  journal_mode:       {report.journal_mode or 'n/a'}")
+    console.print(f"  wal_autocheckpoint: {report.wal_autocheckpoint}")
+    console.print(f"  busy_timeout_ms:    {report.busy_timeout_ms}")
+    console.print(f"  synchronous:        {report.synchronous or 'n/a'}")
+    console.print(f"  page_count:         {report.page_count}")
+    console.print(f"  page_size:          {report.page_size}")
+    console.print(f"  freelist_count:     {report.freelist_count}")
+    console.print()
+    console.print("[bold]Files[/bold]")
+    console.print(f"  db_size_bytes:  {report.db_size_bytes}")
+    console.print(f"  wal_exists:     {report.wal_exists}  size={report.wal_size_bytes}")
+    console.print(f"  shm_exists:     {report.shm_exists}  size={report.shm_size_bytes}")
+    console.print()
+    console.print("[bold]Checkpoint / Integrity[/bold]")
+    console.print(
+        f"  wal_checkpoint(PASSIVE): busy={report.checkpoint_busy} "
+        f"log={report.checkpoint_log} checkpointed={report.checkpoint_checkpointed}"
+    )
+    console.print(f"  quick_check: {report.integrity or 'skipped'}")
+    if report.findings:
+        console.print()
+        console.print("[bold]Findings[/bold]")
+        for finding in report.findings:
+            console.print(f"  - {finding}")

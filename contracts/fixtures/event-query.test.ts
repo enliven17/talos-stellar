@@ -59,6 +59,7 @@ describe("fixture document parsing", () => {
     for (const fixture of set.fixtures) {
       const parsed = parseEventFixture(fixture, set);
       expect(parsed.event).toBe(fixture.event);
+      expect(parsed.tx_index_in_ledger).toBe(fixture.tx_index_in_ledger);
       expect(parsed.decoded.contract).toBe(fixture.contract);
     }
   });
@@ -190,6 +191,45 @@ describe("bounded querying", () => {
     expect(page2.page).toBe(2);
   });
 
+  it("orders before pagination by the canonical event cursor", () => {
+    const first = set.fixtures.find((event) => event.id === "creation.tls_crt.normal")!;
+    const second = set.fixtures.find((event) => event.id === "creation.tls_crt2.normal")!;
+    const laterTransaction = { ...first, id: "cursor.tx1", tx_index_in_ledger: 1, event_index_in_tx: 0 };
+    const earlierTransaction = { ...first, id: "cursor.tx0.event2", tx_index_in_ledger: 0, event_index_in_tx: 2 };
+    const unsorted: FixtureSet = {
+      ...set,
+      fixtures: [laterTransaction, second, earlierTransaction, first],
+    };
+
+    const page1 = queryEvents(unsorted, { fromLedger: 100000, toLedger: 100000, pageSize: 2 });
+    const page2 = queryEvents(unsorted, { fromLedger: 100000, toLedger: 100000, pageSize: 2, page: 2 });
+
+    expect(page1.events.map((event) => event.id)).toEqual([
+      "creation.tls_crt.normal",
+      "creation.tls_crt2.normal",
+    ]);
+    expect(page2.events.map((event) => event.id)).toEqual(["cursor.tx0.event2", "cursor.tx1"]);
+    expect(unsorted.fixtures[0].id).toBe("cursor.tx1");
+  });
+
+  it("rejects a missing transaction index in an otherwise valid event", () => {
+    const fixture = { ...set.fixtures[0] } as Record<string, unknown>;
+    delete fixture.tx_index_in_ledger;
+    expect(() => parseEventFixture(fixture, set)).toThrow(MalformedEventError);
+  });
+
+  it("validates u32 cursor boundaries and rejects duplicate cursors", () => {
+    const base = { ...raw, fixtures: [...raw.fixtures] };
+    const missingIndex = { ...base.fixtures[0] } as Record<string, unknown>;
+    delete missingIndex.tx_index_in_ledger;
+    expect(() => parseFixtureSet({ ...base, fixtures: [missingIndex, ...base.fixtures.slice(1)] })).toThrow(MalformedEventError);
+
+    const outOfRange = { ...base.fixtures[0], event_index_in_tx: 0x1_0000_0000 };
+    expect(() => parseEventFixture(outOfRange, set)).toThrow(MalformedEventError);
+
+    const duplicate = { ...base.fixtures[0], id: "duplicate.cursor" };
+    expect(() => parseFixtureSet({ ...base, fixtures: [...base.fixtures, duplicate] })).toThrow(MalformedEventError);
+  });
   it("returns an empty page for an empty range", () => {
     const result = queryEvents(set, {
       topic: "div_clm",

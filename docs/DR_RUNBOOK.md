@@ -6,6 +6,17 @@ This runbook is the **source of truth** when something breaks: every procedure
 below has been exercised locally and in CI. Operators should be able to follow
 the steps without consulting source code.
 
+This file (and any other `*RUNBOOK*.md`) is checked by
+[`scripts/validate-runbooks.mjs`](../scripts/validate-runbooks.mjs): it fails
+if a required section (triggers, verification, recovery, troubleshooting) is
+missing, or if a referenced repo file or `pnpm`/`uv run` command no longer
+exists. Run it locally after editing a runbook:
+
+```bash
+node scripts/validate-runbooks.mjs .
+node --test scripts/validate-runbooks.test.mjs
+```
+
 ---
 
 ## Targets

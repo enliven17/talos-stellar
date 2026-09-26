@@ -814,6 +814,43 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      # Contract artifact cache (#635): warms
+      # contracts/target/wasm32-unknown-unknown/release keyed by OS +
+      # rustc fingerprint + strong hash of the contract build inputs
+      # (scripts/ci-contract-cache.sh key-hash). The wasm build always
+      # runs and passes the verify gate BEFORE signing, so SBOM subject
+      # hashes and signatures only ever cover artifacts verified in this
+      # run. Corrupted cache entries are wiped and rebuilt (miss, not a
+      # failure), flaky restore/save steps are non-fatal, and missing key
+      # inputs or missing/invalid artifacts fail closed with an explicit
+      # ::error::. Only the wasm build output is cached.
+      #
+      # Local reproduction:
+      #   bash scripts/ci-contract-cache.test.sh
+      - name: Compute contract cache key
+        id: cache-key
+        run: |
+          HASH=$(bash scripts/ci-contract-cache.sh key-hash contracts)
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "toolchain=$(rustc --version | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore contract artifact cache
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: contracts/target/wasm32-unknown-unknown/release
+          key: ${{ runner.os }}-contracts-wasm-${{ steps.cache-key.outputs.toolchain }}-${{ steps.cache-key.outputs.hash }}
+          restore-keys: |
+            ${{ runner.os }}-contracts-wasm-${{ steps.cache-key.outputs.toolchain }}-
+
+      - name: Warn on contract cache restore failure
+        if: steps.cache-restore.outcome == 'failure'
+        run: echo "::warning::Contract artifact cache restore failed (flaky step or backend error) — continuing with a full rebuild. The cache is an optimization only; artifacts are always built and verified before signing."
+
+      - name: Validate restored contract artifacts
+        run: bash scripts/ci-contract-cache.sh validate contracts/target/wasm32-unknown-unknown/release
+
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
         if: inputs.sign_artifacts != false
@@ -925,6 +962,17 @@ jobs:
       - name: Build contracts WASMs (for provenance subject hashes)
         working-directory: contracts
         run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Verify contract artifacts
+        run: bash scripts/ci-contract-cache.sh verify contracts/target/wasm32-unknown-unknown/release
+
+      - name: Save contract artifact cache
+        if: steps.cache-restore.outcome == 'success' && steps.cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: contracts/target/wasm32-unknown-unknown/release
+          key: ${{ steps.cache-restore.outputs.cache-primary-key }}
 
       - name: Sign SBOM artifacts
         id: sign

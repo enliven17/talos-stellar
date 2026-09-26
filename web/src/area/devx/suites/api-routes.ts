@@ -8,7 +8,10 @@ import { GET as liveGET } from "@/app/api/health/live/route";
 import { generateTalosIds, generateActivityEntries, generateTransferPayloads } from "../datasets";
 import { computePercentiles, summarizeStats } from "../metrics";
 
-function mockRequest(url: string, init?: RequestInit): NextRequest {
+function mockRequest(
+  url: string,
+  init?: ConstructorParameters<typeof NextRequest>[1],
+): NextRequest {
   return new NextRequest(new URL(url, "http://localhost:3000"), init);
 }
 

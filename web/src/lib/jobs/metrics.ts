@@ -1,4 +1,5 @@
 import { logger } from "@/lib/logger";
+import { buildLogEvent } from "@/lib/log-schema";
 
 /**
  * Structured job-lifecycle events. Deliberately never includes `payload`,
@@ -6,6 +7,10 @@ import { logger } from "@/lib/logger";
  * in their message or cause) — only identifiers, counters, and durations.
  * `lastError` on the row is a caller-truncated string for the same reason;
  * see truncateError() below.
+ *
+ * Fields go through the shared log schema (`buildLogEvent`): `schemaVersion`
+ * is stamped, scalars are bounded, sensitive keys redacted — signature
+ * unchanged.
  */
 export type JobEvent =
   | "job_enqueued"
@@ -29,7 +34,8 @@ export interface JobLogFields {
 }
 
 export function logJobEvent(event: JobEvent, fields: JobLogFields): void {
-  logger.info({ event, ...fields }, event);
+  const built = buildLogEvent(event, fields);
+  logger.info(built, built.event);
 }
 
 const MAX_ERROR_LEN = 500;

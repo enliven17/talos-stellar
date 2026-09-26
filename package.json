@@ -15,7 +15,10 @@
     "stack:reset": "bash scripts/local-stack.sh reset",
     "test:fixtures": "pnpm --dir contracts test:fixtures",
     "fixtures:gen": "node scripts/generate-registry-fixtures.mjs",
-    "fixtures:check": "node scripts/generate-registry-fixtures.mjs --check"
+    "fixtures:check": "node scripts/generate-registry-fixtures.mjs --check",
+    "migrations:check": "node scripts/check-migration-drift.mjs",
+    "migrations:check:strict": "node scripts/check-migration-drift.mjs --strict",
+    "test:migration-drift": "bash scripts/check-migration-drift.test.sh"
   },
   "dependencies": {
     "next": "16.2.2"

@@ -5,7 +5,7 @@ import { evaluateThresholds } from "./thresholds";
 import { createId } from "@paralleldrive/cuid2";
 import { logger } from "./logger";
 
-export type BenchmarkFn = () => Promise<void> | void;
+export type BenchmarkFn = () => unknown;
 
 export interface BenchmarkOptions {
   label: string;

@@ -1,3 +1,4 @@
+/// <reference types="vitest/importMeta" />
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export function buildLivenessResponse(uptime: number, ts: string) {
