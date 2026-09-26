@@ -309,6 +309,22 @@ if (typeof sdk.ChaosInjector === "function") {
   console.log("  + ChaosInjector instantiation OK (edge sandbox)");
 }
 
+// Deterministic chaos fixtures inside the edge sandbox (pure JS paths only).
+if (typeof sdk.planChaosScenario === "function") {
+  const scenario = sdk.getChaosScenario("always-injects-unit-probability");
+  assert.ok(scenario, "chaos scenario lookup failed in edge sandbox");
+  const plan = sdk.planChaosScenario(scenario);
+  assert.equal(plan.calls[0].outcome, "injected-throw", "chaos plan outcome drifted in edge sandbox");
+  const seeded = sdk.createSeededRandom(1);
+  const seeded2 = sdk.createSeededRandom(1);
+  assert.deepEqual(
+    Array.from({ length: 4 }, seeded),
+    Array.from({ length: 4 }, seeded2),
+    "seeded PRNG not deterministic in edge sandbox",
+  );
+  console.log("  + deterministic chaos fixtures OK (edge sandbox)");
+}
+
 // Malformed / boundary: constructing with missing baseUrl should be explicit, not silent Node crash.
 if (typeof sdk.TalosClient === "function") {
   try {

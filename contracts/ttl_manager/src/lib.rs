@@ -25,6 +25,19 @@
 //! | CRITICAL  | 3 500 000 | ~202 days | Entry is at risk of archival |
 //! | MAX_TTL   | ~4 100 000 | ~237 days | Soroban's default maximum TTL |
 //!
+//! ## Batched extension with bounds
+//!
+//! Batch sweeps are bounded twice so a single call is predictable:
+//!
+//! 1. **Age window** — [`TtlBounds::min_age`] / [`TtlBounds::max_age`] decide
+//!    which entries are eligible; anything outside the window is reported as
+//!    `skipped` rather than silently written.
+//! 2. **Work cap** — [`TtlBounds::max_keys`] caps how many ids one sweep may
+//!    visit (see [`bounded_range`]).
+//!
+//! Invalid bounds fail loudly through [`TtlBounds::validate`] with static
+//! [`BoundsError`] messages that never embed caller or storage data.
+//!
 //! ## Events
 //!
 //! | Event       | Topic         | Data |
@@ -37,6 +50,8 @@
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 extern crate std;
+
+use core::ops::Range;
 
 use soroban_sdk::{symbol_short, Env};
 
@@ -136,6 +151,180 @@ pub fn needs_touch(last_touched: u32, current_ledger: u32) -> bool {
 /// Compute the age of an entry in ledgers.
 pub fn age_ledgers(last_touched: u32, current_ledger: u32) -> u32 {
     current_ledger.saturating_sub(last_touched)
+}
+
+// ── Batched TTL Extension with Bounds ───────────────────────────────
+
+/// Default cap on how many ids one bounded sweep may visit.
+pub const DEFAULT_MAX_BATCH_KEYS: u32 = 200;
+
+/// Hard upper bound for [`TtlBounds::max_keys`].  Bounds that ask for more
+/// keys per call are rejected instead of silently clamped, so the caller
+/// always learns that its sweep would exceed the per-transaction budget.
+pub const MAX_BATCH_KEYS: u32 = 1_000;
+
+/// Age window and work cap applied to a batched TTL extension sweep.
+///
+/// Construct bounds with [`TtlBounds::new`] (explicit caller input) or
+/// [`TtlBounds::renewal`] (the defaults that mirror [`needs_touch`]), then
+/// always call [`TtlBounds::validate`] once before sweeping.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TtlBounds {
+    /// Entries younger than this age (ledgers) are skipped.
+    pub min_age: u32,
+    /// Entries older than this age (ledgers) are skipped.
+    pub max_age: u32,
+    /// Maximum number of ids a single sweep may visit.
+    pub max_keys: u32,
+}
+
+/// Bounds that reject malformed batched-extension requests.
+///
+/// Messages are compile-time constants: they carry no caller, key, or
+/// storage data, so a failed bounds check can never leak sensitive input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BoundsError {
+    /// `min_age` is greater than `max_age` — the window can never match.
+    InvertedAgeWindow,
+    /// `max_keys` is zero — the sweep would visit nothing.
+    ZeroMaxKeys,
+    /// `max_keys` exceeds [`MAX_BATCH_KEYS`].
+    MaxKeysTooLarge,
+}
+
+impl BoundsError {
+    /// Static, privacy-safe diagnostic for this bounds violation.
+    pub const fn message(&self) -> &'static str {
+        match self {
+            Self::InvertedAgeWindow => "ttl bounds: min_age exceeds max_age",
+            Self::ZeroMaxKeys => "ttl bounds: max_keys must be greater than zero",
+            Self::MaxKeysTooLarge => "ttl bounds: max_keys exceeds MAX_BATCH_KEYS",
+        }
+    }
+}
+
+impl TtlBounds {
+    /// Build bounds from explicit caller-supplied values.
+    pub const fn new(min_age: u32, max_age: u32, max_keys: u32) -> Self {
+        Self {
+            min_age,
+            max_age,
+            max_keys,
+        }
+    }
+
+    /// Defaults: renew everything at or past [`RENEWAL_THRESHOLD`], capped at
+    /// [`DEFAULT_MAX_BATCH_KEYS`] ids per sweep.  Identical decisions to
+    /// [`needs_touch`], so existing callers keep their behaviour.
+    pub const fn renewal() -> Self {
+        Self {
+            min_age: RENEWAL_THRESHOLD,
+            max_age: u32::MAX,
+            max_keys: DEFAULT_MAX_BATCH_KEYS,
+        }
+    }
+
+    /// Reject malformed bounds before any storage is touched.
+    pub fn validate(&self) -> Result<(), BoundsError> {
+        if self.min_age > self.max_age {
+            return Err(BoundsError::InvertedAgeWindow);
+        }
+        if self.max_keys == 0 {
+            return Err(BoundsError::ZeroMaxKeys);
+        }
+        if self.max_keys > MAX_BATCH_KEYS {
+            return Err(BoundsError::MaxKeysTooLarge);
+        }
+        Ok(())
+    }
+
+    /// `limit` clamped to this bound's `max_keys` (after [`Self::validate`]).
+    pub fn clamp_limit(&self, limit: u32) -> Result<u32, BoundsError> {
+        self.validate()?;
+        Ok(limit.min(self.max_keys))
+    }
+
+    /// `true` when `age` falls inside `[min_age, max_age]`.
+    pub fn contains(&self, age: u32) -> bool {
+        age >= self.min_age && age <= self.max_age
+    }
+}
+
+/// Decide whether an entry whose last touch is `last_touched` should be
+/// extended, given `bounds`.
+///
+/// Generalises [`needs_touch`] over an explicit age window.  Bounds are **not**
+/// re-validated here: call [`TtlBounds::validate`] once when the bounds are
+/// admitted (contract entry-points do this before sweeping).
+pub fn should_extend(last_touched: u32, current_ledger: u32, bounds: &TtlBounds) -> bool {
+    bounds.contains(age_ledgers(last_touched, current_ledger))
+}
+
+/// Ids a bounded sweep may visit: `[start_id, end_exclusive)` clipped to
+/// `limit` and then to `bounds.max_keys`.
+///
+/// Returns [`BoundsError`] for malformed bounds, so an invalid request never
+/// reaches storage.
+pub fn bounded_range(
+    start_id: u32,
+    limit: u32,
+    bounds: &TtlBounds,
+    end_exclusive: u32,
+) -> Result<Range<u32>, BoundsError> {
+    let capped = bounds.clamp_limit(limit)?;
+    Ok(start_id..end_exclusive.min(start_id.saturating_add(capped)))
+}
+
+/// What happened to a single id during a sweep.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EntryOutcome {
+    /// Entry existed and was re-written (TTL bumped).
+    Touched,
+    /// Entry existed but fell outside the bounds window.
+    Skipped,
+    /// No entry for this id — ignored, matching historical sweeps.
+    Absent,
+}
+
+/// Accumulator for a bounded batch sweep.
+///
+/// Feeds the `ttl_batch` event: `total` counts only ids that existed
+/// (`Touched` + `Skipped`), `Absent` ids are not counted.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BatchSweep {
+    pub total: u32,
+    pub touched: u32,
+    pub skipped: u32,
+}
+
+impl BatchSweep {
+    pub const fn empty() -> Self {
+        Self {
+            total: 0,
+            touched: 0,
+            skipped: 0,
+        }
+    }
+
+    /// Fold one id's outcome into the accumulator.
+    pub fn record(&mut self, outcome: EntryOutcome) {
+        match outcome {
+            EntryOutcome::Touched => {
+                self.total += 1;
+                self.touched += 1;
+            }
+            EntryOutcome::Skipped => {
+                self.total += 1;
+                self.skipped += 1;
+            }
+            EntryOutcome::Absent => {}
+        }
+    }
+
+    /// Emit the `ttl_batch` event for this sweep.
+    pub fn emit(&self, env: &Env) {
+        emit_ttl_batch(env, self.total, self.touched, self.skipped);
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -312,5 +501,180 @@ mod tests {
         assert_eq!(RENEWAL_THRESHOLD, WARN_THRESHOLD);
         // CRITICAL must be greater than WARN
         assert!(CRITICAL_THRESHOLD > WARN_THRESHOLD);
+    }
+
+    // ── Batched extension with bounds ────────────────────────────
+
+    /// Regression: default bounds must make exactly the decisions that the
+    /// long-standing `needs_touch` helper makes, so refactoring callers onto
+    /// `should_extend` cannot change behaviour.
+    #[test]
+    fn renewal_bounds_match_needs_touch() {
+        let bounds = TtlBounds::renewal();
+        let pairs = [
+            (0u32, 0u32),
+            (0, 1_999_999),
+            (0, 2_000_000),
+            (0, 2_000_001),
+            (500_000, 2_499_999),
+            (500_000, 2_500_000),
+            (1_000_000, 500_000),
+            (u32::MAX, u32::MAX),
+        ];
+        for (last_touched, current) in pairs {
+            assert_eq!(
+                should_extend(last_touched, current, &bounds),
+                needs_touch(last_touched, current),
+                "mismatch at last_touched={last_touched}, current={current}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_extend_respects_min_age_boundary() {
+        let bounds = TtlBounds::new(1_000, 10_000, DEFAULT_MAX_BATCH_KEYS);
+        assert!(bounds.validate().is_ok());
+
+        // age = 999 → one ledger below the window
+        assert!(!should_extend(0, 999, &bounds));
+        // age = 1000 → exactly at min_age (inclusive)
+        assert!(should_extend(0, 1_000, &bounds));
+        // age = 10_000 → exactly at max_age (inclusive)
+        assert!(should_extend(0, 10_000, &bounds));
+        // age = 10_001 → one ledger above the window
+        assert!(!should_extend(0, 10_001, &bounds));
+    }
+
+    #[test]
+    fn should_extend_uses_saturating_age() {
+        // last_touched in the future must saturate to age 0, never wrap into
+        // an in-window age.
+        let bounds = TtlBounds::new(0, u32::MAX, DEFAULT_MAX_BATCH_KEYS);
+        assert!(should_extend(1_000, 500, &bounds));
+        let strict = TtlBounds::new(1, u32::MAX, DEFAULT_MAX_BATCH_KEYS);
+        assert!(!should_extend(1_000, 500, &strict));
+    }
+
+    #[test]
+    fn validate_accepts_renewal_defaults() {
+        assert_eq!(TtlBounds::renewal().validate(), Ok(()));
+        assert_eq!(TtlBounds::renewal().min_age, RENEWAL_THRESHOLD);
+        assert_eq!(TtlBounds::renewal().max_age, u32::MAX);
+        assert_eq!(TtlBounds::renewal().max_keys, DEFAULT_MAX_BATCH_KEYS);
+        assert!(DEFAULT_MAX_BATCH_KEYS <= MAX_BATCH_KEYS);
+    }
+
+    #[test]
+    fn validate_rejects_inverted_window() {
+        let bounds = TtlBounds::new(5_000, 1_000, DEFAULT_MAX_BATCH_KEYS);
+        assert_eq!(bounds.validate(), Err(BoundsError::InvertedAgeWindow));
+        assert_eq!(
+            bounds.validate().unwrap_err().message(),
+            "ttl bounds: min_age exceeds max_age"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_max_keys() {
+        let bounds = TtlBounds::new(0, u32::MAX, 0);
+        assert_eq!(bounds.validate(), Err(BoundsError::ZeroMaxKeys));
+        assert_eq!(
+            bounds.validate().unwrap_err().message(),
+            "ttl bounds: max_keys must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_max_keys_above_hard_cap() {
+        let bounds = TtlBounds::new(0, u32::MAX, MAX_BATCH_KEYS + 1);
+        assert_eq!(bounds.validate(), Err(BoundsError::MaxKeysTooLarge));
+    }
+
+    #[test]
+    fn validate_accepts_exact_hard_cap() {
+        let bounds = TtlBounds::new(0, u32::MAX, MAX_BATCH_KEYS);
+        assert_eq!(bounds.validate(), Ok(()));
+    }
+
+    #[test]
+    fn clamp_limit_caps_request_at_max_keys() {
+        let bounds = TtlBounds::new(0, u32::MAX, 3);
+        assert_eq!(bounds.clamp_limit(10), Ok(3));
+        assert_eq!(bounds.clamp_limit(3), Ok(3));
+        assert_eq!(bounds.clamp_limit(0), Ok(0));
+    }
+
+    #[test]
+    fn clamp_limit_propagates_invalid_bounds() {
+        let bounds = TtlBounds::new(10, 0, 0);
+        // Inverted window is reported before the zero cap.
+        assert_eq!(bounds.clamp_limit(5), Err(BoundsError::InvertedAgeWindow));
+    }
+
+    #[test]
+    fn bounded_range_applies_limit_and_key_cap() {
+        let bounds = TtlBounds::new(0, u32::MAX, 3);
+
+        // limit above the key cap is clamped to 3 ids
+        assert_eq!(bounded_range(1, 50, &bounds, 100), Ok(1..4));
+        // limit below the key cap is honoured
+        assert_eq!(bounded_range(1, 2, &bounds, 100), Ok(1..3));
+        // end_exclusive clips the range when the domain is smaller
+        assert_eq!(bounded_range(1, 50, &bounds, 2), Ok(1..2));
+    }
+
+    #[test]
+    fn bounded_range_boundary_values() {
+        let bounds = TtlBounds::renewal();
+
+        // zero limit → empty sweep
+        assert_eq!(bounded_range(1, 0, &bounds, 100), Ok(1..1));
+        // start beyond the domain → empty sweep (end is clipped below start)
+        let beyond = bounded_range(100, 10, &bounds, 50).unwrap();
+        assert_eq!(beyond, 100..50);
+        assert_eq!(beyond.count(), 0);
+        // start at the last id must not overflow when adding the cap
+        assert_eq!(
+            bounded_range(u32::MAX - 1, 10, &bounds, u32::MAX),
+            Ok((u32::MAX - 1)..u32::MAX)
+        );
+        // u32::MAX start with a large domain stays finite
+        assert_eq!(
+            bounded_range(u32::MAX, 10, &bounds, u32::MAX),
+            Ok(u32::MAX..u32::MAX)
+        );
+    }
+
+    #[test]
+    fn bounded_range_rejects_malformed_bounds() {
+        let bounds = TtlBounds::new(9_000, 100, 0);
+        assert_eq!(
+            bounded_range(1, 10, &bounds, 100),
+            Err(BoundsError::InvertedAgeWindow)
+        );
+    }
+
+    #[test]
+    fn batch_sweep_records_outcomes() {
+        let mut sweep = BatchSweep::empty();
+        assert_eq!(sweep, BatchSweep::default());
+        assert_eq!((sweep.total, sweep.touched, sweep.skipped), (0, 0, 0));
+
+        sweep.record(EntryOutcome::Touched);
+        sweep.record(EntryOutcome::Touched);
+        sweep.record(EntryOutcome::Skipped);
+        sweep.record(EntryOutcome::Absent);
+
+        // Absent ids are not counted in `total`, matching legacy sweeps.
+        assert_eq!((sweep.total, sweep.touched, sweep.skipped), (3, 2, 1));
+    }
+
+    #[test]
+    fn batch_sweep_all_absent_stays_empty() {
+        let mut sweep = BatchSweep::empty();
+        for _ in 0..5 {
+            sweep.record(EntryOutcome::Absent);
+        }
+        assert_eq!((sweep.total, sweep.touched, sweep.skipped), (0, 0, 0));
     }
 }

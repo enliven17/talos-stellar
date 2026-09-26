@@ -62,6 +62,36 @@ assert.equal(chaos.isEnabled(), false);
 assert.equal(chaos.hasFault(sdk.FaultType.NETWORK_DROP), true);
 console.log("  + ChaosInjector instantiation & registration OK");
 
+// Deterministic chaos fixtures: plan + replay a registered scenario end to end.
+assert.ok(Array.isArray(sdk.CHAOS_SCENARIOS) && sdk.CHAOS_SCENARIOS.length > 0, "CHAOS_SCENARIOS missing/empty");
+assert.equal(typeof sdk.planChaosScenario, "function", "planChaosScenario missing");
+assert.equal(typeof sdk.replayChaosScenario, "function", "replayChaosScenario missing");
+assert.equal(typeof sdk.buildChaosFixtureBundle, "function", "buildChaosFixtureBundle missing");
+assert.equal(typeof sdk.createSeededRandom, "function", "createSeededRandom missing");
+assert.equal(typeof sdk.faultEffect, "function", "faultEffect missing");
+{
+  const scenario = sdk.getChaosScenario("api-timeout-delay-then-throw");
+  assert.ok(scenario, "chaos scenario lookup failed");
+  const plan = sdk.planChaosScenario(scenario);
+  assert.equal(plan.calls[0].outcome, "injected-delay-then-throw", "chaos plan outcome drifted");
+  const replay = await sdk.replayChaosScenario(scenario);
+  assert.deepEqual(
+    replay.calls.map((c) => c.outcome),
+    plan.calls.map((c) => c.outcome),
+    "chaos replay diverged from plan",
+  );
+  // Boundary: malformed fault configs must fail loudly, never register silently.
+  assert.throws(
+    () => new sdk.ChaosInjector({}).registerFault({ type: "NETWORK_GREMLIN", probability: 0.5 }),
+    TypeError,
+    "unknown fault type must throw TypeError",
+  );
+  const seededA = sdk.createSeededRandom(42);
+  const seededB = sdk.createSeededRandom(42);
+  assert.deepEqual(Array.from({ length: 8 }, seededA), Array.from({ length: 8 }, seededB), "seeded PRNG not deterministic");
+  console.log("  + deterministic chaos fixtures (plan/replay/PRNG) OK");
+}
+
 // Helpers
 assert.equal(typeof sdk.generateKeypair, "function", "generateKeypair not exported");
 assert.equal(typeof sdk.isValidPublicKey, "function", "isValidPublicKey not exported");

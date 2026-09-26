@@ -435,8 +435,25 @@ def backup(output, agent_id, passphrase, web_endpoint, web_api_url, ops_token):
     console.print(f"  scope:         {run.scope}")
     console.print(f"  files:         {len(run.files)}")
     console.print(f"  row_count:     {run.manifest.get('rowCountTotal', 0)}")
-    console.print(f"  duration_s:    {elapsed:.2f}")
+    console.print(f"  duration_s:    {elapsed:.2f}")    
+    settings = Settings()
+    if settings.backup_retention_enabled:
+        from talos_agent.backup_service import prune_backups
 
+        try:
+            deleted = prune_backups(
+                directory=out.parent,
+                max_count=settings.backup_retention_max_count,
+                max_age_days=settings.backup_retention_max_age_days,
+            )
+        except BackupError as exc:
+            # Retention is best-effort cleanup; the backup itself already
+            # succeeded above, so a policy misconfiguration must not turn
+            # into a failed `backup` command. Report and continue.
+            console.print(f"[yellow]Retention pruning skipped:[/yellow] {exc}")
+        else:
+            if deleted:
+                console.print(f"  pruned:        {len(deleted)} old backup(s) removed")
     if web_endpoint:
         import asyncio
         import os

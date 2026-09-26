@@ -70,6 +70,8 @@ These are returned by the `storage_migration` library used by the registry, not 
 | Registry | `Category exceeds maximum byte length`; `Description exceeds maximum byte length` | Talos category (> 32 bytes) or description (> 512 bytes) metadata is too long. |
 | Registry | `Token symbol cannot be empty`; `Token symbol exceeds maximum byte length` | Pulse `token_symbol` is missing or exceeds 12 bytes. |
 | Registry | Migration/rollback rejection diagnostics | Migration helper rejected version ordering, range, or in-progress state. |
+| Registry, Governance, Name service | `Domain is paused` | The write path's pause domain is active (or was paused indefinitely). |
+| Registry, Governance, Name service | `ttl bounds: min_age exceeds max_age`; `ttl bounds: max_keys must be greater than zero`; `ttl bounds: max_keys exceeds MAX_BATCH_KEYS` | `extend_ttl_batch` bounds were rejected by the shared `ttl-manager` validator before any storage read or write. |
 | Governance | `Already initialized` | Initialization already completed. |
 | Governance | `Quorum must be positive`; `Consensus threshold must be 1..10000 bps`; `Voting period must be positive` | Initial or updated configuration is outside bounds. |
 | Governance | `Title cannot be empty`; `Description cannot be empty` | Proposal metadata is missing. |

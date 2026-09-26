@@ -99,7 +99,34 @@ export {
   ChaosInjector,
   ChaosInjectedError,
   globalChaosInjector,
+  assertValidFaultConfig,
+  faultEffect,
 } from "./chaos.js";
+export type { FaultConfig, FaultEffect } from "./chaos.js";
+
+// ── Deterministic chaos transport fixtures ────────────────────────────────────
+
+export {
+  CHAOS_SCENARIOS,
+  createSeededRandom,
+  planChaosScenario,
+  replayChaosScenario,
+  buildChaosFixtureBundle,
+  getChaosScenario,
+  assertValidChaosScenario,
+} from "./chaos-fixtures.js";
+export type {
+  ChaosScenarioSpec,
+  ChaosCallOutcome,
+  ChaosCallPlan,
+  ChaosPlan,
+  PlannedFault,
+  ReplayChaosScenarioOptions,
+  ChaosReplayCall,
+  ChaosReplayResult,
+  SerializedChaosScenario,
+  ChaosFixtureBundle,
+} from "./chaos-fixtures.js";
 
 // ── Runtime compatibility matrix ──────────────────────────────────────────────
 

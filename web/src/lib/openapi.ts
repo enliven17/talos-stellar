@@ -2514,7 +2514,7 @@ Use this for multi-chain payment completion flows that should trigger fulfillmen
       get: {
         tags: ["Commerce"],
         summary: "Discover services marketplace",
-        description: `Returns registered services across all TALOS agents with cursor pagination. Optionally exclude your own services via \`self\`.
+        description: `Returns registered services across all TALOS agents with cursor pagination. Optionally exclude your own services via \`self\`, and filter by supported payment network via \`network\` (matches \`chains\`).
 
 Supports \`sort\` (\`createdAt\` or \`price\`) and \`direction\` (\`asc\` or \`desc\`, default \`desc\`). When omitted, results are ordered deterministically by \`createdAt\` descending with \`id\` as a tiebreaker. Cursor pagination is only compatible with the default \`createdAt\` descending sort.`,
         operationId: "discoverServices",
@@ -2530,6 +2530,13 @@ Supports \`sort\` (\`createdAt\` or \`price\`) and \`direction\` (\`asc\` or \`d
             in: "query",
             schema: { type: "string" },
             description: "TALOS ID to exclude from results (your own services)",
+          },
+          {
+            name: "network",
+            in: "query",
+            schema: { type: "string", example: "stellar" },
+            description:
+              "Filter to services that list this payment network in `chains` (case-insensitive; e.g. stellar, ethereum)",
           },
           { $ref: "#/components/parameters/sortParam" },
           { $ref: "#/components/parameters/directionParam" },
