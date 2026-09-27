@@ -19,7 +19,7 @@ emitted bytes (otherwise the deployed WASM has been tampered with).
 |-------------------------|--------------------|-----------------------|--------------------------------------|
 | `TalosRegistry`         | `(1, 1, 0)`        | `"TalosRegistry"`     | `54 61 6C 6F 73 52 65 67 69 73 74 72 79 00 00 00` ("TalosRegistry\0\0\0") |
 | `TalosNameService`      | `(1, 1, 0)`        | `"TalosNameService"`  | `54 61 6C 6F 73 4E 61 6D 65 53 65 72 76 69 63 65` ("TalosNameService") |
-| `TalosGovernance`       | `(1, 0, 0)`        | `"TalosGovernance"`   | `54 61 6C 6F 73 47 6F 76 65 72 6E 61 6E 63 65 00` ("TalosGovernance\0") |
+| `TalosGovernance`       | `(1, 1, 0)`        | `"TalosGovernance"`   | `54 61 6C 6F 73 47 6F 76 65 72 6E 61 6E 63 65 00` ("TalosGovernance\0") |
 
 A new contract added later MUST keep `major = 1` until a hard upgrade is
 scheduled — bumping `major` is a deployment-grade event and operators
@@ -103,6 +103,7 @@ is a `major` bump.
 | `vote_weighting`    | Snapshot-based token-weighted voting.                        |
 | `config_admin`      | `update_config` / `cache_token_balance` (admin only).        |
 | `interface_query`   | `version` / `interface_id` / `supports_version`.             |
+| `quorum_state`      | `get_proposal_quorum_state` query; `EventQuorumReached` emitted once per proposal when quorum is first crossed. |
 
 ## 5. Deprecation table
 
@@ -176,6 +177,13 @@ to align the byte slices at canonical boundaries.
 ```
 54 61 6C 6F 73 47 6F 76   65 72 6E 61 6E 63 65 00
 00 00 00 01 00 00 00 00   00 00 00 00 00 00 00 00
+```
+
+#### TalosGovernance `(1, 1, 0)` @ `"TalosGovernance"` _(current)_
+
+```
+54 61 6C 6F 73 47 6F 76   65 72 6E 61 6E 63 65 00
+00 00 00 01 00 00 00 01   00 00 00 00 00 00 00 00
 ```
 
 ## 7. Cross-contract compatibility

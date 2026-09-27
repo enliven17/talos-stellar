@@ -124,6 +124,25 @@ describe("end-to-end decode per event family", () => {
     });
   });
 
+  it("decodes a quorum-reached event (qrm_rchd)", () => {
+    const parsed = decode("governance.qrm_rchd.normal");
+    expect(parsed.family).toBe("governance");
+    expect(parsed.contract).toBe("talos_governance");
+    // topics: (qrm_rchd symbol, proposal_id u32)
+    expect(parsed.decoded.topics).toEqual({ event: "qrm_rchd", proposal_id: 7 });
+    // data: (proposal_id u32, votes_cast i128, quorum_threshold i128, approval_bps i128)
+    expect(parsed.decoded.data).toEqual({
+      proposal_id: 7,
+      votes_cast: 100,
+      quorum_threshold: 100,
+      approval_bps: 6000,
+    });
+    // Round-trip: ledger cursor fields preserved
+    expect(parsed.ledger_sequence).toBe(100115);
+    expect(parsed.tx_index_in_ledger).toBe(0);
+    expect(parsed.event_index_in_tx).toBe(1);
+  });
+
   it("decodes a payment event (div_clm)", () => {
     const parsed = decode("payment.div_clm.normal");
     expect(parsed.family).toBe("payment");
@@ -179,7 +198,8 @@ describe("bounded querying", () => {
       toLedger: 100300,
       pageSize: 10,
     });
-    expect(result.total).toBe(3);
+    // prop_crt + vote + prop_stat + qrm_rchd = 4
+    expect(result.total).toBe(4);
   });
 
   it("paginates with a bounded page size", () => {
