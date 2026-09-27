@@ -46,6 +46,16 @@ Install the workspace dependencies from the repository root:
 ```bash
 pnpm install
 ```
+Generate the dependency license report from the installed workspace graph:
+
+```bash
+pnpm licenses:report
+```
+
+The command writes `dist/licenses/dependency-licenses.json` and
+`dist/licenses/dependency-licenses.md`. It fails closed when pnpm cannot read
+the dependency graph or any dependency has missing or ambiguous license
+metadata. The generated directory is a CI artifact and should not be committed.
 
 If you only need the web app, you can still work from the root with `pnpm dev` because the root package forwards to `web/`.
 

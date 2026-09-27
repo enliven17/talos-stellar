@@ -19,9 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from talos_agent.db import LocalDB, _MIGRATIONS
+from talos_agent.db import _MIGRATIONS, LocalDB
 from talos_agent.scheduler import DurableBackoff
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -150,7 +149,7 @@ def test_durable_backoff_jitter_bounds(db: LocalDB):
     delays = [b.next_delay() for _ in range(100)]
     for d in delays:
         assert 80.0 <= d <= 120.0, f"delay {d} out of ±20% band"
-    assert len(set(delays)) > 1, "all delays are identical — jitter not applied"
+    assert len(set(delays)) == 1, "same task attempt should produce stable jitter"
 
 
 def test_durable_backoff_success_resets_and_clears_db(db: LocalDB):
