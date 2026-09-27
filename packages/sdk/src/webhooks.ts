@@ -80,6 +80,19 @@ export interface VerifyWebhookOptions {
   secret: string | string[];
   /** Allowed deviation in seconds between the current time and webhook timestamp. Default 300 (5 minutes). */
   toleranceSeconds?: number;
+  /**
+   * How long (in seconds) a processed event ID is retained in the replay store.
+   * Must be >= `toleranceSeconds` — if it were shorter, a dedup entry could
+   * expire while the original timestamp is still within the acceptance window,
+   * allowing a replay attack.
+   *
+   * When omitted, defaults to `toleranceSeconds + 60` (or 86400 when
+   * `toleranceSeconds` is 0) to preserve backward-compatible behaviour.
+   *
+   * Passing a value shorter than `toleranceSeconds` throws
+   * {@link TalosWebhookError} with code `REPLAY_MISCONFIGURED`.
+   */
+  replayWindowSeconds?: number;
   /** Optional store to prevent replay attacks by recording processed event IDs. */
   replayStore?: ReplayStore;
   /** The event ID from the payload, required if replayStore is used. */
@@ -96,6 +109,9 @@ export interface ParsedSignature {
   versions: number[];
   signatures: Array<{ version: number; hex: string }>;
 }
+
+/** Matches only a well-formed hex string: no whitespace, sign, or `0x` prefix. */
+const HEX_PATTERN = /^[0-9a-fA-F]+$/;
 
 function payloadToString(payload: string | Uint8Array): string {
   if (typeof payload === "string") return payload;
@@ -234,15 +250,24 @@ export class TalosWebhook {
   }
 
   /**
-   * Helper to decode hex string to Uint8Array.
+   * Helper to decode a hex string to a `Uint8Array`.
+   *
+   * Strict by design: a signed payload has exactly one valid byte-level
+   * decoding, so any input that is not itself an unambiguous hex encoding
+   * (even length, `[0-9a-fA-F]` only) is rejected outright rather than
+   * partially parsed. `parseInt` is deliberately not used to convert each
+   * byte pair because it tolerates leading whitespace, `+`/`-` signs, and
+   * `0x`-prefixed substrings, and it stops at the first invalid character
+   * instead of failing — any of which would let distinct, non-canonical
+   * header strings silently decode to bytes that shouldn't be treated as a
+   * valid signature.
    */
   static hexToBuf(hex: string): Uint8Array | null {
-    if (hex.length % 2 !== 0) return null;
+    if (hex.length === 0 || hex.length % 2 !== 0) return null;
+    if (!HEX_PATTERN.test(hex)) return null;
     const arr = new Uint8Array(hex.length / 2);
     for (let i = 0; i < hex.length; i += 2) {
-      const byte = parseInt(hex.substring(i, i + 2), 16);
-      if (Number.isNaN(byte)) return null;
-      arr[i / 2] = byte;
+      arr[i / 2] = parseInt(hex.substring(i, i + 2), 16);
     }
     return arr;
   }
@@ -304,11 +329,41 @@ export class TalosWebhook {
       signatureHeader,
       secret,
       toleranceSeconds = 300,
+      replayWindowSeconds,
       replayStore,
       eventId,
       logger,
       chaosInjector,
     } = options;
+
+    // Replay-window guard: replayWindowSeconds must cover the full tolerance
+    // window, otherwise a dedup entry can expire while the timestamp is still
+    // accepted, opening a replay attack vector.
+    if (replayWindowSeconds !== undefined) {
+      if (
+        !Number.isFinite(replayWindowSeconds) ||
+        replayWindowSeconds < 0
+      ) {
+        logger?.error(
+          "Webhook verification misconfigured: replayWindowSeconds must be a non-negative finite number",
+          { replayWindowSeconds },
+        );
+        throw new TalosWebhookError(
+          "replayWindowSeconds must be a non-negative finite number",
+          "REPLAY_MISCONFIGURED",
+        );
+      }
+      if (toleranceSeconds > 0 && replayWindowSeconds < toleranceSeconds) {
+        logger?.error(
+          "Webhook verification misconfigured: replayWindowSeconds is shorter than toleranceSeconds",
+          { replayWindowSeconds, toleranceSeconds },
+        );
+        throw new TalosWebhookError(
+          `replayWindowSeconds (${replayWindowSeconds}) must be >= toleranceSeconds (${toleranceSeconds}) to prevent replay attacks after dedup entry expiry`,
+          "REPLAY_MISCONFIGURED",
+        );
+      }
+    }
 
     if (!signatureHeader) {
       logger?.warn("Webhook verification failed: Missing signature header", {
@@ -457,7 +512,12 @@ export class TalosWebhook {
           );
         }
 
-        const ttl = toleranceSeconds > 0 ? toleranceSeconds + 60 : 86400;
+        const ttl =
+          replayWindowSeconds !== undefined
+            ? replayWindowSeconds
+            : toleranceSeconds > 0
+              ? toleranceSeconds + 60
+              : 86400;
         if (chaosInjector) {
           await chaosInjector.maybeInjectFault(FaultType.REPLAY_STORE_ERROR);
         }

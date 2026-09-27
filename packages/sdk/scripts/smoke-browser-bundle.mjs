@@ -143,5 +143,21 @@ for (const k of essentials) {
   console.log("  + " + k + " present on TalosSDK");
 }
 
+// Deterministic chaos fixtures: pure JS, no Node globals needed.
+if (typeof sdk.planChaosScenario === "function") {
+  const scenario = sdk.getChaosScenario("always-injects-unit-probability");
+  assert.ok(scenario, "chaos scenario lookup failed in browser bundle");
+  const plan = sdk.planChaosScenario(scenario);
+  assert.equal(plan.calls[0].outcome, "injected-throw", "chaos plan outcome drifted in browser bundle");
+  const drawA = sdk.createSeededRandom(7);
+  const drawB = sdk.createSeededRandom(7);
+  assert.deepEqual(
+    Array.from({ length: 4 }, () => drawA()),
+    Array.from({ length: 4 }, () => drawB()),
+    "seeded PRNG not deterministic in browser bundle",
+  );
+  console.log("  + deterministic chaos fixtures OK (browser bundle)");
+}
+
 console.log("[compat:browser-bundle] ALL CHECKS PASSED");
 process.exit(0);

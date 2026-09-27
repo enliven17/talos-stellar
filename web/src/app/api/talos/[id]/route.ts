@@ -1,3 +1,5 @@
+import { revalidateTag } from "next/cache";
+import { agentMutationTags } from "@/lib/cache-tags";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos } from "@/db/schema";
@@ -34,6 +36,7 @@ async function handleGet(
     }
 
     const { apiKey, ...safeTalos } = talos;
+    for (const tag of agentMutationTags(id)) revalidateTag(tag);
     return Response.json({ ...safeTalos, apiKeyMasked: maskApiKey(apiKey) });
   } catch {
     return internalError(request);
