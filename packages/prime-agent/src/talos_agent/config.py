@@ -139,6 +139,23 @@ class Settings(BaseSettings):
     )
 
 
+    # API client response size cap (Issue #561)
+    # Hard upper bound on response bodies read from the Talos Web API.  Defaults
+    # to 1 MiB — large enough for any legitimate JSON payload and small enough to
+    # prevent memory exhaustion from oversized or malicious responses.
+    api_client_response_max_bytes: int = Field(
+        default=1_048_576,
+        ge=1_024,
+        le=104_857_600,
+        validation_alias="TALOS_API_CLIENT_RESPONSE_MAX_BYTES",
+        description=(
+            "Maximum bytes allowed in a Talos Web API response body. "
+            "Responses that exceed this limit are rejected with "
+            "ResponseTooLargeError before the body is decoded. "
+            "Default 1 MiB. Min 1 KiB, max 100 MiB."
+        ),
+    )
+
     # X (Twitter)
     x_username: str = ""
     x_password: str = ""

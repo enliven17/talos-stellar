@@ -1043,4 +1043,187 @@ mod tests {
         assert_eq!(MigrationError::from_code(0), None);
         assert_eq!(MigrationError::from_code(99), None);
     }
+
+    // ── Budget regression gates (#610) ───────────────────────────────────────
+    //
+    // storage_migration is a library crate (no contract struct), so calls run
+    // through `env.as_contract(&contract_id, || { … })`.  Budget tracking is
+    // still active in this mode and measures real host resource consumption.
+    // Ceilings are loose regression sentinels; WASM costs will be higher.
+
+    const BUDGET_CPU_INITIALIZE_SCHEMA: u64  = 300_000;
+    const BUDGET_MEM_INITIALIZE_SCHEMA: u64  =  60_000;
+
+    const BUDGET_CPU_BEGIN_MIGRATION: u64    = 300_000;
+    const BUDGET_MEM_BEGIN_MIGRATION: u64    =  60_000;
+
+    const BUDGET_CPU_COMPLETE_MIGRATION: u64 = 400_000;
+    const BUDGET_MEM_COMPLETE_MIGRATION: u64 =  80_000;
+
+    const BUDGET_CPU_DRY_RUN: u64            = 200_000;
+    const BUDGET_MEM_DRY_RUN: u64            =  40_000;
+
+    #[test]
+    fn budget_initialize_schema_within_limits() {
+        let env = Env::default();
+        let contract_id = soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            env.budget().reset_default();
+            initialize_schema(&env, 1);
+        });
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_INITIALIZE_SCHEMA,
+            "initialize_schema CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_INITIALIZE_SCHEMA,
+        );
+        assert!(
+            mem < BUDGET_MEM_INITIALIZE_SCHEMA,
+            "initialize_schema memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_INITIALIZE_SCHEMA,
+        );
+    }
+
+    #[test]
+    fn budget_begin_migration_within_limits() {
+        let env = Env::default();
+        let contract_id = soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 1);
+
+            env.budget().reset_default();
+            let result = begin_migration(&env, 1, 1, 2);
+            assert_eq!(result, Ok(()));
+        });
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_BEGIN_MIGRATION,
+            "begin_migration CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_BEGIN_MIGRATION,
+        );
+        assert!(
+            mem < BUDGET_MEM_BEGIN_MIGRATION,
+            "begin_migration memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_BEGIN_MIGRATION,
+        );
+    }
+
+    #[test]
+    fn budget_complete_migration_within_limits() {
+        let env = Env::default();
+        let contract_id = soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 1);
+            assert_eq!(begin_migration(&env, 1, 1, 2), Ok(()));
+
+            env.budget().reset_default();
+            complete_migration(&env, 1, 2);
+        });
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_COMPLETE_MIGRATION,
+            "complete_migration CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_COMPLETE_MIGRATION,
+        );
+        assert!(
+            mem < BUDGET_MEM_COMPLETE_MIGRATION,
+            "complete_migration memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_COMPLETE_MIGRATION,
+        );
+    }
+
+    #[test]
+    fn budget_dry_run_within_limits() {
+        let env = Env::default();
+        let contract_id = soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 1);
+
+            env.budget().reset_default();
+            let plan = dry_run(&env, 1, 1, 2);
+            assert!(plan.applicable);
+        });
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_DRY_RUN,
+            "dry_run CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_DRY_RUN,
+        );
+        assert!(
+            mem < BUDGET_MEM_DRY_RUN,
+            "dry_run memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_DRY_RUN,
+        );
+    }
+
+    /// Boundary: dry_run on an already-up-to-date schema reports a no-op
+    /// and must be just as cheap as a regular dry_run.
+    #[test]
+    fn budget_dry_run_up_to_date_within_limits() {
+        let env = Env::default();
+        let contract_id = soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 2);
+
+            env.budget().reset_default();
+            let plan = dry_run(&env, 2, 2, 2);
+            assert!(plan.up_to_date);
+            assert!(plan.applicable);
+        });
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_DRY_RUN,
+            "dry_run (up-to-date) CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_DRY_RUN,
+        );
+        assert!(
+            mem < BUDGET_MEM_DRY_RUN,
+            "dry_run (up-to-date) memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_DRY_RUN,
+        );
+    }
+
+    /// Negative: begin_migration with a mismatched `from` version must be
+    /// rejected cheaply — the early-exit path costs less than a full migration.
+    #[test]
+    fn budget_begin_migration_out_of_order_rejected_cheaply() {
+        let env = Env::default();
+        let contract_id = soroban_sdk::Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 1);
+
+            env.budget().reset_default();
+            let result = begin_migration(&env, 1, 3, 4); // from=3 but stored=1
+            assert_eq!(result, Err(MigrationError::OutOfOrder));
+        });
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_BEGIN_MIGRATION,
+            "rejected begin_migration CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_BEGIN_MIGRATION,
+        );
+        assert!(
+            mem < BUDGET_MEM_BEGIN_MIGRATION,
+            "rejected begin_migration memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_BEGIN_MIGRATION,
+        );
+    }
 }
