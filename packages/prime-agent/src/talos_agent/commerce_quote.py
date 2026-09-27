@@ -93,11 +93,11 @@ class X402ClockSkewPolicy:
             ("min_remaining_validity_secs", self.min_remaining_validity_secs),
         ):
             if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ValueError(f"{name} must be a number")
+                raise TypeError(f"{name} must be a number, got {type(value).__name__}")
             if not math.isfinite(value):
-                raise ValueError(f"{name} must be finite")
+                raise ValueError(f"{name} must be finite, got {value!r}")
             if value < 0:
-                raise ValueError(f"{name} must be >= 0")
+                raise ValueError(f"{name} must be >= 0, got {value!r}")
 
     def effective_deadline(self, expires_at: datetime) -> datetime:
         """Return the last instant at which signing is still considered safe.

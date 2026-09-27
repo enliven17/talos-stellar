@@ -8,6 +8,7 @@ regression guarantee that omitting a policy keeps the original strict behaviour.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from datetime import datetime, timedelta, timezone
 
@@ -23,6 +24,7 @@ from talos_agent.commerce_quote import (
     STRICT_CLOCK_SKEW_POLICY,
     X402ClockSkewPolicy,
     enforce_commerce_quote_expiry,
+    quote_expiry_iso,
     verify_quote_not_expired,
 )
 
@@ -76,13 +78,13 @@ class TestPolicyConstruction:
             X402ClockSkewPolicy(max_clock_skew_secs=value)
 
     def test_non_numeric_rejected(self):
-        with pytest.raises(ValueError, match="number"):
+        with pytest.raises(TypeError, match="number"):
             X402ClockSkewPolicy(max_clock_skew_secs="30")  # type: ignore[arg-type]
-        with pytest.raises(ValueError, match="number"):
+        with pytest.raises(TypeError, match="number"):
             X402ClockSkewPolicy(max_clock_skew_secs=True)  # type: ignore[arg-type]
 
     def test_policy_is_immutable(self):
-        with pytest.raises(Exception):
+        with pytest.raises(dataclasses.FrozenInstanceError):
             DEFAULT_X402_CLOCK_SKEW_POLICY.max_clock_skew_secs = 999  # type: ignore[misc]
 
     def test_effective_deadline_shifts_by_skew_minus_margin(self):
@@ -94,7 +96,7 @@ class TestPolicyConstruction:
 
     def test_naive_deadline_normalized_to_utc(self):
         policy = X402ClockSkewPolicy(max_clock_skew_secs=10.0, min_remaining_validity_secs=0.0)
-        naive = datetime(2026, 6, 15, 12, 0, 0)
+        naive = FIXED_NOW.replace(tzinfo=None)  # deliberately naive
         assert policy.effective_deadline(naive) == FIXED_NOW + timedelta(seconds=10)
 
 
@@ -243,7 +245,29 @@ class TestEnforceCommerceQuoteExpiryWithPolicy:
     def test_naive_now_is_treated_as_utc(self):
         err = enforce_commerce_quote_expiry(
             _quote(-3600),
-            now=datetime(2026, 6, 15, 12, 0, 0),
+            now=FIXED_NOW.replace(tzinfo=None),  # deliberately naive
             policy=DEFAULT_X402_CLOCK_SKEW_POLICY,
         )
         assert err["code"] == EXPIRED_QUOTE
+
+
+class TestQuoteExpiryIso:
+    """`quote_expiry_iso` is the durable-audit helper; it must never raise."""
+
+    def test_normalizes_to_zulu(self):
+        assert quote_expiry_iso(_quote(0)) == _iso(0)
+        assert quote_expiry_iso({"expires_at": "2026-06-15T12:00:00+00:00"}) == _iso(0)
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            None,
+            {},
+            {"price": 1.0},
+            {"quote": {"amount": "1.000000"}},
+            {"quote": {"expiresAt": "soon"}},
+            {"expiresAt": 1234567890},
+        ],
+    )
+    def test_returns_none_for_missing_or_malformed(self, payload):
+        assert quote_expiry_iso(payload) is None
