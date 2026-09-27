@@ -4,6 +4,13 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import * as sdk from '../src/index.js';
+import {
+  planChaosScenario,
+  getChaosScenario,
+  createSeededRandom,
+  CHAOS_SCENARIOS,
+} from '../src/chaos-fixtures.js';
+import { FaultType } from '../src/chaos.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const EDGE_SMOKE = resolve(__dirname, '../scripts/smoke-edge.mjs');
@@ -121,5 +128,42 @@ describe('Edge runtime compatibility smoke', () => {
     }
     // Some constructors tolerate null via defaults — also acceptable.
     expect(true).toBe(true);
+  });
+
+  it('exports the deterministic chaos fixture surface', () => {
+    expect(sdk.CHAOS_SCENARIOS).toBeDefined();
+    expect(sdk.planChaosScenario).toBeTypeOf('function');
+    expect(sdk.replayChaosScenario).toBeTypeOf('function');
+    expect(sdk.buildChaosFixtureBundle).toBeTypeOf('function');
+    expect(sdk.createSeededRandom).toBeTypeOf('function');
+    expect(sdk.faultEffect).toBeTypeOf('function');
+  });
+
+  it('chaos planner is pure JS and deterministic (browser-safe boundary)', () => {
+    const scenario = getChaosScenario('always-injects-unit-probability');
+    expect(scenario).toBeDefined();
+    const plan = planChaosScenario(scenario!);
+    expect(plan.calls[0].outcome).toBe('injected-throw');
+    expect(plan.calls[0].injected).toBe(true);
+    // Seeded PRNG relies only on Math (no Node crypto), so it is usable in
+    // every supported runtime from the compat matrix.
+    const a = createSeededRandom(1);
+    const b = createSeededRandom(1);
+    expect(Array.from({ length: 8 }, () => a())).toEqual(
+      Array.from({ length: 8 }, () => b()),
+    );
+  });
+
+  it('every registered scenario name is a stable wire key (regression)', () => {
+    const names = CHAOS_SCENARIOS.map((s) => s.name);
+    expect(names.length).toBeGreaterThan(0);
+    expect(new Set(names).size).toBe(names.length);
+    for (const name of names) {
+      expect(getChaosScenario(name)).toBeDefined();
+    }
+    // Boundary scenario pins the strict r < p decision rule.
+    const boundary = planChaosScenario(getChaosScenario('probability-boundary-half-excluded')!);
+    expect(boundary.calls.map((c) => c.injected)).toEqual([false, true, false]);
+    expect(boundary.calls[0].faultType).toBe(FaultType.NETWORK_DROP);
   });
 });

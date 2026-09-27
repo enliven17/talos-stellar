@@ -726,6 +726,13 @@ impl TalosGovernance {
     }
 
     /// Batch-touch all governance proposals + admin keys (admin only).
+    ///
+    /// The sweep is bounded by the renewal age window; use
+    /// [`TalosGovernance::extend_ttl_batch`] to pass explicit bounds and a
+    /// per-call key cap.
+    ///
+    /// # Authorization
+    /// Requires the admin to sign.
     pub fn touch_all_ttl(e: Env) -> (u32, u32) {
         pause_control::check_not_paused(&e, PAUSE_GOVERNANCE_CONFIG);
 
@@ -736,9 +743,70 @@ impl TalosGovernance {
             .expect("Contract not initialized");
         admin.require_auth();
 
+        let next_id: u32 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(1);
+        Self::sweep_governance_ttl(&e, &ttl_manager::TtlBounds::renewal(), 1..next_id)
+    }
+
+    /// Batched TTL extension with explicit age and work bounds.
+    ///
+    /// Sweeps the admin key plus proposal ids
+    /// `[1, min(next_proposal_id, 1 + limit))`, clipped to
+    /// [`ttl_manager::DEFAULT_MAX_BATCH_KEYS`] ids per call, and re-writes only
+    /// entries whose age in ledgers falls inside `[min_age, max_age]`.
+    /// Entries outside the window are reported as `skipped`; ids with no entry
+    /// are ignored.
+    ///
+    /// Returns `(touched, skipped)`.
+    ///
+    /// # Panics
+    /// - `"Domain is paused"` — when the governance-config domain is paused.
+    /// - `"Contract not initialized"` — if `initialize` has not been called.
+    /// - `"ttl bounds: ..."` — static diagnostic for malformed bounds
+    ///   (`min_age > max_age`, `max_keys` of 0, or `max_keys` above
+    ///   [`ttl_manager::MAX_BATCH_KEYS`]). Diagnostics are compile-time
+    ///   constants and never embed caller or storage data.
+    ///
+    /// # Authorization
+    /// Requires the admin to sign.
+    pub fn extend_ttl_batch(e: Env, limit: u32, min_age: u32, max_age: u32) -> (u32, u32) {
+        pause_control::check_not_paused(&e, PAUSE_GOVERNANCE_CONFIG);
+
+        let admin: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
+        admin.require_auth();
+
+        let next_id: u32 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(1);
+        let bounds =
+            ttl_manager::TtlBounds::new(min_age, max_age, ttl_manager::DEFAULT_MAX_BATCH_KEYS);
+        let range = ttl_manager::bounded_range(1, limit, &bounds, next_id)
+            .unwrap_or_else(|err| panic!("{}", err.message()));
+        Self::sweep_governance_ttl(&e, &bounds, range)
+    }
+
+    /// Shared bounded sweep behind `touch_all_ttl` / `extend_ttl_batch`.
+    ///
+    /// Re-writes the admin key (marker id 0) and every proposal in `range`
+    /// whose age falls inside `bounds`, refreshes the matching `LastTouched`
+    /// markers, emits `ttl_batch`, and returns `(touched, skipped)`. Ids
+    /// without an entry are neither touched nor skipped.
+    fn sweep_governance_ttl(
+        e: &Env,
+        bounds: &ttl_manager::TtlBounds,
+        range: core::ops::Range<u32>,
+    ) -> (u32, u32) {
         let current_ledger = e.ledger().sequence();
-        let mut touched = 0u32;
-        let mut skipped = 0u32;
+        let mut sweep = ttl_manager::BatchSweep::empty();
 
         if let Some(a) = e.storage().persistent().get::<_, Address>(&DataKey::Admin) {
             let last: u32 = e
@@ -746,44 +814,47 @@ impl TalosGovernance {
                 .persistent()
                 .get(&DataKey::LastTouched(0))
                 .unwrap_or(0);
-            if ttl_manager::needs_touch(last, current_ledger) {
+            if ttl_manager::should_extend(last, current_ledger, bounds) {
                 e.storage().persistent().set(&DataKey::Admin, &a);
                 e.storage()
                     .persistent()
                     .set(&DataKey::LastTouched(0), &current_ledger);
-                touched += 1;
+                sweep.record(ttl_manager::EntryOutcome::Touched);
             } else {
-                skipped += 1;
+                sweep.record(ttl_manager::EntryOutcome::Skipped);
             }
+        } else {
+            sweep.record(ttl_manager::EntryOutcome::Absent);
         }
 
-        let next_id: u32 = e
-            .storage()
-            .persistent()
-            .get(&DataKey::NextProposalId)
-            .unwrap_or(1);
-        for pid in 1..next_id {
+        for pid in range {
             let key = DataKey::Proposal(pid);
-            if let Some(proposal) = e.storage().persistent().get::<_, Proposal>(&key) {
-                let last_touched: u32 = e
-                    .storage()
-                    .persistent()
-                    .get(&DataKey::LastTouched(pid))
-                    .unwrap_or(0);
-                if ttl_manager::needs_touch(last_touched, current_ledger) {
-                    e.storage().persistent().set(&key, &proposal);
-                    e.storage()
-                        .persistent()
-                        .set(&DataKey::LastTouched(pid), &current_ledger);
-                    touched += 1;
-                } else {
-                    skipped += 1;
+            let proposal: Proposal = match e.storage().persistent().get(&key) {
+                Some(proposal) => proposal,
+                None => {
+                    sweep.record(ttl_manager::EntryOutcome::Absent);
+                    continue;
                 }
+            };
+            let last_touched: u32 = e
+                .storage()
+                .persistent()
+                .get(&DataKey::LastTouched(pid))
+                .unwrap_or(0);
+
+            if ttl_manager::should_extend(last_touched, current_ledger, bounds) {
+                e.storage().persistent().set(&key, &proposal);
+                e.storage()
+                    .persistent()
+                    .set(&DataKey::LastTouched(pid), &current_ledger);
+                sweep.record(ttl_manager::EntryOutcome::Touched);
+            } else {
+                sweep.record(ttl_manager::EntryOutcome::Skipped);
             }
         }
 
-        ttl_manager::emit_ttl_batch(&e, touched + skipped, touched, skipped);
-        (touched, skipped)
+        sweep.emit(e);
+        (sweep.touched, sweep.skipped)
     }
 
     /// Query storage health for tracked proposal entries.
@@ -1204,6 +1275,234 @@ mod tests {
         let (_, _, data) = stat_events.last().unwrap();
         let payload: EventProposalStatusChanged = soroban_sdk::FromVal::from_val(&env, data);
         assert_eq!(payload.status, ProposalStatus::Executed);
+    }
+
+    // ── Batched TTL extension with bounds ─────────────────────────
+
+    /// Build an initialized governance contract with the ledger already at
+    /// `sequence_number`, so entry ages are exact and later one-ledger bumps
+    /// cannot archive contract code.
+    fn setup_at(
+        sequence_number: u32,
+    ) -> (
+        Env,
+        Address,
+        Address,
+        Address,
+        TalosGovernanceClient<'static>,
+    ) {
+        let env = Env::default();
+        env.ledger().with_mut(|li| {
+            li.sequence_number = sequence_number;
+            li.timestamp = 1_000;
+        });
+
+        let contract_id = env.register_contract(None, TalosGovernance);
+        let client = TalosGovernanceClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let pulse = Address::generate(&env);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "initialize",
+                    args: (admin.clone(), pulse.clone(), 100_i128, 5_100_i128, 20_u32)
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .initialize(&admin, &pulse, &100_i128, &5_100_i128, &20_u32);
+
+        (env, contract_id, admin, pulse, client)
+    }
+
+    /// Invoke `extend_ttl_batch` with the admin's mock authorization.
+    fn extend_ttl_batch_as_admin(
+        env: &Env,
+        contract_id: &Address,
+        client: &TalosGovernanceClient<'static>,
+        admin: &Address,
+        limit: u32,
+        min_age: u32,
+        max_age: u32,
+    ) -> Option<(u32, u32)> {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "extend_ttl_batch",
+                    args: (limit, min_age, max_age).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_extend_ttl_batch(&limit, &min_age, &max_age)
+            .ok()
+            .and_then(|outcome| outcome.ok())
+    }
+
+    /// Positive: admin key + proposal inside the window are re-written.
+    #[test]
+    fn extend_ttl_batch_renews_entries_inside_window() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        let result =
+            extend_ttl_batch_as_admin(&env, &contract_id, &client, &admin, 10, 0, u32::MAX)
+                .expect("bounded extension must succeed");
+
+        // Admin key (marker id 0) + one proposal.
+        assert_eq!(result, (2, 0));
+    }
+
+    /// Negative: entries younger than `min_age` are reported, never written.
+    #[test]
+    fn extend_ttl_batch_skips_entries_below_min_age() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        // Ledger sequence is 100, so every entry's age is 100.
+        let result =
+            extend_ttl_batch_as_admin(&env, &contract_id, &client, &admin, 10, 101, u32::MAX)
+                .expect("bounded extension must succeed");
+
+        assert_eq!(result, (0, 2));
+    }
+
+    /// Boundary: a zero limit empties the proposal range; only the admin key
+    /// (which is not part of the id range) is still evaluated.
+    #[test]
+    fn extend_ttl_batch_zero_limit_spares_proposals() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        let result = extend_ttl_batch_as_admin(&env, &contract_id, &client, &admin, 0, 0, u32::MAX)
+            .expect("bounded extension must succeed");
+
+        assert_eq!(result, (1, 0), "only the admin key may be visited");
+    }
+
+    /// Boundary: `limit` caps the proposal sweep — proposals beyond the limit
+    /// are not counted at all. The admin key is always evaluated first.
+    #[test]
+    fn extend_ttl_batch_honours_limit() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        let result = extend_ttl_batch_as_admin(&env, &contract_id, &client, &admin, 1, 0, u32::MAX)
+            .expect("bounded extension must succeed");
+
+        // Admin key + proposal 1 only; proposal 2 stays outside the sweep.
+        assert_eq!(result, (2, 0));
+    }
+
+    /// Negative: malformed bounds fail with a static, privacy-safe diagnostic
+    /// before any storage is read or written.
+    #[test]
+    #[should_panic(expected = "ttl bounds: min_age exceeds max_age")]
+    fn extend_ttl_batch_rejects_inverted_window() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "extend_ttl_batch",
+                    args: (10u32, 5_000_000u32, 1_000u32).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .extend_ttl_batch(&10, &5_000_000, &1_000);
+    }
+
+    /// Negative: `extend_ttl_batch` is admin-gated exactly like `touch_all_ttl`.
+    #[test]
+    fn extend_ttl_batch_without_auth_is_rejected() {
+        let (_env, _contract_id, _admin, _pulse, client) = setup();
+
+        assert!(
+            client.try_extend_ttl_batch(&10, &0, &u32::MAX).is_err(),
+            "extend_ttl_batch must require admin auth"
+        );
+    }
+
+    /// The governance-config pause domain blocks `extend_ttl_batch`.
+    #[test]
+    #[should_panic(expected = "Domain is paused")]
+    fn extend_ttl_batch_is_blocked_while_paused() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause_domain",
+                    args: (PAUSE_GOVERNANCE_CONFIG, 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .pause_domain(&PAUSE_GOVERNANCE_CONFIG, &0);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "extend_ttl_batch",
+                    args: (10u32, 0u32, u32::MAX).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .extend_ttl_batch(&10, &0, &u32::MAX);
+    }
+
+    /// Regression: `touch_all_ttl` keeps skipping young entries and renews
+    /// them once the renewal threshold is crossed, so routing it through the
+    /// bounded sweep core changes no behaviour.
+    #[test]
+    fn touch_all_ttl_still_skips_then_renews_after_threshold() {
+        let (env, contract_id, admin, _pulse, client) =
+            setup_at(ttl_manager::RENEWAL_THRESHOLD - 1);
+        let proposer = Address::generate(&env);
+        create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        let before = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "touch_all_ttl",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .touch_all_ttl();
+        assert_eq!(before, (0, 2));
+
+        // One more ledger crosses the threshold → both entries are renewed.
+        env.ledger().with_mut(|li| li.sequence_number += 1);
+
+        let after = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "touch_all_ttl",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .touch_all_ttl();
+        assert_eq!(after, (2, 0));
     }
 
     #[test]

@@ -22,11 +22,8 @@ breaker that stops cascading failures when a provider is degraded.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
-import re
-import unicodedata
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
@@ -44,6 +41,12 @@ from talos_agent.circuit_breaker import (
     ProviderCircuitBreaker,
     cb_registry,
 )
+from talos_agent.redact import (
+    REDACT_FIELD_NAMES as SECRET_FIELD_NAMES,
+    redact_json_value as _sanitize_json_value,
+    redact_text as _sanitize_response_text,
+    redact_value as _strip_control_chars,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,23 +55,6 @@ MAX_ATTEMPTS = 3
 WAIT_INITIAL = 1.0
 WAIT_MAX = 10.0
 LOG_RESPONSE_SUMMARY_MAX_CHARS = 1024
-SECRET_FIELD_NAMES = {
-    "access_token",
-    "refresh_token",
-    "api_key",
-    "apikey",
-    "apiKey",
-    "authorization",
-    "auth",
-    "token",
-    "secret",
-    "password",
-    "private_key",
-    "privateKey",
-    # The x402 payment header carries a signed payment payload (#439).
-    "x-payment",
-    "x_payment",
-}
 
 DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
 MAX_TOOL_TIMEOUT_SECONDS = 300.0
@@ -104,46 +90,9 @@ class ToolTimeoutError(Exception):
         super().__init__(f"Tool {tool_name!r} timed out after {timeout:g}s")
 
 
-def _sanitize_json_value(value: object) -> object:
-    if isinstance(value, dict):
-        return {
-            key: ("[REDACTED]" if key.lower() in SECRET_FIELD_NAMES else _sanitize_json_value(val))
-            for key, val in value.items()
-        }
-    if isinstance(value, list):
-        return [_sanitize_json_value(item) for item in value]
-    return value
-
-_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-
-
-def _strip_control_chars(text: str) -> str:
-    """Neutralize CR/LF and other control chars to prevent log injection."""
-    return _CONTROL_CHAR_RE.sub(" ", text)
-
-def _sanitize_response_text(text: str) -> str:
-    normalized = _strip_control_chars(unicodedata.normalize("NFC", text))
-    try:
-        payload = json.loads(normalized)
-    except Exception:
-        sanitized = normalized
-    else:
-        sanitized = json.dumps(_sanitize_json_value(payload), ensure_ascii=False)
-
-    sanitized = re.sub(
-        r"(?i)(Bearer|Token)\s+[A-Za-z0-9\-\._~\+/]+=*",
-        "[REDACTED]",
-        sanitized,
-    )
-    sanitized = re.sub(r"S[A-Z2-7]{55}", "[REDACTED]", sanitized)
-    sanitized = re.sub(
-        r"""(?i)(?:api[_-]?key|token|secret|authorization|password|private[_-]?key|x[-_]payment)["'`]?\s*[:=]\s*["'`]?([^"'`\s]+)["'`]?""",
-        lambda m: f"{m.group(0).split(m.group(1))[0]}[REDACTED]",
-        sanitized,
-    )
-    if len(sanitized) > LOG_RESPONSE_SUMMARY_MAX_CHARS:
-        return sanitized[: LOG_RESPONSE_SUMMARY_MAX_CHARS - 1] + "…"
-    return sanitized
+# _sanitize_json_value, _strip_control_chars, and _sanitize_response_text are
+# imported from talos_agent.redact above and remain available for callers that
+# reference them via this module (backward-compatible aliases).
 
 
 def _extract_safe_response_summary(response: httpx.Response) -> str | None:

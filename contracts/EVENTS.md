@@ -82,6 +82,26 @@ is idempotent per cursor (see §4).
 | (`name_reg2`, talos_id: u32) | (version: u32, name: String, owner: Address) |
 | (`reg_upd`,) | (old_registry: Address, new_registry: Address) |
 | (`tl_sch`/`tl_exec`/`tl_cnl`/`tl_cfg`) | same shape as registry timelock events |
+| (`pause_on`, domain: PauseDomain) | (actor: Address, expires_at: u64) |
+| (`pause_off`, domain: PauseDomain) | (actor: Address,) |
+| (`guard_add`,) | (guardian: Address,) |
+| (`guard_rem`,) | (guardian: Address,) |
+| (`name_fee`, talos_id: u32) | (payer: Address, asset: Address, fee: i128) |
+| (`dep_path`,) | (deprecated: String, replacement: String) |
+
+**`pause_on` semantics:**
+- `domain` identifies the paused write path (`NameRegistration`).
+- `expires_at` is the Unix timestamp when the pause automatically lifts.
+  A value of `0` means the pause is indefinite (only settable by the admin).
+  Privacy-safe: no caller transaction hash or secret data is included.
+
+**Pause expiry rules (enforced on-chain, #597):**
+- Admin can set `expires_at = 0` (indefinite) or `> 0` up to `MAX_ADMIN_PAUSE_SECS` (30 days).
+- Guardian can only pause for `1 .. MAX_GUARDIAN_PAUSE_SECS` (7 days) — duration = 0 is rejected.
+- A guardian cannot overwrite an admin-set pause (`DomainLockedByAdmin` error).
+- Pauses are lazily expired: `is_paused` / `pause_info` treat an expired record as inactive
+  without removing it from storage; explicit `unpause` removes the record and emits `pause_off`.
+- `pause_off` is only emitted on an explicit admin `unpause` call, not on lazy expiry.
 
 ### talos_dividends
 | topics | data |

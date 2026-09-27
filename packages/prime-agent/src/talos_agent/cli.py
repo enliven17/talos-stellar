@@ -8,6 +8,8 @@ import os
 import re
 import sys
 import time
+import uuid
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,7 +18,7 @@ from rich.console import Console
 
 from talos_agent import __version__
 from talos_agent.checkpoint_cli import checkpoint
-from talos_agent.config import APP_DIR, Settings, ensure_app_dir
+from talos_agent.config import APP_DIR, Settings, ensure_app_dir, safe_config_error
 
 console = Console()
 
@@ -68,7 +70,7 @@ def start(talos_id: str | None, env_file: str):
                     dec = decrypt_with_password(value, master_key)
                     os.environ.setdefault(key, dec)
                 except Exception as e:
-                    console.print(f"[red]Error decrypting {key}:[/red] {e}")
+                    console.print(f"[red]Error decrypting {key}:[/red] {safe_config_error(e)}")
                     sys.exit(1)
             else:
                 os.environ.setdefault(key, value)
@@ -76,7 +78,11 @@ def start(talos_id: str | None, env_file: str):
     kwargs: dict = {"_env_file": env_file}
     if talos_id:
         kwargs["talos_id"] = talos_id
-    settings = Settings(**kwargs)
+    try:
+        settings = Settings(**kwargs)
+    except Exception as exc:
+        console.print(f"[red]Configuration error:[/red] {safe_config_error(exc)}")
+        raise click.exceptions.Exit(1) from None
 
     all_keys = settings.get_all_api_keys()
     if not all_keys:
@@ -431,8 +437,25 @@ def backup(output, agent_id, passphrase, web_endpoint, web_api_url, ops_token):
     console.print(f"  scope:         {run.scope}")
     console.print(f"  files:         {len(run.files)}")
     console.print(f"  row_count:     {run.manifest.get('rowCountTotal', 0)}")
-    console.print(f"  duration_s:    {elapsed:.2f}")
+    console.print(f"  duration_s:    {elapsed:.2f}")    
+    settings = Settings()
+    if settings.backup_retention_enabled:
+        from talos_agent.backup_service import prune_backups
 
+        try:
+            deleted = prune_backups(
+                directory=out.parent,
+                max_count=settings.backup_retention_max_count,
+                max_age_days=settings.backup_retention_max_age_days,
+            )
+        except BackupError as exc:
+            # Retention is best-effort cleanup; the backup itself already
+            # succeeded above, so a policy misconfiguration must not turn
+            # into a failed `backup` command. Report and continue.
+            console.print(f"[yellow]Retention pruning skipped:[/yellow] {exc}")
+        else:
+            if deleted:
+                console.print(f"  pruned:        {len(deleted)} old backup(s) removed")
     if web_endpoint:
         import asyncio
         import os
@@ -734,6 +757,305 @@ def diagnostics(json_output: bool):
         if a.detail:
             console.print(f"    Detail: {a.detail}")
     console.print()
+
+
+@main.group()
+@click.option(
+    "--db-path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Secret database path (defaults to the prime-agent database)",
+)
+@click.pass_context
+def secrets(ctx: click.Context, db_path: Path | None):
+    """Manage encrypted, versioned runtime secrets."""
+    from talos_agent.db import DB_PATH, LocalDB
+    from talos_agent.secret_store import SecretStore, decode_keyring
+
+    settings = Settings()
+    try:
+        db = LocalDB(
+            path=db_path or DB_PATH,
+            timeout_ms=settings.secret_db_timeout_ms,
+        )
+        store = SecretStore(
+            db,
+            keyring=decode_keyring(settings.secret_keyring),
+            active_key_id=settings.secret_active_key_id,
+            scope=settings.secret_scope,
+            max_value_bytes=settings.secret_max_bytes,
+            dual_read=settings.secret_dual_read,
+            legacy_fallback=settings.secret_legacy_fallback,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    ctx.obj = {"db": db, "store": store}
+    ctx.call_on_close(db.close)
+
+
+@secrets.command("stage")
+@click.argument("name")
+@click.option("--request-id", default=None, help="Idempotency key (generated if omitted)")
+@click.option("--actor", default="operator", show_default=True)
+@click.option("--reason", default=None, help="Lowercase audit reason code")
+@click.pass_obj
+def stage_secret(obj: dict, name: str, request_id: str | None, actor: str, reason: str | None):
+    """Prompt for and stage an encrypted value without activating it."""
+    value = click.prompt("Secret value", hide_input=True, confirmation_prompt=True)
+    try:
+        version = obj["store"].stage(
+            name,
+            value,
+            request_id=request_id or str(uuid.uuid4()),
+            actor=actor,
+            reason=reason,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=asdict(version))
+
+
+@secrets.command("activate")
+@click.argument("name")
+@click.argument("version", type=click.IntRange(min=1))
+@click.option("--expected-version", type=click.IntRange(min=1), default=None)
+@click.option("--actor", default="operator", show_default=True)
+@click.option("--reason", default=None, help="Lowercase audit reason code")
+@click.option(
+    "--with-checkpoint",
+    "checkpoint_request_id",
+    default=None,
+    help="Idempotency key; creates a pre-activation rollback checkpoint",
+)
+@click.pass_obj
+def activate_secret(
+    obj: dict,
+    name: str,
+    version: int,
+    expected_version: int | None,
+    actor: str,
+    reason: str | None,
+    checkpoint_request_id: str | None,
+):
+    """Atomically activate a staged version using compare-and-swap."""
+    store = obj["store"]
+    expected = expected_version if expected_version is not None else store.current_version(name)
+    try:
+        result = store.activate(
+            name,
+            version,
+            expected_active_version=expected,
+            actor=actor,
+            reason=reason,
+            checkpoint_request_id=checkpoint_request_id,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=asdict(result))
+
+
+@secrets.command("rotate")
+@click.argument("name")
+@click.option("--request-id", default=None, help="Idempotency key (generated if omitted)")
+@click.option("--expected-version", type=click.IntRange(min=1), default=None)
+@click.option("--actor", default="operator", show_default=True)
+@click.option("--reason", default="routine_rotation", show_default=True)
+@click.option(
+    "--with-checkpoint/--no-checkpoint",
+    default=True,
+    show_default=True,
+    help="Create a rollback checkpoint of the pre-rotation head",
+)
+@click.pass_obj
+def rotate_secret(
+    obj: dict,
+    name: str,
+    request_id: str | None,
+    expected_version: int | None,
+    actor: str,
+    reason: str,
+    with_checkpoint: bool,
+):
+    """Prompt for, stage, and atomically activate a new encrypted version."""
+    store = obj["store"]
+    expected = expected_version if expected_version is not None else store.current_version(name)
+    value = click.prompt("New secret value", hide_input=True, confirmation_prompt=True)
+    rid = request_id or str(uuid.uuid4())
+    try:
+        staged = store.stage(
+            name,
+            value,
+            request_id=rid,
+            actor=actor,
+            reason=reason,
+        )
+        active = store.activate(
+            name,
+            staged.version,
+            expected_active_version=expected,
+            actor=actor,
+            reason=reason,
+            checkpoint_request_id=(f"ckpt-{rid}" if with_checkpoint and expected is not None else None),
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=asdict(active))
+
+
+@secrets.command("recover")
+@click.argument("name")
+@click.argument("version", type=click.IntRange(min=1))
+@click.option("--expected-version", type=click.IntRange(min=1), required=True)
+@click.option("--actor", default="operator", show_default=True)
+@click.option("--reason", default="credential_rejected", show_default=True)
+@click.pass_obj
+def recover_secret(
+    obj: dict,
+    name: str,
+    version: int,
+    expected_version: int,
+    actor: str,
+    reason: str,
+):
+    """Recover a prior non-revoked version with an atomic CAS."""
+    try:
+        result = obj["store"].recover(
+            name,
+            version,
+            expected_active_version=expected_version,
+            actor=actor,
+            reason=reason,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=asdict(result))
+
+
+@secrets.command("revoke")
+@click.argument("name")
+@click.argument("version", type=click.IntRange(min=1))
+@click.option("--actor", default="operator", show_default=True)
+@click.option("--reason", default="rotation_complete", show_default=True)
+@click.pass_obj
+def revoke_secret(obj: dict, name: str, version: int, actor: str, reason: str):
+    """Permanently exclude a non-active version from runtime reads."""
+    try:
+        result = obj["store"].revoke(name, version, actor=actor, reason=reason)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=asdict(result))
+
+
+@secrets.command("list")
+@click.argument("name")
+@click.pass_obj
+def list_secrets(obj: dict, name: str):
+    """List lifecycle metadata. Ciphertext and key IDs are never displayed."""
+    try:
+        versions = obj["store"].list_versions(name)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=[asdict(version) for version in versions])
+
+
+@secrets.command("audit")
+@click.argument("name")
+@click.option("--limit", type=click.IntRange(min=1, max=500), default=50)
+@click.pass_obj
+def audit_secrets(obj: dict, name: str, limit: int):
+    """Show bounded secret lifecycle audit events."""
+    try:
+        events = obj["store"].audit_events(name, limit)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=events)
+
+
+@secrets.group("checkpoint")
+def secrets_checkpoint():
+    """Manage secret-rotation rollback checkpoints."""
+
+
+@secrets_checkpoint.command("create")
+@click.argument("name")
+@click.option("--request-id", default=None, help="Idempotency key (generated if omitted)")
+@click.option("--actor", default="operator", show_default=True)
+@click.option("--reason", default="pre_rotation", show_default=True)
+@click.pass_obj
+def checkpoint_create(
+    obj: dict, name: str, request_id: str | None, actor: str, reason: str
+):
+    """Snapshot the current secret head for later rollback."""
+    try:
+        result = obj["store"].create_rollback_checkpoint(
+            name,
+            request_id=request_id or str(uuid.uuid4()),
+            actor=actor,
+            reason=reason,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=asdict(result))
+
+
+@secrets_checkpoint.command("list")
+@click.argument("name")
+@click.pass_obj
+def checkpoint_list(obj: dict, name: str):
+    """List rollback checkpoints (no ciphertext or key material)."""
+    try:
+        result = obj["store"].list_rollback_checkpoints(name)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=[asdict(item) for item in result])
+
+
+@secrets_checkpoint.command("rollback")
+@click.argument("name")
+@click.argument("checkpoint_id")
+@click.option("--expected-version", type=click.IntRange(min=1), required=True)
+@click.option("--actor", default="operator", show_default=True)
+@click.option("--reason", default="checkpoint_rollback", show_default=True)
+@click.pass_obj
+def checkpoint_rollback(
+    obj: dict,
+    name: str,
+    checkpoint_id: str,
+    expected_version: int,
+    actor: str,
+    reason: str,
+):
+    """Restore the secret head captured by a checkpoint (CAS)."""
+    try:
+        result = obj["store"].rollback_to_checkpoint(
+            name,
+            checkpoint_id,
+            expected_active_version=expected_version,
+            actor=actor,
+            reason=reason,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=asdict(result))
+
+
+@secrets_checkpoint.command("discard")
+@click.argument("name")
+@click.argument("checkpoint_id")
+@click.option("--actor", default="operator", show_default=True)
+@click.option("--reason", default="checkpoint_discarded", show_default=True)
+@click.pass_obj
+def checkpoint_discard(
+    obj: dict, name: str, checkpoint_id: str, actor: str, reason: str
+):
+    """Discard an open checkpoint so it cannot be restored."""
+    try:
+        result = obj["store"].discard_rollback_checkpoint(
+            name, checkpoint_id, actor=actor, reason=reason
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=asdict(result))
 
 
 @main.command(name="wal-health")
