@@ -2238,4 +2238,219 @@ mod tests {
             .try_initialize(&admin, &pulse, &100_i128, &5_000_i128, &20_u32);
         assert!(result.is_err(), "double initialization must be rejected");
     }
+
+    // ── Budget regression gates (#610) ───────────────────────────────────────
+    //
+    // Measure CPU-instruction and memory-byte cost on the host target.
+    // Ceilings are loose regression catches; actual WASM costs are higher.
+    // env.budget().reset_default() re-zeroes counters and re-applies the
+    // default per-transaction limit before each measurement.
+
+    const BUDGET_CPU_INITIALIZE_GOV: u64       = 400_000;
+    const BUDGET_MEM_INITIALIZE_GOV: u64       =  80_000;
+
+    const BUDGET_CPU_CREATE_PROPOSAL: u64      = 600_000;
+    const BUDGET_MEM_CREATE_PROPOSAL: u64      = 120_000;
+
+    const BUDGET_CPU_VOTE: u64                 = 800_000;
+    const BUDGET_MEM_VOTE: u64                 = 150_000;
+
+    const BUDGET_CPU_RECORD_DIVIDEND: u64      = 600_000;
+    const BUDGET_MEM_RECORD_DIVIDEND: u64      = 120_000;
+
+    const BUDGET_CPU_GET_PROPOSAL: u64         = 200_000;
+    const BUDGET_MEM_GET_PROPOSAL: u64         =  50_000;
+
+    #[test]
+    fn budget_initialize_within_limits() {
+        let env = Env::default();
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 100;
+            li.timestamp = 1_000;
+        });
+        let contract_id = env.register_contract(None, TalosGovernance);
+        let client = TalosGovernanceClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let pulse = Address::generate(&env);
+
+        env.budget().reset_default();
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "initialize",
+                    args: (admin.clone(), pulse.clone(), 100_i128, 5_100_i128, 20_u32)
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .initialize(&admin, &pulse, &100_i128, &5_100_i128, &20_u32);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_INITIALIZE_GOV,
+            "governance initialize CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_INITIALIZE_GOV,
+        );
+        assert!(
+            mem < BUDGET_MEM_INITIALIZE_GOV,
+            "governance initialize memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_INITIALIZE_GOV,
+        );
+    }
+
+    #[test]
+    fn budget_create_proposal_within_limits() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        env.budget().reset_default();
+        create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_CREATE_PROPOSAL,
+            "create_proposal CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_CREATE_PROPOSAL,
+        );
+        assert!(
+            mem < BUDGET_MEM_CREATE_PROPOSAL,
+            "create_proposal memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_CREATE_PROPOSAL,
+        );
+    }
+
+    #[test]
+    fn budget_vote_within_limits() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let voter    = Address::generate(&env);
+
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        cache_balance_with_auth(
+            &env, &contract_id, &client, &admin,
+            proposal.snapshot_ledger, &voter, 200,
+        );
+
+        env.budget().reset_default();
+        client
+            .mock_auths(&[MockAuth {
+                address: &voter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "vote",
+                    args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .vote(&voter, &proposal_id, &VoteChoice::Approve);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_VOTE,
+            "vote CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_VOTE,
+        );
+        assert!(
+            mem < BUDGET_MEM_VOTE,
+            "vote memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_VOTE,
+        );
+    }
+
+    #[test]
+    fn budget_record_dividend_snapshot_within_limits() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+
+        env.budget().reset_default();
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "record_dividend_snapshot",
+                    args: (admin.clone(), 1_u32, 500_000_i128, 100_i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .record_dividend_snapshot(&admin, &1_u32, &500_000_i128, &100_i128);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_RECORD_DIVIDEND,
+            "record_dividend_snapshot CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_RECORD_DIVIDEND,
+        );
+        assert!(
+            mem < BUDGET_MEM_RECORD_DIVIDEND,
+            "record_dividend_snapshot memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_RECORD_DIVIDEND,
+        );
+    }
+
+    #[test]
+    fn budget_get_proposal_read_within_limits() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        env.budget().reset_default();
+        let _ = client.get_proposal(&proposal_id);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_GET_PROPOSAL,
+            "get_proposal CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_GET_PROPOSAL,
+        );
+        assert!(
+            mem < BUDGET_MEM_GET_PROPOSAL,
+            "get_proposal memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_GET_PROPOSAL,
+        );
+    }
+
+    /// Negative: create_proposal with empty title must fail cheaply.
+    #[test]
+    fn budget_create_proposal_empty_title_rejected_cheaply() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let empty    = soroban_sdk::String::from_str(&env, "");
+        let desc     = soroban_sdk::String::from_str(&env, "Some description");
+
+        env.budget().reset_default();
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &proposer,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_proposal",
+                    args: (proposer.clone(), 1_u32, empty.clone(), desc.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_proposal(&proposer, &1_u32, &empty, &desc);
+        assert!(result.is_err(), "empty title must be rejected");
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        // Validation rejection must be no more expensive than a success path.
+        assert!(
+            cpu < BUDGET_CPU_CREATE_PROPOSAL,
+            "rejected create_proposal CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_CREATE_PROPOSAL,
+        );
+        assert!(
+            mem < BUDGET_MEM_CREATE_PROPOSAL,
+            "rejected create_proposal memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_CREATE_PROPOSAL,
+        );
+    }
 }

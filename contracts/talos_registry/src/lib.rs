@@ -5730,4 +5730,313 @@ mod tests {
         // Attempting update_kernel on a deactivated talos without auth must fail
         assert!(client.try_update_kernel(&id, &kernel()).is_err());
     }
+
+    // ── Budget regression gates (#610) ───────────────────────────────────────
+    //
+    // Measure CPU-instruction and memory-byte cost of the core write paths.
+    // Ceilings are intentionally loose regression sentinels, not hard Soroban
+    // production limits (the WASM runtime charges more than the host target).
+    // Any entry-point that blows past its ceiling should be reviewed to check
+    // that the added cost is intentional and proportionate.
+    //
+    // env.budget().reset_default() re-zeroes both counters and resets the
+    // per-call limit before each measured invocation, isolating one call.
+
+    const BUDGET_CPU_INITIALIZE_REG: u64  =  400_000;
+    const BUDGET_MEM_INITIALIZE_REG: u64  =   80_000;
+
+    const BUDGET_CPU_CREATE_TALOS: u64    = 1_000_000;
+    const BUDGET_MEM_CREATE_TALOS: u64    =  200_000;
+
+    const BUDGET_CPU_GET_TALOS: u64       =  200_000;
+    const BUDGET_MEM_GET_TALOS: u64       =   50_000;
+
+    const BUDGET_CPU_UPDATE_PATRON: u64   =  800_000;
+    const BUDGET_MEM_UPDATE_PATRON: u64   =  160_000;
+
+    const BUDGET_CPU_DEACTIVATE: u64      =  600_000;
+    const BUDGET_MEM_DEACTIVATE: u64      =  120_000;
+
+    #[test]
+    fn budget_initialize_within_limits() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let protocol_wallet = Address::generate(&env);
+
+        env.budget().reset_default();
+        client.initialize(&protocol_wallet);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_INITIALIZE_REG,
+            "registry initialize CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_INITIALIZE_REG,
+        );
+        assert!(
+            mem < BUDGET_MEM_INITIALIZE_REG,
+            "registry initialize memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_INITIALIZE_REG,
+        );
+    }
+
+    #[test]
+    fn budget_create_talos_within_limits() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator         = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        client.initialize(&protocol_wallet);
+
+        env.budget().reset_default();
+        create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_CREATE_TALOS,
+            "create_talos CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_CREATE_TALOS,
+        );
+        assert!(
+            mem < BUDGET_MEM_CREATE_TALOS,
+            "create_talos memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_CREATE_TALOS,
+        );
+    }
+
+    #[test]
+    fn budget_get_talos_read_within_limits() {
+        let (env, contract_id) = setup();
+        let client          = TalosRegistryClient::new(&env, &contract_id);
+        let creator         = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        client.initialize(&protocol_wallet);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        env.budget().reset_default();
+        let _ = client.get_talos(&id);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_GET_TALOS,
+            "get_talos CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_GET_TALOS,
+        );
+        assert!(
+            mem < BUDGET_MEM_GET_TALOS,
+            "get_talos memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_GET_TALOS,
+        );
+    }
+
+    #[test]
+    fn budget_update_patron_within_limits() {
+        let (env, contract_id) = setup();
+        let client          = TalosRegistryClient::new(&env, &contract_id);
+        let creator         = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        client.initialize(&protocol_wallet);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let new_patron = Patron {
+            creator_share: 50,
+            investor_share: 30,
+            treasury_share: 20,
+            creator_addr: creator.clone(),
+            investor_addr: Address::generate(&env),
+            treasury_addr: Address::generate(&env),
+        };
+
+        env.budget().reset_default();
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_patron",
+                    args: (id, new_patron.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_patron(&id, &new_patron);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_UPDATE_PATRON,
+            "update_patron CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_UPDATE_PATRON,
+        );
+        assert!(
+            mem < BUDGET_MEM_UPDATE_PATRON,
+            "update_patron memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_UPDATE_PATRON,
+        );
+    }
+
+    #[test]
+    fn budget_deactivate_talos_within_limits() {
+        let (env, contract_id) = setup();
+        let client          = TalosRegistryClient::new(&env, &contract_id);
+        let creator         = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        client.initialize(&protocol_wallet);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        env.budget().reset_default();
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "deactivate_talos",
+                    args: (id, creator.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .deactivate_talos(&id, &creator);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_DEACTIVATE,
+            "deactivate_talos CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_DEACTIVATE,
+        );
+        assert!(
+            mem < BUDGET_MEM_DEACTIVATE,
+            "deactivate_talos memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_DEACTIVATE,
+        );
+    }
+
+    /// Boundary: create_talos with metadata at maximum byte limits stays
+    /// within the budget ceiling (worst-case payload size should not
+    /// blow past the regression gate).
+    #[test]
+    fn budget_create_talos_max_metadata_within_limits() {
+        let (env, contract_id) = setup();
+        let client          = TalosRegistryClient::new(&env, &contract_id);
+        let creator         = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        client.initialize(&protocol_wallet);
+
+        // Build strings at their maximum allowed byte lengths.
+        let name        = s(&env, &"A".repeat(MAX_NAME_BYTES as usize));
+        let category    = s(&env, &"B".repeat(MAX_CATEGORY_BYTES as usize));
+        let description = s(&env, &"C".repeat(MAX_DESCRIPTION_BYTES as usize));
+        let symbol_str  = "D".repeat(MAX_TOKEN_SYMBOL_BYTES as usize);
+        let pat = Patron {
+            creator_share: 60,
+            investor_share: 25,
+            treasury_share: 15,
+            creator_addr: creator.clone(),
+            investor_addr: Address::generate(&env),
+            treasury_addr: Address::generate(&env),
+        };
+        let p = Pulse {
+            total_supply: 1_000_000,
+            price_usd_cents: 100,
+            token_symbol: s(&env, &symbol_str),
+        };
+
+        env.budget().reset_default();
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_talos",
+                    args: (
+                        name.clone(),
+                        category.clone(),
+                        description.clone(),
+                        pat.clone(),
+                        kernel(),
+                        p.clone(),
+                        protocol_wallet.clone(),
+                    ).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .create_talos(&name, &category, &description, &pat, &kernel(), &p, &protocol_wallet);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_CREATE_TALOS,
+            "create_talos (max metadata) CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_CREATE_TALOS,
+        );
+        assert!(
+            mem < BUDGET_MEM_CREATE_TALOS,
+            "create_talos (max metadata) memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_CREATE_TALOS,
+        );
+    }
+
+    /// Negative: malformed patron shares are rejected before any storage
+    /// write, so the early-exit must be cheaper than success.
+    #[test]
+    fn budget_create_talos_invalid_shares_rejected_cheaply() {
+        let (env, contract_id) = setup();
+        let client          = TalosRegistryClient::new(&env, &contract_id);
+        let creator         = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        client.initialize(&protocol_wallet);
+
+        let bad_patron = Patron {
+            creator_share: 50,
+            investor_share: 50,
+            treasury_share: 50, // sum = 150, must be rejected
+            creator_addr: creator.clone(),
+            investor_addr: Address::generate(&env),
+            treasury_addr: Address::generate(&env),
+        };
+
+        env.budget().reset_default();
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_talos",
+                    args: (
+                        s(&env, "X"),
+                        s(&env, ""),
+                        s(&env, ""),
+                        bad_patron.clone(),
+                        kernel(),
+                        pulse(&env),
+                        protocol_wallet.clone(),
+                    ).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_talos(
+                &s(&env, "X"),
+                &s(&env, ""),
+                &s(&env, ""),
+                &bad_patron,
+                &kernel(),
+                &pulse(&env),
+                &protocol_wallet,
+            );
+        assert!(result.is_err(), "invalid shares must be rejected");
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_CREATE_TALOS,
+            "rejected create_talos CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_CREATE_TALOS,
+        );
+        assert!(
+            mem < BUDGET_MEM_CREATE_TALOS,
+            "rejected create_talos memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_CREATE_TALOS,
+        );
+    }
 }

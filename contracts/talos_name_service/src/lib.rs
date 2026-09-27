@@ -5625,4 +5625,193 @@ mod tests {
             "has_name must work while paused"
         );
     }
+
+    // ── Budget regression gates (#610) ───────────────────────────────────────
+    //
+    // Measure CPU-instruction and memory-byte cost of the core write and read
+    // paths on the host (native Rust) target.  Ceilings are loose regression
+    // sentinels; WASM runtime costs will be higher.
+
+    const BUDGET_CPU_NS_INITIALIZE: u64    =  500_000;
+    const BUDGET_MEM_NS_INITIALIZE: u64    =  100_000;
+
+    const BUDGET_CPU_REGISTER_NAME: u64    = 1_200_000;
+    const BUDGET_MEM_REGISTER_NAME: u64    =  250_000;
+
+    const BUDGET_CPU_RESOLVE_NAME: u64     =  200_000;
+    const BUDGET_MEM_RESOLVE_NAME: u64     =   50_000;
+
+    const BUDGET_CPU_NAME_OF: u64          =  200_000;
+    const BUDGET_MEM_NAME_OF: u64          =   50_000;
+
+    #[test]
+    fn budget_initialize_within_limits() {
+        let env = Env::default();
+        let registry_contract    = env.register_contract(None, TalosRegistry);
+        let name_service_contract = env.register_contract(None, TalosNameService);
+        let client = TalosNameServiceClient::new(&env, &name_service_contract);
+        let admin  = Address::generate(&env);
+
+        env.budget().reset_default();
+        client.initialize(&registry_contract, &admin, &0i128);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_NS_INITIALIZE,
+            "name service initialize CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_NS_INITIALIZE,
+        );
+        assert!(
+            mem < BUDGET_MEM_NS_INITIALIZE,
+            "name service initialize memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_NS_INITIALIZE,
+        );
+    }
+
+    #[test]
+    fn budget_register_name_within_limits() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner           = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name            = s(&env, "budgettest");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+
+        env.budget().reset_default();
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name,
+        );
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_REGISTER_NAME,
+            "register_name CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_REGISTER_NAME,
+        );
+        assert!(
+            mem < BUDGET_MEM_REGISTER_NAME,
+            "register_name memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_REGISTER_NAME,
+        );
+    }
+
+    #[test]
+    fn budget_resolve_name_read_within_limits() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner           = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name            = s(&env, "resolvetest");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name,
+        );
+
+        env.budget().reset_default();
+        let _ = client.resolve_name(&name);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_RESOLVE_NAME,
+            "resolve_name CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_RESOLVE_NAME,
+        );
+        assert!(
+            mem < BUDGET_MEM_RESOLVE_NAME,
+            "resolve_name memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_RESOLVE_NAME,
+        );
+    }
+
+    #[test]
+    fn budget_name_of_read_within_limits() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner           = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name            = s(&env, "nameoftest");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name,
+        );
+
+        env.budget().reset_default();
+        let _ = client.name_of(&talos_id);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_NAME_OF,
+            "name_of CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_NAME_OF,
+        );
+        assert!(
+            mem < BUDGET_MEM_NAME_OF,
+            "name_of memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_NAME_OF,
+        );
+    }
+
+    /// Negative: registering an already-taken name must fail cheaply (no
+    /// storage write occurs, so the rejection should be cheaper than success).
+    #[test]
+    fn budget_register_name_duplicate_rejected_cheaply() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner           = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name            = s(&env, "duptest");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name,
+        );
+
+        // Attempt a second registration with the same name — must fail.
+        let talos_id2 = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+
+        env.budget().reset_default();
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id2, name.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id2,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .try_register_name(&owner, &talos_id2, &name);
+        assert!(result.is_err(), "duplicate name must be rejected");
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_REGISTER_NAME,
+            "rejected register_name CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_REGISTER_NAME,
+        );
+        assert!(
+            mem < BUDGET_MEM_REGISTER_NAME,
+            "rejected register_name memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_REGISTER_NAME,
+        );
+    }
 }

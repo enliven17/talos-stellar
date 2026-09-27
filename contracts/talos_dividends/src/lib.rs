@@ -1305,4 +1305,229 @@ mod tests {
         assert_eq!(client.next_epoch_id(&1u32), 3u64);
         assert_eq!(client.next_epoch_id(&2u32), 2u64);
     }
+
+    // ── Budget regression gates (#610) ───────────────────────────────────────
+    //
+    // These tests assert that key entry-points stay within CPU-instruction and
+    // memory-byte ceilings measured on the host (native Rust) target.
+    //
+    // IMPORTANT: The Soroban SDK test runtime underestimates costs relative to
+    // the actual WASM runtime.  The limits below are therefore intentionally
+    // loose — they are regression catches rather than hard production caps.
+    // If an entry-point exceeds a ceiling it means a refactor significantly
+    // increased its resource consumption and the change needs review.
+    //
+    // Measurement pattern:
+    //   1. `env.budget().reset_default()` — zero the counters and re-apply the
+    //      default per-transaction limits so each test is fully isolated.
+    //   2. Execute the entry-point under test.
+    //   3. Assert `cpu_instruction_cost()` and `memory_bytes_cost()` stay below
+    //      the stated ceilings.
+
+    /// CPU/memory ceiling for `initialize`.
+    const BUDGET_CPU_INITIALIZE: u64    = 300_000;
+    const BUDGET_MEM_INITIALIZE: u64    =  60_000;
+
+    /// CPU/memory ceiling for `commit_epoch` (single epoch, default params).
+    const BUDGET_CPU_COMMIT_EPOCH: u64  = 600_000;
+    const BUDGET_MEM_COMMIT_EPOCH: u64  = 100_000;
+
+    /// CPU/memory ceiling for `claim_dividend` (single claim, 60 % share).
+    const BUDGET_CPU_CLAIM: u64         = 800_000;
+    const BUDGET_MEM_CLAIM: u64         = 130_000;
+
+    /// CPU/memory ceiling for `get_epoch` (read-only).
+    const BUDGET_CPU_GET_EPOCH: u64     = 200_000;
+    const BUDGET_MEM_GET_EPOCH: u64     =  50_000;
+
+    #[test]
+    fn budget_initialize_within_limits() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, TalosDividends);
+        let client = TalosDividendsClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let registry = Address::generate(&env);
+
+        env.budget().reset_default();
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "initialize",
+                    args: (admin.clone(), registry.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .initialize(&admin, &registry)
+            .unwrap();
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_INITIALIZE,
+            "initialize CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_INITIALIZE,
+        );
+        assert!(
+            mem < BUDGET_MEM_INITIALIZE,
+            "initialize memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_INITIALIZE,
+        );
+    }
+
+    #[test]
+    fn budget_commit_epoch_within_limits() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+
+        env.budget().reset_default();
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch",
+                    args: (admin.clone(), talos_id, 10_000_i128, 7_200_u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .commit_epoch(&admin, &talos_id, &10_000_i128, &7_200_u64)
+            .unwrap();
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_COMMIT_EPOCH,
+            "commit_epoch CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_COMMIT_EPOCH,
+        );
+        assert!(
+            mem < BUDGET_MEM_COMMIT_EPOCH,
+            "commit_epoch memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_COMMIT_EPOCH,
+        );
+    }
+
+    #[test]
+    fn budget_claim_dividend_within_limits() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator  = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        env.budget().reset_default();
+        do_claim(
+            &env, &contract_id, &client,
+            &creator, talos_id, epoch_id,
+            &creator, &investor, &treasury,
+        )
+        .unwrap();
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_CLAIM,
+            "claim_dividend CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_CLAIM,
+        );
+        assert!(
+            mem < BUDGET_MEM_CLAIM,
+            "claim_dividend memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_CLAIM,
+        );
+    }
+
+    #[test]
+    fn budget_get_epoch_read_within_limits() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        env.budget().reset_default();
+        let _ = client.get_epoch(&talos_id, &epoch_id);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_GET_EPOCH,
+            "get_epoch CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_GET_EPOCH,
+        );
+        assert!(
+            mem < BUDGET_MEM_GET_EPOCH,
+            "get_epoch memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_GET_EPOCH,
+        );
+    }
+
+    /// Boundary: commit with minimum allowed `total_amount` stays within budget.
+    #[test]
+    fn budget_commit_epoch_minimum_amount_within_limits() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 2u32;
+
+        env.budget().reset_default();
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch",
+                    args: (admin.clone(), talos_id, MIN_EPOCH_AMOUNT, MIN_EXPIRY_SECS).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .commit_epoch(&admin, &talos_id, &MIN_EPOCH_AMOUNT, &MIN_EXPIRY_SECS)
+            .unwrap();
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_COMMIT_EPOCH,
+            "commit_epoch (min amount) CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_COMMIT_EPOCH,
+        );
+        assert!(
+            mem < BUDGET_MEM_COMMIT_EPOCH,
+            "commit_epoch (min amount) memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_COMMIT_EPOCH,
+        );
+    }
+
+    /// Negative: a rejected `commit_epoch` (zero amount) must also not
+    /// overspend — validation is O(1) and should be cheaper than success.
+    #[test]
+    fn budget_commit_epoch_rejected_does_not_overspend() {
+        let (env, contract_id, admin, _, client) = setup();
+
+        env.budget().reset_default();
+        let _ = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch",
+                    args: (admin.clone(), 1u32, 0_i128, 7_200_u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_commit_epoch(&admin, &1u32, &0_i128, &7_200_u64);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        // Rejected paths must be no more expensive than the success path.
+        assert!(
+            cpu < BUDGET_CPU_COMMIT_EPOCH,
+            "rejected commit_epoch CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_COMMIT_EPOCH,
+        );
+        assert!(
+            mem < BUDGET_MEM_COMMIT_EPOCH,
+            "rejected commit_epoch memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_COMMIT_EPOCH,
+        );
+    }
 }

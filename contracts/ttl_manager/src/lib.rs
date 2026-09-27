@@ -1029,4 +1029,122 @@ mod ttl_near_expiration_tests {
                 "BoundsError message must not embed caller values");
         }
     }
+
+    // ── Budget regression gates (#610) ───────────────────────────────────────
+    //
+    // TTL-manager functions are pure (no contract entry-points), but they still
+    // consume host resources that are tracked by the Soroban test budget.
+    // Ceilings are loose regression checks; native Rust underestimates WASM cost.
+
+    const BUDGET_CPU_KEY_HEALTH_100: u64    = 500_000;
+    const BUDGET_MEM_KEY_HEALTH_100: u64    = 100_000;
+
+    const BUDGET_CPU_BATCH_SWEEP_200: u64   = 800_000;
+    const BUDGET_MEM_BATCH_SWEEP_200: u64   = 160_000;
+
+    const BUDGET_CPU_VALIDATE_BOUNDS: u64   = 100_000;
+    const BUDGET_MEM_VALIDATE_BOUNDS: u64   =  20_000;
+
+    #[test]
+    fn budget_key_health_100_observations_within_limits() {
+        let env = Env::default();
+
+        env.budget().reset_default();
+        let mut h = KeyHealth::empty();
+        for i in 0u32..100 {
+            h.observe(i * 50_000);
+        }
+        let _ = h.needs_immediate_attention();
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_KEY_HEALTH_100,
+            "KeyHealth 100 obs CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_KEY_HEALTH_100,
+        );
+        assert!(
+            mem < BUDGET_MEM_KEY_HEALTH_100,
+            "KeyHealth 100 obs memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_KEY_HEALTH_100,
+        );
+    }
+
+    #[test]
+    fn budget_batch_sweep_200_records_within_limits() {
+        let env = Env::default();
+
+        env.budget().reset_default();
+        let mut sweep = BatchSweep::empty();
+        for i in 0u32..200 {
+            let outcome = if i % 3 == 0 {
+                EntryOutcome::Touched
+            } else if i % 3 == 1 {
+                EntryOutcome::Skipped
+            } else {
+                EntryOutcome::Absent
+            };
+            sweep.record(outcome);
+        }
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_BATCH_SWEEP_200,
+            "BatchSweep 200 records CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_BATCH_SWEEP_200,
+        );
+        assert!(
+            mem < BUDGET_MEM_BATCH_SWEEP_200,
+            "BatchSweep 200 records memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_BATCH_SWEEP_200,
+        );
+    }
+
+    #[test]
+    fn budget_ttl_bounds_validate_within_limits() {
+        let env = Env::default();
+
+        env.budget().reset_default();
+        let _ = TtlBounds::renewal().validate();
+        let _ = TtlBounds::new(0, u32::MAX, MAX_BATCH_KEYS).validate();
+        let _ = TtlBounds::new(u32::MAX, 0, DEFAULT_MAX_BATCH_KEYS).validate(); // inverted — Err
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_VALIDATE_BOUNDS,
+            "TtlBounds::validate CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_VALIDATE_BOUNDS,
+        );
+        assert!(
+            mem < BUDGET_MEM_VALIDATE_BOUNDS,
+            "TtlBounds::validate memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_VALIDATE_BOUNDS,
+        );
+    }
+
+    /// Boundary: `bounded_range` with `max_keys = MAX_BATCH_KEYS` (hard cap)
+    /// must compute the result in O(1) and stay within budget.
+    #[test]
+    fn budget_bounded_range_max_keys_within_limits() {
+        let env = Env::default();
+        let bounds = TtlBounds::new(0, u32::MAX, MAX_BATCH_KEYS);
+
+        env.budget().reset_default();
+        let _ = bounded_range(0, MAX_BATCH_KEYS, &bounds, u32::MAX);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_VALIDATE_BOUNDS,
+            "bounded_range CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_VALIDATE_BOUNDS,
+        );
+        assert!(
+            mem < BUDGET_MEM_VALIDATE_BOUNDS,
+            "bounded_range memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_VALIDATE_BOUNDS,
+        );
+    }
 }
