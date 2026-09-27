@@ -32,6 +32,7 @@ pnpm bench:suite contract   # Contract-adjacent workflow benchmarks
 
 # Set environment overrides
 BENCHMARK_RUNS=50 BENCHMARK_VARIANCE_THRESHOLD=0.2 BENCHMARK_PERFORMANCE_BUDGET_MS=4000 BENCHMARK_P99_THRESHOLD_MS=8000 pnpm bench:suite api
+```
 
 ## Benchmark Suites
 
