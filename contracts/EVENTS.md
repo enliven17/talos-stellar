@@ -1,6 +1,6 @@
 # Talos Contract Event Indexing Specification
 
-**Spec version:** 1.2.0
+**Spec version:** 1.3.0
 **Applies to:** talos_registry, talos_governance, talos_name_service, talos_dividends
 
 ## 1. Event envelope
@@ -59,6 +59,7 @@ is idempotent per cursor (see §4).
 | (`tls_crt`, creator: Address) | (talos_id: u32, name: String, category: String) | new Talos registered |
 | (`tls_crt2`, creator: Address) | (version: u32, talos_id: u32, name: String, category: String) | new Talos registered (v2) |
 | (`pat_upd`, talos_id: u32) | (creator_addr: Address, creator_share: u32, investor_share: u32) | patron split changed |
+| (`meta_upd`, talos_id: u32) | (name: String, category: String, description: String) | creator metadata fields updated (added v1.5.0) |
 | (`fee_chg`,) | (old_bps: u32, new_bps: u32) | protocol fee changed |
 | (`adm_prp`,) | (current: Address, proposed: Address) | admin transfer proposed |
 | (`adm_acc`,) | (new_admin: Address,) | admin transfer accepted |

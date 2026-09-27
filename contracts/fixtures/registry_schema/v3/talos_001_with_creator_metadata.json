@@ -1,0 +1,44 @@
+{
+  "meta": {
+    "schema_version": 3,
+    "contract": "TalosRegistry",
+    "kind": "Talos",
+    "generator": "scripts/generate-registry-fixtures.mjs v1",
+    "note": "Schema v3: Talos struct gains 'metadata: Option<String>' (additive, added talos-registry v1.5.0). Old parsers must treat missing key as None. Byte limit: 200. Creator metadata fields (name, category, description) are also mutable via update_creator_metadata.",
+    "additive_fields": [
+      "metadata"
+    ]
+  },
+  "storage_key": {
+    "type": "Talos",
+    "id": 1
+  },
+  "value": {
+    "id": 1,
+    "name": "Updated Genesis",
+    "category": "Growth",
+    "description": "Autonomous growth agent with updated strategy",
+    "creator": "GDN5AZ5KL6ZUN4W7SLRUXA3ZXCF4V6POZPV2QKDVDHM7QAN6R54IB3BV",
+    "patron": {
+      "creator_share": 60,
+      "investor_share": 25,
+      "treasury_share": 15,
+      "creator_addr": "GDN5AZ5KL6ZUN4W7SLRUXA3ZXCF4V6POZPV2QKDVDHM7QAN6R54IB3BV",
+      "investor_addr": "GDBYLOLNZLP5FPXG3CXHHZ47I5AKETMOMV2JVQJ3UDHLIQORPKYERYJI",
+      "treasury_addr": "GATSGV2VGSVIWSMOLRMFFVTAAANHPFINBC3EPLDCJ5A753UTM5WH7V5R"
+    },
+    "kernel": {
+      "approval_threshold": "10",
+      "gtm_budget": "1000",
+      "min_patron_pulse": "100"
+    },
+    "pulse": {
+      "total_supply": "1000000",
+      "price_usd_cents": "100",
+      "token_symbol": "VEGA"
+    },
+    "created_at": "1710000000",
+    "active": true,
+    "metadata": "ipfs://QmVegaStrategyV3Example"
+  }
+}

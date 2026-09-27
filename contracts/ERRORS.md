@@ -4,6 +4,14 @@ This page documents errors exposed by the contract sources in this workspace. Nu
 
 ## Typed contract errors
 
+### TalosRegistry (`ContractError`)
+
+| Code | Variant | Meaning / caller action |
+|---:|---|---|
+| 1 | `InvalidPatronShares` | Patron shares do not sum to 100; correct the three share values. |
+| 2 | `TalosNotFound` | Requested Talos ID has no storage record; verify the ID and registry state. Added in v1.5.0. |
+| 3 | `MetadataFieldTooLong` | A caller-supplied field in `update_creator_metadata` exceeds its byte limit (`name` > 64, `category` > 32, `description` > 512); shorten the field and retry. Added in v1.5.0. |
+
 ### TalosNameService (`ContractError`)
 
 | Code | Variant | Meaning / caller action |
@@ -68,6 +76,7 @@ These are returned by the `storage_migration` library used by the registry, not 
 | Registry | `Unsupported event schema major version` | Requested event schema major version is unsupported. |
 | Registry | `Name cannot be empty`; `Name exceeds maximum byte length` | Caller-supplied Talos name is missing or exceeds 64 bytes. |
 | Registry | `Category exceeds maximum byte length`; `Description exceeds maximum byte length` | Talos category (> 32 bytes) or description (> 512 bytes) metadata is too long. |
+| Registry | `Name cannot be empty` (in `update_creator_metadata`) | Name field supplied to `update_creator_metadata` is empty; use a non-empty name. |
 | Registry | `Token symbol cannot be empty`; `Token symbol exceeds maximum byte length` | Pulse `token_symbol` is missing or exceeds 12 bytes. |
 | Registry | Migration/rollback rejection diagnostics | Migration helper rejected version ordering, range, or in-progress state. |
 | Registry, Governance, Name service | `Domain is paused` | The write path's pause domain is active (or was paused indefinitely). |

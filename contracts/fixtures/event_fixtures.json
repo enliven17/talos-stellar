@@ -1,5 +1,5 @@
 {
-  "spec_version": "1.2.0",
+  "spec_version": "1.3.0",
   "format": "talos-event-fixtures",
   "description": "Canonical, versioned event-query fixtures for indexers consuming Talos Soroban contract events by topic and ledger range. Consumers load this JSON directly (TypeScript, Python, Rust). Any change that alters decoding MUST bump spec_version and follow the versioning rules in contracts/EVENTS.md.",
   "bounds": {
@@ -46,6 +46,19 @@
           { "position": 0, "type": "address", "name": "creator_addr" },
           { "position": 1, "type": "u32", "name": "creator_share" },
           { "position": 2, "type": "u32", "name": "investor_share" }
+        ]
+      },
+      "meta_upd": {
+        "contract": "talos_registry",
+        "description": "Creator updated their bounded metadata fields (name, category, description). Added in talos-registry v1.5.0 (EVENT_SCHEMA_VERSION 1.1.0). Privacy-safe: no caller address or transaction data included.",
+        "topics": [
+          { "position": 0, "type": "symbol", "name": "event", "description": "event type symbol" },
+          { "position": 1, "type": "u32", "name": "talos_id", "description": "Talos whose metadata fields changed" }
+        ],
+        "data": [
+          { "position": 0, "type": "string", "name": "name", "description": "new name (non-empty, max 64 bytes)" },
+          { "position": 1, "type": "string", "name": "category", "description": "new category (may be empty, max 32 bytes)" },
+          { "position": 2, "type": "string", "name": "description", "description": "new description (may be empty, max 512 bytes)" }
         ]
       },
       "reg_upd": {
@@ -200,6 +213,36 @@
         "ledger_sequence": 100010,
         "topics": { "event": "pat_upd", "talos_id": 1 },
         "data": { "creator_addr": "GDC2TFRPZ3SJJYE2GDOIVHVGU3J7RZ7WCDIGKNZC4OY4CCIY7JK5JGYZ", "creator_share": 5000, "investor_share": 3000 }
+      }
+    },
+    {
+      "id": "update.meta_upd.normal",
+      "family": "update",
+      "event": "meta_upd",
+      "contract": "talos_registry",
+      "ledger_sequence": 100015,
+      "tx_index_in_ledger": 0,
+      "tx_hash": "b3c4d5e6f70819304a5b6c7d8e9f011213141516171819202a3b4c5d6e7f8091",
+      "event_index_in_tx": 0,
+      "topics": [
+        { "type": "symbol", "value": "meta_upd" },
+        { "type": "u32", "value": 1 }
+      ],
+      "data": [
+        { "type": "string", "value": "Updated Genesis" },
+        { "type": "string", "value": "Growth" },
+        { "type": "string", "value": "Autonomous growth agent with updated strategy" }
+      ],
+      "decoded": {
+        "event": "meta_upd",
+        "contract": "talos_registry",
+        "ledger_sequence": 100015,
+        "topics": { "event": "meta_upd", "talos_id": 1 },
+        "data": {
+          "name": "Updated Genesis",
+          "category": "Growth",
+          "description": "Autonomous growth agent with updated strategy"
+        }
       }
     },
     {

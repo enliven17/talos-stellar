@@ -40,7 +40,7 @@ pub struct EventSchemaVersion {
 /// Canonical event-schema version for this contract.
 pub const EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion {
     major: SUPPORTED_MAJOR,
-    minor: 0,
+    minor: 1,
 };
 
 // ── Data Types ──────────────────────────────────────────────────────
@@ -49,6 +49,10 @@ pub const EVENT_SCHEMA_VERSION: EventSchemaVersion = EventSchemaVersion {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ContractError {
     InvalidPatronShares = 1,
+    /// The requested Talos ID has no record in storage.
+    TalosNotFound = 2,
+    /// A caller-supplied metadata field exceeds its byte limit.
+    MetadataFieldTooLong = 3,
 }
 
 #[contracttype]
@@ -91,6 +95,12 @@ pub struct Talos {
     pub pulse: Pulse,
     pub created_at: u64,
     pub active: bool,
+    /// Optional freeform metadata string supplied by the creator.
+    /// Added in v1.5.0 as an additive field (None on existing records).
+    /// Bounded to [`MAX_METADATA_BYTES`] bytes. Never includes secrets,
+    /// payment proofs, or sensitive data — callers are responsible for
+    /// supplying only public information.
+    pub metadata: Option<String>,
 }
 
 #[contracttype]
@@ -142,6 +152,9 @@ pub enum PauseDomain {
     KernelUpdates,
     PulseUpdates,
     Deactivation,
+    /// Added in v1.5.0 — pauses `update_creator_metadata`. Shares the
+    /// same numeric pause domain slot as other Talos metadata updates.
+    MetadataUpdates,
 }
 
 /// Persisted record of an active pause on a single [`PauseDomain`].
@@ -192,6 +205,8 @@ pub enum DataKey {
 // Event schema (topics → data):
 //   tls_crt : (symbol, creator: Address)   → (talos_id: u32, name: String, category: String)
 //   pat_upd : (symbol, talos_id: u32)      → (creator: Address, creator_share: u32, investor_share: u32)
+//   meta_upd: (symbol, talos_id: u32)      → (name: String, category: String, description: String)
+//                                                  Creator-bound metadata fields updated (added v1.5.0).
 //   fee_chg : (symbol,)                    → (old_bps: u32, new_bps: u32)
 //   adm_prp : (symbol,)                    → (current: Address, proposed: Address)
 //   adm_acc : (symbol,)                    → (new_admin: Address)
@@ -224,6 +239,23 @@ fn emit_patron_updated(env: &Env, talos_id: u32, patron: &Patron) {
             patron.investor_share,
         ),
     );
+}
+
+/// Emitted when a creator updates the bounded metadata fields on their Talos.
+///
+/// Privacy-safe: topics contain only the talos_id (a public integer), and
+/// data contains only the updated field values that the creator explicitly
+/// supplied. No caller address, transaction hash, or payment data is included.
+fn emit_creator_metadata_updated(
+    env: &Env,
+    talos_id: u32,
+    name: &String,
+    category: &String,
+    description: &String,
+) {
+    let topics = (symbol_short!("meta_upd"), talos_id);
+    env.events()
+        .publish(topics, (name.clone(), category.clone(), description.clone()));
 }
 
 fn emit_protocol_fee_changed(env: &Env, old_bps: u32, new_bps: u32) {
@@ -376,6 +408,36 @@ fn validate_talos_metadata(name: &String, category: &String, description: &Strin
     validate_token_symbol(&pulse.token_symbol);
 }
 
+/// Validate the three creator-owned mutable metadata fields supplied to
+/// [`TalosRegistry::update_creator_metadata`].
+///
+/// Enforces the same byte limits as the creation path so that no update
+/// can grow a field beyond its original bound. Returns
+/// [`ContractError::MetadataFieldTooLong`] on the first violation so that
+/// callers receive a stable typed error rather than a diagnostic panic.
+///
+/// `name` is also checked for non-emptiness because it is a required
+/// identifier; `category` and `description` may be empty.
+fn validate_creator_metadata_fields(
+    env: &Env,
+    name: &String,
+    category: &String,
+    description: &String,
+) {
+    if name.len() == 0 {
+        panic!("Name cannot be empty");
+    }
+    if name.len() > MAX_NAME_BYTES {
+        panic_with_error!(env, ContractError::MetadataFieldTooLong);
+    }
+    if category.len() > MAX_CATEGORY_BYTES {
+        panic_with_error!(env, ContractError::MetadataFieldTooLong);
+    }
+    if description.len() > MAX_DESCRIPTION_BYTES {
+        panic_with_error!(env, ContractError::MetadataFieldTooLong);
+    }
+}
+
 // ── Emergency Pause Helpers ────────────────────────────────────────
 
 fn get_guardians(e: &Env) -> Vec<Address> {
@@ -433,6 +495,10 @@ const MAX_CATEGORY_BYTES: u32 = 32;
 const MAX_DESCRIPTION_BYTES: u32 = 512;
 /// Maximum byte length of `Pulse.token_symbol`.
 const MAX_TOKEN_SYMBOL_BYTES: u32 = 12;
+/// Maximum byte length of `Talos.metadata` (the optional freeform creator field).
+/// Chosen to accommodate a typical IPFS CIDv1 (59 bytes) with room for a short
+/// label, while keeping per-entry storage rent predictable.
+pub const MAX_METADATA_BYTES: u32 = 200;
 
 // ── Storage schema migrations (see `storage_migration` crate) ────────
 
@@ -457,7 +523,7 @@ const MAX_ROLLBACK_DEPTH: u32 = 1;
 /// This constant is embedded in the WASM binary at compile time and is
 /// therefore immutable once deployed; it cannot be altered by any admin
 /// call, storage write, or cross-contract invocation.
-pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 4, 0);
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 5, 0);
 
 /// Stable 32-byte interface identifier for TalosRegistry v1.
 ///
@@ -469,7 +535,7 @@ pub const INTERFACE_ID: [u8; 32] = [
     0x54, 0x61, 0x6C, 0x6F, 0x73, 0x52, 0x65, 0x67, // "TalosReg"
     0x69, 0x73, 0x74, 0x72, 0x79, 0x00, 0x00, 0x00, // "istry" + zero pads
     0x00, 0x00, 0x00, 0x01, // major = 1
-    0x00, 0x00, 0x00, 0x03, // minor = 3
+    0x00, 0x00, 0x00, 0x05, // minor = 5
     0x00, 0x00, 0x00, 0x00, // patch = 0
     0x00, 0x00, 0x00, 0x00,
 ];
@@ -485,6 +551,7 @@ pub fn features_list() -> &'static [&'static str] {
         "protocol_fee",
         "interface_query",
         "fees_collector",
+        "creator_metadata",
     ]
 }
 
@@ -595,6 +662,7 @@ impl TalosRegistry {
             pulse,
             created_at: e.ledger().timestamp(),
             active: true,
+            metadata: None,
         };
 
         // Store Talos
@@ -713,6 +781,65 @@ impl TalosRegistry {
         e.storage()
             .persistent()
             .set(&DataKey::Talos(talos_id), &talos);
+    }
+
+    /// Update the bounded creator-owned metadata fields on a Talos.
+    ///
+    /// Allows the original creator to change `name`, `category`, and
+    /// `description` after genesis. All three fields are validated against
+    /// the same byte limits enforced at creation time, and the write path is
+    /// protected by the shared `PAUSE_TALOS_UPDATE` pause domain so an
+    /// operator can halt metadata changes without affecting unrelated writes.
+    ///
+    /// # Arguments
+    /// * `talos_id` — ID of the Talos to update.
+    /// * `name` — New name; required (non-empty), max [`MAX_NAME_BYTES`] bytes.
+    /// * `category` — New category; may be empty, max [`MAX_CATEGORY_BYTES`] bytes.
+    /// * `description` — New description; may be empty, max [`MAX_DESCRIPTION_BYTES`] bytes.
+    ///
+    /// # Authorization
+    /// Only the `creator` address recorded at genesis may call this function.
+    ///
+    /// # Errors
+    /// - [`ContractError::TalosNotFound`] — `talos_id` has no storage record.
+    /// - [`ContractError::MetadataFieldTooLong`] — a supplied field exceeds its byte limit.
+    ///
+    /// # Events
+    /// Emits `meta_upd` with `(talos_id)` in topics and `(name, category, description)`
+    /// in data. Privacy-safe: only the publicly-supplied field values are emitted;
+    /// no caller address, transaction hash, or payment data is included.
+    pub fn update_creator_metadata(
+        e: Env,
+        talos_id: u32,
+        name: String,
+        category: String,
+        description: String,
+    ) {
+        pause_control::check_not_paused(&e, PAUSE_TALOS_UPDATE);
+
+        let mut talos: Talos = match e
+            .storage()
+            .persistent()
+            .get(&DataKey::Talos(talos_id))
+        {
+            Some(t) => t,
+            None => panic_with_error!(&e, ContractError::TalosNotFound),
+        };
+
+        // Only the original creator may update metadata.
+        talos.creator.require_auth();
+
+        validate_creator_metadata_fields(&e, &name, &category, &description);
+
+        talos.name = name.clone();
+        talos.category = category.clone();
+        talos.description = description.clone();
+
+        e.storage()
+            .persistent()
+            .set(&DataKey::Talos(talos_id), &talos);
+
+        emit_creator_metadata_updated(&e, talos_id, &name, &category, &description);
     }
 
     /// Deactivate a Talos.
@@ -1891,7 +2018,7 @@ mod tests {
         let version = client.event_schema_version();
 
         assert_eq!(version.major, 1);
-        assert_eq!(version.minor, 0);
+        assert_eq!(version.minor, 1);
     }
 
     #[test]
@@ -1983,7 +2110,7 @@ mod tests {
     fn version_returns_compile_time_constant() {
         let (env, contract_id) = setup();
         let client = TalosRegistryClient::new(&env, &contract_id);
-        assert_eq!(client.version(), (1u32, 3u32, 0u32));
+        assert_eq!(client.version(), (1u32, 5u32, 0u32));
     }
 
     #[test]
@@ -5729,5 +5856,555 @@ mod tests {
 
         // Attempting update_kernel on a deactivated talos without auth must fail
         assert!(client.try_update_kernel(&id, &kernel()).is_err());
+    }
+
+    // ── update_creator_metadata tests ───────────────────────────────
+
+    fn update_meta_with_auth(
+        env: &Env,
+        client: &TalosRegistryClient,
+        contract_id: &Address,
+        creator: &Address,
+        talos_id: u32,
+        name: &String,
+        category: &String,
+        description: &String,
+    ) {
+        client
+            .mock_auths(&[MockAuth {
+                address: creator,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "update_creator_metadata",
+                    args: (
+                        talos_id,
+                        name.clone(),
+                        category.clone(),
+                        description.clone(),
+                    )
+                        .into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_creator_metadata(&talos_id, name, category, description)
+    }
+
+    /// Positive: creator can update all three fields and changes are persisted.
+    #[test]
+    fn update_creator_metadata_persists_new_values() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let new_name = s(&env, "Updated Name");
+        let new_cat = s(&env, "Sales");
+        let new_desc = s(&env, "New description");
+
+        update_meta_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            id,
+            &new_name,
+            &new_cat,
+            &new_desc,
+        );
+
+        let talos = client.get_talos(&id).expect("talos should exist");
+        assert_eq!(talos.name, new_name);
+        assert_eq!(talos.category, new_cat);
+        assert_eq!(talos.description, new_desc);
+    }
+
+    /// Positive: empty category and description are allowed (they are
+    /// descriptive, not required identifiers).
+    #[test]
+    fn update_creator_metadata_allows_empty_optional_fields() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let new_name = s(&env, "ValidName");
+        let empty = s(&env, "");
+
+        update_meta_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            id,
+            &new_name,
+            &empty,
+            &empty,
+        );
+
+        let talos = client.get_talos(&id).expect("talos should exist");
+        assert_eq!(talos.name, new_name);
+        assert_eq!(talos.category, empty);
+        assert_eq!(talos.description, empty);
+    }
+
+    /// Positive: emits meta_upd event with correct topics and data.
+    #[test]
+    fn update_creator_metadata_emits_meta_upd_event() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let new_name = s(&env, "EventName");
+        let new_cat = s(&env, "Ops");
+        let new_desc = s(&env, "Event desc");
+
+        update_meta_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            id,
+            &new_name,
+            &new_cat,
+            &new_desc,
+        );
+
+        let events = env.events().all();
+        let meta_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(a, t, _)| {
+                if *a != contract_id {
+                    return false;
+                }
+                let sym: Result<Symbol, _> =
+                    TryFromVal::try_from_val(&env, &t.get(0).unwrap());
+                sym.map(|s| s == symbol_short!("meta_upd"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(meta_events.len(), 1, "expected exactly one meta_upd event");
+
+        // Verify topics[1] is the talos_id.
+        let (_, topics, data) = &meta_events[0];
+        let event_talos_id: u32 = TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+        assert_eq!(event_talos_id, id);
+
+        // Verify data tuple is (name, category, description).
+        let data_tuple: (String, String, String) =
+            TryFromVal::try_from_val(&env, data).unwrap();
+        assert_eq!(data_tuple.0, new_name);
+        assert_eq!(data_tuple.1, new_cat);
+        assert_eq!(data_tuple.2, new_desc);
+    }
+
+    /// Positive: patron, kernel, pulse, and other fields are untouched.
+    #[test]
+    fn update_creator_metadata_does_not_affect_other_fields() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let before = client.get_talos(&id).expect("talos should exist");
+
+        update_meta_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            id,
+            &s(&env, "NewName"),
+            &s(&env, ""),
+            &s(&env, ""),
+        );
+
+        let after = client.get_talos(&id).expect("talos should exist");
+        assert_eq!(after.patron.creator_share, before.patron.creator_share);
+        assert_eq!(after.patron.creator_addr, before.patron.creator_addr);
+        assert_eq!(after.kernel.approval_threshold, before.kernel.approval_threshold);
+        assert_eq!(after.pulse.token_symbol, before.pulse.token_symbol);
+        assert_eq!(after.created_at, before.created_at);
+        assert_eq!(after.active, before.active);
+        assert_eq!(after.creator, before.creator);
+    }
+
+    /// Regression: existing caller of get_talos still works after field addition.
+    #[test]
+    fn get_talos_still_returns_record_after_metadata_field_added() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        // Old callers reading the record should not break; metadata defaults to None.
+        let talos = client.get_talos(&id).expect("get_talos must return record");
+        assert_eq!(talos.id, id);
+        assert_eq!(talos.metadata, None);
+    }
+
+    /// Negative: non-creator address must not be able to update metadata.
+    #[test]
+    fn update_creator_metadata_rejects_non_creator() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let imposter = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        // Imposter tries to update without auth — must fail.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &imposter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_creator_metadata",
+                    args: (id, s(&env, "X"), s(&env, ""), s(&env, "")).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_creator_metadata(&id, &s(&env, "X"), &s(&env, ""), &s(&env, ""));
+        assert!(result.is_err(), "imposter must not update metadata");
+
+        // Fields must be unchanged.
+        let talos = client.get_talos(&id).expect("talos should exist");
+        assert_ne!(talos.name, s(&env, "X"));
+    }
+
+    /// Negative: calling without any mock auth must fail.
+    #[test]
+    fn update_creator_metadata_requires_auth() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let result = client.try_update_creator_metadata(
+            &id,
+            &s(&env, "NoAuth"),
+            &s(&env, ""),
+            &s(&env, ""),
+        );
+        assert!(result.is_err());
+    }
+
+    /// Negative: name cannot be empty.
+    #[test]
+    fn update_creator_metadata_rejects_empty_name() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_creator_metadata",
+                    args: (id, s(&env, ""), s(&env, ""), s(&env, "")).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_creator_metadata(&id, &s(&env, ""), &s(&env, ""), &s(&env, ""));
+        assert!(result.is_err(), "empty name must be rejected");
+    }
+
+    /// Negative: name exceeds MAX_NAME_BYTES (64) returns MetadataFieldTooLong.
+    #[test]
+    fn update_creator_metadata_rejects_name_too_long() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let long_name = s(&env, &"a".repeat(65));
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_creator_metadata",
+                    args: (id, long_name.clone(), s(&env, ""), s(&env, "")).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_creator_metadata(&id, &long_name, &s(&env, ""), &s(&env, ""));
+        assert!(result.is_err(), "name > 64 bytes must be rejected");
+    }
+
+    /// Negative: category exceeds MAX_CATEGORY_BYTES (32) returns MetadataFieldTooLong.
+    #[test]
+    fn update_creator_metadata_rejects_category_too_long() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let long_cat = s(&env, &"c".repeat(33));
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_creator_metadata",
+                    args: (id, s(&env, "Name"), long_cat.clone(), s(&env, "")).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_creator_metadata(&id, &s(&env, "Name"), &long_cat, &s(&env, ""));
+        assert!(result.is_err(), "category > 32 bytes must be rejected");
+    }
+
+    /// Negative: description exceeds MAX_DESCRIPTION_BYTES (512) returns MetadataFieldTooLong.
+    #[test]
+    fn update_creator_metadata_rejects_description_too_long() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let long_desc = s(&env, &"d".repeat(513));
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_creator_metadata",
+                    args: (id, s(&env, "Name"), s(&env, ""), long_desc.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_creator_metadata(&id, &s(&env, "Name"), &s(&env, ""), &long_desc);
+        assert!(result.is_err(), "description > 512 bytes must be rejected");
+    }
+
+    /// Negative: non-existent talos_id returns TalosNotFound error.
+    #[test]
+    fn update_creator_metadata_rejects_missing_talos() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_creator_metadata",
+                    args: (999u32, s(&env, "Name"), s(&env, ""), s(&env, "")).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_creator_metadata(&999, &s(&env, "Name"), &s(&env, ""), &s(&env, ""));
+        assert!(result.is_err(), "unknown talos_id must return TalosNotFound");
+    }
+
+    /// Boundary: name at exactly MAX_NAME_BYTES (64) is accepted.
+    #[test]
+    fn update_creator_metadata_accepts_name_at_exact_limit() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let exact_name = s(&env, &"a".repeat(64));
+        update_meta_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            id,
+            &exact_name,
+            &s(&env, ""),
+            &s(&env, ""),
+        );
+        let talos = client.get_talos(&id).expect("talos should exist");
+        assert_eq!(talos.name, exact_name);
+    }
+
+    /// Boundary: category at exactly MAX_CATEGORY_BYTES (32) is accepted.
+    #[test]
+    fn update_creator_metadata_accepts_category_at_exact_limit() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let exact_cat = s(&env, &"c".repeat(32));
+        update_meta_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            id,
+            &s(&env, "Name"),
+            &exact_cat,
+            &s(&env, ""),
+        );
+        let talos = client.get_talos(&id).expect("talos should exist");
+        assert_eq!(talos.category, exact_cat);
+    }
+
+    /// Boundary: description at exactly MAX_DESCRIPTION_BYTES (512) is accepted.
+    #[test]
+    fn update_creator_metadata_accepts_description_at_exact_limit() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let exact_desc = s(&env, &"d".repeat(512));
+        update_meta_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &creator,
+            id,
+            &s(&env, "Name"),
+            &s(&env, ""),
+            &exact_desc,
+        );
+        let talos = client.get_talos(&id).expect("talos should exist");
+        assert_eq!(talos.description, exact_desc);
+    }
+
+    /// Boundary: multiple successive updates overwrite each other correctly.
+    #[test]
+    fn update_creator_metadata_idempotent_on_repeated_calls() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        update_meta_with_auth(
+            &env, &client, &contract_id, &creator, id,
+            &s(&env, "First"), &s(&env, ""), &s(&env, ""),
+        );
+        update_meta_with_auth(
+            &env, &client, &contract_id, &creator, id,
+            &s(&env, "Second"), &s(&env, "Cat"), &s(&env, "Desc"),
+        );
+        update_meta_with_auth(
+            &env, &client, &contract_id, &creator, id,
+            &s(&env, "Second"), &s(&env, "Cat"), &s(&env, "Desc"),
+        );
+
+        let talos = client.get_talos(&id).expect("talos should exist");
+        assert_eq!(talos.name, s(&env, "Second"));
+        assert_eq!(talos.category, s(&env, "Cat"));
+        assert_eq!(talos.description, s(&env, "Desc"));
+    }
+
+    /// Authorization: pausing PAUSE_TALOS_UPDATE blocks update_creator_metadata.
+    #[test]
+    fn update_creator_metadata_is_blocked_while_paused() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        // Seed the shared pause-control status for the PAUSE_TALOS_UPDATE domain directly.
+        // The registry exposes no external entry-point to pause this domain; the canonical
+        // test technique mirrors extend_ttl_batch_is_blocked_while_paused.
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(
+                &pause_control::PauseDataKey::PauseStatus(PAUSE_TALOS_UPDATE),
+                &pause_control::PauseStatus {
+                    paused: true,
+                    paused_by: protocol_wallet.clone(),
+                    paused_at: 0,
+                    expires_at: 0,
+                },
+            );
+        });
+
+        // update_creator_metadata is blocked by PAUSE_TALOS_UPDATE.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_creator_metadata",
+                    args: (id, s(&env, "Name"), s(&env, ""), s(&env, "")).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_creator_metadata(&id, &s(&env, "Name"), &s(&env, ""), &s(&env, ""));
+        assert!(result.is_err(), "paused domain must block update_creator_metadata");
+
+        // Verify fields are unchanged.
+        let talos = client.get_talos(&id).expect("talos should exist");
+        assert_ne!(talos.name, s(&env, "Name"));
+    }
+
+    /// Storage compatibility: existing Talos records (no metadata field) load
+    /// without error and report metadata as None.
+    #[test]
+    fn existing_talos_record_has_metadata_none_by_default() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        let talos = client.get_talos(&id).expect("should retrieve talos");
+        assert_eq!(
+            talos.metadata, None,
+            "freshly-created Talos must have metadata == None"
+        );
+    }
+
+    /// Regression: create_talos, update_patron, update_kernel, update_pulse
+    /// all still compile and function correctly alongside update_creator_metadata.
+    #[test]
+    fn existing_update_functions_unaffected_by_metadata_field() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        // update_patron still works.
+        let new_patron = Patron {
+            creator_share: 50,
+            investor_share: 30,
+            treasury_share: 20,
+            creator_addr: creator.clone(),
+            investor_addr: Address::generate(&env),
+            treasury_addr: Address::generate(&env),
+        };
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_patron",
+                    args: (id, new_patron.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_patron(&id, &new_patron);
+
+        let talos = client.get_talos(&id).expect("talos should exist");
+        assert_eq!(talos.patron.creator_share, 50);
+        // metadata untouched
+        assert_eq!(talos.metadata, None);
     }
 }
