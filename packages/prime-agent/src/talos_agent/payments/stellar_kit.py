@@ -15,6 +15,7 @@ from rich.console import Console
 
 from talos_agent.adapters.snapshots import StellarHealthSnapshot
 from talos_agent.http import request_with_retry
+from talos_agent.redact import redact_text as _redact_text
 
 _HORIZON_URL = os.getenv("STELLAR_HORIZON_URL", "https://horizon-testnet.stellar.org")
 
@@ -71,7 +72,7 @@ class StellarKit:
                     return {"balance_xlm": 0, "account": acct}
             return {"error": "Horizon query failed"}
         except Exception as e:
-            return {"error": f"Balance query failed: {e}"}
+            return {"error": f"Balance query failed: {_redact_text(str(e))}"}
 
     async def get_token_balance(self, account_id: str, token_id: str) -> dict[str, Any]:
         """Query Stellar asset balance via Horizon."""
@@ -89,7 +90,7 @@ class StellarKit:
                     return {"balance": balance, "token_id": token_id, "account": account_id}
             return {"error": "Horizon query failed"}
         except Exception as e:
-            return {"error": f"Token balance query failed: {e}"}
+            return {"error": f"Token balance query failed: {_redact_text(str(e))}"}
 
     async def transfer_xlm(self, to_account: str, amount: float) -> dict[str, Any]:
         """Request XLM transfer via Web API (Web handles signing)."""
@@ -101,4 +102,4 @@ class StellarKit:
                 return {"status": "submitted", "to": to_account, "amount": amount}
             return {"error": "Transfer request failed"}
         except Exception as e:
-            return {"error": f"Transfer failed: {e}"}
+            return {"error": f"Transfer failed: {_redact_text(str(e))}"}

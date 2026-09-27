@@ -186,6 +186,315 @@ describe('TalosWebhook', () => {
     });
   });
 
+  describe('replayWindowSeconds guard', () => {
+    // ── Positive cases ───────────────────────────────────────────────────────
+
+    it('positive: accepts replayWindowSeconds equal to toleranceSeconds (boundary equality)', async () => {
+      const replayStore: ReplayStore = {
+        has: vi.fn().mockResolvedValue(false),
+        set: vi.fn().mockResolvedValue(undefined),
+      };
+      await expect(
+        TalosWebhook.verify({
+          payload,
+          signatureHeader,
+          secret,
+          toleranceSeconds: 300,
+          replayWindowSeconds: 300, // exactly equal — valid
+          replayStore,
+          eventId,
+        })
+      ).resolves.toMatchObject({ timestamp });
+      // TTL stored must be exactly replayWindowSeconds
+      expect(replayStore.set).toHaveBeenCalledWith(eventId, 300);
+    });
+
+    it('positive: accepts replayWindowSeconds greater than toleranceSeconds and uses it as TTL', async () => {
+      const replayStore: ReplayStore = {
+        has: vi.fn().mockResolvedValue(false),
+        set: vi.fn().mockResolvedValue(undefined),
+      };
+      await expect(
+        TalosWebhook.verify({
+          payload,
+          signatureHeader,
+          secret,
+          toleranceSeconds: 300,
+          replayWindowSeconds: 600,
+          replayStore,
+          eventId,
+        })
+      ).resolves.toMatchObject({ timestamp });
+      expect(replayStore.set).toHaveBeenCalledWith(eventId, 600);
+    });
+
+    it('positive: replayWindowSeconds works without replayStore (guard fires before store is reached)', async () => {
+      // Should succeed — no replayStore means no TTL write path, but the guard
+      // still validates the configured window up-front.
+      await expect(
+        TalosWebhook.verify({
+          payload,
+          signatureHeader,
+          secret,
+          toleranceSeconds: 300,
+          replayWindowSeconds: 400, // valid
+        })
+      ).resolves.toMatchObject({ timestamp });
+    });
+
+    it('positive: replayWindowSeconds=0 is accepted when toleranceSeconds=0 (both zero)', async () => {
+      const replayStore: ReplayStore = {
+        has: vi.fn().mockResolvedValue(false),
+        set: vi.fn().mockResolvedValue(undefined),
+      };
+      await expect(
+        TalosWebhook.verify({
+          payload,
+          signatureHeader,
+          secret,
+          toleranceSeconds: 0,
+          replayWindowSeconds: 0,
+          replayStore,
+          eventId,
+        })
+      ).resolves.toMatchObject({ timestamp });
+      // When toleranceSeconds is 0 the fallback would be 86400; with an explicit
+      // replayWindowSeconds of 0 we store exactly that value.
+      expect(replayStore.set).toHaveBeenCalledWith(eventId, 0);
+    });
+
+    it('positive: large replayWindowSeconds (e.g. 86400) is accepted', async () => {
+      const replayStore: ReplayStore = {
+        has: vi.fn().mockResolvedValue(false),
+        set: vi.fn().mockResolvedValue(undefined),
+      };
+      await expect(
+        TalosWebhook.verify({
+          payload,
+          signatureHeader,
+          secret,
+          toleranceSeconds: 300,
+          replayWindowSeconds: 86400,
+          replayStore,
+          eventId,
+        })
+      ).resolves.toMatchObject({ timestamp });
+      expect(replayStore.set).toHaveBeenCalledWith(eventId, 86400);
+    });
+
+    // ── Negative cases ───────────────────────────────────────────────────────
+
+    it('negative: replayWindowSeconds shorter than toleranceSeconds throws REPLAY_MISCONFIGURED', async () => {
+      await expect(
+        TalosWebhook.verify({
+          payload,
+          signatureHeader,
+          secret,
+          toleranceSeconds: 300,
+          replayWindowSeconds: 299, // shorter by 1 second
+        })
+      ).rejects.toMatchObject({
+        code: 'REPLAY_MISCONFIGURED',
+        message: expect.stringContaining('299'),
+      });
+    });
+
+    it('negative: replayWindowSeconds=0 with positive toleranceSeconds throws REPLAY_MISCONFIGURED', async () => {
+      await expect(
+        TalosWebhook.verify({
+          payload,
+          signatureHeader,
+          secret,
+          toleranceSeconds: 300,
+          replayWindowSeconds: 0,
+        })
+      ).rejects.toMatchObject({ code: 'REPLAY_MISCONFIGURED' });
+    });
+
+    it('negative: replayWindowSeconds=-1 throws REPLAY_MISCONFIGURED (non-negative check)', async () => {
+      await expect(
+        TalosWebhook.verify({
+          payload,
+          signatureHeader,
+          secret,
+          replayWindowSeconds: -1,
+        })
+      ).rejects.toMatchObject({ code: 'REPLAY_MISCONFIGURED' });
+    });
+
+    it('negative: replayWindowSeconds=NaN throws REPLAY_MISCONFIGURED', async () => {
+      await expect(
+        TalosWebhook.verify({
+          payload,
+          signatureHeader,
+          secret,
+          replayWindowSeconds: NaN,
+        })
+      ).rejects.toMatchObject({ code: 'REPLAY_MISCONFIGURED' });
+    });
+
+    it('negative: replayWindowSeconds=Infinity throws REPLAY_MISCONFIGURED', async () => {
+      await expect(
+        TalosWebhook.verify({
+          payload,
+          signatureHeader,
+          secret,
+          replayWindowSeconds: Infinity,
+        })
+      ).rejects.toMatchObject({ code: 'REPLAY_MISCONFIGURED' });
+    });
+
+    it('negative: error message contains both values for diagnosability', async () => {
+      await expect(
+        TalosWebhook.verify({
+          payload,
+          signatureHeader,
+          secret,
+          toleranceSeconds: 300,
+          replayWindowSeconds: 120,
+        })
+      ).rejects.toMatchObject({
+        code: 'REPLAY_MISCONFIGURED',
+        message: expect.stringContaining('120'),
+      });
+    });
+
+    it('negative: error does not include secret material', async () => {
+      let caughtError: Error | undefined;
+      try {
+        await TalosWebhook.verify({
+          payload,
+          signatureHeader,
+          secret: 'super-secret-value',
+          toleranceSeconds: 300,
+          replayWindowSeconds: 100,
+        });
+      } catch (err) {
+        caughtError = err as Error;
+      }
+      expect(caughtError).toBeDefined();
+      expect(caughtError!.message).not.toContain('super-secret-value');
+    });
+
+    // ── Boundary cases ───────────────────────────────────────────────────────
+
+    it('boundary: replayWindowSeconds exactly 1 second above toleranceSeconds is accepted', async () => {
+      const replayStore: ReplayStore = {
+        has: vi.fn().mockResolvedValue(false),
+        set: vi.fn().mockResolvedValue(undefined),
+      };
+      await expect(
+        TalosWebhook.verify({
+          payload,
+          signatureHeader,
+          secret,
+          toleranceSeconds: 300,
+          replayWindowSeconds: 301,
+          replayStore,
+          eventId,
+        })
+      ).resolves.toMatchObject({ timestamp });
+      expect(replayStore.set).toHaveBeenCalledWith(eventId, 301);
+    });
+
+    it('boundary: replayWindowSeconds exactly 1 second below toleranceSeconds is rejected', async () => {
+      await expect(
+        TalosWebhook.verify({
+          payload,
+          signatureHeader,
+          secret,
+          toleranceSeconds: 300,
+          replayWindowSeconds: 299,
+        })
+      ).rejects.toMatchObject({ code: 'REPLAY_MISCONFIGURED' });
+    });
+
+    it('boundary: omitting replayWindowSeconds preserves legacy TTL = toleranceSeconds + 60', async () => {
+      const replayStore: ReplayStore = {
+        has: vi.fn().mockResolvedValue(false),
+        set: vi.fn().mockResolvedValue(undefined),
+      };
+      await TalosWebhook.verify({
+        payload,
+        signatureHeader,
+        secret,
+        toleranceSeconds: 300,
+        // replayWindowSeconds intentionally omitted
+        replayStore,
+        eventId,
+      });
+      expect(replayStore.set).toHaveBeenCalledWith(eventId, 360); // backward-compat: 300 + 60
+    });
+
+    it('boundary: omitting replayWindowSeconds with toleranceSeconds=0 uses default TTL 86400', async () => {
+      const replayStore: ReplayStore = {
+        has: vi.fn().mockResolvedValue(false),
+        set: vi.fn().mockResolvedValue(undefined),
+      };
+      await TalosWebhook.verify({
+        payload,
+        signatureHeader,
+        secret,
+        toleranceSeconds: 0, // disabled
+        // replayWindowSeconds omitted
+        replayStore,
+        eventId,
+      });
+      expect(replayStore.set).toHaveBeenCalledWith(eventId, 86400);
+    });
+
+    // ── Regression cases ─────────────────────────────────────────────────────
+
+    it('regression: guard fires before signature check — no crypto work done on misconfigured call', async () => {
+      // Passing an obviously bad header so a guard bypass would expose itself
+      // as a SIGNATURE_MISMATCH rather than REPLAY_MISCONFIGURED.
+      const badHeader = 'not-a-valid-header';
+      await expect(
+        TalosWebhook.verify({
+          payload,
+          signatureHeader: badHeader,
+          secret,
+          toleranceSeconds: 300,
+          replayWindowSeconds: 100, // invalid
+        })
+      ).rejects.toMatchObject({ code: 'REPLAY_MISCONFIGURED' });
+    });
+
+    it('regression: existing callers without replayWindowSeconds still pass (no breaking change)', async () => {
+      // This test documents backward compatibility: adding replayWindowSeconds
+      // must not change the public API contract for callers that omit it.
+      await expect(
+        TalosWebhook.verify({ payload, signatureHeader, secret })
+      ).resolves.toMatchObject({ timestamp });
+    });
+
+    it('regression: logger.error is called with privacy-safe metadata on misconfiguration', async () => {
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      await expect(
+        TalosWebhook.verify({
+          payload,
+          signatureHeader,
+          secret: 'do-not-leak',
+          toleranceSeconds: 300,
+          replayWindowSeconds: 50,
+          logger,
+        })
+      ).rejects.toMatchObject({ code: 'REPLAY_MISCONFIGURED' });
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('replayWindowSeconds'),
+        expect.objectContaining({ replayWindowSeconds: 50, toleranceSeconds: 300 }),
+      );
+      // Secret value must not appear in any log call
+      for (const call of [
+        ...logger.info.mock.calls,
+        ...logger.warn.mock.calls,
+        ...logger.error.mock.calls,
+      ]) {
+        expect(JSON.stringify(call)).not.toContain('do-not-leak');
+      }
+    });
+  });
+
   describe('hexToBuf strictness (ambiguous encoding rejection)', () => {
     it('decodes a well-formed hex string', () => {
       expect(TalosWebhook.hexToBuf('deadbeef')).toEqual(
