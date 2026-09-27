@@ -779,14 +779,14 @@ The pause control logic lives in a shared library crate (`pause-control`) used b
 | `PAUSE_TALOS_CREATION` | 1 | `create_talos` |
 | `PAUSE_TALOS_UPDATE` | 2 | `update_patron`, `update_kernel`, `update_pulse` |
 | `PAUSE_TALOS_DEACTIVATION` | 3 | `deactivate_talos` |
-| `PAUSE_PROTOCOL_CONFIG` | 4 | `set_protocol_fee`, `propose_admin`, `set_timelock_config`, `schedule_action`, `cancel_action`, `accept_admin`, `cancel_admin_transfer`, `touch_batch` |
+| `PAUSE_PROTOCOL_CONFIG` | 4 | `set_protocol_fee`, `propose_admin`, `set_timelock_config`, `schedule_action`, `cancel_action`, `accept_admin`, `cancel_admin_transfer`, `touch_batch`, `extend_ttl_batch` |
 
 #### TalosNameService
 
 | Domain | ID | Guarded functions |
 |--------|----|-------------------|
 | `PAUSE_NAME_REGISTRATION` | 5 | `register_name` |
-| `PAUSE_NAME_CONFIG` | 6 | `set_admin`, `set_registry_contract`, `set_timelock_config`, `schedule_action`, `cancel_action`, `touch_all_ttl` |
+| `PAUSE_NAME_CONFIG` | 6 | `set_admin`, `set_registry_contract`, `set_timelock_config`, `schedule_action`, `cancel_action`, `touch_all_ttl`, `extend_ttl_batch` |
 
 #### TalosGovernance
 
@@ -794,7 +794,7 @@ The pause control logic lives in a shared library crate (`pause-control`) used b
 |--------|----|-------------------|
 | `PAUSE_PROPOSAL_CREATION` | 7 | `create_proposal` |
 | `PAUSE_GOVERNANCE_VOTING` | 8 | `vote` |
-| `PAUSE_GOVERNANCE_CONFIG` | 9 | `update_config`, `cache_token_balance`, `touch_all_ttl` |
+| `PAUSE_GOVERNANCE_CONFIG` | 9 | `update_config`, `cache_token_balance`, `touch_all_ttl`, `extend_ttl_batch` |
 
 ### Entry-points
 

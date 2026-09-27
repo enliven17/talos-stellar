@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import {
   DEFAULT_SELLER_QUOTE_TTL_SECONDS,
   SellerQuoteError,
@@ -10,7 +10,19 @@ import { verifyQuoteNotExpired, validateQuote } from "../src/a2a-validation.js";
 
 const PROVIDER =
   "GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW";
-const FIXED_NOW = new Date("2026-06-15T12:00:00.000Z");
+// Fixed reference clock for deterministic quote construction. Must stay in
+// the future (quotes are validated against the real wall clock by
+// verifyQuoteNotExpired); bump it forward if this test ever time-bombs.
+const FIXED_NOW = new Date("2030-06-15T12:00:00.000Z");
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(FIXED_NOW);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("toCanonicalDecimalAmount", () => {
   it("accepts canonical six-digit strings", () => {
@@ -47,7 +59,7 @@ describe("constructSellerQuote", () => {
       assetCode: "USDC",
       network: "stellar",
       amount: "1.500000",
-      expiresAt: "2026-06-15T12:10:00.000Z",
+      expiresAt: "2030-06-15T12:10:00.000Z",
     });
     expect(validateQuote(quote)).toEqual([]);
     expect(verifyQuoteNotExpired(quote)).toBe(true);
@@ -69,12 +81,12 @@ describe("constructSellerQuote", () => {
     const quote = constructSellerQuote({
       providerId: PROVIDER,
       amount: "1.000000",
-      expiresAt: "2026-06-15T18:00:00.000Z",
+      expiresAt: "2030-06-15T18:00:00.000Z",
       ttlSeconds: 60,
       now: FIXED_NOW,
       quoteId: "q-1",
     });
-    expect(quote.expiresAt).toBe("2026-06-15T18:00:00.000Z");
+    expect(quote.expiresAt).toBe("2030-06-15T18:00:00.000Z");
     expect(quote.quoteId).toBe("q-1");
   });
 
@@ -208,7 +220,7 @@ describe("constructSellerPaymentDetails", () => {
     expect(details.talosId).toBe("talos-1");
     expect(details.quote.amount).toBe("2.500000");
     expect(details.expiresAt).toBe(details.quote.expiresAt);
-    expect(details.quote.expiresAt).toBe("2026-06-15T12:05:00.000Z");
+    expect(details.quote.expiresAt).toBe("2030-06-15T12:05:00.000Z");
   });
 
   it("allows an explicit payee override", () => {

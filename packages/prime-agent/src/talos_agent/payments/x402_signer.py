@@ -13,6 +13,7 @@ from typing import Any
 from rich.console import Console
 
 from talos_agent.adapters.snapshots import X402HealthSnapshot
+from talos_agent.redact import redact_text as _redact_text
 
 console = Console()
 
@@ -88,7 +89,7 @@ class X402Signer:
             )
 
             if not result or "error" in result:
-                err_detail = result.get("details", "") if result else ""
+                err_detail = _redact_text(result.get("details", "") if result else "")
                 return {"error": f"{result.get('error', 'Signing request failed')} {err_detail}".strip()}
 
             return {
@@ -100,4 +101,4 @@ class X402Signer:
                 "amount": amount,
             }
         except Exception as e:
-            return {"error": f"Signing failed: {e}"}
+            return {"error": f"Signing failed: {_redact_text(str(e))}"}

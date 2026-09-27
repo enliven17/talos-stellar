@@ -42,7 +42,13 @@ jobs:
         run: uv sync --frozen --all-extras --all-groups
 
       - name: Lint
-        run: uv run ruff check src tests
+        run: uv run ruff check src tests scripts
 
       - name: Test
-        run: uv run pytest tests/ -v
+        run: uv run pytest tests/ -v --cov --cov-report=json --cov-report=term
+
+      # Per-module floors for critical agent modules (issue #638). Reads the
+      # JSON report produced above; thresholds live in the script's
+      # COVERAGE_FLOORS table (single source of truth).
+      - name: Coverage gate
+        run: uv run python scripts/check-coverage.py coverage.json

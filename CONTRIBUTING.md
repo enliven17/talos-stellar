@@ -46,6 +46,16 @@ Install the workspace dependencies from the repository root:
 ```bash
 pnpm install
 ```
+Generate the dependency license report from the installed workspace graph:
+
+```bash
+pnpm licenses:report
+```
+
+The command writes `dist/licenses/dependency-licenses.json` and
+`dist/licenses/dependency-licenses.md`. It fails closed when pnpm cannot read
+the dependency graph or any dependency has missing or ambiguous license
+metadata. The generated directory is a CI artifact and should not be committed.
 
 If you only need the web app, you can still work from the root with `pnpm dev` because the root package forwards to `web/`.
 
@@ -730,6 +740,19 @@ Versioning, changelogs, and tagging for `web`, `sdk`, `agent`, and `contracts` a
 see [`RELEASES.md`](./RELEASES.md). You don't need to do anything for this beyond writing
 [Conventional Commits](https://www.conventionalcommits.org/) subjects (`feat: ...`, `fix: ...`,
 etc.) in your PRs; version bumps are computed from those.
+
+Every PR title is automatically checked by the
+[`Release Checks`](.github/workflows/release-checks.yml) CI workflow. To
+validate your PR title locally before pushing:
+
+```bash
+PR_TITLE="feat(sdk): add payments resource" \
+  node scripts/release/check-release-note.mjs
+```
+
+The check fails (exit 1) when the title does not follow Conventional Commits
+format. Rename the PR and re-push to fix it. See [`RELEASES.md`](./RELEASES.md)
+for the full format reference and local reproduction steps.
 
 ## Issue and PR Templates
 

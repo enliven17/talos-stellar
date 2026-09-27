@@ -1,9 +1,9 @@
-export const dynamic = 'force-dynamic';
-
 import { db } from "@/db";
 import { tlsTalos, tlsCommerceJobs } from "@/db/schema";
 import { eq, sql } from "drizzle-orm";
+import { unstable_cache } from "next/cache";
 import { notFound } from "next/navigation";
+import { agentTag } from "@/lib/cache-tags";
 import { TalosDetailClient } from "./detail-client";
 
 export default async function TalosDetailPage({
@@ -12,6 +12,13 @@ export default async function TalosDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+
+  // Subscribe this route to the agent tag so mutation routes can
+  // `revalidateTag(agentTag(id))` and drop stale detail payloads.
+  await unstable_cache(async () => id, [`agent-detail-tag-${id}`], {
+    tags: [agentTag(id)],
+    revalidate: 60,
+  })();
 
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
