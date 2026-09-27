@@ -55,11 +55,13 @@ function getRelativeTime(iso: string): string {
 
 function AgentLabel({ name, agent }: { name: string; agent: string | null }) {
   return (
-    <span className="inline-flex items-center gap-1.5 min-w-0">
+    <span className="inline-flex items-center gap-1.5 min-w-0 flex-1 basis-0">
       <AgentAvatar name={agent || name} size={18} className="shrink-0" />
-      <span className="text-foreground font-medium truncate">{name}</span>
+      <span className="text-foreground font-medium min-w-0 flex-1 truncate" title={name}>
+        {name}
+      </span>
       {agent && (
-        <span className="text-muted/50 font-mono text-[10px] shrink-0">
+        <span className="text-muted/50 font-mono text-[10px] max-w-8 truncate shrink-0" title={`@${agent}`}>
           @{agent}
         </span>
       )}
@@ -182,9 +184,9 @@ export function ActivityClient({ stats: initialStats, transactions: initialTrans
         <h1 className="text-2xl font-bold text-accent tracking-tight">
           Activity
         </h1>
-        <p className="text-sm text-muted mt-2 flex items-center gap-2">
+        <p className="text-sm text-muted mt-2 flex flex-wrap items-center gap-2">
           Real-time agent-to-agent commerce across the TALOS ecosystem
-          <span className="inline-flex items-center gap-1.5 text-[10px] text-accent font-bold">
+          <span className="inline-flex items-center gap-1.5 text-[10px] text-accent font-bold shrink-0">
             <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
             LIVE
           </span>
@@ -216,12 +218,12 @@ export function ActivityClient({ stats: initialStats, transactions: initialTrans
           ].map((stat) => (
             <div
               key={stat.label}
-              className="bg-surface border border-border p-4 hover:bg-surface-hover transition-colors"
+              className="bg-surface border border-border min-w-0 p-3 sm:p-4 hover:bg-surface-hover transition-colors"
             >
               <p className="text-muted text-xs uppercase tracking-wider mb-1">
                 {stat.label}
               </p>
-              <p className="text-accent text-lg font-bold tabular-nums">
+              <p className="text-accent text-sm sm:text-lg font-bold tabular-nums">
                 {stat.value}
               </p>
             </div>
@@ -259,7 +261,7 @@ export function ActivityClient({ stats: initialStats, transactions: initialTrans
             </div>
           ) : (
             <div className="divide-y divide-border">
-              {filtered.map((tx, idx) => (
+              {filtered.map((tx) => (
                 <div
                   key={tx.id}
                   className="px-4 py-3 hover:bg-surface-hover transition-colors"
@@ -278,8 +280,8 @@ export function ActivityClient({ stats: initialStats, transactions: initialTrans
                       <span className="text-muted shrink-0">→</span>
                       <AgentLabel name={tx.sellerName} agent={tx.sellerAgent} />
                     </div>
-                    <div className="flex items-center gap-2 mt-1 text-xs text-muted/50">
-                      <span className="truncate max-w-[180px]">&ldquo;{tx.itemName}&rdquo;</span>
+                    <div className="flex items-center gap-2 mt-1 text-xs text-muted/50 min-w-0">
+                      <span className="min-w-0 flex-1 truncate" title={tx.itemName}>&ldquo;{tx.itemName}&rdquo;</span>
                       <span className="ml-auto shrink-0" suppressHydrationWarning>{getRelativeTime(tx.timestamp)}</span>
                     </div>
                   </div>
