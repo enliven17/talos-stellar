@@ -494,7 +494,7 @@ impl TalosNameService {
     pub fn interface_id(e: Env) -> BytesN<32> {
         BytesN::from_array(&e, &INTERFACE_ID)
     }
-
+    
     /// Return the canonical deployment-manifest digest for this contract.
     ///
     /// This additive read-only query re-derives a stable digest from the
@@ -1805,7 +1805,7 @@ mod tests {
         let (maj, min, patch) = client.version();
         assert_eq!((maj, min, patch), CONTRACT_VERSION);
     }
-
+    
     #[test]
     fn deployment_manifest_digest_is_stable_and_canonical() {
         let (env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
@@ -1830,7 +1830,7 @@ mod tests {
         let expected = env.crypto().sha256(&payload).to_bytes();
         assert_eq!(digest, expected);
     }
-
+    
     // ── interface_id() + golden vector ───────────────────────────────
 
     #[test]
@@ -2047,23 +2047,23 @@ mod tests {
 
     #[test]
     fn set_registry_contract_emits_dep_path_event_when_timelocked() {
-        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
-        let new_admin = Address::generate(&env);
+        let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
+        let admin = Address::generate(&env);
         client
             .mock_auths(&[MockAuth {
-                address: &admin,
+                address: &_admin,
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "set_admin",
-                    args: (new_admin.clone(),).into_val(&env),
+                    args: (admin.clone(),).into_val(&env),
                     sub_invokes: &[],
                 },
             }])
-            .set_admin(&new_admin);
+            .set_admin(&admin);
 
         client
             .mock_auths(&[MockAuth {
-                address: &new_admin,
+                address: &admin,
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "set_timelock_config",
@@ -2076,7 +2076,7 @@ mod tests {
         let new_registry = Address::generate(&env);
         let res = client
             .mock_auths(&[MockAuth {
-                address: &new_admin,
+                address: &admin,
                 invoke: &MockAuthInvoke {
                     contract: &contract_id,
                     fn_name: "set_registry_contract",
@@ -3068,7 +3068,7 @@ mod tests {
     /// register_name without mock_auths must be rejected.
     #[test]
     fn register_name_without_auth_is_rejected() {
-        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
         let owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         let name = s(&env, "noauth");
@@ -3087,7 +3087,7 @@ mod tests {
     /// set_registry_contract without mock_auths must be rejected.
     #[test]
     fn set_registry_contract_without_auth_is_rejected() {
-        let (env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
+        let (env, _registry_contract, _contract_id, _registry_client, client) = setup();
         let admin = Address::generate(&env);
         client.set_admin(&admin);
         let new_registry = Address::generate(&env);
@@ -3099,7 +3099,7 @@ mod tests {
     /// set_timelock_config without mock_auths must be rejected.
     #[test]
     fn ns_set_timelock_config_without_auth_is_rejected() {
-        let (env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
+        let (env, _registry_contract, _contract_id, _registry_client, client) = setup();
         let admin = Address::generate(&env);
         client.set_admin(&admin);
 
@@ -3110,7 +3110,7 @@ mod tests {
     /// schedule_action without mock_auths must be rejected.
     #[test]
     fn ns_schedule_action_without_auth_is_rejected() {
-        let (env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
+        let (env, _registry_contract, _contract_id, _registry_client, client) = setup();
         let admin = Address::generate(&env);
         client.set_admin(&admin);
 
@@ -3122,7 +3122,7 @@ mod tests {
     /// cancel_action without mock_auths must be rejected.
     #[test]
     fn ns_cancel_action_without_auth_is_rejected() {
-        let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
         let admin = Address::generate(&env);
         client.set_admin(&admin);
 
@@ -3148,7 +3148,7 @@ mod tests {
     /// A non-owner cannot register_name for a talos they don't own.
     #[test]
     fn register_name_for_other_owner_is_rejected() {
-        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
         let creator = Address::generate(&env);
         let imposter = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
@@ -3183,7 +3183,7 @@ mod tests {
     /// A non-admin impersonator cannot set_registry_contract.
     #[test]
     fn set_registry_contract_wrong_signer_is_rejected() {
-        let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
         let admin = Address::generate(&env);
         let imposter = Address::generate(&env);
         client.set_admin(&admin);
@@ -3206,7 +3206,7 @@ mod tests {
     /// Non-admin cannot cancel a timelock action.
     #[test]
     fn ns_cancel_action_wrong_signer_is_rejected() {
-        let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
         let admin = Address::generate(&env);
         let imposter = Address::generate(&env);
         client.set_admin(&admin);
@@ -3243,7 +3243,7 @@ mod tests {
     /// Name below minimum length (2 chars) must be rejected.
     #[test]
     fn register_name_too_short_is_rejected() {
-        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
         let owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         let talos_id = create_talos_with_auth(
@@ -3277,7 +3277,7 @@ mod tests {
     /// Name at minimum length (3 chars) must be accepted.
     #[test]
     fn register_name_at_min_length_is_accepted() {
-        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
         let owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         let talos_id = create_talos_with_auth(
@@ -3311,7 +3311,7 @@ mod tests {
     /// Name at maximum length (32 chars) must be accepted.
     #[test]
     fn register_name_at_max_length_is_accepted() {
-        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
         let owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         let talos_id = create_talos_with_auth(
@@ -3346,7 +3346,7 @@ mod tests {
     /// Name exceeding maximum length (33 chars) must be rejected.
     #[test]
     fn register_name_too_long_is_rejected() {
-        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let (env, registry_contract, contract_id, registry_client, client) = setup();
         let owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         let talos_id = create_talos_with_auth(
@@ -3381,7 +3381,7 @@ mod tests {
     /// Timelock grace_period of zero must be rejected.
     #[test]
     fn ns_set_timelock_config_zero_grace_period_is_rejected() {
-        let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
         let admin = Address::generate(&env);
         client.set_admin(&admin);
 
@@ -3402,7 +3402,7 @@ mod tests {
     /// Timelock min_delay above MAX must be rejected.
     #[test]
     fn ns_set_timelock_config_above_max_min_delay_is_rejected() {
-        let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
         let admin = Address::generate(&env);
         client.set_admin(&admin);
 
@@ -3425,7 +3425,7 @@ mod tests {
     /// Executing an already-cancelled proposal must fail.
     #[test]
     fn ns_execute_cancelled_proposal_is_rejected() {
-        let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
         let admin = Address::generate(&env);
         client.set_admin(&admin);
 
@@ -3461,7 +3461,7 @@ mod tests {
     /// Cancelling an already-executed proposal must fail.
     #[test]
     fn ns_cancel_executed_proposal_is_rejected() {
-        let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
+        let (env, _registry_contract, contract_id, _registry_client, client) = setup();
         let admin = Address::generate(&env);
         client.set_admin(&admin);
 
@@ -3497,7 +3497,7 @@ mod tests {
     /// is_name_available returns false for an invalid name format.
     #[test]
     fn is_name_available_returns_false_for_invalid_format() {
-        let (env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
+        let (env, _registry_contract, _contract_id, _registry_client, client) = setup();
         // Invalid names must return false even if not registered
         assert!(!client.is_name_available(&s(&env, "AB"))); // uppercase + too short
         assert!(!client.is_name_available(&s(&env, "-bad")));

@@ -1474,14 +1474,10 @@ impl TalosRegistry {
 
     /// Return the canonical deployment-manifest digest for this contract.
     ///
-    /// The digest is computed from the immutable public interface:
-    /// - `INTERFACE_ID`
-    /// - semver `(major, minor, patch)`
-    /// - ordered capability list
-    /// - event schema version
-    ///
-    /// It is intentionally not stored in ledger state so calls remain purely
-    /// read-only while operators can compare deployments deterministically.
+    /// This additive read-only query re-derives a stable digest from the
+    /// interface ID, semver, capability list, and event schema version. It
+    /// never stores any data in state and therefore remains safe for repeated
+    /// operator verification and compatibility checks.
     pub fn deployment_manifest_digest(e: Env) -> BytesN<32> {
         let mut payload = soroban_sdk::Bytes::new(&e);
         payload.append(&soroban_sdk::Bytes::from_array(&e, &INTERFACE_ID));
@@ -3215,9 +3211,7 @@ mod tests {
             );
 
         assert!(result.is_ok(), "exactly-at-limit metadata must be accepted");
-        let id = result
-            .expect("boundary metadata create must be ok")
-            .expect("talos creation should succeed");
+        let id = result.ok().expect("boundary metadata create must be ok");
         let talos = client.get_talos(&id).expect("talos must be stored");
         assert_eq!(talos.name, name);
         assert_eq!(talos.category, category);
