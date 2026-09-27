@@ -516,6 +516,31 @@ impl TalosNameService {
     pub fn interface_id(e: Env) -> BytesN<32> {
         BytesN::from_array(&e, &INTERFACE_ID)
     }
+    
+    /// Return the canonical deployment-manifest digest for this contract.
+    ///
+    /// This additive read-only query re-derives a stable digest from the
+    /// interface ID, semver, capability list, and event schema version. It
+    /// never stores any data in state and therefore remains safe for repeated
+    /// operator verification and compatibility checks.
+    pub fn deployment_manifest_digest(e: Env) -> BytesN<32> {
+        let mut payload = soroban_sdk::Bytes::new(&e);
+        payload.append(&soroban_sdk::Bytes::from_array(&e, &INTERFACE_ID));
+        payload.extend_from_slice(&CONTRACT_VERSION.0.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.1.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.2.to_be_bytes());
+
+        for feature in features_list() {
+            let bytes = feature.as_bytes();
+            payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            payload.extend_from_slice(bytes);
+        }
+
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.major.to_be_bytes());
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.minor.to_be_bytes());
+
+        e.crypto().sha256(&payload).to_bytes()
+    }
 
     /// Return `true` when the deployed semver supports the requested
     /// `(major, minor, patch)` floor. See `version_supports` for the
@@ -2043,7 +2068,32 @@ mod tests {
         let (maj, min, patch) = client.version();
         assert_eq!((maj, min, patch), CONTRACT_VERSION);
     }
+    
+    #[test]
+    fn deployment_manifest_digest_is_stable_and_canonical() {
+        let (env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
 
+        let digest = client.deployment_manifest_digest();
+        let again = client.deployment_manifest_digest();
+        assert_eq!(digest, again, "digest must be deterministic");
+
+        let mut payload = soroban_sdk::Bytes::new(&env);
+        payload.append(&soroban_sdk::Bytes::from_array(&env, &INTERFACE_ID));
+        payload.extend_from_slice(&CONTRACT_VERSION.0.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.1.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.2.to_be_bytes());
+        for feature in features_list() {
+            let bytes = feature.as_bytes();
+            payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            payload.extend_from_slice(bytes);
+        }
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.major.to_be_bytes());
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.minor.to_be_bytes());
+
+        let expected = env.crypto().sha256(&payload).to_bytes();
+        assert_eq!(digest, expected);
+    }
+    
     // ── interface_id() + golden vector ───────────────────────────────
 
     #[test]
