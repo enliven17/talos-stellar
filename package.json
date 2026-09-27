@@ -26,7 +26,9 @@
     "migrations:check:strict": "node scripts/check-migration-drift.mjs --strict",
     "test:migration-drift": "bash scripts/check-migration-drift.test.sh",
     "licenses:report": "node scripts/generate-license-report.mjs",
-    "licenses:test": "node --test scripts/generate-license-report.test.mjs"
+    "licenses:test": "node --test scripts/generate-license-report.test.mjs",
+    "sbom:verify": "node scripts/verify-sbom.mjs",
+    "test:sbom-verify": "node --test scripts/verify-sbom.test.mjs"
   },
   "dependencies": {
     "next": "16.2.2"
