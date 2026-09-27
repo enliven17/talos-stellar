@@ -12,6 +12,7 @@ from talos_agent.observability import log
 from talos_agent.payments import USDC_TESTNET_ISSUER
 from talos_agent.payments.x402_signer import X402Signer
 from talos_agent.commerce_quote import (
+    DEFAULT_X402_CLOCK_SKEW_POLICY,
     enforce_commerce_quote_expiry,
     quote_expiry_iso,
 )
@@ -113,10 +114,16 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
     # Nested quote.expiresAt (A2A) is preferred; top-level expiresAt accepted.
     # Legacy price/payee-only 402s without expiry remain allowed (require_expiry=False)
     # unless a quote object is present — then expiry is mandatory.
+    #
+    # expiresAt is stamped by the issuer's clock while this check runs on ours,
+    # so the comparison carries the bounded x402 clock-skew policy: the
+    # settlement margin stops us spending a nonce on a quote that would expire
+    # between signing and settlement.
     quote_obj = payment_details.get("quote")
     expiry_error = enforce_commerce_quote_expiry(
         payment_details,
         require_expiry=isinstance(quote_obj, dict),
+        policy=DEFAULT_X402_CLOCK_SKEW_POLICY,
     )
     if expiry_error is not None:
         return expiry_error
