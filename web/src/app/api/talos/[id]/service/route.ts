@@ -285,7 +285,12 @@ async function handlePost(
     } catch (settleErr) {
       console.error("Stellar x402 settlement failed:", settleErr);
       return Response.json(
-        { error: "On-chain payment settlement failed" },
+        {
+          error: "On-chain payment settlement failed",
+          retryable: true,
+          retryAfterMs: 5000,
+          hint: "The payment may not have settled yet. Wait a few seconds and retry with the same payment token.",
+        },
         { status: 502 }
       );
     }
@@ -300,7 +305,7 @@ async function handlePost(
       } catch (fulfillErr) {
         console.error("Service fulfillment failed:", fulfillErr);
         return Response.json(
-          { error: "Service fulfillment failed" },
+          { error: "Service fulfillment failed", retryable: false },
           { status: 502 }
         );
       }

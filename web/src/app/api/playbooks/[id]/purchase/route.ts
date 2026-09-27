@@ -111,7 +111,15 @@ export async function POST(
       txHash = settled.txHash;
     } catch (err) {
       console.error("Playbook purchase settlement failed:", err);
-      return Response.json({ error: "On-chain payment settlement failed" }, { status: 502 });
+      return Response.json(
+        {
+          error: "On-chain payment settlement failed",
+          retryable: true,
+          retryAfterMs: 5000,
+          hint: "The payment may not have settled yet. Wait a few seconds and retry with the same payment token.",
+        },
+        { status: 502 },
+      );
     }
 
     // Record purchase + revenue

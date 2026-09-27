@@ -71,6 +71,20 @@ function idempotentResponse(
   return res;
 }
 
+/**
+ * Thrown when a transaction was submitted to the Stellar network but its
+ * operations do not satisfy the expected payment terms (wrong amount, wrong
+ * payee, or wrong asset).  The user's funds have been transferred — this is
+ * NOT retryable.
+ */
+class PaymentVerificationError extends Error {
+  readonly retryable = false as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "PaymentVerificationError";
+  }
+}
+
 async function submitAndVerifyPayment(
   signedXdr: string,
   expectedAmount: string,
@@ -79,10 +93,17 @@ async function submitAndVerifyPayment(
   const { TransactionBuilder, Horizon, Networks, Asset } = await import("@stellar/stellar-sdk");
   const server = new Horizon.Server("https://horizon-testnet.stellar.org");
   const tx = TransactionBuilder.fromXDR(signedXdr, Networks.TESTNET);
+
+  // Any error thrown here (network outage, node error, XDR parse failure)
+  // means the transaction has NOT landed on-chain — the user was NOT charged
+  // and the caller may safely retry with the same signed XDR.
   const result = await server.submitTransaction(tx);
   const txHash = result.hash;
 
-  // Verify at least one operation is a USDC payment to the expected recipient
+  // The payment has now been submitted on-chain.  Verification checks that
+  // the submitted operations match what the service expects.  A mismatch
+  // (wrong payee, wrong asset, insufficient amount) means the user's funds
+  // have already been transferred — this is NOT retryable.
   const USDC_ISSUER_VAL = USDC_ISSUER;
   const usdc = new Asset("USDC", USDC_ISSUER_VAL);
   const ops = tx.operations as unknown as Array<{
@@ -100,7 +121,9 @@ async function submitAndVerifyPayment(
       parseFloat(op.amount ?? "0") >= parseFloat(expectedAmount),
   );
   if (!valid) {
-    throw new Error("Payment TX does not include required USDC payment to service recipient");
+    throw new PaymentVerificationError(
+      "Payment was submitted but did not match the expected amount or recipient",
+    );
   }
 
   return { txHash };
@@ -253,7 +276,30 @@ export async function POST(
       try {
         ({ txHash } = await submitAndVerifyPayment(signedXdr, String(service.price), recipient));
       } catch (err: unknown) {
-        return Response.json({ error: err instanceof Error ? err.message : "Payment submission failed" }, { status: 402 });
+        // PaymentVerificationError: the TX was submitted and funds were
+        // transferred, but the operations did not match the expected payment
+        // terms.  The user's payment cannot be undone — NOT retryable.
+        if (err instanceof PaymentVerificationError) {
+          return Response.json(
+            {
+              error: err.message,
+              retryable: false,
+            },
+            { status: 402 },
+          );
+        }
+        // All other errors (network outage, Horizon node error, XDR parse
+        // failure, etc.) mean the transaction has NOT landed on-chain.
+        // The user has NOT been charged and may safely retry.
+        return Response.json(
+          {
+            error: err instanceof Error ? err.message : "Payment submission failed",
+            retryable: true,
+            retryAfterMs: 5000,
+            hint: "The Stellar network may be temporarily busy. Wait a few seconds and retry.",
+          },
+          { status: 402 },
+        );
       }
     } else {
       txHash = legacyTxHash!;
@@ -278,7 +324,7 @@ export async function POST(
         result = await fulfillInstant(service.serviceName, payload ?? {});
       } catch (err: unknown) {
         return Response.json(
-          { error: `Fulfillment failed: ${err instanceof Error ? err.message : "unknown error"}` },
+          { error: `Fulfillment failed: ${err instanceof Error ? err.message : "unknown error"}`, retryable: false },
           { status: 502 },
         );
       }
