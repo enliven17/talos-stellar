@@ -13,6 +13,8 @@ pub mod allowlist;
 pub mod registry_schema_fixtures;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod registry_schema_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod upgrade_simulation_tests;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 extern crate std;
