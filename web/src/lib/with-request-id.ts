@@ -2,7 +2,9 @@ import { NextRequest } from "next/server";
 import { getRequestId } from "./api-response";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-type RouteHandler = (req: NextRequest, ...rest: any[]) => Promise<Response>;
+type RequestRouteHandler = (req: Request, ...rest: any[]) => Promise<Response>;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type NextRequestRouteHandler = (req: NextRequest, ...rest: any[]) => Promise<Response>;
 
 /**
  * Generic over rest args so it composes with both dynamic routes
@@ -15,12 +17,14 @@ type RouteHandler = (req: NextRequest, ...rest: any[]) => Promise<Response>;
  * `#state`, don't survive across chunk boundaries when a request built by
  * one bundled copy of the class is fed back into another).
  */
-export function withRequestId<H extends RouteHandler>(handler: H): H {
+export function withRequestId<H extends RequestRouteHandler>(handler: H): H;
+export function withRequestId<H extends NextRequestRouteHandler>(handler: H): H;
+export function withRequestId(handler: NextRequestRouteHandler): NextRequestRouteHandler {
   return (async (req: NextRequest, ...rest: unknown[]) => {
     const requestId = getRequestId(req);
     const res = await handler(req, ...rest);
     const newRes = new Response(res.body, res);
     newRes.headers.set("x-request-id", requestId);
     return newRes;
-  }) as H;
+  }) as NextRequestRouteHandler;
 }

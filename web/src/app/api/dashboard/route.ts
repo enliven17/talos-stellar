@@ -3,8 +3,9 @@ import { db } from "@/db";
 import { tlsTalos, tlsPatrons } from "@/db/schema";
 import { eq, or, inArray } from "drizzle-orm";
 import { withTimeout, TimeoutError } from "@/lib/timeout";
+import { withRequestId } from "@/lib/with-request-id";
 
-export async function GET(req: NextRequest) {
+async function _GET(req: NextRequest) {
   const wallet = req.nextUrl.searchParams.get("wallet");
   if (!wallet) {
     return NextResponse.json({ error: "wallet parameter required" }, { status: 400 });
@@ -206,3 +207,5 @@ function getRelativeTime(date: Date): string {
   if (hours < 24) return `${hours}h ago`;
   return `${Math.floor(hours / 24)}d ago`;
 }
+
+export const GET = withRequestId(_GET);

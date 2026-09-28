@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { logger } from "@/lib/logger";
 import { db } from "@/db";
@@ -106,7 +107,7 @@ async function submitAndVerifyPayment(
   return { txHash };
 }
 
-export async function POST(
+async function _POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -397,7 +398,7 @@ export async function POST(
  * GET /api/talos/:id/jobs?txHash=xxx  or  ?jobId=xxx
  * Poll job status
  */
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -433,3 +434,6 @@ export async function GET(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);
+export const GET = withRequestId(_GET);

@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { withTransactionRetry } from "@/db/db-retry";
@@ -16,7 +17,7 @@ import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
  *
  * Auth: Bearer token with revenue:write scope (scoped key or legacy).
  */
-export async function POST(
+async function _POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -116,7 +117,7 @@ export async function POST(
  * GET /api/talos/:id/revenue/buyback
  * Preview: treasury balance + buyback stats
  */
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -171,3 +172,6 @@ export async function GET(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);
+export const GET = withRequestId(_GET);
