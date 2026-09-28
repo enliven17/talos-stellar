@@ -76,7 +76,7 @@ async function main() {
   console.log("Starting Web Accessibility Checks...");
   let success = true;
   
-  console.log("\\n[1/2] Running positive testing (accessible components)...");
+  console.log("\n[1/2] Running positive testing (accessible components)...");
   
   const components = [
     { name: "AgentAvatar", el: React.createElement(AgentAvatar, { name: "TestAgent" }) },
@@ -102,10 +102,10 @@ async function main() {
   }
   
   if (!success) {
-    console.error("\\n[FAIL] Accessibility checks failed.");
+    console.error("\n[FAIL] Accessibility checks failed.");
     process.exit(1);
   } else {
-    console.log("\\n[PASS] All accessibility checks passed.");
+    console.log("\n[PASS] All accessibility checks passed.");
     process.exit(0);
   }
 }
