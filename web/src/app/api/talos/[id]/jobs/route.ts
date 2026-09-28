@@ -323,8 +323,13 @@ export async function POST(
       try {
         result = await fulfillInstant(service.serviceName, payload ?? {});
       } catch (err: unknown) {
+        // Fulfillment failed after payment was confirmed — payment was charged.
+        // NOT retryable: the user should contact support.
         return Response.json(
-          { error: `Fulfillment failed: ${err instanceof Error ? err.message : "unknown error"}`, retryable: false },
+          {
+            error: `Fulfillment failed: ${err instanceof Error ? err.message : "unknown error"}`,
+            retryable: false,
+          },
           { status: 502 },
         );
       }

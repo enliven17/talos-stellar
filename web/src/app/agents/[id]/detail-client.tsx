@@ -147,6 +147,17 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
   const [serviceResult, setServiceResult] = useState<{ jobId: string; txHash: string; result?: Record<string, unknown>; status?: string } | null>(null);
   const [serviceError, setServiceError] = useState<{ message: string; retryable: boolean; retryAfterMs?: number } | null>(null);
   const [retryCountdown, setRetryCountdown] = useState(0);
+  // Hold the interval ID so we can clear it on unmount (prevents memory leaks
+  // and stale state updates after the modal is closed / component unmounts).
+  const retryIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (retryIntervalRef.current !== null) {
+        clearInterval(retryIntervalRef.current);
+      }
+    };
+  }, []);
 
   const handleRequestService = useCallback(async () => {
     if (!address || !talos.service) return;
@@ -195,13 +206,21 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
           retryAfterMs,
         });
         setServiceStatus("error");
-        // Start countdown if server tells us to wait
+        // Start countdown if server tells us to wait before retrying
         if (isRetryable && retryAfterMs > 0) {
           const seconds = Math.ceil(retryAfterMs / 1000);
           setRetryCountdown(seconds);
-          const interval = setInterval(() => {
+          // Clear any previous interval before starting a new one
+          if (retryIntervalRef.current !== null) {
+            clearInterval(retryIntervalRef.current);
+          }
+          retryIntervalRef.current = setInterval(() => {
             setRetryCountdown((c) => {
-              if (c <= 1) { clearInterval(interval); return 0; }
+              if (c <= 1) {
+                clearInterval(retryIntervalRef.current!);
+                retryIntervalRef.current = null;
+                return 0;
+              }
               return c - 1;
             });
           }, 1000);
@@ -1497,11 +1516,11 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       {/* ─── Service Request Modal ────────────────────────── */}
       {serviceOpen && talos.service && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/60" onClick={() => !serviceStatus.match(/paying/) && (setServiceOpen(false), setServiceError(null), setServiceStatus("idle"))} />
+          <div className="absolute inset-0 bg-black/60" onClick={() => { if (!serviceStatus.match(/paying/)) { if (retryIntervalRef.current !== null) { clearInterval(retryIntervalRef.current); retryIntervalRef.current = null; } setServiceOpen(false); setServiceError(null); setServiceStatus("idle"); setRetryCountdown(0); } }} />
           <div className="relative bg-background border border-border w-full max-w-md mx-4 p-0">
             <div className="flex items-center justify-between px-6 py-4 border-b border-border">
               <div className="text-xs text-accent tracking-wider">[REQUEST SERVICE]</div>
-              <button onClick={() => { setServiceOpen(false); setServiceError(null); setServiceStatus("idle"); }} className="text-muted hover:text-foreground text-sm">&times;</button>
+              <button onClick={() => { if (retryIntervalRef.current !== null) { clearInterval(retryIntervalRef.current); retryIntervalRef.current = null; } setServiceOpen(false); setServiceError(null); setServiceStatus("idle"); setRetryCountdown(0); }} className="text-muted hover:text-foreground text-sm">&times;</button>
             </div>
 
             {serviceStatus === "success" && serviceResult ? (
@@ -1553,10 +1572,14 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                     {serviceError.retryable ? (
                       <div className="space-y-2">
                         <p className="text-xs text-muted">
-                          This error is transient — your payment was not charged. You can safely retry.
+                          This is a transient network error — the transaction did not reach the network. You can safely retry.
                         </p>
                         <button
                           onClick={() => {
+                            if (retryIntervalRef.current !== null) {
+                              clearInterval(retryIntervalRef.current);
+                              retryIntervalRef.current = null;
+                            }
                             setServiceStatus("idle");
                             setServiceError(null);
                             setRetryCountdown(0);
@@ -1569,7 +1592,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                       </div>
                     ) : (
                       <p className="text-xs text-muted">
-                        This error is not retryable. Check your wallet balance and try again later.
+                        This error cannot be retried. Your payment may have been submitted — check your wallet and contact support if needed.
                       </p>
                     )}
                   </div>

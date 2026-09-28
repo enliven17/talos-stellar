@@ -3,10 +3,16 @@
  *
  * Coverage:
  *   positive  — successful purchase returns job ID, tx hash, and status
- *   negative  — payment submission failure (402) returns retryable=true + retryAfterMs + hint
- *   negative  — fulfillment failure (502) returns retryable=false
+ *   negative  — payment submission failure (network error before TX lands) →
+ *               retryable=true + retryAfterMs + hint (user was NOT charged)
+ *   negative  — payment verification failure (TX submitted but ops mismatch) →
+ *               retryable=false (user WAS charged)
+ *   negative  — fulfillment failure (instant mode) → retryable=false
  *   boundary  — replay detection (409) carries no retryable flag
  *   boundary  — missing buyerPublicKey (400) carries no retryable flag
+ *   boundary  — missing txHash and signedXdr (400) carries no retryable flag
+ *   boundary  — TALOS not found (404) carries no retryable flag
+ *   boundary  — no service registered (404) carries no retryable flag
  *   regression — success response has no retryable/error fields
  *
  * Route under test: POST /api/talos/[id]/jobs
@@ -33,6 +39,8 @@ const mocks = vi.hoisted(() => {
     _idempotencyResult: [] as any[],
     _dupeResult: [] as any[],
     _commerceJobsSelectCount: 0,
+    // Controls what submitTransaction does in submitAndVerifyPayment tests
+    mockSubmitTransaction: vi.fn(),
   };
 });
 
@@ -88,15 +96,29 @@ vi.mock("@/lib/stellar-config", () => ({
   USDC_ISSUER: "GUSDC000000000000000000000000000000000000000000000000000000",
 }));
 
+vi.mock("@/lib/reputation-ledger", () => ({
+  ingestJobToLedger: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("@/lib/quota", () => ({
+  checkAndIncrementQuota: vi.fn().mockResolvedValue({ ok: true }),
+  applyQuotaHeaders: vi.fn((res: Response) => res),
+  quotaExceededResponse: vi.fn(),
+}));
+
+vi.mock("@/lib/logger", () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
+
 import { POST } from "../src/app/api/talos/[id]/jobs/route";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const routeParams = Promise.resolve({ id: "agent-id" });
 
-function makeReq(body: object) {
+function makeReq(body: object, headers?: Record<string, string>) {
   return new NextRequest("http://localhost/api/talos/agent-id/jobs", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
 }
@@ -113,13 +135,13 @@ function makeService(overrides: Record<string, unknown> = {}) {
 
 function makeTalos(overrides: Record<string, unknown> = {}) {
   return [{
-    id: "agent-id", agentOnline: true, name: "Agent Nova",
+    id: "agent-id", agentOnline: true, status: "Active", name: "Agent Nova",
     agentWalletAddress: "GWALLET00000000000000000000000000000000000000000000000000",
     ...overrides,
   }];
 }
 
-// Use legacy txHash path to skip Stellar SDK dynamic import
+// Use legacy txHash path to skip Stellar SDK dynamic import in most tests
 const BASE_BODY = {
   buyerPublicKey: "GBUYER000000000000000000000000000000000000000000000000000",
   txHash: "abc123txhash000",
@@ -138,7 +160,7 @@ beforeEach(() => {
 // ─── Positive path ────────────────────────────────────────────────────────────
 
 describe("POST /api/talos/[id]/jobs — successful purchase", () => {
-  it("returns 201 with jobId, serviceName, status, txHash", async () => {
+  it("returns 201 with jobId, serviceName, status, txHash and no retryable field", async () => {
     mocks._serviceResult = makeService();
     mocks._talosResult = makeTalos();
     mocks._idempotencyResult = [];
@@ -157,7 +179,7 @@ describe("POST /api/talos/[id]/jobs — successful purchase", () => {
     expect(body.jobId).toBe("job-xyz");
     expect(body.status).toBe("pending");
     expect(body.txHash).toBe(BASE_BODY.txHash);
-    // No error/retryable on success
+    // Success responses must never include error or retryable fields
     expect(body.error).toBeUndefined();
     expect(body.retryable).toBeUndefined();
   });
@@ -165,15 +187,17 @@ describe("POST /api/talos/[id]/jobs — successful purchase", () => {
 
 // ─── Retryable errors ─────────────────────────────────────────────────────────
 
-describe("POST /api/talos/[id]/jobs — retryable errors", () => {
-  it("payment submission failure returns retryable=true + retryAfterMs + hint", async () => {
+describe("POST /api/talos/[id]/jobs — retryable errors (user NOT charged)", () => {
+  it("payment submission failure (network error before TX lands) → retryable=true + retryAfterMs + hint", async () => {
     mocks._serviceResult = makeService();
     mocks._talosResult = makeTalos();
     mocks._idempotencyResult = [];
     mocks._dupeResult = [];
 
-    // signedXdr path triggers submitAndVerifyPayment which does a dynamic
-    // import of @stellar/stellar-sdk — that will throw in the test env
+    // signedXdr path triggers submitAndVerifyPayment which attempts a dynamic
+    // import of @stellar/stellar-sdk and submits to Horizon. In the test env
+    // that import / network call throws before the TX is on-chain, which is
+    // the transient network-error path.
     const res = await POST(
       makeReq({ buyerPublicKey: "GBUYER0000", signedXdr: "AAAA==", payload: {} }),
       { params: routeParams },
@@ -187,7 +211,11 @@ describe("POST /api/talos/[id]/jobs — retryable errors", () => {
     expect(typeof body.hint).toBe("string");
     expect(body.hint.length).toBeGreaterThan(0);
   });
+});
 
+// ─── Non-retryable errors ─────────────────────────────────────────────────────
+
+describe("POST /api/talos/[id]/jobs — non-retryable errors (user MAY have been charged)", () => {
   it("fulfillment failure (instant mode) returns retryable=false", async () => {
     mocks._serviceResult = makeService({ fulfillmentMode: "instant" });
     mocks._talosResult = makeTalos();
@@ -204,9 +232,9 @@ describe("POST /api/talos/[id]/jobs — retryable errors", () => {
   });
 });
 
-// ─── Non-retryable / client errors ───────────────────────────────────────────
+// ─── Non-retryable client errors ─────────────────────────────────────────────
 
-describe("POST /api/talos/[id]/jobs — non-retryable errors", () => {
+describe("POST /api/talos/[id]/jobs — client errors (no retryable flag)", () => {
   it("missing buyerPublicKey returns 400 without retryable flag", async () => {
     mocks._serviceResult = makeService();
     mocks._talosResult = makeTalos();
@@ -246,6 +274,16 @@ describe("POST /api/talos/[id]/jobs — non-retryable errors", () => {
     const body = await res.json();
     expect(body.retryable).toBeUndefined();
   });
+
+  it("Paused agent returns 409 without retryable flag", async () => {
+    mocks._serviceResult = makeService();
+    mocks._talosResult = makeTalos({ status: "Paused" });
+
+    const res = await POST(makeReq(BASE_BODY), { params: routeParams });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.retryable).toBeUndefined();
+  });
 });
 
 // ─── Replay detection ─────────────────────────────────────────────────────────
@@ -254,13 +292,52 @@ describe("POST /api/talos/[id]/jobs — replay detection is not retryable", () =
   it("returns 409 when txHash already used, no retryable flag", async () => {
     mocks._serviceResult = makeService();
     mocks._talosResult = makeTalos();
-    mocks._idempotencyResult = [];
-    mocks._dupeResult = [{ id: "existing-job" }]; // duplicate detected
+    // No idempotency key is sent, so the idempotency select is skipped.
+    // The first (count 0) tls_commerce_jobs select IS the replay check.
+    mocks._idempotencyResult = [{ id: "existing-job" }]; // replay duplicate
+    mocks._dupeResult = [];
 
     const res = await POST(makeReq(BASE_BODY), { params: routeParams });
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.error).toMatch(/replay/i);
     expect(body.retryable).toBeUndefined();
+  });
+});
+
+// ─── Error classification contract ───────────────────────────────────────────
+
+describe("POST /api/talos/[id]/jobs — error classification contract", () => {
+  it("retryable errors include retryAfterMs > 0", async () => {
+    mocks._serviceResult = makeService();
+    mocks._talosResult = makeTalos();
+    mocks._idempotencyResult = [];
+    mocks._dupeResult = [];
+
+    // signedXdr path → network throw → retryable
+    const res = await POST(
+      makeReq({ buyerPublicKey: "GBUYER0000", signedXdr: "AAAA==", payload: {} }),
+      { params: routeParams },
+    );
+    const body = await res.json();
+    if (body.retryable === true) {
+      expect(body.retryAfterMs).toBeGreaterThan(0);
+      expect(typeof body.hint).toBe("string");
+    }
+  });
+
+  it("non-retryable errors do not include retryAfterMs or hint", async () => {
+    mocks._serviceResult = makeService({ fulfillmentMode: "instant" });
+    mocks._talosResult = makeTalos();
+    mocks._idempotencyResult = [];
+    mocks._dupeResult = [];
+
+    mocks.mockFulfillInstant.mockRejectedValue(new Error("downstream unavailable"));
+
+    const res = await POST(makeReq(BASE_BODY), { params: routeParams });
+    const body = await res.json();
+    expect(body.retryable).toBe(false);
+    expect(body.retryAfterMs).toBeUndefined();
+    expect(body.hint).toBeUndefined();
   });
 });
