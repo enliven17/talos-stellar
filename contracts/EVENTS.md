@@ -1,6 +1,6 @@
 # Talos Contract Event Indexing Specification
 
-**Spec version:** 1.1.0
+**Spec version:** 1.2.0
 **Applies to:** talos_registry, talos_governance, talos_name_service, talos_dividends
 
 ## 1. Event envelope
@@ -14,7 +14,8 @@ Every Soroban event an indexer receives has:
 | data | Val (tuple) | positional, see per-event tables below |
 | ledger_sequence | u32 | from the RPC/Horizon envelope, not the event itself |
 | tx_hash | Hash | from the envelope |
-| event_index_in_tx | u32 | from the envelope |
+| tx_index_in_ledger | u32 | zero-based transaction position from the envelope |
+| event_index_in_tx | u32 | zero-based event position from the envelope |
 
 ## 1.1. Topic positions and data decoding rules
 
@@ -26,12 +27,9 @@ Every Soroban event an indexer receives has:
 - **`data` is a positional tuple** decoded strictly left-to-right using the
   per-event `data` column below. Field order is part of the stable contract:
   it is never reordered except under a breaking (major) version bump per §4.
-- **Decoded JSON shape.** The canonical fixtures (`contracts/fixtures/`)
-  represent each event as `{ event, contract, ledger_sequence, topics, data }`
-  where `topics` and `data` are objects keyed by the field names in the
-  catalog. Addresses stay as `G…`/`C…` strings, symbols stay as strings,
+- **Decoded JSON shape.** The canonical fixtures (`contracts/fixtures/`) retain the raw envelope cursor fields `ledger_sequence`, `tx_index_in_ledger`, and `event_index_in_tx`. The helper returns decoded fields with the parsed cursor so consumers can sort and paginate by the full tuple. Addresses stay as `G…`/`C…` strings, symbols stay as strings,
   and `u32`/`u64`/`i128` are numbers. The `event-query` helper decodes a raw
-  event to exactly this shape and rejects anything that does not match.
+  event and rejects anything that does not match.
 - **Malformed payloads** (empty topics, `topics[0]` not a symbol, wrong topic
   type, wrong data arity, wrong data type) are rejected by the helper rather
   than silently mis-decoded.
@@ -39,7 +37,15 @@ Every Soroban event an indexer receives has:
 ## 2. Ordering guarantees
 
 Indexers MUST treat `(ledger_sequence, tx_index_in_ledger, event_index_in_tx)`
-as the canonical cursor. Events are strictly monotonic on this tuple and
+as the canonical cursor. `tx_index_in_ledger` and `event_index_in_tx` are
+zero-based positions supplied by the Soroban event envelope. They represent
+ledger transaction order and event publication order within a transaction,
+including events from nested contract invocations. An operation that publishes
+multiple compatibility events keeps that order stable: `tls_crt` precedes
+`tls_crt2`, and `name_reg` precedes `name_reg2`.
+
+Consumers MUST sort and paginate by the full cursor, not response arrival order,
+topic, contract, or fixture-file order. Events are strictly monotonic on this tuple and
 never reordered within a ledger. On restart, an indexer resumes from the
 last committed cursor and replays forward — this is safe because processing
 is idempotent per cursor (see §4).
@@ -68,6 +74,9 @@ is idempotent per cursor (see §4).
 | (`prop_crt`, proposal_id: u32) | (talos_id: u32, proposer: Address) |
 | (`vote`, proposal_id: u32) | (voter: Address, choice: VoteChoice, weight: i128) |
 | (`prop_stat`, proposal_id: u32) | status: ProposalStatus |
+| (`qrm_rchd`, proposal_id: u32) | (proposal_id: u32, votes_cast: i128, quorum_threshold: i128, approval_bps: i128) |
+
+`qrm_rchd` is emitted **at most once** per proposal, on the first vote that brings `votes_cast` to or above `quorum_threshold`. A `DataKey::QuorumReached(proposal_id)` sentinel prevents re-emission for subsequent votes.
 
 ### talos_name_service
 | topics | data |
@@ -76,6 +85,26 @@ is idempotent per cursor (see §4).
 | (`name_reg2`, talos_id: u32) | (version: u32, name: String, owner: Address) |
 | (`reg_upd`,) | (old_registry: Address, new_registry: Address) |
 | (`tl_sch`/`tl_exec`/`tl_cnl`/`tl_cfg`) | same shape as registry timelock events |
+| (`pause_on`, domain: PauseDomain) | (actor: Address, expires_at: u64) |
+| (`pause_off`, domain: PauseDomain) | (actor: Address,) |
+| (`guard_add`,) | (guardian: Address,) |
+| (`guard_rem`,) | (guardian: Address,) |
+| (`name_fee`, talos_id: u32) | (payer: Address, asset: Address, fee: i128) |
+| (`dep_path`,) | (deprecated: String, replacement: String) |
+
+**`pause_on` semantics:**
+- `domain` identifies the paused write path (`NameRegistration`).
+- `expires_at` is the Unix timestamp when the pause automatically lifts.
+  A value of `0` means the pause is indefinite (only settable by the admin).
+  Privacy-safe: no caller transaction hash or secret data is included.
+
+**Pause expiry rules (enforced on-chain, #597):**
+- Admin can set `expires_at = 0` (indefinite) or `> 0` up to `MAX_ADMIN_PAUSE_SECS` (30 days).
+- Guardian can only pause for `1 .. MAX_GUARDIAN_PAUSE_SECS` (7 days) — duration = 0 is rejected.
+- A guardian cannot overwrite an admin-set pause (`DomainLockedByAdmin` error).
+- Pauses are lazily expired: `is_paused` / `pause_info` treat an expired record as inactive
+  without removing it from storage; explicit `unpause` removes the record and emits `pause_off`.
+- `pause_off` is only emitted on an explicit admin `unpause` call, not on lazy expiry.
 
 ### talos_dividends
 | topics | data |

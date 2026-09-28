@@ -102,6 +102,23 @@ def _record_tool_timeout(timeout_seconds: float, elapsed_seconds: float) -> None
     )
 
 
+async def _cleanup_browser_on_cancellation() -> None:
+    """Best-effort browser session teardown when a tool/agent cycle is cancelled."""
+    try:
+        from talos_agent.tools import browser as browser_mod
+
+        cleanup = getattr(browser_mod, "cleanup_browser_sessions_on_cancellation", None)
+        if cleanup is None:
+            return
+        await cleanup()
+    except Exception as exc:
+        # Never let cleanup failure mask CancelledError; keep the message privacy-safe.
+        console.print(
+            f"[yellow]Browser cleanup after cancellation failed "
+            f"({type(exc).__name__}).[/yellow]"
+        )
+
+
 async def _execute_tool_with_timeout(
     settings: Settings,
     tools: ToolRegistry,
@@ -117,6 +134,9 @@ async def _execute_tool_with_timeout(
     except asyncio.CancelledError:
         task.cancel()
         await asyncio.sleep(0)
+        # Cancelled mid-tool (shutdown / deadline): drop any live browser session
+        # so Stagehand/Chrome cannot outlive the cancelled work.
+        await _cleanup_browser_on_cancellation()
         raise
     if task in done:
         return task.result()
@@ -186,6 +206,7 @@ async def _legacy_agent_loop(
     for iteration in range(settings.max_iterations):
         if shutdown_event and shutdown_event.is_set():
             console.print("[yellow]Shutdown requested — aborting agent loop.[/yellow]")
+            await _cleanup_browser_on_cancellation()
             break
 
         console.print(f"[dim]Agent iteration {iteration + 1}...[/dim]")
@@ -279,6 +300,7 @@ async def _routed_agent_loop(
     for iteration in range(settings.max_iterations):
         if shutdown_event and shutdown_event.is_set():
             console.print("[yellow]Shutdown requested — aborting agent loop.[/yellow]")
+            await _cleanup_browser_on_cancellation()
             break
 
         console.print(f"[dim]Agent iteration {iteration + 1}...[/dim]")

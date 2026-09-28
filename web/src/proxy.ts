@@ -70,6 +70,12 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
   const apiKey = getApiKey(request);
   const method = request.method.toUpperCase();
 
+  // Computed up front (pure, no I/O) so it's available for every response
+  // path below, including the 429 rate-limit rejection — a client that gets
+  // rate-limited on a deprecated version still needs the Deprecation/Sunset
+  // signal so a retry lands on the right version.
+  const versionInfo = negotiateApiVersion(pathname);
+
   // Identify which policy bucket applies to this request.
   const isAuthRoute =
     pathname.endsWith("/me") ||
@@ -84,12 +90,14 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
       limit: p.limit,
       windowMs: p.windowMs,
     });
+    result.policy = p.name;
   } else if (method === "GET") {
     const p = RATE_LIMIT_POLICIES.read;
     result = await rateLimit(`${p.keyPrefix}:${ip}`, {
       limit: p.limit,
       windowMs: p.windowMs,
     });
+    result.policy = p.name;
   } else if (method === "POST" && apiKey) {
     const p = RATE_LIMIT_POLICIES.writeKey;
     // Hash the API key so raw secrets never reach the shared store.
@@ -102,21 +110,23 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
       limit: p.limit,
       windowMs: p.windowMs,
     });
+    result.policy = p.name;
   } else {
     const p = RATE_LIMIT_POLICIES.writeIp;
     result = await rateLimit(`${p.keyPrefix}:${ip}`, {
       limit: p.limit,
       windowMs: p.windowMs,
     });
+    result.policy = p.name;
   }
 
   if (!result.ok) {
-    return rateLimitResponse(result) as NextResponse;
+    const response = rateLimitResponse(result);
+    addVersionHeaders(response.headers, versionInfo);
+    return response as NextResponse;
   }
 
   // ─── API versioning ───────────────────────────────────────────
-
-  const versionInfo = negotiateApiVersion(pathname);
 
   if (isVersionedPath(pathname)) {
     const url = request.nextUrl.clone();

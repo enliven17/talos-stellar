@@ -31,7 +31,7 @@ pnpm bench:suite sdk        # SDK call benchmarks
 pnpm bench:suite contract   # Contract-adjacent workflow benchmarks
 
 # Set environment overrides
-BENCHMARK_RUNS=50 BENCHMARK_VARIANCE_THRESHOLD=0.2 pnpm bench:suite api
+BENCHMARK_RUNS=50 BENCHMARK_VARIANCE_THRESHOLD=0.2 BENCHMARK_PERFORMANCE_BUDGET_MS=4000 BENCHMARK_P99_THRESHOLD_MS=8000 pnpm bench:suite api
 ```
 
 ## Benchmark Suites
@@ -119,6 +119,8 @@ All configuration is defined in the `BenchmarkConfig` interface. Values are load
 | `BENCHMARK_TIMEOUT_MS` | 30000 | Per-benchmark timeout |
 | `BENCHMARK_DATASET_SIZE` | 1000 | Dataset size for generators |
 | `BENCHMARK_VARIANCE_THRESHOLD` | 0.15 | Max acceptable coefficient of variation (warn) |
+| `BENCHMARK_PERFORMANCE_BUDGET_MS` | 5000 | Mean latency regression budget (fail) |
+| `BENCHMARK_P99_THRESHOLD_MS` | 10000 | p99 latency regression budget (fail) |
 | `BENCHMARK_MEMORY_THRESHOLD_MB` | 512 | Peak memory threshold (fail) |
 | `BENCHMARK_CPU_THRESHOLD_PCT` | 80 | Peak CPU threshold (warn) |
 | `BENCHMARK_ARTIFACT_DIR` | `.benchmarks` | Output directory for artifact files |
@@ -172,6 +174,8 @@ Benchmark thresholds control pass/fail gates. Built-in rules:
 | Metric | Default | Severity | Comparator |
 |---|---|---|---|
 | `variance` | 0.15 | warn | gt |
+| `meanDurationMs` | 5000 | fail | gt |
+| `p99` | 10000 | fail | gt |
 | `peakMemoryMb` | 512 | fail | gt |
 | `peakCpuPercent` | 80 | warn | gt |
 
@@ -245,7 +249,7 @@ A dedicated CI workflow (`.github/workflows/benchmark-ci.yml`) runs on every pus
 To run benchmarks locally as CI does:
 
 ```bash
-CI=true BENCHMARK_RUNS=20 BENCHMARK_WARMUP_RUNS=3 pnpm bench:suite api
+CI=true BENCHMARK_RUNS=20 BENCHMARK_WARMUP_RUNS=3 BENCHMARK_PERFORMANCE_BUDGET_MS=5000 BENCHMARK_P99_THRESHOLD_MS=10000 pnpm bench:suite api
 ```
 
 When `CI=true`:
@@ -267,3 +271,39 @@ To disable the benchmark system:
 | Thresholds failing on CI | CI runners are slower | Adjust `BENCHMARK_MEMORY_THRESHOLD_MB` or `BENCHMARK_VARIANCE_THRESHOLD` |
 | Artifact directory missing | Wrong working directory | Set `BENCHMARK_ARTIFACT_DIR` to absolute path |
 | Trend report empty | No prior artifacts | Run benchmarks, then re-run trend analysis |
+
+
+## Nightly Property Tests
+
+Property-based suites live alongside the benchmark framework in `web/src/area/devx/` and exercise invariants over datasets, metrics, thresholds, and the schedule config itself.
+
+### Schedule
+
+- **Cron (UTC):** `27 5 * * *` (single source of truth: `DEFAULT_PROPERTY_CRON` in `property-schedule.ts` and `.github/workflows/property-tests-nightly.yml`)
+- **Workflow:** `.github/workflows/property-tests-nightly.yml` (nightly + `workflow_dispatch` + path-filtered PR/push)
+- **Fail-closed:** malformed cron, empty/unknown suites, and non-finite iteration counts throw `PropertyScheduleError` and exit non-zero — they never silently skip.
+
+### Local commands
+
+```bash
+# Focused unit coverage for schedule + suites
+pnpm --dir web test:property
+
+# Execute the nightly property runner (writes `.property-artifacts/`)
+pnpm --dir web property:nightly
+
+# Useful overrides
+PROPERTY_TEST_ITERATIONS=50 PROPERTY_TEST_SEED=7 PROPERTY_TEST_SUITES=metrics,schedule \
+  pnpm --dir web property:nightly
+```
+
+### Suites
+
+| Suite | Invariants |
+| --- | --- |
+| `datasets` | id charset/length, payload shape, activity enums, Stellar transfer shape, seed determinism |
+| `metrics` | percentile ordering + in-range, mean/median within min/max, empty-input zeros |
+| `thresholds` | fail severity blocks pass; unknown metrics ignored |
+| `schedule` | default cron parse, malformed cron fail-closed, stable daily seed, privacy-safe describe |
+
+Logging goes through `sanitizeForLogging` — secrets, tokens, signatures, and payment proofs are never written to artifacts or logs.

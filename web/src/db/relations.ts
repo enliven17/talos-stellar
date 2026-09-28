@@ -14,6 +14,8 @@ import {
   tlsTokenPurchases,
   tlsBenchmarkRuns,
   tlsBenchmarkResults,
+  tlsWebhookSubscriptions,
+  tlsWebhookDeliveries,
 } from "./schema";
 
 export const talosRelations = relations(tlsTalos, ({ many, one }) => ({
@@ -82,4 +84,16 @@ export const benchmarkRunRelations = relations(tlsBenchmarkRuns, ({ many }) => (
 
 export const benchmarkResultRelations = relations(tlsBenchmarkResults, ({ one }) => ({
   run: one(tlsBenchmarkRuns, { fields: [tlsBenchmarkResults.runId], references: [tlsBenchmarkRuns.id] }),
+}));
+
+export const webhookSubscriptionRelations = relations(tlsWebhookSubscriptions, ({ one, many }) => ({
+  talos: one(tlsTalos, { fields: [tlsWebhookSubscriptions.talosId], references: [tlsTalos.id] }),
+  deliveries: many(tlsWebhookDeliveries),
+}));
+
+export const webhookDeliveryRelations = relations(tlsWebhookDeliveries, ({ one }) => ({
+  subscription: one(tlsWebhookSubscriptions, {
+    fields: [tlsWebhookDeliveries.subscriptionId],
+    references: [tlsWebhookSubscriptions.id],
+  }),
 }));

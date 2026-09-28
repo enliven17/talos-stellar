@@ -44,7 +44,8 @@ async function handlePost(
 
     // Resolve the effective asset code: prefer the typed `asset` field,
     // fall back to the legacy `assetCode` string, then default to USDC.
-    const effectiveAssetCode = asset?.code ?? assetCode ?? "USDC";
+    const effectiveAssetCode =
+      (asset && "code" in asset ? asset.code : undefined) ?? assetCode ?? "USDC";
     const amountUsd = Number(amount);
 
     if (!Number.isFinite(amountUsd) || amountUsd <= 0) {

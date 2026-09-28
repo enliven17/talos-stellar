@@ -487,6 +487,169 @@ function sanitizeDataForInstance(input: unknown): unknown {
 }
 
 /**
+ * Pattern matching query-parameter names whose values should be redacted
+ * before the path is surfaced in a {@link TalosErrorEvent}.
+ *
+ * This is intentionally broader than {@link SENSITIVE_FIELD_PATTERN} because
+ * parameter names in query strings often use different conventions (e.g.
+ * `api_key`, `apikey`, `access_token`, `bearer`).
+ */
+const SENSITIVE_QUERY_PARAM_PATTERN =
+  /^(token|authorization|auth|api[_-]?key|access[_-]?token|secret|bearer|password|credential|key|sig(nature)?|hash|nonce|seed|proof)$/i;
+
+/**
+ * Strip sensitive credential values from query-string parameters in a path or
+ * URL string, replacing the value with `[REDACTED]`.
+ *
+ * - Path strings without a query component are returned unchanged.
+ * - Any query-parameter name matching {@link SENSITIVE_QUERY_PARAM_PATTERN}
+ *   has its value replaced with the literal string `[REDACTED]`.
+ * - Non-URL-encoded fragments and other edge cases are handled gracefully;
+ *   a malformed query string is returned as-is so error context is never lost.
+ *
+ * This function is applied to the `path` field of every {@link TalosErrorEvent}
+ * before it is delivered to the caller's `onError` hook, providing a safety
+ * net even if a caller accidentally includes credentials in a query string.
+ */
+export function redactEventPath(rawPath: string): string {
+  const qIdx = rawPath.indexOf("?");
+  if (qIdx === -1) return rawPath;
+
+  const base = rawPath.slice(0, qIdx);
+  const queryString = rawPath.slice(qIdx + 1);
+
+  try {
+    const params = new URLSearchParams(queryString);
+    let changed = false;
+    for (const [key] of params.entries()) {
+      if (SENSITIVE_QUERY_PARAM_PATTERN.test(key)) {
+        params.set(key, "[REDACTED]");
+        changed = true;
+      }
+    }
+    if (!changed) return rawPath;
+    return `${base}?${params.toString()}`;
+  } catch {
+    // Malformed query string — return the path without the query portion to
+    // avoid leaking anything unparseable.
+    return base;
+  }
+}
+
+// ── x402 Buyer Proof Diagnostics ─────────────────────────────────────────────
+
+import type {
+  BuyerProofDiagnostics,
+  X402ProofStage,
+} from "./types.js";
+
+/**
+ * Maximum character length for `signingFailureReason` in proof diagnostics.
+ * Keeps the field from becoming a vector for large raw error payloads.
+ */
+const MAX_SIGNING_FAILURE_REASON_BYTES = 200;
+
+/**
+ * Build a privacy-safe {@link BuyerProofDiagnostics} snapshot from the
+ * components of an x402 buyer-proof exchange. This is a pure function —
+ * it never performs I/O, never logs, and never throws.
+ *
+ * ### What is redacted
+ * - The X-PAYMENT / `paymentHeader` value is **never** included.
+ * - The raw WWW-Authenticate header is **never** included; only the parsed,
+ *   typed `challenge` sub-object is surfaced.
+ * - `signingFailureReason` is truncated to
+ *   {@link MAX_SIGNING_FAILURE_REASON_BYTES} characters.
+ *
+ * ### What is included
+ * - `payee` — Stellar public key (`G…`); not a secret.
+ * - `price` — raw challenge price string.
+ * - `parsedAmount` — the numeric value of `price` (may be `NaN`).
+ * - `signingSucceeded` / `proofResponseStatus` / `stage`.
+ *
+ * @param path - The API path being purchased (credentials in query-params
+ *   are redacted by the caller before passing here; this function does
+ *   not re-apply redactEventPath to avoid double-encoding).
+ * @param challenge - Parsed x402 challenge as returned by
+ *   {@link parseX402Challenge}, or `undefined` when the 402 lacked one.
+ * @param stage - The lifecycle stage reached.
+ * @param opts - Optional extra fields for later lifecycle stages.
+ */
+export function diagnoseBuyerProof(
+  path: string,
+  challenge: Record<string, string> | undefined,
+  stage: X402ProofStage,
+  opts: {
+    signingSucceeded?: boolean;
+    signingFailureReason?: string;
+    proofResponseStatus?: number;
+  } = {},
+): BuyerProofDiagnostics {
+  const capturedAt = new Date().toISOString();
+
+  // Build the safe challenge sub-object, excluding all raw header text.
+  let challengeDiag: BuyerProofDiagnostics["challenge"];
+  let parsedAmount: number | undefined;
+  if (challenge) {
+    challengeDiag = {
+      payee: challenge.payee ?? "",
+      price: challenge.price ?? "",
+      ...(challenge.token !== undefined ? { token: challenge.token } : {}),
+      ...(challenge.network !== undefined ? { network: challenge.network } : {}),
+    };
+    parsedAmount = parseFloat(challenge.price ?? "");
+  }
+
+  const succeeded =
+    stage === "proof_accepted" ||
+    (stage === "proof_submitted" && opts.proofResponseStatus !== undefined && opts.proofResponseStatus < 400);
+
+  // Truncate signing failure reason to prevent large raw error text.
+  const signingFailureReason =
+    opts.signingFailureReason != null
+      ? opts.signingFailureReason.slice(0, MAX_SIGNING_FAILURE_REASON_BYTES)
+      : undefined;
+
+  // Human-readable summary — no secrets, no header values.
+  let summary: string;
+  switch (stage) {
+    case "no_challenge":
+      summary = `x402 proof failed: 402 response did not carry a valid challenge on ${path}`;
+      break;
+    case "challenge_parsed":
+      summary = `x402 challenge parsed (payee=${challengeDiag?.payee ?? "?"}, price=${challengeDiag?.price ?? "?"}) on ${path}`;
+      break;
+    case "signing_requested":
+      summary = `x402 signing requested for ${path}`;
+      break;
+    case "proof_submitted":
+      summary = `x402 proof submitted on ${path} → HTTP ${opts.proofResponseStatus ?? "?"}`;
+      break;
+    case "proof_accepted":
+      summary = `x402 proof accepted on ${path}`;
+      break;
+    case "proof_rejected":
+      summary = `x402 proof rejected on ${path} (HTTP ${opts.proofResponseStatus ?? "?"})`;
+      break;
+    default:
+      summary = `x402 proof exchange stage "${stage as string}" on ${path}`;
+  }
+
+  return {
+    stage,
+    capturedAt,
+    path,
+    ...(challengeDiag !== undefined ? { challenge: challengeDiag } : {}),
+    ...(parsedAmount !== undefined ? { parsedAmount } : {}),
+    ...(opts.signingSucceeded !== undefined ? { signingSucceeded: opts.signingSucceeded } : {}),
+    ...(signingFailureReason !== undefined ? { signingFailureReason } : {}),
+    ...(opts.proofResponseStatus !== undefined ? { proofResponseStatus: opts.proofResponseStatus } : {}),
+    succeeded,
+    summary,
+  };
+}
+
+/**
  * Build the right {@link TalosAPIError} subclass for a given HTTP response.
  * Pure function — kept small so tests can exercise it directly.
  */
@@ -499,6 +662,11 @@ export function errorFromResponse(
   const { body, data } = sanitizeBody(rawBody);
   const safeHeaders = snapshotHeaders(headers);
   const requestId = safeHeaders["x-request-id"];
+  // `Retry-After` is valid on any error response (RFC 9110 §10.2.3), not just
+  // 429 — a 503 during a maintenance window is a common real-world source.
+  // Parse it once so every subclass preserves the same structured hint that
+  // `.headers["retry-after"]` already carries in raw form.
+  const retryAfterMs = parseRetryAfter(safeHeaders["retry-after"]);
   const issues = Array.isArray((data as { issues?: unknown[] } | undefined)?.issues)
     ? (((data as { issues: unknown[] }).issues as unknown[]) as unknown[]).filter(
         (x): x is string => typeof x === "string",
@@ -511,43 +679,49 @@ export function errorFromResponse(
         headers: safeHeaders,
         requestId,
         data,
+        retryAfterMs,
       });
     case 401:
       return new TalosAuthenticationError(status, body, path, {
         headers: safeHeaders,
         requestId,
         data,
+        retryAfterMs,
       });
     case 402:
       return new TalosPaymentError(status, body, path, {
         headers: safeHeaders,
         requestId,
         data,
+        retryAfterMs,
       });
     case 403:
       return new TalosForbiddenError(status, body, path, {
         headers: safeHeaders,
         requestId,
         data,
+        retryAfterMs,
       });
     case 404:
       return new TalosNotFoundError(status, body, path, {
         headers: safeHeaders,
         requestId,
         data,
+        retryAfterMs,
       });
     case 409:
       return new TalosConflictError(status, body, path, {
         headers: safeHeaders,
         requestId,
         data,
+        retryAfterMs,
       });
     case 429:
       return new TalosRateLimitError(status, body, path, {
         headers: safeHeaders,
         requestId,
         data,
-        retryAfterMs: parseRetryAfter(safeHeaders["retry-after"]),
+        retryAfterMs,
       });
     case 502:
     case 503:
@@ -556,6 +730,7 @@ export function errorFromResponse(
         headers: safeHeaders,
         requestId,
         data,
+        retryAfterMs,
       });
     default:
       if (status >= 500) {
@@ -563,12 +738,14 @@ export function errorFromResponse(
           headers: safeHeaders,
           requestId,
           data,
+          retryAfterMs,
         });
       }
       return new TalosAPIError(status, body, path, {
         headers: safeHeaders,
         requestId,
         data,
+        retryAfterMs,
       });
   }
 }

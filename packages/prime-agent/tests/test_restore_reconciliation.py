@@ -796,3 +796,34 @@ class TestCommercePersistedFencingTokens:
         assert commerce._db is None
         await commerce.set_claimed_job("cj-5", fencing_token=500, ttl_seconds=60)
         assert commerce._claimed_jobs.get("cj-5") == 500
+
+    async def test_release_claimed_jobs_releases_and_removes_successful_claims(
+        self, tmp_path: Path
+    ):
+        db = _fresh_db(tmp_path)
+        commerce._db = db
+        commerce._api = MagicMock()
+        commerce._api.release_job = AsyncMock(return_value={"released": True})
+
+        await commerce.set_claimed_job("cj-release", fencing_token=600, ttl_seconds=60)
+        released, failed = await commerce.release_claimed_jobs()
+
+        assert (released, failed) == (1, 0)
+        assert db.get_claimed_job("cj-release") is None
+        commerce._api.release_job.assert_awaited_once_with("cj-release", 600)
+        db.close()
+
+    async def test_release_claimed_jobs_keeps_failed_claims_for_reconciliation(
+        self, tmp_path: Path
+    ):
+        db = _fresh_db(tmp_path)
+        commerce._db = db
+        commerce._api = MagicMock()
+        commerce._api.release_job = AsyncMock(return_value=None)
+
+        await commerce.set_claimed_job("cj-failed", fencing_token=601, ttl_seconds=60)
+        released, failed = await commerce.release_claimed_jobs()
+
+        assert (released, failed) == (0, 1)
+        assert db.get_claimed_job("cj-failed") is not None
+        db.close()

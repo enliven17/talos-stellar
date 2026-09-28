@@ -3,13 +3,29 @@
 from __future__ import annotations
 
 import json
+import re
 from decimal import Decimal
 from pathlib import Path
 
-from pydantic import Field, PrivateAttr
+from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from talos_agent.circuit_breaker import CircuitBreakerConfig
+
 APP_DIR = Path.home() / ".talos-agent"
+
+_CONFIG_SECRET_FIELDS = re.compile(
+    r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|secret|password|private[_-]?key|seed|mnemonic|signature|payment)"
+)
+_CONFIG_SECRET_VALUE = re.compile(r"(?i)(input_value\s*=\s*)(['\"])(.*?)(\2)")
+
+
+def safe_config_error(error: BaseException) -> str:
+    """Return a useful configuration error without exposing secret values."""
+    text = str(error)
+    if _CONFIG_SECRET_FIELDS.search(text):
+        text = _CONFIG_SECRET_VALUE.sub(r"\1'[REDACTED]'", text)
+    return text or "configuration could not be loaded"
 
 
 def _json_config_source() -> dict:
@@ -100,6 +116,46 @@ class Settings(BaseSettings):
         "checks budgets before allowing further calls.",
     )
 
+        # Backup retention policy (Issue #543) — disabled by default, backward compatible
+    backup_retention_enabled: bool = Field(
+        default=False,
+        description="Prune old local backup artifacts after each successful backup, "
+        "according to backup_retention_max_count / backup_retention_max_age_days. "
+        "When disabled (default), backups accumulate forever (legacy behavior).",
+    )
+    backup_retention_max_count: int = Field(
+        default=10,
+        ge=0,
+        le=100000,
+        description="Maximum number of backup artifacts to keep per agent scope. "
+        "0 means unlimited (age-based pruning only, if enabled).",
+    )
+    backup_retention_max_age_days: int = Field(
+        default=30,
+        ge=0,
+        le=36500,
+        description="Maximum age in days of a backup artifact before it is eligible "
+        "for pruning. 0 means unlimited (count-based pruning only, if enabled).",
+    )
+
+
+    # API client response size cap (Issue #561)
+    # Hard upper bound on response bodies read from the Talos Web API.  Defaults
+    # to 1 MiB — large enough for any legitimate JSON payload and small enough to
+    # prevent memory exhaustion from oversized or malicious responses.
+    api_client_response_max_bytes: int = Field(
+        default=1_048_576,
+        ge=1_024,
+        le=104_857_600,
+        validation_alias="TALOS_API_CLIENT_RESPONSE_MAX_BYTES",
+        description=(
+            "Maximum bytes allowed in a Talos Web API response body. "
+            "Responses that exceed this limit are rejected with "
+            "ResponseTooLargeError before the body is decoded. "
+            "Default 1 MiB. Min 1 KiB, max 100 MiB."
+        ),
+    )
+
     # X (Twitter)
     x_username: str = ""
     x_password: str = ""
@@ -118,6 +174,30 @@ class Settings(BaseSettings):
     channel_configs: dict = Field(default_factory=dict, description="Per-channel credentials map")
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+
+    # Telegram send queue (opt-in; when disabled the adapter sends directly, as before).
+    # Defaults follow Telegram's documented limits: ~1 msg/s per chat, 20 msgs/min per group.
+    telegram_rate_limit_enabled: bool = Field(
+        default=False, validation_alias="TALOS_TELEGRAM_RATE_LIMIT_ENABLED"
+    )
+    telegram_min_interval_seconds: float = Field(
+        default=1.0, ge=0, le=60, validation_alias="TALOS_TELEGRAM_MIN_INTERVAL_SECONDS"
+    )
+    telegram_max_per_minute: int = Field(
+        default=20, ge=1, le=1000, validation_alias="TALOS_TELEGRAM_MAX_PER_MINUTE"
+    )
+    telegram_queue_max_size: int = Field(
+        default=1000, ge=1, le=100000, validation_alias="TALOS_TELEGRAM_QUEUE_MAX_SIZE"
+    )
+    telegram_queue_max_attempts: int = Field(
+        default=5, ge=1, le=50, validation_alias="TALOS_TELEGRAM_QUEUE_MAX_ATTEMPTS"
+    )
+    telegram_queue_max_age_seconds: float = Field(
+        default=3600.0, ge=1, le=604800, validation_alias="TALOS_TELEGRAM_QUEUE_MAX_AGE_SECONDS"
+    )
+    telegram_queue_drain_interval_seconds: float = Field(
+        default=1.0, ge=0.1, le=60, validation_alias="TALOS_TELEGRAM_QUEUE_DRAIN_INTERVAL_SECONDS"
+    )
 
     # Versioned encrypted secret rotation (opt-in for backward compatibility).
     secret_rotation_enabled: bool = Field(
@@ -145,6 +225,11 @@ class Settings(BaseSettings):
         ge=1,
         le=60000,
         validation_alias="TALOS_SECRET_DB_TIMEOUT_MS",
+    )
+    secret_store_backend: str = Field(
+        default="sqlite",
+        validation_alias="TALOS_SECRET_STORE_BACKEND",
+        description="Pluggable secret-store backend: sqlite (default) or memory",
     )
 
     # Third-party adapter capability sandbox (opt-in rollout).
@@ -196,6 +281,23 @@ class Settings(BaseSettings):
         le=1000000,
         validation_alias="TALOS_ADAPTER_MAX_INVOCATION_RECORDS",
     )
+    adapter_retry_configs: dict[str, dict] = Field(
+        default_factory=dict,
+        validation_alias="TALOS_ADAPTER_RETRY_CONFIGS",
+        description="Per-adapter retry and circuit breaker settings as JSON",
+    )
+
+    @field_validator("adapter_retry_configs")
+    @classmethod
+    def validate_adapter_retry_configs(cls, value: dict[str, dict]) -> dict[str, dict]:
+        for adapter, config in value.items():
+            if not isinstance(adapter, str) or not adapter or not isinstance(config, dict):
+                raise ValueError("adapter retry configs must map adapter names to objects")
+            try:
+                CircuitBreakerConfig.from_mapping(config)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid retry config for adapter '{adapter}'") from exc
+        return {adapter.lower(): config for adapter, config in value.items()}
 
     # Policy engine (disabled by default — backward compatible)
     policy_engine_enabled: bool = Field(default=False, description="Enable the declarative policy engine for autonomous actions")
@@ -263,6 +365,12 @@ class Settings(BaseSettings):
     )
     talos_job_effect_dispatch_timeout_seconds: int = Field(default=20, ge=1, le=120)
     talos_job_effect_db_timeout_ms: int = Field(default=5_000, ge=1, le=30_000)
+
+    # A2A (Agent-to-Agent) composition timeouts
+    a2a_connect_timeout: float = Field(default=10.0, description="Seconds to wait for A2A TCP connect")
+    a2a_read_timeout: float = Field(default=30.0, description="Seconds to wait for A2A response body")
+    a2a_write_timeout: float = Field(default=10.0, description="Seconds to wait to send A2A request body")
+    a2a_pool_timeout: float = Field(default=5.0, description="Seconds to wait for A2A connection from pool")
 
     # Graceful shutdown (#182)
     shutdown_deadline: float = Field(

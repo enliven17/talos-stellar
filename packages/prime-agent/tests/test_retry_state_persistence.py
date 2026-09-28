@@ -20,9 +20,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from talos_agent.db import LocalDB, _MIGRATIONS
+from talos_agent.clock import FakeClock
+from talos_agent.db import _MIGRATIONS, LocalDB
 from talos_agent.scheduler import DurableBackoff
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -240,7 +240,7 @@ def test_durable_backoff_max_backoff_cap(tmp_path: Path):
 
 
 def test_durable_backoff_jitter_preserved(tmp_path: Path):
-    """With jitter enabled, delays should vary and stay within ±jitter% of the base."""
+    """With jitter enabled, delay is stable and stays within the configured band."""
     db = _fresh_db(tmp_path)
     bo = DurableBackoff(
         "polling", db=db, base_delay=10.0, initial_backoff=100.0, jitter=0.2,
@@ -250,8 +250,75 @@ def test_durable_backoff_jitter_preserved(tmp_path: Path):
     delays = [bo.next_delay() for _ in range(50)]
     for d in delays:
         assert 80.0 <= d <= 120.0, f"Delay {d} outside jitter range"
-    # Should not be identical
-    assert len(set(delays)) > 1
+    assert len(set(delays)) == 1
+    db.close()
+
+
+def test_durable_backoff_jitter_is_deterministic_and_deadline_scoped(tmp_path: Path):
+    fixed_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    clock = FakeClock(fixed_time)
+    first = DurableBackoff(
+        "polling",
+        LocalDB(path=tmp_path / "first.db"),
+        base_delay=5,
+        initial_backoff=100,
+        jitter_identity="agent-one",
+        clock=clock,
+    )
+    same_identity = DurableBackoff(
+        "polling",
+        LocalDB(path=tmp_path / "same.db"),
+        base_delay=5,
+        initial_backoff=100,
+        jitter_identity="agent-one",
+        clock=clock,
+    )
+    other_identity = DurableBackoff(
+        "polling",
+        LocalDB(path=tmp_path / "other.db"),
+        base_delay=5,
+        initial_backoff=100,
+        jitter_identity="agent-two",
+        clock=clock,
+    )
+
+    first.failure()
+    same_identity.failure()
+    other_identity.failure()
+
+    assert first.next_delay() == same_identity.next_delay()
+    assert first.next_delay() != other_identity.next_delay()
+    assert first.delay_until_next_attempt() == pytest.approx(first.next_delay())
+
+    clock.advance(1)
+    assert first.delay_until_next_attempt() == pytest.approx(first.next_delay() - 1)
+
+
+@pytest.mark.parametrize(
+    "jitter", [-0.01, 1.01, float("nan"), float("inf"), 10**1000, "0.2", True]
+)
+def test_durable_backoff_rejects_invalid_jitter(tmp_path: Path, jitter):
+    db = _fresh_db(tmp_path)
+    with pytest.raises(ValueError, match="jitter must be a finite number between 0 and 1"):
+        DurableBackoff("invalid_jitter", db, base_delay=5, jitter=jitter)
+    db.close()
+
+
+def test_durable_backoff_accepts_full_jitter_boundary(tmp_path: Path):
+    db = _fresh_db(tmp_path)
+    backoff = DurableBackoff(
+        "full_jitter", db, base_delay=5, initial_backoff=100, jitter=1
+    )
+    backoff.failure()
+
+    assert 0.1 <= backoff.next_delay() <= 200
+    db.close()
+
+
+def test_durable_backoff_rejects_non_string_jitter_identity(tmp_path: Path):
+    db = _fresh_db(tmp_path)
+    with pytest.raises(ValueError, match="jitter identity must be a string"):
+        DurableBackoff("invalid_identity", db, base_delay=5, jitter_identity=object())
     db.close()
 
 

@@ -24,13 +24,22 @@ def _inject_trace_context(logger, method_name, event_dict):
 
 
 def configure_logging() -> None:
-    """Set up structlog to emit JSON lines to stdout."""
+    """Set up structlog to emit JSON lines to stdout.
+
+    The redaction processor runs *after* trace context is injected (so
+    ``trace_id`` / ``span_id`` are present and can be preserved) and
+    *before* ``JSONRenderer`` (so secrets never reach the serialized
+    output).
+    """
+    from talos_agent.redact import redact_event_dict
+
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
             _inject_trace_context,
+            redact_event_dict,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),

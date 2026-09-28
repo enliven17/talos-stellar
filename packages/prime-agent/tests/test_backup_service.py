@@ -261,3 +261,174 @@ def test_artifact_not_found_error_is_safe():
     assert "passphrase" not in msg.lower()
     assert "SXXXXXX" not in msg
     assert "ENC::" not in msg
+
+
+def test_stream_encrypted_artifact_roundtrip(tmp_path: Path):
+    from talos_agent.backup_service import stream_encrypted_artifact
+    from talos_agent.crypto import encrypt_with_password, decrypt_with_password
+
+    payload = "hello-stream-" + ("x" * 5000)
+    encrypted = encrypt_with_password(payload, "stream-pass-ok")
+    out = tmp_path / "streamed.enc"
+    written = stream_encrypted_artifact(encrypted, out, chunk_size=1024)
+    assert out.exists()
+    assert written == len(encrypted)
+    assert decrypt_with_password(out.read_text(encoding="utf8"), "stream-pass-ok") == payload
+
+
+def test_stream_encrypted_artifact_rejects_tiny_chunk(tmp_path: Path):
+    from talos_agent.backup_service import stream_encrypted_artifact, BackupError
+    with pytest.raises(BackupError):
+        stream_encrypted_artifact("abc", tmp_path / "x.enc", chunk_size=8)
+
+        
+
+# ── Retention (Issue #543) ────────────────────────────────────────
+#
+# Positive:  count-only and age-only pruning keep the right files.
+# Negative:  invalid policy values raise BackupError; unrelated file
+#            extensions are never touched.
+# Boundary:  disabled policy (0/0) is a no-op; exact-count boundary keeps
+#            everything; both limits combined use OR semantics, so the
+#            stricter one wins per file.
+# Regression: a file that can't be deleted is skipped, not raised, so a
+#             single locked/racing file can never fail the surrounding
+#             `backup` command.
+
+
+def _touch_with_age(path: Path, age_days: float) -> None:
+    import os
+    import time
+
+    path.write_text("x")
+    mtime = time.time() - age_days * 86400
+    os.utime(path, (mtime, mtime))
+
+
+def test_prune_noop_when_both_limits_disabled(tmp_path: Path):
+    """Default policy (0/0, matches backup_retention_enabled=False) touches nothing."""
+    from talos_agent.backup_service import prune_backups
+
+    for i in range(5):
+        _touch_with_age(tmp_path / f"talos-agent-{i}.enc", age_days=i * 10)
+
+    deleted = prune_backups(directory=tmp_path, max_count=0, max_age_days=0)
+    assert deleted == []
+    assert len(list(tmp_path.glob("*.enc"))) == 5
+
+
+def test_prune_by_count_keeps_newest(tmp_path: Path):
+    from talos_agent.backup_service import prune_backups
+
+    for i in range(5):
+        _touch_with_age(tmp_path / f"talos-agent-{i}.enc", age_days=i)
+
+    deleted = prune_backups(directory=tmp_path, max_count=2, max_age_days=0)
+    remaining = sorted(p.name for p in tmp_path.glob("*.enc"))
+    assert len(deleted) == 3
+    assert remaining == ["talos-agent-0.enc", "talos-agent-1.enc"]
+
+
+def test_prune_by_age_deletes_older_than_cutoff(tmp_path: Path):
+    from talos_agent.backup_service import prune_backups
+
+    _touch_with_age(tmp_path / "recent.enc", age_days=5)
+    _touch_with_age(tmp_path / "borderline.enc", age_days=29)
+    _touch_with_age(tmp_path / "stale.enc", age_days=35)
+
+    deleted = prune_backups(directory=tmp_path, max_count=0, max_age_days=30)
+    remaining = sorted(p.name for p in tmp_path.glob("*.enc"))
+    assert [p.name for p in deleted] == ["stale.enc"]
+    assert remaining == ["borderline.enc", "recent.enc"]
+
+
+def test_prune_count_exact_boundary_keeps_all(tmp_path: Path):
+    """max_count equal to the number of files deletes nothing (off-by-one guard)."""
+    from talos_agent.backup_service import prune_backups
+
+    for i in range(3):
+        _touch_with_age(tmp_path / f"talos-agent-{i}.enc", age_days=i)
+
+    deleted = prune_backups(directory=tmp_path, max_count=3, max_age_days=0)
+    assert deleted == []
+    assert len(list(tmp_path.glob("*.enc"))) == 3
+
+
+def test_prune_or_semantics_age_beats_count(tmp_path: Path):
+    """Both limits set: a file outside EITHER limit is deleted (OR, not AND).
+
+    max_count=4 alone would keep the 35-day-old file; max_age_days=30
+    alone would keep it too many files. Combined, the age limit must
+    still remove it even though the count limit had room to spare.
+    """
+    from talos_agent.backup_service import prune_backups
+
+    for i, age in enumerate([0, 10, 20, 35]):
+        _touch_with_age(tmp_path / f"talos-agent-{i}.enc", age_days=age)
+
+    deleted = prune_backups(directory=tmp_path, max_count=4, max_age_days=30)
+    remaining = sorted(p.name for p in tmp_path.glob("*.enc"))
+    assert [p.name for p in deleted] == ["talos-agent-3.enc"]
+    assert remaining == ["talos-agent-0.enc", "talos-agent-1.enc", "talos-agent-2.enc"]
+
+
+def test_prune_ignores_non_artifact_files(tmp_path: Path):
+    """`.partial` staging files and `.pre-restore` restore backups are never candidates."""
+    from talos_agent.backup_service import prune_backups
+
+    for i in range(5):
+        _touch_with_age(tmp_path / f"talos-agent-{i}.enc", age_days=i)
+    _touch_with_age(tmp_path / "talos-agent-0.enc.partial", age_days=99)
+    _touch_with_age(tmp_path / "talos-agent.db.pre-restore", age_days=99)
+
+    prune_backups(directory=tmp_path, max_count=1, max_age_days=0)
+    assert (tmp_path / "talos-agent-0.enc.partial").exists()
+    assert (tmp_path / "talos-agent.db.pre-restore").exists()
+
+
+def test_prune_rejects_negative_max_count(tmp_path: Path):
+    from talos_agent.backup_service import BackupError, prune_backups
+
+    with pytest.raises(BackupError):
+        prune_backups(directory=tmp_path, max_count=-1, max_age_days=0)
+
+
+def test_prune_rejects_negative_max_age_days(tmp_path: Path):
+    from talos_agent.backup_service import BackupError, prune_backups
+
+    with pytest.raises(BackupError):
+        prune_backups(directory=tmp_path, max_count=0, max_age_days=-1)
+
+
+def test_prune_missing_directory_returns_empty(tmp_path: Path):
+    """A directory that doesn't exist yet (first-ever backup) is not an error."""
+    from talos_agent.backup_service import prune_backups
+
+    missing = tmp_path / "does-not-exist-yet"
+    assert prune_backups(directory=missing, max_count=1, max_age_days=1) == []
+
+
+def test_prune_skips_undeletable_file_without_raising(tmp_path: Path, monkeypatch):
+    """A file that fails to unlink (permission error, concurrent removal) is
+    skipped, never raised — pruning must not turn a successful backup into
+    a failed `backup` command."""
+    from pathlib import Path as _Path
+
+    from talos_agent.backup_service import prune_backups
+
+    for i in range(3):
+        _touch_with_age(tmp_path / f"talos-agent-{i}.enc", age_days=i)
+
+    real_unlink = _Path.unlink
+
+    def flaky_unlink(self, *args, **kwargs):
+        if self.name == "talos-agent-2.enc":
+            raise OSError("simulated permission error")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(_Path, "unlink", flaky_unlink)
+
+    deleted = prune_backups(directory=tmp_path, max_count=1, max_age_days=0)
+    assert [p.name for p in deleted] == ["talos-agent-1.enc"]
+    assert (tmp_path / "talos-agent-2.enc").exists()
+    assert (tmp_path / "talos-agent-0.enc").exists()

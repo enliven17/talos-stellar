@@ -63,6 +63,19 @@ export const CURRENT_SIGNATURE_VERSION = 1;
 /** Supported signature versions for verification. */
 export const SUPPORTED_SIGNATURE_VERSIONS = [1];
 
+// ─── Secret rotation ─────────────────────────────────────────────
+
+/** Default overlap window (seconds) while previous + current secrets dual-sign. */
+export const DEFAULT_SECRET_ROTATION_GRACE_SECONDS = Number(
+  process.env.WEBHOOK_SECRET_ROTATION_GRACE_SECONDS ?? 86_400,
+);
+
+/** Minimum allowed grace window (5 minutes). */
+export const MIN_SECRET_ROTATION_GRACE_SECONDS = 300;
+
+/** Maximum allowed grace window (30 days). */
+export const MAX_SECRET_ROTATION_GRACE_SECONDS = 2_592_000;
+
 // ─── Encryption ──────────────────────────────────────────────────
 
 /** Derive the AES-256-GCM encryption key for webhook secrets from an env var. */

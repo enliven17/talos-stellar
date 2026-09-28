@@ -2,6 +2,60 @@
 
 Autonomous agent corporation runtime for Stellar GTM agents.
 
+## API Client Response Size Cap (issue #561)
+
+All HTTP responses from the Talos Web API are bounded before the body is
+decoded. This prevents memory exhaustion from oversized or malicious responses
+and closes a potential information-disclosure path where a very large response
+could be logged or stored.
+
+### How it works
+
+1. **Content-Length fast-reject** — if the server declares a body size that
+   already exceeds the limit, the request is rejected immediately before any
+   body bytes are read.
+2. **Body measurement** — after httpx buffers the response, `len(response.content)`
+   is checked as the authoritative byte count. This catches cases where the
+   server omits or lies about `Content-Length`.
+3. **`ResponseTooLargeError`** — raised on any violation. The error carries only
+   `url_path`, `actual_bytes`, and `limit_bytes`. Response bodies, headers,
+   secrets, seeds, and payment proofs are never included in the error.
+
+### Configuration
+
+| Variable | Default | Range | Description |
+|---|---|---|---|
+| `TALOS_API_CLIENT_RESPONSE_MAX_BYTES` | `1048576` (1 MiB) | 1 KiB–100 MiB | Maximum allowed response body size |
+
+To tighten the cap in a constrained environment:
+
+```bash
+TALOS_API_CLIENT_RESPONSE_MAX_BYTES=262144  # 256 KiB
+```
+
+### Error handling
+
+`ResponseTooLargeError` is importable from `talos_agent.http`. Callers that
+need to handle it explicitly can do so:
+
+```python
+from talos_agent.http import ResponseTooLargeError
+
+try:
+    result = await api_client.get_talos(talos_id)
+except ResponseTooLargeError as exc:
+    logger.warning(
+        "API response too large path=%s actual=%d limit=%d",
+        exc.url_path, exc.actual_bytes, exc.limit_bytes,
+    )
+```
+
+### Compatibility
+
+All existing public methods (`get_talos`, `report_activity`, `update_status`,
+`get_pending_jobs`, etc.) are unaffected — typical JSON responses are well
+under 1 MiB. The cap only fires on responses that exceed the configured limit.
+
 ## Checkpoint Export and Inspection
 
 The checkpoint CLI provides safe operator commands for exporting and inspecting an agent checkpoint without modifying the running agent or its SQLite database.
@@ -187,6 +241,44 @@ _MIGRATIONS.append(
    pytest tests/
    ```
 3. Deploy. The database will automatically upgrade on startup.
+
+## Coverage Enforcement (issue #638)
+
+Critical agent modules — payments, crypto/secrets, durability (checkpoint/
+restore/db), scheduling, policy engine, and network resilience — carry a hard
+**per-module** coverage floor. Thresholds live in one place:
+`COVERAGE_FLOORS` in [`scripts/check-coverage.py`](./scripts/check-coverage.py).
+The global `fail_under` backstop lives in `[tool.coverage.report]` in
+`pyproject.toml`.
+
+### Exact local commands
+
+```bash
+cd packages/prime-agent
+
+# 1. Run the suite with coverage enabled (produces coverage.json)
+uv run pytest tests/ --cov --cov-report=json --cov-report=term
+
+# 2. Run the per-module gate (same command CI runs)
+uv run python scripts/check-coverage.py coverage.json
+```
+
+The gate exits `0` when every critical module is at or above its floor and `1`
+with an explicit per-module failure list otherwise. It also fails closed on a
+missing, malformed, or unexpected-format report instead of silently passing.
+
+### Raising the floor / adding a module
+
+1. Improve tests for the module until its reported percentage meets the new
+   floor.
+2. Update (or add) the entry in `COVERAGE_FLOORS` in
+   `scripts/check-coverage.py`.
+3. Re-run both commands above.
+
+Non-critical modules are covered by the global `fail_under` backstop in
+`pyproject.toml` rather than a per-module floor, so unrelated low-coverage code
+does not block unrelated work. When a module becomes load-bearing (money,
+identity, durability), add it to `COVERAGE_FLOORS`.
 
 ## Deployment
 
