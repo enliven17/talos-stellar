@@ -72,7 +72,7 @@ describe("health probes", () => {
 
   describe("readiness probe (GET /api/health)", () => {
     it("returns 200 ok when all dependencies are healthy", async () => {
-      vi.mocked(db.execute).mockResolvedValue({ rows: [] });
+      vi.mocked(db.execute).mockResolvedValue({ rows: [] } as never);
       mockFetch.mockResolvedValue(new Response(null, { status: 200 }));
 
       const response = await healthGet(healthRequest());
@@ -82,13 +82,15 @@ describe("health probes", () => {
       const body = await response.json();
       expect(body).toEqual({
         ok: true,
+        status: "ok",
+        ready: true,
         checks: { db: "ok", stellar: "ok" },
         ts: expect.any(String),
       });
       expect(isIsoString(body.ts)).toBe(true);
     });
 
-    it("returns 503 with db error when the database is down", async () => {
+    it("returns 503 unavailable when the database is down (critical)", async () => {
       vi.mocked(db.execute).mockRejectedValue(new Error("connection refused"));
       mockFetch.mockResolvedValue(new Response(null, { status: 200 }));
 
@@ -97,22 +99,26 @@ describe("health probes", () => {
 
       const body = await response.json();
       expect(body.ok).toBe(false);
+      expect(body.status).toBe("unavailable");
+      expect(body.ready).toBe(false);
       expect(body.checks).toEqual({ db: "error", stellar: "ok" });
     });
 
-    it("returns 503 with stellar error when Horizon fails", async () => {
-      vi.mocked(db.execute).mockResolvedValue({ rows: [] });
+    it("returns 200 degraded when Horizon fails (soft dependency)", async () => {
+      vi.mocked(db.execute).mockResolvedValue({ rows: [] } as never);
       mockFetch.mockResolvedValue(new Response(null, { status: 503 }));
 
       const response = await healthGet(healthRequest());
-      expect(response.status).toBe(503);
+      expect(response.status).toBe(200);
 
       const body = await response.json();
       expect(body.ok).toBe(false);
+      expect(body.status).toBe("degraded");
+      expect(body.ready).toBe(true);
       expect(body.checks).toEqual({ db: "ok", stellar: "error" });
     });
 
-    it("returns 503 with both errors when both dependencies fail", async () => {
+    it("returns 503 unavailable when both dependencies fail", async () => {
       vi.mocked(db.execute).mockRejectedValue(new Error("database down"));
       mockFetch.mockRejectedValue(new Error("network error"));
 
@@ -121,6 +127,8 @@ describe("health probes", () => {
 
       const body = await response.json();
       expect(body.ok).toBe(false);
+      expect(body.status).toBe("unavailable");
+      expect(body.ready).toBe(false);
       expect(body.checks).toEqual({ db: "error", stellar: "error" });
     });
 
@@ -143,7 +151,7 @@ describe("health probes", () => {
     it("returns a bounded response when the database times out", async () => {
       vi.useFakeTimers();
       vi.mocked(db.execute).mockImplementation(
-        () => new Promise(() => {}) // never settles
+        () => new Promise(() => {}) as never // never settles
       );
       mockFetch.mockResolvedValue(new Response(null, { status: 200 }));
 
@@ -156,26 +164,28 @@ describe("health probes", () => {
       expect(body.checks).toEqual({ db: "error", stellar: "ok" });
     });
 
-    it("returns a bounded response when Horizon times out", async () => {
+    it("returns a bounded degraded response when Horizon times out", async () => {
       vi.useFakeTimers();
-      vi.mocked(db.execute).mockResolvedValue({ rows: [] });
+      vi.mocked(db.execute).mockResolvedValue({ rows: [] } as never);
       mockFetch.mockImplementation(
-        () => new Promise(() => {}) // never settles
+        () => new Promise(() => {}) as never // never settles
       );
 
       const pending = healthGet(healthRequest());
       await vi.advanceTimersByTimeAsync(STELLAR_TIMEOUT_MS + 10);
       const response = await pending;
 
-      expect(response.status).toBe(503);
+      expect(response.status).toBe(200);
       const body = await response.json();
+      expect(body.status).toBe("degraded");
+      expect(body.ready).toBe(true);
       expect(body.checks).toEqual({ db: "ok", stellar: "error" });
     });
   });
 
   describe("readiness probe (GET /api/health/ready)", () => {
     it("matches the main /api/health response contract", async () => {
-      vi.mocked(db.execute).mockResolvedValue({ rows: [] });
+      vi.mocked(db.execute).mockResolvedValue({ rows: [] } as never);
       mockFetch.mockResolvedValue(new Response(null, { status: 200 }));
 
       const [healthResponse, readyResponse] = await Promise.all([
@@ -194,7 +204,7 @@ describe("health probes", () => {
     it("returns 503 with db error when the database times out", async () => {
       vi.useFakeTimers();
       vi.mocked(db.execute).mockImplementation(
-        () => new Promise(() => {})
+        () => new Promise(() => {}) as never
       );
       mockFetch.mockResolvedValue(new Response(null, { status: 200 }));
 
@@ -232,8 +242,8 @@ describe("health probe timeout env config", () => {
   it("honors valid HEALTH_*_TIMEOUT_MS overrides", async () => {
     const { parseTimeoutMs, resolveDbTimeoutMs, resolveStellarTimeoutMs } = await import("./utils");
     expect(parseTimeoutMs("1500", 2000)).toBe(1500);
-    expect(resolveDbTimeoutMs({ HEALTH_DB_TIMEOUT_MS: "1500" } as NodeJS.ProcessEnv)).toBe(1500);
-    expect(resolveStellarTimeoutMs({ HEALTH_STELLAR_TIMEOUT_MS: "4500" } as NodeJS.ProcessEnv)).toBe(4500);
+    expect(resolveDbTimeoutMs({ HEALTH_DB_TIMEOUT_MS: "1500" })).toBe(1500);
+    expect(resolveStellarTimeoutMs({ HEALTH_STELLAR_TIMEOUT_MS: "4500" })).toBe(4500);
   });
 
   it("falls back on malformed, zero, and out-of-range values", async () => {
@@ -244,5 +254,36 @@ describe("health probe timeout env config", () => {
     expect(parseTimeoutMs("999999", 2000)).toBe(2000);
     expect(parseTimeoutMs("12.5", 2000)).toBe(2000);
     expect(parseTimeoutMs("  ", 2000)).toBe(2000);
+  });
+});
+
+
+describe("summarizeReadiness", () => {
+  it("classifies ok / degraded / unavailable without conflating soft failure with hard failure", async () => {
+    const { summarizeReadiness } = await import("./utils");
+    expect(summarizeReadiness({ db: "ok", stellar: "ok" })).toEqual({
+      status: "ok",
+      ok: true,
+      ready: true,
+      httpStatus: 200,
+    });
+    expect(summarizeReadiness({ db: "ok", stellar: "error" })).toEqual({
+      status: "degraded",
+      ok: false,
+      ready: true,
+      httpStatus: 200,
+    });
+    expect(summarizeReadiness({ db: "error", stellar: "ok" })).toEqual({
+      status: "unavailable",
+      ok: false,
+      ready: false,
+      httpStatus: 503,
+    });
+    expect(summarizeReadiness({ db: "error", stellar: "error" })).toEqual({
+      status: "unavailable",
+      ok: false,
+      ready: false,
+      httpStatus: 503,
+    });
   });
 });

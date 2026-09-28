@@ -1,0 +1,27 @@
+[package]
+name = "indexer-fixtures"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Typed event fixtures for Talos Protocol Soroban indexer integration tests"
+
+[lib]
+crate-type = ["rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+talos-registry = { path = "../talos_registry" }
+talos-name-service = { path = "../talos_name_service" }
+talos-governance = { path = "../talos_governance" }
+
+[dev-dependencies]
+talos-registry = { path = "../talos_registry" }
+talos-name-service = { path = "../talos_name_service" }
+talos-governance = { path = "../talos_governance" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+talos-registry = { path = "../talos_registry" }
+talos-name-service = { path = "../talos_name_service" }
+talos-governance = { path = "../talos_governance" }

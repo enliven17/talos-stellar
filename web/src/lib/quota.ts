@@ -40,8 +40,7 @@
 
 import { and, eq, isNull, or, sql } from "drizzle-orm";
 import { tlsQuotaConfigs, tlsQuotaUsage } from "@/db/schema";
-import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
-import type * as schema from "@/db/schema";
+import type { db as appDb } from "@/db";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -83,7 +82,7 @@ export interface QuotaResult {
 
 // ─── DB type alias (Drizzle's inferred type) ─────────────────────────────────
 
-type Db = PostgresJsDatabase<typeof schema>;
+type Db = typeof appDb;
 
 // ─── Window helpers ───────────────────────────────────────────────────────────
 

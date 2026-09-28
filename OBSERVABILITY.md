@@ -1,5 +1,10 @@
 # Observability Guide
 
+The canonical operational metric definitions, source events, bounded
+dimensions, and fail-closed rules are maintained in
+[docs/operational-metrics.md](docs/operational-metrics.md). Verify the table
+locally with `pnpm metrics:check` before changing an operational signal.
+
 ## Error Tracking (Sentry)
 
 ### Web (Next.js)
@@ -49,6 +54,27 @@ logger.error({ err, requestId }, "handler failed");
 ```
 
 In development, logs are pretty-printed via `pino-pretty`.
+
+#### Log schema (`web/src/lib/log-schema.ts`)
+
+Structured lines are built as `{ event, schemaVersion: 1, requestId?, ...fields }`:
+- `event` — snake_case, max 64 chars (ambiguous names fail closed to
+  `invalid_log_event` with a `reason` code; raw input is never echoed).
+- `fields` — flat scalars only (`string | number | boolean | null`), max 16
+  entries, strings truncated to 500 chars. Sensitive keys (seeds, tokens,
+  payment proofs, media, …) reuse the canonical policy in
+  `web/src/lib/redact.ts` and emit `[REDACTED]` — the schema defines no
+  parallel secret list.
+- `requestId` — included only when it sanitizes via the shared
+  `sanitizeRequestId` (`web/src/lib/api-response.ts`); never generated here.
+
+Build with `buildLogEvent(event, fields, { requestId })` — pure, never
+throws, safe to retry. The outbox (`logOutboxEvent`) and jobs
+(`logJobEvent`) emitters already route through it with unchanged
+signatures. Focused check:
+```bash
+pnpm --dir web exec vitest run tests/log-schema.unit.test.ts
+```
 
 ### Agent (Python) — structlog
 Logs are JSON lines on stdout, captured by Railway.

@@ -46,6 +46,16 @@ Install the workspace dependencies from the repository root:
 ```bash
 pnpm install
 ```
+Generate the dependency license report from the installed workspace graph:
+
+```bash
+pnpm licenses:report
+```
+
+The command writes `dist/licenses/dependency-licenses.json` and
+`dist/licenses/dependency-licenses.md`. It fails closed when pnpm cannot read
+the dependency graph or any dependency has missing or ambiguous license
+metadata. The generated directory is a CI artifact and should not be committed.
 
 If you only need the web app, you can still work from the root with `pnpm dev` because the root package forwards to `web/`.
 
@@ -149,6 +159,46 @@ The stack defaults to the web service and a mock Stellar provider. Add the optio
 ```bash
 docker compose --profile agent up -d prime-agent
 ```
+
+#### Deterministic smoke fixture
+
+The local stack's expected shape — ports, health endpoints, and mock marketplace
+agents — is captured in a deterministic fixture at
+`web/tests/fixtures/smoke-fixture.json`. Regenerating it is byte-stable (no
+timestamps, randomness, or network): every run on any machine produces identical
+output, so diffs in review are meaningful.
+
+The exact local command to verify the fixture is canonical and drift-free:
+
+```bash
+pnpm smoke:fixture:check
+```
+
+To regenerate it after intentionally changing the fixture definition in
+`scripts/smoke-fixture.lib.mjs`:
+
+```bash
+pnpm smoke:fixture:gen
+```
+
+Focused tests (positive, negative, boundary, regression, and privacy coverage):
+
+```bash
+pnpm --dir web exec vitest run tests/smoke-fixture.unit.test.ts
+```
+
+Behavior notes:
+
+- **Fail closed** — ambiguous, malformed, or secret-shaped input aborts with a
+  non-zero exit and an explicit, privacy-safe error. Field names that look like
+  secrets (`secret`, `seed`, `private key`, `password`, `api key`, `proof`, …)
+  are rejected outright and their values are never logged or returned.
+- **Placeholder data only** — the fixture never contains real keys, seeds, or
+  payment proofs; agent addresses are deterministic truncated placeholders in
+  the same style as the demo seed.
+- **CI** — `pnpm smoke:fixture:check` is safe to wire into any workflow step;
+  it exits `0` when the committed fixture matches the canonical output and `1`
+  with a regeneration hint otherwise.
 
 ### Web
 
@@ -341,6 +391,26 @@ Choose the focused command by area:
 
 Deploy commands such as `pnpm --dir contracts run deploy:testnet` and `./deploy.sh testnet` require configured Stellar credentials and network access. Treat failures from missing signers, RPC timeouts, Horizon rate limits, or Soroban testnet availability as deployment-environment issues unless local `cargo test` or Wasm build also fails.
 
+### Runbook changes
+
+Any `*RUNBOOK*.md` (for example [`docs/DR_RUNBOOK.md`](./docs/DR_RUNBOOK.md)) is validated for
+required sections (triggers, verification, recovery, troubleshooting) and for referenced files and
+commands actually existing. See [`OBSERVABILITY.md`](./OBSERVABILITY.md) for the monitoring signals
+those runbooks respond to.
+
+```bash
+node scripts/validate-runbooks.mjs .
+node --test scripts/validate-runbooks.test.mjs
+```
+
+| Changed files | Focused command | CI workflow |
+| --- | --- | --- |
+| `docs/*RUNBOOK*.md`, `*RUNBOOK*.md`, `OBSERVABILITY.md` | `node scripts/validate-runbooks.mjs .` | `Runbook Validation CI` |
+
+The validator fails closed: a runbook missing a required section, a referenced file that no longer
+exists, an unresolvable `pnpm --dir`/`pnpm --filter` script, or an unknown `uv run` binary are all
+errors, and finding zero runbooks at all is treated as an error rather than silently passing.
+
 ### Common failure messages
 
 | Message | Usually means | Next step |
@@ -395,6 +465,10 @@ Behavior:
 Regression tests for the check live in `scripts/secret-scan.test.sh` (`bash scripts/secret-scan.test.sh`).
 
 ## Database Transaction Retry & Serialization Hardening
+
+For the cross-package, local-stack, release, security, and runtime metric
+definitions used by operators, see [docs/operational-metrics.md](docs/operational-metrics.md).
+Run `pnpm metrics:check` when changing a metric source or definition.
 
 Critical database state transitions (money, token purchases, patron creation, job state transitions, agent genesis) use `withTransactionRetry` from `web/src/db/db-retry.ts` to automatically recover from PostgreSQL serialization conflicts (`40001`), deadlocks (`40P01`), lock timeouts (`55P03`), and transient connection failures.
 
@@ -666,6 +740,19 @@ Versioning, changelogs, and tagging for `web`, `sdk`, `agent`, and `contracts` a
 see [`RELEASES.md`](./RELEASES.md). You don't need to do anything for this beyond writing
 [Conventional Commits](https://www.conventionalcommits.org/) subjects (`feat: ...`, `fix: ...`,
 etc.) in your PRs; version bumps are computed from those.
+
+Every PR title is automatically checked by the
+[`Release Checks`](.github/workflows/release-checks.yml) CI workflow. To
+validate your PR title locally before pushing:
+
+```bash
+PR_TITLE="feat(sdk): add payments resource" \
+  node scripts/release/check-release-note.mjs
+```
+
+The check fails (exit 1) when the title does not follow Conventional Commits
+format. Rename the PR and re-push to fix it. See [`RELEASES.md`](./RELEASES.md)
+for the full format reference and local reproduction steps.
 
 ## Issue and PR Templates
 

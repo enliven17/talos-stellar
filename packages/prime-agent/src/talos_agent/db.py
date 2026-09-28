@@ -294,6 +294,76 @@ CREATE INDEX IF NOT EXISTS idx_completion_markers_expires_at
     ),
     (
         10,
+        # Secret rotation tables (re-homed after checkpoint migrations claimed 7-9)
+        # plus named rollback checkpoints for safe rotation recovery.
+        """
+CREATE TABLE IF NOT EXISTS secret_versions (
+    scope           TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    version         INTEGER NOT NULL,
+    ciphertext      TEXT NOT NULL,
+    key_id          TEXT NOT NULL,
+    status          TEXT NOT NULL CHECK (status IN ('staged', 'active', 'superseded', 'revoked')),
+    request_id      TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    activated_at    TEXT,
+    revoked_at      TEXT,
+    PRIMARY KEY (scope, name, version),
+    UNIQUE (scope, name, request_id)
+);
+
+CREATE TABLE IF NOT EXISTS secret_heads (
+    scope             TEXT NOT NULL,
+    name              TEXT NOT NULL,
+    active_version    INTEGER NOT NULL,
+    previous_version  INTEGER,
+    generation        INTEGER NOT NULL DEFAULT 1,
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (scope, name)
+);
+
+CREATE TABLE IF NOT EXISTS secret_audit_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id    TEXT NOT NULL UNIQUE,
+    scope       TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    version     INTEGER,
+    event_type  TEXT NOT NULL,
+    outcome     TEXT NOT NULL,
+    actor       TEXT NOT NULL,
+    reason      TEXT,
+    metadata    TEXT NOT NULL DEFAULT '{}',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS secret_rollback_checkpoints (
+    scope              TEXT NOT NULL,
+    name               TEXT NOT NULL,
+    checkpoint_id      TEXT NOT NULL,
+    active_version     INTEGER NOT NULL,
+    previous_version   INTEGER,
+    generation         INTEGER NOT NULL,
+    request_id         TEXT NOT NULL,
+    actor              TEXT NOT NULL,
+    reason             TEXT,
+    status             TEXT NOT NULL CHECK (status IN ('open', 'restored', 'discarded')),
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    restored_at        TEXT,
+    discarded_at       TEXT,
+    PRIMARY KEY (scope, name, checkpoint_id),
+    UNIQUE (scope, name, request_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_secret_versions_status
+    ON secret_versions(scope, name, status);
+CREATE INDEX IF NOT EXISTS idx_secret_audit_lookup
+    ON secret_audit_events(scope, name, id);
+CREATE INDEX IF NOT EXISTS idx_secret_checkpoints_status
+    ON secret_rollback_checkpoints(scope, name, status);
+        """,
+    ),
+    (
+        10,
         # Restore durable job inbox/outbox if an earlier migration collision
         # dropped them, and add an append-only audit trail for effect replay.
         """
@@ -374,6 +444,42 @@ CREATE INDEX IF NOT EXISTS idx_job_effect_replay_audit_effect
     ON job_effect_replay_audit(owner_talos_id, effect_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_job_effect_replay_audit_job
     ON job_effect_replay_audit(owner_talos_id, job_id, created_at);
+        """,
+    ),
+    (
+        11,
+        # Durable Telegram send queue. Stores message text and chat target only:
+        # never bot tokens, request URLs, or raw Telegram error bodies.
+        # Times are UTC epoch seconds (REAL) so ordering never depends on text formats.
+        """
+CREATE TABLE IF NOT EXISTS telegram_send_queue (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    dedupe_key          TEXT UNIQUE,
+    chat_id             TEXT NOT NULL,
+    kind                TEXT NOT NULL CHECK (kind IN ('post', 'reply')),
+    text                TEXT NOT NULL,
+    reply_to_message_id INTEGER,
+    state               TEXT NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending', 'sending', 'sent', 'failed', 'indeterminate')),
+    attempt_count       INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at     REAL NOT NULL,
+    last_attempt_at     REAL,
+    lease_expires_at    REAL,
+    message_id          INTEGER,
+    last_error_code     TEXT,
+    created_at          REAL NOT NULL,
+    updated_at          REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS telegram_rate_state (
+    chat_id       TEXT PRIMARY KEY,
+    blocked_until REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_telegram_send_queue_state
+    ON telegram_send_queue(state, id);
+CREATE INDEX IF NOT EXISTS idx_telegram_send_queue_attempts
+    ON telegram_send_queue(chat_id, last_attempt_at);
         """,
     ),
 ]

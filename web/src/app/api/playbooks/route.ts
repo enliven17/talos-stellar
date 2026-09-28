@@ -12,6 +12,7 @@ import {
   type PlaybooksSortField,
 } from "@/lib/marketplace-sort";
 import { withTraceContext } from "@/lib/tracing";
+import { resolveTalosFromRequest } from "@/lib/auth";
 
 
 // GET /api/playbooks — List playbooks (with optional filters and cursor pagination)

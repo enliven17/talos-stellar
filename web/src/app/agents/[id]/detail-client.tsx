@@ -6,6 +6,7 @@ import { useWallet } from "@/components/wallet-gate";
 import { AgentAvatar } from "@/components/agent-avatar";
 import { AgentLifecyclePanel } from "@/components/agent-lifecycle-panel";
 import { AgentAvailabilityBadge } from "@/components/agent-availability-badge";
+import { AgentEmptyState } from "@/components/agent-view-states";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER as STELLAR_USDC_ISSUER } from "@/lib/stellar-config";
 
 

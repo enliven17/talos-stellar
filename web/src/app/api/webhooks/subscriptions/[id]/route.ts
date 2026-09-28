@@ -116,7 +116,7 @@ export async function PATCH(
     if (error) return error;
 
     // Build update payload
-    const updateData: Record<string, unknown> = {};
+    const updateData: Partial<typeof tlsWebhookSubscriptions.$inferInsert> = {};
 
     if (data.url !== undefined) updateData.url = data.url;
     if (data.eventTypes !== undefined) updateData.eventTypes = data.eventTypes;
@@ -181,7 +181,7 @@ export async function PATCH(
 
     const [updated] = await db
       .update(tlsWebhookSubscriptions)
-      .set(updateData as any)
+      .set(updateData)
       .where(
         and(
           eq(tlsWebhookSubscriptions.id, id),

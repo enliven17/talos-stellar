@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "description": "Negative fixtures for ChaosInjector.registerFault: malformed fault configurations that must fail loudly at registration time (see src/chaos.ts assertValidFaultConfig). Malformed probability types and unknown fault types previously registered silently and never fired; this fixture pins the explicit-error contract. Privacy-safe: contains no secrets, credentials, payment proofs, or request payloads.",
+  "cases": [
+    {
+      "name": "null-config",
+      "config": null,
+      "expectedError": "TypeError",
+      "expectedMessageIncludes": "FaultConfig must be a non-null object"
+    },
+    {
+      "name": "array-config",
+      "config": [],
+      "expectedError": "TypeError",
+      "expectedMessageIncludes": "FaultConfig must be a non-null object"
+    },
+    {
+      "name": "missing-type",
+      "config": { "probability": 0.5 },
+      "expectedError": "TypeError",
+      "expectedMessageIncludes": "FaultConfig.type must be one of"
+    },
+    {
+      "name": "unknown-type",
+      "config": { "type": "NETWORK_GREMLIN", "probability": 0.5 },
+      "expectedError": "TypeError",
+      "expectedMessageIncludes": "FaultConfig.type must be one of"
+    },
+    {
+      "name": "non-string-type",
+      "config": { "type": 42, "probability": 0.5 },
+      "expectedError": "TypeError",
+      "expectedMessageIncludes": "FaultConfig.type must be one of"
+    },
+    {
+      "name": "missing-probability",
+      "config": { "type": "NETWORK_DROP" },
+      "expectedError": "TypeError",
+      "expectedMessageIncludes": "FaultConfig.probability must be a finite number"
+    },
+    {
+      "name": "nan-probability",
+      "config": { "type": "NETWORK_DROP", "probability": "NaN" },
+      "expectedError": "TypeError",
+      "expectedMessageIncludes": "FaultConfig.probability must be a finite number"
+    },
+    {
+      "name": "string-probability",
+      "config": { "type": "NETWORK_DROP", "probability": "0.5" },
+      "expectedError": "TypeError",
+      "expectedMessageIncludes": "FaultConfig.probability must be a finite number"
+    },
+    {
+      "name": "infinite-probability",
+      "config": { "type": "NETWORK_DROP", "probability": "Infinity" },
+      "expectedError": "TypeError",
+      "expectedMessageIncludes": "FaultConfig.probability must be a finite number"
+    },
+    {
+      "name": "negative-probability",
+      "config": { "type": "NETWORK_DROP", "probability": -0.1 },
+      "expectedError": "RangeError",
+      "expectedMessageIncludes": "Fault probability must be between 0 and 1"
+    },
+    {
+      "name": "probability-above-one",
+      "config": { "type": "NETWORK_DROP", "probability": 1.1 },
+      "expectedError": "RangeError",
+      "expectedMessageIncludes": "Fault probability must be between 0 and 1"
+    },
+    {
+      "name": "negative-duration",
+      "config": { "type": "NETWORK_DELAY", "probability": 1, "durationMs": -1 },
+      "expectedError": "RangeError",
+      "expectedMessageIncludes": "FaultConfig.durationMs must be >= 0"
+    },
+    {
+      "name": "nan-duration",
+      "config": { "type": "NETWORK_DELAY", "probability": 1, "durationMs": "NaN" },
+      "expectedError": "TypeError",
+      "expectedMessageIncludes": "FaultConfig.durationMs must be a finite number"
+    },
+    {
+      "name": "non-string-message",
+      "config": { "type": "NETWORK_DROP", "probability": 0.5, "message": 42 },
+      "expectedError": "TypeError",
+      "expectedMessageIncludes": "FaultConfig.message must be a string"
+    }
+  ]
+}

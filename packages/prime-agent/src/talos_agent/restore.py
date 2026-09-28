@@ -46,9 +46,10 @@ All thresholds are configurable with sensible defaults.  See
 Observability
 --------------
 Every action is emitted through ``structlog`` (structured JSON) at ``INFO``
-level via ``talos_agent.observability.log``.  A single summary record
-``restore_reconciliation_complete`` is emitted at the end with counts of
-every action taken.
+level via ``talos_agent.observability.log``.  After reconciliation a privacy-safe
+``restore_checksum`` digest is computed and a
+``restore_reconciliation_complete`` summary (counts + checksum) is emitted.
+The latest reconciliation telemetry is cached for ``TelemetryCollector``.
 
 Errors
 ------
@@ -330,6 +331,205 @@ def compute_restore_state_diff(
         staged_conn.close()
 
 
+# ── Restore checksum + reconciliation telemetry ────────────────────────────────
+
+_RESTORE_CHECKSUM_VERSION = 1
+_LAST_RECONCILIATION_TELEMETRY: dict[str, Any] | None = None
+
+
+@dataclass
+class RestoreChecksum:
+    """Privacy-safe integrity checksum of restored durable agent state.
+
+    Digests cover table names, row counts, and keyed fingerprints only —
+    never secret values, seeds, payment proofs, or sensitive media.
+    """
+
+    algorithm: str = "sha256"
+    digest: str = ""
+    version: int = _RESTORE_CHECKSUM_VERSION
+    table_count: int = 0
+    total_rows: int = 0
+    computed_at: str = ""
+    empty: bool = False
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        if not data.get("error"):
+            data.pop("error", None)
+        return data
+
+
+def _safe_checksum_error(exc: BaseException) -> str:
+    """Return an explicit, privacy-safe error label (no secret material)."""
+    name = type(exc).__name__
+    detail = str(exc)
+    lower = detail.lower()
+    if any(
+        tok in lower
+        for tok in (
+            "password",
+            "secret",
+            "token",
+            "seed",
+            "mnemonic",
+            "private",
+            "proof",
+            "api_key",
+        )
+    ):
+        return name
+    if len(detail) > 120:
+        detail = detail[:117] + "..."
+    return f"{name}:{detail}" if detail else name
+
+
+def _canonical_checksum_payload(snapshot: dict[str, Any]) -> str:
+    payload = {"v": _RESTORE_CHECKSUM_VERSION, "tables": snapshot}
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _hash_canonical(canonical: str) -> str:
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _resolve_sqlite_conn(source: Any) -> tuple[sqlite3.Connection, bool]:
+    """Return ``(connection, should_close)`` for a LocalDB / path / connection."""
+    if isinstance(source, sqlite3.Connection):
+        return source, False
+    if isinstance(source, (str, Path)):
+        conn = sqlite3.connect(str(source))
+        return conn, True
+    conn = getattr(source, "_conn", None)
+    if not isinstance(conn, sqlite3.Connection):
+        raise TypeError("source must be a LocalDB, path, or sqlite3.Connection")
+    return conn, False
+
+
+def compute_restore_checksum(source: Any) -> RestoreChecksum:
+    """Compute a privacy-safe restore checksum for durable agent state.
+
+    Parameters
+    ----------
+    source:
+        A :class:`~talos_agent.db.LocalDB`, filesystem path, or open
+        ``sqlite3.Connection``.  A missing path is treated as an empty
+        database (boundary-safe) rather than raising.
+    """
+    computed_at = datetime.now(timezone.utc).isoformat()
+
+    if source is None:
+        digest = _hash_canonical(_canonical_checksum_payload({}))
+        return RestoreChecksum(
+            digest=digest,
+            computed_at=computed_at,
+            empty=True,
+            error="missing_source",
+        )
+
+    if isinstance(source, (str, Path)) and not Path(source).exists():
+        digest = _hash_canonical(_canonical_checksum_payload({}))
+        return RestoreChecksum(
+            digest=digest,
+            computed_at=computed_at,
+            empty=True,
+            table_count=0,
+            total_rows=0,
+        )
+
+    should_close = False
+    conn: sqlite3.Connection | None = None
+    try:
+        conn, should_close = _resolve_sqlite_conn(source)
+    except Exception as exc:
+        return RestoreChecksum(
+            digest="",
+            computed_at=computed_at,
+            empty=True,
+            error=_safe_checksum_error(exc),
+        )
+
+    try:
+        tables = sorted(_list_user_tables(conn))
+        snapshot: dict[str, Any] = {}
+        total_rows = 0
+        for table in tables:
+            count = _table_row_count(conn, table)
+            total_rows += count
+            entry: dict[str, Any] = {"count": count}
+            key_col = _TABLE_KEY_COLUMNS.get(table)
+            if key_col is not None:
+                key_map = _table_key_map(conn, table, key_col)
+                entry["keys"] = {k: key_map[k] for k in sorted(key_map)}
+            snapshot[table] = entry
+
+        digest = _hash_canonical(_canonical_checksum_payload(snapshot))
+        return RestoreChecksum(
+            digest=digest,
+            computed_at=computed_at,
+            table_count=len(tables),
+            total_rows=total_rows,
+            empty=(len(tables) == 0 and total_rows == 0),
+        )
+    except Exception as exc:
+        return RestoreChecksum(
+            digest="",
+            computed_at=computed_at,
+            empty=True,
+            error=_safe_checksum_error(exc),
+        )
+    finally:
+        if should_close and conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def get_last_reconciliation_telemetry() -> dict[str, Any] | None:
+    """Return the most recent privacy-safe reconciliation telemetry snapshot."""
+    if _LAST_RECONCILIATION_TELEMETRY is None:
+        return None
+    return dict(_LAST_RECONCILIATION_TELEMETRY)
+
+
+def clear_last_reconciliation_telemetry() -> None:
+    """Reset cached reconciliation telemetry (tests / process restart)."""
+    global _LAST_RECONCILIATION_TELEMETRY
+    _LAST_RECONCILIATION_TELEMETRY = None
+
+
+def record_reconciliation_telemetry(
+    result: "ReconcileResult",
+    checksum: RestoreChecksum | None = None,
+) -> dict[str, Any]:
+    """Cache and return privacy-safe reconciliation telemetry for collectors."""
+    global _LAST_RECONCILIATION_TELEMETRY
+    telemetry: dict[str, Any] = {
+        "markers_pruned": result.markers_pruned,
+        "backoff_rows_capped": result.backoff_rows_capped,
+        "schedules_reset": result.schedules_reset,
+        "claimed_jobs_found": result.claimed_jobs_found,
+        "claimed_jobs_restored": result.claimed_jobs_restored,
+        "claimed_jobs_dropped": result.claimed_jobs_dropped,
+        "claimed_jobs_deferred": result.claimed_jobs_deferred,
+        "error_count": len(result.errors),
+    }
+    if checksum is not None:
+        telemetry["checksum"] = checksum.digest
+        telemetry["checksum_algorithm"] = checksum.algorithm
+        telemetry["checksum_version"] = checksum.version
+        telemetry["checksum_table_count"] = checksum.table_count
+        telemetry["checksum_total_rows"] = checksum.total_rows
+        telemetry["checksum_empty"] = checksum.empty
+        telemetry["checksum_computed_at"] = checksum.computed_at
+        if checksum.error:
+            telemetry["checksum_error"] = checksum.error
+    _LAST_RECONCILIATION_TELEMETRY = dict(telemetry)
+    return telemetry
+
+
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -394,8 +594,31 @@ class ReconcileResult:
     claimed_jobs_dropped: int = 0    # lease lost/expired → removed from DB
     claimed_jobs_deferred: int = 0   # API unreachable → kept in DB, not in memory
 
+    # Restore checksum (privacy-safe)
+    checksum: str = ""
+    checksum_algorithm: str = "sha256"
+    checksum_table_count: int = 0
+    checksum_total_rows: int = 0
+
     # Errors
     errors: list[str] = field(default_factory=list)
+
+    def to_telemetry(self) -> dict[str, Any]:
+        """Return a privacy-safe reconciliation telemetry dict (counts + checksum)."""
+        return {
+            "markers_pruned": self.markers_pruned,
+            "backoff_rows_capped": self.backoff_rows_capped,
+            "schedules_reset": self.schedules_reset,
+            "claimed_jobs_found": self.claimed_jobs_found,
+            "claimed_jobs_restored": self.claimed_jobs_restored,
+            "claimed_jobs_dropped": self.claimed_jobs_dropped,
+            "claimed_jobs_deferred": self.claimed_jobs_deferred,
+            "error_count": len(self.errors),
+            "checksum": self.checksum,
+            "checksum_algorithm": self.checksum_algorithm,
+            "checksum_table_count": self.checksum_table_count,
+            "checksum_total_rows": self.checksum_total_rows,
+        }
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -779,6 +1002,26 @@ async def reconcile_after_restore(
     # Step 4 — re-verify claimed jobs against authoritative API (async, network)
     await _verify_claimed_jobs(db, api, result, config)
 
+    # Step 5 — emit restore checksum + reconciliation telemetry (privacy-safe)
+    checksum = compute_restore_checksum(db)
+    result.checksum = checksum.digest
+    result.checksum_algorithm = checksum.algorithm
+    result.checksum_table_count = checksum.table_count
+    result.checksum_total_rows = checksum.total_rows
+    if checksum.error:
+        result.errors.append(f"restore_checksum:{checksum.error}")
+
+    telemetry = record_reconciliation_telemetry(result, checksum)
+    log.info(
+        "restore_checksum",
+        algorithm=checksum.algorithm,
+        digest=checksum.digest,
+        version=checksum.version,
+        table_count=checksum.table_count,
+        total_rows=checksum.total_rows,
+        empty=checksum.empty,
+        error=checksum.error,
+    )
     log.info(
         "restore_reconciliation_complete",
         markers_pruned=result.markers_pruned,
@@ -789,6 +1032,11 @@ async def reconcile_after_restore(
         claimed_jobs_dropped=result.claimed_jobs_dropped,
         claimed_jobs_deferred=result.claimed_jobs_deferred,
         errors=len(result.errors),
+        checksum=result.checksum,
+        checksum_algorithm=result.checksum_algorithm,
+        checksum_table_count=result.checksum_table_count,
+        checksum_total_rows=result.checksum_total_rows,
+        telemetry=telemetry,
     )
 
     if result.errors:
@@ -1386,6 +1634,7 @@ __all__ = [
     "PreflightError",
     "ReconcileConfig",
     "ReconcileResult",
+    "RestoreChecksum",
     "RestoreStateDiff",
     "RestoreTableDiff",
     "RollbackError",
@@ -1394,12 +1643,16 @@ __all__ = [
     "StagedRestoreManager",
     "StagedRestoreResult",
     "StagingError",
+    "clear_last_reconciliation_telemetry",
+    "compute_restore_checksum",
     "compute_restore_state_diff",
+    "get_last_reconciliation_telemetry",
     "perform_restore_dry_run",
     "perform_restore_dry_run_sync",
     "perform_staged_restore",
     "perform_staged_restore_sync",
     "reconcile_after_restore",
+    "record_reconciliation_telemetry",
     "recover_interrupted_restore",
 ]
 
