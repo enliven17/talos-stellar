@@ -111,6 +111,8 @@ export {
   SCHEMA_VERSION_RESPONSE_HEADER,
   SchemaVersionMismatchError,
   negotiateSchemaVersion,
+  SSE_MAX_FIELD_BYTES,
+  SSE_MAX_DATA_LINES,
 } from "./events.js";
 export type {
   TalosEventType,

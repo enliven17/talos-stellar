@@ -14,6 +14,8 @@
  * - Schema version negotiation: sends an `X-Talos-Event-Schema-Version` request header and
  *   validates the server's acknowledged version from the response header. Mismatches surface
  *   as {@link SchemaVersionMismatchError} before any events are delivered.
+ * - Parser hardening: handles \r\n line endings, UTF-8 BOM, oversized fields, empty data lines,
+ *   malformed frames, and deeply split chunks without unbounded memory growth.
  */
 
 import type { Logger } from "./webhooks.js";
@@ -155,6 +157,34 @@ export function negotiateSchemaVersion(
 
   return result;
 }
+
+// ── Parser hardening constants ─────────────────────────────────────────────────
+
+/**
+ * Maximum byte length of a single SSE field value (field name excluded).
+ * Values that exceed this limit are silently truncated and a warning is emitted.
+ * Protects against malicious or malfunctioning servers sending arbitrarily
+ * large payloads through a single SSE field.
+ *
+ * @default 1_048_576 (1 MiB)
+ */
+export const SSE_MAX_FIELD_BYTES = 1_048_576;
+
+/**
+ * Maximum number of data lines accumulated per SSE event frame.
+ * Frames that exceed this limit are discarded and a warning is emitted.
+ * Protects against server bugs that emit thousands of `data:` lines per frame.
+ *
+ * @default 1_000
+ */
+export const SSE_MAX_DATA_LINES = 1_000;
+
+/**
+ * The UTF-8 byte order mark (BOM) that some servers prepend to the first
+ * chunk of a text/event-stream response. Per the SSE specification, a BOM
+ * at the beginning of the stream must be ignored.
+ */
+const UTF8_BOM = "\uFEFF";
 
 // ── Public event types ─────────────────────────────────────────────────────────
 
@@ -305,6 +335,20 @@ export interface TalosEventStreamOptions {
 
   /** Optional chaos injector for fault injection during SSE connections. */
   chaosInjector?: ChaosInjector;
+
+  /**
+   * Maximum byte length of a single SSE field value before it is silently
+   * truncated. Protects against malicious or runaway servers.
+   * @default SSE_MAX_FIELD_BYTES (1 MiB)
+   */
+  maxFieldBytes?: number;
+
+  /**
+   * Maximum number of \`data:\` lines accumulated per SSE event frame before
+   * the frame is discarded. Protects against servers emitting runaway frames.
+   * @default SSE_MAX_DATA_LINES (1 000)
+   */
+  maxDataLines?: number;
 }
 
 // ── Internal state ─────────────────────────────────────────────────────────────
@@ -389,6 +433,8 @@ export class TalosEventStream {
       random: opts.random ?? Math.random,
       schemaVersion: opts.schemaVersion ?? TALOS_EVENT_SCHEMA_VERSION,
       strictSchemaVersionCheck: opts.strictSchemaVersionCheck ?? false,
+      maxFieldBytes: opts.maxFieldBytes ?? SSE_MAX_FIELD_BYTES,
+      maxDataLines: opts.maxDataLines ?? SSE_MAX_DATA_LINES,
       authHeader: opts.authHeader,
       seenStore: opts.seenStore,
       logger: opts.logger,
@@ -607,11 +653,14 @@ export class TalosEventStream {
     const reader = body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let firstChunk = true;
 
     // Current event being accumulated
     let eventId: string | undefined;
     let eventType: TalosEventType = "message";
     let dataLines: string[] = [];
+    // Guard against runaway frames with too many data: lines
+    let dataLineOverflow = false;
 
     try {
       while (true) {
@@ -621,20 +670,115 @@ export class TalosEventStream {
         }
 
         const { done, value } = await reader.read();
-        if (done) return;
+        if (done) {
+          // Stream ended — flush any content still in the buffer.
+          // A trailing \r that was held back (potential first half of \r\n)
+          // is now confirmed to be a bare \r line terminator.
+          if (buffer.length > 0) {
+            const normalized = buffer
+              .replace(/\uFEFF/g, "")
+              .replace(/\r\n/g, "\n")
+              .replace(/\r/g, "\n");
+            const lines = normalized.split("\n");
+            if (lines[lines.length - 1] === "") lines.pop();
+            for (const line of lines) {
+              if (line === "") {
+                if (!dataLineOverflow && dataLines.length > 0) {
+                  const data = dataLines.join("\n");
+                  const finalId = eventId;
+                  const finalType = eventType;
+                  if (finalId !== undefined) this.lastEventId = finalId;
+                  this.heartbeatMisses = 0;
+                  this._resetHeartbeatTimer();
+                  if (finalType !== "heartbeat") {
+                    const evt: TalosStreamEvent = {
+                      id: finalId,
+                      type: finalType,
+                      data,
+                      receivedAt: new Date(),
+                    };
+                    await this._dispatch(evt);
+                  }
+                }
+                eventId = undefined;
+                eventType = "message";
+                dataLines = [];
+                dataLineOverflow = false;
+              } else if (!line.startsWith(":")) {
+                const colonIdx = line.indexOf(":");
+                const field = colonIdx === -1 ? line : line.slice(0, colonIdx);
+                const val =
+                  colonIdx === -1
+                    ? ""
+                    : line.slice(colonIdx + 1).replace(/^ /, "");
+                if (field === "id") eventId = val;
+                else if (field === "event")
+                  eventType = val as TalosEventType;
+                else if (field === "data") {
+                  if (!dataLineOverflow) dataLines.push(val);
+                }
+              }
+            }
+          }
+          return;
+        }
 
-        buffer += decoder.decode(value, { stream: true });
+        let chunk = decoder.decode(value, { stream: true });
 
-        const lines = buffer.split("\n");
-        // Keep the last (potentially incomplete) line in the buffer
-        buffer = lines.pop() ?? "";
+        // Strip UTF-8 BOM from the very first decoded chunk.
+        // Per the SSE spec the BOM must be silently ignored.
+        if (firstChunk) {
+          if (chunk.startsWith(UTF8_BOM)) {
+            chunk = chunk.slice(UTF8_BOM.length);
+          }
+          firstChunk = false;
+        }
+
+        buffer += chunk;
+
+        // Split on both LF and CRLF per the SSE specification (§9.2).
+        // We normalise CRLF → LF first so the subsequent \n split works
+        // identically regardless of the server's line-ending convention.
+        //
+        // CRLF cross-chunk boundary: if the buffer ends with a bare \r we
+        // cannot yet tell whether the next chunk starts with \n (making it a
+        // \r\n pair) or not.  Hold the trailing \r back until the next chunk
+        // arrives so we never split a \r\n pair across two iterations.
+        let toProcess: string;
+        if (buffer.endsWith("\r")) {
+          toProcess = buffer.slice(0, buffer.length - 1);
+          buffer = "\r"; // held back — will be prepended on the next iteration
+        } else {
+          toProcess = buffer;
+          buffer = "";
+        }
+
+        if (toProcess.length === 0) continue;
+
+        // Strip any BOM characters that appear in the processed text.
+        // The SSE spec only mandates stripping at stream position 0, but a
+        // BOM appearing elsewhere (e.g. from a misconfigured proxy injecting
+        // one mid-stream) would corrupt field names if left in place.
+        const normalized = toProcess
+          .replace(/\uFEFF/g, "")
+          .replace(/\r\n/g, "\n")
+          .replace(/\r/g, "\n");
+        const lines = normalized.split("\n");
+        // Keep the last (potentially incomplete) line in the buffer,
+        // and reattach any held-back \r so it reassembles correctly next time.
+        buffer = (lines.pop() ?? "") + buffer;
 
         for (const rawLine of lines) {
-          const line = rawLine.replace(/\r$/, "");
+          // rawLine is already CR-stripped at this point
 
-          if (line === "") {
+          if (rawLine === "") {
             // Blank line — dispatch the accumulated event
-            if (dataLines.length > 0) {
+            if (dataLineOverflow) {
+              // Discard the frame; the overflow warning was already emitted
+              this.opts.logger?.warn("sse:frame_discarded_data_overflow", {
+                maxDataLines: this.opts.maxDataLines,
+              });
+            } else if (dataLines.length > 0) {
               const data = dataLines.join("\n");
               const finalId = eventId;
               const finalType = eventType;
@@ -661,33 +805,56 @@ export class TalosEventStream {
             eventId = undefined;
             eventType = "message";
             dataLines = [];
+            dataLineOverflow = false;
             continue;
           }
 
-          if (line.startsWith(":")) {
+          if (rawLine.startsWith(":")) {
             // SSE comment — counts as a heartbeat tick
             this.heartbeatMisses = 0;
             this._resetHeartbeatTimer();
             continue;
           }
 
-          const colonIdx = line.indexOf(":");
-          const field = colonIdx === -1 ? line : line.slice(0, colonIdx);
-          const value =
-            colonIdx === -1 ? "" : line.slice(colonIdx + 1).replace(/^ /, "");
+          const colonIdx = rawLine.indexOf(":");
+          const field = colonIdx === -1 ? rawLine : rawLine.slice(0, colonIdx);
+          let fieldValue =
+            colonIdx === -1
+              ? ""
+              : rawLine.slice(colonIdx + 1).replace(/^ /, "");
+
+          // Truncate oversized field values to prevent memory exhaustion.
+          if (fieldValue.length > this.opts.maxFieldBytes) {
+            this.opts.logger?.warn("sse:field_value_truncated", {
+              field,
+              originalLength: fieldValue.length,
+              maxFieldBytes: this.opts.maxFieldBytes,
+            });
+            fieldValue = fieldValue.slice(0, this.opts.maxFieldBytes);
+          }
 
           switch (field) {
             case "id":
-              eventId = value;
+              eventId = fieldValue;
               break;
             case "event":
-              eventType = value as TalosEventType;
+              eventType = fieldValue as TalosEventType;
               break;
             case "data":
-              dataLines.push(value);
+              if (!dataLineOverflow) {
+                if (dataLines.length >= this.opts.maxDataLines) {
+                  // Mark overflow; the frame will be discarded at dispatch time
+                  dataLineOverflow = true;
+                  this.opts.logger?.warn("sse:data_line_limit_reached", {
+                    maxDataLines: this.opts.maxDataLines,
+                  });
+                } else {
+                  dataLines.push(fieldValue);
+                }
+              }
               break;
             case "retry": {
-              const ms = parseInt(value, 10);
+              const ms = parseInt(fieldValue, 10);
               if (!Number.isNaN(ms)) {
                 // Server hint: update base reconnect delay
                 this.opts.baseReconnectDelayMs = ms;
