@@ -1,0 +1,38 @@
+name: Runbook Validation CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/*RUNBOOK*.md'
+      - '*RUNBOOK*.md'
+      - 'OBSERVABILITY.md'
+      - 'scripts/validate-runbooks.mjs'
+      - '.github/workflows/runbook-validation-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/*RUNBOOK*.md'
+      - '*RUNBOOK*.md'
+      - 'OBSERVABILITY.md'
+      - 'scripts/validate-runbooks.mjs'
+      - '.github/workflows/runbook-validation-ci.yml'
+
+jobs:
+  validate:
+    name: Validate incident runbooks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run validator unit tests
+        run: node --test scripts/validate-runbooks.test.mjs
+
+      - name: Validate runbooks
+        run: node scripts/validate-runbooks.mjs .

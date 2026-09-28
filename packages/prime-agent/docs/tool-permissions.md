@@ -104,6 +104,7 @@ than retry blindly:
 | `PERMISSION_NOT_GRANTED` | Manifest declares a capability the operator did not grant. |
 | `PERMISSION_HOST_NOT_ALLOWED` | Manifest's host allowlist is not covered by the grant. |
 | `PERMISSION_SPEND_LIMIT_EXCEEDED` | Requested amount exceeds `min(manifest ceiling, grant ceiling)`. |
+| `PERMISSION_SPEND_AMOUNT_INVALID` | A `wallet.transfer` tool was called with an amount key (`amount` / `amount_usd` / `price` / `value`) whose value is not a finite, non-negative number (e.g. `"NaN"`, `"-5"`, `"Infinity"`, `true`, `null`, `"ten"`). A *missing* amount is still inert. |
 | `PERMISSION_APPROVAL_REQUIRED` | Manifest or grant demands human approval; pass `approved=True` after it is obtained. |
 
 The permission check runs **before** the policy engine: a tool that may not
@@ -126,6 +127,30 @@ JSON line on the `talos_agent.tools.permissions` logger):
 Argument *values* are never recorded — only the manifest surface and the
 outcome — so the trail is safe to ship to a log aggregator. A failing audit sink
 is logged and swallowed; it never breaks a tool call.
+
+## Deny-by-default regression fixtures
+
+`tests/fixtures/policy/deny_by_default/` pins what the runtime refuses, as data:
+
+- `tool_permissions.json` — one case per `PermissionEnforcer` decision: the
+  tool, its manifest (`null` = undeclared, `{"legacy": "<tool>"}`, or inline
+  capability ids), the grants (`"NO_GRANTS"`, `"LEGACY_GRANTS"`, or a raw
+  `TOOL_PERMISSION_GRANTS` mapping), the mode, and the expected `allowed` /
+  `code` / `capability`.
+- `adapter_capabilities.json` — adapter sandbox cases (manifest overrides plus
+  network / secret / tool / filesystem checks that must `allow` or `deny`) and
+  a list of `invalid_manifests` that `load_manifests` must reject.
+
+`tests/test_deny_by_default_fixtures.py` interprets both files. On top of each
+case it asserts that a canary planted in tool arguments and resolved secrets
+never appears in a decision, audit record, exception message, or log line, and
+that every `CODE_*` constant in `permissions.py` is covered by at least one
+fixture — a new denial code without a regression case fails CI.
+
+To add a regression, append a case with a unique kebab-case `id` and a one-line
+`description` of the invariant; no Python change is needed. Never put real
+credentials in a fixture — the hygiene test rejects anything shaped like a
+Stellar secret seed.
 
 ## Legacy migration
 

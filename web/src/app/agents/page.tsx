@@ -1,12 +1,11 @@
-export const dynamic = 'force-dynamic';
-
+import { unstable_cache } from "next/cache";
 import { db } from "@/db";
 import { tlsTalos, tlsPatrons, tlsRevenues, tlsCommerceJobs } from "@/db/schema";
-import { desc, eq, sql } from "drizzle-orm";
+import { desc, sql } from "drizzle-orm";
 import { AgentsClient } from "./agents-client";
+import { AGENTS_LIST_TAG } from "@/lib/cache-tags";
 
-export default async function AgentsPage() {
-  // Aggregate counts in DB instead of loading all relations
+async function loadAgentsData() {
   const patronCounts = db
     .select({
       talosId: tlsPatrons.talosId,
@@ -46,7 +45,6 @@ export default async function AgentsPage() {
     },
   });
 
-  // Fetch aggregated stats
   const [patronRows, revenueRows, jobRows] = await Promise.all([
     db.select().from(patronCounts),
     db.select().from(revenueSums),
@@ -57,7 +55,7 @@ export default async function AgentsPage() {
   const revenueMap = new Map(revenueRows.map((r) => [r.talosId, r.total]));
   const jobMap = new Map(jobRows.map((r) => [r.talosId, { total: r.total, completed: r.completed }]));
 
-  const data = agents.map((c) => {
+  return agents.map((c) => {
     const totalRevenue = revenueMap.get(c.id) ?? 0;
     const jobs = jobMap.get(c.id) ?? { total: 0, completed: 0 };
     const successRate = jobs.total > 0 ? Math.round((jobs.completed / jobs.total) * 100) : null;
@@ -91,6 +89,14 @@ export default async function AgentsPage() {
       createdAt: c.createdAt.toISOString(),
     };
   });
+}
 
+const getCachedAgents = unstable_cache(loadAgentsData, ["agents-list"], {
+  tags: [AGENTS_LIST_TAG],
+  revalidate: 60,
+});
+
+export default async function AgentsPage() {
+  const data = await getCachedAgents();
   return <AgentsClient agents={data} />;
 }

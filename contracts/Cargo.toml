@@ -6,6 +6,7 @@ members = [
     "talos_governance",
     "ttl_manager",
     "storage_migration",
+    "indexer_fixtures",
 ]
 
 [workspace.dependencies]

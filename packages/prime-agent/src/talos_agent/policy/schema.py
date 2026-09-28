@@ -10,6 +10,7 @@ from __future__ import annotations
 import enum
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -44,6 +45,48 @@ class PolicyDecision(str, enum.Enum):
     APPROVE = "approve"
     ESCALATE = "escalate"
     DENY = "deny"
+
+
+# ── Privacy helpers for decision traces ───────────────────────────────────────
+
+# Deny-by-key: secret-shaped field names are never emitted into traces.
+_SECRET_KEY_PATTERN = re.compile(
+    r"(api[_-]?key|authorization|auth|secret|password|token|private[_-]?key|"
+    r"seed|mnemonic|signature|x-payment|payment[_-]?proof|cookie|passwd|credential)",
+    re.IGNORECASE,
+)
+_MAX_TRACE_VALUE_LEN = 64
+
+
+def _is_secret_field(name: str) -> bool:
+    return bool(_SECRET_KEY_PATTERN.search(name or ""))
+
+
+def redact_trace_value(field_name: str, value: Any) -> str | None:
+    """Return a privacy-safe string representation of *value* for traces.
+
+    Secrets, seeds, payment proofs, and sensitive media references are never
+    returned.  Non-secret values are truncated.  ``None`` when the value
+    itself is missing (or fully redacted as absent).
+    """
+    if value is None:
+        return None
+    if _is_secret_field(field_name):
+        return "[redacted]"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        parts = []
+        for item in list(value)[:8]:
+            parts.append(redact_trace_value(field_name, item) or "?")
+        rendered = "[" + ", ".join(parts) + ("…" if len(value) > 8 else "") + "]"
+        return rendered[:_MAX_TRACE_VALUE_LEN]
+    text = str(value)
+    if len(text) > _MAX_TRACE_VALUE_LEN:
+        return text[: _MAX_TRACE_VALUE_LEN - 3] + "..."
+    return text
 
 
 # ── Dataclasses ───────────────────────────────────────────────────────────────
@@ -134,18 +177,15 @@ class Policy:
             name=d.get("name", ""),
             version=d.get("version", "1.0.0"),
             description=d.get("description", ""),
-            rules=tuple(
-                PolicyRule.from_dict(r)
-                for r in d.get("rules", [])
-            ),
-            priority=d.get("priority", 0),
-            enabled=d.get("enabled", True),
+            rules=tuple(PolicyRule.from_dict(r) for r in d.get("rules", [])),
+            priority=int(d.get("priority", 0)),
+            enabled=bool(d.get("enabled", True)),
         )
 
 
 @dataclass(frozen=True)
 class ActionSpec:
-    """A structured representation of an agent action under evaluation.
+    """A fully-specified action presented to the policy engine.
 
     An ``ActionSpec`` is the input to :meth:`PolicyEngine.evaluate`.
     It fully describes the action being taken so policies can match
@@ -220,6 +260,127 @@ class ActionSpec:
         return None
 
 
+# ── Explainable decision traces ───────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ConditionTrace:
+    """Privacy-safe record of a single condition evaluation."""
+
+    field: str
+    operator: str
+    matched: bool
+    observed: str | None = None
+    expected: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "field": self.field,
+            "operator": self.operator,
+            "matched": self.matched,
+            "observed": self.observed,
+            "expected": self.expected,
+        }
+
+    def explain(self) -> str:
+        obs = self.observed if self.observed is not None else "<missing>"
+        exp = self.expected if self.expected is not None else "<n/a>"
+        status = "matched" if self.matched else "no-match"
+        return (
+            f"{self.field} {self.operator} {exp} "
+            f"(observed={obs}, {status})"
+        )
+
+
+@dataclass(frozen=True)
+class RuleTraceStep:
+    """One step in a policy decision trace (one rule evaluation)."""
+
+    policy: str
+    rule_id: str
+    severity: str
+    matched: bool
+    decision: str
+    reason: str = ""
+    conditions: tuple[ConditionTrace, ...] = ()
+    effect: str = "continue"
+    """What the engine did after this step.
+
+    Common values: ``continue``, ``record``, ``short_circuit_deny``,
+    ``skipped_disabled_policy``, ``catch_all_blocker_skipped``.
+    """
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "policy": self.policy,
+            "rule_id": self.rule_id,
+            "severity": self.severity,
+            "matched": self.matched,
+            "decision": self.decision,
+            "reason": self.reason,
+            "conditions": [c.to_dict() for c in self.conditions],
+            "effect": self.effect,
+        }
+
+    def explain(self) -> str:
+        conds = "; ".join(c.explain() for c in self.conditions) or "(no conditions)"
+        return (
+            f"[{self.policy}/{self.rule_id}] matched={self.matched} "
+            f"severity={self.severity} decision={self.decision} "
+            f"effect={self.effect} :: {conds}"
+        )
+
+
+@dataclass(frozen=True)
+class PolicyDecisionTrace:
+    """Explainable, privacy-safe record of a full policy evaluation.
+
+    Operators and contributors can inspect ``steps`` and ``summary`` to
+    understand *why* the engine approved, escalated, or denied an action
+    without seeing secrets, seeds, or payment proofs.
+    """
+
+    action: str
+    decision: str
+    engine_enabled: bool = True
+    short_circuited: bool = False
+    steps: tuple[RuleTraceStep, ...] = ()
+    summary: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action": self.action,
+            "decision": self.decision,
+            "engine_enabled": self.engine_enabled,
+            "short_circuited": self.short_circuited,
+            "steps": [s.to_dict() for s in self.steps],
+            "summary": self.summary,
+        }
+
+    def explain(self) -> str:
+        """Multi-line human-readable explanation of the decision."""
+        lines = [
+            f"action={self.action} decision={self.decision} "
+            f"enabled={self.engine_enabled} short_circuited={self.short_circuited}",
+        ]
+        if self.summary:
+            lines.append(f"summary: {self.summary}")
+        for step in self.steps:
+            lines.append(f"  - {step.explain()}")
+        return "\n".join(lines)
+
+    @classmethod
+    def disabled(cls, action: str) -> PolicyDecisionTrace:
+        return cls(
+            action=action,
+            decision=PolicyDecision.APPROVE.value,
+            engine_enabled=False,
+            short_circuited=False,
+            steps=(),
+            summary="Policy engine disabled; action approved without rule evaluation.",
+        )
+
+
 @dataclass(frozen=True)
 class PolicyResult:
     """The result of evaluating a set of policies against an action.
@@ -241,6 +402,8 @@ class PolicyResult:
     simulation:
         ``True`` when this result came from the :class:`PolicySimulator`
         and no enforcement should occur.
+    trace:
+        Explainable, privacy-safe decision trace for operators and audit.
     """
 
     decision: PolicyDecision
@@ -250,6 +413,7 @@ class PolicyResult:
     evaluated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     result_digest: str = ""
     simulation: bool = False
+    trace: PolicyDecisionTrace | None = None
 
     def __post_init__(self) -> None:
         if not self.result_digest:
@@ -268,8 +432,19 @@ class PolicyResult:
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
 
+    def explain(self) -> str:
+        """Return a human-readable explanation of this decision."""
+        if self.trace is not None:
+            return self.trace.explain()
+        if self.evidence:
+            return (
+                f"decision={self.decision.value}; "
+                + "; ".join(self.evidence)
+            )
+        return f"decision={self.decision.value} (no evidence recorded)"
+
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "decision": self.decision.value,
             "violated_rules": [
                 {
@@ -286,17 +461,26 @@ class PolicyResult:
             "result_digest": self.result_digest,
             "simulation": self.simulation,
         }
+        if self.trace is not None:
+            payload["trace"] = self.trace.to_dict()
+        return payload
 
     @classmethod
     def approved(
         cls,
         *,
         simulation: bool = False,
+        trace: PolicyDecisionTrace | None = None,
+        all_results: tuple[dict[str, Any], ...] = (),
+        evidence: tuple[str, ...] = (),
     ) -> PolicyResult:
         """Convenience factory: all checks passed."""
         return cls(
             decision=PolicyDecision.APPROVE,
             simulation=simulation,
+            trace=trace,
+            all_results=all_results,
+            evidence=evidence,
         )
 
     @classmethod
@@ -305,13 +489,18 @@ class PolicyResult:
         rule: PolicyRule,
         *,
         simulation: bool = False,
+        trace: PolicyDecisionTrace | None = None,
+        all_results: tuple[dict[str, Any], ...] = (),
+        evidence: tuple[str, ...] | None = None,
     ) -> PolicyResult:
         """Convenience factory: single rule blocked the action."""
         return cls(
             decision=PolicyDecision.DENY,
             violated_rules=(rule,),
-            evidence=(f"[{rule.rule_id}] {rule.reason}",),
+            evidence=evidence if evidence is not None else (f"[{rule.rule_id}] {rule.reason}",),
             simulation=simulation,
+            trace=trace,
+            all_results=all_results,
         )
 
     @classmethod
@@ -320,13 +509,20 @@ class PolicyResult:
         rules: tuple[PolicyRule, ...],
         *,
         simulation: bool = False,
+        trace: PolicyDecisionTrace | None = None,
+        all_results: tuple[dict[str, Any], ...] = (),
+        evidence: tuple[str, ...] | None = None,
     ) -> PolicyResult:
         """Convenience factory: one or more rules require escalation."""
         return cls(
             decision=PolicyDecision.ESCALATE,
             violated_rules=rules,
-            evidence=tuple(
-                f"[{r.rule_id}] {r.reason}" for r in rules
+            evidence=(
+                evidence
+                if evidence is not None
+                else tuple(f"[{r.rule_id}] {r.reason}" for r in rules)
             ),
             simulation=simulation,
+            trace=trace,
+            all_results=all_results,
         )

@@ -1,0 +1,30 @@
+name: Contributor Metadata
+description: Update your contributor metadata or request access
+title: "[CONTRIB] "
+labels: ["contributor"]
+body:
+  - type: input
+    id: github_handle
+    attributes:
+      label: GitHub Handle
+      description: Your GitHub username (without the @)
+    validations:
+      required: true
+  - type: input
+    id: stellar_wallet
+    attributes:
+      label: Stellar Wallet Address
+      description: Your public Stellar address for pulse rewards (must start with G)
+    validations:
+      required: true
+  - type: dropdown
+    id: role
+    attributes:
+      label: Primary Role
+      options:
+        - Developer
+        - Reviewer
+        - Documentation
+        - Design
+    validations:
+      required: true
