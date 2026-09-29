@@ -6,6 +6,7 @@ import { NextResponse } from "next/server";
 import { getAccountInfo, getNetworkPassphrase, getUSDCIssuer } from "@/lib/stellar";
 import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
 import { logger } from "@/lib/logger";
+import { registerTx } from "@/lib/reconciler";
 
 /**
  * Buy Mitos tokens from a Talos.
@@ -399,6 +400,18 @@ export async function POST(
     talosId: id,
     replayed: false,
   }, "buy-token purchase committed");
+
+  // Register the payment txHash with the finality reconciler so it can track
+  // on-chain settlement and apply repair if the tx is later found to be failed
+  // or expired.  Fire-and-forget: a registration failure never blocks the caller.
+  registerTx({
+    txHash,
+    sourceType: "token_purchase",
+    sourceId: txHash,           // tls_token_purchases PK is the txHash itself
+    expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000), // 2 h window
+  }).catch((err) =>
+    logger.error({ err, txHash, talosId: id }, "reconciler_register_tx_failed"),
+  );
 
   const successRes = NextResponse.json(responseBody);
   successRes.headers.set("Idempotency-Key", txHash);

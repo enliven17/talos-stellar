@@ -8,6 +8,7 @@ import { fulfillInstant } from "@/lib/fulfillment";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER } from "@/lib/stellar-config";
 import { ingestJobToLedger } from "@/lib/reputation-ledger";
 import { applyQuotaHeaders, checkAndIncrementQuota, quotaExceededResponse } from "@/lib/quota";
+import { registerTx } from "@/lib/reconciler";
 
 const IDEMPOTENCY_KEY_MAX_BYTES = 128;
 
@@ -374,6 +375,20 @@ export async function POST(
     );
 
     const finalBody = { ...responseBody, jobId: job.id };
+
+    // Register the payment txHash with the finality reconciler so it can
+    // track on-chain settlement and apply repair if the tx is later found to
+    // be failed or expired.  Fire-and-forget: a registration failure never
+    // blocks the caller.
+    registerTx({
+      txHash,
+      sourceType: "commerce_job",
+      sourceId: job.id,           // tls_commerce_jobs.id is the repair target
+      expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000), // 2 h window
+    }).catch((err) =>
+      logger.error({ err, txHash, jobId: job.id, talosId: id }, "reconciler_register_tx_failed"),
+    );
+
     return applyQuotaHeaders(Response.json(finalBody, { status: 201 }), quotaResult);
   } catch (err: unknown) {
     const e = err as Record<string, unknown>;
