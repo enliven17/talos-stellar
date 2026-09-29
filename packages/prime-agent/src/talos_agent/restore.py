@@ -139,7 +139,7 @@ _TABLE_KEY_COLUMNS: dict[str, str] = {
     "approval_cache": "action_hash",
     "commerce_queue": "id",
     "claimed_jobs": "job_id",
-    "completion_markers": "marker_key",
+    "completion_markers": "idempotency_key",
 }
 
 # Substrings that mark config/row keys as sensitive — values are never returned.
@@ -501,7 +501,7 @@ def clear_last_reconciliation_telemetry() -> None:
 
 
 def record_reconciliation_telemetry(
-    result: "ReconcileResult",
+    result: ReconcileResult,
     checksum: RestoreChecksum | None = None,
 ) -> dict[str, Any]:
     """Cache and return privacy-safe reconciliation telemetry for collectors."""

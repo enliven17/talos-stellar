@@ -1258,12 +1258,40 @@ class LocalDB:
         return [dict(r) for r in rows]
 
     def prune_expired_completion_markers(self) -> int:
-        """Delete expired completion markers. Returns the number of rows removed."""
-        cursor = self._conn.execute(
-            "DELETE FROM completion_markers WHERE expires_at <= datetime('now')"
-        )
-        self._conn.commit()
-        return cursor.rowcount
+        """Delete expired completion markers. Returns the number of rows removed.
+
+        Only rows with a parseable ISO-8601 ``expires_at`` that is at or before
+        the current UTC time are pruned. Malformed or NULL timestamps are left
+        untouched so the sweep is safe and non-destructive for invalid data.
+        """
+        rows = self._conn.execute(
+            "SELECT id, expires_at FROM completion_markers"
+        ).fetchall()
+        expired_ids: list[int] = []
+        now = datetime.now(timezone.utc)
+
+        for row in rows:
+            expires_at = row["expires_at"]
+            if not expires_at:
+                continue
+            try:
+                expires_dt = datetime.fromisoformat(expires_at)
+                if expires_dt.tzinfo is None:
+                    expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                continue
+
+            if expires_dt <= now:
+                expired_ids.append(int(row["id"]))
+
+        if expired_ids:
+            self._conn.executemany(
+                "DELETE FROM completion_markers WHERE id = ?",
+                [(marker_id,) for marker_id in expired_ids],
+            )
+            self._conn.commit()
+
+        return len(expired_ids)
 
     # ── WAL health ─────────────────────────────────────────
 
