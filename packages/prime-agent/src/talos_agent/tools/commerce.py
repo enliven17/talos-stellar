@@ -481,7 +481,13 @@ async def claim_job(job_id: str, ttl_seconds: int = 300) -> dict:
     if not result:
         return {"error": f"Failed to claim job {job_id} — it may be leased by another worker"}
     fencing_token = result.get("fencingToken")
-    if fencing_token is not None:
+    if fencing_token is not None and _job_effect_store is not None:
+        _job_effect_store.mark_claimed(
+            job_id,
+            fencing_token=fencing_token,
+            lease_expires_at=result.get("leaseExpiresAt"),
+        )
+    elif fencing_token is not None:
         # Parse server-reported expiry for accurate lease tracking
         expires_raw = result.get("leaseExpiresAt")
         lease_expires_at: datetime | None = None

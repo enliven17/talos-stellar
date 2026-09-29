@@ -115,12 +115,17 @@ class NetworkRule:
             raise ManifestValidationError("network rule port is out of range")
 
     def matches(self, host: str, port: int, method: str, path: str) -> bool:
-        """Explicit wildcard matching for network rules."""
+        """Explicit wildcard matching for network rules.
+
+        A rule without an explicit port matches the HTTPS default (443);
+        a rule with a port only matches that exact port.
+        """
         if not isinstance(host, str) or not isinstance(method, str) or not isinstance(path, str):
             return False
         if self.host != host:
             return False
-        if self.port is not None and self.port != port:
+        effective_rule_port = self.port if self.port is not None else 443
+        if effective_rule_port != port:
             return False
         return method.upper() in self.methods and path.startswith(self.path_prefix)
 

@@ -1011,7 +1011,7 @@ async def reconcile_after_restore(
     if checksum.error:
         result.errors.append(f"restore_checksum:{checksum.error}")
 
-    telemetry = record_reconciliation_telemetry(result, checksum)
+    record_reconciliation_telemetry(result, checksum)
     log.info(
         "restore_checksum",
         algorithm=checksum.algorithm,
@@ -1036,7 +1036,6 @@ async def reconcile_after_restore(
         checksum_algorithm=result.checksum_algorithm,
         checksum_table_count=result.checksum_table_count,
         checksum_total_rows=result.checksum_total_rows,
-        telemetry=telemetry,
     )
 
     if result.errors:

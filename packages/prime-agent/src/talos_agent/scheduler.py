@@ -378,6 +378,11 @@ class DurableBackoff:
         """True when max_attempts is set and has been exceeded."""
         return self._terminal
 
+    @property
+    def terminal(self) -> bool:
+        """Alias for :attr:`is_terminal` used by scheduler call sites."""
+        return self._terminal
+
     def wait_remaining(self) -> float:
         """Seconds until the next attempt is allowed (0 if overdue or no state)."""
         if self._next_attempt_at is None:
