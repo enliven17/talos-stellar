@@ -6,6 +6,7 @@ members = [
     "talos_governance",
     "ttl_manager",
     "storage_migration",
+    "talos_dividends",
     "indexer_fixtures",
 ]
 

@@ -102,6 +102,7 @@ export async function fetchActivityStats(): Promise<ActivityStats> {
 export async function fetchActivityTransactions(
   limit: number,
   cursor?: string | null,
+  typeFilter: ActivityType | null = null,
 ): Promise<{ transactions: Transaction[]; nextCursor: string | null }> {
   const buyerTalos = alias(tlsTalos, "buyerTalos");
   const pbBuyerTalos = alias(tlsTalos, "pbBuyerTalos");
@@ -138,7 +139,7 @@ export async function fetchActivityTransactions(
       .leftJoin(buyerTalos, eq(tlsCommerceJobs.requesterTalosId, buyerTalos.id))
       .where(jobCursorCond)
       .orderBy(desc(tlsCommerceJobs.createdAt), desc(tlsCommerceJobs.id))
-      .limit(limit + 1),
+      .limit(typeFilter === "playbook" ? 0 : limit + 1),
 
     db
       .select({
@@ -163,7 +164,7 @@ export async function fetchActivityTransactions(
       )
       .where(pbCursorCond)
       .orderBy(desc(tlsPlaybookPurchases.createdAt), desc(tlsPlaybookPurchases.id))
-      .limit(limit + 1),
+      .limit(typeFilter === "service" ? 0 : limit + 1),
   ]);
 
   const transactions: Transaction[] = [];

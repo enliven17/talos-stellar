@@ -6,7 +6,7 @@ async function main() {
   const branch = process.argv[4] || "unknown-branch";
 
   if (!command || !prNumberStr) {
-    console.error("Usage: tsx env-cli.ts <provision|teardown> <prNumber> [branch]");
+    console.error("Usage: tsx env-cli.ts <provision|teardown|cleanup> <prNumber> [branch]");
     process.exit(1);
   }
 
@@ -28,17 +28,23 @@ async function main() {
       console.log(`Tearing down environment for PR #${prNumber}...`);
       await provider.teardown(prNumber);
       console.log("Environment destroyed successfully.");
+    } else if (command === "cleanup") {
+      console.log(`Cleaning up environment for PR #${prNumber} after failure...`);
+      await provider.cleanup(prNumber);
+      console.log("Environment cleaned up successfully.");
     } else {
       console.error(`Unknown command: ${command}`);
       process.exit(1);
     }
   } catch (err) {
-    console.error(`Failed to execute ${command}:`, err);
+    const safeError = err instanceof Error ? err.message : "Unknown error occurred";
+    console.error(`Failed to execute ${command}:`, safeError);
     process.exit(1);
   }
 }
 
 main().catch(err => {
-  console.error(err);
+  const safeError = err instanceof Error ? err.message : "Unknown error occurred";
+  console.error("Fatal error:", safeError);
   process.exit(1);
 });

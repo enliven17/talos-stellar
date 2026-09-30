@@ -12,6 +12,7 @@ from talos_agent.observability import log
 from talos_agent.payments import USDC_TESTNET_ISSUER
 from talos_agent.payments.x402_signer import X402Signer
 from talos_agent.commerce_quote import (
+    DEFAULT_X402_CLOCK_SKEW_POLICY,
     enforce_commerce_quote_expiry,
     quote_expiry_iso,
 )
@@ -113,10 +114,16 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
     # Nested quote.expiresAt (A2A) is preferred; top-level expiresAt accepted.
     # Legacy price/payee-only 402s without expiry remain allowed (require_expiry=False)
     # unless a quote object is present — then expiry is mandatory.
+    #
+    # expiresAt is stamped by the issuer's clock while this check runs on ours,
+    # so the comparison carries the bounded x402 clock-skew policy: the
+    # settlement margin stops us spending a nonce on a quote that would expire
+    # between signing and settlement.
     quote_obj = payment_details.get("quote")
     expiry_error = enforce_commerce_quote_expiry(
         payment_details,
         require_expiry=isinstance(quote_obj, dict),
+        policy=DEFAULT_X402_CLOCK_SKEW_POLICY,
     )
     if expiry_error is not None:
         return expiry_error
@@ -474,7 +481,13 @@ async def claim_job(job_id: str, ttl_seconds: int = 300) -> dict:
     if not result:
         return {"error": f"Failed to claim job {job_id} — it may be leased by another worker"}
     fencing_token = result.get("fencingToken")
-    if fencing_token is not None:
+    if fencing_token is not None and _job_effect_store is not None:
+        _job_effect_store.mark_claimed(
+            job_id,
+            fencing_token=fencing_token,
+            lease_expires_at=result.get("leaseExpiresAt"),
+        )
+    elif fencing_token is not None:
         # Parse server-reported expiry for accurate lease tracking
         expires_raw = result.get("leaseExpiresAt")
         lease_expires_at: datetime | None = None

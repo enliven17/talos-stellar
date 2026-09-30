@@ -1,8 +1,16 @@
-﻿# Soroban contract errors
+# Soroban contract errors
 
 This page documents errors exposed by the contract sources in this workspace. Numeric values are the `#[contracterror]` discriminants in Rust. Pair a code with its contract address and method when diagnosing a failed invocation. Codes are contract-specific: code `2` means different things in `TalosNameService` and `TalosDividends`.
 
 ## Typed contract errors
+
+### TalosRegistry (`ContractError`)
+
+| Code | Variant | Meaning / caller action |
+|---:|---|---|
+| 1 | `InvalidPatronShares` | Patron shares do not sum to 100; correct the three share values. |
+| 2 | `TalosNotFound` | Requested Talos ID has no storage record; verify the ID and registry state. Added in v1.5.0. |
+| 3 | `MetadataFieldTooLong` | A caller-supplied field in `update_creator_metadata` exceeds its byte limit (`name` > 64, `category` > 32, `description` > 512); shorten the field and retry. Added in v1.5.0. |
 
 ### TalosNameService (`ContractError`)
 
@@ -48,6 +56,7 @@ These are returned by the `storage_migration` library used by the registry, not 
 | 3 | `MigrationInProgress` | Another migration holds the lock; wait for it to finish. |
 | 4 | `RollbackNotAllowed` | Rollback target is not below current version. |
 | 5 | `RollbackTooDeep` | Rollback exceeds the supported depth. |
+| 6 | `TargetExceedsMax` | Target version exceeds the maximum supported schema version. |
 
 ## String panic diagnostics
 
@@ -68,8 +77,9 @@ These are returned by the `storage_migration` library used by the registry, not 
 | Registry | `Unsupported event schema major version` | Requested event schema major version is unsupported. |
 | Registry | `Name cannot be empty`; `Name exceeds maximum byte length` | Caller-supplied Talos name is missing or exceeds 64 bytes. |
 | Registry | `Category exceeds maximum byte length`; `Description exceeds maximum byte length` | Talos category (> 32 bytes) or description (> 512 bytes) metadata is too long. |
+| Registry | `Name cannot be empty` (in `update_creator_metadata`) | Name field supplied to `update_creator_metadata` is empty; use a non-empty name. |
 | Registry | `Token symbol cannot be empty`; `Token symbol exceeds maximum byte length` | Pulse `token_symbol` is missing or exceeds 12 bytes. |
-| Registry | Migration/rollback rejection diagnostics | Migration helper rejected version ordering, range, or in-progress state. |
+| Registry | `Migration target must be greater than or equal to current version`; `Migration target exceeds supported schema version`; Migration/rollback rejection diagnostics | Explicit migration target is below current version, exceeds latest supported schema version, or migration helper rejected ordering/lock state. |
 | Registry, Governance, Name service | `Domain is paused` | The write path's pause domain is active (or was paused indefinitely). |
 | Registry, Governance, Name service | `ttl bounds: min_age exceeds max_age`; `ttl bounds: max_keys must be greater than zero`; `ttl bounds: max_keys exceeds MAX_BATCH_KEYS` | `extend_ttl_batch` bounds were rejected by the shared `ttl-manager` validator before any storage read or write. |
 | Governance | `Already initialized` | Initialization already completed. |
@@ -91,3 +101,63 @@ Soroban authorization failures, missing entry points, invalid XDR/value types, r
 ## Maintaining this reference
 
 Update this page when adding or changing a `#[contracterror]` variant, and preserve existing discriminants for deployed contracts. Document new panic diagnostics as non-stable text; do not assign numeric codes to panic strings unless the contract exposes a typed error.
+
+## Budget regression gates (#610)
+
+Budget regression gates are host-side (non-WASM) test assertions that verify each entry-point stays within CPU-instruction and memory-byte ceilings measured by `env.budget()`. They are implemented in the `#[cfg(test)]` modules of every contract crate and in `indexer_fixtures`.
+
+### What the gates are
+
+Each gate follows this pattern:
+
+```rust
+env.budget().reset_default();       // zero counters, re-apply default limit
+client.some_entry_point(…);         // call under measurement
+let cpu = env.budget().cpu_instruction_cost();
+let mem = env.budget().memory_bytes_cost();
+assert!(cpu < CEILING_CPU, "…");
+assert!(mem < CEILING_MEM, "…");
+```
+
+`env.budget().reset_default()` re-zeroes both accumulators and re-applies the default per-transaction limit before each measured call, so tests are fully isolated from any setup cost.
+
+### Cost dimensions
+
+| Dimension | Method | Unit |
+|---|---|---|
+| CPU | `env.budget().cpu_instruction_cost()` | abstract instructions |
+| Memory | `env.budget().memory_bytes_cost()` | bytes |
+
+> **Note:** The Soroban SDK test runtime runs Rust natively and **underestimates** costs relative to the WASM runtime deployed on-chain. Ceilings in the tests are therefore loose regression sentinels, not hard production transaction limits. If an entry-point exceeds a ceiling in CI it means a change significantly increased its resource consumption and requires explicit review.
+
+### Coverage per crate
+
+| Crate | Entry-points gated | Notes |
+|---|---|---|
+| `talos_registry` | `initialize`, `create_talos`, `get_talos`, `update_patron`, `deactivate_talos` | Includes boundary test at max metadata byte lengths and malformed-shares rejection. |
+| `talos_governance` | `initialize`, `create_proposal`, `vote`, `record_dividend_snapshot`, `get_proposal` | Includes empty-title rejection gate. |
+| `talos_name_service` | `initialize`, `register_name`, `resolve_name`, `name_of` | Includes duplicate-name rejection gate. |
+| `talos_dividends` | `initialize`, `commit_epoch`, `claim_dividend`, `get_epoch` | Includes minimum-amount boundary and zero-amount rejection gates. |
+| `ttl_manager` | `KeyHealth::observe` (×100), `BatchSweep::record` (×200), `TtlBounds::validate`, `bounded_range` | Pure function gates; no contract struct needed. |
+| `storage_migration` | `initialize_schema`, `begin_migration`, `complete_migration`, `dry_run` | Uses `env.as_contract()` context; includes up-to-date dry-run and out-of-order rejection gates. |
+
+### BudgetGateEvent (indexer_fixtures)
+
+`indexer_fixtures` exports a `BudgetGateEvent` typed struct and a `budget_gate_fixture` constructor for use by off-chain test tooling that needs a canonical typed representation of a budget measurement:
+
+```rust
+pub struct BudgetGateEvent {
+    pub entry_point: String,  // e.g. "create_talos"
+    pub cpu_cost: u64,
+    pub mem_cost: u64,
+}
+```
+
+This struct is `#[contracttype]` and round-trips through the Soroban XDR codec. It is **never emitted by production contract code** — budget gates exist only in `#[cfg(test)]` modules.
+
+### Rollout and compatibility notes
+
+- Adding or tightening a ceiling is a non-breaking change; it is safe to raise ceilings when the host-side cost of an operation genuinely increases.
+- Removing a gate requires the same justification as removing a test.
+- Budget gates do not require migration, schema changes, or on-chain deployment. They run entirely on the host target (`cargo test --workspace`).
+- Errors must not expose secrets, seeds, payment proofs, or other sensitive input — the same rule that governs all other error paths in this workspace.

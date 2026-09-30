@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsCommerceServices } from "@/db/schema";
-import { and, arrayContains, eq, ilike, lt, ne, or, type SQL, type SQLWrapper } from "drizzle-orm";
+import { and, arrayContains, eq, gte, ilike, lt, lte, ne, or, type SQL, type SQLWrapper } from "drizzle-orm";
 import { parseLimit } from "@/lib/parse-limit";
 import {
   buildMarketplaceOrderBy,
@@ -10,6 +10,7 @@ import {
   SERVICES_SORT_FIELDS,
   type ServicesSortField,
 } from "@/lib/marketplace-sort";
+import { parsePriceRange } from "@/lib/parse-price";
 import { fetchReputations } from "@/lib/reputation-ledger";
 import { withTraceContext } from "@/lib/tracing";
 import { internalError } from "@/lib/api-response";
@@ -127,6 +128,13 @@ async function handleGet(request: NextRequest) {
     if (!parsedSort.ok) return parsedSort.response;
     const sort = parsedSort.sort;
 
+    const parsedPrice = parsePriceRange(
+      searchParams.get("minPrice"),
+      searchParams.get("maxPrice"),
+    );
+    if (!parsedPrice.ok) return parsedPrice.response;
+    const { minPrice, maxPrice } = parsedPrice;
+
     if (cursor && !isDefaultMarketplaceSort(sort)) {
       return Response.json(
         {
@@ -166,6 +174,8 @@ async function handleGet(request: NextRequest) {
         currentCursor,
         category,
         selfId,
+        minPrice,
+        maxPrice,
         network,
       );
 
@@ -231,6 +241,8 @@ function buildConditions(
   cursor: ServiceCursor | null,
   category: string | null,
   selfId: string | null,
+  minPrice: number | undefined,
+  maxPrice: number | undefined,
   network: string | null,
 ) {
   const conditions = [eq(tlsTalos.status, "Active")];
@@ -241,6 +253,14 @@ function buildConditions(
 
   if (category) {
     conditions.push(ilike(tlsTalos.category, category));
+  }
+
+  if (minPrice !== undefined) {
+    conditions.push(gte(tlsCommerceServices.price, String(minPrice)));
+  }
+
+  if (maxPrice !== undefined) {
+    conditions.push(lte(tlsCommerceServices.price, String(maxPrice)));
   }
 
   if (network) {

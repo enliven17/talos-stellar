@@ -168,9 +168,28 @@ implements idempotency via the PK + `status` column. No schema changes needed.
 
 ### Key expiry
 
-Keys are retained for the lifetime of their associated record. There is no TTL-based key
-expiry in this implementation (adding one is a forward migration when needed). The partial
-unique index makes re-use across different talosIds safe.
+Completed keys expire with a bounded retention window. A commerce-job record's key expires
+`IDEMPOTENCY_KEY_RETENTION_MS` after the record reached its terminal `completed` state; only
+completed records are ever eligible, so in-flight (`pending` / `negotiating` / `counter_offer`)
+keys never expire out from under a retry. The partial unique index makes re-use across
+different talosIds safe regardless.
+
+The expiry instant is *derived*, not stored: a terminal row is never written again, so its
+`updatedAt` (falling back to `createdAt`) is its completion time. Storing a separate expiry
+column would duplicate that completion timestamp — the same parallel-source-of-truth problem
+the persistence model already avoids.
+
+Reclamation runs through `cleanupExpiredIdempotencyKeys()` in
+`web/src/lib/idempotency/store.ts`, triggered by `POST /api/internal/idempotency/cleanup`:
+
+- Each run deletes at most `IDEMPOTENCY_CLEANUP_BATCH_SIZE` rows (hard-capped at 5,000), so a
+  run is always bounded. `hasMore` in the response says whether another run is warranted.
+- The DELETE re-asserts `status = 'completed'`, so a row that changes state between the
+  candidate SELECT and the DELETE is never removed.
+- Missing or malformed completion timestamps fail closed: the row is treated as non-expiring
+  and left untouched. Missing tables/columns are reported as `table_missing` / `column_missing`
+  rather than thrown.
+- Re-running is idempotent; a run with nothing expired is a cheap no-op `SELECT`.
 
 ---
 
@@ -346,9 +365,11 @@ If Phase 2 enforcement is rolled out and must be reversed: set `REQUIRE_IDEMPOTE
 - In-memory rate-limit store (`rate-limit.ts`) is per-process. Key uniqueness enforcement is at
   the DB level via the partial unique index, which is single-source-of-truth and works across
   multiple Vercel instances.
-- Key expiry is not implemented. Long-running deployments accumulate one `idempotencyKey` column
-  value per job. This is fine at current scale; a background cleanup job can be added later if
-  needed.
+- Completed key expiry is bounded, derived, and opt-in to schedule: retention defaults to 30 days
+  (`IDEMPOTENCY_KEY_RETENTION_MS`) and each cleanup run deletes at most 500 rows
+  (`IDEMPOTENCY_CLEANUP_BATCH_SIZE`, hard cap 5,000) via
+  `POST /api/internal/idempotency/cleanup`. Wiring that endpoint into a scheduler is an operator
+  action; until then, keys are retained indefinitely, exactly as before.
 - The Python SDK generates a new key per call object (not per connection). If an agent restarts
   mid-retry, the new process generates a new key and the previous in-flight request may complete
   independently. The server's partial unique index prevents duplicate commits in this case.
@@ -364,6 +385,7 @@ If Phase 2 enforcement is rolled out and must be reversed: set `REQUIRE_IDEMPOTE
 | `packages/sdk/tests/idempotency.test.ts` | Key generation, format validation, `IdempotencyConflictError`, retry with key, 409 handling |
 | `packages/prime-agent/tests/test_idempotency.py` | Key generation, auto-inject, opt-out, conflict detection, retry with stable key |
 | `web/tests/sdk-idempotency-integration.test.ts` | End-to-end: SDK generates key → server accepts → replay returns cached response |
+| `web/tests/commerce-jobs-idempotency-expiry.test.ts` | Completed-only expiry, inclusive boundary, bounded batch, re-run safety, fail-closed timestamps, structured dependency-failure codes |
 
 ---
 
@@ -384,4 +406,10 @@ web/src/app/api/talos/[id]/buy-token/route.ts       modified — echo header, lo
 web/tests/sdk-idempotency-integration.test.ts       new — integration tests
 CONTRIBUTING.md                                     modified — idempotency section
 OBSERVABILITY.md                                    modified — idempotency log events
+web/src/lib/idempotency/config.ts                   new — retention + bounded-batch configuration
+web/src/lib/idempotency/store.ts                    new — derived expiry + bounded cleanup
+web/src/lib/idempotency/index.ts                    new — public surface
+web/src/app/api/internal/idempotency/cleanup/route.ts new — scheduler-triggered cleanup endpoint
+web/tests/commerce-jobs-idempotency-expiry.test.ts     new — expiry + cleanup tests
+web/.env.example                                    modified — cleanup env vars
 ```

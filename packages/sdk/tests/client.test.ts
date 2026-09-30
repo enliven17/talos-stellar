@@ -768,6 +768,56 @@ describe("Typed SDK Error Hierarchy", () => {
         expect(v.isRetryable).toBe(false);
       }
     });
+
+    it("exposes the documented API envelope as typed fields", () => {
+      const error = errorFromResponse(
+        400,
+        "/api/talos",
+        JSON.stringify({
+          code: "VALIDATION_ERROR",
+          message: "Rejected Bearer private-token",
+          requestId: "body-request-id",
+          issues: ["name: required"],
+          token: "must-not-leak",
+        }),
+        new Headers({ "x-request-id": "header-request-id", "retry-after": "2" }),
+      );
+
+      expect(error.status).toBe(400);
+      expect(error.code).toBe("validation_error");
+      expect(error.apiCode).toBe("VALIDATION_ERROR");
+      expect(error.apiMessage).toBe("Rejected Bearer [REDACTED]");
+      expect(error.requestId).toBe("header-request-id");
+      expect(error.headers["retry-after"]).toBe("2");
+      expect(error.retryAfterMs).toBe(2_000);
+      expect(error.validationDetails).toEqual(["name: required"]);
+      expect(error.message).not.toContain("must-not-leak");
+      expect(error.apiMessage).not.toContain("must-not-leak");
+      expect(error.apiMessage).not.toContain("private-token");
+    });
+
+    it("uses a safe fallback for malformed and non-JSON responses", () => {
+      const malformed = errorFromResponse(502, "/api/talos", "{not-json", new Headers());
+      const nonJson = errorFromResponse(503, "/api/talos", "<html>upstream failed</html>", new Headers());
+
+      expect(malformed.apiMessage).toBe("Request failed with status 502");
+      expect(nonJson.apiMessage).toBe("Request failed with status 503");
+      expect(malformed.apiCode).toBeUndefined();
+      expect(malformed.validationDetails).toEqual([]);
+    });
+
+    it("maps HTTP 422 responses to typed validation details", () => {
+      const error = errorFromResponse(
+        422,
+        "/api/talos",
+        JSON.stringify({ code: "INVALID_INPUT", message: "Invalid input", issues: ["name: too short"] }),
+        new Headers(),
+      );
+
+      expect(error).toBeInstanceOf(TalosValidationError);
+      expect((error as TalosValidationError).issues).toEqual(["name: too short"]);
+      expect(error.validationDetails).toEqual(["name: too short"]);
+    });
   });
 
   describe("Authentication error (401/403)", () => {

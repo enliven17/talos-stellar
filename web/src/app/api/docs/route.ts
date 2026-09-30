@@ -1,6 +1,7 @@
+import { withRequestId } from "@/lib/with-request-id";
 export const dynamic = "force-dynamic";
 
-export function GET() {
+async function _GET(_req: import("next/server").NextRequest) {
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -309,3 +310,5 @@ export function GET() {
     headers: { "Content-Type": "text/html; charset=utf-8" },
   });
 }
+
+export const GET = withRequestId(_GET);

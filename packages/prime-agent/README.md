@@ -2,6 +2,60 @@
 
 Autonomous agent corporation runtime for Stellar GTM agents.
 
+## API Client Response Size Cap (issue #561)
+
+All HTTP responses from the Talos Web API are bounded before the body is
+decoded. This prevents memory exhaustion from oversized or malicious responses
+and closes a potential information-disclosure path where a very large response
+could be logged or stored.
+
+### How it works
+
+1. **Content-Length fast-reject** — if the server declares a body size that
+   already exceeds the limit, the request is rejected immediately before any
+   body bytes are read.
+2. **Body measurement** — after httpx buffers the response, `len(response.content)`
+   is checked as the authoritative byte count. This catches cases where the
+   server omits or lies about `Content-Length`.
+3. **`ResponseTooLargeError`** — raised on any violation. The error carries only
+   `url_path`, `actual_bytes`, and `limit_bytes`. Response bodies, headers,
+   secrets, seeds, and payment proofs are never included in the error.
+
+### Configuration
+
+| Variable | Default | Range | Description |
+|---|---|---|---|
+| `TALOS_API_CLIENT_RESPONSE_MAX_BYTES` | `1048576` (1 MiB) | 1 KiB–100 MiB | Maximum allowed response body size |
+
+To tighten the cap in a constrained environment:
+
+```bash
+TALOS_API_CLIENT_RESPONSE_MAX_BYTES=262144  # 256 KiB
+```
+
+### Error handling
+
+`ResponseTooLargeError` is importable from `talos_agent.http`. Callers that
+need to handle it explicitly can do so:
+
+```python
+from talos_agent.http import ResponseTooLargeError
+
+try:
+    result = await api_client.get_talos(talos_id)
+except ResponseTooLargeError as exc:
+    logger.warning(
+        "API response too large path=%s actual=%d limit=%d",
+        exc.url_path, exc.actual_bytes, exc.limit_bytes,
+    )
+```
+
+### Compatibility
+
+All existing public methods (`get_talos`, `report_activity`, `update_status`,
+`get_pending_jobs`, etc.) are unaffected — typical JSON responses are well
+under 1 MiB. The cap only fires on responses that exceed the configured limit.
+
 ## Checkpoint Export and Inspection
 
 The checkpoint CLI provides safe operator commands for exporting and inspecting an agent checkpoint without modifying the running agent or its SQLite database.
@@ -252,3 +306,16 @@ Before enabling it, read the
 The runbook documents the exact external idempotency boundary, configuration,
 migration, structured operational events, metadata-only replay inspection,
 recovery procedure, known limitations, and rollback steps.
+
+## Stellar transaction retry failures
+
+Stellar transfer failures are classified as `retryable`, `rate_limited`,
+`indeterminate`, `permanent`, or `unknown` so callers and operators can decide
+whether a transaction is safe to retry. The classification is privacy-safe —
+no seeds, payment proofs, or raw upstream text are logged or returned — and is
+surfaced through the existing payment proxy and tool results.
+
+See the
+[Stellar retry failure runbook](../../docs/prime-agent-stellar-retry-failures.md)
+for the input → class mapping, privacy guarantees, compatibility notes, and
+how to consume the classification.

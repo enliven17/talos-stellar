@@ -9,6 +9,7 @@ import {
   withTimeout,
   type HealthChecks,
 } from "./utils";
+import { withRequestId } from "@/lib/with-request-id";
 
 export const runtime = "nodejs";
 
@@ -116,8 +117,8 @@ export function createHealthHandler({
   };
 }
 
-export const GET = createHealthHandler({
+export const GET = withRequestId(createHealthHandler({
   db: defaultDb,
   // Resolve the global at call time so instrumented/stubbed fetch is honoured.
   fetchFn: (input, init) => fetch(input, init),
-});
+}));
