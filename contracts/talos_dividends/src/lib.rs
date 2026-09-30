@@ -33,6 +33,7 @@
 //! | `RegistryContract`          | `Address`        | persistent  |
 //! | `Epoch(talos_id, epoch_id)` | `EpochRecord`    | persistent  |
 //! | `Claimed(epoch_id, patron)` | `bool`           | persistent  |
+//! | `RoundingDust(talos_id, epoch_id)` | `i128`     | persistent  |
 //! | `NextEpochId(talos_id)`     | `u64`            | persistent  |
 //!
 //! ## Events (topics → data)
@@ -41,6 +42,7 @@
 //! |------------|-------------------------------------------|----------------------------------------------------|
 //! | `ep_cmt`   | `(symbol, talos_id: u32)`                 | `(epoch_id: u64, total: i128, expiry_secs: u64)`   |
 //! | `div_clm`  | `(symbol, epoch_id: u64, patron: Address)`| `(talos_id: u32, amount: i128, role: PatronRole)`  |
+//! | `div_dst`  | `(symbol, epoch_id: u64)`                  | `(talos_id: u32, dust: i128)`                      |
 //! | `ep_rcv`   | `(symbol, epoch_id: u64)`                 | `(talos_id: u32, recovered: i128, admin: Address)` |
 //!
 //! ## Compatibility / rollout notes
@@ -49,6 +51,9 @@
 //! Deploy independently, configure `registry_contract` to point at the live
 //! `TalosRegistry`, and begin committing epochs.  Old push-based flows can
 //! continue operating in parallel until clients migrate to the claim interface.
+//! Rounding dust is stored under a new key and defaults to absent for existing
+//! epochs, so no migration is required.  It is recorded on the first claim,
+//! when the contract receives the validated three-role split.
 //!
 //! ## Version
 //!
@@ -172,6 +177,9 @@ pub enum DataKey {
     Claimed(u64, Address),
     /// Monotonically increasing epoch counter per talos: `talos_id: u32`.
     NextEpochId(u32),
+    /// Rounding remainder derived from the epoch's validated patron split.
+    /// Appended to preserve existing key discriminants.
+    RoundingDust(u32, u64),
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -218,6 +226,11 @@ fn emit_dividend_claimed(
     );
 }
 
+fn emit_rounding_dust(env: &Env, epoch_id: u64, talos_id: u32, dust: i128) {
+    env.events()
+        .publish((symbol_short!("div_dst"), epoch_id), (talos_id, dust));
+}
+
 fn emit_epoch_recovered(env: &Env, epoch_id: u64, talos_id: u32, recovered: i128, admin: Address) {
     env.events().publish(
         (symbol_short!("ep_rcv"), epoch_id),
@@ -260,6 +273,33 @@ fn compute_allocation(total_amount: i128, share_pct: u32) -> Result<i128, Contra
         return Err(ContractError::ZeroAllocation);
     }
     Ok(allocation)
+}
+
+fn compute_rounding_dust(
+    total_amount: i128,
+    creator_share: u32,
+    investor_share: u32,
+    treasury_share: u32,
+) -> Result<i128, ContractError> {
+    let creator = total_amount
+        .checked_mul(creator_share as i128)
+        .ok_or(ContractError::Overflow)?
+        / 100;
+    let investor = total_amount
+        .checked_mul(investor_share as i128)
+        .ok_or(ContractError::Overflow)?
+        / 100;
+    let treasury = total_amount
+        .checked_mul(treasury_share as i128)
+        .ok_or(ContractError::Overflow)?
+        / 100;
+    let distributed = creator
+        .checked_add(investor)
+        .and_then(|value| value.checked_add(treasury))
+        .ok_or(ContractError::Overflow)?;
+    total_amount
+        .checked_sub(distributed)
+        .ok_or(ContractError::Overflow)
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -467,6 +507,24 @@ impl TalosDividends {
         // Compute allocation.
         let allocation = compute_allocation(record.total_amount, share_pct)?;
 
+        let dust = compute_rounding_dust(
+            record.total_amount,
+            creator_share,
+            investor_share,
+            treasury_share,
+        )?;
+        let dust_key = DataKey::RoundingDust(talos_id, epoch_id);
+        if let Some(recorded_dust) = env.storage().persistent().get(&dust_key) {
+            if recorded_dust != dust {
+                return Err(ContractError::InconsistentShareData);
+            }
+        } else {
+            env.storage().persistent().set(&dust_key, &dust);
+            if dust > 0 {
+                emit_rounding_dust(&env, epoch_id, talos_id, dust);
+            }
+        }
+
         // Accounting invariant: ensure we do not over-distribute.
         let new_claimed = record
             .claimed_amount
@@ -562,6 +620,14 @@ impl TalosDividends {
             .has(&DataKey::Claimed(epoch_id, claimant))
     }
 
+    /// Return the rounding remainder recorded from the first valid claim.
+    /// Returns `None` until a claim supplies the epoch's patron split.
+    pub fn get_rounding_dust(env: Env, talos_id: u32, epoch_id: u64) -> Option<i128> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RoundingDust(talos_id, epoch_id))
+    }
+
     /// Return the next epoch ID that would be assigned for `talos_id`.
     pub fn next_epoch_id(env: Env, talos_id: u32) -> u64 {
         env.storage()
@@ -633,6 +699,30 @@ mod tests {
         (env, contract_id, admin, registry, client)
     }
 
+    /// Helper: commit an epoch with explicit amount and expiry.
+    fn commit_epoch(
+        env: &Env,
+        contract_id: &Address,
+        client: &TalosDividendsClient<'static>,
+        admin: &Address,
+        talos_id: u32,
+        total_amount: i128,
+        expiry_secs: u64,
+    ) -> u64 {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "commit_epoch",
+                    args: (admin.clone(), talos_id, total_amount, expiry_secs).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .commit_epoch(admin, &talos_id, &total_amount, &expiry_secs)
+            .unwrap()
+    }
+
     /// Helper: commit a default epoch (total=10_000, expiry=7_200s).
     fn commit_default_epoch(
         env: &Env,
@@ -658,7 +748,7 @@ mod tests {
     /// Returns the allocation on success; panics if the contract returns an error.
     /// For negative-path tests, call `try_claim_dividend` directly.
     #[allow(clippy::too_many_arguments)]
-    fn do_claim(
+    fn do_claim_with_shares(
         env: &Env,
         contract_id: &Address,
         client: &TalosDividendsClient<'static>,
@@ -682,17 +772,17 @@ mod tests {
                         creator.clone(),
                         investor.clone(),
                         treasury.clone(),
-                        60_u32,
-                        25_u32,
-                        15_u32,
+                        creator_share,
+                        investor_share,
+                        treasury_share,
                     )
                         .into_val(env),
                     sub_invokes: &[],
                 },
             }])
             .claim_dividend(
-                claimant, &talos_id, &epoch_id, creator, investor, treasury, &60_u32, &25_u32,
-                &15_u32,
+                claimant, &talos_id, &epoch_id, creator, investor, treasury, &creator_share,
+                &investor_share, &treasury_share,
             )
     }
 
@@ -982,6 +1072,85 @@ mod tests {
 
         // treasury_share = 15%; 10_000 * 15 / 100 = 1_500
         assert_eq!(allocation, 1_500);
+    }
+
+    #[test]
+    fn records_rounding_dust_once_and_emits_event() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_epoch(&env, &contract_id, &client, &admin, talos_id, 101, 7_200);
+
+        do_claim_with_shares(
+            &env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor,
+            &treasury, 60, 25, 15,
+        )
+        .unwrap();
+
+        assert_eq!(client.get_rounding_dust(&talos_id, &epoch_id), Some(1));
+        let events = env.events().all();
+        let dust_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(_, topics, _)| {
+                let symbol: Result<Symbol, _> =
+                    TryFromVal::try_from_val(&env, &topics.get(0).unwrap());
+                symbol.map(|value| value == symbol_short!("div_dst")).unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(dust_events.len(), 1);
+        let (_, _, data) = dust_events[0].clone();
+        let (got_talos_id, got_dust): (u32, i128) = TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!((got_talos_id, got_dust), (talos_id, 1));
+    }
+
+    #[test]
+    fn rejects_claims_with_inconsistent_share_data() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_epoch(&env, &contract_id, &client, &admin, talos_id, 101, 7_200);
+
+        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury)
+            .unwrap();
+        let result = do_claim_with_shares(
+            &env, &contract_id, &client, &investor, talos_id, epoch_id, &creator, &investor,
+            &treasury, 61, 24, 15,
+        );
+        assert_eq!(result, Err(ContractError::InconsistentShareData));
+        assert!(!client.has_claimed(&epoch_id, &investor));
+    }
+
+    #[test]
+    fn recovery_includes_unclaimed_rounding_dust() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_epoch(&env, &contract_id, &client, &admin, talos_id, 101, 7_200);
+
+        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury)
+            .unwrap();
+        env.ledger().with_mut(|li| li.timestamp = 9_000);
+
+        let recovered = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "recover_expired",
+                    args: (admin.clone(), talos_id, epoch_id).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .recover_expired(&admin, &talos_id, &epoch_id)
+            .unwrap();
+
+        assert_eq!(recovered, 41); // 101 - floor(101 * 60 / 100)
     }
 
     #[test]

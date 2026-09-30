@@ -3,6 +3,7 @@
 export { TalosClient } from "./client.js";
 export type {
   TalosClientOptions,
+  RetryPolicyOptions,
   RetryOptions,
   RetryPolicyOptions,
   TalosErrorEvent,

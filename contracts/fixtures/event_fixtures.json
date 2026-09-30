@@ -146,6 +146,17 @@
           { "position": 1, "type": "i128", "name": "amount" },
           { "position": 2, "type": "symbol", "name": "role" }
         ]
+      },
+      "div_dst": {
+        "contract": "talos_dividends",
+        "topics": [
+          { "position": 0, "type": "symbol", "name": "event", "description": "event type symbol" },
+          { "position": 1, "type": "u64", "name": "epoch_id" }
+        ],
+        "data": [
+          { "position": 0, "type": "u32", "name": "talos_id" },
+          { "position": 1, "type": "i128", "name": "dust" }
+        ]
       }
     }
   },
@@ -436,6 +447,30 @@
         "ledger_sequence": 100210,
         "topics": { "event": "div_clm", "epoch_id": 42, "patron": "GBUC4RLWOMRLPAIL4UZPB3MZYHVMMCC2UUEOVJ4DCFVHWHHRT7WY4F33" },
         "data": { "talos_id": 1, "amount": 600000, "role": "Creator" }
+      }
+    },
+    {
+      "id": "payment.div_dst.normal",
+      "family": "payment",
+      "event": "div_dst",
+      "contract": "talos_dividends",
+      "ledger_sequence": 100211,
+      "tx_hash": "b2c3d4e5f60718293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f6071",
+      "event_index_in_tx": 0,
+      "topics": [
+        { "type": "symbol", "value": "div_dst" },
+        { "type": "u64", "value": 42 }
+      ],
+      "data": [
+        { "type": "u32", "value": 1 },
+        { "type": "i128", "value": 1 }
+      ],
+      "decoded": {
+        "event": "div_dst",
+        "contract": "talos_dividends",
+        "ledger_sequence": 100211,
+        "topics": { "event": "div_dst", "epoch_id": 42 },
+        "data": { "talos_id": 1, "dust": 1 }
       }
     }
   ],

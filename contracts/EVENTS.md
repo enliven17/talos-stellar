@@ -112,6 +112,7 @@ is idempotent per cursor (see §4).
 |---|---|
 | (`ep_cmt`, talos_id: u32) | (epoch_id: u64, total: i128, expiry_secs: u64) |
 | (`div_clm`, epoch_id: u64, patron: Address) | (talos_id: u32, amount: i128, role: PatronRole) |
+| (`div_dst`, epoch_id: u64) | (talos_id: u32, dust: i128) |
 | (`ep_rcv`, epoch_id: u64) | (talos_id: u32, recovered: i128, admin: Address) |
 
 `VoteChoice` is `{ Approve | Reject }`; `ProposalStatus` is
