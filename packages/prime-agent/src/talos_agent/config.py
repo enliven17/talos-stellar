@@ -72,8 +72,16 @@ class Settings(BaseSettings):
 
     @property
     def llm_api_key(self) -> str:
+        override = self.__dict__.get("_llm_api_key_override")
+        if override is not None:
+            return override
         groq_key = self.secret_value("groq_api_key")
         return groq_key or self.secret_value("openai_api_key")
+
+    @llm_api_key.setter
+    def llm_api_key(self, value: str) -> None:
+        """Allow runtime credential revocation (lifecycle pause/shutdown)."""
+        self.__dict__["_llm_api_key_override"] = value
 
     @property
     def llm_model(self) -> str:
@@ -138,6 +146,23 @@ class Settings(BaseSettings):
         "for pruning. 0 means unlimited (count-based pruning only, if enabled).",
     )
 
+
+    # API client response size cap (Issue #561)
+    # Hard upper bound on response bodies read from the Talos Web API.  Defaults
+    # to 1 MiB — large enough for any legitimate JSON payload and small enough to
+    # prevent memory exhaustion from oversized or malicious responses.
+    api_client_response_max_bytes: int = Field(
+        default=1_048_576,
+        ge=1_024,
+        le=104_857_600,
+        validation_alias="TALOS_API_CLIENT_RESPONSE_MAX_BYTES",
+        description=(
+            "Maximum bytes allowed in a Talos Web API response body. "
+            "Responses that exceed this limit are rejected with "
+            "ResponseTooLargeError before the body is decoded. "
+            "Default 1 MiB. Min 1 KiB, max 100 MiB."
+        ),
+    )
 
     # X (Twitter)
     x_username: str = ""
@@ -348,6 +373,12 @@ class Settings(BaseSettings):
     )
     talos_job_effect_dispatch_timeout_seconds: int = Field(default=20, ge=1, le=120)
     talos_job_effect_db_timeout_ms: int = Field(default=5_000, ge=1, le=30_000)
+
+    # A2A (Agent-to-Agent) composition timeouts
+    a2a_connect_timeout: float = Field(default=10.0, description="Seconds to wait for A2A TCP connect")
+    a2a_read_timeout: float = Field(default=30.0, description="Seconds to wait for A2A response body")
+    a2a_write_timeout: float = Field(default=10.0, description="Seconds to wait to send A2A request body")
+    a2a_pool_timeout: float = Field(default=5.0, description="Seconds to wait for A2A connection from pool")
 
     # Graceful shutdown (#182)
     shutdown_deadline: float = Field(

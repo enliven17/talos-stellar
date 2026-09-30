@@ -105,6 +105,20 @@
         "data": [
           { "position": 0, "type": "symbol", "name": "status" }
         ]
+      },
+      "qrm_rchd": {
+        "contract": "talos_governance",
+        "description": "Emitted the first time a proposal crosses the quorum threshold. Emitted at most once per proposal (idempotency sentinel DataKey::QuorumReached prevents re-emission).",
+        "topics": [
+          { "position": 0, "type": "symbol", "name": "event", "description": "event type symbol" },
+          { "position": 1, "type": "u32", "name": "proposal_id" }
+        ],
+        "data": [
+          { "position": 0, "type": "u32", "name": "proposal_id" },
+          { "position": 1, "type": "i128", "name": "votes_cast" },
+          { "position": 2, "type": "i128", "name": "quorum_threshold" },
+          { "position": 3, "type": "i128", "name": "approval_bps" }
+        ]
       }
     },
     "payment": {
@@ -345,6 +359,33 @@
       }
     },
     {
+      "id": "governance.qrm_rchd.normal",
+      "family": "governance",
+      "event": "qrm_rchd",
+      "contract": "talos_governance",
+      "ledger_sequence": 100115,
+      "tx_index_in_ledger": 0,
+      "tx_hash": "a7b8c9d0e1f20918293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f",
+      "event_index_in_tx": 1,
+      "topics": [
+        { "type": "symbol", "value": "qrm_rchd" },
+        { "type": "u32", "value": 7 }
+      ],
+      "data": [
+        { "type": "u32", "value": 7 },
+        { "type": "i128", "value": 100 },
+        { "type": "i128", "value": 100 },
+        { "type": "i128", "value": 6000 }
+      ],
+      "decoded": {
+        "event": "qrm_rchd",
+        "contract": "talos_governance",
+        "ledger_sequence": 100115,
+        "topics": { "event": "qrm_rchd", "proposal_id": 7 },
+        "data": { "proposal_id": 7, "votes_cast": 100, "quorum_threshold": 100, "approval_bps": 6000 }
+      }
+    },
+    {
       "id": "payment.ep_cmt.normal",
       "family": "payment",
       "event": "ep_cmt",
@@ -504,6 +545,9 @@
         "event": "tls_crt2",
         "contract": "talos_registry",
         "ledger_sequence": 6,
+        "tx_index_in_ledger": 0,
+        "tx_hash": "0000000000000000000000000000000000000000000000000000000000000006",
+        "event_index_in_tx": 0,
         "topics": [
           { "type": "symbol", "value": "tls_crt2" },
           { "type": "address", "value": "GDC2TFRPZ3SJJYE2GDOIVHVGU3J7RZ7WCDIGKNZC4OY4CCIY7JK5JGYZ" }

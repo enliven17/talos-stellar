@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPlaybooks, tlsPlaybookPurchases } from "@/db/schema";
@@ -5,7 +6,7 @@ import { eq, sql } from "drizzle-orm";
 import { resolveTalosFromRequest } from "@/lib/auth";
 
 // GET /api/playbooks/:id — Playbook detail
-export async function GET(
+async function _GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -69,7 +70,7 @@ export async function GET(
 
 // PATCH /api/playbooks/:id — Update playbook (requires TALOS apiKey)
 // Uses resolveTalosFromRequest for scoped key + legacy key support.
-export async function PATCH(
+async function _PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -144,3 +145,6 @@ export async function PATCH(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withRequestId(_GET);
+export const PATCH = withRequestId(_PATCH);

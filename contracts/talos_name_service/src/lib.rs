@@ -9,6 +9,9 @@
 #![no_std]
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod upgrade_simulation_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
 extern crate std;
 
 use soroban_sdk::{
@@ -308,7 +311,7 @@ pub const INTERFACE_ID: [u8; 32] = [
 
 /// Expected `INTERFACE_ID` of the configured `RegistryContract`, mirroring
 /// the bytes published by `talos_registry::INTERFACE_ID` (namespace
-/// `"TalosRegistry"`, version `(1, 3, 0)`). Kept as an inline copy rather
+/// `"TalosRegistry"`, version `(1, 4, 0)`). Kept as an inline copy rather
 /// than a crate dependency so this contract's ABI check has no build-time
 /// coupling to the Registry crate; see the golden-vector test for the
 /// independent reproduction of the byte layout.
@@ -317,7 +320,7 @@ pub const EXPECTED_REGISTRY_INTERFACE_ID: [u8; 32] = [
     0x69, 0x73, 0x74, 0x72, 0x79, 0x00, 0x00, 0x00, // "istry" + zero pads
     // (major, minor, patch) big-endian u32s
     0x00, 0x00, 0x00, 0x01, // major = 1
-    0x00, 0x00, 0x00, 0x03, // minor = 3
+    0x00, 0x00, 0x00, 0x04, // minor = 4
     0x00, 0x00, 0x00, 0x00, // patch = 0
     // reserved
     0x00, 0x00, 0x00, 0x00,
@@ -334,6 +337,7 @@ pub fn features_list() -> &'static [&'static str] {
         "interface_query",   // version / interface_id / supports_version
         "cross_contract",    // invokes creator_of on the configured registry
         "paginated_reverse_lookup", // names_page — cursor-based reverse scan
+        "name_canonicalization", // canonicalize() normalizes names before registration
     ]
 }
 
@@ -462,6 +466,63 @@ fn validate_name(name: &String) -> bool {
     true
 }
 
+/// Canonicalize a caller-supplied name before validation and storage.
+///
+/// Canonicalization rules (applied left-to-right, in order):
+///   1. **Trim** leading and trailing ASCII whitespace (space U+0020, tab U+0009,
+///      newline U+000A, carriage-return U+000D).
+///   2. **Lowercase** any ASCII uppercase letters (A-Z → a-z).
+///
+/// After canonicalization the result is a valid candidate for `validate_name`.
+/// Callers that pass an already-lowercase, no-whitespace name observe no change.
+///
+/// # Panics
+/// Panics with `"Name cannot be empty after canonicalization"` if the input is
+/// all whitespace or empty — a privacy-safe error with no caller-supplied value.
+///
+/// # no_std compatibility
+/// Operates entirely on a 64-byte stack buffer (max name byte length after
+/// trim is bounded at 32; input is capped at 64 bytes to absorb leading/trailing
+/// whitespace without heap allocation).
+pub(crate) fn canonicalize_name(env: &Env, name: &String) -> String {
+    let raw_len = name.len() as usize;
+    // Allocate a buffer large enough for the raw input plus whitespace slack.
+    // Names are bounded at 32 bytes; with up to 16 bytes of surrounding whitespace
+    // the raw input is at most 64 bytes before we even look at it.
+    const BUF: usize = 64;
+    if raw_len > BUF {
+        panic!("Name exceeds maximum input length for canonicalization");
+    }
+    let mut buf = [0u8; BUF];
+    name.copy_into_slice(&mut buf[..raw_len]);
+
+    // Step 1: find trim boundaries (ASCII whitespace only)
+    let mut start = 0usize;
+    let mut end = raw_len;
+    while start < end && matches!(buf[start], b' ' | b'\t' | b'\n' | b'\r') {
+        start += 1;
+    }
+    while end > start && matches!(buf[end - 1], b' ' | b'\t' | b'\n' | b'\r') {
+        end -= 1;
+    }
+
+    if start == end {
+        panic!("Name cannot be empty after canonicalization");
+    }
+
+    // Step 2: lowercase in-place
+    let mut out = [0u8; 32];
+    let trimmed_len = end - start;
+    if trimmed_len > 32 {
+        panic!("Name exceeds maximum byte length after canonicalization");
+    }
+    for (i, b) in buf[start..end].iter().enumerate() {
+        out[i] = b.to_ascii_lowercase();
+    }
+
+    String::from_bytes(env, &out[..trimmed_len])
+}
+
 // ── Contract ────────────────────────────────────────────────────────
 
 /// Compile-time interface version of TalosNameService.
@@ -515,6 +576,31 @@ impl TalosNameService {
     /// name service before invoking entry-points.
     pub fn interface_id(e: Env) -> BytesN<32> {
         BytesN::from_array(&e, &INTERFACE_ID)
+    }
+    
+    /// Return the canonical deployment-manifest digest for this contract.
+    ///
+    /// This additive read-only query re-derives a stable digest from the
+    /// interface ID, semver, capability list, and event schema version. It
+    /// never stores any data in state and therefore remains safe for repeated
+    /// operator verification and compatibility checks.
+    pub fn deployment_manifest_digest(e: Env) -> BytesN<32> {
+        let mut payload = soroban_sdk::Bytes::new(&e);
+        payload.append(&soroban_sdk::Bytes::from_array(&e, &INTERFACE_ID));
+        payload.extend_from_slice(&CONTRACT_VERSION.0.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.1.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.2.to_be_bytes());
+
+        for feature in features_list() {
+            let bytes = feature.as_bytes();
+            payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            payload.extend_from_slice(bytes);
+        }
+
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.major.to_be_bytes());
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.minor.to_be_bytes());
+
+        e.crypto().sha256(&payload).to_bytes()
     }
 
     /// Return `true` when the deployed semver supports the requested
@@ -575,11 +661,19 @@ impl TalosNameService {
     /// * `e` - Soroban environment
     /// * `owner` - The address authorizing this name registration
     /// * `talos_id` - The Talos ID to associate with the name
-    /// * `name` - Human-readable name (3-32 chars, lowercase alphanumeric + hyphens)
+    /// * `name` - Human-readable name (3-32 chars, lowercase alphanumeric + hyphens).
+    ///            Leading/trailing whitespace is trimmed and uppercase ASCII letters
+    ///            are lowercased before validation so "Vega", "VEGA", and " vega "
+    ///            all register as "vega".
     pub fn register_name(e: Env, owner: Address, talos_id: u32, name: String) {
         pause_control::check_not_paused(&e, PAUSE_NAME_REGISTRATION);
 
         owner.require_auth();
+
+        // Canonicalize before validation so callers using mixed-case or
+        // whitespace-padded names receive identical on-chain state as those
+        // using the already-canonical form.
+        let name = canonicalize_name(&e, &name);
 
         if !validate_name(&name) {
             panic!("Invalid name. Must be 3-32 chars, lowercase alphanumeric + hyphens, no consecutive hyphens.");
@@ -664,6 +758,23 @@ impl TalosNameService {
     /// Return the configured admin, if any.
     pub fn admin(e: Env) -> Option<Address> {
         e.storage().persistent().get(&DataKey::Admin)
+    }
+
+    /// Canonicalize a name the same way `register_name` does before storing it.
+    ///
+    /// Off-chain callers should use this to derive the canonical form without
+    /// incurring a full registration. The result is the exact string that will
+    /// be stored on-chain when the same input is passed to `register_name`.
+    ///
+    /// Rules (applied in order):
+    ///   1. Trim leading/trailing ASCII whitespace.
+    ///   2. Lowercase ASCII uppercase letters (A-Z → a-z).
+    ///
+    /// # Panics
+    /// - `"Name cannot be empty after canonicalization"` — if input is all whitespace.
+    /// - `"Name exceeds maximum input length for canonicalization"` — if input > 64 bytes.
+    pub fn canonicalize(e: Env, name: String) -> String {
+        canonicalize_name(&e, &name)
     }
 
     /// Update the name-registration fee. Only the configured admin may call this.
@@ -1165,6 +1276,8 @@ impl TalosNameService {
     /// Resolve a name to a Talos ID.
     /// Returns None if the name doesn't exist.
     pub fn resolve_name(e: Env, name: String) -> Option<u32> {
+        // Canonicalize so "Vega" and "vega" resolve to the same record.
+        let name = canonicalize_name(&e, &name);
         e.storage().persistent().get(&DataKey::NameRecord(name))
     }
 
@@ -1246,6 +1359,9 @@ impl TalosNameService {
 
     /// Check if a name is available.
     pub fn is_name_available(e: Env, name: String) -> bool {
+        // Canonicalize before availability check so mixed-case inputs agree
+        // with the stored canonical form.
+        let name = canonicalize_name(&e, &name);
         if !validate_name(&name) {
             return false;
         }
@@ -2043,7 +2159,32 @@ mod tests {
         let (maj, min, patch) = client.version();
         assert_eq!((maj, min, patch), CONTRACT_VERSION);
     }
+    
+    #[test]
+    fn deployment_manifest_digest_is_stable_and_canonical() {
+        let (env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
 
+        let digest = client.deployment_manifest_digest();
+        let again = client.deployment_manifest_digest();
+        assert_eq!(digest, again, "digest must be deterministic");
+
+        let mut payload = soroban_sdk::Bytes::new(&env);
+        payload.append(&soroban_sdk::Bytes::from_array(&env, &INTERFACE_ID));
+        payload.extend_from_slice(&CONTRACT_VERSION.0.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.1.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.2.to_be_bytes());
+        for feature in features_list() {
+            let bytes = feature.as_bytes();
+            payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            payload.extend_from_slice(bytes);
+        }
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.major.to_be_bytes());
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.minor.to_be_bytes());
+
+        let expected = env.crypto().sha256(&payload).to_bytes();
+        assert_eq!(digest, expected);
+    }
+    
     // ── interface_id() + golden vector ───────────────────────────────
 
     #[test]
@@ -5624,5 +5765,592 @@ mod tests {
             client.has_name(&talos_id),
             "has_name must work while paused"
         );
+    }
+
+    // ── Budget regression gates (#610) ───────────────────────────────────────
+    //
+    // Measure CPU-instruction and memory-byte cost of the core write and read
+    // paths on the host (native Rust) target.  Ceilings are loose regression
+    // sentinels; WASM runtime costs will be higher.
+
+    const BUDGET_CPU_NS_INITIALIZE: u64    =  500_000;
+    const BUDGET_MEM_NS_INITIALIZE: u64    =  100_000;
+
+    const BUDGET_CPU_REGISTER_NAME: u64    = 1_200_000;
+    const BUDGET_MEM_REGISTER_NAME: u64    =  250_000;
+
+    const BUDGET_CPU_RESOLVE_NAME: u64     =  200_000;
+    const BUDGET_MEM_RESOLVE_NAME: u64     =   50_000;
+
+    const BUDGET_CPU_NAME_OF: u64          =  200_000;
+    const BUDGET_MEM_NAME_OF: u64          =   50_000;
+
+    #[test]
+    fn budget_initialize_within_limits() {
+        let env = Env::default();
+        let registry_contract    = env.register_contract(None, TalosRegistry);
+        let name_service_contract = env.register_contract(None, TalosNameService);
+        let client = TalosNameServiceClient::new(&env, &name_service_contract);
+        let admin  = Address::generate(&env);
+
+        env.budget().reset_default();
+        client.initialize(&registry_contract, &admin, &0i128);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_NS_INITIALIZE,
+            "name service initialize CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_NS_INITIALIZE,
+        );
+        assert!(
+            mem < BUDGET_MEM_NS_INITIALIZE,
+            "name service initialize memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_NS_INITIALIZE,
+        );
+    }
+
+    #[test]
+    fn budget_register_name_within_limits() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner           = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name            = s(&env, "budgettest");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+
+        env.budget().reset_default();
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name,
+        );
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_REGISTER_NAME,
+            "register_name CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_REGISTER_NAME,
+        );
+        assert!(
+            mem < BUDGET_MEM_REGISTER_NAME,
+            "register_name memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_REGISTER_NAME,
+        );
+    }
+
+    #[test]
+    fn budget_resolve_name_read_within_limits() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner           = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name            = s(&env, "resolvetest");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name,
+        );
+
+        env.budget().reset_default();
+        let _ = client.resolve_name(&name);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_RESOLVE_NAME,
+            "resolve_name CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_RESOLVE_NAME,
+        );
+        assert!(
+            mem < BUDGET_MEM_RESOLVE_NAME,
+            "resolve_name memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_RESOLVE_NAME,
+        );
+    }
+
+    #[test]
+    fn budget_name_of_read_within_limits() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner           = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name            = s(&env, "nameoftest");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name,
+        );
+
+        env.budget().reset_default();
+        let _ = client.name_of(&talos_id);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_NAME_OF,
+            "name_of CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_NAME_OF,
+        );
+        assert!(
+            mem < BUDGET_MEM_NAME_OF,
+            "name_of memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_NAME_OF,
+        );
+    }
+
+    /// Negative: registering an already-taken name must fail cheaply (no
+    /// storage write occurs, so the rejection should be cheaper than success).
+    #[test]
+    fn budget_register_name_duplicate_rejected_cheaply() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner           = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name            = s(&env, "duptest");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name,
+        );
+
+        // Attempt a second registration with the same name — must fail.
+        let talos_id2 = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+
+        env.budget().reset_default();
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id2, name.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id2,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .try_register_name(&owner, &talos_id2, &name);
+        assert!(result.is_err(), "duplicate name must be rejected");
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_REGISTER_NAME,
+            "rejected register_name CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_REGISTER_NAME,
+        );
+        assert!(
+            mem < BUDGET_MEM_REGISTER_NAME,
+            "rejected register_name memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_REGISTER_NAME,
+        );
+    }
+
+    // ── #594 canonicalize_name tests ─────────────────────────────────
+    //
+    // Verify name canonicalization (trim + lowercase) is applied
+    // consistently across canonicalize(), register_name, resolve_name,
+    // and is_name_available.
+
+    #[test]
+    fn canonicalize_converts_uppercase_to_lowercase() {
+        let (env, _, _, _, _, client) = setup();
+        assert_eq!(client.canonicalize(&s(&env, "VEGA")), s(&env, "vega"));
+        assert_eq!(client.canonicalize(&s(&env, "Vega")), s(&env, "vega"));
+        assert_eq!(client.canonicalize(&s(&env, "vEgA")), s(&env, "vega"));
+    }
+
+    #[test]
+    fn canonicalize_trims_leading_trailing_whitespace() {
+        let (env, _, _, _, _, client) = setup();
+        assert_eq!(client.canonicalize(&s(&env, "  vega  ")), s(&env, "vega"));
+        assert_eq!(client.canonicalize(&s(&env, " vega")),    s(&env, "vega"));
+        assert_eq!(client.canonicalize(&s(&env, "vega ")),    s(&env, "vega"));
+    }
+
+    #[test]
+    fn canonicalize_trim_and_lowercase_combined() {
+        let (env, _, _, _, _, client) = setup();
+        assert_eq!(client.canonicalize(&s(&env, "  VEGA  ")), s(&env, "vega"));
+        assert_eq!(client.canonicalize(&s(&env, " Atlas ")),  s(&env, "atlas"));
+    }
+
+    #[test]
+    fn canonicalize_already_canonical_is_noop() {
+        let (env, _, _, _, _, client) = setup();
+        assert_eq!(client.canonicalize(&s(&env, "vega")),        s(&env, "vega"));
+        assert_eq!(client.canonicalize(&s(&env, "my-agent-1")),  s(&env, "my-agent-1"));
+    }
+
+    #[test]
+    fn canonicalize_digits_and_hyphens_unchanged() {
+        let (env, _, _, _, _, client) = setup();
+        assert_eq!(client.canonicalize(&s(&env, "my-agent-42")), s(&env, "my-agent-42"));
+        assert_eq!(client.canonicalize(&s(&env, "abc")),         s(&env, "abc"));
+    }
+
+    #[test]
+    fn register_name_uppercase_stores_lowercase() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+
+        let upper = s(&env, "VEGA");
+        client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, upper.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .register_name(&owner, &talos_id, &upper);
+
+        let canonical = s(&env, "vega");
+        assert_eq!(client.name_of(&talos_id), Some(canonical.clone()), "stored name must be lowercase");
+        assert_eq!(client.resolve_name(&canonical), Some(talos_id), "lowercase resolve must succeed");
+    }
+
+    #[test]
+    fn register_name_mixed_case_with_padding_stores_canonical() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+
+        let padded = s(&env, " Atlas ");
+        client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, padded.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .register_name(&owner, &talos_id, &padded);
+
+        let canonical = s(&env, "atlas");
+        assert_eq!(client.name_of(&talos_id), Some(canonical.clone()));
+        assert_eq!(client.resolve_name(&canonical), Some(talos_id));
+    }
+
+    #[test]
+    fn resolve_name_is_case_insensitive() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &s(&env, "vega"));
+
+        assert_eq!(client.resolve_name(&s(&env, "VEGA")),   Some(talos_id));
+        assert_eq!(client.resolve_name(&s(&env, "Vega")),   Some(talos_id));
+        assert_eq!(client.resolve_name(&s(&env, "vega")),   Some(talos_id));
+        assert_eq!(client.resolve_name(&s(&env, " vega ")), Some(talos_id));
+    }
+
+    #[test]
+    fn is_name_available_is_case_insensitive() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+
+        assert!(client.is_name_available(&s(&env, "vega")));
+        assert!(client.is_name_available(&s(&env, "VEGA")));
+
+        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &s(&env, "vega"));
+
+        assert!(!client.is_name_available(&s(&env, "vega")));
+        assert!(!client.is_name_available(&s(&env, "VEGA")));
+        assert!(!client.is_name_available(&s(&env, "Vega")));
+        assert!(!client.is_name_available(&s(&env, " vega ")));
+    }
+
+    #[test]
+    fn duplicate_registration_rejected_for_canonical_form() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &s(&env, "vega"));
+
+        // Registering "VEGA" while "vega" is taken must fail
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, s(&env, "VEGA")).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &s(&env, "VEGA"));
+        assert!(res.is_err(), "uppercase duplicate must be rejected");
+    }
+
+    // ── #608 event-schema compatibility tests ────────────────────────
+    //
+    // Verify name_reg / name_reg2 events match EVENTS.md §3:
+    //   - Positive: events emitted, topics/data match schema
+    //   - Schema version: name_reg2 data[0] == 1
+    //   - Ordering: name_reg precedes name_reg2
+    //   - Canonical name in event when caller passes uppercase
+    //   - Boundary: min/max length names
+    //   - Negative: no event on invalid name / duplicate rejection
+
+    #[test]
+    fn event_schema_version_constant_is_stable() {
+        assert_eq!(EVENT_SCHEMA_VERSION.major, 1u32);
+        assert_eq!(EVENT_SCHEMA_VERSION.minor, 0u32);
+    }
+
+    #[test]
+    fn name_reg_event_emitted_with_correct_schema() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        let name = s(&env, "vega");
+        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &name);
+
+        let events = env.events().all();
+        let reg_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(_, t, _)| {
+                let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &t.get(0).unwrap());
+                sym.map(|s| s == symbol_short!("name_reg")).unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(reg_events.len(), 1, "exactly one name_reg event");
+
+        let (_, topics, data) = reg_events[0].clone();
+        // topics = ("name_reg", talos_id: u32)
+        assert_eq!(topics.len(), 2);
+        let t1: u32 = TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+        assert_eq!(t1, talos_id);
+        // data = (name: String, owner: Address)
+        let (ev_name, ev_owner): (String, Address) = TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(ev_name, name);
+        assert_eq!(ev_owner, owner);
+    }
+
+    #[test]
+    fn name_reg2_carries_schema_version_one() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        let name = s(&env, "nova");
+        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &name);
+
+        let events = env.events().all();
+        let reg2_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(_, t, _)| {
+                let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &t.get(0).unwrap());
+                sym.map(|s| s == symbol_short!("name_reg2")).unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(reg2_events.len(), 1, "exactly one name_reg2 event");
+
+        let (_, topics, data) = reg2_events[0].clone();
+        assert_eq!(topics.len(), 2);
+        let t1: u32 = TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+        assert_eq!(t1, talos_id);
+        // data = (version: u32, name: String, owner: Address)
+        let (version, ev_name, ev_owner): (u32, String, Address) =
+            TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(version, 1u32, "name_reg2 schema version must be 1");
+        assert_eq!(ev_name, name);
+        assert_eq!(ev_owner, owner);
+    }
+
+    #[test]
+    fn name_reg_precedes_name_reg2() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &s(&env, "atlas"));
+
+        let events = env.events().all();
+        let mut reg_idx: Option<u32> = None;
+        let mut reg2_idx: Option<u32> = None;
+        for i in 0..events.len() {
+            let (_, topics, _) = events.get(i).unwrap();
+            let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &topics.get(0).unwrap());
+            if let Ok(sym) = sym {
+                if sym == symbol_short!("name_reg")  { reg_idx  = Some(i); }
+                if sym == symbol_short!("name_reg2") { reg2_idx = Some(i); }
+            }
+        }
+        let ri  = reg_idx.expect("name_reg must be emitted");
+        let r2i = reg2_idx.expect("name_reg2 must be emitted");
+        assert!(ri < r2i, "name_reg ({ri}) must precede name_reg2 ({r2i})");
+    }
+
+    #[test]
+    fn name_reg_event_carries_canonical_name_for_uppercase_input() {
+        // Even when caller passes "VEGA", name_reg event data[0] must be "vega".
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+
+        let upper = s(&env, "VEGA");
+        client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, upper.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .register_name(&owner, &talos_id, &upper);
+
+        for (_, topics, data) in env.events().all().iter() {
+            let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &topics.get(0).unwrap());
+            if let Ok(sym) = sym {
+                if sym == symbol_short!("name_reg") {
+                    let (ev_name, _): (String, Address) = TryFromVal::try_from_val(&env, &data).unwrap();
+                    assert_eq!(ev_name, s(&env, "vega"), "event name must be canonical lowercase");
+                    return;
+                }
+            }
+        }
+        panic!("name_reg not found");
+    }
+
+    #[test]
+    fn no_event_on_invalid_name() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+
+        let bad = s(&env, "bad--name");
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, bad.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &bad);
+        assert!(res.is_err(), "consecutive-hyphen name must be rejected");
+
+        for (_, topics, _) in env.events().all().iter() {
+            let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &topics.get(0).unwrap());
+            if let Ok(sym) = sym {
+                assert_ne!(sym, symbol_short!("name_reg"),  "must not emit name_reg on rejection");
+                assert_ne!(sym, symbol_short!("name_reg2"), "must not emit name_reg2 on rejection");
+            }
+        }
+    }
+
+    #[test]
+    fn no_event_on_duplicate_name() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &s(&env, "vega"));
+        let events_before = env.events().all().len();
+
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, s(&env, "vega")).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &s(&env, "vega"));
+        assert!(res.is_err(), "duplicate must be rejected");
+        assert_eq!(env.events().all().len(), events_before, "no new events on duplicate");
+    }
+
+    #[test]
+    fn name_reg_emitted_for_min_length_name() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &s(&env, "abc"));
+
+        let found = env.events().all().iter().any(|(_, t, _)| {
+            let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &t.get(0).unwrap());
+            sym.map(|s| s == symbol_short!("name_reg")).unwrap_or(false)
+        });
+        assert!(found, "name_reg must be emitted for 3-char (min) name");
+    }
+
+    #[test]
+    fn name_reg_emitted_for_max_length_name() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        let max_name = s(&env, "abcdefghijklmnopqrstuvwxyz123456"); // 32 chars
+        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &max_name);
+
+        let found = env.events().all().iter().any(|(_, t, _)| {
+            let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &t.get(0).unwrap());
+            sym.map(|s| s == symbol_short!("name_reg")).unwrap_or(false)
+        });
+        assert!(found, "name_reg must be emitted for 32-char (max) name");
     }
 }

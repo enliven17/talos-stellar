@@ -1,9 +1,10 @@
 {
   "contracts": [
     "TalosRegistry",
-    "TalosNameService"
+    "TalosNameService",
+    "TalosGovernance"
   ],
-  "description": "Supported on-disk storage schema versions. Latest matches the highest deployed schema. Add new version by appending and regenerating fixtures.",
+  "description": "Supported on-disk storage schema versions. Latest matches storage_migration::SCHEMA_TIMELOCK_DEFAULTS. Add new version by appending and regenerating fixtures.",
   "latest": 3,
   "supported": [
     1,
@@ -11,8 +12,8 @@
     3
   ],
   "changelog": {
-    "1": "Baseline schema.",
-    "2": "Additive: optional 'metadata' field on FixtureTalos (Option<String>). Existing records read as None.",
-    "3": "talos-registry v1.5.0: Talos struct on-chain gains 'metadata: Option<String>'. Creator metadata fields (name, category, description) are mutable via update_creator_metadata. Emits meta_upd event. New typed errors: TalosNotFound (2), MetadataFieldTooLong (3). EVENT_SCHEMA_VERSION bumped to 1.1.0. CONTRACT_VERSION bumped to 1.5.0."
+    "1": "Genesis schema. Registry: Talos, PatronUpdate, NameRecord, TalosName, CreatorOf. Governance: GovernanceBundle (no TimelockConfig).",
+    "2": "Added explicit TimelockConfig to GovernanceBundle. Additive: metadata field on Talos (Option<String>).",
+    "3": "TalosGovernance v1.1.0: adds DataKey::QuorumReached(u32) idempotency sentinel. Written once when a proposal first crosses the quorum threshold. Purely additive — existing keys and entry-points are unchanged. Companion EventQuorumReached (topic: qrm_rchd) is emitted at most once per proposal."
   }
 }

@@ -1,19 +1,12 @@
 // ── Client ────────────────────────────────────────────────────────
 
-export {
-  TalosClient,
-  resolveRetryPolicy,
-  resolveRetryOptions,
-} from "./client.js";
+export { TalosClient } from "./client.js";
 export type {
   TalosClientOptions,
   RetryOptions,
   RetryPolicyOptions,
-  ResolvedRetryPolicy,
-  ResolvedRetryOptions,
   TalosErrorEvent,
   WriteOptions,
-  ReadOptions,
 } from "./client.js";
 
 // ── Pagination ─────────────────────────────────────────────────────
@@ -73,10 +66,19 @@ export {
   snapshotHeaders,
   parseRetryAfter,
   parseX402Challenge,
-  redactEventPath,
-  diagnoseBuyerProof,
   MAX_BODY_BYTES,
 } from "./errors.js";
+
+// ── Feature Detection ─────────────────────────────────────────────
+//
+// Provides backwards-compatible feature detection for SDK capabilities.
+// This allows consumers to safely check for the presence of specific
+// features without breaking on older versions or environments.
+export {
+  detectFeature,
+  FeatureFlags,
+  FeatureStatus,
+} from "./features.js";
 
 // ── Domain types ──────────────────────────────────────────────────
 
@@ -90,22 +92,16 @@ export * from "./a2a-intent.js";
 export * from "./a2a-validation.js";
 export * from "./a2a-operations.js";
 export {
-  DEFAULT_SELLER_QUOTE_TTL_SECONDS,
-  SellerQuoteError,
-  constructSellerQuote,
-  constructSellerPaymentDetails,
-  toCanonicalDecimalAmount,
-} from "./seller-quote.js";
-export type {
-  ConstructSellerQuoteParams,
-  ConstructSellerPaymentDetailsParams,
-  SellerPaymentDetails,
-  SellerQuoteErrorCode,
-} from "./seller-quote.js";
-export {
   TalosEventStream,
   TalosStreamError,
   InMemorySeenStore,
+  TALOS_EVENT_SCHEMA_VERSION,
+  SCHEMA_VERSION_REQUEST_HEADER,
+  SCHEMA_VERSION_RESPONSE_HEADER,
+  SchemaVersionMismatchError,
+  negotiateSchemaVersion,
+  SSE_MAX_FIELD_BYTES,
+  SSE_MAX_DATA_LINES,
 } from "./events.js";
 export type {
   TalosEventType,
@@ -115,6 +111,7 @@ export type {
   TalosStreamCloseHandler,
   TalosEventStreamOptions,
   SeenStore,
+  SchemaVersionNegotiationResult,
 } from "./events.js";
 
 // ── Contract event decoding ───────────────────────────────────────────────────

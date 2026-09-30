@@ -26,6 +26,7 @@ import logging
 import math
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
+from urllib.parse import urlsplit
 
 import httpx
 from tenacity import (
@@ -88,6 +89,30 @@ class ToolTimeoutError(Exception):
             "timeout_seconds": timeout,
         }
         super().__init__(f"Tool {tool_name!r} timed out after {timeout:g}s")
+
+
+class ResponseTooLargeError(Exception):
+    """Raised when an API response body exceeds the configured size cap.
+
+    Privacy contract: this error never includes the response body, headers,
+    or any content from the response.  Only the sanitised URL path, the
+    measured byte count, and the configured limit are recorded, so secrets,
+    seeds, payment proofs, and sensitive media cannot leak via error logs.
+    """
+
+    def __init__(self, url: str, actual_bytes: int, limit_bytes: int) -> None:
+        # Store only the path component — host/credentials are stripped.
+        try:
+            parts = urlsplit(url)
+            self.url_path: str = parts.path or url
+        except ValueError:
+            self.url_path = "<unknown>"
+        self.actual_bytes: int = actual_bytes
+        self.limit_bytes: int = limit_bytes
+        super().__init__(
+            f"Response body too large: {actual_bytes} bytes exceeds limit of "
+            f"{limit_bytes} bytes (path={self.url_path!r})"
+        )
 
 
 # _sanitize_json_value, _strip_control_chars, and _sanitize_response_text are

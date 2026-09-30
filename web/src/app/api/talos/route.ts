@@ -11,6 +11,7 @@ import { TimeoutError, withTimeout } from "@/lib/timeout";
 import { fetchReputations } from "@/lib/reputation-ledger";
 import { withDriftDetection } from "@/lib/drift";
 import { badRequest, forbidden, internalError } from "@/lib/api-response";
+import { withRequestId } from "@/lib/with-request-id";
 import { revalidateTag } from "next/cache";
 import { AGENTS_LIST_TAG, agentTag } from "@/lib/cache-tags";
 import {
@@ -54,7 +55,7 @@ export function decodeTalosCursor(raw: string | null): TalosCursor | null {
 }
 
 // GET /api/talos — List TALOS entries with cursor-based pagination
-export async function GET(request: NextRequest) {
+async function _GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const rawCursor = searchParams.get("cursor");
@@ -439,4 +440,4 @@ async function _POST(request: NextRequest) {
 
 // Re-export POST wrapped with drift detection.
 // The original async function above is kept intact so it can be tested directly.
-export const POST = withDriftDetection("POST /api/talos", _POST);
+export const POST = withRequestId(withDriftDetection("POST /api/talos", _POST));
