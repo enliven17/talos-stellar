@@ -171,7 +171,7 @@ class TestCursorPagination:
         )
 
         assert page == PaginatedPage(items=[{"id": "a1"}, {"id": "a2"}], next_cursor="cursor-2")
-        assert route.calls[0].request.url.params == {"status": "pending", "limit": "2"}
+        assert dict(route.calls[0].request.url.params) == {"status": "pending", "limit": "2"}
 
     @pytest.mark.asyncio
     @respx.mock
@@ -187,7 +187,7 @@ class TestCursorPagination:
 
         assert [approval["id"] for approval in approvals] == ["a1", "a2", "a3"]
         assert len(route.calls) == 2
-        assert route.calls[1].request.url.params == {"limit": "2", "cursor": "cursor-2"}
+        assert dict(route.calls[1].request.url.params) == {"limit": "2", "cursor": "cursor-2"}
 
     @pytest.mark.asyncio
     @respx.mock

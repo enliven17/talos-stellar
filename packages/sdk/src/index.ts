@@ -1,19 +1,12 @@
 // ── Client ────────────────────────────────────────────────────────
 
-export {
-  TalosClient,
-  resolveRetryPolicy,
-  resolveRetryOptions,
-} from "./client.js";
+export { TalosClient } from "./client.js";
 export type {
   TalosClientOptions,
   RetryOptions,
   RetryPolicyOptions,
-  ResolvedRetryPolicy,
-  ResolvedRetryOptions,
   TalosErrorEvent,
   WriteOptions,
-  ReadOptions,
 } from "./client.js";
 
 // ── Pagination ─────────────────────────────────────────────────────
@@ -73,10 +66,19 @@ export {
   snapshotHeaders,
   parseRetryAfter,
   parseX402Challenge,
-  redactEventPath,
-  diagnoseBuyerProof,
   MAX_BODY_BYTES,
 } from "./errors.js";
+
+// ── Feature Detection ─────────────────────────────────────────────
+//
+// Provides backwards-compatible feature detection for SDK capabilities.
+// This allows consumers to safely check for the presence of specific
+// features without breaking on older versions or environments.
+export {
+  detectFeature,
+  FeatureFlags,
+  FeatureStatus,
+} from "./features.js";
 
 // ── Domain types ──────────────────────────────────────────────────
 
@@ -89,19 +91,6 @@ export * from "./webhooks.js";
 export * from "./a2a-intent.js";
 export * from "./a2a-validation.js";
 export * from "./a2a-operations.js";
-export {
-  DEFAULT_SELLER_QUOTE_TTL_SECONDS,
-  SellerQuoteError,
-  constructSellerQuote,
-  constructSellerPaymentDetails,
-  toCanonicalDecimalAmount,
-} from "./seller-quote.js";
-export type {
-  ConstructSellerQuoteParams,
-  ConstructSellerPaymentDetailsParams,
-  SellerPaymentDetails,
-  SellerQuoteErrorCode,
-} from "./seller-quote.js";
 export {
   TalosEventStream,
   TalosStreamError,

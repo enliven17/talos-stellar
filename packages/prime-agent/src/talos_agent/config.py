@@ -72,8 +72,16 @@ class Settings(BaseSettings):
 
     @property
     def llm_api_key(self) -> str:
+        override = self.__dict__.get("_llm_api_key_override")
+        if override is not None:
+            return override
         groq_key = self.secret_value("groq_api_key")
         return groq_key or self.secret_value("openai_api_key")
+
+    @llm_api_key.setter
+    def llm_api_key(self, value: str) -> None:
+        """Allow runtime credential revocation (lifecycle pause/shutdown)."""
+        self.__dict__["_llm_api_key_override"] = value
 
     @property
     def llm_model(self) -> str:

@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from talos_agent.db import _MIGRATIONS, LocalDB
+from talos_agent.db import LocalDB
 from talos_agent.scheduler import DurableBackoff
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -41,10 +41,18 @@ def test_migration_creates_retry_state_table(db: LocalDB):
     assert cursor.fetchone() is not None, "retry_state table missing after migration"
 
 
-def test_migration_6_is_latest(db: LocalDB):
-    """The DB user_version must equal the latest migration index (6)."""
+def test_migration_latest_matches_user_version(db: LocalDB):
+    """The DB user_version must equal the latest migration index.
+
+    Originally pinned to 6 when retry_state was the newest migration;
+    later features (durable job effects, telegram queue, adapter
+    invocations) appended migrations 7+, so the check stays structural:
+    the applied user_version must always match the last migration entry.
+    """
+    from talos_agent.db import _MIGRATIONS
+
     latest = _MIGRATIONS[-1][0]
-    assert latest == 6
+    assert latest >= 6
     version = db._conn.execute("PRAGMA user_version").fetchone()[0]
     assert version == latest
 

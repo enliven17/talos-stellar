@@ -14,6 +14,7 @@ import binascii
 import json
 import re
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -22,6 +23,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from talos_agent.observability import log
 from talos_agent.secret_store_backends import (
     BackendBusyError,
+    SecretRollbackCheckpointRecord,
     SecretStoreBackend,
     SecretVersionRecord,
     create_secret_store_backend,
@@ -374,13 +376,6 @@ class SecretStore:
                 "checkpoint request ID must be a safe identifier of at most 128 characters"
             )
         try:
-            self._conn.execute("BEGIN IMMEDIATE")
-            head = self._conn.execute(
-                "SELECT active_version, previous_version, generation "
-                "FROM secret_heads WHERE scope = ? AND name = ?",
-                (self._scope, name),
-            ).fetchone()
-            actual = int(head["active_version"]) if head else None
             self._backend.begin_immediate()
             head = self._backend.get_head(self._scope, name)
             actual = int(head.active_version) if head else None
@@ -400,17 +395,13 @@ class SecretStore:
                 self._insert_rollback_checkpoint_unlocked(
                     name,
                     active_version=actual,
-                    previous_version=int(head["previous_version"])
-                    if head["previous_version"] is not None
-                    else None,
-                    generation=int(head["generation"]),
+                    previous_version=head.previous_version,
+                    generation=int(head.generation),
                     request_id=checkpoint_request_id,
                     actor=actor,
                     reason=reason,
                     checkpoint_id=None,
                 )
-            target = self._get_version_row(name, version)
-            if target["status"] not in _ACTIVATABLE:
             target = self._require_version(name, version)
             if target.status not in _ACTIVATABLE:
                 raise SecretConflictError(
@@ -526,19 +517,21 @@ class SecretStore:
             raise
 
 
-    def _public_checkpoint(self, row: sqlite3.Row) -> SecretRollbackCheckpoint:
+    def _public_checkpoint(
+        self, row: SecretRollbackCheckpointRecord
+    ) -> SecretRollbackCheckpoint:
         return SecretRollbackCheckpoint(
-            name=row["name"],
-            checkpoint_id=row["checkpoint_id"],
-            active_version=int(row["active_version"]),
-            previous_version=int(row["previous_version"])
-            if row["previous_version"] is not None
+            name=row.name,
+            checkpoint_id=row.checkpoint_id,
+            active_version=int(row.active_version),
+            previous_version=int(row.previous_version)
+            if row.previous_version is not None
             else None,
-            generation=int(row["generation"]),
-            status=row["status"],
-            created_at=row["created_at"],
-            restored_at=row["restored_at"],
-            discarded_at=row["discarded_at"],
+            generation=int(row.generation),
+            status=row.status,
+            created_at=row.created_at,
+            restored_at=row.restored_at,
+            discarded_at=row.discarded_at,
         )
 
     def _insert_rollback_checkpoint_unlocked(
@@ -554,15 +547,9 @@ class SecretStore:
         checkpoint_id: str | None,
     ) -> SecretRollbackCheckpoint:
         """Insert or return an idempotent checkpoint. Caller holds the transaction."""
-        existing = self._conn.execute(
-            """
-            SELECT name, checkpoint_id, active_version, previous_version, generation,
-                   status, created_at, restored_at, discarded_at
-            FROM secret_rollback_checkpoints
-            WHERE scope = ? AND name = ? AND request_id = ?
-            """,
-            (self._scope, name, request_id),
-        ).fetchone()
+        existing = self._backend.get_rollback_checkpoint_by_request_id(
+            self._scope, name, request_id
+        )
         if existing:
             return self._public_checkpoint(existing)
 
@@ -571,24 +558,16 @@ class SecretStore:
             raise SecretValidationError(
                 "checkpoint ID must be a safe identifier of at most 128 characters"
             )
-        self._conn.execute(
-            """
-            INSERT INTO secret_rollback_checkpoints
-                (scope, name, checkpoint_id, active_version, previous_version,
-                 generation, request_id, actor, reason, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
-            """,
-            (
-                self._scope,
-                name,
-                cid,
-                active_version,
-                previous_version,
-                generation,
-                request_id,
-                actor,
-                reason,
-            ),
+        self._backend.insert_rollback_checkpoint(
+            scope=self._scope,
+            name=name,
+            checkpoint_id=cid,
+            active_version=active_version,
+            previous_version=previous_version,
+            generation=generation,
+            request_id=request_id,
+            actor=actor,
+            reason=reason,
         )
         self._audit(
             name=name,
@@ -603,15 +582,8 @@ class SecretStore:
                 "generation": generation,
             },
         )
-        row = self._conn.execute(
-            """
-            SELECT name, checkpoint_id, active_version, previous_version, generation,
-                   status, created_at, restored_at, discarded_at
-            FROM secret_rollback_checkpoints
-            WHERE scope = ? AND name = ? AND checkpoint_id = ?
-            """,
-            (self._scope, name, cid),
-        ).fetchone()
+        row = self._backend.get_rollback_checkpoint(self._scope, name, cid)
+        assert row is not None
         return self._public_checkpoint(row)
 
     def create_rollback_checkpoint(
@@ -630,52 +602,34 @@ class SecretStore:
                 "request ID must be a safe identifier of at most 128 characters"
             )
         try:
-            self._conn.execute("BEGIN IMMEDIATE")
-            head = self._conn.execute(
-                """
-                SELECT active_version, previous_version, generation
-                FROM secret_heads WHERE scope = ? AND name = ?
-                """,
-                (self._scope, name),
-            ).fetchone()
+            self._backend.begin_immediate()
+            head = self._backend.get_head(self._scope, name)
             if not head:
                 raise SecretNotFoundError(f"no active head for secret {name!r}")
             result = self._insert_rollback_checkpoint_unlocked(
                 name,
-                active_version=int(head["active_version"]),
-                previous_version=int(head["previous_version"])
-                if head["previous_version"] is not None
-                else None,
-                generation=int(head["generation"]),
+                active_version=int(head.active_version),
+                previous_version=head.previous_version,
+                generation=int(head.generation),
                 request_id=request_id,
                 actor=actor,
                 reason=reason,
                 checkpoint_id=checkpoint_id,
             )
-            self._conn.commit()
+            self._backend.commit()
             self._transition_log(name, result.active_version, "checkpoint_created", "success")
             return result
         except Exception as exc:
-            self._conn.rollback()
+            self._backend.rollback()
             self._transition_log(name, None, "checkpoint_created", "failure", exc)
-            if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower():
-                raise SecretBusyError(
-                    "secret store is busy; retry the idempotent operation"
-                ) from exc
+            busy = self._map_busy(exc)
+            if busy is not None:
+                raise busy from exc
             raise
 
     def list_rollback_checkpoints(self, name: str) -> list[SecretRollbackCheckpoint]:
         name = self._validate_identifier(name, "secret name")
-        rows = self._conn.execute(
-            """
-            SELECT name, checkpoint_id, active_version, previous_version, generation,
-                   status, created_at, restored_at, discarded_at
-            FROM secret_rollback_checkpoints
-            WHERE scope = ? AND name = ?
-            ORDER BY created_at DESC, checkpoint_id DESC
-            """,
-            (self._scope, name),
-        ).fetchall()
+        rows = self._backend.list_rollback_checkpoints(self._scope, name)
         return [self._public_checkpoint(row) for row in rows]
 
     def discard_rollback_checkpoint(
@@ -693,64 +647,51 @@ class SecretStore:
                 "checkpoint ID must be a safe identifier of at most 128 characters"
             )
         try:
-            self._conn.execute("BEGIN IMMEDIATE")
-            row = self._conn.execute(
-                """
-                SELECT name, checkpoint_id, active_version, previous_version, generation,
-                       status, created_at, restored_at, discarded_at
-                FROM secret_rollback_checkpoints
-                WHERE scope = ? AND name = ? AND checkpoint_id = ?
-                """,
-                (self._scope, name, checkpoint_id),
-            ).fetchone()
+            self._backend.begin_immediate()
+            row = self._backend.get_rollback_checkpoint(
+                self._scope, name, checkpoint_id
+            )
             if not row:
                 raise SecretNotFoundError(f"checkpoint {checkpoint_id!r} does not exist")
-            if row["status"] == "discarded":
-                self._conn.commit()
+            if row.status == "discarded":
+                self._backend.commit()
                 return self._public_checkpoint(row)
-            if row["status"] != "open":
+            if row.status != "open":
                 raise SecretConflictError(
-                    f"checkpoint {checkpoint_id!r} cannot be discarded from state {row['status']}"
+                    f"checkpoint {checkpoint_id!r} cannot be discarded from state {row.status}"
                 )
-            self._conn.execute(
-                """
-                UPDATE secret_rollback_checkpoints
-                SET status = 'discarded', discarded_at = datetime('now')
-                WHERE scope = ? AND name = ? AND checkpoint_id = ?
-                """,
-                (self._scope, name, checkpoint_id),
+            self._backend.update_rollback_checkpoint_status(
+                self._scope,
+                name,
+                checkpoint_id,
+                "discarded",
+                set_discarded=True,
             )
             self._audit(
                 name=name,
-                version=int(row["active_version"]),
+                version=int(row.active_version),
                 event_type="checkpoint_discarded",
                 outcome="success",
                 actor=actor,
                 reason=reason,
                 metadata={"checkpoint_id": checkpoint_id},
             )
-            updated = self._conn.execute(
-                """
-                SELECT name, checkpoint_id, active_version, previous_version, generation,
-                       status, created_at, restored_at, discarded_at
-                FROM secret_rollback_checkpoints
-                WHERE scope = ? AND name = ? AND checkpoint_id = ?
-                """,
-                (self._scope, name, checkpoint_id),
-            ).fetchone()
-            self._conn.commit()
+            updated = self._backend.get_rollback_checkpoint(
+                self._scope, name, checkpoint_id
+            )
+            assert updated is not None
+            self._backend.commit()
             result = self._public_checkpoint(updated)
             self._transition_log(
                 name, result.active_version, "checkpoint_discarded", "success"
             )
             return result
         except Exception as exc:
-            self._conn.rollback()
+            self._backend.rollback()
             self._transition_log(name, None, "checkpoint_discarded", "failure", exc)
-            if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower():
-                raise SecretBusyError(
-                    "secret store is busy; retry the idempotent operation"
-                ) from exc
+            busy = self._map_busy(exc)
+            if busy is not None:
+                raise busy from exc
             raise
 
     def rollback_to_checkpoint(
@@ -771,136 +712,88 @@ class SecretStore:
         if expected_active_version < 1:
             raise SecretValidationError("expected active version must be positive")
         try:
-            self._conn.execute("BEGIN IMMEDIATE")
-            checkpoint = self._conn.execute(
-                """
-                SELECT name, checkpoint_id, active_version, previous_version, generation,
-                       status, created_at, restored_at, discarded_at
-                FROM secret_rollback_checkpoints
-                WHERE scope = ? AND name = ? AND checkpoint_id = ?
-                """,
-                (self._scope, name, checkpoint_id),
-            ).fetchone()
+            self._backend.begin_immediate()
+            checkpoint = self._backend.get_rollback_checkpoint(
+                self._scope, name, checkpoint_id
+            )
             if not checkpoint:
                 raise SecretNotFoundError(f"checkpoint {checkpoint_id!r} does not exist")
-            if checkpoint["status"] == "discarded":
+            if checkpoint.status == "discarded":
                 raise SecretConflictError(
                     f"checkpoint {checkpoint_id!r} has been discarded"
                 )
 
-            head = self._conn.execute(
-                """
-                SELECT active_version, previous_version, generation
-                FROM secret_heads WHERE scope = ? AND name = ?
-                """,
-                (self._scope, name),
-            ).fetchone()
-            actual = int(head["active_version"]) if head else None
-            target_version = int(checkpoint["active_version"])
-            target_previous = (
-                int(checkpoint["previous_version"])
-                if checkpoint["previous_version"] is not None
-                else None
-            )
+            head = self._backend.get_head(self._scope, name)
+            actual = int(head.active_version) if head else None
+            target_version = int(checkpoint.active_version)
+            target_previous = checkpoint.previous_version
 
-            head_previous = (
-                int(head["previous_version"])
-                if head is not None and head["previous_version"] is not None
-                else None
-            )
+            head_previous = head.previous_version if head is not None else None
             # Idempotent: already restored to the checkpointed head.
             if (
-                checkpoint["status"] == "restored"
+                checkpoint.status == "restored"
                 and actual == target_version
                 and head_previous == target_previous
             ):
-                self._conn.commit()
-                return self._public_version(self._get_version_row(name, target_version))
+                self._backend.commit()
+                return self._public_version(self._require_version(name, target_version))
 
-            if checkpoint["status"] == "restored":
+            if checkpoint.status == "restored":
                 raise SecretConflictError(
                     f"checkpoint {checkpoint_id!r} was restored but the head has moved"
                 )
-            if checkpoint["status"] != "open":
+            if checkpoint.status != "open":
                 raise SecretConflictError(
-                    f"checkpoint {checkpoint_id!r} cannot be restored from state {checkpoint['status']}"
+                    f"checkpoint {checkpoint_id!r} cannot be restored from state {checkpoint.status}"
                 )
             if actual != expected_active_version:
                 raise SecretConflictError(
                     f"active version changed: expected {expected_active_version}, found {actual}"
                 )
 
-            target = self._get_version_row(name, target_version)
-            if target["status"] == "revoked":
+            target = self._require_version(name, target_version)
+            if target.status == "revoked":
                 raise SecretConflictError(
                     f"checkpoint target version {target_version} is revoked"
                 )
-            if target["status"] not in (_ACTIVATABLE | {"active"}):
+            if target.status not in (_ACTIVATABLE | {"active"}):
                 raise SecretConflictError(
-                    f"version {target_version} cannot be restored from state {target['status']}"
+                    f"version {target_version} cannot be restored from state {target.status}"
                 )
             self._decrypt(target)
             if target_previous is not None:
-                prev_row = self._get_version_row(name, target_previous)
-                if prev_row["status"] == "revoked":
+                prev_row = self._require_version(name, target_previous)
+                if prev_row.status == "revoked":
                     raise SecretConflictError(
                         f"checkpoint previous version {target_previous} is revoked"
                     )
 
             if actual is not None and actual != target_version:
-                self._conn.execute(
-                    """
-                    UPDATE secret_versions SET status = 'superseded'
-                    WHERE scope = ? AND name = ? AND version = ? AND status = 'active'
-                    """,
-                    (self._scope, name, actual),
+                self._backend.set_version_status(
+                    self._scope, name, actual, "superseded"
                 )
-            self._conn.execute(
-                """
-                UPDATE secret_versions
-                SET status = 'active',
-                    activated_at = COALESCE(activated_at, datetime('now')),
-                    revoked_at = NULL
-                WHERE scope = ? AND name = ? AND version = ?
-                """,
-                (self._scope, name, target_version),
-            )
+            self._backend.restore_version_activation(self._scope, name, target_version)
             if target_previous is not None:
-                self._conn.execute(
-                    """
-                    UPDATE secret_versions
-                    SET status = 'superseded', revoked_at = NULL
-                    WHERE scope = ? AND name = ? AND version = ? AND status != 'revoked'
-                    """,
-                    (self._scope, name, target_previous),
+                self._backend.supersede_unless_revoked(
+                    self._scope, name, target_previous
                 )
 
             if head:
-                self._conn.execute(
-                    """
-                    UPDATE secret_heads
-                    SET active_version = ?, previous_version = ?,
-                        generation = generation + 1, updated_at = datetime('now')
-                    WHERE scope = ? AND name = ?
-                    """,
-                    (target_version, target_previous, self._scope, name),
+                self._backend.update_head(
+                    self._scope,
+                    name,
+                    active_version=target_version,
+                    previous_version=target_previous,
                 )
             else:
-                self._conn.execute(
-                    """
-                    INSERT INTO secret_heads (scope, name, active_version, previous_version)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (self._scope, name, target_version, target_previous),
-                )
+                self._backend.insert_head(self._scope, name, target_version)
 
-            self._conn.execute(
-                """
-                UPDATE secret_rollback_checkpoints
-                SET status = 'restored', restored_at = datetime('now')
-                WHERE scope = ? AND name = ? AND checkpoint_id = ?
-                """,
-                (self._scope, name, checkpoint_id),
+            self._backend.update_rollback_checkpoint_status(
+                self._scope,
+                name,
+                checkpoint_id,
+                "restored",
+                set_restored=True,
             )
             self._audit(
                 name=name,
@@ -915,29 +808,19 @@ class SecretStore:
                     "from_version": actual,
                 },
             )
-            row = self._get_version_row(name, target_version)
-            self._conn.commit()
+            row = self._require_version(name, target_version)
+            self._backend.commit()
             result = self._public_version(row)
             self._transition_log(name, target_version, "checkpoint_restored", "success")
             return result
         except Exception as exc:
-            self._conn.rollback()
+            self._backend.rollback()
             self._transition_log(name, None, "checkpoint_restored", "failure", exc)
-            if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower():
-                raise SecretBusyError(
-                    "secret store is busy; retry the idempotent operation"
-                ) from exc
+            busy = self._map_busy(exc)
+            if busy is not None:
+                raise busy from exc
             raise
 
-    def _get_version_row(self, name: str, version: int) -> sqlite3.Row:
-        row = self._conn.execute(
-            """
-            SELECT name, version, status, created_at, activated_at, revoked_at,
-                   ciphertext, key_id
-            FROM secret_versions WHERE scope = ? AND name = ? AND version = ?
-            """,
-            (self._scope, name, version),
-        ).fetchone()
     def _require_version(self, name: str, version: int) -> SecretVersionRecord:
         row = self._backend.get_version(self._scope, name, version)
         if not row:

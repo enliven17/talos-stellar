@@ -9,6 +9,9 @@
 #![no_std]
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod upgrade_simulation_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
 extern crate std;
 
 use soroban_sdk::{

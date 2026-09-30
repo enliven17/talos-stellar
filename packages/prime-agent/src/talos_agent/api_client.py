@@ -21,10 +21,48 @@ from talos_agent.payments.stellar_retry import (
     attach_stellar_failure,
     classify_stellar_failure,
 )
+from talos_agent.idempotency import (
+    IdempotencyConflictError,
+    generate_idempotency_key,
+    is_payload_conflict,
+    validate_idempotency_key,
+)
 from talos_agent.tracing import inject_trace_headers, traced_span
 
 _NO_KEY = object()
 _MAX_PAGINATION_PAGES = 1_000
+
+
+def _inject_key(
+    idempotency_key: Any,  # str | None | _NO_KEY
+) -> str | None:
+    """Resolve the effective idempotency key for a write call.
+
+    - ``_NO_KEY`` sentinel  → auto-generate a fresh UUID v4.
+    - ``None``             → opt-out; no key injected.
+    - Any string           → use as-is after validation.
+    """
+    if idempotency_key is _NO_KEY:
+        return generate_idempotency_key()
+    if idempotency_key is None:
+        return None
+    return validate_idempotency_key(idempotency_key)
+
+
+def _check_idempotency_conflict(
+    response: httpx.Response,
+    key: str | None,
+    path: str,
+) -> None:
+    """Raise :class:`IdempotencyConflictError` if the 409 is a payload conflict."""
+    if response.status_code != 409 or key is None:
+        return
+    try:
+        body = response.text
+    except Exception:
+        body = ""
+    if is_payload_conflict(body):
+        raise IdempotencyConflictError(key=key, path=path, body=body)
 
 
 def _check_response_size(response: httpx.Response, limit_bytes: int) -> None:
@@ -100,11 +138,16 @@ class TalosAPIClient:
     # ── Retry-wrapped, traced HTTP verbs ──────────────────
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        """Single choke point for all Web API calls: span + trace-header
-        injection + retry-count/status metrics, on top of the existing
-        request_with_retry backoff. Every public method below funnels
-        through this instead of calling httpx directly.
+        """Single choke point for all Web API calls: auth headers + idempotency
+        key + circuit-breaker gating + span + trace-header injection +
+        retry-count/status metrics, on top of the existing request_with_retry
+        backoff. Every public method below funnels through this instead of
+        calling httpx directly.
         """
+        # Fire-and-forget verbs (status heartbeats) opt out via idempotency_key=None.
+        idempotency_key = kwargs.pop("idempotency_key", _NO_KEY)
+        key = _inject_key(idempotency_key)
+
         path = urlsplit(url).path or url
         start = time.monotonic()
         retry_count = 0
@@ -117,6 +160,9 @@ class TalosAPIClient:
             # Inject only after the span above is current, so the
             # traceparent we send actually points at *this* span.
             headers = dict(kwargs.pop("headers", None) or {})
+            if key is not None:
+                headers["Idempotency-Key"] = key
+            headers.update(self._request_headers())
             inject_trace_headers(headers)
             kwargs["headers"] = headers
 
@@ -132,8 +178,9 @@ class TalosAPIClient:
                     retry_count += 1
                     return await send(url, **kwargs)
 
-                response = await request_with_retry(_do_send)
+                response = await request_with_retry(_do_send, provider="talos_web_api")
                 status_code = response.status_code
+                _check_idempotency_conflict(response, key, url)
                 _check_response_size(response, self._response_max_bytes)
                 span.set_attribute("http.response.status_code", status_code)
                 span.set_attribute("http.retry.count", max(0, retry_count - 1))
@@ -149,31 +196,16 @@ class TalosAPIClient:
                 )
 
     async def _get(self, url: str, **kwargs: Any) -> httpx.Response:
-        response = await request_with_retry(lambda: self._client.get(url, **kwargs), provider="talos_web_api")
-        _check_response_size(response, self._response_max_bytes)
-        return response
+        return await self._request("GET", url, **kwargs)
 
     async def _post(self, url: str, **kwargs: Any) -> httpx.Response:
-        idempotency_key = kwargs.pop("idempotency_key", _NO_KEY)
-        if idempotency_key is not _NO_KEY and idempotency_key:
-            headers = dict(kwargs.pop("headers", {}) or {})
-            headers["Idempotency-Key"] = str(idempotency_key)
-            kwargs["headers"] = headers
-        response = await request_with_retry(lambda: self._client.post(url, **kwargs), provider="talos_web_api")
-        _check_response_size(response, self._response_max_bytes)
-        return response
+        return await self._request("POST", url, **kwargs)
 
     async def _put(self, url: str, **kwargs: Any) -> httpx.Response:
-        response = await request_with_retry(lambda: self._client.put(url, **kwargs), provider="talos_web_api")
-        _check_response_size(response, self._response_max_bytes)
-        return response
+        return await self._request("PUT", url, **kwargs)
 
     async def _patch(self, url: str, **kwargs: Any) -> httpx.Response:
-        # Strip idempotency_key if callers pass it (fire-and-forget pattern).
-        kwargs.pop("idempotency_key", None)
-        response = await request_with_retry(lambda: self._client.patch(url, **kwargs), provider="talos_web_api")
-        _check_response_size(response, self._response_max_bytes)
-        return response
+        return await self._request("PATCH", url, **kwargs)
 
     async def _get_cursor_page(
         self,

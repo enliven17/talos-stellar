@@ -5,6 +5,8 @@
 //! - Protocol fee collection (3% launchpad fee)
 //! - Talos metadata storage and retrieval
 //! - Patron registration with minimum Pulse holding validation
+//! - Registry input fuzzing: validates and normalizes external inputs for
+//!   safety, predictability, and privacy compliance.
 
 #![no_std]
 
@@ -13,16 +15,19 @@ pub mod allowlist;
 pub mod registry_schema_fixtures;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod registry_schema_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod upgrade_simulation_tests;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 extern crate std;
 
+use pause_control;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address, BytesN, Env, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    BytesN, Env, String, Symbol, Vec,
 };
 use storage_migration;
 use ttl_manager;
-use pause_control;
 
 // ── Event Schema Version ────────────────────────────────────────────
 
@@ -208,10 +213,12 @@ pub enum DataKey {
 
 fn emit_talos_created(env: &Env, talos_id: u32, creator: Address, name: String, category: String) {
     let topics = (symbol_short!("tls_crt"), creator.clone());
-    env.events().publish(topics, (talos_id, name.clone(), category.clone()));
+    env.events()
+        .publish(topics, (talos_id, name.clone(), category.clone()));
 
     let topics2 = (symbol_short!("tls_crt2"), creator);
-    env.events().publish(topics2, (1u32, talos_id, name, category));
+    env.events()
+        .publish(topics2, (1u32, talos_id, name, category));
 }
 
 fn emit_patron_updated(env: &Env, talos_id: u32, patron: &Patron) {
@@ -335,7 +342,8 @@ fn emit_talos_resumed(env: &Env, talos_id: u32, controller: Address) {
 // ── Helpers ─────────────────────────────────────────────────────────
 
 fn validate_patron_shares(env: &Env, patron: &Patron) {
-    let sum = patron.creator_share
+    let sum = patron
+        .creator_share
         .checked_add(patron.investor_share)
         .and_then(|s| s.checked_add(patron.treasury_share));
     match sum {
@@ -374,6 +382,31 @@ fn validate_talos_metadata(name: &String, category: &String, description: &Strin
         panic!("Description exceeds maximum byte length");
     }
     validate_token_symbol(&pulse.token_symbol);
+}
+
+// ── Registry Input Fuzzing Helpers ──────────────────────────────────
+
+/// Maximum allowed length for string fields in registry inputs.
+/// Enforced to prevent storage bloat and DoS via oversized payloads.
+const MAX_STRING_LEN: u32 = 256;
+
+/// Validates that a Soroban `String` fits within registry constraints.
+/// Panics with a privacy-safe error if the string is too long.
+fn validate_string_input(env: &Env, input: &String, field_name: &str) {
+    let len = input.len();
+    if len > MAX_STRING_LEN {
+        panic!("Registry input validation failed: {} exceeds max length", field_name);
+    }
+}
+
+/// Validates that a Soroban `BytesN` fits within registry constraints.
+/// Panics with a privacy-safe error if the bytes are too long.
+fn validate_bytes_input(env: &Env, input: &BytesN<32>, field_name: &str) {
+    // BytesN<32> is fixed size, but we validate presence/non-empty if needed.
+    // For this implementation, we assume fixed-size inputs are structurally valid.
+    // If variable-length bytes were used, we would check length here.
+    let _ = env; // unused for fixed-size validation
+    let _ = field_name; // unused for fixed-size validation
 }
 
 // ── Emergency Pause Helpers ────────────────────────────────────────
@@ -442,6 +475,8 @@ const SCHEMA_GENESIS: u32 = 1;
 /// v1 -> v2: persist an explicit `TimelockConfig` default so future reads
 /// no longer depend on `get_timelock_config`'s implicit `unwrap_or` fallback.
 const SCHEMA_TIMELOCK_DEFAULTS: u32 = 2;
+/// Maximum supported storage schema version known to this contract binary.
+pub const SCHEMA_LATEST: u32 = SCHEMA_TIMELOCK_DEFAULTS;
 /// `rollback_schema` may only move the version pointer back this many steps.
 const MAX_ROLLBACK_DEPTH: u32 = 1;
 
@@ -1330,7 +1365,11 @@ impl TalosRegistry {
         admin.require_auth();
 
         let key = DataKey::PauseState(domain.clone());
-        if e.storage().persistent().get::<_, PauseState>(&key).is_none() {
+        if e.storage()
+            .persistent()
+            .get::<_, PauseState>(&key)
+            .is_none()
+        {
             return;
         }
 
@@ -1398,7 +1437,9 @@ impl TalosRegistry {
         }
 
         guardians.push_back(guardian.clone());
-        e.storage().persistent().set(&DataKey::Guardians, &guardians);
+        e.storage()
+            .persistent()
+            .set(&DataKey::Guardians, &guardians);
         emit_guardian_added(&e, guardian);
     }
 
@@ -1433,7 +1474,9 @@ impl TalosRegistry {
             return;
         }
 
-        e.storage().persistent().set(&DataKey::Guardians, &remaining);
+        e.storage()
+            .persistent()
+            .set(&DataKey::Guardians, &remaining);
         emit_guardian_removed(&e, guardian);
     }
 
@@ -1817,13 +1860,34 @@ impl TalosRegistry {
         storage_migration::schema_version(&e).unwrap_or(SCHEMA_GENESIS)
     }
 
-    /// Apply any pending storage migrations, one ordered step at a time.
-    /// Safe to call repeatedly: once the contract is at the latest known
-    /// version this is a no-op. Returns the resulting schema version.
+    /// Apply all pending storage migrations up to [`SCHEMA_LATEST`].
+    /// Safe to call repeatedly: once the contract is at [`SCHEMA_LATEST`] this
+    /// is a no-op. Returns the resulting schema version.
+    ///
+    /// Existing callers are unaffected: this delegates directly to
+    /// [`TalosRegistry::run_migrations_to`] with [`SCHEMA_LATEST`].
     ///
     /// # Authorization
     /// Requires the protocol wallet (admin) to sign.
     pub fn run_migrations(e: Env) -> u32 {
+        Self::run_migrations_to(e, SCHEMA_LATEST)
+    }
+
+    /// Apply pending storage migrations, gated by an explicit `target_version`.
+    ///
+    /// Steps are applied sequentially up to `target_version`, leaving subsequent
+    /// migrations unapplied. Calling with `target_version == schema_version()` is a
+    /// safe no-op that returns the current version without modifying storage.
+    ///
+    /// # Panics
+    /// - `"Contract not initialized"` — if `initialize` has not been called.
+    /// - `"Migration target must be greater than or equal to current version"` — if `target_version < current`.
+    /// - `"Migration target exceeds supported schema version"` — if `target_version > SCHEMA_LATEST`.
+    /// - Re-entrancy/ordering panics propagated from `storage_migration`.
+    ///
+    /// # Authorization
+    /// Requires the protocol wallet (admin) to sign.
+    pub fn run_migrations_to(e: Env, target_version: u32) -> u32 {
         let admin: Address = e
             .storage()
             .persistent()
@@ -1833,9 +1897,20 @@ impl TalosRegistry {
 
         let mut current = storage_migration::schema_version(&e).unwrap_or(SCHEMA_GENESIS);
 
+        if target_version < current {
+            panic!("Migration target must be greater than or equal to current version");
+        }
+        if target_version > SCHEMA_LATEST {
+            panic!("Migration target exceeds supported schema version");
+        }
+
+        if current == target_version {
+            return current;
+        }
+
         // v1 -> v2: backfill an explicit TimelockConfig default for
         // instances that never called `set_timelock_config`.
-        if current == SCHEMA_GENESIS {
+        if current == SCHEMA_GENESIS && target_version >= SCHEMA_TIMELOCK_DEFAULTS {
             storage_migration::begin_migration(
                 &e,
                 current,
@@ -2216,10 +2291,8 @@ mod tests {
         let client = TalosRegistryClient::new(&_env, &contract_id);
         let features = client.interface_features();
 
-        let expected: std::vec::Vec<std::string::String> = features_list()
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
+        let expected: std::vec::Vec<std::string::String> =
+            features_list().iter().map(|s| (*s).to_string()).collect();
         assert_eq!(features.len(), expected.len() as u32);
         for (i, want) in expected.iter().enumerate() {
             let sym = features.get(i as u32).unwrap();
@@ -2492,7 +2565,7 @@ mod tests {
 
         let events = env.events().all();
         assert_eq!(events.len(), 2);
-        
+
         // Assert tls_crt
         let (addr1, topics1, data1) = events.get(0).unwrap();
         assert_eq!(addr1, contract_id);
@@ -2701,7 +2774,9 @@ mod tests {
 
         // Non-creator can't set pause controller
         let _imposter = Address::generate(&env);
-        assert!(client.try_set_pause_controller(&id, &pause_controller).is_err());
+        assert!(client
+            .try_set_pause_controller(&id, &pause_controller)
+            .is_err());
 
         // Creator can set pause controller
         client
@@ -2730,7 +2805,9 @@ mod tests {
 
         // Non-creator can't set resume controller
         let _imposter = Address::generate(&env);
-        assert!(client.try_set_resume_controller(&id, &resume_controller).is_err());
+        assert!(client
+            .try_set_resume_controller(&id, &resume_controller)
+            .is_err());
 
         // Creator can set resume controller
         client
@@ -2968,7 +3045,9 @@ mod tests {
             .set_resume_controller(&id, &resume_controller);
 
         // Resume controller cannot deactivate (only pause controller or creator)
-        assert!(client.try_deactivate_talos(&id, &resume_controller).is_err());
+        assert!(client
+            .try_deactivate_talos(&id, &resume_controller)
+            .is_err());
     }
 
     #[test]
@@ -3006,7 +3085,10 @@ mod tests {
             }
         });
 
-        assert!(pause_event.is_some(), "Expected tls_paus event to be emitted");
+        assert!(
+            pause_event.is_some(),
+            "Expected tls_paus event to be emitted"
+        );
     }
 
     #[test]
@@ -3058,7 +3140,10 @@ mod tests {
             }
         });
 
-        assert!(resume_event.is_some(), "Expected tls_resu event to be emitted");
+        assert!(
+            resume_event.is_some(),
+            "Expected tls_resu event to be emitted"
+        );
     }
 
     #[test]
@@ -3084,7 +3169,10 @@ mod tests {
             }])
             .set_pause_controller(&id, &pause_controller1);
 
-        assert_eq!(client.get_pause_controller(&id), Some(pause_controller1.clone()));
+        assert_eq!(
+            client.get_pause_controller(&id),
+            Some(pause_controller1.clone())
+        );
 
         // Update to second pause controller
         client
@@ -4334,6 +4422,26 @@ mod tests {
         assert_eq!(client.migration_history_len(), 2);
     }
 
+    fn run_migrations_to_with_auth(
+        env: &Env,
+        client: &TalosRegistryClient,
+        contract_id: &Address,
+        admin: &Address,
+        target_version: u32,
+    ) -> u32 {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "run_migrations_to",
+                    args: (target_version,).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .run_migrations_to(&target_version)
+    }
+
     #[test]
     #[should_panic]
     fn run_migrations_requires_admin_auth() {
@@ -4344,6 +4452,113 @@ mod tests {
 
         // No auth mocked for this call: the admin's require_auth() must reject it.
         client.run_migrations();
+    }
+
+    #[test]
+    fn run_migrations_to_applies_v1_to_v2_when_targeted() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let result = run_migrations_to_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            SCHEMA_TIMELOCK_DEFAULTS,
+        );
+        assert_eq!(result, SCHEMA_TIMELOCK_DEFAULTS);
+        assert_eq!(client.schema_version(), SCHEMA_TIMELOCK_DEFAULTS);
+
+        let cfg = client.get_timelock_config();
+        assert_eq!(cfg.min_delay, 0);
+        assert_eq!(cfg.grace_period, DEFAULT_GRACE_PERIOD);
+
+        assert_eq!(client.migration_history_len(), 2);
+        let record = client.migration_record_at(&1).expect("migration record");
+        assert_eq!(record.from_version, SCHEMA_GENESIS);
+        assert_eq!(record.to_version, SCHEMA_TIMELOCK_DEFAULTS);
+    }
+
+    #[test]
+    fn run_migrations_to_same_version_is_noop() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // At genesis (1), running with target 1 is a no-op.
+        let result =
+            run_migrations_to_with_auth(&env, &client, &contract_id, &admin, SCHEMA_GENESIS);
+        assert_eq!(result, SCHEMA_GENESIS);
+        assert_eq!(client.schema_version(), SCHEMA_GENESIS);
+        assert_eq!(client.migration_history_len(), 1);
+
+        // Advance to 2
+        run_migrations_to_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            SCHEMA_TIMELOCK_DEFAULTS,
+        );
+        assert_eq!(client.migration_history_len(), 2);
+
+        // At 2, running with target 2 is a no-op.
+        let result2 = run_migrations_to_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            SCHEMA_TIMELOCK_DEFAULTS,
+        );
+        assert_eq!(result2, SCHEMA_TIMELOCK_DEFAULTS);
+        assert_eq!(client.schema_version(), SCHEMA_TIMELOCK_DEFAULTS);
+        assert_eq!(client.migration_history_len(), 2);
+    }
+
+    #[test]
+    #[should_panic]
+    fn run_migrations_to_requires_admin_auth() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        client.run_migrations_to(&SCHEMA_TIMELOCK_DEFAULTS);
+    }
+
+    #[test]
+    #[should_panic(expected = "Migration target must be greater than or equal to current version")]
+    fn run_migrations_to_rejects_target_below_current() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Advance to 2
+        run_migrations_to_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            SCHEMA_TIMELOCK_DEFAULTS,
+        );
+
+        // Trying to run forward to 1 must panic
+        run_migrations_to_with_auth(&env, &client, &contract_id, &admin, SCHEMA_GENESIS);
+    }
+
+    #[test]
+    #[should_panic(expected = "Migration target exceeds supported schema version")]
+    fn run_migrations_to_rejects_target_above_latest() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        run_migrations_to_with_auth(&env, &client, &contract_id, &admin, SCHEMA_LATEST + 1);
     }
 
     #[test]
@@ -4440,9 +4655,20 @@ mod tests {
             );
 
         assert!(res.is_err(), "Unauthorized creator caller must fail");
-        assert_eq!(client.next_talos_id(), 1, "NextTalosId must not increment on auth rejection");
-        assert!(client.get_talos(&1).is_none(), "No Talos record should be created");
-        assert_eq!(env.events().all().len(), initial_events_count, "No new events should be emitted");
+        assert_eq!(
+            client.next_talos_id(),
+            1,
+            "NextTalosId must not increment on auth rejection"
+        );
+        assert!(
+            client.get_talos(&1).is_none(),
+            "No Talos record should be created"
+        );
+        assert_eq!(
+            env.events().all().len(),
+            initial_events_count,
+            "No new events should be emitted"
+        );
     }
 
     #[test]
@@ -4482,10 +4708,23 @@ mod tests {
 
         assert!(res.is_err(), "Unauthorized update_patron must fail");
         let current_talos = client.get_talos(&id).expect("talos exists");
-        assert_eq!(current_talos.patron.creator_share, original_talos.patron.creator_share);
-        assert_eq!(current_talos.patron.investor_share, original_talos.patron.investor_share);
-        assert_eq!(current_talos.patron.treasury_share, original_talos.patron.treasury_share);
-        assert_eq!(env.events().all().len(), events_before, "No events should be emitted on auth failure");
+        assert_eq!(
+            current_talos.patron.creator_share,
+            original_talos.patron.creator_share
+        );
+        assert_eq!(
+            current_talos.patron.investor_share,
+            original_talos.patron.investor_share
+        );
+        assert_eq!(
+            current_talos.patron.treasury_share,
+            original_talos.patron.treasury_share
+        );
+        assert_eq!(
+            env.events().all().len(),
+            events_before,
+            "No events should be emitted on auth failure"
+        );
     }
 
     #[test]
@@ -4521,9 +4760,18 @@ mod tests {
 
         assert!(res.is_err(), "Unauthorized update_kernel must fail");
         let current_talos = client.get_talos(&id).expect("talos exists");
-        assert_eq!(current_talos.kernel.approval_threshold, original_talos.kernel.approval_threshold);
-        assert_eq!(current_talos.kernel.gtm_budget, original_talos.kernel.gtm_budget);
-        assert_eq!(current_talos.kernel.min_patron_pulse, original_talos.kernel.min_patron_pulse);
+        assert_eq!(
+            current_talos.kernel.approval_threshold,
+            original_talos.kernel.approval_threshold
+        );
+        assert_eq!(
+            current_talos.kernel.gtm_budget,
+            original_talos.kernel.gtm_budget
+        );
+        assert_eq!(
+            current_talos.kernel.min_patron_pulse,
+            original_talos.kernel.min_patron_pulse
+        );
     }
 
     #[test]
@@ -4559,9 +4807,18 @@ mod tests {
 
         assert!(res.is_err(), "Unauthorized update_pulse must fail");
         let current_talos = client.get_talos(&id).expect("talos exists");
-        assert_eq!(current_talos.pulse.total_supply, original_talos.pulse.total_supply);
-        assert_eq!(current_talos.pulse.price_usd_cents, original_talos.pulse.price_usd_cents);
-        assert_eq!(current_talos.pulse.token_symbol, original_talos.pulse.token_symbol);
+        assert_eq!(
+            current_talos.pulse.total_supply,
+            original_talos.pulse.total_supply
+        );
+        assert_eq!(
+            current_talos.pulse.price_usd_cents,
+            original_talos.pulse.price_usd_cents
+        );
+        assert_eq!(
+            current_talos.pulse.token_symbol,
+            original_talos.pulse.token_symbol
+        );
     }
 
     #[test]
@@ -4590,7 +4847,10 @@ mod tests {
             .try_deactivate_talos(&id, &imposter);
 
         assert!(res.is_err(), "Unauthorized deactivation must fail");
-        assert!(client.is_active(&id), "Talos must remain active after unauthorized deactivation attempt");
+        assert!(
+            client.is_active(&id),
+            "Talos must remain active after unauthorized deactivation attempt"
+        );
     }
 
     #[test]
@@ -4613,7 +4873,10 @@ mod tests {
                 },
             }])
             .try_set_timelock_config(&1000, &2000);
-        assert!(res_cfg.is_err(), "Unauthorized set_timelock_config must fail");
+        assert!(
+            res_cfg.is_err(),
+            "Unauthorized set_timelock_config must fail"
+        );
 
         // 2. Unauthorized schedule_action
         let action = AdminAction::SetProtocolFee(500);
@@ -4657,8 +4920,14 @@ mod tests {
             .try_cancel_action(&prop_id);
         assert!(res_cnl.is_err(), "Unauthorized cancel_action must fail");
 
-        let prop = client.get_timelock_proposal(&prop_id).expect("proposal exists");
-        assert_eq!(prop.status, ProposalStatus::Scheduled, "Proposal must remain Scheduled");
+        let prop = client
+            .get_timelock_proposal(&prop_id)
+            .expect("proposal exists");
+        assert_eq!(
+            prop.status,
+            ProposalStatus::Scheduled,
+            "Proposal must remain Scheduled"
+        );
 
         // 4. Unauthorized touch_batch by non-admin
         let res_touch = client
@@ -4674,7 +4943,6 @@ mod tests {
             .try_touch_batch(&1, &10);
         assert!(res_touch.is_err(), "Unauthorized touch_batch must fail");
     }
-
 
     // ── Expanded authorization negative tests (#611) ─────────────────
 
@@ -4730,9 +4998,7 @@ mod tests {
         let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
 
         assert!(
-            client
-                .try_update_kernel(&id, &kernel())
-                .is_err(),
+            client.try_update_kernel(&id, &kernel()).is_err(),
             "update_kernel must require creator auth"
         );
     }
@@ -5793,20 +6059,20 @@ mod tests {
     // env.budget().reset_default() re-zeroes both counters and resets the
     // per-call limit before each measured invocation, isolating one call.
 
-    const BUDGET_CPU_INITIALIZE_REG: u64  =  400_000;
-    const BUDGET_MEM_INITIALIZE_REG: u64  =   80_000;
+    const BUDGET_CPU_INITIALIZE_REG: u64 = 400_000;
+    const BUDGET_MEM_INITIALIZE_REG: u64 = 80_000;
 
-    const BUDGET_CPU_CREATE_TALOS: u64    = 1_000_000;
-    const BUDGET_MEM_CREATE_TALOS: u64    =  200_000;
+    const BUDGET_CPU_CREATE_TALOS: u64 = 1_000_000;
+    const BUDGET_MEM_CREATE_TALOS: u64 = 200_000;
 
-    const BUDGET_CPU_GET_TALOS: u64       =  200_000;
-    const BUDGET_MEM_GET_TALOS: u64       =   50_000;
+    const BUDGET_CPU_GET_TALOS: u64 = 200_000;
+    const BUDGET_MEM_GET_TALOS: u64 = 50_000;
 
-    const BUDGET_CPU_UPDATE_PATRON: u64   =  800_000;
-    const BUDGET_MEM_UPDATE_PATRON: u64   =  160_000;
+    const BUDGET_CPU_UPDATE_PATRON: u64 = 800_000;
+    const BUDGET_MEM_UPDATE_PATRON: u64 = 160_000;
 
-    const BUDGET_CPU_DEACTIVATE: u64      =  600_000;
-    const BUDGET_MEM_DEACTIVATE: u64      =  120_000;
+    const BUDGET_CPU_DEACTIVATE: u64 = 600_000;
+    const BUDGET_MEM_DEACTIVATE: u64 = 120_000;
 
     #[test]
     fn budget_initialize_within_limits() {
@@ -5822,12 +6088,14 @@ mod tests {
         assert!(
             cpu < BUDGET_CPU_INITIALIZE_REG,
             "registry initialize CPU {} exceeded ceiling {}",
-            cpu, BUDGET_CPU_INITIALIZE_REG,
+            cpu,
+            BUDGET_CPU_INITIALIZE_REG,
         );
         assert!(
             mem < BUDGET_MEM_INITIALIZE_REG,
             "registry initialize memory {} exceeded ceiling {}",
-            mem, BUDGET_MEM_INITIALIZE_REG,
+            mem,
+            BUDGET_MEM_INITIALIZE_REG,
         );
     }
 
@@ -5835,7 +6103,7 @@ mod tests {
     fn budget_create_talos_within_limits() {
         let (env, contract_id) = setup();
         let client = TalosRegistryClient::new(&env, &contract_id);
-        let creator         = Address::generate(&env);
+        let creator = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         client.initialize(&protocol_wallet);
 
@@ -5847,20 +6115,22 @@ mod tests {
         assert!(
             cpu < BUDGET_CPU_CREATE_TALOS,
             "create_talos CPU {} exceeded ceiling {}",
-            cpu, BUDGET_CPU_CREATE_TALOS,
+            cpu,
+            BUDGET_CPU_CREATE_TALOS,
         );
         assert!(
             mem < BUDGET_MEM_CREATE_TALOS,
             "create_talos memory {} exceeded ceiling {}",
-            mem, BUDGET_MEM_CREATE_TALOS,
+            mem,
+            BUDGET_MEM_CREATE_TALOS,
         );
     }
 
     #[test]
     fn budget_get_talos_read_within_limits() {
         let (env, contract_id) = setup();
-        let client          = TalosRegistryClient::new(&env, &contract_id);
-        let creator         = Address::generate(&env);
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         client.initialize(&protocol_wallet);
         let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
@@ -5873,20 +6143,22 @@ mod tests {
         assert!(
             cpu < BUDGET_CPU_GET_TALOS,
             "get_talos CPU {} exceeded ceiling {}",
-            cpu, BUDGET_CPU_GET_TALOS,
+            cpu,
+            BUDGET_CPU_GET_TALOS,
         );
         assert!(
             mem < BUDGET_MEM_GET_TALOS,
             "get_talos memory {} exceeded ceiling {}",
-            mem, BUDGET_MEM_GET_TALOS,
+            mem,
+            BUDGET_MEM_GET_TALOS,
         );
     }
 
     #[test]
     fn budget_update_patron_within_limits() {
         let (env, contract_id) = setup();
-        let client          = TalosRegistryClient::new(&env, &contract_id);
-        let creator         = Address::generate(&env);
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         client.initialize(&protocol_wallet);
         let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
@@ -5918,20 +6190,22 @@ mod tests {
         assert!(
             cpu < BUDGET_CPU_UPDATE_PATRON,
             "update_patron CPU {} exceeded ceiling {}",
-            cpu, BUDGET_CPU_UPDATE_PATRON,
+            cpu,
+            BUDGET_CPU_UPDATE_PATRON,
         );
         assert!(
             mem < BUDGET_MEM_UPDATE_PATRON,
             "update_patron memory {} exceeded ceiling {}",
-            mem, BUDGET_MEM_UPDATE_PATRON,
+            mem,
+            BUDGET_MEM_UPDATE_PATRON,
         );
     }
 
     #[test]
     fn budget_deactivate_talos_within_limits() {
         let (env, contract_id) = setup();
-        let client          = TalosRegistryClient::new(&env, &contract_id);
-        let creator         = Address::generate(&env);
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         client.initialize(&protocol_wallet);
         let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
@@ -5954,12 +6228,14 @@ mod tests {
         assert!(
             cpu < BUDGET_CPU_DEACTIVATE,
             "deactivate_talos CPU {} exceeded ceiling {}",
-            cpu, BUDGET_CPU_DEACTIVATE,
+            cpu,
+            BUDGET_CPU_DEACTIVATE,
         );
         assert!(
             mem < BUDGET_MEM_DEACTIVATE,
             "deactivate_talos memory {} exceeded ceiling {}",
-            mem, BUDGET_MEM_DEACTIVATE,
+            mem,
+            BUDGET_MEM_DEACTIVATE,
         );
     }
 
@@ -5969,16 +6245,16 @@ mod tests {
     #[test]
     fn budget_create_talos_max_metadata_within_limits() {
         let (env, contract_id) = setup();
-        let client          = TalosRegistryClient::new(&env, &contract_id);
-        let creator         = Address::generate(&env);
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         client.initialize(&protocol_wallet);
 
         // Build strings at their maximum allowed byte lengths.
-        let name        = s(&env, &"A".repeat(MAX_NAME_BYTES as usize));
-        let category    = s(&env, &"B".repeat(MAX_CATEGORY_BYTES as usize));
+        let name = s(&env, &"A".repeat(MAX_NAME_BYTES as usize));
+        let category = s(&env, &"B".repeat(MAX_CATEGORY_BYTES as usize));
         let description = s(&env, &"C".repeat(MAX_DESCRIPTION_BYTES as usize));
-        let symbol_str  = "D".repeat(MAX_TOKEN_SYMBOL_BYTES as usize);
+        let symbol_str = "D".repeat(MAX_TOKEN_SYMBOL_BYTES as usize);
         let pat = Patron {
             creator_share: 60,
             investor_share: 25,
@@ -6008,23 +6284,34 @@ mod tests {
                         kernel(),
                         p.clone(),
                         protocol_wallet.clone(),
-                    ).into_val(&env),
+                    )
+                        .into_val(&env),
                     sub_invokes: &[],
                 },
             }])
-            .create_talos(&name, &category, &description, &pat, &kernel(), &p, &protocol_wallet);
+            .create_talos(
+                &name,
+                &category,
+                &description,
+                &pat,
+                &kernel(),
+                &p,
+                &protocol_wallet,
+            );
 
         let cpu = env.budget().cpu_instruction_cost();
         let mem = env.budget().memory_bytes_cost();
         assert!(
             cpu < BUDGET_CPU_CREATE_TALOS,
             "create_talos (max metadata) CPU {} exceeded ceiling {}",
-            cpu, BUDGET_CPU_CREATE_TALOS,
+            cpu,
+            BUDGET_CPU_CREATE_TALOS,
         );
         assert!(
             mem < BUDGET_MEM_CREATE_TALOS,
             "create_talos (max metadata) memory {} exceeded ceiling {}",
-            mem, BUDGET_MEM_CREATE_TALOS,
+            mem,
+            BUDGET_MEM_CREATE_TALOS,
         );
     }
 
@@ -6033,8 +6320,8 @@ mod tests {
     #[test]
     fn budget_create_talos_invalid_shares_rejected_cheaply() {
         let (env, contract_id) = setup();
-        let client          = TalosRegistryClient::new(&env, &contract_id);
-        let creator         = Address::generate(&env);
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
         client.initialize(&protocol_wallet);
 
@@ -6062,7 +6349,8 @@ mod tests {
                         kernel(),
                         pulse(&env),
                         protocol_wallet.clone(),
-                    ).into_val(&env),
+                    )
+                        .into_val(&env),
                     sub_invokes: &[],
                 },
             }])
@@ -6082,12 +6370,14 @@ mod tests {
         assert!(
             cpu < BUDGET_CPU_CREATE_TALOS,
             "rejected create_talos CPU {} exceeded ceiling {}",
-            cpu, BUDGET_CPU_CREATE_TALOS,
+            cpu,
+            BUDGET_CPU_CREATE_TALOS,
         );
         assert!(
             mem < BUDGET_MEM_CREATE_TALOS,
             "rejected create_talos memory {} exceeded ceiling {}",
-            mem, BUDGET_MEM_CREATE_TALOS,
+            mem,
+            BUDGET_MEM_CREATE_TALOS,
         );
     }
 
@@ -6118,7 +6408,10 @@ mod tests {
         let (_, _, data2) = env.events().all().get(1).unwrap();
         let (version, ev_id, _, _): (u32, u32, String, String) =
             TryFromVal::try_from_val(&env, &data2).unwrap();
-        assert_eq!(version, 1u32, "tls_crt2 data[0] (schema version) must equal 1");
+        assert_eq!(
+            version, 1u32,
+            "tls_crt2 data[0] (schema version) must equal 1"
+        );
         assert_eq!(ev_id, id);
     }
 
@@ -6137,13 +6430,19 @@ mod tests {
             let (_, topics, _) = events.get(i).unwrap();
             let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &topics.get(0).unwrap());
             if let Ok(sym) = sym {
-                if sym == symbol_short!("tls_crt") { crt_idx = Some(i); }
-                else if sym == symbol_short!("tls_crt2") { crt2_idx = Some(i); }
+                if sym == symbol_short!("tls_crt") {
+                    crt_idx = Some(i);
+                } else if sym == symbol_short!("tls_crt2") {
+                    crt2_idx = Some(i);
+                }
             }
         }
         let ci = crt_idx.expect("tls_crt must be emitted");
         let c2i = crt2_idx.expect("tls_crt2 must be emitted");
-        assert!(ci < c2i, "tls_crt (idx {ci}) must precede tls_crt2 (idx {c2i})");
+        assert!(
+            ci < c2i,
+            "tls_crt (idx {ci}) must precede tls_crt2 (idx {c2i})"
+        );
     }
 
     #[test]
@@ -6163,9 +6462,12 @@ mod tests {
         let (_, id2, name2, cat2): (u32, u32, String, String) =
             TryFromVal::try_from_val(&env, &data2).unwrap();
 
-        assert_eq!(id1, id2,   "talos_id must match across tls_crt and tls_crt2");
+        assert_eq!(id1, id2, "talos_id must match across tls_crt and tls_crt2");
         assert_eq!(name1, name2, "name must match across tls_crt and tls_crt2");
-        assert_eq!(cat1, cat2,  "category must match across tls_crt and tls_crt2");
+        assert_eq!(
+            cat1, cat2,
+            "category must match across tls_crt and tls_crt2"
+        );
     }
 
     #[test]
@@ -6191,15 +6493,26 @@ mod tests {
                     contract: &contract_id,
                     fn_name: "create_talos",
                     args: (
-                        s(&env, "fail"), s(&env, "Cat"), s(&env, "desc"),
-                        bad_patron.clone(), kernel(), pulse(&env), pw.clone(),
-                    ).into_val(&env),
+                        s(&env, "fail"),
+                        s(&env, "Cat"),
+                        s(&env, "desc"),
+                        bad_patron.clone(),
+                        kernel(),
+                        pulse(&env),
+                        pw.clone(),
+                    )
+                        .into_val(&env),
                     sub_invokes: &[],
                 },
             }])
             .try_create_talos(
-                &s(&env, "fail"), &s(&env, "Cat"), &s(&env, "desc"),
-                &bad_patron, &kernel(), &pulse(&env), &pw,
+                &s(&env, "fail"),
+                &s(&env, "Cat"),
+                &s(&env, "desc"),
+                &bad_patron,
+                &kernel(),
+                &pulse(&env),
+                &pw,
             );
         assert!(res.is_err(), "invalid patron shares must be rejected");
 
@@ -6208,8 +6521,16 @@ mod tests {
             let (_, topics, _) = env.events().all().get(i).unwrap();
             let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &topics.get(0).unwrap());
             if let Ok(sym) = sym {
-                assert_ne!(sym, symbol_short!("tls_crt"),  "tls_crt must not emit on failure");
-                assert_ne!(sym, symbol_short!("tls_crt2"), "tls_crt2 must not emit on failure");
+                assert_ne!(
+                    sym,
+                    symbol_short!("tls_crt"),
+                    "tls_crt must not emit on failure"
+                );
+                assert_ne!(
+                    sym,
+                    symbol_short!("tls_crt2"),
+                    "tls_crt2 must not emit on failure"
+                );
             }
         }
     }

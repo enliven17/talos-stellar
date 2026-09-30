@@ -60,6 +60,12 @@ const SENSITIVE_FIELD_PATTERN = /^(token|authorization|secret|api[_-]?key|passwo
 export interface TalosAPIErrorOptions {
   /** Override the default error message (used to preserve raw network message). */
   message?: string;
+  /** Stable machine-readable code from the API response envelope. */
+  apiCode?: string;
+  /** Safe human-readable message from the API response envelope. */
+  apiMessage?: string;
+  /** Validation details from the API response envelope. */
+  validationDetails?: string[];
   /** Stable string discriminator (set automatically by subclasses). */
   code?: TalosErrorCode;
   /** Whether the failure is transient and safe to retry. */
@@ -101,9 +107,18 @@ export function sanitizeBody(raw: string | undefined | null): {
     return { body: truncate(compact), data: safe };
   } catch {
     // Not JSON — collapse to a single line, truncate.
-    const single = raw.replace(/\s+/g, " ").trim();
+    const single = redactInlineSecrets(raw.replace(/\s+/g, " ").trim());
     return { body: truncate(single) };
   }
+}
+
+function redactInlineSecrets(value: string): string {
+  return value
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [REDACTED]")
+    .replace(
+      /\b(token|access[_-]?token|api[_-]?key|authorization|secret|password|cookie|signature|nonce)\b\s*[:=]\s*("[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      "$1=[REDACTED]",
+    );
 }
 
 /** Truncate a string to MAX_BODY_BYTES, suffixing with an ellipsis marker. */
@@ -236,6 +251,9 @@ export function parseX402Challenge(header: string | undefined | null): Record<st
 export class TalosAPIError extends Error {
   public code: TalosErrorCode = "api_error";
   public isRetryable: boolean = false;
+  public readonly apiCode?: string;
+  public readonly apiMessage: string;
+  public readonly validationDetails: string[];
   public readonly retryAfterMs?: number;
   public readonly requestId?: string;
   public readonly headers: Record<string, string>;
@@ -254,6 +272,9 @@ export class TalosAPIError extends Error {
     this.name = "TalosAPIError";
     this.code = options.code ?? "api_error";
     this.isRetryable = options.isRetryable ?? false;
+    this.apiCode = options.apiCode;
+    this.apiMessage = options.apiMessage ?? `Request failed with status ${status}`;
+    this.validationDetails = options.validationDetails?.slice() ?? [];
     this.retryAfterMs = options.retryAfterMs;
     this.requestId = options.requestId;
     this.headers = options.headers ?? {};
@@ -314,7 +335,11 @@ export class TalosValidationError extends TalosAPIError {
     issues: string[] = [],
     options: TalosAPIErrorOptions = {},
   ) {
-    super(status, body, path, { ...options, code: "validation_error" });
+    super(status, body, path, {
+      ...options,
+      code: "validation_error",
+      validationDetails: options.validationDetails ?? issues,
+    });
     this.name = "TalosValidationError";
     this.issues = issues;
   }
@@ -660,93 +685,86 @@ export function errorFromResponse(
   headers: Headers | Record<string, string>,
 ): TalosAPIError {
   const { body, data } = sanitizeBody(rawBody);
+  const envelope = parseErrorEnvelope(rawBody);
   const safeHeaders = snapshotHeaders(headers);
-  const requestId = safeHeaders["x-request-id"];
+  const requestId = safeHeaders["x-request-id"] ?? envelope.requestId;
   // `Retry-After` is valid on any error response (RFC 9110 §10.2.3), not just
   // 429 — a 503 during a maintenance window is a common real-world source.
   // Parse it once so every subclass preserves the same structured hint that
   // `.headers["retry-after"]` already carries in raw form.
   const retryAfterMs = parseRetryAfter(safeHeaders["retry-after"]);
-  const issues = Array.isArray((data as { issues?: unknown[] } | undefined)?.issues)
-    ? (((data as { issues: unknown[] }).issues as unknown[]) as unknown[]).filter(
-        (x): x is string => typeof x === "string",
-      )
-    : [];
+  const issues = envelope.issues;
+  const options = {
+    headers: safeHeaders,
+    requestId,
+    data,
+    retryAfterMs,
+    apiCode: envelope.code,
+    apiMessage: envelope.message ?? `Request failed with status ${status}`,
+    validationDetails: issues,
+  };
 
   switch (status) {
     case 400:
-      return new TalosValidationError(status, body, path, issues, {
-        headers: safeHeaders,
-        requestId,
-        data,
-        retryAfterMs,
-      });
+    case 422:
+      return new TalosValidationError(status, body, path, issues, options);
     case 401:
-      return new TalosAuthenticationError(status, body, path, {
-        headers: safeHeaders,
-        requestId,
-        data,
-        retryAfterMs,
-      });
+      return new TalosAuthenticationError(status, body, path, options);
     case 402:
-      return new TalosPaymentError(status, body, path, {
-        headers: safeHeaders,
-        requestId,
-        data,
-        retryAfterMs,
-      });
+      return new TalosPaymentError(status, body, path, options);
     case 403:
-      return new TalosForbiddenError(status, body, path, {
-        headers: safeHeaders,
-        requestId,
-        data,
-        retryAfterMs,
-      });
+      return new TalosForbiddenError(status, body, path, options);
     case 404:
-      return new TalosNotFoundError(status, body, path, {
-        headers: safeHeaders,
-        requestId,
-        data,
-        retryAfterMs,
-      });
+      return new TalosNotFoundError(status, body, path, options);
     case 409:
-      return new TalosConflictError(status, body, path, {
-        headers: safeHeaders,
-        requestId,
-        data,
-        retryAfterMs,
-      });
+      return new TalosConflictError(status, body, path, options);
     case 429:
-      return new TalosRateLimitError(status, body, path, {
-        headers: safeHeaders,
-        requestId,
-        data,
-        retryAfterMs,
-      });
+      return new TalosRateLimitError(status, body, path, options);
     case 502:
     case 503:
     case 504:
-      return new TalosServerRetryableError(status, body, path, {
-        headers: safeHeaders,
-        requestId,
-        data,
-        retryAfterMs,
-      });
+      return new TalosServerRetryableError(status, body, path, options);
     default:
       if (status >= 500) {
-        return new TalosServerError(status, body, path, {
-          headers: safeHeaders,
-          requestId,
-          data,
-          retryAfterMs,
-        });
+        return new TalosServerError(status, body, path, options);
       }
-      return new TalosAPIError(status, body, path, {
-        headers: safeHeaders,
-        requestId,
-        data,
-        retryAfterMs,
-      });
+      return new TalosAPIError(status, body, path, options);
+  }
+}
+
+function parseErrorEnvelope(rawBody: string): {
+  code?: string;
+  message?: string;
+  requestId?: string;
+  issues: string[];
+} {
+  try {
+    const parsed: unknown = JSON.parse(rawBody);
+    if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { issues: [] };
+    }
+    const envelope = parsed as Record<string, unknown>;
+    const safeText = (value: unknown): string | undefined => {
+      if (typeof value !== "string") return undefined;
+      const normalized = redactInlineSecrets(
+        value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim(),
+      );
+      return normalized ? normalized.slice(0, 512) : undefined;
+    };
+    const requestId = safeText(envelope.requestId);
+    return {
+      code: safeText(envelope.code),
+      message: safeText(envelope.message) ?? safeText(envelope.error),
+      requestId: requestId && /^[A-Za-z0-9._~:-]{1,128}$/.test(requestId) ? requestId : undefined,
+      issues: Array.isArray(envelope.issues)
+        ? envelope.issues
+            .slice(0, 50)
+            .map(safeText)
+            .filter((issue): issue is string => issue !== undefined)
+        : [],
+    };
+  } catch {
+    return { issues: [] };
   }
 }
 

@@ -1,4 +1,4 @@
-﻿# Soroban contract errors
+# Soroban contract errors
 
 This page documents errors exposed by the contract sources in this workspace. Numeric values are the `#[contracterror]` discriminants in Rust. Pair a code with its contract address and method when diagnosing a failed invocation. Codes are contract-specific: code `2` means different things in `TalosNameService` and `TalosDividends`.
 
@@ -48,6 +48,7 @@ These are returned by the `storage_migration` library used by the registry, not 
 | 3 | `MigrationInProgress` | Another migration holds the lock; wait for it to finish. |
 | 4 | `RollbackNotAllowed` | Rollback target is not below current version. |
 | 5 | `RollbackTooDeep` | Rollback exceeds the supported depth. |
+| 6 | `TargetExceedsMax` | Target version exceeds the maximum supported schema version. |
 
 ## String panic diagnostics
 
@@ -69,7 +70,7 @@ These are returned by the `storage_migration` library used by the registry, not 
 | Registry | `Name cannot be empty`; `Name exceeds maximum byte length` | Caller-supplied Talos name is missing or exceeds 64 bytes. |
 | Registry | `Category exceeds maximum byte length`; `Description exceeds maximum byte length` | Talos category (> 32 bytes) or description (> 512 bytes) metadata is too long. |
 | Registry | `Token symbol cannot be empty`; `Token symbol exceeds maximum byte length` | Pulse `token_symbol` is missing or exceeds 12 bytes. |
-| Registry | Migration/rollback rejection diagnostics | Migration helper rejected version ordering, range, or in-progress state. |
+| Registry | `Migration target must be greater than or equal to current version`; `Migration target exceeds supported schema version`; Migration/rollback rejection diagnostics | Explicit migration target is below current version, exceeds latest supported schema version, or migration helper rejected ordering/lock state. |
 | Registry, Governance, Name service | `Domain is paused` | The write path's pause domain is active (or was paused indefinitely). |
 | Registry, Governance, Name service | `ttl bounds: min_age exceeds max_age`; `ttl bounds: max_keys must be greater than zero`; `ttl bounds: max_keys exceeds MAX_BATCH_KEYS` | `extend_ttl_batch` bounds were rejected by the shared `ttl-manager` validator before any storage read or write. |
 | Governance | `Already initialized` | Initialization already completed. |
