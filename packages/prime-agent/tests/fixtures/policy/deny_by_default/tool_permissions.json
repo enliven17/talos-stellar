@@ -1,0 +1,321 @@
+{
+  "_comment": "Deny-by-default regression fixtures for talos_agent.tools.permissions.PermissionEnforcer. Each case is evaluated against a fresh enforcer. 'manifest' is null (undeclared), {\"legacy\": \"<tool>\"} (frozen legacy table) or an inline manifest of capability ids. 'grants' is \"NO_GRANTS\", \"LEGACY_GRANTS\" or a raw mapping passed through PermissionGrants.from_mapping (the same path TOOL_PERMISSION_GRANTS takes). 'mode' defaults to \"enforce\". Never put real secrets here; the test injects its own canary.",
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "undeclared-tool-no-grants",
+      "description": "A tool with no manifest is denied once enforcement is on.",
+      "tool": "mystery_tool",
+      "manifest": null,
+      "grants": "NO_GRANTS",
+      "expect": {"allowed": false, "code": "PERMISSION_MANIFEST_MISSING", "capability": null}
+    },
+    {
+      "id": "undeclared-tool-cannot-be-rescued-by-broad-grants",
+      "description": "Legacy grants (including hosts=*) never widen a tool that declared nothing.",
+      "tool": "mystery_tool",
+      "manifest": null,
+      "grants": "LEGACY_GRANTS",
+      "expect": {"allowed": false, "code": "PERMISSION_MANIFEST_MISSING", "capability": null}
+    },
+    {
+      "id": "undeclared-tool-audit-mode-records-would-deny",
+      "description": "AUDIT mode lets the call through but must record the true outcome.",
+      "tool": "mystery_tool",
+      "manifest": null,
+      "grants": "NO_GRANTS",
+      "mode": "audit",
+      "expect": {"allowed": true, "would_deny": true, "code": "PERMISSION_MANIFEST_MISSING", "capability": null}
+    },
+    {
+      "id": "off-mode-is-the-only-bypass",
+      "description": "OFF is the documented emergency switch and short-circuits every check.",
+      "tool": "mystery_tool",
+      "manifest": null,
+      "grants": "NO_GRANTS",
+      "mode": "off",
+      "expect": {"allowed": true, "would_deny": false, "code": "PERMISSION_OK", "capability": null}
+    },
+    {
+      "id": "explicit-none-manifest-needs-no-grants",
+      "description": "Boundary: a manifest that explicitly declares only .none members is a pure tool and is allowed with zero grants.",
+      "tool": "pure_formatter",
+      "manifest": {},
+      "grants": "NO_GRANTS",
+      "expect": {"allowed": true, "code": "PERMISSION_OK", "capability": null}
+    },
+    {
+      "id": "read-only-tool-with-no-grants",
+      "description": "Even the least privileged real capability needs an explicit grant.",
+      "tool": "get_learnings",
+      "manifest": {"legacy": "get_learnings"},
+      "grants": "NO_GRANTS",
+      "expect": {"allowed": false, "code": "PERMISSION_NOT_GRANTED", "capability": "data.read_local"}
+    },
+    {
+      "id": "empty-grants-mapping-is-no-grants",
+      "description": "An empty operator mapping must parse to 'nothing granted', not 'everything granted'.",
+      "tool": "get_learnings",
+      "manifest": {"legacy": "get_learnings"},
+      "grants": {},
+      "expect": {"allowed": false, "code": "PERMISSION_NOT_GRANTED", "capability": "data.read_local"}
+    },
+    {
+      "id": "capabilities-as-bare-string-grants-nothing",
+      "description": "Malformed: a string instead of a list must not be read as a grant of that capability.",
+      "tool": "get_learnings",
+      "manifest": {"legacy": "get_learnings"},
+      "grants": {"capabilities": "data.read_local"},
+      "expect": {"allowed": false, "code": "PERMISSION_NOT_GRANTED", "capability": "data.read_local"}
+    },
+    {
+      "id": "capability-grants-are-exact-not-globs",
+      "description": "Grant ids are compared literally; 'wallet.*' does not grant wallet.transfer.",
+      "tool": "pay_vendor",
+      "manifest": {"wallet": ["wallet.transfer"], "max_spend_usd": "50"},
+      "grants": {"capabilities": ["wallet.*"], "max_spend_usd": "50"},
+      "arguments": {"amount": "1"},
+      "expect": {"allowed": false, "code": "PERMISSION_NOT_GRANTED", "capability": "wallet.transfer"}
+    },
+    {
+      "id": "unknown-grant-vocabulary-is-ignored",
+      "description": "Unknown capability ids in grants neither crash nor widen anything.",
+      "tool": "get_learnings",
+      "manifest": {"legacy": "get_learnings"},
+      "grants": {"capabilities": ["data.read_everything", "root"]},
+      "expect": {"allowed": false, "code": "PERMISSION_NOT_GRANTED", "capability": "data.read_local"}
+    },
+    {
+      "id": "legacy-grants-exclude-privileged-transfer",
+      "description": "The migration grant set never includes privileged capabilities; transfer_xlm is denied on the first missing one (sorted).",
+      "tool": "transfer_xlm",
+      "manifest": {"legacy": "transfer_xlm"},
+      "grants": "LEGACY_GRANTS",
+      "arguments": {"amount": "1"},
+      "expect": {"allowed": false, "code": "PERMISSION_NOT_GRANTED", "capability": "side_effect.state"}
+    },
+    {
+      "id": "legacy-grants-exclude-token-issue",
+      "description": "Token issuance is privileged and absent from the legacy grant set.",
+      "tool": "airdrop_pulse",
+      "manifest": {"legacy": "airdrop_pulse"},
+      "grants": "LEGACY_GRANTS",
+      "expect": {"allowed": false, "code": "PERMISSION_NOT_GRANTED", "capability": "side_effect.state"}
+    },
+    {
+      "id": "network-grant-without-host-allowlist",
+      "description": "Granting network.http without any hosts still denies every destination.",
+      "tool": "fetch_prices",
+      "manifest": {"network": ["network.http"], "hosts": ["api.example.com"]},
+      "grants": {"capabilities": ["network.http"]},
+      "expect": {"allowed": false, "code": "PERMISSION_HOST_NOT_ALLOWED", "capability": "api.example.com"}
+    },
+    {
+      "id": "host-glob-does-not-match-suffix-attack",
+      "description": "'*.talos.xyz' must not cover talos.xyz.evil.com.",
+      "tool": "fetch_prices",
+      "manifest": {"network": ["network.http"], "hosts": ["talos.xyz.evil.com"]},
+      "grants": {"capabilities": ["network.http"], "hosts": ["*.talos.xyz"]},
+      "expect": {"allowed": false, "code": "PERMISSION_HOST_NOT_ALLOWED", "capability": "talos.xyz.evil.com"}
+    },
+    {
+      "id": "host-glob-does-not-match-lookalike",
+      "description": "'*.talos.xyz' must not cover evil-talos.xyz (no dot boundary).",
+      "tool": "fetch_prices",
+      "manifest": {"network": ["network.http"], "hosts": ["evil-talos.xyz"]},
+      "grants": {"capabilities": ["network.http"], "hosts": ["*.talos.xyz"]},
+      "expect": {"allowed": false, "code": "PERMISSION_HOST_NOT_ALLOWED", "capability": "evil-talos.xyz"}
+    },
+    {
+      "id": "every-manifest-host-must-be-covered",
+      "description": "One uncovered host in the manifest denies the tool even if the others are granted.",
+      "tool": "fetch_prices",
+      "manifest": {"network": ["network.http"], "hosts": ["api.talos.xyz", "api.example.com"]},
+      "grants": {"capabilities": ["network.http"], "hosts": ["*.talos.xyz"]},
+      "expect": {"allowed": false, "code": "PERMISSION_HOST_NOT_ALLOWED", "capability": "api.example.com"}
+    },
+    {
+      "id": "granted-subdomain-is-allowed",
+      "description": "Positive control: a covered host with the capability granted is allowed.",
+      "tool": "fetch_prices",
+      "manifest": {"network": ["network.http"], "hosts": ["api.talos.xyz"]},
+      "grants": {"capabilities": ["network.http"], "hosts": ["*.talos.xyz"]},
+      "expect": {"allowed": true, "code": "PERMISSION_OK", "capability": null}
+    },
+    {
+      "id": "transfer-grant-with-default-zero-ceiling",
+      "description": "Granting wallet.transfer without max_spend_usd leaves a ceiling of 0, so any positive spend is denied.",
+      "tool": "pay_vendor",
+      "manifest": {"wallet": ["wallet.transfer"], "max_spend_usd": "50"},
+      "grants": {"capabilities": ["wallet.transfer"]},
+      "arguments": {"amount": "0.01"},
+      "expect": {"allowed": false, "code": "PERMISSION_SPEND_LIMIT_EXCEEDED", "capability": "wallet.transfer"}
+    },
+    {
+      "id": "malformed-grant-ceiling-falls-back-to-zero",
+      "description": "An unparseable max_spend_usd in grants becomes 0, not unlimited.",
+      "tool": "pay_vendor",
+      "manifest": {"wallet": ["wallet.transfer"], "max_spend_usd": "50"},
+      "grants": {"capabilities": ["wallet.transfer"], "max_spend_usd": "lots"},
+      "arguments": {"amount": "1"},
+      "expect": {"allowed": false, "code": "PERMISSION_SPEND_LIMIT_EXCEEDED", "capability": "wallet.transfer"}
+    },
+    {
+      "id": "spend-at-ceiling-is-allowed",
+      "description": "Boundary: requested == min(manifest, grant) ceiling is allowed.",
+      "tool": "pay_vendor",
+      "manifest": {"wallet": ["wallet.transfer"], "max_spend_usd": "10"},
+      "grants": {"capabilities": ["wallet.transfer"], "max_spend_usd": "50"},
+      "arguments": {"amount": "10"},
+      "expect": {"allowed": true, "code": "PERMISSION_OK", "capability": null}
+    },
+    {
+      "id": "spend-just-over-manifest-ceiling",
+      "description": "Boundary: the smaller (manifest) ceiling wins even when the grant is larger.",
+      "tool": "pay_vendor",
+      "manifest": {"wallet": ["wallet.transfer"], "max_spend_usd": "10"},
+      "grants": {"capabilities": ["wallet.transfer"], "max_spend_usd": "50"},
+      "arguments": {"amount": "10.01"},
+      "expect": {"allowed": false, "code": "PERMISSION_SPEND_LIMIT_EXCEEDED", "capability": "wallet.transfer"}
+    },
+    {
+      "id": "spend-just-over-grant-ceiling",
+      "description": "Boundary: widening a manifest can never exceed the operator grant.",
+      "tool": "pay_vendor",
+      "manifest": {"wallet": ["wallet.transfer"], "max_spend_usd": "10000"},
+      "grants": {"capabilities": ["wallet.transfer"], "max_spend_usd": "25"},
+      "arguments": {"amount_usd": 25.000001},
+      "expect": {"allowed": false, "code": "PERMISSION_SPEND_LIMIT_EXCEEDED", "capability": "wallet.transfer"}
+    },
+    {
+      "id": "spend-amount-nan-fails-closed",
+      "description": "Malformed: NaN cannot be ordered against a ceiling; it must deny, not raise or pass.",
+      "tool": "pay_vendor",
+      "manifest": {"wallet": ["wallet.transfer"], "max_spend_usd": "50"},
+      "grants": {"capabilities": ["wallet.transfer"], "max_spend_usd": "50"},
+      "arguments": {"amount": "NaN"},
+      "expect": {"allowed": false, "code": "PERMISSION_SPEND_AMOUNT_INVALID", "capability": "wallet.transfer"}
+    },
+    {
+      "id": "spend-amount-infinity-fails-closed",
+      "description": "Malformed: an infinite amount is rejected as invalid.",
+      "tool": "pay_vendor",
+      "manifest": {"wallet": ["wallet.transfer"], "max_spend_usd": "50"},
+      "grants": {"capabilities": ["wallet.transfer"], "max_spend_usd": "50"},
+      "arguments": {"amount": "Infinity"},
+      "expect": {"allowed": false, "code": "PERMISSION_SPEND_AMOUNT_INVALID", "capability": "wallet.transfer"}
+    },
+    {
+      "id": "spend-amount-negative-fails-closed",
+      "description": "Malformed: a negative amount would trivially pass 'requested > ceiling'; it must deny.",
+      "tool": "pay_vendor",
+      "manifest": {"wallet": ["wallet.transfer"], "max_spend_usd": "50"},
+      "grants": {"capabilities": ["wallet.transfer"], "max_spend_usd": "50"},
+      "arguments": {"amount": "-5"},
+      "expect": {"allowed": false, "code": "PERMISSION_SPEND_AMOUNT_INVALID", "capability": "wallet.transfer"}
+    },
+    {
+      "id": "spend-amount-garbage-fails-closed",
+      "description": "Malformed: a present but non-numeric amount must not disable the spend check.",
+      "tool": "pay_vendor",
+      "manifest": {"wallet": ["wallet.transfer"], "max_spend_usd": "50"},
+      "grants": {"capabilities": ["wallet.transfer"], "max_spend_usd": "50"},
+      "arguments": {"price": "ten dollars"},
+      "expect": {"allowed": false, "code": "PERMISSION_SPEND_AMOUNT_INVALID", "capability": "wallet.transfer"}
+    },
+    {
+      "id": "spend-amount-boolean-fails-closed",
+      "description": "Malformed: booleans are not amounts.",
+      "tool": "pay_vendor",
+      "manifest": {"wallet": ["wallet.transfer"], "max_spend_usd": "50"},
+      "grants": {"capabilities": ["wallet.transfer"], "max_spend_usd": "50"},
+      "arguments": {"value": true},
+      "expect": {"allowed": false, "code": "PERMISSION_SPEND_AMOUNT_INVALID", "capability": "wallet.transfer"}
+    },
+    {
+      "id": "spend-amount-null-fails-closed",
+      "description": "Malformed: an explicit null amount is present-but-unreadable, not missing.",
+      "tool": "pay_vendor",
+      "manifest": {"wallet": ["wallet.transfer"], "max_spend_usd": "50"},
+      "grants": {"capabilities": ["wallet.transfer"], "max_spend_usd": "50"},
+      "arguments": {"amount": null},
+      "expect": {"allowed": false, "code": "PERMISSION_SPEND_AMOUNT_INVALID", "capability": "wallet.transfer"}
+    },
+    {
+      "id": "spend-amount-zero-is-allowed",
+      "description": "Boundary: zero is a valid, finite, non-negative amount.",
+      "tool": "pay_vendor",
+      "manifest": {"wallet": ["wallet.transfer"], "max_spend_usd": "50"},
+      "grants": {"capabilities": ["wallet.transfer"], "max_spend_usd": "50"},
+      "arguments": {"amount": 0},
+      "expect": {"allowed": true, "code": "PERMISSION_OK", "capability": null}
+    },
+    {
+      "id": "invalid-amount-on-non-transfer-tool-is-ignored",
+      "description": "Compatibility: amount parsing only applies to wallet.transfer tools.",
+      "tool": "get_learnings",
+      "manifest": {"legacy": "get_learnings"},
+      "grants": {"capabilities": ["data.read_local"]},
+      "arguments": {"amount": "NaN"},
+      "expect": {"allowed": true, "code": "PERMISSION_OK", "capability": null}
+    },
+    {
+      "id": "manifest-requires-approval-unapproved",
+      "description": "A fully granted transfer still stops for a human when the manifest demands approval.",
+      "tool": "transfer_xlm",
+      "manifest": {"legacy": "transfer_xlm"},
+      "grants": {
+        "capabilities": ["data.write_remote", "network.http", "wallet.transfer", "side_effect.state"],
+        "hosts": ["*.stellar.org", "horizon.stellar.org", "horizon-testnet.stellar.org"],
+        "max_spend_usd": "100"
+      },
+      "arguments": {"amount": "5"},
+      "expect": {"allowed": false, "code": "PERMISSION_APPROVAL_REQUIRED", "capability": null, "requires_approval": true}
+    },
+    {
+      "id": "manifest-requires-approval-approved",
+      "description": "Positive control: the same call proceeds once approved.",
+      "tool": "transfer_xlm",
+      "manifest": {"legacy": "transfer_xlm"},
+      "grants": {
+        "capabilities": ["data.write_remote", "network.http", "wallet.transfer", "side_effect.state"],
+        "hosts": ["*.stellar.org", "horizon.stellar.org", "horizon-testnet.stellar.org"],
+        "max_spend_usd": "100"
+      },
+      "arguments": {"amount": "5"},
+      "approved": true,
+      "expect": {"allowed": true, "code": "PERMISSION_OK", "capability": null}
+    },
+    {
+      "id": "approval-does-not-bypass-spend-ceiling",
+      "description": "Human approval is not a spend override; the ceiling is checked first.",
+      "tool": "transfer_xlm",
+      "manifest": {"legacy": "transfer_xlm"},
+      "grants": {
+        "capabilities": ["data.write_remote", "network.http", "wallet.transfer", "side_effect.state"],
+        "hosts": ["*.stellar.org", "horizon.stellar.org", "horizon-testnet.stellar.org"],
+        "max_spend_usd": "100"
+      },
+      "arguments": {"amount": "100.5"},
+      "approved": true,
+      "expect": {"allowed": false, "code": "PERMISSION_SPEND_LIMIT_EXCEEDED", "capability": "wallet.transfer"}
+    },
+    {
+      "id": "approval-does-not-bypass-missing-grant",
+      "description": "Human approval cannot grant a capability the operator never granted.",
+      "tool": "create_pulse_token",
+      "manifest": {"legacy": "create_pulse_token"},
+      "grants": "LEGACY_GRANTS",
+      "approved": true,
+      "expect": {"allowed": false, "code": "PERMISSION_NOT_GRANTED", "capability": "side_effect.state"}
+    },
+    {
+      "id": "operator-escalation-on-granted-capability",
+      "description": "Grants.escalate forces approval even for a granted, non-privileged capability.",
+      "tool": "get_learnings",
+      "manifest": {"legacy": "get_learnings"},
+      "grants": {"capabilities": ["data.read_local"], "escalate": ["data.read_local"]},
+      "expect": {"allowed": false, "code": "PERMISSION_APPROVAL_REQUIRED", "capability": null, "requires_approval": true}
+    }
+  ]
+}

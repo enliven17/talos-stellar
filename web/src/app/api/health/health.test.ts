@@ -6,7 +6,8 @@
  * bounded timeouts without waiting real time.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { NextRequest } from "next/server";
 
 // Mock the database module before importing routes that use it.
 vi.mock("@/db", () => ({
@@ -28,9 +29,8 @@ import { GET as readyGet } from "./ready/route";
 import { GET as liveGet } from "./live/route";
 import { DB_TIMEOUT_MS, STELLAR_TIMEOUT_MS } from "./utils";
 
-// A fake request object for the /api/health route.
-function healthRequest() {
-  return { nextUrl: new URL("http://localhost/api/health") } as any;
+function healthRequest(path = "/api/health") {
+  return new NextRequest(new URL(path, "http://localhost"));
 }
 
 function isIsoString(value: unknown): boolean {
@@ -48,7 +48,7 @@ describe("health probes", () => {
       vi.mocked(db.execute).mockRejectedValue(new Error("db unavailable"));
       mockFetch.mockRejectedValue(new Error("horizon unavailable"));
 
-      const response = await liveGet();
+      const response = await liveGet(healthRequest("/api/health/live"));
       expect(response.status).toBe(200);
 
       const body = await response.json();
@@ -65,14 +65,15 @@ describe("health probes", () => {
     });
 
     it("returns no-store cache header", async () => {
-      const response = await liveGet();
+      const response = await liveGet(healthRequest("/api/health/live"));
       expect(response.headers.get("Cache-Control")).toBe("no-store");
+      expect(response.headers.get("x-request-id")).toBeTruthy();
     });
   });
 
   describe("readiness probe (GET /api/health)", () => {
     it("returns 200 ok when all dependencies are healthy", async () => {
-      vi.mocked(db.execute).mockResolvedValue({ rows: [] });
+      vi.mocked(db.execute).mockResolvedValue({ rows: [] } as never);
       mockFetch.mockResolvedValue(new Response(null, { status: 200 }));
 
       const response = await healthGet(healthRequest());
@@ -82,13 +83,15 @@ describe("health probes", () => {
       const body = await response.json();
       expect(body).toEqual({
         ok: true,
+        status: "ok",
+        ready: true,
         checks: { db: "ok", stellar: "ok" },
         ts: expect.any(String),
       });
       expect(isIsoString(body.ts)).toBe(true);
     });
 
-    it("returns 503 with db error when the database is down", async () => {
+    it("returns 503 unavailable when the database is down (critical)", async () => {
       vi.mocked(db.execute).mockRejectedValue(new Error("connection refused"));
       mockFetch.mockResolvedValue(new Response(null, { status: 200 }));
 
@@ -97,22 +100,26 @@ describe("health probes", () => {
 
       const body = await response.json();
       expect(body.ok).toBe(false);
+      expect(body.status).toBe("unavailable");
+      expect(body.ready).toBe(false);
       expect(body.checks).toEqual({ db: "error", stellar: "ok" });
     });
 
-    it("returns 503 with stellar error when Horizon fails", async () => {
-      vi.mocked(db.execute).mockResolvedValue({ rows: [] });
+    it("returns 200 degraded when Horizon fails (soft dependency)", async () => {
+      vi.mocked(db.execute).mockResolvedValue({ rows: [] } as never);
       mockFetch.mockResolvedValue(new Response(null, { status: 503 }));
 
       const response = await healthGet(healthRequest());
-      expect(response.status).toBe(503);
+      expect(response.status).toBe(200);
 
       const body = await response.json();
       expect(body.ok).toBe(false);
+      expect(body.status).toBe("degraded");
+      expect(body.ready).toBe(true);
       expect(body.checks).toEqual({ db: "ok", stellar: "error" });
     });
 
-    it("returns 503 with both errors when both dependencies fail", async () => {
+    it("returns 503 unavailable when both dependencies fail", async () => {
       vi.mocked(db.execute).mockRejectedValue(new Error("database down"));
       mockFetch.mockRejectedValue(new Error("network error"));
 
@@ -121,6 +128,8 @@ describe("health probes", () => {
 
       const body = await response.json();
       expect(body.ok).toBe(false);
+      expect(body.status).toBe("unavailable");
+      expect(body.ready).toBe(false);
       expect(body.checks).toEqual({ db: "error", stellar: "error" });
     });
 
@@ -143,7 +152,7 @@ describe("health probes", () => {
     it("returns a bounded response when the database times out", async () => {
       vi.useFakeTimers();
       vi.mocked(db.execute).mockImplementation(
-        () => new Promise(() => {}) // never settles
+        () => new Promise(() => {}) as never // never settles
       );
       mockFetch.mockResolvedValue(new Response(null, { status: 200 }));
 
@@ -156,31 +165,33 @@ describe("health probes", () => {
       expect(body.checks).toEqual({ db: "error", stellar: "ok" });
     });
 
-    it("returns a bounded response when Horizon times out", async () => {
+    it("returns a bounded degraded response when Horizon times out", async () => {
       vi.useFakeTimers();
-      vi.mocked(db.execute).mockResolvedValue({ rows: [] });
+      vi.mocked(db.execute).mockResolvedValue({ rows: [] } as never);
       mockFetch.mockImplementation(
-        () => new Promise(() => {}) // never settles
+        () => new Promise(() => {}) as never // never settles
       );
 
       const pending = healthGet(healthRequest());
       await vi.advanceTimersByTimeAsync(STELLAR_TIMEOUT_MS + 10);
       const response = await pending;
 
-      expect(response.status).toBe(503);
+      expect(response.status).toBe(200);
       const body = await response.json();
+      expect(body.status).toBe("degraded");
+      expect(body.ready).toBe(true);
       expect(body.checks).toEqual({ db: "ok", stellar: "error" });
     });
   });
 
   describe("readiness probe (GET /api/health/ready)", () => {
     it("matches the main /api/health response contract", async () => {
-      vi.mocked(db.execute).mockResolvedValue({ rows: [] });
+      vi.mocked(db.execute).mockResolvedValue({ rows: [] } as never);
       mockFetch.mockResolvedValue(new Response(null, { status: 200 }));
 
       const [healthResponse, readyResponse] = await Promise.all([
         healthGet(healthRequest()),
-        readyGet(),
+        readyGet(healthRequest("/api/health/ready")),
       ]);
 
       expect(readyResponse.status).toBe(healthResponse.status);
@@ -194,17 +205,86 @@ describe("health probes", () => {
     it("returns 503 with db error when the database times out", async () => {
       vi.useFakeTimers();
       vi.mocked(db.execute).mockImplementation(
-        () => new Promise(() => {})
+        () => new Promise(() => {}) as never
       );
       mockFetch.mockResolvedValue(new Response(null, { status: 200 }));
 
-      const pending = readyGet();
+      const pending = readyGet(healthRequest("/api/health/ready"));
       await vi.advanceTimersByTimeAsync(DB_TIMEOUT_MS + 10);
       const response = await pending;
 
       expect(response.status).toBe(503);
       const body = await response.json();
       expect(body.checks).toEqual({ db: "error", stellar: "ok" });
+    });
+  });
+});
+
+
+describe("health probe timeout env config", () => {
+  const prevDb = process.env.HEALTH_DB_TIMEOUT_MS;
+  const prevStellar = process.env.HEALTH_STELLAR_TIMEOUT_MS;
+
+  afterEach(() => {
+    if (prevDb === undefined) delete process.env.HEALTH_DB_TIMEOUT_MS;
+    else process.env.HEALTH_DB_TIMEOUT_MS = prevDb;
+    if (prevStellar === undefined) delete process.env.HEALTH_STELLAR_TIMEOUT_MS;
+    else process.env.HEALTH_STELLAR_TIMEOUT_MS = prevStellar;
+  });
+
+  it("uses defaults when env vars are unset", async () => {
+    delete process.env.HEALTH_DB_TIMEOUT_MS;
+    delete process.env.HEALTH_STELLAR_TIMEOUT_MS;
+    const { resolveDbTimeoutMs, resolveStellarTimeoutMs, DEFAULT_DB_TIMEOUT_MS, DEFAULT_STELLAR_TIMEOUT_MS } = await import("./utils");
+    expect(resolveDbTimeoutMs({})).toBe(DEFAULT_DB_TIMEOUT_MS);
+    expect(resolveStellarTimeoutMs({})).toBe(DEFAULT_STELLAR_TIMEOUT_MS);
+  });
+
+  it("honors valid HEALTH_*_TIMEOUT_MS overrides", async () => {
+    const { parseTimeoutMs, resolveDbTimeoutMs, resolveStellarTimeoutMs } = await import("./utils");
+    expect(parseTimeoutMs("1500", 2000)).toBe(1500);
+    expect(resolveDbTimeoutMs({ HEALTH_DB_TIMEOUT_MS: "1500" })).toBe(1500);
+    expect(resolveStellarTimeoutMs({ HEALTH_STELLAR_TIMEOUT_MS: "4500" })).toBe(4500);
+  });
+
+  it("falls back on malformed, zero, and out-of-range values", async () => {
+    const { parseTimeoutMs } = await import("./utils");
+    expect(parseTimeoutMs("nope", 2000)).toBe(2000);
+    expect(parseTimeoutMs("0", 2000)).toBe(2000);
+    expect(parseTimeoutMs("-5", 2000)).toBe(2000);
+    expect(parseTimeoutMs("999999", 2000)).toBe(2000);
+    expect(parseTimeoutMs("12.5", 2000)).toBe(2000);
+    expect(parseTimeoutMs("  ", 2000)).toBe(2000);
+  });
+});
+
+
+describe("summarizeReadiness", () => {
+  it("classifies ok / degraded / unavailable without conflating soft failure with hard failure", async () => {
+    const { summarizeReadiness } = await import("./utils");
+    expect(summarizeReadiness({ db: "ok", stellar: "ok" })).toEqual({
+      status: "ok",
+      ok: true,
+      ready: true,
+      httpStatus: 200,
+    });
+    expect(summarizeReadiness({ db: "ok", stellar: "error" })).toEqual({
+      status: "degraded",
+      ok: false,
+      ready: true,
+      httpStatus: 200,
+    });
+    expect(summarizeReadiness({ db: "error", stellar: "ok" })).toEqual({
+      status: "unavailable",
+      ok: false,
+      ready: false,
+      httpStatus: 503,
+    });
+    expect(summarizeReadiness({ db: "error", stellar: "error" })).toEqual({
+      status: "unavailable",
+      ok: false,
+      ready: false,
+      httpStatus: 503,
     });
   });
 });

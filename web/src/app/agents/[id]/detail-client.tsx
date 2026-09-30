@@ -5,6 +5,8 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { useWallet } from "@/components/wallet-gate";
 import { AgentAvatar } from "@/components/agent-avatar";
 import { AgentLifecyclePanel } from "@/components/agent-lifecycle-panel";
+import { AgentAvailabilityBadge } from "@/components/agent-availability-badge";
+import { AgentEmptyState } from "@/components/agent-view-states";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER as STELLAR_USDC_ISSUER } from "@/lib/stellar-config";
 
 
@@ -143,10 +145,24 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
   const [servicePayload, setServicePayload] = useState("");
   const [serviceStatus, setServiceStatus] = useState<"idle" | "paying" | "success" | "error">("idle");
   const [serviceResult, setServiceResult] = useState<{ jobId: string; txHash: string; result?: Record<string, unknown>; status?: string } | null>(null);
+  const [serviceError, setServiceError] = useState<{ message: string; retryable: boolean; retryAfterMs?: number } | null>(null);
+  const [retryCountdown, setRetryCountdown] = useState(0);
+  // Hold the interval ID so we can clear it on unmount (prevents memory leaks
+  // and stale state updates after the modal is closed / component unmounts).
+  const retryIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (retryIntervalRef.current !== null) {
+        clearInterval(retryIntervalRef.current);
+      }
+    };
+  }, []);
 
   const handleRequestService = useCallback(async () => {
     if (!address || !talos.service) return;
     setServiceStatus("paying");
+    setServiceError(null);
     try {
       const { Asset, TransactionBuilder, Operation, BASE_FEE, Horizon, Networks } = await import("@stellar/stellar-sdk");
       const HORIZON_URL = "https://horizon-testnet.stellar.org";
@@ -182,12 +198,37 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
         setServiceResult({ jobId: data.jobId, txHash: data.txHash, result: data.result, status: data.status });
         setServiceStatus("success");
       } else {
-        alert(data.error || "Job creation failed");
+        const isRetryable = Boolean(data.retryable);
+        const retryAfterMs = typeof data.retryAfterMs === "number" ? data.retryAfterMs : 0;
+        setServiceError({
+          message: data.error || "Job creation failed",
+          retryable: isRetryable,
+          retryAfterMs,
+        });
         setServiceStatus("error");
+        // Start countdown if server tells us to wait before retrying
+        if (isRetryable && retryAfterMs > 0) {
+          const seconds = Math.ceil(retryAfterMs / 1000);
+          setRetryCountdown(seconds);
+          // Clear any previous interval before starting a new one
+          if (retryIntervalRef.current !== null) {
+            clearInterval(retryIntervalRef.current);
+          }
+          retryIntervalRef.current = setInterval(() => {
+            setRetryCountdown((c) => {
+              if (c <= 1) {
+                clearInterval(retryIntervalRef.current!);
+                retryIntervalRef.current = null;
+                return 0;
+              }
+              return c - 1;
+            });
+          }, 1000);
+        }
       }
     } catch (err: unknown) {
       console.error("[request-service]", err);
-      alert(err instanceof Error ? err.message : "Transaction failed");
+      setServiceError({ message: err instanceof Error ? err.message : "Transaction failed", retryable: false });
       setServiceStatus("error");
     }
   }, [address, talos.id, talos.service, talos.agentWalletAddress, servicePayload, signTransaction]);
@@ -428,9 +469,12 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
           <div>
           <div className="flex items-center gap-3 mb-2">
             <h1 className="text-2xl font-bold text-accent">{talos.name}</h1>
-            <span className={`text-xs ${talos.status === "Active" ? "text-accent font-bold" : "text-muted"}`}>
-              [{talos.agentOnline ? "ONLINE" : "OFFLINE"}]
-            </span>
+            <AgentAvailabilityBadge
+              agentOnline={talos.agentOnline}
+              agentLastSeen={talos.agentLastSeen}
+              status={talos.status}
+              size="md"
+            />
           </div>
           {talos.agentName && (
             <div className="flex items-center gap-2 text-sm text-foreground/70 mb-1">
@@ -447,9 +491,6 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
           <div className="flex items-center gap-4 mt-3 text-xs text-muted">
             <span>[{talos.category.toUpperCase()}]</span>
             <span>Created {talos.createdAt}</span>
-            {talos.agentLastSeen && !talos.agentOnline && (
-              <span>Last seen {new Date(talos.agentLastSeen).toLocaleDateString()}</span>
-            )}
           </div>
           </div>
         </div>
@@ -891,9 +932,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
               )}
             </>
           ) : (
-            <div className="text-center py-20 text-muted text-sm">
-              This agent does not offer a commerce service yet.
-            </div>
+            <AgentEmptyState kind="service" />
           )}
         </div>
       )}
@@ -902,7 +941,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       {tab === "Activity" && (
         <div className="bg-surface border border-border divide-y divide-border">
           {talos.activities.length === 0 ? (
-            <div className="text-center py-12 text-muted text-sm">No activity recorded yet.</div>
+            <AgentEmptyState kind="activity" className="py-12" />
           ) : (
             talos.activities.map((a) => (
               <div key={a.id} className="flex items-start gap-4 p-4 hover:bg-surface-hover transition-colors">
@@ -982,7 +1021,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
               <span className="text-right">Share</span>
             </div>
             {talos.patrons.length === 0 ? (
-              <div className="py-12 text-center text-sm text-muted">No patrons yet. Be the first.</div>
+              <AgentEmptyState kind="patrons" className="py-12" />
             ) : (
               talos.patrons.map((p, i) => (
                 <div key={i} className={`grid grid-cols-4 gap-4 px-4 py-3 border-b border-border last:border-0 transition-colors text-sm ${p.stellarPublicKey === address ? "bg-accent/5" : "hover:bg-surface-hover"}`}>
@@ -1085,7 +1124,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
           <div className="bg-surface border border-border p-6">
             <div className="text-xs text-muted mb-6">[REVENUE HISTORY]</div>
             {REVENUE_HISTORY.length === 0 ? (
-              <div className="text-center py-12 text-muted text-sm">No revenue data yet.</div>
+              <AgentEmptyState kind="revenue" className="py-12" />
             ) : (
               <div className="flex items-end gap-3 h-40">
                 {REVENUE_HISTORY.map((r) => (
@@ -1196,7 +1235,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
 
           {/* Approvals list */}
           {approvalsLoaded && approvals.length === 0 && (
-            <div className="py-16 text-center text-muted text-sm">No proposals yet.</div>
+            <AgentEmptyState kind="proposals" className="py-16" />
           )}
           {approvals.map(a => (
             <div key={a.id} className="bg-surface border border-border p-5">
@@ -1308,9 +1347,12 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
           <div className="bg-surface border border-border p-6">
             <div className="flex items-center justify-between mb-6">
               <div className="text-xs text-muted">[PRIME AGENT STATUS]</div>
-              <span className={`text-xs ${talos.agentOnline ? "text-green-400" : "text-muted"}`}>
-                {talos.agentOnline ? "[ONLINE]" : "[OFFLINE]"}
-              </span>
+              <AgentAvailabilityBadge
+                agentOnline={talos.agentOnline}
+                agentLastSeen={talos.agentLastSeen}
+                status={talos.status}
+                size="sm"
+              />
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
               <div>
@@ -1474,11 +1516,11 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       {/* ─── Service Request Modal ────────────────────────── */}
       {serviceOpen && talos.service && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/60" onClick={() => !serviceStatus.match(/paying/) && setServiceOpen(false)} />
+          <div className="absolute inset-0 bg-black/60" onClick={() => { if (!serviceStatus.match(/paying/)) { if (retryIntervalRef.current !== null) { clearInterval(retryIntervalRef.current); retryIntervalRef.current = null; } setServiceOpen(false); setServiceError(null); setServiceStatus("idle"); setRetryCountdown(0); } }} />
           <div className="relative bg-background border border-border w-full max-w-md mx-4 p-0">
             <div className="flex items-center justify-between px-6 py-4 border-b border-border">
               <div className="text-xs text-accent tracking-wider">[REQUEST SERVICE]</div>
-              <button onClick={() => setServiceOpen(false)} className="text-muted hover:text-foreground text-sm">&times;</button>
+              <button onClick={() => { if (retryIntervalRef.current !== null) { clearInterval(retryIntervalRef.current); retryIntervalRef.current = null; } setServiceOpen(false); setServiceError(null); setServiceStatus("idle"); setRetryCountdown(0); }} className="text-muted hover:text-foreground text-sm">&times;</button>
             </div>
 
             {serviceStatus === "success" && serviceResult ? (
@@ -1520,6 +1562,42 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                   )}
                 </div>
 
+                {/* Inline error with retry guidance */}
+                {serviceStatus === "error" && serviceError && (
+                  <div className="bg-red-950/30 border border-red-800/50 p-4 space-y-3">
+                    <div className="flex items-start gap-2">
+                      <span className="text-red-400 text-xs font-bold shrink-0">[ERROR]</span>
+                      <p className="text-xs text-red-300 leading-relaxed">{serviceError.message}</p>
+                    </div>
+                    {serviceError.retryable ? (
+                      <div className="space-y-2">
+                        <p className="text-xs text-muted">
+                          This is a transient network error — the transaction did not reach the network. You can safely retry.
+                        </p>
+                        <button
+                          onClick={() => {
+                            if (retryIntervalRef.current !== null) {
+                              clearInterval(retryIntervalRef.current);
+                              retryIntervalRef.current = null;
+                            }
+                            setServiceStatus("idle");
+                            setServiceError(null);
+                            setRetryCountdown(0);
+                          }}
+                          disabled={retryCountdown > 0}
+                          className="w-full py-2 text-xs font-medium border border-accent text-accent hover:bg-accent hover:text-background transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          {retryCountdown > 0 ? `Retry in ${retryCountdown}s…` : "Retry Purchase"}
+                        </button>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted">
+                        This error cannot be retried. Your payment may have been submitted — check your wallet and contact support if needed.
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 <div>
                   <label className="text-xs text-muted block mb-1.5">Request / Payload (optional JSON or plain text)</label>
                   <textarea
@@ -1544,7 +1622,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
 
                 <button
                   onClick={handleRequestService}
-                  disabled={serviceStatus === "paying"}
+                  disabled={serviceStatus === "paying" || retryCountdown > 0}
                   className="w-full py-3 text-sm font-medium bg-accent text-background hover:bg-foreground transition-colors disabled:opacity-50"
                 >
                   {serviceStatus === "paying" ? "Processing payment..." : `Pay ${talos.service.price} USDC & Submit Job`}

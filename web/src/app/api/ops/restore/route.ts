@@ -29,7 +29,7 @@ import {
   backupDefaultTimeoutMs,
   backupMaxBytes,
 } from "@/lib/backup-config";
-import { rateLimit, rateLimitResponse } from "@/lib/rate-limit";
+import { applyRateLimitHeaders, rateLimit, rateLimitResponse } from "@/lib/rate-limit";
 import { withRequestId } from "@/lib/with-request-id";
 import { logger } from "@/lib/logger";
 import {
@@ -77,7 +77,8 @@ const rawPost = async (req: NextRequest): Promise<Response> => {
   if (!auth.ok) return auth.error;
 
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "anon";
-  const rl = rateLimit(`ops:restore:${ip}`, RATE_LIMIT);
+  const rl = await rateLimit(`ops:restore:${ip}`, RATE_LIMIT);
+  rl.policy = "ops-restore";
   if (!rl.ok) {
     return rateLimitResponse(rl);
   }
@@ -87,23 +88,32 @@ const rawPost = async (req: NextRequest): Promise<Response> => {
   try {
     form = await req.formData();
   } catch (err) {
-    return Response.json(
-      { error: "Invalid multipart body", details: sanitizeErrorMessage(err) },
-      { status: 400 },
+    return applyRateLimitHeaders(
+      Response.json(
+        { error: "Invalid multipart body", details: sanitizeErrorMessage(err) },
+        { status: 400 },
+      ),
+      rl,
     );
   }
 
   const artifact = form.get("artifact");
   if (!(artifact instanceof File)) {
-    return Response.json(
-      { error: "Missing 'artifact' file part" },
-      { status: 400 },
+    return applyRateLimitHeaders(
+      Response.json(
+        { error: "Missing 'artifact' file part" },
+        { status: 400 },
+      ),
+      rl,
     );
   }
   if (artifact.size > MAX_BACKUP_ARTIFACT_BYTES) {
-    return Response.json(
-      { error: `Artifact exceeds MAX_BACKUP_ARTIFACT_BYTES=${MAX_BACKUP_ARTIFACT_BYTES}` },
-      { status: 413 },
+    return applyRateLimitHeaders(
+      Response.json(
+        { error: `Artifact exceeds MAX_BACKUP_ARTIFACT_BYTES=${MAX_BACKUP_ARTIFACT_BYTES}` },
+        { status: 413 },
+      ),
+      rl,
     );
   }
   const artifactBuf = Buffer.from(await artifact.arrayBuffer());
@@ -112,9 +122,12 @@ const rawPost = async (req: NextRequest): Promise<Response> => {
 
   const passphrase = req.headers.get("x-backup-passphrase") ?? "";
   if (passphrase.length < 8) {
-    return Response.json(
-      { error: "X-Backup-Passphrase header required (≥ 8 chars)" },
-      { status: 400 },
+    return applyRateLimitHeaders(
+      Response.json(
+        { error: "X-Backup-Passphrase header required (≥ 8 chars)" },
+        { status: 400 },
+      ),
+      rl,
     );
   }
 
@@ -125,22 +138,28 @@ const rawPost = async (req: NextRequest): Promise<Response> => {
     try {
       metaJson = JSON.parse(metaRaw);
     } catch {
-      return Response.json({ error: "metadata part must be valid JSON" }, { status: 400 });
+      return applyRateLimitHeaders(Response.json({ error: "metadata part must be valid JSON" }, { status: 400 }), rl);
     }
   }
   const parsed = TriggerRestoreRequestSchema.safeParse(metaJson);
   if (!parsed.success) {
-    return Response.json(
-      { error: "Validation failed", issues: parsed.error.issues.map((i) => i.message) },
-      { status: 400 },
+    return applyRateLimitHeaders(
+      Response.json(
+        { error: "Validation failed", issues: parsed.error.issues.map((i) => i.message) },
+        { status: 400 },
+      ),
+      rl,
     );
   }
 
   const confirmHeader = (req.headers.get(RESTORE_CONFIRM_HEADER) ?? "").trim().toLowerCase();
   if (parsed.data.mode === "apply" && confirmHeader !== RESTORE_CONFIRM_VALUE) {
-    return Response.json(
-      { error: `X-Confirm: ${RESTORE_CONFIRM_VALUE} header required when mode='apply'` },
-      { status: 409 },
+    return applyRateLimitHeaders(
+      Response.json(
+        { error: `X-Confirm: ${RESTORE_CONFIRM_VALUE} header required when mode='apply'` },
+        { status: 409 },
+      ),
+      rl,
     );
   }
 
@@ -202,20 +221,23 @@ const rawPost = async (req: NextRequest): Promise<Response> => {
     );
 
     if (parsed.data.mode !== "apply") {
-      return Response.json({
-        ok: true,
-        mode: "verify-only",
-        runId,
-        scope: verified.scope,
-        signalVersion: verified.signalVersion,
-        rowCountTotal: verified.rowCountTotal,
-        rowCounts: verified.plaintext.database.rowCounts,
-        sha256Artifact,
-        sizeBytes: artifact.size,
-        encryption: "AES-256-GCM#PBKDF2-SHA256#200000",
-        timestamp: verified.timestamp,
-        rowCountsAtLeast: verified.rowCountTotal,
-      });
+      return applyRateLimitHeaders(
+        Response.json({
+          ok: true,
+          mode: "verify-only",
+          runId,
+          scope: verified.scope,
+          signalVersion: verified.signalVersion,
+          rowCountTotal: verified.rowCountTotal,
+          rowCounts: verified.plaintext.database.rowCounts,
+          sha256Artifact,
+          sizeBytes: artifact.size,
+          encryption: "AES-256-GCM#PBKDF2-SHA256#200000",
+          timestamp: verified.timestamp,
+          rowCountsAtLeast: verified.rowCountTotal,
+        }),
+        rl,
+      );
     }
 
     // Apply in a transaction.
@@ -273,14 +295,17 @@ const rawPost = async (req: NextRequest): Promise<Response> => {
       );
     }
 
-    return Response.json({
-      ok: true,
-      mode: "apply",
-      runId,
-      rowsRestored: applyResult.rowsRestored,
-      durationMs: applyResult.durationMs,
-      perTableCounts: applyResult.tableCounts,
-    });
+    return applyRateLimitHeaders(
+      Response.json({
+        ok: true,
+        mode: "apply",
+        runId,
+        rowsRestored: applyResult.rowsRestored,
+        durationMs: applyResult.durationMs,
+        perTableCounts: applyResult.tableCounts,
+      }),
+      rl,
+    );
   } catch (err) {
     const safeErrMsg = err instanceof BackupCryptoError
       ? err.message
@@ -309,9 +334,12 @@ const rawPost = async (req: NextRequest): Promise<Response> => {
     );
     // Tighter error codes so callers can act on the failure type.
     const status = err instanceof BackupCryptoError ? 422 : 500;
-    return Response.json(
-      { error: "Restore failed", runId, details: safeErrMsg },
-      { status },
+    return applyRateLimitHeaders(
+      Response.json(
+        { error: "Restore failed", runId, details: safeErrMsg },
+        { status },
+      ),
+      rl,
     );
   }
 };

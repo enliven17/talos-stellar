@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsApiKeys } from "@/db/schema";
@@ -7,7 +8,7 @@ import { parseBody } from "@/lib/schemas";
 import { updateApiKeySchema } from "@/lib/schemas";
 
 // PATCH /api/talos/:id/api-keys/:keyId — Update scopes, name, expiry
-export async function PATCH(
+async function _PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string; keyId: string }> }
 ) {
@@ -63,7 +64,7 @@ export async function PATCH(
 }
 
 // DELETE /api/talos/:id/api-keys/:keyId — Revoke a key (soft-delete)
-export async function DELETE(
+async function _DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string; keyId: string }> }
 ) {
@@ -94,3 +95,6 @@ export async function DELETE(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const PATCH = withRequestId(_PATCH);
+export const DELETE = withRequestId(_DELETE);

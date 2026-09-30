@@ -3,18 +3,113 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+from opentelemetry.trace import SpanKind
 
 from talos_agent import metrics
 from talos_agent.config import Settings
-from talos_agent.http import RetryableHTTPError, request_with_retry
+from talos_agent.http import (
+    ResponseTooLargeError,
+    RetryableHTTPError,
+    request_with_retry,
+)
+from talos_agent.payments.stellar_retry import (
+    attach_stellar_failure,
+    classify_stellar_failure,
+)
+from talos_agent.idempotency import (
+    IdempotencyConflictError,
+    generate_idempotency_key,
+    is_payload_conflict,
+    validate_idempotency_key,
+)
 from talos_agent.tracing import inject_trace_headers, traced_span
-from opentelemetry.trace import SpanKind
 
 _NO_KEY = object()
+_MAX_PAGINATION_PAGES = 1_000
+
+
+def _inject_key(
+    idempotency_key: Any,  # str | None | _NO_KEY
+) -> str | None:
+    """Resolve the effective idempotency key for a write call.
+
+    - ``_NO_KEY`` sentinel  → auto-generate a fresh UUID v4.
+    - ``None``             → opt-out; no key injected.
+    - Any string           → use as-is after validation.
+    """
+    if idempotency_key is _NO_KEY:
+        return generate_idempotency_key()
+    if idempotency_key is None:
+        return None
+    return validate_idempotency_key(idempotency_key)
+
+
+def _check_idempotency_conflict(
+    response: httpx.Response,
+    key: str | None,
+    path: str,
+) -> None:
+    """Raise :class:`IdempotencyConflictError` if the 409 is a payload conflict."""
+    if response.status_code != 409 or key is None:
+        return
+    try:
+        body = response.text
+    except Exception:
+        body = ""
+    if is_payload_conflict(body):
+        raise IdempotencyConflictError(key=key, path=path, body=body)
+
+
+def _check_response_size(response: httpx.Response, limit_bytes: int) -> None:
+    """Raise ResponseTooLargeError when the response body exceeds *limit_bytes*.
+
+    The check is performed in two stages to fail as early as possible:
+
+    1. **Content-Length header** — if the server declared a body size that
+       already exceeds the limit, reject before reading a single byte.
+    2. **Actual body size** — after the body is buffered by httpx, measure
+       ``len(response.content)`` as the authoritative byte count.
+
+    Privacy contract: neither the response body nor any header values are
+    included in the error.  Only the URL path, measured size, and limit are
+    recorded so that secrets, seeds, payment proofs, and media cannot leak.
+    """
+    try:
+        url = str(response.request.url)
+    except RuntimeError:
+        url = str(response.url)
+
+    # Stage 1: fast-reject on declared Content-Length.
+    content_length_header = response.headers.get("content-length")
+    if content_length_header is not None:
+        try:
+            declared = int(content_length_header)
+        except ValueError:
+            declared = None
+        if declared is not None and declared > limit_bytes:
+            raise ResponseTooLargeError(url, declared, limit_bytes)
+
+    # Stage 2: measure the buffered body (authoritative).
+    actual = len(response.content)
+    if actual > limit_bytes:
+        raise ResponseTooLargeError(url, actual, limit_bytes)
+
+
+class PaginationError(ValueError):
+    """Raised when a paginated API response cannot be consumed safely."""
+
+
+@dataclass(frozen=True)
+class PaginatedPage:
+    """One cursor-based API page, preserving the server response order."""
+
+    items: list[dict[str, Any]]
+    next_cursor: str | None
 
 
 class TalosAPIClient:
@@ -29,6 +124,10 @@ class TalosAPIClient:
             timeout=30.0,
         )
         self._settings = settings
+        max_bytes = getattr(settings, "api_client_response_max_bytes", None)
+        self._response_max_bytes: int = (
+            max_bytes if isinstance(max_bytes, int) and not isinstance(max_bytes, bool) else 1_048_576
+        )
 
     def _request_headers(self, supplied: dict[str, str] | None = None) -> dict[str, str]:
         """Capture one credential for the complete retry lifecycle of a request."""
@@ -39,11 +138,16 @@ class TalosAPIClient:
     # ── Retry-wrapped, traced HTTP verbs ──────────────────
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        """Single choke point for all Web API calls: span + trace-header
-        injection + retry-count/status metrics, on top of the existing
-        request_with_retry backoff. Every public method below funnels
-        through this instead of calling httpx directly.
+        """Single choke point for all Web API calls: auth headers + idempotency
+        key + circuit-breaker gating + span + trace-header injection +
+        retry-count/status metrics, on top of the existing request_with_retry
+        backoff. Every public method below funnels through this instead of
+        calling httpx directly.
         """
+        # Fire-and-forget verbs (status heartbeats) opt out via idempotency_key=None.
+        idempotency_key = kwargs.pop("idempotency_key", _NO_KEY)
+        key = _inject_key(idempotency_key)
+
         path = urlsplit(url).path or url
         start = time.monotonic()
         retry_count = 0
@@ -56,6 +160,9 @@ class TalosAPIClient:
             # Inject only after the span above is current, so the
             # traceparent we send actually points at *this* span.
             headers = dict(kwargs.pop("headers", None) or {})
+            if key is not None:
+                headers["Idempotency-Key"] = key
+            headers.update(self._request_headers())
             inject_trace_headers(headers)
             kwargs["headers"] = headers
 
@@ -71,8 +178,10 @@ class TalosAPIClient:
                     retry_count += 1
                     return await send(url, **kwargs)
 
-                response = await request_with_retry(_do_send)
+                response = await request_with_retry(_do_send, provider="talos_web_api")
                 status_code = response.status_code
+                _check_idempotency_conflict(response, key, url)
+                _check_response_size(response, self._response_max_bytes)
                 span.set_attribute("http.response.status_code", status_code)
                 span.set_attribute("http.retry.count", max(0, retry_count - 1))
                 return response
@@ -87,21 +196,108 @@ class TalosAPIClient:
                 )
 
     async def _get(self, url: str, **kwargs: Any) -> httpx.Response:
-        return await request_with_retry(lambda: self._client.get(url, **kwargs), provider="talos_web_api")
+        return await self._request("GET", url, **kwargs)
 
     async def _post(self, url: str, **kwargs: Any) -> httpx.Response:
-        idempotency_key = kwargs.pop("idempotency_key", _NO_KEY)
-        if idempotency_key is not _NO_KEY and idempotency_key:
-            headers = dict(kwargs.pop("headers", {}) or {})
-            headers["Idempotency-Key"] = str(idempotency_key)
-            kwargs["headers"] = headers
-        return await request_with_retry(lambda: self._client.post(url, **kwargs), provider="talos_web_api")
+        return await self._request("POST", url, **kwargs)
 
     async def _put(self, url: str, **kwargs: Any) -> httpx.Response:
-        return await request_with_retry(lambda: self._client.put(url, **kwargs), provider="talos_web_api")
+        return await self._request("PUT", url, **kwargs)
 
     async def _patch(self, url: str, **kwargs: Any) -> httpx.Response:
-        return await request_with_retry(lambda: self._client.patch(url, **kwargs), provider="talos_web_api")
+        return await self._request("PATCH", url, **kwargs)
+
+    async def _get_cursor_page(
+        self,
+        url: str,
+        *,
+        item_key: str,
+        params: dict[str, Any] | None = None,
+        cursor: str | None = None,
+        page_size: int | None = None,
+    ) -> PaginatedPage:
+        """Fetch and validate one cursor-based page from a collection endpoint."""
+        query = dict(params or {})
+        if cursor is not None:
+            query["cursor"] = cursor
+        if page_size is not None:
+            query["limit"] = page_size
+
+        response = await self._get(url, params=query)
+        if response.status_code != 200:
+            raise PaginationError(f"pagination request failed with status {response.status_code}")
+
+        try:
+            payload = response.json()
+        except (TypeError, ValueError) as exc:
+            raise PaginationError("pagination response was not valid JSON") from exc
+
+        # Older deployments returned a bare list.  It is a complete, single page
+        # and remains supported by the existing list methods.
+        if isinstance(payload, list):
+            items = payload
+            next_cursor = None
+        elif isinstance(payload, dict):
+            if item_key not in payload or "nextCursor" not in payload:
+                raise PaginationError("pagination response is missing required fields")
+            items = payload[item_key]
+            next_cursor = payload["nextCursor"]
+        else:
+            raise PaginationError("pagination response has an unexpected shape")
+
+        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+            raise PaginationError("pagination response contains invalid items")
+        if next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor):
+            raise PaginationError("pagination response contains an invalid next cursor")
+        return PaginatedPage(items=items, next_cursor=next_cursor)
+
+    async def _get_all_cursor_pages(
+        self,
+        url: str,
+        *,
+        item_key: str,
+        params: dict[str, Any] | None = None,
+        page_size: int | None = None,
+        max_pages: int = _MAX_PAGINATION_PAGES,
+    ) -> list[dict[str, Any]]:
+        """Traverse cursor pages with bounds, loop detection, and de-duplication."""
+        if not isinstance(max_pages, int) or isinstance(max_pages, bool) or max_pages < 1:
+            raise ValueError("max_pages must be a positive integer")
+
+        items: list[dict[str, Any]] = []
+        seen_cursors: set[str] = set()
+        seen_items: set[str] = set()
+        cursor: str | None = None
+
+        for _ in range(max_pages):
+            page = await self._get_cursor_page(
+                url,
+                item_key=item_key,
+                params=params,
+                cursor=cursor,
+                page_size=page_size,
+            )
+            for item in page.items:
+                # API list records have IDs; talosId is the stable identifier on
+                # marketplace records.  Reject a duplicate rather than silently
+                # returning it twice when a continuation regresses.
+                identifier = item.get("id", item.get("talosId"))
+                if not isinstance(identifier, str) or not identifier:
+                    raise PaginationError("pagination item is missing a stable identifier")
+                if identifier in seen_items:
+                    raise PaginationError("pagination response contains a duplicate item")
+                seen_items.add(identifier)
+                items.append(item)
+
+            next_cursor = page.next_cursor
+            if next_cursor is None:
+                return items
+            if next_cursor in seen_cursors or next_cursor == cursor:
+                raise PaginationError("pagination response repeated a cursor")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
+        raise PaginationError("pagination exceeded the maximum page count")
 
     # ── Talos Config ──────────────────────────────────────
 
@@ -189,15 +385,49 @@ class TalosAPIClient:
             return r.json()
         return None
 
-    async def get_approvals(self, talos_id: str, status: str | None = None) -> list[dict]:
+    async def get_approvals_page(
+        self,
+        talos_id: str,
+        status: str | None = None,
+        *,
+        cursor: str | None = None,
+        page_size: int | None = None,
+    ) -> PaginatedPage:
+        """Get one approvals page using the API's opaque cursor."""
         params: dict[str, Any] = {}
         if status:
             params["status"] = status
-        r = await self._get(f"/api/talos/{talos_id}/approvals", params=params)
-        if r.status_code == 200:
-            data = r.json()
-            return data if isinstance(data, list) else data.get("approvals", [])
-        return []
+        return await self._get_cursor_page(
+            f"/api/talos/{talos_id}/approvals",
+            item_key="approvals",
+            params=params,
+            cursor=cursor,
+            page_size=page_size,
+        )
+
+    async def get_all_approvals(
+        self,
+        talos_id: str,
+        status: str | None = None,
+        *,
+        page_size: int | None = None,
+        max_pages: int = _MAX_PAGINATION_PAGES,
+    ) -> list[dict[str, Any]]:
+        """Get all approvals in API order, stopping at the final cursor."""
+        params: dict[str, Any] = {}
+        if status:
+            params["status"] = status
+        return await self._get_all_cursor_pages(
+            f"/api/talos/{talos_id}/approvals",
+            item_key="approvals",
+            params=params,
+            page_size=page_size,
+            max_pages=max_pages,
+        )
+
+    async def get_approvals(self, talos_id: str, status: str | None = None) -> list[dict]:
+        """Compatibility wrapper returning all approval pages as one list."""
+        return await self.get_all_approvals(talos_id, status)
 
     async def get_approval(self, talos_id: str, approval_id: str) -> dict | None:
         r = await self._get(f"/api/talos/{talos_id}/approvals/{approval_id}")
@@ -252,7 +482,7 @@ class TalosAPIClient:
         params = {}
         if service_type:
             params["type"] = service_type
-        return await self._get(f"/api/talos/{talos_id}/service", params=params)
+        return await self._get(f"/api/talos/{talos_id}/service", params=params, timeout=self._a2a_timeout)
 
     async def submit_commerce(
         self,
@@ -268,6 +498,7 @@ class TalosAPIClient:
             json={"payload": payload},
             headers={"X-PAYMENT": payment_header},
             idempotency_key=idempotency_key,
+            timeout=self._a2a_timeout,
         )
         if r.status_code in (200, 201):
             return r.json()
@@ -277,19 +508,55 @@ class TalosAPIClient:
         except Exception:
             return {"error": f"Commerce submission failed with status {r.status_code}"}
 
-    async def discover_services(
-        self, category: str | None = None, target: str | None = None
-    ) -> list[dict]:
+    async def discover_services_page(
+        self,
+        category: str | None = None,
+        target: str | None = None,
+        *,
+        cursor: str | None = None,
+        page_size: int | None = None,
+    ) -> PaginatedPage:
+        """Get one marketplace-services page using the API's opaque cursor."""
         params: dict[str, Any] = {"self": self._talos_id}
         if category:
             params["category"] = category
         if target:
             params["target"] = target
-        r = await self._get("/api/services", params=params)
-        if r.status_code == 200:
-            data = r.json()
-            return data if isinstance(data, list) else data.get("data", [])
-        return []
+        return await self._get_cursor_page(
+            "/api/services",
+            item_key="data",
+            params=params,
+            cursor=cursor,
+            page_size=page_size,
+        )
+
+    async def discover_all_services(
+        self,
+        category: str | None = None,
+        target: str | None = None,
+        *,
+        page_size: int | None = None,
+        max_pages: int = _MAX_PAGINATION_PAGES,
+    ) -> list[dict[str, Any]]:
+        """Get all marketplace services in API order, stopping at the final cursor."""
+        params: dict[str, Any] = {"self": self._talos_id}
+        if category:
+            params["category"] = category
+        if target:
+            params["target"] = target
+        return await self._get_all_cursor_pages(
+            "/api/services",
+            item_key="data",
+            params=params,
+            page_size=page_size,
+            max_pages=max_pages,
+        )
+
+    async def discover_services(
+        self, category: str | None = None, target: str | None = None
+    ) -> list[dict]:
+        """Compatibility wrapper returning all marketplace pages as one list."""
+        return await self.discover_all_services(category, target)
 
     async def register_service(
         self,
@@ -339,15 +606,26 @@ class TalosAPIClient:
         )
         if r.status_code in (200, 201):
             return r.json()
+        # Classify the failure at the boundary where the status code is known.
+        # The classification is bounded and privacy-safe (no response text).
+        failure = classify_stellar_failure(status_code=r.status_code)
         try:
-            return r.json()
+            payload = r.json()
         except Exception:
-            return {"error": f"Transfer failed with status {r.status_code}"}
+            payload = None
+        if isinstance(payload, dict):
+            # Additive: preserve any server-provided fields, only fill in the
+            # classification. Existing callers that read ``error`` keep working.
+            for key, value in failure.to_dict().items():
+                payload.setdefault(key, value)
+            payload.setdefault("error", failure.message)
+            return payload
+        return attach_stellar_failure(None, failure)
 
     # ── Jobs ───────────────────────────────────────────────
 
     async def get_pending_jobs(self) -> list[dict]:
-        r = await self._get("/api/jobs/pending")
+        r = await self._get("/api/jobs/pending", timeout=self._a2a_timeout)
         if r.status_code == 200:
             data = r.json()
             return data if isinstance(data, list) else data.get("jobs", [])
@@ -359,6 +637,7 @@ class TalosAPIClient:
         r = await self._post(
             f"/api/jobs/{job_id}/claim",
             json={"ttlSeconds": ttl_seconds},
+            timeout=self._a2a_timeout,
         )
         if r.status_code == 200:
             return r.json()
@@ -369,6 +648,7 @@ class TalosAPIClient:
         r = await self._post(
             f"/api/jobs/{job_id}/heartbeat",
             json={"fencingToken": fencing_token},
+            timeout=self._a2a_timeout,
         )
         if r.status_code == 200:
             return r.json()
@@ -397,6 +677,7 @@ class TalosAPIClient:
             f"/api/jobs/{job_id}/result",
             json={"result": result, "fencingToken": fencing_token},
             headers=headers,
+            timeout=self._a2a_timeout,
         )
         if r.status_code in (200, 201):
             return r.json()
@@ -480,3 +761,20 @@ class TalosAPIClient:
     def set_request_id(self, request_id: str) -> None:
         """Propagate cycle_id as X-Request-Id to web API calls."""
         self._client.headers["x-request-id"] = request_id
+
+    # ── A2A Timeout ────────────────────────────────────────
+
+    @property
+    def _a2a_timeout(self) -> httpx.Timeout:
+        """Build an httpx.Timeout from the four A2A timeout settings.
+
+        Returns a fresh Timeout each call so callers always get a value that
+        reflects the current settings, and the property remains free of
+        mutable cached state.
+        """
+        return httpx.Timeout(
+            connect=self._settings.a2a_connect_timeout,
+            read=self._settings.a2a_read_timeout,
+            write=self._settings.a2a_write_timeout,
+            pool=self._settings.a2a_pool_timeout,
+        )

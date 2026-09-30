@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import math
 import os
 import random
 import signal
@@ -11,19 +13,26 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
-from talos_agent.clock import ClockProtocol, SystemClock
-from talos_agent import metrics
-
 import structlog
 from rich.console import Console
+
+from talos_agent import metrics
+from talos_agent.clock import ClockProtocol, SystemClock
 
 if TYPE_CHECKING:
     from talos_agent.config import Settings
 
 from talos_agent.circuit_breaker import cb_registry
-from talos_agent.observability import log, setup as setup_observability
+from talos_agent.observability import log
+from talos_agent.observability import setup as setup_observability
+from talos_agent.payments.stellar_retry import (
+    classify_stellar_failure,
+    classify_stellar_result,
+)
 from talos_agent.tracing import (
     force_flush as force_flush_tracing,
+)
+from talos_agent.tracing import (
     shutdown_tracing,
     traced_span,
 )
@@ -32,6 +41,20 @@ console = Console()
 logger = logging.getLogger(__name__)
 
 SHUTDOWN_GRACE_PERIOD = 10  # seconds before force-exit on second signal
+
+
+def _validate_jitter(jitter: float) -> None:
+    try:
+        valid = (
+            not isinstance(jitter, bool)
+            and isinstance(jitter, (int, float))
+            and math.isfinite(float(jitter))
+            and 0 <= jitter <= 1
+        )
+    except (OverflowError, ValueError):
+        valid = False
+    if not valid:
+        raise ValueError("jitter must be a finite number between 0 and 1")
 
 
 def _traced_task_run(name: str, talos_config: dict):
@@ -109,6 +132,10 @@ async def run_loan_repayment(
         "repaid": 0,
         "warnings": 0,
         "errors": 0,
+        # Bounded, privacy-safe failure classification counts (see
+        # talos_agent.payments.stellar_retry) so operators can tell a
+        # transient outage from a terminal input error at a glance.
+        "failure_classes": {},
     }
 
     if not loans_due:
@@ -190,6 +217,13 @@ async def run_loan_repayment(
                 "defi",
             )
             result["errors"] += 1
+            # Classify so the operator-facing summary distinguishes a
+            # transient outage (retryable) from a terminal failure.
+            failure = classify_stellar_result(transfer_result) or classify_stellar_failure()
+            classes = result["failure_classes"]
+            classes[failure.classification.value] = (
+                classes.get(failure.classification.value, 0) + 1
+            )
             continue
 
         db.record_repayment(loan_id, repay_amount, tx_hash=transfer_result.get("tx_hash"))
@@ -215,6 +249,7 @@ class Backoff:
         max_backoff: float = 300.0,
         jitter: float = 0.2,
     ):
+        _validate_jitter(jitter)
         self.base_delay = base_delay
         self.initial_backoff = initial_backoff
         self.max_backoff = max_backoff
@@ -258,6 +293,10 @@ class DurableBackoff:
     state; a failed run writes the updated attempt count and the wall-clock
     time at which the next attempt is allowed.
 
+    Retry jitter is stable for a task, agent identity, and failure count. The
+    optional identity should be stable and non-sensitive; it is hashed in memory
+    and is not persisted or logged.
+
     ``max_attempts`` is enforced: once exceeded the task is marked *terminal*
     and ``is_terminal`` returns ``True`` so callers can stop scheduling it.
     Pass ``max_attempts=0`` (the default) to disable the cap entirely.
@@ -275,13 +314,18 @@ class DurableBackoff:
         jitter: float = 0.2,
         max_attempts: int = MAX_ATTEMPTS_DEFAULT,
         clock: ClockProtocol | None = None,
+        jitter_identity: str | None = None,
     ):
+        _validate_jitter(jitter)
+        if jitter_identity is not None and not isinstance(jitter_identity, str):
+            raise ValueError("jitter identity must be a string")
         self.task_name = task_name
         self._db = db
         self.base_delay = base_delay
         self.initial_backoff = initial_backoff
         self.max_backoff = max_backoff
         self.jitter = jitter
+        self._jitter_identity = jitter_identity or task_name
         self.max_attempts = max_attempts
         self._clock: ClockProtocol = clock if clock is not None else SystemClock()
 
@@ -334,12 +378,23 @@ class DurableBackoff:
         """True when max_attempts is set and has been exceeded."""
         return self._terminal
 
+    @property
+    def terminal(self) -> bool:
+        """Alias for :attr:`is_terminal` used by scheduler call sites."""
+        return self._terminal
+
     def wait_remaining(self) -> float:
         """Seconds until the next attempt is allowed (0 if overdue or no state)."""
         if self._next_attempt_at is None:
             return 0.0
         remaining = (self._next_attempt_at - self._clock.now()).total_seconds()
         return max(remaining, 0.0)
+
+    def delay_until_next_attempt(self) -> float:
+        """Return the persisted deadline remainder, or the next normal delay."""
+        if self._next_attempt_at is not None:
+            return self.wait_remaining()
+        return self.next_delay()
 
     def next_delay(self) -> float:
         """Compute the next sleep duration (same semantics as ``Backoff.next_delay``)."""
@@ -350,8 +405,13 @@ class DurableBackoff:
         delay = min(delay, self.max_backoff)
 
         if self.jitter > 0:
-            j = delay * self.jitter
-            delay = delay + random.uniform(-j, j)
+            material = (
+                f"{self.task_name}\0{self._jitter_identity}\0{self.fail_count}"
+            ).encode()
+            sample = int.from_bytes(
+                hashlib.blake2b(material, digest_size=8).digest(), "big"
+            ) / ((1 << 64) - 1)
+            delay *= 1 - self.jitter + 2 * self.jitter * sample
 
         actual_delay = max(delay, 0.1)
         logger.debug(
@@ -390,6 +450,17 @@ class DurableBackoff:
         self._next_attempt_at = self._clock.now() + timedelta(seconds=delay)
         self._persist()
 
+
+async def _wait_for_restored_deadline(shutdown_event, backoff: DurableBackoff) -> None:
+    """Honor a persisted retry deadline before the worker's first post-restart call."""
+    remaining = backoff.wait_remaining()
+    if remaining <= 0:
+        return
+    try:
+        await asyncio.wait_for(shutdown_event.wait(), timeout=remaining)
+    except asyncio.TimeoutError:
+        pass
+
 async def run(settings: Settings, agent_slot: int = 0) -> None:
     """Entry point called by `talos-agent start`. agent_slot used for log prefixes in multi mode."""
     setup_observability()
@@ -401,10 +472,11 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         timeout_ms=settings.secret_db_timeout_ms,
     )
     if settings.secret_rotation_enabled:
-        from talos_agent.secret_store import SecretStore, decode_keyring
+        from talos_agent.secret_store import build_secret_store, decode_keyring
 
-        secret_store = SecretStore(
-            db,
+        secret_store = build_secret_store(
+            backend=settings.secret_store_backend,
+            db=db,
             keyring=decode_keyring(settings.secret_keyring),
             active_key_id=settings.secret_active_key_id,
             scope=settings.secret_scope,
@@ -691,6 +763,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
 
     # Shutdown handler — force-exit on second signal
     shutdown_event = asyncio.Event()
+    shutdown_drain_complete = asyncio.Event()
     _signal_count = 0
 
     def _handle_signal():
@@ -819,7 +892,13 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
 
     async def polling_task():
         """Poll Web API for approvals and commerce jobs."""
-        backoff = DurableBackoff(task_name="polling", db=db, base_delay=settings.polling_interval)
+        backoff = DurableBackoff(
+            task_name="polling",
+            db=db,
+            base_delay=settings.polling_interval,
+            jitter_identity=settings.talos_id,
+        )
+        await _wait_for_restored_deadline(shutdown_event, backoff)
         while not shutdown_event.is_set():
             try:
                 with _traced_task_run("polling", talos_config):
@@ -868,14 +947,22 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                     break
 
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=backoff.next_delay())
+                await asyncio.wait_for(
+                    shutdown_event.wait(), timeout=backoff.delay_until_next_attempt()
+                )
                 break
             except asyncio.TimeoutError:
                 pass
 
     async def heartbeat_task():
         """Report online status periodically."""
-        backoff = DurableBackoff(task_name="heartbeat", db=db, base_delay=settings.heartbeat_interval)
+        backoff = DurableBackoff(
+            task_name="heartbeat",
+            db=db,
+            base_delay=settings.heartbeat_interval,
+            jitter_identity=settings.talos_id,
+        )
+        await _wait_for_restored_deadline(shutdown_event, backoff)
         while not shutdown_event.is_set():
             try:
                 with _traced_task_run("heartbeat", talos_config):
@@ -889,16 +976,24 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                     break
 
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=backoff.next_delay())
+                await asyncio.wait_for(
+                    shutdown_event.wait(), timeout=backoff.delay_until_next_attempt()
+                )
                 break
             except asyncio.TimeoutError:
                 pass
 
     async def job_heartbeat_task():
-        """Extend leases on claimed jobs periodically."""
+        """Extend leases until the graceful shutdown drain has completed."""
         from talos_agent.tools.commerce import get_claimed_jobs_copy
-        backoff = DurableBackoff(task_name="job_heartbeat", db=db, base_delay=settings.job_heartbeat_interval)
-        while not shutdown_event.is_set():
+        backoff = DurableBackoff(
+            task_name="job_heartbeat",
+            db=db,
+            base_delay=settings.job_heartbeat_interval,
+            jitter_identity=settings.talos_id,
+        )
+        await _wait_for_restored_deadline(shutdown_event, backoff)
+        while True:
             try:
                 claimed = (
                     job_effect_store.claimed_jobs()
@@ -908,17 +1003,50 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                 for job_id, fencing_token in claimed.items():
                     result = await api.heartbeat_job(job_id, fencing_token)
                     if not result:
-                        logger.warning("job_lease_heartbeat_failed", job_id=job_id)
+                        logger.warning("job_lease_heartbeat_failed")
                 backoff.success()
             except Exception as e:
-                logger.debug(f"Job heartbeat error: {e}")
+                logger.debug("Job heartbeat error: %s", e)
                 backoff.failure()
 
-            try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=backoff.next_delay())
+            if shutdown_drain_complete.is_set():
                 break
+
+            try:
+                if shutdown_event.is_set():
+                    await asyncio.wait_for(
+                        shutdown_drain_complete.wait(),
+                        timeout=backoff.delay_until_next_attempt(),
+                    )
+                    break
+                await asyncio.wait_for(
+                    shutdown_event.wait(),
+                    timeout=backoff.delay_until_next_attempt(),
+                )
             except asyncio.TimeoutError:
                 pass
+
+    telegram_queue_worker = None
+    if settings.telegram_rate_limit_enabled:
+        from talos_agent.adapters.telegram_queue import (
+            TelegramQueueConfig,
+            TelegramQueueWorker,
+            TelegramSendQueue,
+        )
+        from talos_agent.tools import publishing as _publishing_tools
+
+        telegram_queue_worker = TelegramQueueWorker(
+            TelegramSendQueue(db, TelegramQueueConfig.from_settings(settings)),
+            # Read lazily: build_all_tools replaces the registry after browser recovery.
+            lambda: _publishing_tools._adapter_registry,
+            idle_interval=settings.telegram_queue_drain_interval_seconds,
+        )
+
+    async def telegram_queue_task():
+        """Drain the durable Telegram send queue at the paced rate."""
+        if telegram_queue_worker is None:
+            return
+        await telegram_queue_worker.run(shutdown_event)
 
     async def job_effect_dispatch_task():
         """Recover and dispatch durable provider-job effects."""
@@ -928,7 +1056,9 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             task_name="job_effect_dispatch",
             db=db,
             base_delay=settings.talos_job_effect_dispatch_interval,
+            jitter_identity=settings.talos_id,
         )
+        await _wait_for_restored_deadline(shutdown_event, backoff)
         while not shutdown_event.is_set():
             try:
                 result = await job_effect_dispatcher.dispatch_once()
@@ -949,14 +1079,22 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                 log.error("job_effect_dispatch_batch_failed", error_code="batch_failure")
                 backoff.failure()
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=backoff.next_delay())
+                await asyncio.wait_for(
+                    shutdown_event.wait(), timeout=backoff.delay_until_next_attempt()
+                )
                 break
             except asyncio.TimeoutError:
                 pass
 
     async def activity_flush_task():
         """Flush buffered activity logs to Web API."""
-        backoff = DurableBackoff(task_name="activity_flush", db=db, base_delay=30)
+        backoff = DurableBackoff(
+            task_name="activity_flush",
+            db=db,
+            base_delay=30,
+            jitter_identity=settings.talos_id,
+        )
+        await _wait_for_restored_deadline(shutdown_event, backoff)
         while not shutdown_event.is_set():
             try:
                 with _traced_task_run("activity_flush", talos_config):
@@ -979,7 +1117,9 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                     break
 
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=backoff.next_delay())
+                await asyncio.wait_for(
+                    shutdown_event.wait(), timeout=backoff.delay_until_next_attempt()
+                )
                 break
             except asyncio.TimeoutError:
                 pass
@@ -1211,6 +1351,8 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         tasks.append(
             asyncio.create_task(job_effect_dispatch_task(), name="job_effect_dispatch")
         )
+    if telegram_queue_worker is not None:
+        tasks.append(asyncio.create_task(telegram_queue_task(), name="telegram_queue"))
 
     try:
         await shutdown_event.wait()
@@ -1219,6 +1361,12 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         # Stop polling: shutdown_event is already set so each task's inner
         # wait() will break on the next iteration without starting new work.
         #
+        # The job heartbeat is deliberately excluded from the drain wait: it
+        # must continue renewing active remote leases while in-flight work is
+        # given the graceful shutdown window.
+        heartbeat_task = next((t for t in tasks if t.get_name() == "job_heartbeat"), None)
+        drain_tasks = [t for t in tasks if t is not heartbeat_task]
+
         # Wait up to shutdown_deadline seconds for running tasks to finish
         # naturally before we force-cancel them.
         deadline = settings.shutdown_deadline
@@ -1228,18 +1376,17 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             )
             try:
                 await asyncio.wait_for(
-                    asyncio.shield(asyncio.gather(*tasks, return_exceptions=True)),
+                    asyncio.shield(asyncio.gather(*drain_tasks, return_exceptions=True)),
                     timeout=deadline,
                 )
                 console.print("[green]All tasks finished within deadline.[/green]")
             except asyncio.TimeoutError:
-                still_running = [t for t in tasks if not t.done()]
+                still_running = [t for t in drain_tasks if not t.done()]
                 console.print(
                     f"[red]Deadline exceeded — cancelling {len(still_running)} task(s): "
                     + ", ".join(t.get_name() for t in still_running)
                     + "[/red]"
                 )
-                # Record each cancelled task so operators can inspect what was cut short.
                 for t in still_running:
                     try:
                         db.add_activity(
@@ -1249,14 +1396,57 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                         )
                     except Exception:
                         pass
+                # Release browser sessions before cancelling in-flight work so
+                # Stagehand/Chrome cannot outlive the cancelled tasks (#552).
+                try:
+                    from talos_agent.tools.browser import (
+                        cleanup_browser_sessions_on_cancellation,
+                    )
+
+                    await cleanup_browser_sessions_on_cancellation()
+                except Exception:
+                    pass
                 for t in still_running:
                     t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.gather(*drain_tasks, return_exceptions=True)
         else:
             # Immediate cancel when deadline == 0.
-            for t in tasks:
+            try:
+                from talos_agent.tools.browser import (
+                    cleanup_browser_sessions_on_cancellation,
+                )
+
+                await cleanup_browser_sessions_on_cancellation()
+            except Exception:
+                pass
+            for t in drain_tasks:
                 t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*drain_tasks, return_exceptions=True)
+
+        # Stop the heartbeat before releasing persisted provider-job leases.
+        # This prevents a heartbeat from racing with claim release.
+        shutdown_drain_complete.set()
+        if heartbeat_task is not None:
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+
+        # Release legacy persisted provider-job leases after in-flight work has
+        # either completed or been cancelled. Failed releases remain durable
+        # for restore reconciliation on the next run.
+        try:
+            from talos_agent.tools.commerce import release_claimed_jobs
+
+            released, release_failures = await release_claimed_jobs()
+            if released or release_failures:
+                log.info(
+                    "job_shutdown_drain_complete",
+                    released=released,
+                    release_failures=release_failures,
+                )
+        except Exception as exc:
+            logger.warning(
+                "job_shutdown_release_failed",
+                error_type=type(exc).__name__,
+            )
         # ─────────────────────────────────────────────────────────────────
     finally:
         console.print("[yellow]Cleaning up...[/yellow]")
@@ -1265,10 +1455,15 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
         except Exception:
             pass
         try:
-            if browser:
-                await asyncio.wait_for(browser.close(), timeout=5)
+            from talos_agent.tools.browser import cleanup_browser_sessions_on_cancellation
+
+            await asyncio.wait_for(cleanup_browser_sessions_on_cancellation(), timeout=5)
         except Exception:
-            pass
+            try:
+                if browser:
+                    await asyncio.wait_for(browser.close(), timeout=5)
+            except Exception:
+                pass
         await api.close()
         db.close()
         # Flush any spans/metrics buffered by the batch processors before exit

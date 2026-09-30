@@ -6,6 +6,7 @@
  * DELETE /api/webhooks/subscriptions/:id  — Delete subscription
  */
 
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsWebhookSubscriptions } from "@/db/schema";
@@ -13,7 +14,7 @@ import { eq, and } from "drizzle-orm";
 import { logger } from "@/lib/logger";
 import { z } from "zod/v4";
 import { parseBody } from "@/lib/schemas";
-import { encryptSecret } from "@/lib/webhooks/signing";
+import { rotateWebhookSecret } from "@/lib/webhooks/rotation";
 
 // ─── Auth helper ─────────────────────────────────────────────────
 
@@ -46,7 +47,7 @@ const updateSubscriptionSchema = z
 
 // ─── GET /api/webhooks/subscriptions/:id ─────────────────────────
 
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -66,6 +67,8 @@ export async function GET(
         description: tlsWebhookSubscriptions.description,
         active: tlsWebhookSubscriptions.active,
         signatureVersion: tlsWebhookSubscriptions.signatureVersion,
+        secretRotatedAt: tlsWebhookSubscriptions.secretRotatedAt,
+        previousSecretExpiresAt: tlsWebhookSubscriptions.previousSecretExpiresAt,
         createdAt: tlsWebhookSubscriptions.createdAt,
         updatedAt: tlsWebhookSubscriptions.updatedAt,
       })
@@ -83,7 +86,13 @@ export async function GET(
       return Response.json({ error: "Subscription not found" }, { status: 404 });
     }
 
-    return Response.json(subscription);
+    return Response.json({
+      ...subscription,
+      rotationActive: Boolean(
+        subscription.previousSecretExpiresAt &&
+          subscription.previousSecretExpiresAt.getTime() > Date.now(),
+      ),
+    });
   } catch (err) {
     logger.error({ subscriptionId: id, err }, "get_webhook_subscription_error");
     return Response.json({ error: "Internal server error" }, { status: 500 });
@@ -92,7 +101,7 @@ export async function GET(
 
 // ─── PATCH /api/webhooks/subscriptions/:id ───────────────────────
 
-export async function PATCH(
+async function _PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -108,31 +117,72 @@ export async function PATCH(
     if (error) return error;
 
     // Build update payload
-    const updateData: Record<string, unknown> = {};
+    const updateData: Partial<typeof tlsWebhookSubscriptions.$inferInsert> = {};
 
     if (data.url !== undefined) updateData.url = data.url;
     if (data.eventTypes !== undefined) updateData.eventTypes = data.eventTypes;
     if (data.description !== undefined) updateData.description = data.description;
     if (data.active !== undefined) updateData.active = data.active;
 
-    // Encrypt new secret if provided
+    // Secret changes use zero-downtime rotation (retain previous during grace).
     if (data.secret !== undefined) {
-      try {
-        updateData.secretCiphertext = encryptSecret(data.secret);
-        // Increment signature version on secret rotation
-        updateData.signatureVersion = 1;
-      } catch (err) {
-        logger.error({ err }, "webhook_secret_encrypt_failed");
-        return Response.json(
-          { error: "Failed to encrypt webhook secret" },
-          { status: 500 },
-        );
+      const rotated = await rotateWebhookSecret({
+        subscriptionId: id,
+        talosId: callerTalosId,
+        newSecret: data.secret,
+      });
+      if ("error" in rotated) {
+        return Response.json({ error: rotated.error }, { status: rotated.status });
       }
+      // Drop secret from field list so we don't double-apply below.
+      delete (data as { secret?: string }).secret;
+    }
+
+    // If only secret was provided, return the post-rotation subscription view.
+    if (Object.keys(updateData).length === 0) {
+      const subscription = await db
+        .select({
+          id: tlsWebhookSubscriptions.id,
+          url: tlsWebhookSubscriptions.url,
+          eventTypes: tlsWebhookSubscriptions.eventTypes,
+          description: tlsWebhookSubscriptions.description,
+          active: tlsWebhookSubscriptions.active,
+          signatureVersion: tlsWebhookSubscriptions.signatureVersion,
+          secretRotatedAt: tlsWebhookSubscriptions.secretRotatedAt,
+          previousSecretExpiresAt: tlsWebhookSubscriptions.previousSecretExpiresAt,
+          createdAt: tlsWebhookSubscriptions.createdAt,
+          updatedAt: tlsWebhookSubscriptions.updatedAt,
+        })
+        .from(tlsWebhookSubscriptions)
+        .where(
+          and(
+            eq(tlsWebhookSubscriptions.id, id),
+            eq(tlsWebhookSubscriptions.talosId, callerTalosId),
+          ),
+        )
+        .limit(1)
+        .then((r) => r[0] ?? null);
+
+      if (!subscription) {
+        return Response.json({ error: "Subscription not found" }, { status: 404 });
+      }
+
+      logger.info(
+        { subscriptionId: id, talosId: callerTalosId, updatedFields: ["secret"] },
+        "webhook_subscription_updated",
+      );
+      return Response.json({
+        ...subscription,
+        rotationActive: Boolean(
+          subscription.previousSecretExpiresAt &&
+            subscription.previousSecretExpiresAt.getTime() > Date.now(),
+        ),
+      });
     }
 
     const [updated] = await db
       .update(tlsWebhookSubscriptions)
-      .set(updateData as any)
+      .set(updateData)
       .where(
         and(
           eq(tlsWebhookSubscriptions.id, id),
@@ -146,6 +196,8 @@ export async function PATCH(
         description: tlsWebhookSubscriptions.description,
         active: tlsWebhookSubscriptions.active,
         signatureVersion: tlsWebhookSubscriptions.signatureVersion,
+        secretRotatedAt: tlsWebhookSubscriptions.secretRotatedAt,
+        previousSecretExpiresAt: tlsWebhookSubscriptions.previousSecretExpiresAt,
         createdAt: tlsWebhookSubscriptions.createdAt,
         updatedAt: tlsWebhookSubscriptions.updatedAt,
       });
@@ -168,7 +220,7 @@ export async function PATCH(
 
 // ─── DELETE /api/webhooks/subscriptions/:id ──────────────────────
 
-export async function DELETE(
+async function _DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -205,3 +257,7 @@ export async function DELETE(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withRequestId(_GET);
+export const PATCH = withRequestId(_PATCH);
+export const DELETE = withRequestId(_DELETE);

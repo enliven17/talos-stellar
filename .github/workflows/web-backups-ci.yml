@@ -1,13 +1,14 @@
 # Web Backups CI — proves the restore drill end-to-end on every PR.
 #
 # Spins up ephemeral Postgres 16, applies migrations + role bootstrap,
-# seeds deterministic data, exercises:
-#   1. POST /api/ops/backup (encrypted ENC:: blob)
-#   2. POST /api/ops/restore (verify-only round-trip)
-#   3. // round-trip via the prime-agent CLI (encrypted ENC:: blob)
-#   4. POST /api/ops/restore with X-Confirm: yes (apply on a fresh PG)
+# seeds deterministic fixtures from web/tests/fixtures/backup-restore/,
+# then exercises the production backup-service APIs:
+#   1. buildBackup (encrypted ENC:: blob)
+#   2. verifyArtifact (verify-only round-trip + wrong-password fail-closed)
+#   3. applyRestore onto a fresh target DB (row counts + content match)
+#   4. Cross-language crypto parity (Python ↔ TypeScript)
+#   5. Focused vitest + pytest backup suites
 #
-# Verifies row counts and sha256 match between source and restored DBs.
 # Any mismatch fails the build.
 
 name: Web Backups CI
@@ -22,11 +23,14 @@ on:
       - "web/src/app/api/ops/**"
       - "web/drizzle/0013_add_backup_runs.sql"
       - "web/src/db/schema.ts"
+      - "web/scripts/ci-backup-restore-drill.ts"
+      - "web/tests/fixtures/backup-restore/**"
+      - "web/tests/backup-restore-fixture.test.ts"
+      - "web/tests/backup-crypto.test.ts"
+      - "web/tests/backup-types.test.ts"
       - "packages/prime-agent/src/talos_agent/backup_service.py"
       - "packages/prime-agent/src/talos_agent/cli.py"
       - "packages/prime-agent/tests/test_backup_service.py"
-      - "web/tests/backup-crypto.test.ts"
-      - "web/tests/backup-types.test.ts"
       - ".github/workflows/web-backups-ci.yml"
   push:
     branches:
@@ -58,10 +62,9 @@ jobs:
           --health-retries 10
 
     env:
-      # Reset for the secondary DB we'll create from scratch inside the
-      # source instance via SQL.
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/talos_source
       DIRECT_URL: postgresql://postgres:postgres@localhost:5432/talos_source
+      TARGET_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/talos_restore
       OPS_ADMIN_SECRET: ci-only-ops-secret-rotate-me
       TALOS_BACKUP_TIMEOUT_MS: 15000
       TALOS_BACKUP_MAX_BYTES: 5242880
@@ -118,79 +121,52 @@ jobs:
           psql "$DIRECT_URL" -f web/drizzle/bootstrap-roles.sql
           cd web && pnpm db:migrate
 
-      - name: Seed deterministic test data on source DB
+      - name: Seed deterministic fixture on source DB
         env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/talos_source
           DIRECT_URL: postgresql://postgres:postgres@localhost:5432/talos_source
         run: |
-          cat <<SQL | psql "$DIRECT_URL"
-          INSERT INTO tls_talos (id, name, category, description, status)
-            VALUES ('dr-test-1', 'DR Test', 'Operations', 'fixture', 'Active');
-          INSERT INTO tls_patrons (id, talosId, stellarPublicKey, role, share)
-            VALUES ('dr-patron-1', 'dr-test-1', 'GABC', 'patron', 100.00);
-          INSERT INTO tls_revenues (id, talosId, amount, currency, source)
-            VALUES ('dr-rev-1', 'dr-test-1', 10.5, 'USDC', 'dr-test');
-          SQL
+          test -f web/tests/fixtures/backup-restore/seed.sql
+          test -f web/tests/fixtures/backup-restore/manifest.json
+          psql "$DIRECT_URL" -f web/tests/fixtures/backup-restore/seed.sql
 
-      - name: Trigger encrypted backup via /api/ops/backup
+      - name: Run fixture backup → verify → restore drill
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/talos_source
-          DIRECT_URL: postgresql://postgres:postgres@localhost:5432/talos_source
-          OPS_ADMIN_SECRET: ci-only-ops-secret-rotate-me
+          TARGET_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/talos_restore
           BACKUP_PASSPHRASE: ci-passphrase-must-be-long-enough
-        run: |
-          mkdir -p artifacts
-          # We need a web server to call /api/ops/backup. Instead of spinning
-          # up the full Next.js server, directly invoke `pnpm node` against a
-          # built-in mini-driver that produces the same artifact.
-          cd web
-          cat <<'TS' > /tmp/dump.ts
-          import { Pool } from "pg";
-          import * as fs from "fs";
-          const pool = new Pool({ connectionString: process.env.DATABASE_URL! });
-          (async () => {
-            const tablesRes = await pool.query(
-              "SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name ASC",
-            );
-            const out: Record<string, unknown[]> = {};
-            for (const { table_name } of tablesRes.rows) {
-              const r = await pool.query(`SELECT * FROM "${table_name}"`);
-              out[table_name] = r.rows;
-            }
-            process.stdout.write(JSON.stringify({ tables: out }));
-            await pool.end();
-          })().catch((e) => { console.error(e); process.exit(1); });
-          TS
-          DATABASE_URL=postgresql://postgres:postgres@localhost:5432/talos_source \
-            pnpm tsx /tmp/dump.ts > ../artifacts/source-dump.json
-          ls -la ../artifacts/source-dump.json
+          TALOS_BACKUP_TIMEOUT_MS: 15000
+        working-directory: web
+        run: pnpm exec tsx scripts/ci-backup-restore-drill.ts
 
-      - name: "Cross-language parity check: prime-agent CLI decrypts a TS-produced blob"
+      - name: "Cross-language parity: Python decrypts the CI artifact"
         env:
           BACKUP_PASSPHRASE: ci-passphrase-must-be-long-enough
         run: |
-          # Use Python to round-trip the JSON dump through the agent's
-          # crypto helper, then decrypt via the same helper to prove the
-          # wire format is identical to web/src/lib/backup-crypto.ts.
+          test -f artifacts/fixture-backup.enc
           cd packages/prime-agent
-          uv run python - <<PY
-          import json, os, base64
-          from talos_agent.crypto import encrypt_with_password, decrypt_with_password
-          data = json.load(open("../../artifacts/source-dump.json"))
-          blob = encrypt_with_password(json.dumps(data), os.environ["BACKUP_PASSPHRASE"])
-          open("/tmp/agent-encrypted.enc", "w").write(blob)
-          rt = json.loads(decrypt_with_password(blob, os.environ["BACKUP_PASSPHRASE"]))
-          assert rt["tables"]["tls_talos"][0]["name"] == "DR Test", "round-trip lost data"
+          uv run python - <<'PY'
+          import json, os
+          from talos_agent.crypto import decrypt_with_password
+          blob = open("../../artifacts/fixture-backup.enc").read()
+          pt = json.loads(decrypt_with_password(blob, os.environ["BACKUP_PASSPHRASE"]))
+          assert pt["tables"]["tls_talos"][0]["name"] == "DR Test", "round-trip lost data"
           print("PYTHON_DECRYPT_OK")
           PY
 
-      - name: "Cross-language parity check: Node decrypts a Python-produced blob"
+      - name: "Cross-language parity: Node decrypts a Python-produced blob"
         env:
           BACKUP_PASSPHRASE: ci-passphrase-must-be-long-enough
         run: |
-          # Read the Python-produced artifact; Node should be able to
-          # decrypt it (primitives must be binary-compatible).
-          cd web
+          cd packages/prime-agent
+          uv run python - <<'PY'
+          import json, os
+          from talos_agent.crypto import encrypt_with_password
+          data = {"tables": {"tls_talos": [{"name": "DR Test"}]}}
+          blob = encrypt_with_password(json.dumps(data), os.environ["BACKUP_PASSPHRASE"])
+          open("/tmp/agent-encrypted.enc", "w").write(blob)
+          print("PYTHON_ENCRYPT_OK")
+          PY
+          cd ../../web
           cat <<'TS' > /tmp/decrypt-ts.ts
           import fs from "fs";
           import { decryptWithPassword } from "./src/lib/backup-crypto";
@@ -198,17 +174,16 @@ jobs:
           const pt = decryptWithPassword(blob, process.env.BACKUP_PASSPHRASE!);
           const json = JSON.parse(pt.toString("utf8"));
           if (json?.tables?.tls_talos?.[0]?.name !== "DR Test") {
-            console.error("decrypted payload mismatch", json?.tables?.tls_talos?.[0]);
+            console.error("decrypted payload mismatch");
             process.exit(1);
           }
           console.log("TS_DECRYPT_OK");
           TS
-          BACKUP_PASSPHRASE="$BACKUP_PASSPHRASE" \
-            pnpm tsx /tmp/decrypt-ts.ts
+          BACKUP_PASSPHRASE="$BACKUP_PASSPHRASE" pnpm tsx /tmp/decrypt-ts.ts
 
-      - name: Run vitest backup suite
+      - name: Run vitest backup suite (fixtures + crypto + types)
         working-directory: web
-        run: pnpm vitest run tests/backup-crypto.test.ts tests/backup-types.test.ts
+        run: pnpm vitest run tests/backup-restore-fixture.test.ts tests/backup-crypto.test.ts tests/backup-types.test.ts
 
       - name: Run pytest backup suite
         working-directory: packages/prime-agent

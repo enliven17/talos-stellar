@@ -13,9 +13,22 @@
     "stack:down": "bash scripts/local-stack.sh down",
     "stack:logs": "bash scripts/local-stack.sh logs",
     "stack:reset": "bash scripts/local-stack.sh reset",
+    "stack:reset-data": "bash scripts/local-stack.sh reset-data",
     "test:fixtures": "pnpm --dir contracts test:fixtures",
     "fixtures:gen": "node scripts/generate-registry-fixtures.mjs",
-    "fixtures:check": "node scripts/generate-registry-fixtures.mjs --check"
+    "fixtures:check": "node scripts/generate-registry-fixtures.mjs --check",
+    "metrics:check": "node scripts/operational-metrics.test.mjs",
+    "smoke:fixture:gen": "node scripts/generate-smoke-fixture.mjs",
+    "smoke:fixture:check": "node scripts/generate-smoke-fixture.mjs --check",
+    "secrets:check": "bash scripts/secret-scan.sh",
+    "test:mock-stellar-faults": "node scripts/mock-stellar-fault-injection.test.mjs",
+    "migrations:check": "node scripts/check-migration-drift.mjs",
+    "migrations:check:strict": "node scripts/check-migration-drift.mjs --strict",
+    "test:migration-drift": "bash scripts/check-migration-drift.test.sh",
+    "licenses:report": "node scripts/generate-license-report.mjs",
+    "licenses:test": "node --test scripts/generate-license-report.test.mjs",
+    "sbom:verify": "node scripts/verify-sbom.mjs",
+    "test:sbom-verify": "node --test scripts/verify-sbom.test.mjs"
   },
   "dependencies": {
     "next": "16.2.2"

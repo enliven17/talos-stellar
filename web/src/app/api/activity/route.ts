@@ -6,10 +6,11 @@ import {
 } from "./query";
 import { parseLimit, ACTIVITY_DEFAULT_LIMIT, ACTIVITY_MAX_LIMIT } from "@/lib/limits";
 import { errorResponse } from "@/lib/api-response";
+import { withRequestId } from "@/lib/with-request-id";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(request: Request) {
+async function _GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const parsedLimit = parseLimit(searchParams.get("limit"), ACTIVITY_DEFAULT_LIMIT, ACTIVITY_MAX_LIMIT);
   if (!parsedLimit.ok) return parsedLimit.response;
@@ -44,3 +45,5 @@ export async function GET(request: Request) {
     return errorResponse(request, 500, "INTERNAL_ERROR", "An unexpected error occurred");
   }
 }
+
+export const GET = withRequestId(_GET);

@@ -43,6 +43,7 @@ import {
   heartbeatJobSchema,
   releaseJobSchema,
   submitJobResultSchema,
+  reportJobProgressSchema,
   reportRevenueSchema,
   recordDividendSchema,
   updateStatusSchema,
@@ -129,6 +130,11 @@ const schemas = [
     routes: ["POST /api/jobs/:id/result"],
   },
   {
+    name: "reportJobProgress",
+    schema: reportJobProgressSchema,
+    routes: ["POST /api/jobs/:id/progress"],
+  },
+  {
     name: "reportRevenue",
     schema: reportRevenueSchema,
     routes: ["POST /api/talos/:id/revenue"],
@@ -185,7 +191,7 @@ for (const entry of schemas) {
   // zodToJsonSchema wraps in { definitions: { <name>: ... } } when name is given
   // Extract the actual schema object
   const extracted =
-    (jsonSchema as Record<string, unknown>).definitions?.[entry.name] ??
+    (jsonSchema as { definitions?: Record<string, unknown> }).definitions?.[entry.name] ??
     jsonSchema;
 
   const fileName = `${entry.name}.json`;

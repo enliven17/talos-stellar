@@ -339,6 +339,7 @@ def build_all_tools(
     from talos_agent.adapters.discord import DiscordAdapter, DiscordAdapterConfig
     from talos_agent.adapters.registry import AdapterRegistry
     from talos_agent.adapters.telegram import TelegramAdapter, TelegramAdapterConfig
+    from talos_agent.adapters.telegram_queue import TelegramQueueConfig, TelegramSendQueue
     from talos_agent.adapters.x import XAdapter, XAdapterConfig
 
     if settings.adapter_sandbox_enabled:
@@ -359,6 +360,7 @@ def build_all_tools(
             manifests=manifests,
             db=db,
             secret_resolver=settings.secret_value,
+            retry_configs=settings.adapter_retry_configs,
         )
         adapter_registry = AdapterRegistry(sandbox)
         adapter_registry.register(
@@ -391,6 +393,11 @@ def build_all_tools(
                     TelegramAdapterConfig(chat_id=settings.telegram_chat_id),
                     secrets=sandbox.secrets("telegram"),
                     http=sandbox.http("telegram"),
+                    queue=(
+                        TelegramSendQueue(db, TelegramQueueConfig.from_settings(settings))
+                        if settings.telegram_rate_limit_enabled
+                        else None
+                    ),
                 )
             )
     else:

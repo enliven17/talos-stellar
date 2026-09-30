@@ -35,6 +35,7 @@ import { GET as servicesGET } from "@/app/api/services/route";
 import {
   decodeServiceCursor,
   encodeServiceCursor,
+  parseServiceNetwork,
 } from "@/app/api/services/route";
 
 type Svc = {
@@ -108,6 +109,28 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 // 1. encodeServiceCursor / decodeServiceCursor — opaque round-trip
 // ---------------------------------------------------------------------------
+
+
+describe("parseServiceNetwork", () => {
+  it("returns null network when param is omitted", () => {
+    expect(parseServiceNetwork(null)).toEqual({ ok: true, network: null });
+  });
+
+  it("trims and lowercases a valid identifier", () => {
+    expect(parseServiceNetwork("  Stellar ")).toEqual({
+      ok: true,
+      network: "stellar",
+    });
+  });
+
+  it("rejects empty and malformed values", async () => {
+    for (const raw of ["", "  ", "bad id", "!!!"]) {
+      const result = parseServiceNetwork(raw);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.response.status).toBe(400);
+    }
+  });
+});
 
 describe("cursor encoding (opaque, deterministic)", () => {
   it("round-trips a createdAt+id pair without leaking the raw shape", () => {
@@ -558,3 +581,79 @@ describe("reputation post-filtering with pagination", () => {
     expect(body.nextCursor).not.toBeNull();
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// 9. Payment-network filter (`network` query param)
+// ---------------------------------------------------------------------------
+
+describe("payment network filter", () => {
+  it("accepts a valid network and returns matching services", async () => {
+    const ts = new Date("2026-08-01T00:00:00.000Z");
+    const svc = makeService({
+      id: "svc-stellar",
+      createdAt: ts,
+      chains: ["stellar"],
+      serviceName: "Stellar Pay",
+    });
+    mocks.mockDb.select.mockReturnValue(buildChain([svc]));
+
+    const res = await servicesGET(req({ network: "stellar", limit: "10" }));
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(serviceNames(body)).toEqual(["Stellar Pay"]);
+    expect(body.data[0].chains).toEqual(["stellar"]);
+    expect(mocks.mockDb.select).toHaveBeenCalled();
+  });
+
+  it("normalizes mixed-case network identifiers before querying", async () => {
+    const svc = makeService({
+      id: "svc-eth",
+      createdAt: new Date("2026-08-01T00:00:00.000Z"),
+      chains: ["ethereum"],
+      serviceName: "Eth Bridge",
+    });
+    mocks.mockDb.select.mockReturnValue(buildChain([svc]));
+
+    const res = await servicesGET(req({ network: "Ethereum" }));
+    expect(res.status).toBe(200);
+    expect(serviceNames(await res.json())).toEqual(["Eth Bridge"]);
+  });
+
+  it.each(["", "   "])(
+    "rejects blank network %j with 400 and never hits the DB",
+    async (raw) => {
+      const res = await servicesGET(req({ network: raw }));
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toMatch(/network/i);
+      expect(mocks.mockDb.select).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["bad network", "!!!", "-stellar", "a".repeat(65)])(
+    "rejects malformed network %j with 400",
+    async (raw) => {
+      const res = await servicesGET(req({ network: raw }));
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toMatch(/network/i);
+      expect(mocks.mockDb.select).not.toHaveBeenCalled();
+    },
+  );
+
+  it("omitted network preserves default unfiltered behaviour", async () => {
+    const svc = makeService({
+      id: "svc-any",
+      createdAt: new Date("2026-08-01T00:00:00.000Z"),
+      chains: ["stellar", "ethereum"],
+    });
+    mocks.mockDb.select.mockReturnValue(buildChain([svc]));
+
+    const res = await servicesGET(req({ limit: "5" }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.data).toHaveLength(1);
+  });
+});
+

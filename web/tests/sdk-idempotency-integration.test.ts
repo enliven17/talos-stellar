@@ -294,7 +294,7 @@ describe("Integration: SDK generates key → server echoes it back", () => {
     vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
       // Only intercept the activity call
       if (typeof url === "string" && url.includes("/activity")) {
-        const req = new NextRequest(url, init);
+        const req = new NextRequest(url, init as ConstructorParameters<typeof NextRequest>[1]);
         // We can't invoke the activity route handler here without a full mock,
         // but we verify the header is present in the outbound request.
         const key = (init.headers as Record<string, string>)?.["Idempotency-Key"];
@@ -348,7 +348,7 @@ describe("Integration: SDK generates key → server echoes it back", () => {
 
   it("7c. SDK retries POST on 503 and succeeds on second attempt with same key", async () => {
     let callCount = 0;
-    let capturedKeys: string[] = [];
+    const capturedKeys: string[] = [];
 
     vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
       callCount++;

@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
@@ -56,7 +57,7 @@ function validationErrorResponse(issues: string[]) {
 // Authentication:
 //   - Requires HMAC SHA-256 signature in X-Signature
 //   - Signature is computed over the raw request body with CROSS_CHAIN_WEBHOOK_SECRET
-export async function POST(request: NextRequest) {
+async function _POST(request: NextRequest) {
   try {
     const webhookSecret = process.env.CROSS_CHAIN_WEBHOOK_SECRET;
     if (!webhookSecret) {
@@ -336,3 +337,5 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);
