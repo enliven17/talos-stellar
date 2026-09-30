@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { verifyAdminKey } from "@/lib/admin-auth";
 import { getJob, requestCancel } from "@/lib/jobs";
@@ -6,7 +7,7 @@ import { getJob, requestCancel } from "@/lib/jobs";
 // is cancelled immediately; a leased (in-flight) job is flagged and stops
 // on its next heartbeat() call inside the handler — cancellation of running
 // work is best-effort, not instant, since we don't kill handler code.
-export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+async function _POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const auth = verifyAdminKey(request);
   if (!auth.ok) return auth.response;
 
@@ -27,3 +28,5 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);

@@ -1,0 +1,43 @@
+{
+  "meta": {
+    "schema_version": 3,
+    "contract": "TalosRegistry",
+    "kind": "Talos",
+    "generator": "scripts/generate-registry-fixtures.mjs v1",
+    "note": "Schema v3 compat check: 'metadata' key absent. Parser must map missing key to None (same rule as v2 parser). Verifies backward-compatible read of records created before update_creator_metadata existed.",
+    "additive_fields": [
+      "metadata"
+    ]
+  },
+  "storage_key": {
+    "type": "Talos",
+    "id": 2
+  },
+  "value": {
+    "id": 2,
+    "name": "Atlas",
+    "category": "Sales",
+    "description": "Autonomous sales agent",
+    "creator": "GDBYLOLNZLP5FPXG3CXHHZ47I5AKETMOMV2JVQJ3UDHLIQORPKYERYJI",
+    "patron": {
+      "creator_share": 60,
+      "investor_share": 25,
+      "treasury_share": 15,
+      "creator_addr": "GDBYLOLNZLP5FPXG3CXHHZ47I5AKETMOMV2JVQJ3UDHLIQORPKYERYJI",
+      "investor_addr": "GDN5AZ5KL6ZUN4W7SLRUXA3ZXCF4V6POZPV2QKDVDHM7QAN6R54IB3BV",
+      "treasury_addr": "GATSGV2VGSVIWSMOLRMFFVTAAANHPFINBC3EPLDCJ5A753UTM5WH7V5R"
+    },
+    "kernel": {
+      "approval_threshold": "10",
+      "gtm_budget": "1000",
+      "min_patron_pulse": "100"
+    },
+    "pulse": {
+      "total_supply": "1000000",
+      "price_usd_cents": "100",
+      "token_symbol": "ATLAS"
+    },
+    "created_at": "1710003600",
+    "active": true
+  }
+}

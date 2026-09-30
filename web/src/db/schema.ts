@@ -360,6 +360,10 @@ export const tlsCommerceJobs = pgTable(
     leaseExpiresAt: timestamp("leaseExpiresAt", { mode: "date", precision: 3 }), // lease TTL
     fencingToken: integer("fencingToken").notNull().default(0), // monotonic counter for stale-worker fencing
 
+    // Mid-flight progress reported by the provider (POST /api/jobs/:id/progress).
+    // Shape: { percent?, stage?, message?, updatedAt, reportedBy }. Nullable = no report yet.
+    progress: jsonb("progress"),
+
     createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
     updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
   },
@@ -455,6 +459,82 @@ export const tlsTokenPurchases = pgTable(
     index("tls_token_purchases_talosId_createdAt_idx").on(t.talosId, t.createdAt),
   ],
 );
+
+
+// ─── Webhook Subscriptions ────────────────────────────────────────
+//
+// Each row represents an outbound webhook endpoint that a TALOS has configured
+// to receive signed event notifications. The webhook secret is encrypted at rest
+// using AES-256-GCM and is never exposed via the API.
+//
+// Zero-downtime rotation stores the previous ciphertext until
+// previousSecretExpiresAt so deliveries can dual-sign during the grace window.
+
+export const tlsWebhookSubscriptions = pgTable(
+  "tls_webhook_subscriptions",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talos_id").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    url: text("url").notNull(),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    /** Previous secret retained during rotation grace (encrypted). */
+    previousSecretCiphertext: text("previous_secret_ciphertext"),
+    /** When the previous secret stops being dual-signed. */
+    previousSecretExpiresAt: timestamp("previous_secret_expires_at", { mode: "date", precision: 3 }),
+    /** Wall-clock time of the most recent secret rotation. */
+    secretRotatedAt: timestamp("secret_rotated_at", { mode: "date", precision: 3 }),
+    signatureVersion: integer("signature_version").notNull().default(1),
+    eventTypes: text("event_types").array().notNull().default([]),
+    description: text("description"),
+    active: boolean("active").notNull().default(true),
+
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    index("tls_webhook_subscriptions_talos_id_idx").on(t.talosId),
+    index("tls_webhook_subscriptions_previous_expires_idx").on(t.previousSecretExpiresAt),
+  ],
+);
+
+// ─── Webhook Deliveries ────────────────────────────────────────────
+//
+// Records every delivery attempt for a webhook event. Supports retries,
+// dead-letter transitions, and concurrent-safe lease acquisition using the
+// same fencing-token pattern as tls_commerce_jobs.
+
+export const tlsWebhookDeliveries = pgTable(
+  "tls_webhook_deliveries",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    subscriptionId: text("subscription_id").notNull().references(() => tlsWebhookSubscriptions.id, { onDelete: "cascade" }),
+    eventType: text("event_type").notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(5),
+    lastStatusCode: integer("last_status_code"),
+    lastError: text("last_error"),
+    lastAttemptAt: timestamp("last_attempt_at", { mode: "date", precision: 3 }),
+    nextAttemptAt: timestamp("next_attempt_at", { mode: "date", precision: 3 }),
+    completedAt: timestamp("completed_at", { mode: "date", precision: 3 }),
+    responseBody: text("response_body"),
+
+    // Lease fields (same pattern as tls_commerce_jobs)
+    leasedBy: text("leased_by"),
+    leasedAt: timestamp("leased_at", { mode: "date", precision: 3 }),
+    leaseExpiresAt: timestamp("lease_expires_at", { mode: "date", precision: 3 }),
+    fencingToken: integer("fencing_token").notNull().default(0),
+
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tls_webhook_deliveries_sub_id_payload_hash_unique").on(t.subscriptionId, t.payloadHash),
+    index("tls_webhook_deliveries_pending_idx").on(t.nextAttemptAt, t.status)
+      .where(sql`${t.status} = ANY(ARRAY['pending', 'failed'])`),
+  ],
+);
+
 
 // ─── Stellar Transaction Finality Record ─────────────────────────
 //
@@ -714,3 +794,210 @@ export const tlsReputationInputs = pgTable(
     index("tls_reputation_inputs_talosId_requester_idx").on(t.talosId, t.requesterTalosId),
   ],
 );
+
+// ─── Background Jobs (Durable Execution Queue) ────────────────────
+//
+// Postgres-backed durable job queue for slow/retryable web-side work.
+// Leasing uses `SELECT ... FOR UPDATE SKIP LOCKED` (see src/lib/jobs/store.ts)
+// so multiple app instances can safely pull from the same queue without a
+// broker. Status lifecycle:
+//
+//   pending → leased → completed
+//                    ↘ pending (transient failure, runAt pushed out)
+//                    ↘ dead_letter (retries exhausted / fatal error)
+//   pending|leased → cancelled (cooperative — handler observes cancelRequested)
+//
+// A lease is a (leaseId, leaseExpiresAt) pair. Workers extend it via
+// heartbeat while processing; if a worker dies mid-job the lease simply
+// expires and the reaper returns the row to pending (or dead_letter once
+// maxAttempts is exhausted) — no separate crash-recovery path needed.
+
+export const tlsJobs = pgTable(
+  "tls_jobs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+
+    // Job type — maps to a handler registered in src/lib/jobs/registry.ts
+    queue: text("queue").notNull(),
+    payload: jsonb("payload").notNull().default({}),
+
+    // pending | leased | completed | dead_letter | cancelled
+    status: text("status").notNull().default("pending"),
+    priority: integer("priority").notNull().default(0),
+
+    // Earliest time this job is eligible to be leased (supports delayed retry)
+    runAt: timestamp("runAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+
+    // Lease ownership — leaseId is a random token so a reaped-and-relaunched
+    // lease can never be mistaken for the original by a slow worker.
+    leaseId: text("leaseId"),
+    leaseOwner: text("leaseOwner"),
+    leaseExpiresAt: timestamp("leaseExpiresAt", { mode: "date", precision: 3 }),
+    heartbeatAt: timestamp("heartbeatAt", { mode: "date", precision: 3 }),
+
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("maxAttempts").notNull().default(8),
+
+    // transient | rate_limited | fatal — see src/lib/jobs/retry.ts
+    retryClass: text("retryClass").notNull().default("transient"),
+
+    // Cooperative cancellation — handler polls this via the heartbeat() call
+    cancelRequested: boolean("cancelRequested").notNull().default(false),
+
+    // Caller-supplied dedupe key, scoped per queue. Nullable — most jobs don't need one.
+    idempotencyKey: text("idempotencyKey"),
+
+    // Sanitized, truncated error message from the most recent failed attempt.
+    // Never store raw payloads/secrets here — see src/lib/jobs/metrics.ts.
+    lastError: text("lastError"),
+    result: jsonb("result"),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+    completedAt: timestamp("completedAt", { mode: "date", precision: 3 }),
+  },
+  (t) => [
+    index("tls_jobs_status_runAt_idx").on(t.status, t.runAt),
+    index("tls_jobs_queue_status_idx").on(t.queue, t.status),
+    index("tls_jobs_leaseExpiresAt_idx").on(t.leaseExpiresAt),
+    uniqueIndex("tls_jobs_queue_idempotencyKey_unique")
+      .on(t.queue, t.idempotencyKey)
+      .where(sql`"idempotencyKey" IS NOT NULL`),
+  ],
+);
+
+// ─── Transactional Outbox (Domain Events) ──────────────────────────
+//
+// Written atomically (same db.transaction) alongside the domain mutation
+// that produces the event, so a row here can never diverge from the state
+// change it describes. Dispatch is a separate, lease-based step — see
+// src/lib/outbox/store.ts — using the same SELECT ... FOR UPDATE SKIP
+// LOCKED technique as the jobs queue so multiple instances can drain safely.
+//
+// Status lifecycle: pending → leased → dispatched
+//                                    ↘ pending (retry, runAt pushed out)
+//                                    ↘ dead_letter (retries exhausted)
+
+export const tlsOutboxEvents = pgTable(
+  "tls_outbox_events",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+
+    aggregateType: text("aggregateType").notNull(),   // e.g. "commerce_job"
+    aggregateId: text("aggregateId").notNull(),        // e.g. the job id
+    eventType: text("eventType").notNull(),             // e.g. "commerce_job.completed"
+    payload: jsonb("payload").notNull().default({}),
+
+    // pending | leased | dispatched | dead_letter
+    status: text("status").notNull().default("pending"),
+    runAt: timestamp("runAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+
+    leaseId: text("leaseId"),
+    leaseOwner: text("leaseOwner"),
+    leaseExpiresAt: timestamp("leaseExpiresAt", { mode: "date", precision: 3 }),
+
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("maxAttempts").notNull().default(8),
+
+    // Caller-supplied dedupe key, scoped per eventType. Nullable — optional.
+    dedupeKey: text("dedupeKey"),
+
+    lastError: text("lastError"),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+    dispatchedAt: timestamp("dispatchedAt", { mode: "date", precision: 3 }),
+  },
+  (t) => [
+    index("tls_outbox_events_status_runAt_idx").on(t.status, t.runAt),
+    index("tls_outbox_events_eventType_status_idx").on(t.eventType, t.status),
+    index("tls_outbox_events_leaseExpiresAt_idx").on(t.leaseExpiresAt),
+    index("tls_outbox_events_dispatchedAt_idx").on(t.dispatchedAt),
+    uniqueIndex("tls_outbox_events_eventType_dedupeKey_unique")
+      .on(t.eventType, t.dedupeKey)
+      .where(sql`"dedupeKey" IS NOT NULL`),
+  ],
+);
+
+// ─── Quota Configuration ─────────────────────────────────────────
+//
+// One row per (talosId, resource) defining the limit and reset window.
+// A NULL talosId row is the platform default applied when no agent-specific
+// override exists.
+//
+// resources: activity_writes | job_writes | revenue_writes | sse_connections
+// windowSize: hourly | daily | monthly
+
+export const tlsQuotaConfigs = pgTable(
+  "tls_quota_configs",
+  {
+    // NULL = platform default; non-NULL = per-agent override
+    talosId: text("talosId").references(() => tlsTalos.id, { onDelete: "cascade" }),
+
+    resource: text("resource").notNull(),
+    maxCount: integer("maxCount").notNull().default(1000),
+    windowSize: text("windowSize").notNull().default("daily"),
+    enabled: boolean("enabled").notNull().default(true),
+    notes: text("notes"),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+  },
+  // Composite PK: (talosId, resource) — PostgreSQL allows multiple NULL talosId
+  // rows, so platform-level defaults coexist without collision.
+);
+
+// ─── Quota Usage ─────────────────────────────────────────────────
+//
+// Atomic per-window usage counter. Incremented via INSERT … ON CONFLICT
+// DO UPDATE to prevent double-counting under concurrency.
+
+export const tlsQuotaUsage = pgTable(
+  "tls_quota_usage",
+  {
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    resource: text("resource").notNull(),
+
+    // UTC-floored window start timestamp (hour / day / month)
+    windowStart: timestamp("windowStart", { mode: "date", precision: 3 }).notNull(),
+
+    count: integer("count").notNull().default(0),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().defaultNow().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    index("tls_quota_usage_talosId_resource_idx").on(t.talosId, t.resource),
+  ],
+);
+
+// ─── Backup Runs (DR audit trail) ──────────────────────────────────
+
+export const tlsBackupRuns = pgTable(
+  "tls_backup_runs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    op: text("op").notNull(),                    // 'backup' | 'restore' | 'verify'
+    scope: text("scope").notNull(),              // 'system' | 'config'
+    talosId: text("talosId"),
+    agentId: text("agentId"),
+    status: text("status").notNull().default("pending"), // 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+    triggeredBy: text("triggeredBy"),             // 'cli' | 'api' | 'ci' | 'cron' (free-form, privacy-safe)
+
+    artifactPath: text("artifactPath"),
+    encryption: text("encryption"),              // e.g. 'AES-256-GCM#PBKDF2-SHA256#200000'
+    sizeBytes: bigint("sizeBytes", { mode: "number" }),
+    sha256: text("sha256"),
+    durationMs: integer("durationMs"),
+
+    errorMessage: text("errorMessage"),          // sanitised: no secrets/keys/payloads
+    metadata: jsonb("metadata"),                 // { rowCounts, signalVersion, ... } — privacy-safe only
+
+    startedAt: timestamp("startedAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    finishedAt: timestamp("finishedAt", { mode: "date", precision: 3 }),
+  },
+  (t) => [
+    index("tls_backup_runs_status_idx").on(t.status),
+    index("tls_backup_runs_startedAt_idx").on(t.startedAt),
+    index("tls_backup_runs_op_status_idx").on(t.op, t.status),
+  ],
+);
+

@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPatrons, tlsApprovals, tlsActivities } from "@/db/schema";
@@ -78,7 +79,7 @@ function resolveLimit(value: string | null):
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export async function GET(request: NextRequest) {
+async function _GET(request: NextRequest) {
   const wallet = request.nextUrl.searchParams.get("wallet");
   if (!wallet) {
     return new Response("wallet parameter required", { status: 400 });
@@ -285,3 +286,5 @@ export async function GET(request: NextRequest) {
     },
   });
 }
+
+export const GET = withRequestId(_GET);

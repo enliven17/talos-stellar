@@ -40,7 +40,7 @@ describe("verifyAgentApiKey - Scoped Authorization", () => {
     const selectKeysMock = {
       from: vi.fn().mockReturnThis(),
       where: vi.fn().mockReturnThis(),
-      limit: vi.fn().mockResolvedValue([{ id: "k1", scopes: ["wallet:read"] }]),
+      limit: vi.fn().mockResolvedValue([{ id: "k1", scopes: ["wallet:read"], status: "active" }]),
     };
 
     // Mock db.update for updating lastUsedAt
@@ -81,7 +81,7 @@ describe("verifyAgentApiKey - Scoped Authorization", () => {
     const selectKeysMock = {
       from: vi.fn().mockReturnThis(),
       where: vi.fn().mockReturnThis(),
-      limit: vi.fn().mockResolvedValue([{ id: "k1", scopes: ["activity:write"] }]),
+      limit: vi.fn().mockResolvedValue([{ id: "k1", scopes: ["activity:write"], status: "active" }]),
     };
 
     const updateMock = {

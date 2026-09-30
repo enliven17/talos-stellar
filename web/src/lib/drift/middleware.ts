@@ -150,7 +150,7 @@ export function withDriftDetection(
     }
 
     // Buffer the body so both validator and handler can read it
-    let rawBody: string;
+    let rawBody = "";
     let parsedBody: unknown;
     try {
       rawBody = await req.text();
@@ -169,7 +169,7 @@ export function withDriftDetection(
       }
       recordWarn(requestId, routeKey, violations);
       // Re-build request with empty body so handler gets consistent behaviour
-      return handler(rebuildRequest(req, rawBody ?? ""), ctx);
+      return handler(rebuildRequest(req, rawBody), ctx);
     }
 
     // Run validation inside a try/catch — validator must never break traffic
@@ -233,7 +233,7 @@ function rebuildRequest(original: NextRequest, body: string): NextRequest {
     method: original.method,
     headers: original.headers,
     body,
-    // @ts-expect-error duplex is required for Node 18+ streaming but not in types
+    // duplex is required for Node 18+ streaming request bodies
     duplex: "half",
   });
 }

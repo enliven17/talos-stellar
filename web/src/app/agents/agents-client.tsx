@@ -3,6 +3,7 @@
 import { useState, useMemo } from "react";
 import Link from "next/link";
 import { AgentAvatar } from "@/components/agent-avatar";
+import { AgentEmptyState, AgentErrorState } from "@/components/agent-view-states";
 
 interface TalosListItem {
   id: string;
@@ -72,7 +73,15 @@ function getRelativeTime(iso: string): string {
   return `${Math.floor(days / 30)}mo ago`;
 }
 
-export function AgentsClient({ agents }: { agents: TalosListItem[] }) {
+export function AgentsClient({
+  agents,
+  loadError,
+  onRetry,
+}: {
+  agents: TalosListItem[];
+  loadError?: string | null;
+  onRetry?: () => void;
+}) {
   const [search, setSearch] = useState("");
   const [activeCategory, setActiveCategory] = useState<Category>("All");
   const [sortBy, setSortBy] = useState<SortOption>("revenue");
@@ -119,6 +128,22 @@ export function AgentsClient({ agents }: { agents: TalosListItem[] }) {
   }, [agents, search, activeCategory, sortBy, statusFilter]);
 
   const onlineCount = agents.filter((c) => c.agentOnline).length;
+  const hasActiveFilters =
+    search !== "" || activeCategory !== "All" || statusFilter !== "All";
+
+  if (loadError) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-12">
+        <div className="mb-10">
+          <div className="text-sm text-muted mb-2 tracking-wide">{/* AGENT DIRECTORY */}</div>
+          <h1 className="text-2xl font-bold text-accent tracking-tight">
+            Discover Agent Services
+          </h1>
+        </div>
+        <AgentErrorState error={loadError} onRetry={onRetry} />
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-12">
@@ -219,9 +244,25 @@ export function AgentsClient({ agents }: { agents: TalosListItem[] }) {
 
       {/* Grid */}
       {filtered.length === 0 ? (
-        <div className="text-center py-20 text-muted text-sm">
-          No agents match your query.
-        </div>
+        <AgentEmptyState
+          kind={agents.length === 0 ? "catalog" : "filtered"}
+          action={
+            hasActiveFilters ? (
+              <button
+                type="button"
+                data-testid="agents-clear-filters"
+                onClick={() => {
+                  setSearch("");
+                  setActiveCategory("All");
+                  setStatusFilter("All");
+                }}
+                className="border border-accent text-accent px-4 py-2 text-sm hover:bg-accent hover:text-background transition-colors"
+              >
+                Clear filters
+              </button>
+            ) : undefined
+          }
+        />
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {filtered.map((item) => (

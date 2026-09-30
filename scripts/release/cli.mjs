@@ -4,10 +4,12 @@
 // Usage:
 //   node scripts/release/cli.mjs plan [--prerelease=<channel>] [--summary-out=<file>]
 //   node scripts/release/cli.mjs tag [--create]
+//   node scripts/release/cli.mjs rollback <tag>
 //
 // See RELEASES.md for the full workflow this drives.
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import {
   parseCommit,
   bumpForCommits,
@@ -158,13 +160,55 @@ function tagCommand(args) {
   console.log(JSON.stringify(releasable, null, 2));
 }
 
+
+function rollbackCommand(args) {
+  if (args.length !== 1 || !args[0] || args[0].startsWith("--")) {
+    console.error("Error: Ambiguous or malformed rollback input. Expected exactly one tag.");
+    process.exit(1);
+  }
+  const tag = args[0];
+
+  try {
+    execFileSync("git", ["--version"]);
+  } catch (err) {
+    console.error("Error: Missing dependency. 'git' is required.");
+    process.exit(1);
+  }
+
+  if (!tagExists(REPO_ROOT, tag)) {
+    console.error("Error: Rollback failed.");
+    console.error("Please verify the tag exists.");
+    process.exit(1);
+  }
+
+  try {
+    execFileSync("git", ["tag", "-d", tag], { cwd: REPO_ROOT, encoding: "utf8", stdio: "ignore" });
+  } catch (err) {
+    // Ignore local tag deletion failure, it might only exist remotely
+  }
+
+  try {
+    execFileSync("git", ["push", "origin", `:refs/tags/${tag}`], { cwd: REPO_ROOT, encoding: "utf8", stdio: "pipe" });
+  } catch (err) {
+    console.error("Error: Rollback failed. Could not delete remote tag.");
+    console.error("Please verify the tag exists and you have the necessary permissions.");
+    process.exit(1);
+  }
+
+  console.log(`Successfully rolled back tag: ${tag}`);
+  console.log("Reminder: Please delete the GitHub Release if not automated via gh CLI.");
+  console.log("Reminder: Open a new PR to revert the manifest/changelog commit. DO NOT mutate git history.");
+}
+
 const [, , command, ...rest] = process.argv;
 
 if (command === "plan") {
   planCommand(rest);
 } else if (command === "tag") {
   tagCommand(rest);
+} else if (command === "rollback") {
+  rollbackCommand(rest);
 } else {
-  console.error("usage: cli.mjs <plan|tag> [options]");
+  console.error("usage: cli.mjs <plan|tag|rollback> [options]");
   process.exit(1);
 }

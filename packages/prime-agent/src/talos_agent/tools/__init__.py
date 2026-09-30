@@ -8,14 +8,46 @@ logger = logging.getLogger(__name__)
 DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
 MAX_TOOL_TIMEOUT_SECONDS = 300.0
 
+#: Tool names that execute planner logic — used by callers to decide
+#: whether a ``CancelledError`` should be recorded as a planner cancellation.
+PLANNER_TOOL_NAMES: frozenset[str] = frozenset(
+    {"compose_a2a_plan", "plan_purchase", "normalize_providers"}
+)
+
 ToolTimeoutResult = namedtuple('ToolTimeoutResult', ['timeout', 'elapsed', 'timed_out'])
 
 
-async def execute_with_timeout(coro, timeout=DEFAULT_TOOL_TIMEOUT_SECONDS):
-    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
-        raise ValueError("timeout must be a number")
+def _validate_timeout(timeout):
+    """Validate timeout parameter for tool execution.
+    
+    Ensures timeout is a valid numeric value within acceptable bounds.
+    Raises ValueError for invalid inputs.
+    """
+    if isinstance(timeout, bool):
+        raise ValueError("timeout must be a number, not a boolean")
+    if not isinstance(timeout, (int, float)):
+        raise ValueError(f"timeout must be a number, got {type(timeout).__name__}")
     if not (0 < timeout <= MAX_TOOL_TIMEOUT_SECONDS):
-        raise ValueError("timeout out of range")
+        raise ValueError(f"timeout must be between 0 and {MAX_TOOL_TIMEOUT_SECONDS}, got {timeout}")
+
+
+async def execute_with_timeout(coro, timeout=DEFAULT_TOOL_TIMEOUT_SECONDS):
+    """Execute a coroutine with a specified timeout.
+    
+    Args:
+        coro: The coroutine to execute.
+        timeout: Timeout in seconds. Must be a positive number <= MAX_TOOL_TIMEOUT_SECONDS.
+        
+    Returns:
+        The result of the coroutine, or ToolTimeoutResult if timed out.
+        
+    Raises:
+        ValueError: If timeout is invalid.
+        asyncio.CancelledError: If the task is cancelled.
+        Exception: If the coroutine raises an exception.
+    """
+    _validate_timeout(timeout)
+    
     start = time.monotonic()
     try:
         res = await asyncio.wait_for(coro, timeout)

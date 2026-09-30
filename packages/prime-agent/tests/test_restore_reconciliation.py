@@ -109,6 +109,51 @@ class TestPruneCompletionMarkers:
         assert db.has_completion_marker("idem-fresh") is True
         db.close()
 
+    async def test_marker_exactly_at_now_is_pruned(self, tmp_path: Path):
+        db = _fresh_db(tmp_path)
+        now = _utc_now().isoformat()
+        db._conn.execute(
+            "INSERT INTO completion_markers (job_id, idempotency_key, expires_at) VALUES (?, ?, ?)",
+            ("job-exact-now", "idem-exact", now),
+        )
+        db._conn.commit()
+
+        result = await reconcile_after_restore(db, config=ReconcileConfig(api_verify_leases=False))
+        assert result.markers_pruned == 1
+        assert db.has_completion_marker("idem-exact") is False
+        db.close()
+
+    async def test_malformed_expiry_does_not_crash_or_delete_valid_records(self, tmp_path: Path):
+        db = _fresh_db(tmp_path)
+        db._conn.execute(
+            "INSERT INTO completion_markers (job_id, idempotency_key, expires_at) VALUES (?, ?, ?)",
+            ("job-bad", "idem-bad", "not-a-date"),
+        )
+        db.add_completion_marker("job-good", "idem-good", retain_days=7)
+        db._conn.commit()
+
+        result = await reconcile_after_restore(db, config=ReconcileConfig(api_verify_leases=False))
+        assert result.errors == []
+        assert db.has_completion_marker("idem-good") is True
+        assert db.has_completion_marker("idem-bad") is True
+        db.close()
+
+    async def test_same_idempotency_key_can_be_reused_after_collection(self, tmp_path: Path):
+        db = _fresh_db(tmp_path)
+        past = (_utc_now() - timedelta(days=1)).isoformat()
+        db._conn.execute(
+            "INSERT INTO completion_markers (job_id, idempotency_key, expires_at) VALUES (?, ?, ?)",
+            ("job-old", "idem-reuse", past),
+        )
+        db._conn.commit()
+
+        result = await reconcile_after_restore(db, config=ReconcileConfig(api_verify_leases=False))
+        assert result.markers_pruned == 1
+
+        db.add_completion_marker("job-new", "idem-reuse", retain_days=7)
+        assert db.has_completion_marker("idem-reuse") is True
+        db.close()
+
     async def test_prune_count_returned_in_result(self, tmp_path: Path):
         db = _fresh_db(tmp_path)
         past = (_utc_now() - timedelta(days=1)).isoformat()
@@ -796,3 +841,34 @@ class TestCommercePersistedFencingTokens:
         assert commerce._db is None
         await commerce.set_claimed_job("cj-5", fencing_token=500, ttl_seconds=60)
         assert commerce._claimed_jobs.get("cj-5") == 500
+
+    async def test_release_claimed_jobs_releases_and_removes_successful_claims(
+        self, tmp_path: Path
+    ):
+        db = _fresh_db(tmp_path)
+        commerce._db = db
+        commerce._api = MagicMock()
+        commerce._api.release_job = AsyncMock(return_value={"released": True})
+
+        await commerce.set_claimed_job("cj-release", fencing_token=600, ttl_seconds=60)
+        released, failed = await commerce.release_claimed_jobs()
+
+        assert (released, failed) == (1, 0)
+        assert db.get_claimed_job("cj-release") is None
+        commerce._api.release_job.assert_awaited_once_with("cj-release", 600)
+        db.close()
+
+    async def test_release_claimed_jobs_keeps_failed_claims_for_reconciliation(
+        self, tmp_path: Path
+    ):
+        db = _fresh_db(tmp_path)
+        commerce._db = db
+        commerce._api = MagicMock()
+        commerce._api.release_job = AsyncMock(return_value=None)
+
+        await commerce.set_claimed_job("cj-failed", fencing_token=601, ttl_seconds=60)
+        released, failed = await commerce.release_claimed_jobs()
+
+        assert (released, failed) == (0, 1)
+        assert db.get_claimed_job("cj-failed") is not None
+        db.close()

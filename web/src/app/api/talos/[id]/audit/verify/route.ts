@@ -13,6 +13,7 @@
  *   500 { error: "Internal server error" }
  */
 
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsApiAuditLogs } from "@/db/schema";
@@ -27,7 +28,7 @@ import { logger } from "@/lib/logger";
 
 export const runtime = "nodejs";
 
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -111,3 +112,5 @@ export async function GET(
     );
   }
 }
+
+export const GET = withRequestId(_GET);

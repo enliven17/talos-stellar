@@ -27,23 +27,31 @@ from talos_agent.policy.loader import PolicyLoader
 from talos_agent.policy.middleware import PolicyMiddleware
 from talos_agent.policy.schema import (
     ActionSpec,
+    ConditionTrace,
     Policy,
     PolicyDecision,
+    PolicyDecisionTrace,
     PolicyResult,
     PolicyRule,
+    RuleTraceStep,
     Severity,
+    redact_trace_value,
 )
 from talos_agent.policy.simulator import PolicySimulator
 
 __all__ = [
     "ActionSpec",
+    "ConditionTrace",
     "Policy",
     "PolicyDecision",
+    "PolicyDecisionTrace",
     "PolicyEngine",
     "PolicyLoader",
     "PolicyMiddleware",
     "PolicyResult",
     "PolicyRule",
     "PolicySimulator",
+    "RuleTraceStep",
     "Severity",
+    "redact_trace_value",
 ]

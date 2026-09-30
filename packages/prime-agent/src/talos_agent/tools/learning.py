@@ -278,3 +278,19 @@ async def evolve_strategy() -> dict:
         "playbook": playbook_data,
         "learnings_applied": len(learnings),
     }
+
+
+@tool(
+    "evict_expired_learnings",
+    "Delete strategy learnings whose TTL (expires_at) has passed. "
+    "Safe to run repeatedly; learnings without expires_at are kept. "
+    "Returns eviction counts only — never insight text.",
+)
+async def evict_expired_learnings() -> dict:
+    result = _db.evict_expired_learnings()
+    return {
+        "status": "ok",
+        "evicted": result["evicted"],
+        "ids": result["ids"],
+    }
+

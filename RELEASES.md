@@ -65,6 +65,41 @@ GitHub automatically.
 - **A bad version shipped**: cut a new patch/major release with the fix rather than mutating the
   old tag. Consumers that pinned the bad version are unaffected until they upgrade.
 
+## PR classification checks
+
+Every pull request targeting `main` is validated by the
+[`Release Checks`](.github/workflows/release-checks.yml) workflow, which:
+
+1. Runs the full release script test suite (`scripts/release/*.test.mjs`) so
+   that `classify.mjs`, `cli.mjs`, and `version-files.mjs` remain green on
+   every PR, not just on main.
+2. Validates the PR title against Conventional Commits format using
+   `scripts/release/check-release-note.mjs`. A PR whose title cannot be
+   classified will fail the check and must be renamed before it can be merged.
+
+The check is **fail-closed**: an ambiguous or missing title is treated as an
+error. Non-CC commit subjects on the PR branch are noted for informational
+purposes but do not block the PR — the title is the authoritative
+classification signal (matching squash-merge behaviour).
+
+### Validating locally
+
+```bash
+# Validate a PR title before pushing:
+PR_TITLE="feat(sdk): add payments resource client" \
+  node scripts/release/check-release-note.mjs
+
+# Validate a title + a list of commit subjects:
+PR_TITLE="feat(sdk): add payments resource client" \
+  PR_COMMITS="feat(sdk): add payments resource client
+fix: correct fee rounding
+docs: update README" \
+  node scripts/release/check-release-note.mjs
+
+# Run the full release script test suite (includes the check script):
+node --test scripts/release/*.test.mjs
+```
+
 ## Local reproduction
 
 ```bash
@@ -85,10 +120,10 @@ Every component release automatically attaches:
 |------------|---------|---------|
 | CycloneDX SBOM | `talos-<component>-<tag>-<ts>.cdx.json` | Machine-readable dependency inventory (JSON, CycloneDX 1.6) |
 | SPDX SBOM | `talos-<component>-<tag>-<ts>.spdx` | SPDX 2.3 tag-value inventory (SPDX license scanner compatible) |
-| SLSA provenance | `talos-<component>-<tag>-<ts>.intoto.jsonl` | in-toto v1 statement + SLSA v1 predicate (level L3 aspiration) |
+| SLSA provenance | `talos-<component>-<tag>-<ts>.intoto.jsonl` | in-toto v1 statement + SLSA v1 predicate (level L3 aspiration). Covers SBOM subjects and (for contracts) WASM artifacts. |
 | Cosign keyless signatures | `<artifact>.<ext>.sig` + `<artifact>.<ext>.pem` for each attachment | OIDC-keyless Fulcio-issued signature + signing certificate |
 
-Generation happens in [`.github/workflows/sbom-provenance.yml`](.github/workflows/sbom-provenance.yml), called as a reusable workflow from the release pipeline. Each SBOM is signed with OIDC keyless cosign (issuer `https://token.actions.githubusercontent.com`, workflow identity bound to `.github/workflows/(release-publish|sbom-provenance).yml`).
+Generation happens in [`.github/workflows/sbom-provenance.yml`](.github/workflows/sbom-provenance.yml), called as a reusable workflow from the release pipeline. Each SBOM is signed with OIDC keyless cosign (issuer `https://token.actions.githubusercontent.com`, workflow identity bound to `.github/workflows/(release-publish|sbom-provenance).yml`). The SLSA provenance metadata is generated as in-toto v1 statements with SLSA v1 predicates covering the SBOM subjects and (for contracts) WASM artifacts.
 
 ### Verification
 
@@ -150,3 +185,10 @@ The `src/area/devx` module exposes typed programmatic access used by the web das
   closure without breaking the idempotent-release contract.
 - Rekor (`tlog-upload=false`) is disabled to avoid external dependency latency during the release
   hot path. Transparency-log inclusion is planned as a separate, non-blocking post-release job.
+
+
+### Local Smoke Testing
+To run the integration and smoke tests for the release and rollback CLI, run:
+```bash
+node --test scripts/release/cli.test.mjs
+```
