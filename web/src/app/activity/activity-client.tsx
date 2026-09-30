@@ -237,20 +237,30 @@ export function ActivityClient({ stats: initialStats, transactions: initialTrans
           <h2 className="text-sm text-muted tracking-wide">
             {/* TRANSACTION FEED */}
           </h2>
-          <div className="flex border border-border">
-            {FILTERS.map((f) => (
-              <button
-                key={f}
-                onClick={() => setFilter(f)}
-                className={`px-3 py-2 text-sm transition-colors ${
-                  filter === f
-                    ? "bg-surface text-accent"
-                    : "text-muted hover:text-foreground"
-                } ${f !== "All" ? "border-l border-border" : ""}`}
-              >
-                {f}
-              </button>
-            ))}
+          <div className="flex items-center gap-3">
+            <a
+              href={`/api/activity?format=csv&type=${filter.toLowerCase()}`}
+              download="activity.csv"
+              className="text-sm text-muted hover:text-accent transition-colors"
+              aria-label={`Export ${filter.toLowerCase()} activity as CSV`}
+            >
+              Export CSV
+            </a>
+            <div className="flex border border-border">
+              {FILTERS.map((f) => (
+                <button
+                  key={f}
+                  onClick={() => setFilter(f)}
+                  className={`px-3 py-2 text-sm transition-colors ${
+                    filter === f
+                      ? "bg-surface text-accent"
+                      : "text-muted hover:text-foreground"
+                  } ${f !== "All" ? "border-l border-border" : ""}`}
+                >
+                  {f}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
