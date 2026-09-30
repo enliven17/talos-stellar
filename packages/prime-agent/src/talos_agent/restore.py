@@ -139,7 +139,7 @@ _TABLE_KEY_COLUMNS: dict[str, str] = {
     "approval_cache": "action_hash",
     "commerce_queue": "id",
     "claimed_jobs": "job_id",
-    "completion_markers": "marker_key",
+    "completion_markers": "idempotency_key",
 }
 
 # Substrings that mark config/row keys as sensitive — values are never returned.
@@ -501,7 +501,7 @@ def clear_last_reconciliation_telemetry() -> None:
 
 
 def record_reconciliation_telemetry(
-    result: "ReconcileResult",
+    result: ReconcileResult,
     checksum: RestoreChecksum | None = None,
 ) -> dict[str, Any]:
     """Cache and return privacy-safe reconciliation telemetry for collectors."""
@@ -565,6 +565,7 @@ class ReconcileConfig:
     completion_marker_retain_days: int = 7
     api_verify_leases: bool = True
     api_timeout_secs: float = 10.0
+    encryption_key_version: int = 1
 
 
 _DEFAULT_CONFIG = ReconcileConfig()
@@ -593,6 +594,7 @@ class ReconcileResult:
     claimed_jobs_restored: int = 0   # lease verified ✓ → populated in memory
     claimed_jobs_dropped: int = 0    # lease lost/expired → removed from DB
     claimed_jobs_deferred: int = 0   # API unreachable → kept in DB, not in memory
+    encryption_key_rotations: int = 0
 
     # Restore checksum (privacy-safe)
     checksum: str = ""
@@ -853,6 +855,16 @@ async def _verify_claimed_jobs(
     if not claimed_rows:
         return
 
+    # Rotate encryption keys with versioned envelopes if version changed
+    if config.encryption_key_version > 1:
+        try:
+            await commerce.rotate_encryption_keys(config.encryption_key_version)
+            result.encryption_key_rotations += 1
+        except Exception as exc:  # noqa: BLE001
+            msg = f"verify_claimed_jobs: encryption key rotation failed: {exc}"
+            result.errors.append(msg)
+            logger.warning(msg)
+
     now = _now_utc()
 
     for row in claimed_rows:
@@ -1011,7 +1023,7 @@ async def reconcile_after_restore(
     if checksum.error:
         result.errors.append(f"restore_checksum:{checksum.error}")
 
-    telemetry = record_reconciliation_telemetry(result, checksum)
+    record_reconciliation_telemetry(result, checksum)
     log.info(
         "restore_checksum",
         algorithm=checksum.algorithm,
@@ -1022,6 +1034,11 @@ async def reconcile_after_restore(
         empty=checksum.empty,
         error=checksum.error,
     )
+    log.info(
+        "restore_reconciliation_complete",
+        encryption_key_rotations=result.encryption_key_rotations,
+    )
+
     log.info(
         "restore_reconciliation_complete",
         markers_pruned=result.markers_pruned,
@@ -1036,7 +1053,6 @@ async def reconcile_after_restore(
         checksum_algorithm=result.checksum_algorithm,
         checksum_table_count=result.checksum_table_count,
         checksum_total_rows=result.checksum_total_rows,
-        telemetry=telemetry,
     )
 
     if result.errors:

@@ -9,6 +9,9 @@
 #![no_std]
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod upgrade_simulation_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
 extern crate std;
 
 use soroban_sdk::{
@@ -104,6 +107,27 @@ pub struct PauseInfo {
     pub paused_at: Option<u64>,
     /// `None` when not paused, or when paused indefinitely by the admin.
     pub expires_at: Option<u64>,
+}
+
+/// Maximum number of results returned by a single [`TalosNameService::names_page`] call.
+pub const MAX_REVERSE_PAGE_SIZE: u32 = 50;
+
+/// Maximum number of storage keys scanned per [`TalosNameService::names_page`] call.
+///
+/// Bounds ledger-read cost regardless of how sparse the ID space is.
+/// A sparse registry (many IDs with no name) can exhaust the window before
+/// filling the page; callers should detect `next_start == 0` and stop.
+pub const MAX_REVERSE_SCAN_WINDOW: u32 = 500;
+
+/// A page of reverse-lookup results from [`TalosNameService::names_page`].
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamesPage {
+    /// Up to `limit` `(talos_id, name)` pairs in ascending `talos_id` order.
+    pub items: Vec<(u32, String)>,
+    /// Cursor for the next page.  Pass as `start_id` on the next call.
+    /// `0` means there are no more results within the scan window.
+    pub next_start: u32,
 }
 
 #[contracttype]
@@ -279,7 +303,7 @@ pub const INTERFACE_ID: [u8; 32] = [
     0x65, 0x53, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, // "eService"
     // (major, minor, patch) big-endian u32s
     0x00, 0x00, 0x00, 0x01, // major = 1
-    0x00, 0x00, 0x00, 0x03, // minor = 3
+    0x00, 0x00, 0x00, 0x04, // minor = 4
     0x00, 0x00, 0x00, 0x00, // patch = 0
     // reserved
     0x00, 0x00, 0x00, 0x00,
@@ -287,7 +311,7 @@ pub const INTERFACE_ID: [u8; 32] = [
 
 /// Expected `INTERFACE_ID` of the configured `RegistryContract`, mirroring
 /// the bytes published by `talos_registry::INTERFACE_ID` (namespace
-/// `"TalosRegistry"`, version `(1, 3, 0)`). Kept as an inline copy rather
+/// `"TalosRegistry"`, version `(1, 4, 0)`). Kept as an inline copy rather
 /// than a crate dependency so this contract's ABI check has no build-time
 /// coupling to the Registry crate; see the golden-vector test for the
 /// independent reproduction of the byte layout.
@@ -296,7 +320,7 @@ pub const EXPECTED_REGISTRY_INTERFACE_ID: [u8; 32] = [
     0x69, 0x73, 0x74, 0x72, 0x79, 0x00, 0x00, 0x00, // "istry" + zero pads
     // (major, minor, patch) big-endian u32s
     0x00, 0x00, 0x00, 0x01, // major = 1
-    0x00, 0x00, 0x00, 0x03, // minor = 3
+    0x00, 0x00, 0x00, 0x04, // minor = 4
     0x00, 0x00, 0x00, 0x00, // patch = 0
     // reserved
     0x00, 0x00, 0x00, 0x00,
@@ -312,6 +336,8 @@ pub fn features_list() -> &'static [&'static str] {
         "registry_pointer",  // set_registry_contract — points to TalosRegistry
         "interface_query",   // version / interface_id / supports_version
         "cross_contract",    // invokes creator_of on the configured registry
+        "paginated_reverse_lookup", // names_page — cursor-based reverse scan
+        "name_canonicalization", // canonicalize() normalizes names before registration
     ]
 }
 
@@ -440,6 +466,63 @@ fn validate_name(name: &String) -> bool {
     true
 }
 
+/// Canonicalize a caller-supplied name before validation and storage.
+///
+/// Canonicalization rules (applied left-to-right, in order):
+///   1. **Trim** leading and trailing ASCII whitespace (space U+0020, tab U+0009,
+///      newline U+000A, carriage-return U+000D).
+///   2. **Lowercase** any ASCII uppercase letters (A-Z → a-z).
+///
+/// After canonicalization the result is a valid candidate for `validate_name`.
+/// Callers that pass an already-lowercase, no-whitespace name observe no change.
+///
+/// # Panics
+/// Panics with `"Name cannot be empty after canonicalization"` if the input is
+/// all whitespace or empty — a privacy-safe error with no caller-supplied value.
+///
+/// # no_std compatibility
+/// Operates entirely on a 64-byte stack buffer (max name byte length after
+/// trim is bounded at 32; input is capped at 64 bytes to absorb leading/trailing
+/// whitespace without heap allocation).
+pub(crate) fn canonicalize_name(env: &Env, name: &String) -> String {
+    let raw_len = name.len() as usize;
+    // Allocate a buffer large enough for the raw input plus whitespace slack.
+    // Names are bounded at 32 bytes; with up to 16 bytes of surrounding whitespace
+    // the raw input is at most 64 bytes before we even look at it.
+    const BUF: usize = 64;
+    if raw_len > BUF {
+        panic!("Name exceeds maximum input length for canonicalization");
+    }
+    let mut buf = [0u8; BUF];
+    name.copy_into_slice(&mut buf[..raw_len]);
+
+    // Step 1: find trim boundaries (ASCII whitespace only)
+    let mut start = 0usize;
+    let mut end = raw_len;
+    while start < end && matches!(buf[start], b' ' | b'\t' | b'\n' | b'\r') {
+        start += 1;
+    }
+    while end > start && matches!(buf[end - 1], b' ' | b'\t' | b'\n' | b'\r') {
+        end -= 1;
+    }
+
+    if start == end {
+        panic!("Name cannot be empty after canonicalization");
+    }
+
+    // Step 2: lowercase in-place
+    let mut out = [0u8; 32];
+    let trimmed_len = end - start;
+    if trimmed_len > 32 {
+        panic!("Name exceeds maximum byte length after canonicalization");
+    }
+    for (i, b) in buf[start..end].iter().enumerate() {
+        out[i] = b.to_ascii_lowercase();
+    }
+
+    String::from_bytes(env, &out[..trimmed_len])
+}
+
 // ── Contract ────────────────────────────────────────────────────────
 
 /// Compile-time interface version of TalosNameService.
@@ -454,7 +537,7 @@ fn validate_name(name: &String) -> bool {
 /// This constant is embedded in the WASM binary at compile time and is
 /// therefore immutable once deployed; it cannot be altered by any admin
 /// call, storage write, or cross-contract invocation.
-pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 3, 0);
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 4, 0);
 
 // ── Pause Domains ───────────────────────────────────────────────────
 
@@ -493,6 +576,31 @@ impl TalosNameService {
     /// name service before invoking entry-points.
     pub fn interface_id(e: Env) -> BytesN<32> {
         BytesN::from_array(&e, &INTERFACE_ID)
+    }
+    
+    /// Return the canonical deployment-manifest digest for this contract.
+    ///
+    /// This additive read-only query re-derives a stable digest from the
+    /// interface ID, semver, capability list, and event schema version. It
+    /// never stores any data in state and therefore remains safe for repeated
+    /// operator verification and compatibility checks.
+    pub fn deployment_manifest_digest(e: Env) -> BytesN<32> {
+        let mut payload = soroban_sdk::Bytes::new(&e);
+        payload.append(&soroban_sdk::Bytes::from_array(&e, &INTERFACE_ID));
+        payload.extend_from_slice(&CONTRACT_VERSION.0.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.1.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.2.to_be_bytes());
+
+        for feature in features_list() {
+            let bytes = feature.as_bytes();
+            payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            payload.extend_from_slice(bytes);
+        }
+
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.major.to_be_bytes());
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.minor.to_be_bytes());
+
+        e.crypto().sha256(&payload).to_bytes()
     }
 
     /// Return `true` when the deployed semver supports the requested
@@ -553,11 +661,19 @@ impl TalosNameService {
     /// * `e` - Soroban environment
     /// * `owner` - The address authorizing this name registration
     /// * `talos_id` - The Talos ID to associate with the name
-    /// * `name` - Human-readable name (3-32 chars, lowercase alphanumeric + hyphens)
+    /// * `name` - Human-readable name (3-32 chars, lowercase alphanumeric + hyphens).
+    ///            Leading/trailing whitespace is trimmed and uppercase ASCII letters
+    ///            are lowercased before validation so "Vega", "VEGA", and " vega "
+    ///            all register as "vega".
     pub fn register_name(e: Env, owner: Address, talos_id: u32, name: String) {
         pause_control::check_not_paused(&e, PAUSE_NAME_REGISTRATION);
 
         owner.require_auth();
+
+        // Canonicalize before validation so callers using mixed-case or
+        // whitespace-padded names receive identical on-chain state as those
+        // using the already-canonical form.
+        let name = canonicalize_name(&e, &name);
 
         if !validate_name(&name) {
             panic!("Invalid name. Must be 3-32 chars, lowercase alphanumeric + hyphens, no consecutive hyphens.");
@@ -642,6 +758,23 @@ impl TalosNameService {
     /// Return the configured admin, if any.
     pub fn admin(e: Env) -> Option<Address> {
         e.storage().persistent().get(&DataKey::Admin)
+    }
+
+    /// Canonicalize a name the same way `register_name` does before storing it.
+    ///
+    /// Off-chain callers should use this to derive the canonical form without
+    /// incurring a full registration. The result is the exact string that will
+    /// be stored on-chain when the same input is passed to `register_name`.
+    ///
+    /// Rules (applied in order):
+    ///   1. Trim leading/trailing ASCII whitespace.
+    ///   2. Lowercase ASCII uppercase letters (A-Z → a-z).
+    ///
+    /// # Panics
+    /// - `"Name cannot be empty after canonicalization"` — if input is all whitespace.
+    /// - `"Name exceeds maximum input length for canonicalization"` — if input > 64 bytes.
+    pub fn canonicalize(e: Env, name: String) -> String {
+        canonicalize_name(&e, &name)
     }
 
     /// Update the name-registration fee. Only the configured admin may call this.
@@ -1143,6 +1276,8 @@ impl TalosNameService {
     /// Resolve a name to a Talos ID.
     /// Returns None if the name doesn't exist.
     pub fn resolve_name(e: Env, name: String) -> Option<u32> {
+        // Canonicalize so "Vega" and "vega" resolve to the same record.
+        let name = canonicalize_name(&e, &name);
         e.storage().persistent().get(&DataKey::NameRecord(name))
     }
 
@@ -1152,8 +1287,81 @@ impl TalosNameService {
         e.storage().persistent().get(&DataKey::TalosName(talos_id))
     }
 
+    /// Paginated reverse-lookup: return a page of `(talos_id, name)` entries.
+    ///
+    /// Scans the reverse mapping `TalosName(id)` for Talos IDs in the
+    /// half-open range `[start_id, start_id + limit)`, collecting only the
+    /// IDs that have a registered name. IDs with no name entry are silently
+    /// skipped and **not** counted against the page size.
+    ///
+    /// # Arguments
+    /// * `start_id` — first Talos ID to include in the scan (inclusive cursor).
+    ///   Pass `1` for the first page, or the `next_start` value from a previous
+    ///   response to continue paging.
+    /// * `limit` — maximum number of results to return per page.
+    ///   Clamped to `[1, MAX_REVERSE_PAGE_SIZE]`; callers that supply a value
+    ///   outside this range receive a page bounded by the clamped limit.
+    ///
+    /// # Returns
+    /// A [`NamesPage`] value with:
+    /// * `items` — up to `limit` `(talos_id, name)` tuples in ascending
+    ///   `talos_id` order.
+    /// * `next_start` — the first ID of the next page, or `0` when the scan
+    ///   reached the end of the range without finding more names.
+    ///
+    /// # Privacy
+    /// This read path accesses only stored name strings (no payment proofs,
+    /// seeds, secrets, or caller data) and emits no events.
+    ///
+    /// # Boundary / missing-data behaviour
+    /// * `start_id == 0` is treated as `1` (IDs begin at 1 by convention).
+    /// * A `start_id` larger than any registered ID returns an empty page with
+    ///   `next_start == 0`.
+    /// * The scan is bounded to `start_id + MAX_REVERSE_SCAN_WINDOW` regardless
+    ///   of `limit`, preventing unbounded ledger reads.
+    pub fn names_page(e: Env, start_id: u32, limit: u32) -> NamesPage {
+        // Clamp start
+        let effective_start = if start_id == 0 { 1u32 } else { start_id };
+
+        // Clamp limit
+        let effective_limit = limit.max(1).min(MAX_REVERSE_PAGE_SIZE);
+
+        let mut items: Vec<(u32, String)> = Vec::new(&e);
+        let mut collected: u32 = 0;
+        let scan_end = effective_start.saturating_add(MAX_REVERSE_SCAN_WINDOW);
+
+        let mut cursor = effective_start;
+        while cursor < scan_end && collected < effective_limit {
+            if let Some(name) = e
+                .storage()
+                .persistent()
+                .get::<_, String>(&DataKey::TalosName(cursor))
+            {
+                items.push_back((cursor, name));
+                collected += 1;
+            }
+            cursor = cursor.saturating_add(1);
+            if cursor == 0 {
+                // u32 overflow guard
+                break;
+            }
+        }
+
+        // Determine next_start: the first id of the next page, or 0 at end.
+        let next_start = if cursor < scan_end && collected == effective_limit {
+            cursor
+        } else {
+            0u32
+        };
+
+        NamesPage { items, next_start }
+    }
+
     /// Check if a name is available.
     pub fn is_name_available(e: Env, name: String) -> bool {
+        // Canonicalize before availability check so mixed-case inputs agree
+        // with the stored canonical form.
+        let name = canonicalize_name(&e, &name);
         if !validate_name(&name) {
             return false;
         }
@@ -1901,7 +2109,7 @@ mod tests {
     #[test]
     fn version_returns_compile_time_constant() {
         let (_env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
-        assert_eq!(client.version(), (1u32, 3u32, 0u32));
+        assert_eq!(client.version(), (1u32, 4u32, 0u32));
     }
 
     #[test]
@@ -1951,7 +2159,32 @@ mod tests {
         let (maj, min, patch) = client.version();
         assert_eq!((maj, min, patch), CONTRACT_VERSION);
     }
+    
+    #[test]
+    fn deployment_manifest_digest_is_stable_and_canonical() {
+        let (env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
 
+        let digest = client.deployment_manifest_digest();
+        let again = client.deployment_manifest_digest();
+        assert_eq!(digest, again, "digest must be deterministic");
+
+        let mut payload = soroban_sdk::Bytes::new(&env);
+        payload.append(&soroban_sdk::Bytes::from_array(&env, &INTERFACE_ID));
+        payload.extend_from_slice(&CONTRACT_VERSION.0.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.1.to_be_bytes());
+        payload.extend_from_slice(&CONTRACT_VERSION.2.to_be_bytes());
+        for feature in features_list() {
+            let bytes = feature.as_bytes();
+            payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            payload.extend_from_slice(bytes);
+        }
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.major.to_be_bytes());
+        payload.extend_from_slice(&EVENT_SCHEMA_VERSION.minor.to_be_bytes());
+
+        let expected = env.crypto().sha256(&payload).to_bytes();
+        assert_eq!(digest, expected);
+    }
+    
     // ── interface_id() + golden vector ───────────────────────────────
 
     #[test]
@@ -2569,6 +2802,227 @@ mod tests {
         let (_env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
 
         assert!(client.name_of(&999).is_none());
+    }
+
+    // ── names_page() — paginated reverse lookup ───────────────────────
+
+    #[test]
+    fn names_page_returns_empty_for_empty_registry() {
+        let (_env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
+
+        let page = client.names_page(&1, &10);
+        assert_eq!(page.items.len(), 0);
+        assert_eq!(page.next_start, 0);
+    }
+
+    #[test]
+    fn names_page_returns_registered_names() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name = s(&env, "atlas");
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &name,
+        );
+
+        let page = client.names_page(&1, &10);
+        assert_eq!(page.items.len(), 1);
+        let (id, nm) = page.items.get(0).unwrap();
+        assert_eq!(id, talos_id);
+        assert_eq!(nm, name);
+    }
+
+    #[test]
+    fn names_page_respects_limit() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+
+        // Register 3 Talos names
+        let names = ["nova", "vega", "lens"];
+        let mut ids = Vec::new(&env);
+        for nm in names.iter() {
+            let owner = Address::generate(&env);
+            let pw = Address::generate(&env);
+            let talos_id =
+                create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+            let soroban_name = s(&env, nm);
+            register_name_with_auth(
+                &env,
+                &client,
+                &contract_id,
+                &registry_contract,
+                &owner,
+                talos_id,
+                &soroban_name,
+            );
+            ids.push_back(talos_id);
+        }
+
+        // limit=1 should return exactly one result
+        let page = client.names_page(&1, &1);
+        assert_eq!(page.items.len(), 1);
+        assert!(page.next_start > 0, "next_start should be non-zero when more results exist");
+    }
+
+    #[test]
+    fn names_page_cursor_pagination_covers_all_entries() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+
+        // Register 3 Talos names
+        let names = ["forge", "radar", "solaris"];
+        for nm in names.iter() {
+            let owner = Address::generate(&env);
+            let pw = Address::generate(&env);
+            let talos_id =
+                create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+            let soroban_name = s(&env, nm);
+            register_name_with_auth(
+                &env,
+                &client,
+                &contract_id,
+                &registry_contract,
+                &owner,
+                talos_id,
+                &soroban_name,
+            );
+        }
+
+        // Paginate with limit=1 and collect all pages
+        let mut cursor: u32 = 1;
+        let mut collected: u32 = 0;
+        loop {
+            let page = client.names_page(&cursor, &1);
+            collected += page.items.len();
+            if page.next_start == 0 {
+                break;
+            }
+            cursor = page.next_start;
+            if cursor == 0 {
+                break;
+            }
+        }
+        assert_eq!(collected, 3);
+    }
+
+    #[test]
+    fn names_page_start_id_zero_treated_as_one() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let name = s(&env, "genesis");
+        let talos_id =
+            create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &name,
+        );
+
+        // start_id=0 should return same results as start_id=1
+        let page_zero = client.names_page(&0, &10);
+        let page_one = client.names_page(&1, &10);
+        assert_eq!(page_zero.items.len(), page_one.items.len());
+    }
+
+    #[test]
+    fn names_page_beyond_last_id_returns_empty() {
+        let (_env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
+
+        // Start well past any registered ID
+        let page = client.names_page(&999999, &10);
+        assert_eq!(page.items.len(), 0);
+        assert_eq!(page.next_start, 0);
+    }
+
+    #[test]
+    fn names_page_limit_clamped_to_max() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+
+        // Register a name so the page can return something
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let name = s(&env, "clamptest");
+        let talos_id =
+            create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &name,
+        );
+
+        // A huge limit should behave as MAX_REVERSE_PAGE_SIZE
+        let page = client.names_page(&1, &u32::MAX);
+        assert!(page.items.len() <= MAX_REVERSE_PAGE_SIZE as u32);
+    }
+
+    #[test]
+    fn names_page_skips_ids_without_names() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+
+        // Register 2 names; there will be ID gaps (IDs auto-increment in registry)
+        let owner1 = Address::generate(&env);
+        let pw1 = Address::generate(&env);
+        let talos_id1 =
+            create_talos_with_auth(&env, &registry_client, &registry_contract, &owner1, &pw1);
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner1,
+            talos_id1,
+            &s(&env, "skipgap"),
+        );
+
+        let owner2 = Address::generate(&env);
+        let pw2 = Address::generate(&env);
+        // Create a 2nd Talos but don't register a name for it (gap)
+        let _gap_id =
+            create_talos_with_auth(&env, &registry_client, &registry_contract, &owner2, &pw2);
+
+        let owner3 = Address::generate(&env);
+        let pw3 = Address::generate(&env);
+        let talos_id3 =
+            create_talos_with_auth(&env, &registry_client, &registry_contract, &owner3, &pw3);
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner3,
+            talos_id3,
+            &s(&env, "aftergap"),
+        );
+
+        let page = client.names_page(&1, &50);
+        // Should only return 2 results despite 3 IDs existing
+        assert_eq!(page.items.len(), 2);
+        // Both returned entries must have names
+        for (_, nm) in page.items.iter() {
+            assert!(nm.len() > 0);
+        }
     }
 
     // ── Name Service Timelock unit tests ──────────────────────────────
@@ -4244,5 +4698,1659 @@ mod tests {
         assert_eq!(client.name_of(&talos_id), Some(max_name.clone()));
         assert_eq!(client.resolve_name(&min_name), None);
         assert!(client.is_name_available(&min_name));
+    }
+
+    // ── Pause expiry boundary tests (Issue #597) ──────────────────────
+    //
+    // These tests exercise the time-based expiry semantics of the emergency
+    // pause system.  Key rules under test:
+    //
+    //   • Admin can pause indefinitely (duration = 0) or for up to
+    //     MAX_ADMIN_PAUSE_SECS (30 days).
+    //   • Guardian can only pause for 1..=MAX_GUARDIAN_PAUSE_SECS (7 days).
+    //   • Pauses are lazily expired: is_paused / pause_info treat a record with
+    //     expires_at <= now as inactive without deleting it from storage.
+    //   • A guardian may NOT overwrite an admin-set pause (DomainLockedByAdmin).
+    //   • emit_pause_set / emit_pause_cleared fire on pause/unpause with
+    //     privacy-safe payloads (actor + expires_at; no tx/secret data).
+    //   • After expiry, register_name unblocks automatically (regression).
+    //
+    // Time manipulation: env.ledger().with_mut(|li| li.timestamp += delta)
+    // mirrors the pattern used in timelock tests throughout this file.
+
+    fn pause_as_admin(
+        env: &Env,
+        client: &TalosNameServiceClient,
+        contract_id: &Address,
+        admin: &Address,
+        domain: PauseDomain,
+        duration: u64,
+    ) {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "pause",
+                    args: (admin.clone(), domain, duration).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .pause(admin, &PauseDomain::NameRegistration, &duration);
+    }
+
+    fn unpause_as_admin(
+        env: &Env,
+        client: &TalosNameServiceClient,
+        contract_id: &Address,
+        admin: &Address,
+        domain: PauseDomain,
+    ) {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "unpause",
+                    args: (domain,).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .unpause(&PauseDomain::NameRegistration);
+    }
+
+    // ── Positive: admin indefinite pause ────────────────────────────
+
+    /// Admin can pause with duration = 0 (indefinite); is_paused returns true.
+    #[test]
+    fn pause_admin_indefinite_is_paused() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+
+        pause_as_admin(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            PauseDomain::NameRegistration,
+            0,
+        );
+
+        assert!(
+            client.is_paused(&PauseDomain::NameRegistration),
+            "indefinite admin pause must be active"
+        );
+    }
+
+    /// Admin indefinite pause: pause_info reports active=true and expires_at=None.
+    #[test]
+    fn pause_info_indefinite_admin_pause_shows_no_expiry() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+
+        pause_as_admin(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            PauseDomain::NameRegistration,
+            0,
+        );
+
+        let info = client.pause_info(&PauseDomain::NameRegistration);
+        assert!(info.active, "indefinite pause must be active");
+        assert_eq!(
+            info.expires_at, None,
+            "indefinite pause must not carry an expiry timestamp"
+        );
+        assert_eq!(info.paused_by, Some(admin));
+    }
+
+    // ── Positive: admin bounded pause ───────────────────────────────
+
+    /// Admin bounded pause (duration > 0): is_paused returns true before expiry.
+    #[test]
+    fn pause_admin_bounded_is_paused_before_expiry() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+        let duration = 3_600u64; // 1 hour
+
+        pause_as_admin(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            PauseDomain::NameRegistration,
+            duration,
+        );
+
+        // Advance time by less than duration.
+        env.ledger().with_mut(|li| li.timestamp += duration - 1);
+
+        assert!(
+            client.is_paused(&PauseDomain::NameRegistration),
+            "pause must remain active one second before expiry"
+        );
+    }
+
+    /// Admin bounded pause: is_paused returns false after expiry (lazy expiry).
+    #[test]
+    fn pause_admin_bounded_expires_after_duration() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+        let duration = 3_600u64; // 1 hour
+
+        pause_as_admin(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            PauseDomain::NameRegistration,
+            duration,
+        );
+
+        // Advance time exactly to the expiry timestamp.
+        env.ledger().with_mut(|li| li.timestamp += duration);
+
+        assert!(
+            !client.is_paused(&PauseDomain::NameRegistration),
+            "pause must be inactive once expires_at is reached"
+        );
+    }
+
+    /// Lazy expiry: pause record stays in storage after expiry but
+    /// pause_info correctly reports active=false.
+    #[test]
+    fn pause_info_shows_inactive_after_expiry_without_explicit_unpause() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+        let duration = 1_800u64; // 30 minutes
+
+        pause_as_admin(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            PauseDomain::NameRegistration,
+            duration,
+        );
+
+        // Well past expiry.
+        env.ledger().with_mut(|li| li.timestamp += duration + 1);
+
+        let info = client.pause_info(&PauseDomain::NameRegistration);
+        assert!(
+            !info.active,
+            "pause_info must report inactive once past expires_at"
+        );
+        // The record is still there but semantically inactive; paused_by is set.
+        assert!(
+            info.paused_by.is_some(),
+            "stale record is still present in storage"
+        );
+    }
+
+    // ── Boundary: one second before / at / after expiry ─────────────
+
+    /// Exactly one second before expiry: still active.
+    #[test]
+    fn pause_boundary_one_second_before_expiry_is_still_paused() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+        let duration = 7_200u64; // 2 hours
+
+        pause_as_admin(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            PauseDomain::NameRegistration,
+            duration,
+        );
+
+        env.ledger().with_mut(|li| li.timestamp += duration - 1);
+
+        assert!(
+            client.is_paused(&PauseDomain::NameRegistration),
+            "domain must remain paused at expires_at - 1"
+        );
+    }
+
+    /// Exactly at expiry timestamp: no longer active.
+    #[test]
+    fn pause_boundary_at_expiry_timestamp_is_not_paused() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+        let duration = 7_200u64;
+
+        pause_as_admin(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            PauseDomain::NameRegistration,
+            duration,
+        );
+
+        env.ledger().with_mut(|li| li.timestamp += duration);
+
+        assert!(
+            !client.is_paused(&PauseDomain::NameRegistration),
+            "domain must be inactive exactly at expires_at"
+        );
+    }
+
+    // ── Boundary: guardian pause duration limits ─────────────────────
+
+    /// Guardian can pause at MAX_GUARDIAN_PAUSE_SECS exactly.
+    #[test]
+    fn pause_guardian_at_max_duration_is_accepted() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+        let guardian = Address::generate(&env);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "add_guardian",
+                    args: (guardian.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .add_guardian(&guardian);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &guardian,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause",
+                    args: (guardian.clone(), PauseDomain::NameRegistration, MAX_GUARDIAN_PAUSE_SECS)
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_pause(
+                &guardian,
+                &PauseDomain::NameRegistration,
+                &MAX_GUARDIAN_PAUSE_SECS,
+            );
+
+        assert!(
+            result.is_ok(),
+            "guardian pause at MAX_GUARDIAN_PAUSE_SECS must be accepted"
+        );
+        assert!(client.is_paused(&PauseDomain::NameRegistration));
+    }
+
+    /// Guardian pause duration of MAX_GUARDIAN_PAUSE_SECS + 1 is rejected.
+    #[test]
+    fn pause_guardian_above_max_duration_is_rejected() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+        let guardian = Address::generate(&env);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "add_guardian",
+                    args: (guardian.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .add_guardian(&guardian);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &guardian,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause",
+                    args: (
+                        guardian.clone(),
+                        PauseDomain::NameRegistration,
+                        MAX_GUARDIAN_PAUSE_SECS + 1,
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_pause(
+                &guardian,
+                &PauseDomain::NameRegistration,
+                &(MAX_GUARDIAN_PAUSE_SECS + 1),
+            );
+
+        assert!(
+            result.is_err(),
+            "guardian pause exceeding MAX_GUARDIAN_PAUSE_SECS must be rejected"
+        );
+    }
+
+    /// Guardian pause with duration = 0 is rejected (must be bounded).
+    #[test]
+    fn pause_guardian_zero_duration_is_rejected() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+        let guardian = Address::generate(&env);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "add_guardian",
+                    args: (guardian.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .add_guardian(&guardian);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &guardian,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause",
+                    args: (guardian.clone(), PauseDomain::NameRegistration, 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_pause(&guardian, &PauseDomain::NameRegistration, &0);
+
+        assert!(
+            result.is_err(),
+            "guardian cannot set an indefinite pause (duration = 0)"
+        );
+    }
+
+    // ── Boundary: admin pause duration limits ────────────────────────
+
+    /// Admin pause at MAX_ADMIN_PAUSE_SECS exactly is accepted.
+    #[test]
+    fn pause_admin_at_max_duration_is_accepted() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause",
+                    args: (admin.clone(), PauseDomain::NameRegistration, MAX_ADMIN_PAUSE_SECS)
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_pause(
+                &admin,
+                &PauseDomain::NameRegistration,
+                &MAX_ADMIN_PAUSE_SECS,
+            );
+
+        assert!(
+            result.is_ok(),
+            "admin pause at MAX_ADMIN_PAUSE_SECS must be accepted"
+        );
+        assert!(client.is_paused(&PauseDomain::NameRegistration));
+    }
+
+    /// Admin pause above MAX_ADMIN_PAUSE_SECS is rejected.
+    #[test]
+    fn pause_admin_above_max_duration_is_rejected() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause",
+                    args: (
+                        admin.clone(),
+                        PauseDomain::NameRegistration,
+                        MAX_ADMIN_PAUSE_SECS + 1,
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_pause(
+                &admin,
+                &PauseDomain::NameRegistration,
+                &(MAX_ADMIN_PAUSE_SECS + 1),
+            );
+
+        assert!(
+            result.is_err(),
+            "admin pause exceeding MAX_ADMIN_PAUSE_SECS must be rejected"
+        );
+    }
+
+    // ── Negative: guardian cannot overwrite admin pause ───────────────
+
+    /// Guardian cannot overwrite an admin-set indefinite pause
+    /// (ContractError::DomainLockedByAdmin).
+    #[test]
+    fn pause_guardian_cannot_overwrite_admin_indefinite_pause() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+        let guardian = Address::generate(&env);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "add_guardian",
+                    args: (guardian.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .add_guardian(&guardian);
+
+        // Admin sets indefinite pause first.
+        pause_as_admin(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            PauseDomain::NameRegistration,
+            0,
+        );
+
+        // Guardian attempts to overwrite — must be rejected.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &guardian,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause",
+                    args: (guardian.clone(), PauseDomain::NameRegistration, 3600u64)
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_pause(&guardian, &PauseDomain::NameRegistration, &3600);
+
+        assert!(
+            result.is_err(),
+            "guardian must not overwrite an admin pause"
+        );
+        // Domain is still paused indefinitely by admin.
+        assert!(client.is_paused(&PauseDomain::NameRegistration));
+        let info = client.pause_info(&PauseDomain::NameRegistration);
+        assert_eq!(
+            info.paused_by,
+            Some(admin),
+            "paused_by must still be the admin after rejected guardian override"
+        );
+    }
+
+    /// Guardian cannot overwrite an admin-set bounded pause.
+    #[test]
+    fn pause_guardian_cannot_overwrite_admin_bounded_pause() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+        let guardian = Address::generate(&env);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "add_guardian",
+                    args: (guardian.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .add_guardian(&guardian);
+
+        // Admin sets a 1-day bounded pause.
+        pause_as_admin(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            PauseDomain::NameRegistration,
+            86_400,
+        );
+
+        // Guardian attempts to overwrite.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &guardian,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause",
+                    args: (guardian.clone(), PauseDomain::NameRegistration, 3600u64)
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_pause(&guardian, &PauseDomain::NameRegistration, &3600);
+
+        assert!(
+            result.is_err(),
+            "guardian must not overwrite an admin bounded pause"
+        );
+    }
+
+    // ── Negative: unauthorized caller cannot pause ────────────────────
+
+    /// A random address (not admin, not guardian) cannot pause.
+    #[test]
+    fn pause_unauthorized_caller_is_rejected() {
+        let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
+        let stranger = Address::generate(&env);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &stranger,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause",
+                    args: (stranger.clone(), PauseDomain::NameRegistration, 3600u64)
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_pause(&stranger, &PauseDomain::NameRegistration, &3600);
+
+        assert!(
+            result.is_err(),
+            "non-admin non-guardian must not be able to pause"
+        );
+    }
+
+    /// Non-admin cannot call unpause.
+    #[test]
+    fn unpause_unauthorized_caller_is_rejected() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+        let stranger = Address::generate(&env);
+
+        pause_as_admin(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            PauseDomain::NameRegistration,
+            0,
+        );
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &stranger,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "unpause",
+                    args: (PauseDomain::NameRegistration,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_unpause(&PauseDomain::NameRegistration);
+
+        assert!(result.is_err(), "non-admin must not be able to unpause");
+        // Still paused.
+        assert!(client.is_paused(&PauseDomain::NameRegistration));
+    }
+
+    // ── Positive: unpause clears the pause record ────────────────────
+
+    /// Admin can explicitly unpause an active pause; is_paused returns false.
+    #[test]
+    fn unpause_clears_active_pause() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+
+        pause_as_admin(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            PauseDomain::NameRegistration,
+            0,
+        );
+        assert!(client.is_paused(&PauseDomain::NameRegistration));
+
+        unpause_as_admin(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            PauseDomain::NameRegistration,
+        );
+
+        assert!(
+            !client.is_paused(&PauseDomain::NameRegistration),
+            "domain must be inactive after explicit unpause"
+        );
+        let info = client.pause_info(&PauseDomain::NameRegistration);
+        assert!(!info.active);
+        assert_eq!(info.paused_by, None);
+    }
+
+    /// Unpause is idempotent when the domain is already inactive.
+    #[test]
+    fn unpause_is_idempotent_when_not_paused() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+
+        // No pause set — unpause must succeed silently.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "unpause",
+                    args: (PauseDomain::NameRegistration,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_unpause(&PauseDomain::NameRegistration);
+
+        assert!(result.is_ok(), "unpause on already-inactive domain must be a no-op");
+        assert!(!client.is_paused(&PauseDomain::NameRegistration));
+    }
+
+    // ── Events: pause_on / pause_off ─────────────────────────────────
+
+    /// pause() emits a `pause_on` event with correct topic[1] domain and
+    /// data (actor, expires_at).  Privacy-safe: no tx hash or secret data.
+    #[test]
+    fn pause_emits_pause_on_event_with_correct_payload() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+        let duration = 7_200u64;
+
+        pause_as_admin(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            PauseDomain::NameRegistration,
+            duration,
+        );
+
+        let now: u64 = env.ledger().timestamp();
+        let expected_expires_at = now; // timestamp did not advance after pause call
+        let all_events = env.events().all();
+        let pause_events: std::vec::Vec<_> = all_events
+            .iter()
+            .filter(|(addr, topics, _)| {
+                if *addr != contract_id {
+                    return false;
+                }
+                let sym: Result<Symbol, _> =
+                    TryFromVal::try_from_val(&env, &topics.get(0).unwrap());
+                sym.map(|s| s == symbol_short!("pause_on")).unwrap_or(false)
+            })
+            .collect();
+
+        assert_eq!(pause_events.len(), 1, "exactly one pause_on event must fire");
+        let (_, topics, data) = pause_events[0].clone();
+        // topics[1] must be the PauseDomain.
+        let domain_val: PauseDomain =
+            TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+        assert_eq!(domain_val, PauseDomain::NameRegistration);
+
+        // data is (actor: Address, expires_at: u64).
+        let (actor, expires_at): (Address, u64) =
+            TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(actor, admin);
+        // expires_at must be approximately now + duration; allow ±1 for ledger tick.
+        assert!(
+            expires_at >= expected_expires_at + duration - 1
+                && expires_at <= expected_expires_at + duration + 1,
+            "expires_at in pause_on event must equal paused_at + duration"
+        );
+    }
+
+    /// unpause() emits a `pause_off` event with the admin as the actor.
+    #[test]
+    fn unpause_emits_pause_off_event() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+
+        pause_as_admin(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            PauseDomain::NameRegistration,
+            0,
+        );
+
+        unpause_as_admin(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            PauseDomain::NameRegistration,
+        );
+
+        let all_events = env.events().all();
+        let off_events: std::vec::Vec<_> = all_events
+            .iter()
+            .filter(|(addr, topics, _)| {
+                if *addr != contract_id {
+                    return false;
+                }
+                let sym: Result<Symbol, _> =
+                    TryFromVal::try_from_val(&env, &topics.get(0).unwrap());
+                sym.map(|s| s == symbol_short!("pause_off")).unwrap_or(false)
+            })
+            .collect();
+
+        assert_eq!(off_events.len(), 1, "exactly one pause_off event must fire");
+        let (_, topics, data) = off_events[0].clone();
+        let domain_val: PauseDomain =
+            TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+        assert_eq!(domain_val, PauseDomain::NameRegistration);
+        let (actor,): (Address,) = TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(actor, admin);
+    }
+
+    /// Unpause on an already-inactive domain (idempotent): no pause_off event.
+    #[test]
+    fn unpause_on_inactive_domain_does_not_emit_pause_off() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+        let events_before = event_count(&env, &contract_id);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "unpause",
+                    args: (PauseDomain::NameRegistration,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .unpause(&PauseDomain::NameRegistration);
+
+        assert_eq!(
+            event_count(&env, &contract_id),
+            events_before,
+            "unpause on inactive domain must not emit any event"
+        );
+    }
+
+    // ── pause_info boundary coverage ────────────────────────────────
+
+    /// pause_info on a domain that was never paused returns the zero-value.
+    #[test]
+    fn pause_info_never_paused_returns_inactive() {
+        let (_env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
+
+        let info = client.pause_info(&PauseDomain::NameRegistration);
+        assert!(!info.active);
+        assert_eq!(info.paused_by, None);
+        assert_eq!(info.paused_at, None);
+        assert_eq!(info.expires_at, None);
+    }
+
+    /// pause_info carries the correct expires_at for a bounded admin pause.
+    #[test]
+    fn pause_info_bounded_admin_pause_carries_expiry_timestamp() {
+        let (env, _registry_contract, contract_id, admin, _registry_client, client) = setup();
+        let duration = 3_600u64;
+        let now_before = env.ledger().timestamp();
+
+        pause_as_admin(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            PauseDomain::NameRegistration,
+            duration,
+        );
+
+        let info = client.pause_info(&PauseDomain::NameRegistration);
+        assert!(info.active);
+        let expected_expires_at = now_before + duration;
+        assert_eq!(
+            info.expires_at,
+            Some(expected_expires_at),
+            "expires_at must equal paused_at + duration"
+        );
+    }
+
+    // ── Regression: expiry unblocks register_name ────────────────────
+
+    /// After a pause expires, register_name succeeds again without an
+    /// explicit unpause call.  This is the principal integration regression
+    /// for the lazy-expiry path.
+    ///
+    /// NOTE: register_name is gated by `pause_control::check_not_paused`
+    /// (domain_id = PAUSE_NAME_REGISTRATION), which uses the `pause_domain`
+    /// entry-point, not the higher-level `pause()` that stores `PauseState`.
+    /// This test exercises the `pause_domain` → time-advance → auto-expire
+    /// → register_name path end-to-end.
+    #[test]
+    fn register_name_unblocked_after_pause_expiry() {
+        let (env, registry_contract, contract_id, admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let duration = 3_600u64;
+        let name = s(&env, "expiry-test");
+
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+
+        // Use pause_domain (the path that register_name checks via pause_control).
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause_domain",
+                    args: (PAUSE_NAME_REGISTRATION, duration).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .pause_domain(&PAUSE_NAME_REGISTRATION, &duration);
+
+        // Attempting to register while paused must fail.
+        let blocked = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, name.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &name);
+        assert!(blocked.is_err(), "register_name must be blocked while paused");
+
+        // Advance time past expiry — pause_control's check_not_paused lazily
+        // calls expire_if_elapsed, so the pause is auto-lifted on next call.
+        env.ledger().with_mut(|li| li.timestamp += duration);
+
+        // After expiry, register_name must succeed without an explicit unpause.
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &name,
+        );
+
+        assert_eq!(
+            client.resolve_name(&name),
+            Some(talos_id),
+            "name must be registered after pause expiry"
+        );
+    }
+
+    /// Active pause blocks register_name and returns DomainPaused error.
+    #[test]
+    fn register_name_blocked_while_paused() {
+        let (env, registry_contract, contract_id, admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name = s(&env, "blocked-name");
+
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+
+        // Use pause_domain (the path that register_name checks via pause_control).
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause_domain",
+                    args: (PAUSE_NAME_REGISTRATION, 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .pause_domain(&PAUSE_NAME_REGISTRATION, &0);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, name.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &name);
+
+        assert!(
+            result.is_err(),
+            "register_name must be blocked while domain is paused"
+        );
+        // Name must not exist in storage after a blocked call.
+        assert!(
+            client.is_name_available(&name),
+            "name must remain available after a blocked registration"
+        );
+    }
+
+    // ── Regression: pause + explicit unpause restores registration ───
+
+    /// After explicit unpause, register_name succeeds immediately without
+    /// waiting for expiry.
+    #[test]
+    fn register_name_unblocked_after_explicit_unpause() {
+        let (env, registry_contract, contract_id, admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name = s(&env, "explicit-unpause");
+
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+
+        // Use pause_domain (the path that register_name checks via pause_control).
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause_domain",
+                    args: (PAUSE_NAME_REGISTRATION, 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .pause_domain(&PAUSE_NAME_REGISTRATION, &0);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "unpause_domain",
+                    args: (PAUSE_NAME_REGISTRATION,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .unpause_domain(&PAUSE_NAME_REGISTRATION);
+
+        // Now register_name must succeed.
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &name,
+        );
+
+        assert_eq!(client.resolve_name(&name), Some(talos_id));
+    }
+
+    // ── Regression: reads are never gated by pause ────────────────────
+
+    /// Read-only entry-points (resolve_name, name_of, is_name_available,
+    /// has_name) remain usable while the domain is paused.
+    ///
+    /// Note: reads are checked against the high-level `pause()` /
+    /// `is_paused()` system (DataKey::PauseState) which is entirely
+    /// separate from the pause_control gate on write paths.  Only
+    /// `register_name` (and other writes) check `pause_control`.
+    /// This test confirms both: (a) reads always succeed while the
+    /// PauseState-based domain is active, and (b) reads succeed even
+    /// when the pause_domain (pause_control) gate is set.
+    #[test]
+    fn reads_are_not_blocked_while_paused() {
+        let (env, registry_contract, contract_id, admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name = s(&env, "readable");
+
+        let talos_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &owner,
+            &protocol_wallet,
+        );
+
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &owner,
+            talos_id,
+            &name,
+        );
+
+        // Pause via the higher-level PauseState system.
+        pause_as_admin(
+            &env,
+            &client,
+            &contract_id,
+            &admin,
+            PauseDomain::NameRegistration,
+            0,
+        );
+
+        assert_eq!(
+            client.resolve_name(&name),
+            Some(talos_id),
+            "resolve_name must work while paused"
+        );
+        assert_eq!(
+            client.name_of(&talos_id),
+            Some(name.clone()),
+            "name_of must work while paused"
+        );
+        assert!(
+            !client.is_name_available(&name),
+            "is_name_available must work while paused"
+        );
+        assert!(
+            client.has_name(&talos_id),
+            "has_name must work while paused"
+        );
+    }
+
+    // ── Budget regression gates (#610) ───────────────────────────────────────
+    //
+    // Measure CPU-instruction and memory-byte cost of the core write and read
+    // paths on the host (native Rust) target.  Ceilings are loose regression
+    // sentinels; WASM runtime costs will be higher.
+
+    const BUDGET_CPU_NS_INITIALIZE: u64    =  500_000;
+    const BUDGET_MEM_NS_INITIALIZE: u64    =  100_000;
+
+    const BUDGET_CPU_REGISTER_NAME: u64    = 1_200_000;
+    const BUDGET_MEM_REGISTER_NAME: u64    =  250_000;
+
+    const BUDGET_CPU_RESOLVE_NAME: u64     =  200_000;
+    const BUDGET_MEM_RESOLVE_NAME: u64     =   50_000;
+
+    const BUDGET_CPU_NAME_OF: u64          =  200_000;
+    const BUDGET_MEM_NAME_OF: u64          =   50_000;
+
+    #[test]
+    fn budget_initialize_within_limits() {
+        let env = Env::default();
+        let registry_contract    = env.register_contract(None, TalosRegistry);
+        let name_service_contract = env.register_contract(None, TalosNameService);
+        let client = TalosNameServiceClient::new(&env, &name_service_contract);
+        let admin  = Address::generate(&env);
+
+        env.budget().reset_default();
+        client.initialize(&registry_contract, &admin, &0i128);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_NS_INITIALIZE,
+            "name service initialize CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_NS_INITIALIZE,
+        );
+        assert!(
+            mem < BUDGET_MEM_NS_INITIALIZE,
+            "name service initialize memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_NS_INITIALIZE,
+        );
+    }
+
+    #[test]
+    fn budget_register_name_within_limits() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner           = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name            = s(&env, "budgettest");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+
+        env.budget().reset_default();
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name,
+        );
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_REGISTER_NAME,
+            "register_name CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_REGISTER_NAME,
+        );
+        assert!(
+            mem < BUDGET_MEM_REGISTER_NAME,
+            "register_name memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_REGISTER_NAME,
+        );
+    }
+
+    #[test]
+    fn budget_resolve_name_read_within_limits() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner           = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name            = s(&env, "resolvetest");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name,
+        );
+
+        env.budget().reset_default();
+        let _ = client.resolve_name(&name);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_RESOLVE_NAME,
+            "resolve_name CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_RESOLVE_NAME,
+        );
+        assert!(
+            mem < BUDGET_MEM_RESOLVE_NAME,
+            "resolve_name memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_RESOLVE_NAME,
+        );
+    }
+
+    #[test]
+    fn budget_name_of_read_within_limits() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner           = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name            = s(&env, "nameoftest");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name,
+        );
+
+        env.budget().reset_default();
+        let _ = client.name_of(&talos_id);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_NAME_OF,
+            "name_of CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_NAME_OF,
+        );
+        assert!(
+            mem < BUDGET_MEM_NAME_OF,
+            "name_of memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_NAME_OF,
+        );
+    }
+
+    /// Negative: registering an already-taken name must fail cheaply (no
+    /// storage write occurs, so the rejection should be cheaper than success).
+    #[test]
+    fn budget_register_name_duplicate_rejected_cheaply() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner           = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name            = s(&env, "duptest");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name,
+        );
+
+        // Attempt a second registration with the same name — must fail.
+        let talos_id2 = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+
+        env.budget().reset_default();
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id2, name.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id2,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .try_register_name(&owner, &talos_id2, &name);
+        assert!(result.is_err(), "duplicate name must be rejected");
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_REGISTER_NAME,
+            "rejected register_name CPU {} exceeded ceiling {}",
+            cpu, BUDGET_CPU_REGISTER_NAME,
+        );
+        assert!(
+            mem < BUDGET_MEM_REGISTER_NAME,
+            "rejected register_name memory {} exceeded ceiling {}",
+            mem, BUDGET_MEM_REGISTER_NAME,
+        );
+    }
+
+    // ── #594 canonicalize_name tests ─────────────────────────────────
+    //
+    // Verify name canonicalization (trim + lowercase) is applied
+    // consistently across canonicalize(), register_name, resolve_name,
+    // and is_name_available.
+
+    #[test]
+    fn canonicalize_converts_uppercase_to_lowercase() {
+        let (env, _, _, _, _, client) = setup();
+        assert_eq!(client.canonicalize(&s(&env, "VEGA")), s(&env, "vega"));
+        assert_eq!(client.canonicalize(&s(&env, "Vega")), s(&env, "vega"));
+        assert_eq!(client.canonicalize(&s(&env, "vEgA")), s(&env, "vega"));
+    }
+
+    #[test]
+    fn canonicalize_trims_leading_trailing_whitespace() {
+        let (env, _, _, _, _, client) = setup();
+        assert_eq!(client.canonicalize(&s(&env, "  vega  ")), s(&env, "vega"));
+        assert_eq!(client.canonicalize(&s(&env, " vega")),    s(&env, "vega"));
+        assert_eq!(client.canonicalize(&s(&env, "vega ")),    s(&env, "vega"));
+    }
+
+    #[test]
+    fn canonicalize_trim_and_lowercase_combined() {
+        let (env, _, _, _, _, client) = setup();
+        assert_eq!(client.canonicalize(&s(&env, "  VEGA  ")), s(&env, "vega"));
+        assert_eq!(client.canonicalize(&s(&env, " Atlas ")),  s(&env, "atlas"));
+    }
+
+    #[test]
+    fn canonicalize_already_canonical_is_noop() {
+        let (env, _, _, _, _, client) = setup();
+        assert_eq!(client.canonicalize(&s(&env, "vega")),        s(&env, "vega"));
+        assert_eq!(client.canonicalize(&s(&env, "my-agent-1")),  s(&env, "my-agent-1"));
+    }
+
+    #[test]
+    fn canonicalize_digits_and_hyphens_unchanged() {
+        let (env, _, _, _, _, client) = setup();
+        assert_eq!(client.canonicalize(&s(&env, "my-agent-42")), s(&env, "my-agent-42"));
+        assert_eq!(client.canonicalize(&s(&env, "abc")),         s(&env, "abc"));
+    }
+
+    #[test]
+    fn register_name_uppercase_stores_lowercase() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+
+        let upper = s(&env, "VEGA");
+        client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, upper.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .register_name(&owner, &talos_id, &upper);
+
+        let canonical = s(&env, "vega");
+        assert_eq!(client.name_of(&talos_id), Some(canonical.clone()), "stored name must be lowercase");
+        assert_eq!(client.resolve_name(&canonical), Some(talos_id), "lowercase resolve must succeed");
+    }
+
+    #[test]
+    fn register_name_mixed_case_with_padding_stores_canonical() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+
+        let padded = s(&env, " Atlas ");
+        client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, padded.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .register_name(&owner, &talos_id, &padded);
+
+        let canonical = s(&env, "atlas");
+        assert_eq!(client.name_of(&talos_id), Some(canonical.clone()));
+        assert_eq!(client.resolve_name(&canonical), Some(talos_id));
+    }
+
+    #[test]
+    fn resolve_name_is_case_insensitive() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &s(&env, "vega"));
+
+        assert_eq!(client.resolve_name(&s(&env, "VEGA")),   Some(talos_id));
+        assert_eq!(client.resolve_name(&s(&env, "Vega")),   Some(talos_id));
+        assert_eq!(client.resolve_name(&s(&env, "vega")),   Some(talos_id));
+        assert_eq!(client.resolve_name(&s(&env, " vega ")), Some(talos_id));
+    }
+
+    #[test]
+    fn is_name_available_is_case_insensitive() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+
+        assert!(client.is_name_available(&s(&env, "vega")));
+        assert!(client.is_name_available(&s(&env, "VEGA")));
+
+        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &s(&env, "vega"));
+
+        assert!(!client.is_name_available(&s(&env, "vega")));
+        assert!(!client.is_name_available(&s(&env, "VEGA")));
+        assert!(!client.is_name_available(&s(&env, "Vega")));
+        assert!(!client.is_name_available(&s(&env, " vega ")));
+    }
+
+    #[test]
+    fn duplicate_registration_rejected_for_canonical_form() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &s(&env, "vega"));
+
+        // Registering "VEGA" while "vega" is taken must fail
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, s(&env, "VEGA")).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &s(&env, "VEGA"));
+        assert!(res.is_err(), "uppercase duplicate must be rejected");
+    }
+
+    // ── #608 event-schema compatibility tests ────────────────────────
+    //
+    // Verify name_reg / name_reg2 events match EVENTS.md §3:
+    //   - Positive: events emitted, topics/data match schema
+    //   - Schema version: name_reg2 data[0] == 1
+    //   - Ordering: name_reg precedes name_reg2
+    //   - Canonical name in event when caller passes uppercase
+    //   - Boundary: min/max length names
+    //   - Negative: no event on invalid name / duplicate rejection
+
+    #[test]
+    fn event_schema_version_constant_is_stable() {
+        assert_eq!(EVENT_SCHEMA_VERSION.major, 1u32);
+        assert_eq!(EVENT_SCHEMA_VERSION.minor, 0u32);
+    }
+
+    #[test]
+    fn name_reg_event_emitted_with_correct_schema() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        let name = s(&env, "vega");
+        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &name);
+
+        let events = env.events().all();
+        let reg_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(_, t, _)| {
+                let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &t.get(0).unwrap());
+                sym.map(|s| s == symbol_short!("name_reg")).unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(reg_events.len(), 1, "exactly one name_reg event");
+
+        let (_, topics, data) = reg_events[0].clone();
+        // topics = ("name_reg", talos_id: u32)
+        assert_eq!(topics.len(), 2);
+        let t1: u32 = TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+        assert_eq!(t1, talos_id);
+        // data = (name: String, owner: Address)
+        let (ev_name, ev_owner): (String, Address) = TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(ev_name, name);
+        assert_eq!(ev_owner, owner);
+    }
+
+    #[test]
+    fn name_reg2_carries_schema_version_one() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        let name = s(&env, "nova");
+        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &name);
+
+        let events = env.events().all();
+        let reg2_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(_, t, _)| {
+                let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &t.get(0).unwrap());
+                sym.map(|s| s == symbol_short!("name_reg2")).unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(reg2_events.len(), 1, "exactly one name_reg2 event");
+
+        let (_, topics, data) = reg2_events[0].clone();
+        assert_eq!(topics.len(), 2);
+        let t1: u32 = TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+        assert_eq!(t1, talos_id);
+        // data = (version: u32, name: String, owner: Address)
+        let (version, ev_name, ev_owner): (u32, String, Address) =
+            TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(version, 1u32, "name_reg2 schema version must be 1");
+        assert_eq!(ev_name, name);
+        assert_eq!(ev_owner, owner);
+    }
+
+    #[test]
+    fn name_reg_precedes_name_reg2() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &s(&env, "atlas"));
+
+        let events = env.events().all();
+        let mut reg_idx: Option<u32> = None;
+        let mut reg2_idx: Option<u32> = None;
+        for i in 0..events.len() {
+            let (_, topics, _) = events.get(i).unwrap();
+            let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &topics.get(0).unwrap());
+            if let Ok(sym) = sym {
+                if sym == symbol_short!("name_reg")  { reg_idx  = Some(i); }
+                if sym == symbol_short!("name_reg2") { reg2_idx = Some(i); }
+            }
+        }
+        let ri  = reg_idx.expect("name_reg must be emitted");
+        let r2i = reg2_idx.expect("name_reg2 must be emitted");
+        assert!(ri < r2i, "name_reg ({ri}) must precede name_reg2 ({r2i})");
+    }
+
+    #[test]
+    fn name_reg_event_carries_canonical_name_for_uppercase_input() {
+        // Even when caller passes "VEGA", name_reg event data[0] must be "vega".
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+
+        let upper = s(&env, "VEGA");
+        client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, upper.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .register_name(&owner, &talos_id, &upper);
+
+        for (_, topics, data) in env.events().all().iter() {
+            let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &topics.get(0).unwrap());
+            if let Ok(sym) = sym {
+                if sym == symbol_short!("name_reg") {
+                    let (ev_name, _): (String, Address) = TryFromVal::try_from_val(&env, &data).unwrap();
+                    assert_eq!(ev_name, s(&env, "vega"), "event name must be canonical lowercase");
+                    return;
+                }
+            }
+        }
+        panic!("name_reg not found");
+    }
+
+    #[test]
+    fn no_event_on_invalid_name() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+
+        let bad = s(&env, "bad--name");
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, bad.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &bad);
+        assert!(res.is_err(), "consecutive-hyphen name must be rejected");
+
+        for (_, topics, _) in env.events().all().iter() {
+            let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &topics.get(0).unwrap());
+            if let Ok(sym) = sym {
+                assert_ne!(sym, symbol_short!("name_reg"),  "must not emit name_reg on rejection");
+                assert_ne!(sym, symbol_short!("name_reg2"), "must not emit name_reg2 on rejection");
+            }
+        }
+    }
+
+    #[test]
+    fn no_event_on_duplicate_name() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &s(&env, "vega"));
+        let events_before = env.events().all().len();
+
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, s(&env, "vega")).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &s(&env, "vega"));
+        assert!(res.is_err(), "duplicate must be rejected");
+        assert_eq!(env.events().all().len(), events_before, "no new events on duplicate");
+    }
+
+    #[test]
+    fn name_reg_emitted_for_min_length_name() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &s(&env, "abc"));
+
+        let found = env.events().all().iter().any(|(_, t, _)| {
+            let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &t.get(0).unwrap());
+            sym.map(|s| s == symbol_short!("name_reg")).unwrap_or(false)
+        });
+        assert!(found, "name_reg must be emitted for 3-char (min) name");
+    }
+
+    #[test]
+    fn name_reg_emitted_for_max_length_name() {
+        let (env, registry_contract, contract_id, _, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let pw = Address::generate(&env);
+        let talos_id = create_talos_with_auth(&env, &registry_client, &registry_contract, &owner, &pw);
+        let max_name = s(&env, "abcdefghijklmnopqrstuvwxyz123456"); // 32 chars
+        register_name_with_auth(&env, &client, &contract_id, &registry_contract, &owner, talos_id, &max_name);
+
+        let found = env.events().all().iter().any(|(_, t, _)| {
+            let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &t.get(0).unwrap());
+            sym.map(|s| s == symbol_short!("name_reg")).unwrap_or(false)
+        });
+        assert!(found, "name_reg must be emitted for 32-char (max) name");
     }
 }

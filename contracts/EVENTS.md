@@ -1,6 +1,6 @@
 # Talos Contract Event Indexing Specification
 
-**Spec version:** 1.2.0
+**Spec version:** 1.3.0
 **Applies to:** talos_registry, talos_governance, talos_name_service, talos_dividends
 
 ## 1. Event envelope
@@ -59,6 +59,7 @@ is idempotent per cursor (see §4).
 | (`tls_crt`, creator: Address) | (talos_id: u32, name: String, category: String) | new Talos registered |
 | (`tls_crt2`, creator: Address) | (version: u32, talos_id: u32, name: String, category: String) | new Talos registered (v2) |
 | (`pat_upd`, talos_id: u32) | (creator_addr: Address, creator_share: u32, investor_share: u32) | patron split changed |
+| (`meta_upd`, talos_id: u32) | (name: String, category: String, description: String) | creator metadata fields updated (added v1.5.0) |
 | (`fee_chg`,) | (old_bps: u32, new_bps: u32) | protocol fee changed |
 | (`adm_prp`,) | (current: Address, proposed: Address) | admin transfer proposed |
 | (`adm_acc`,) | (new_admin: Address,) | admin transfer accepted |
@@ -74,6 +75,9 @@ is idempotent per cursor (see §4).
 | (`prop_crt`, proposal_id: u32) | (talos_id: u32, proposer: Address) |
 | (`vote`, proposal_id: u32) | (voter: Address, choice: VoteChoice, weight: i128) |
 | (`prop_stat`, proposal_id: u32) | status: ProposalStatus |
+| (`qrm_rchd`, proposal_id: u32) | (proposal_id: u32, votes_cast: i128, quorum_threshold: i128, approval_bps: i128) |
+
+`qrm_rchd` is emitted **at most once** per proposal, on the first vote that brings `votes_cast` to or above `quorum_threshold`. A `DataKey::QuorumReached(proposal_id)` sentinel prevents re-emission for subsequent votes.
 
 ### talos_name_service
 | topics | data |
@@ -82,12 +86,33 @@ is idempotent per cursor (see §4).
 | (`name_reg2`, talos_id: u32) | (version: u32, name: String, owner: Address) |
 | (`reg_upd`,) | (old_registry: Address, new_registry: Address) |
 | (`tl_sch`/`tl_exec`/`tl_cnl`/`tl_cfg`) | same shape as registry timelock events |
+| (`pause_on`, domain: PauseDomain) | (actor: Address, expires_at: u64) |
+| (`pause_off`, domain: PauseDomain) | (actor: Address,) |
+| (`guard_add`,) | (guardian: Address,) |
+| (`guard_rem`,) | (guardian: Address,) |
+| (`name_fee`, talos_id: u32) | (payer: Address, asset: Address, fee: i128) |
+| (`dep_path`,) | (deprecated: String, replacement: String) |
+
+**`pause_on` semantics:**
+- `domain` identifies the paused write path (`NameRegistration`).
+- `expires_at` is the Unix timestamp when the pause automatically lifts.
+  A value of `0` means the pause is indefinite (only settable by the admin).
+  Privacy-safe: no caller transaction hash or secret data is included.
+
+**Pause expiry rules (enforced on-chain, #597):**
+- Admin can set `expires_at = 0` (indefinite) or `> 0` up to `MAX_ADMIN_PAUSE_SECS` (30 days).
+- Guardian can only pause for `1 .. MAX_GUARDIAN_PAUSE_SECS` (7 days) — duration = 0 is rejected.
+- A guardian cannot overwrite an admin-set pause (`DomainLockedByAdmin` error).
+- Pauses are lazily expired: `is_paused` / `pause_info` treat an expired record as inactive
+  without removing it from storage; explicit `unpause` removes the record and emits `pause_off`.
+- `pause_off` is only emitted on an explicit admin `unpause` call, not on lazy expiry.
 
 ### talos_dividends
 | topics | data |
 |---|---|
 | (`ep_cmt`, talos_id: u32) | (epoch_id: u64, total: i128, expiry_secs: u64) |
 | (`div_clm`, epoch_id: u64, patron: Address) | (talos_id: u32, amount: i128, role: PatronRole) |
+| (`div_dst`, epoch_id: u64) | (talos_id: u32, dust: i128) |
 | (`ep_rcv`, epoch_id: u64) | (talos_id: u32, recovered: i128, admin: Address) |
 
 `VoteChoice` is `{ Approve | Reject }`; `ProposalStatus` is

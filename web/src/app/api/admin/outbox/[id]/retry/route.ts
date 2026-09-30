@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { verifyAdminKey } from "@/lib/admin-auth";
 import { getEvent, requeue } from "@/lib/outbox";
@@ -6,7 +7,7 @@ import { getEvent, requeue } from "@/lib/outbox";
 // attempts to 0, clears lastError, sets runAt to now. 409 if the event
 // isn't in dead_letter (only terminal-failure state is eligible, so this
 // can't be used to re-dispatch an event that already succeeded).
-export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+async function _POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const auth = verifyAdminKey(request);
   if (!auth.ok) return auth.response;
 
@@ -24,3 +25,5 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);

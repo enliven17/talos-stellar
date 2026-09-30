@@ -52,3 +52,16 @@ jobs:
       # COVERAGE_FLOORS table (single source of truth).
       - name: Coverage gate
         run: uv run python scripts/check-coverage.py coverage.json
+
+      # Per-function p99 latency ceilings for synchronous hot paths (issue #645).
+      # Thresholds live in scripts/check-perf-budget.py PERF_BUDGET table
+      # (single source of truth). Uses --samples 50 --warmup 5 for a fast but
+      # meaningful CI pass; run locally with --samples 500 for higher precision.
+      # Fails closed: any p99 that exceeds its ceiling causes the step to fail.
+      - name: Performance budget gate
+        run: uv run python scripts/check-perf-budget.py --samples 50 --warmup 5 --quiet
+        env:
+          # Disable OTEL/Sentry so the perf budget measures pure hot-path code
+          # without any telemetry side effects.
+          OTEL_ENABLED: "false"
+          SENTRY_DSN: ""

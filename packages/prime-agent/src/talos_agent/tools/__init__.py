@@ -8,6 +8,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
 MAX_TOOL_TIMEOUT_SECONDS = 300.0
 
+#: Tool names that execute planner logic — used by callers to decide
+#: whether a ``CancelledError`` should be recorded as a planner cancellation.
+PLANNER_TOOL_NAMES: frozenset[str] = frozenset(
+    {"compose_a2a_plan", "plan_purchase", "normalize_providers"}
+)
+
 ToolTimeoutResult = namedtuple('ToolTimeoutResult', ['timeout', 'elapsed', 'timed_out'])
 
 

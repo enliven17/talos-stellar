@@ -39,6 +39,7 @@ const context = {
   // is allowed to use; `process` is shimmed inside the bundle itself (see
   // scripts/bundle-browser.mjs) and must NOT be provided here.
   window: windowLike,
+  self: windowLike,
   globalThis: globalThisLike,
   self: windowLike,
   TextEncoder,

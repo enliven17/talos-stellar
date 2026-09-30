@@ -25,6 +25,22 @@ describe("checkThresholds", () => {
     expect(violations).toHaveLength(0);
   });
 
+  it("uses the configured web performance regression budget for mean and p99 latency", () => {
+    const strictConfig: BenchmarkConfig = {
+      ...defaultConfig,
+      performanceBudgetMs: 150,
+      p99ThresholdMs: 250,
+    };
+
+    const violations = checkThresholds(
+      { variance: 0.05, meanMs: 300, p99: 400, peakMemoryMb: 100, peakCpuPercent: 30, failureRate: 0 },
+      loadThresholdRules(strictConfig),
+    );
+
+    expect(violations.some((v) => v.metric === "meanDurationMs" && v.severity === "fail")).toBe(true);
+    expect(violations.some((v) => v.metric === "p99" && v.severity === "fail")).toBe(true);
+  });
+
   it("detects variance warning", () => {
     const violations = checkThresholds(
       { variance: 0.3, meanMs: 100, p99: 200, peakMemoryMb: 100, peakCpuPercent: 30, failureRate: 0 },

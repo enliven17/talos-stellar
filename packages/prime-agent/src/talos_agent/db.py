@@ -294,6 +294,76 @@ CREATE INDEX IF NOT EXISTS idx_completion_markers_expires_at
     ),
     (
         10,
+        # Secret rotation tables (re-homed after checkpoint migrations claimed 7-9)
+        # plus named rollback checkpoints for safe rotation recovery.
+        """
+CREATE TABLE IF NOT EXISTS secret_versions (
+    scope           TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    version         INTEGER NOT NULL,
+    ciphertext      TEXT NOT NULL,
+    key_id          TEXT NOT NULL,
+    status          TEXT NOT NULL CHECK (status IN ('staged', 'active', 'superseded', 'revoked')),
+    request_id      TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    activated_at    TEXT,
+    revoked_at      TEXT,
+    PRIMARY KEY (scope, name, version),
+    UNIQUE (scope, name, request_id)
+);
+
+CREATE TABLE IF NOT EXISTS secret_heads (
+    scope             TEXT NOT NULL,
+    name              TEXT NOT NULL,
+    active_version    INTEGER NOT NULL,
+    previous_version  INTEGER,
+    generation        INTEGER NOT NULL DEFAULT 1,
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (scope, name)
+);
+
+CREATE TABLE IF NOT EXISTS secret_audit_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id    TEXT NOT NULL UNIQUE,
+    scope       TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    version     INTEGER,
+    event_type  TEXT NOT NULL,
+    outcome     TEXT NOT NULL,
+    actor       TEXT NOT NULL,
+    reason      TEXT,
+    metadata    TEXT NOT NULL DEFAULT '{}',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS secret_rollback_checkpoints (
+    scope              TEXT NOT NULL,
+    name               TEXT NOT NULL,
+    checkpoint_id      TEXT NOT NULL,
+    active_version     INTEGER NOT NULL,
+    previous_version   INTEGER,
+    generation         INTEGER NOT NULL,
+    request_id         TEXT NOT NULL,
+    actor              TEXT NOT NULL,
+    reason             TEXT,
+    status             TEXT NOT NULL CHECK (status IN ('open', 'restored', 'discarded')),
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    restored_at        TEXT,
+    discarded_at       TEXT,
+    PRIMARY KEY (scope, name, checkpoint_id),
+    UNIQUE (scope, name, request_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_secret_versions_status
+    ON secret_versions(scope, name, status);
+CREATE INDEX IF NOT EXISTS idx_secret_audit_lookup
+    ON secret_audit_events(scope, name, id);
+CREATE INDEX IF NOT EXISTS idx_secret_checkpoints_status
+    ON secret_rollback_checkpoints(scope, name, status);
+        """,
+    ),
+    (
+        11,
         # Restore durable job inbox/outbox if an earlier migration collision
         # dropped them, and add an append-only audit trail for effect replay.
         """
@@ -410,6 +480,53 @@ CREATE INDEX IF NOT EXISTS idx_telegram_send_queue_state
     ON telegram_send_queue(state, id);
 CREATE INDEX IF NOT EXISTS idx_telegram_send_queue_attempts
     ON telegram_send_queue(chat_id, last_attempt_at);
+        """,
+    ),
+    (
+        12,
+        # Capability-sandbox adapter invocation records (idempotency + leases)
+        # and deterministic replay sessions for incident analysis.
+        # Both were lost to a migration-collision splice and are restored here.
+        """
+CREATE TABLE IF NOT EXISTS adapter_invocations (
+    operation_id       TEXT PRIMARY KEY,
+    adapter_name       TEXT NOT NULL,
+    operation          TEXT NOT NULL,
+    input_digest       TEXT NOT NULL,
+    state              TEXT NOT NULL CHECK (
+        state IN ('running', 'succeeded', 'failed', 'indeterminate')
+    ),
+    owner_id           TEXT NOT NULL,
+    lease_expires_at   TEXT NOT NULL,
+    attempt_count      INTEGER NOT NULL DEFAULT 1,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_adapter_invocations_state_lease
+    ON adapter_invocations(state, lease_expires_at);
+
+CREATE TABLE IF NOT EXISTS replay_sessions (
+    session_id    TEXT PRIMARY KEY,
+    talos_id      TEXT NOT NULL,
+    agent_version TEXT NOT NULL,
+    started_at    TEXT NOT NULL,
+    ended_at      TEXT,
+    status        TEXT NOT NULL DEFAULT 'recording',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS replay_events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT NOT NULL REFERENCES replay_sessions(session_id),
+    event_id     TEXT NOT NULL UNIQUE,
+    event_type   TEXT NOT NULL,
+    payload      TEXT NOT NULL,
+    redacted     INTEGER NOT NULL DEFAULT 0,
+    recorded_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_events_session ON replay_events(session_id);
         """,
     ),
 ]
@@ -1011,6 +1128,22 @@ class LocalDB:
         )
         self._conn.commit()
 
+    def save_retry_state(
+        self,
+        task_name: str,
+        *,
+        attempt_count: int,
+        next_attempt_at: datetime | None,
+        terminal: bool = False,
+    ) -> None:
+        """Keyword-alias for :meth:`upsert_retry_state` (optional next_attempt_at)."""
+        self.upsert_retry_state(
+            task_name,
+            attempt_count,
+            next_attempt_at or datetime.now(timezone.utc),
+            terminal,
+        )
+
     def get_retry_state(self, task_name: str) -> dict | None:
         """Return the persisted retry state for a task, or None if absent.
 
@@ -1188,12 +1321,40 @@ class LocalDB:
         return [dict(r) for r in rows]
 
     def prune_expired_completion_markers(self) -> int:
-        """Delete expired completion markers. Returns the number of rows removed."""
-        cursor = self._conn.execute(
-            "DELETE FROM completion_markers WHERE expires_at <= datetime('now')"
-        )
-        self._conn.commit()
-        return cursor.rowcount
+        """Delete expired completion markers. Returns the number of rows removed.
+
+        Only rows with a parseable ISO-8601 ``expires_at`` that is at or before
+        the current UTC time are pruned. Malformed or NULL timestamps are left
+        untouched so the sweep is safe and non-destructive for invalid data.
+        """
+        rows = self._conn.execute(
+            "SELECT id, expires_at FROM completion_markers"
+        ).fetchall()
+        expired_ids: list[int] = []
+        now = datetime.now(timezone.utc)
+
+        for row in rows:
+            expires_at = row["expires_at"]
+            if not expires_at:
+                continue
+            try:
+                expires_dt = datetime.fromisoformat(expires_at)
+                if expires_dt.tzinfo is None:
+                    expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                continue
+
+            if expires_dt <= now:
+                expired_ids.append(int(row["id"]))
+
+        if expired_ids:
+            self._conn.executemany(
+                "DELETE FROM completion_markers WHERE id = ?",
+                [(marker_id,) for marker_id in expired_ids],
+            )
+            self._conn.commit()
+
+        return len(expired_ids)
 
     # ── WAL health ─────────────────────────────────────────
 

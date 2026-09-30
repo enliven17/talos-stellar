@@ -408,6 +408,7 @@ working — new behavior is purely additive.
 | Status | Type | Code | Retryable | Extra fields |
 | --- | --- | --- | --- | --- |
 | 400 | `TalosValidationError` | `validation_error` | no | `issues: string[]` |
+| 422 | `TalosValidationError` | `validation_error` | no | `issues: string[]` |
 | 401 | `TalosAuthenticationError` | `authentication_error` | no | — |
 | 402 | `TalosPaymentError` | `payment_error` | no | `challenge?: { price, payee, token, … }` |
 | 403 | `TalosForbiddenError` | `forbidden` | no | — |
@@ -422,6 +423,14 @@ working — new behavior is purely additive.
 Every error also exposes:
 
 - `code` — stable string discriminator for `switch` / table look-ups.
+- `apiCode?` — the server's original machine-readable envelope code (for
+  example, `VALIDATION_ERROR`); distinct from the SDK's lowercase `code`.
+- `apiMessage` — the safe envelope `message` (or `error`) value. For malformed
+  and non-JSON bodies, this is a generic status-based fallback.
+- `validationDetails` — validation issue strings on every API error; the
+  `TalosValidationError.issues` field remains available as a compatible alias.
+- `status`, `requestId?`, and `headers` — HTTP status, correlation ID, and the
+  existing allowlisted response-header snapshot used for retry decisions.
 - `isRetryable` — hint to the caller.
 - `retryAfterMs?` — server-supplied retry hint, already in milliseconds.
   Populated from the `Retry-After` response header whenever it is present,
@@ -563,6 +572,10 @@ This version is **fully backward-compatible**:
 - All previous public APIs keep their signatures and return types.
 - `TalosAPIError` still has the `(status, body, path)` constructor — old
   `catch (e) { if (e instanceof TalosAPIError) … }` blocks keep working.
+- The existing `Error.message`, `body`, and SDK `code` discriminator retain
+  their prior behavior. Read the new `apiMessage` and `apiCode` fields for the
+  corresponding server-envelope values; `requestId`, retry headers, and
+  `TalosValidationError.issues` remain supported.
 - New fields (`code`, `isRetryable`, `retryAfterMs`, `requestId`, `headers`,
   `data`) are additive.
 - `retryAfterMs` is now populated for every error status that carries a

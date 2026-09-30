@@ -62,7 +62,19 @@ Every API response includes:
 | `X-RateLimit-Limit` | Quota for this bucket |
 | `X-RateLimit-Remaining` | Remaining requests in the current window |
 | `X-RateLimit-Reset` | Unix timestamp (seconds) when the window resets |
+| `X-RateLimit-Policy` | Which bucket applies to this request: `auth`, `read`, `write-key`, or `write-ip` |
 | `Retry-After` | Seconds until the client may retry (429 responses only) |
+
+### Policy values
+
+| Value | Routes | Default limit | Window |
+|---|---|---|---|
+| `auth` | Paths ending in `/me`, containing `check-name` or `regenerate-key` | 20 req | 60 s |
+| `read` | All GET requests | 100 req | 60 s |
+| `write-key` | POST/mutating requests with a Bearer API key | 30 req | 60 s |
+| `write-ip` | POST/mutating requests without a Bearer key | 30 req | 60 s |
+
+Clients can use `X-RateLimit-Policy` to determine which quota bucket applies without inspecting the request path. For example, a client that rotates between different endpoint types can track separate counters per policy value.
 
 ---
 
@@ -151,6 +163,30 @@ curl -i http://localhost:3000/api/talos  # after exceeding limit
 # HTTP/1.1 429
 # Retry-After: 58
 # X-RateLimit-Remaining: 0
+# X-RateLimit-Policy: read
+```
+
+### Verify X-RateLimit-Policy on a normal request
+
+```bash
+# GET → read bucket
+curl -si http://localhost:3000/api/talos | grep -i x-ratelimit
+# X-RateLimit-Limit: 100
+# X-RateLimit-Remaining: 99
+# X-RateLimit-Reset: 1234567890
+# X-RateLimit-Policy: read
+
+# Authenticated POST → write-key bucket
+curl -si -X POST http://localhost:3000/api/talos \
+  -H "Authorization: Bearer tak_yourkey" \
+  -H "Content-Type: application/json" \
+  -d '{}' | grep -i x-ratelimit
+# X-RateLimit-Policy: write-key
+
+# Auth route → auth bucket
+curl -si http://localhost:3000/api/talos/me \
+  -H "Authorization: Bearer tak_yourkey" | grep -i x-ratelimit
+# X-RateLimit-Policy: auth
 ```
 
 ---

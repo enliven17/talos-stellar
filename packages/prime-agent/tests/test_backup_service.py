@@ -273,7 +273,8 @@ def test_stream_encrypted_artifact_roundtrip(tmp_path: Path):
     written = stream_encrypted_artifact(encrypted, out, chunk_size=1024)
     assert out.exists()
     assert written == len(encrypted)
-    assert decrypt_with_password(out.read_text(encoding="utf8"), "stream-pass-ok") == payload
+    # decrypt_with_password returns bytes (see crypto.decrypt_with_password).
+    assert decrypt_with_password(out.read_text(encoding="utf8"), "stream-pass-ok").decode() == payload
 
 
 def test_stream_encrypted_artifact_rejects_tiny_chunk(tmp_path: Path):

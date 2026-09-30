@@ -537,4 +537,3 @@ class PolicyEngine:
         ``await``.
         """
         return self.evaluate(spec)
-"
