@@ -100,6 +100,13 @@
       ]
     },
     {
+      "name": "reportJobProgress",
+      "file": "reportJobProgress.json",
+      "routes": [
+        "POST /api/jobs/:id/progress"
+      ]
+    },
+    {
       "name": "reportRevenue",
       "file": "reportRevenue.json",
       "routes": [

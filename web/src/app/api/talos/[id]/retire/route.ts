@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos } from "@/db/schema";
@@ -6,7 +7,7 @@ import { retireAgentSchema, parseBody } from "@/lib/schemas";
 
 // POST /api/talos/:id/retire - Retire an agent (preserves history, prevents reuse)
 // Requires Stellar ED25519 signature proof of wallet ownership.
-export async function POST(
+async function _POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -109,3 +110,5 @@ export async function POST(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);

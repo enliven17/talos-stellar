@@ -9,6 +9,9 @@ on:
       - 'web/drizzle.config.ts'
       - 'web/package.json'
       - 'web/pnpm-lock.yaml'
+      - 'scripts/check-migration-drift.mjs'
+      - 'scripts/check-migration-drift.test.sh'
+      - 'package.json'
       - '.github/workflows/web-migrations-ci.yml'
   push:
     branches: [main]
@@ -18,6 +21,9 @@ on:
       - 'web/drizzle.config.ts'
       - 'web/package.json'
       - 'web/pnpm-lock.yaml'
+      - 'scripts/check-migration-drift.mjs'
+      - 'scripts/check-migration-drift.test.sh'
+      - 'package.json'
       - '.github/workflows/web-migrations-ci.yml'
 
 permissions:
@@ -54,6 +60,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+
+      - name: Migration drift gate (offline structural)
+        working-directory: ${{ github.workspace }}
+        run: |
+          node scripts/check-migration-drift.mjs
+          bash scripts/check-migration-drift.test.sh
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4

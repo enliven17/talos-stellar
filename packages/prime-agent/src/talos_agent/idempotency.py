@@ -7,8 +7,12 @@ across different agents.
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 IDEMPOTENCY_KEY_MAX_BYTES: int = 128
 
@@ -79,3 +83,50 @@ class IdempotencyConflictError(Exception):
             f'Idempotency key "{key}" was reused with a different payload on {path}. '
             f"Generate a new key for a different request. Server said: {body}"
         )
+
+
+def sanitize_idempotency_key(key: str) -> str:
+    """Sanitize an idempotency key for safe logging or debugging.
+
+    Returns the key unchanged if it is a valid UUID v4. Otherwise, returns
+    a masked version to prevent leaking sensitive data in logs.
+
+    Args:
+        key: The idempotency key to sanitize.
+
+    Returns:
+        The sanitized key string.
+    """
+    if is_uuid_v4(key):
+        return key
+    # Mask non-UUID keys to prevent leaking sensitive identifiers
+    if len(key) <= 8:
+        return "***"
+    return key[:4] + "***" + key[-4:]
+
+
+def log_idempotency_event(
+    event_type: str,
+    key: str,
+    path: str,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Log an idempotency-related event safely.
+
+    Ensures that sensitive data is never logged by sanitizing the key.
+
+    Args:
+        event_type: The type of event (e.g., 'write', 'conflict', 'validate').
+        key: The idempotency key involved.
+        path: The storage path or endpoint involved.
+        extra: Additional context to include in the log.
+    """
+    safe_key = sanitize_idempotency_key(key)
+    log_data = {
+        "event_type": event_type,
+        "key": safe_key,
+        "path": path,
+    }
+    if extra:
+        log_data.update(extra)
+    logger.info("Idempotency event: %s", log_data)

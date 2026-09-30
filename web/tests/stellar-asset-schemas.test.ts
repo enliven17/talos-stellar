@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { Keypair } from "@stellar/stellar-sdk";
 import {
   stellarAssetSchema,
   signPaymentSchema,
@@ -156,10 +157,8 @@ describe("stellarAssetSchema", () => {
 
     it("rejects issuer that starts with S (seed key, not public)", () => {
       // S... keys have version byte 0xb0; should be rejected for issuer use
-      const sdk = require("@stellar/stellar-sdk");
-      const secret = "SAZJ3JF6V5XVNELUCA7LMKUPE7LH6QV4YV4YV4YV4YV4YV4YV4YV";
       // Build a valid-format secret key with correct checksum
-      const kp = sdk.Keypair.random();
+      const kp = Keypair.random();
       const seed = kp.secret(); // starts with S
       expect(
         stellarAssetSchema.safeParse({

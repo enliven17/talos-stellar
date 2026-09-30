@@ -1,0 +1,86 @@
+name: Nightly Property Tests
+
+# Schedules property-based suites over existing devx primitives (datasets,
+# metrics, thresholds, schedule config) every night and on demand.
+# Fail-closed: malformed schedule config / empty event names exit non-zero.
+#
+# Local reproduction:
+#   pnpm --dir web test:property
+#   pnpm --dir web property:nightly
+#   PROPERTY_TEST_ITERATIONS=50 PROPERTY_TEST_SEED=7 pnpm --dir web property:nightly
+
+on:
+  schedule:
+    # 05:27 UTC nightly — matches DEFAULT_PROPERTY_CRON in property-schedule.ts
+    - cron: "27 5 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "web/src/area/devx/**"
+      - "web/package.json"
+      - ".github/workflows/property-tests-nightly.yml"
+  push:
+    branches: [main]
+    paths:
+      - "web/src/area/devx/**"
+      - "web/package.json"
+      - ".github/workflows/property-tests-nightly.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: property-tests-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  property-tests:
+    name: Nightly property suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Focused property schedule unit tests
+        working-directory: web
+        run: pnpm test:property
+
+      - name: Run property suites (nightly schedule config)
+        working-directory: web
+        env:
+          CI: "true"
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          PROPERTY_TEST_ITERATIONS: "100"
+          PROPERTY_TEST_FAIL_CLOSED: "true"
+          PROPERTY_ARTIFACT_DIR: ".property-artifacts"
+          # Never pass secrets into the property runner.
+        run: pnpm property:nightly
+
+      - name: Upload property artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: property-artifacts
+          path: web/.property-artifacts/
+          retention-days: 30
+          if-no-files-found: warn

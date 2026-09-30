@@ -38,13 +38,19 @@ function authedRequest(key: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.mockDb.select.mockReturnValue(mockSelectChain([{ id: "talos_1", apiKey: "correct-key" }]));
+  // 1st select: TALOS row (legacy key), 2nd select: no matching scoped key.
+  mocks.mockDb.select
+    .mockReturnValueOnce(mockSelectChain([{ id: "talos_1", legacyApiKey: "correct-key" }]))
+    .mockReturnValue(mockSelectChain([]));
   mocks.mockDb.insert.mockReturnValue({ values: vi.fn().mockResolvedValue(undefined) });
 });
 
 describe("auth.ts audit log — JOBS_ENABLED=false (default)", () => {
   it("writes the audit log via a direct DB insert, not the job queue", async () => {
     mocks.jobsConfig.enabled = false;
+    // The hash-chained writer (on by default) goes through a transaction;
+    // disable it so the plain direct-insert path is what's exercised.
+    vi.stubEnv("AUDIT_HASH_CHAIN_ENABLED", "false");
 
     const result = await verifyAgentApiKey(authedRequest("correct-key"), "talos_1");
     expect(result.ok).toBe(true);
@@ -54,6 +60,7 @@ describe("auth.ts audit log — JOBS_ENABLED=false (default)", () => {
 
     expect(mocks.mockDb.insert).toHaveBeenCalledTimes(1);
     expect(mocks.enqueue).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
   });
 });
 

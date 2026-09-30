@@ -15,6 +15,7 @@ Install these before you start working locally:
 - `uv`
 - Rust stable toolchain and `cargo`
 - Soroban CLI, installed as `stellar` via `cargo install --locked stellar-cli --features opt`
+- [`gitleaks`](https://github.com/gitleaks/gitleaks) secret scanner — `brew install gitleaks`, or download a binary from the [releases page](https://github.com/gitleaks/gitleaks/releases) (required for `pnpm run secrets:check`)
 
 For the Rust contracts, also add the Wasm target:
 
@@ -45,6 +46,16 @@ Install the workspace dependencies from the repository root:
 ```bash
 pnpm install
 ```
+Generate the dependency license report from the installed workspace graph:
+
+```bash
+pnpm licenses:report
+```
+
+The command writes `dist/licenses/dependency-licenses.json` and
+`dist/licenses/dependency-licenses.md`. It fails closed when pnpm cannot read
+the dependency graph or any dependency has missing or ambiguous license
+metadata. The generated directory is a CI artifact and should not be committed.
 
 If you only need the web app, you can still work from the root with `pnpm dev` because the root package forwards to `web/`.
 
@@ -143,11 +154,65 @@ pnpm stack:down
 pnpm stack:reset
 ```
 
+`pnpm stack:reset` destroys the stack volumes and re-imports everything. To clear
+local test data without recreating the stack, use the safe reset instead:
+
+```bash
+pnpm stack:reset-data --dry-run    # preview the tables and row counts
+pnpm stack:reset-data --yes        # truncate local test data
+pnpm stack:reset-data --yes --seed # truncate, then re-run db:seed
+```
+
+It only ever targets a loopback database, requires `--yes` to destroy anything,
+and never logs credentials. See
+[docs/local-test-data-reset.md](./docs/local-test-data-reset.md) for the full
+behavior contract. Regression tests for the shell layer: `bash scripts/local-stack.test.sh`.
+
 The stack defaults to the web service and a mock Stellar provider. Add the optional prime-agent service with:
 
 ```bash
 docker compose --profile agent up -d prime-agent
 ```
+
+#### Deterministic smoke fixture
+
+The local stack's expected shape — ports, health endpoints, and mock marketplace
+agents — is captured in a deterministic fixture at
+`web/tests/fixtures/smoke-fixture.json`. Regenerating it is byte-stable (no
+timestamps, randomness, or network): every run on any machine produces identical
+output, so diffs in review are meaningful.
+
+The exact local command to verify the fixture is canonical and drift-free:
+
+```bash
+pnpm smoke:fixture:check
+```
+
+To regenerate it after intentionally changing the fixture definition in
+`scripts/smoke-fixture.lib.mjs`:
+
+```bash
+pnpm smoke:fixture:gen
+```
+
+Focused tests (positive, negative, boundary, regression, and privacy coverage):
+
+```bash
+pnpm --dir web exec vitest run tests/smoke-fixture.unit.test.ts
+```
+
+Behavior notes:
+
+- **Fail closed** — ambiguous, malformed, or secret-shaped input aborts with a
+  non-zero exit and an explicit, privacy-safe error. Field names that look like
+  secrets (`secret`, `seed`, `private key`, `password`, `api key`, `proof`, …)
+  are rejected outright and their values are never logged or returned.
+- **Placeholder data only** — the fixture never contains real keys, seeds, or
+  payment proofs; agent addresses are deterministic truncated placeholders in
+  the same style as the demo seed.
+- **CI** — `pnpm smoke:fixture:check` is safe to wire into any workflow step;
+  it exits `0` when the committed fixture matches the canonical output and `1`
+  with a regeneration hint otherwise.
 
 ### Web
 
@@ -238,9 +303,10 @@ Choose the focused command by area:
 | `web/drizzle/**`, `web/src/db/**`, `web/drizzle.config.ts` | `pnpm --dir web run db:migrate`, then the specific DB test with `pnpm --dir web exec vitest run tests/<name>.test.ts` | `Web Migrations CI` |
 | `web/src/area/devx/**` | `pnpm --dir web exec vitest run src/area/devx/__tests__/runner.test.ts` | `Benchmark CI - regression gates` |
 | API route or library unit tests | `pnpm --dir web exec vitest run tests/<name>.test.ts` | `Deploy Web -> Vercel` |
-| Backup or restore paths | `pnpm --dir web exec vitest run tests/backup-crypto.test.ts tests/backup-types.test.ts` | `Web Backups CI` |
+| Local test-data reset (`web/src/lib/local-test-data-reset.ts`, `web/src/db/reset-test-data.ts`, `scripts/local-stack.sh`) | `pnpm --dir web exec vitest run tests/local-test-data-reset.unit.test.ts; bash scripts/local-stack.test.sh` | `Deploy Web -> Vercel` |
+| Backup or restore paths | `pnpm --dir web exec vitest run tests/backup-restore-fixture.test.ts tests/backup-crypto.test.ts tests/backup-types.test.ts` | `Web Backups CI` |
 
-Use `pnpm --dir web run test:e2e` only when API route behavior depends on the running app or cross-route state. Use the local stack with `pnpm stack:up` when you need Postgres plus the mock Stellar provider, and clean it up with `pnpm stack:down`. Do not use `pnpm stack:reset` unless you intentionally want to destroy and recreate local stack data.
+Use `pnpm --dir web run test:e2e` only when API route behavior depends on the running app or cross-route state. Use the local stack with `pnpm stack:up` when you need Postgres plus the mock Stellar provider, and clean it up with `pnpm stack:down`. Do not use `pnpm stack:reset` unless you intentionally want to destroy and recreate local stack data; `pnpm stack:reset-data` clears test rows without touching the stack volumes.
 
 ### SDK changes
 
@@ -340,6 +406,26 @@ Choose the focused command by area:
 
 Deploy commands such as `pnpm --dir contracts run deploy:testnet` and `./deploy.sh testnet` require configured Stellar credentials and network access. Treat failures from missing signers, RPC timeouts, Horizon rate limits, or Soroban testnet availability as deployment-environment issues unless local `cargo test` or Wasm build also fails.
 
+### Runbook changes
+
+Any `*RUNBOOK*.md` (for example [`docs/DR_RUNBOOK.md`](./docs/DR_RUNBOOK.md)) is validated for
+required sections (triggers, verification, recovery, troubleshooting) and for referenced files and
+commands actually existing. See [`OBSERVABILITY.md`](./OBSERVABILITY.md) for the monitoring signals
+those runbooks respond to.
+
+```bash
+node scripts/validate-runbooks.mjs .
+node --test scripts/validate-runbooks.test.mjs
+```
+
+| Changed files | Focused command | CI workflow |
+| --- | --- | --- |
+| `docs/*RUNBOOK*.md`, `*RUNBOOK*.md`, `OBSERVABILITY.md` | `node scripts/validate-runbooks.mjs .` | `Runbook Validation CI` |
+
+The validator fails closed: a runbook missing a required section, a referenced file that no longer
+exists, an unresolvable `pnpm --dir`/`pnpm --filter` script, or an unknown `uv run` binary are all
+errors, and finding zero runbooks at all is treated as an error rather than silently passing.
+
 ### Common failure messages
 
 | Message | Usually means | Next step |
@@ -353,6 +439,14 @@ Deploy commands such as `pnpm --dir contracts run deploy:testnet` and `./deploy.
 | `Browser bundle not built` or missing `packages/sdk/dist/browser/sdk.bundle.js` | SDK build did not produce the expected browser artifact | Run `pnpm --filter @talos-protocol/sdk run build:browser` or the full SDK build. |
 | `ruff` violations | Python formatting or lint rule failures | Run `uv run ruff check src tests` in `packages/prime-agent/` and fix the reported files. |
 | `wasm32-unknown-unknown` target not installed | Rust cannot build Soroban Wasm artifacts | Run `rustup target add wasm32-unknown-unknown`. |
+| `gitleaks is not installed` | The secret scanner is missing from PATH | Install gitleaks (see Prerequisites) and re-run `pnpm run secrets:check`. |
+| `secret-scan: FAILED` with `file:line:rule` | A staged change contains a detected secret | Remove the secret and load it from the environment/secrets manager. Sanctioned false positives get a trailing `# gitleaks:allow` comment. |
+| `unable to load gitleaks config` | `.gitleaks.toml` is missing or malformed | Restore/fix `.gitleaks.toml`; `pnpm run secrets:check` fails closed until the config is valid. |
+| `Refusing to delete local test data without --yes` | The safe reset guards against accidental truncation | Re-run with `--yes`, or preview with `--dry-run`. |
+| `Refusing to reset database "…" on non-local host "…"` (or `non-local host`) | `DATABASE_URL` points at a hosted database such as Supabase | Use `pnpm stack:reset-data` for the compose stack, or export a loopback `DATABASE_URL`. Remote hosts are refused by design — there is no override flag. |
+| `local-stack: the postgres service is not running` | `pnpm stack:reset-data` was run before the stack came up | `pnpm stack:up`, then retry. The reset CLI is never invoked in this state. |
+| `missing modelled tables` or `No Talos tables found` | The local database is not migrated | `pnpm --dir web run db:migrate`, then retry. |
+| `Could not reach 127.0.0.1:5432` | The local database is unreachable after retries | Check `pnpm stack:logs`; start the stack with `pnpm stack:up`. |
 | PR preview comment is present but Vercel URL is absent | The repo preview workflow provisions the mock DB; Vercel attaches previews separately | Check Vercel's GitHub integration/status before treating it as an application failure. |
 
 ## Code Style
@@ -369,7 +463,32 @@ Deploy commands such as `pnpm --dir contracts run deploy:testnet` and `./deploy.
   [durable job effects runbook](./docs/prime-agent-durable-job-effects.md).
 - For Rust, keep formatting standard with `cargo fmt` and validate with `cargo test`
 
+### Secret scanning
+
+Local contribution checks include a [gitleaks](https://github.com/gitleaks/gitleaks) scan of your **staged changes**. The exact command to run before opening a PR is:
+
+```bash
+pnpm run secrets:check
+```
+
+(`pnpm run secrets:check` invokes `bash scripts/secret-scan.sh` — the single source of truth for local secret scanning.)
+
+Behavior:
+
+- **Nothing staged** — the check passes trivially (exit 0).
+- **A secret is detected** — the check fails and prints only `file:line:rule` for each finding. Secret values and line contents are never echoed (output is redacted).
+- **Missing or malformed `.gitleaks.toml`** — the check fails closed with an actionable error; it never reports “no secrets found” in that state.
+- **`gitleaks` not installed or the scanner crashes** — the check fails closed with install/debug instructions (see Prerequisites). It never treats a scanner failure as a clean scan.
+- **Boundary paths** — generated, vendored, build-output, and binary/asset paths are ignored via the explicit allowlist in [`.gitleaks.toml`](./.gitleaks.toml).
+- **Sanctioned false positives** — add a trailing `# gitleaks:allow` comment on that line instead of widening the allowlist.
+
+Regression tests for the check live in `scripts/secret-scan.test.sh` (`bash scripts/secret-scan.test.sh`).
+
 ## Database Transaction Retry & Serialization Hardening
+
+For the cross-package, local-stack, release, security, and runtime metric
+definitions used by operators, see [docs/operational-metrics.md](docs/operational-metrics.md).
+Run `pnpm metrics:check` when changing a metric source or definition.
 
 Critical database state transitions (money, token purchases, patron creation, job state transitions, agent genesis) use `withTransactionRetry` from `web/src/db/db-retry.ts` to automatically recover from PostgreSQL serialization conflicts (`40001`), deadlocks (`40P01`), lock timeouts (`55P03`), and transient connection failures.
 
@@ -549,7 +668,7 @@ The unified CI workflow (`.github/workflows/ci.yml`) runs only the checks releva
 | `packages/sdk/**` | sdk (build/typecheck, tests) |
 | `packages/prime-agent/**` | prime-agent (ruff, pytest) |
 | `contracts/**` | contracts (cargo test, WASM build) |
-| `pnpm-lock.yaml`, `pnpm-workspace.yaml`, root `package.json`, `scripts/**`, `.github/**` | **ALL** packages |
+| `pnpm-lock.yaml`, `package-lock.json`, `pnpm-workspace.yaml`, root `package.json`, `scripts/**`, `.github/**` | **ALL** packages |
 | Unknown / unclassified files | **ALL** packages (fail-closed) |
 
 ### Local validation
@@ -560,14 +679,36 @@ To test the detection script locally before pushing:
 # Dry-run against a specific commit range
 BASE_SHA=<base> HEAD_SHA=<head> bash scripts/ci-detect-changes.sh
 
-# Run the full test suite
+# Request the full matrix explicitly (no git access needed)
+bash scripts/ci-detect-changes.sh --all
+
+# Run the full test suite (this is the exact command CI runs as a
+# self-test step in the `detect` job of `.github/workflows/ci.yml`)
 bash scripts/ci-detect-changes.test.sh
 ```
 
+### Failure semantics (fail closed, fail safe)
+
+The detector never silently skips checks. Every degraded path produces the full package matrix and exits 0, so a broken detector cannot produce a falsely green run:
+
+| Input | Behavior |
+|---|---|
+| Missing `BASE_SHA` / `HEAD_SHA` | `::error::` annotation, ALL packages, exit 0 |
+| Malformed SHA / revision-like option injection | Rejected before git is called; `::error::` annotation, ALL packages, exit 0 |
+| SHA does not resolve to a commit (e.g. force push, shallow clone) | `::error::` annotation, ALL packages, exit 0 |
+| `git diff` failure | Retried up to `DETECT_MAX_DIFF_ATTEMPTS` (default 3) with `DETECT_DIFF_RETRY_BACKOFF_SECONDS` (default 1s) backoff; on exhaustion `::error::` annotation, ALL packages, exit 0 |
+| Malformed retry env knobs | `::warning::` annotation, defaults used |
+| Empty diff (base == head, no changed files) | Empty matrix `{"include":[]}` |
+| Unclassified path | ALL packages; warning reports only the count of offending paths, never the paths themselves |
+| `--all` flag or >2 positional args | Full matrix without git access; explicit error if more than 2 args |
+
+Privacy-safety: diagnostics never echo raw input values (SHAs come from event payloads and paths may be attacker-controlled in fork PRs) and never include secrets, tokens, or payment proofs. The script only inspects file paths via `git diff --name-only -z` and never executes PR code.
+
 ### Design principles
 
-- **Fail-closed**: if the detector cannot confidently determine the scope (invalid SHA, unrecognized path), ALL packages are checked.
-- **No code execution from PRs**: the detector only inspects file paths via `git diff --name-only`.
+- **Fail-closed**: if the detector cannot confidently determine the scope (invalid SHA, unrecognized path, git failure), ALL packages are checked — never zero.
+- **Fail-safe**: every degraded path still exits 0 with a valid matrix, so a broken detector degrades to a full run instead of a silently skipped one.
+- **No code execution from PRs**: the detector only inspects file paths via `git diff --name-only -z` (NUL-delimited, safe for spaces/unicode).
 - **No secrets required**: works for fork PRs using only the GitHub-provided base/head SHAs.
 
 ### Existing per-package workflows
@@ -584,12 +725,32 @@ The following specialized workflows continue to run independently with their own
 
 The unified `ci.yml` workflow is an **additional** PR gate, not a replacement.
 
+### Contract artifact caching
+
+The workflows that build Soroban wasm artifacts (`contracts-ci.yml`, the contracts job in
+`ci.yml`, `release-publish.yml`, and `sbom-provenance.yml`) cache
+`contracts/target/wasm32-unknown-unknown/release` so dependency compilation is not repeated
+on every run. The cache key combines the runner OS, a rustc fingerprint, and a strong
+content hash of the contract build inputs (sources, manifests, `Cargo.lock`, cargo/soroban
+config) computed by `scripts/ci-contract-cache.sh key-hash`. Restored entries are validated
+before use (`validate`) and gated again after the build (`verify`); cold, corrupted, or
+input-changed entries fall back to a full rebuild instead of failing the job or serving
+stale bytes, while ambiguous key inputs and missing/invalid artifacts fail closed with an
+explicit error. Only the build output directory is cached — never `.env` files, configs, or
+secrets.
+
+To validate the cache helpers locally before pushing:
+
+```bash
+bash scripts/ci-contract-cache.test.sh
+```
+
 ## Pull Request Workflow
 
 1. Create a branch from the latest `main`
 2. Make your changes
 3. Update documentation when setup steps or environment variables change
-4. Run the relevant tests for the area you touched
+4. Run the relevant tests for the area you touched, plus `pnpm run secrets:check` for the local secret scan
 5. Open a pull request using the template in [`.github/PULL_REQUEST_TEMPLATE.md`](./.github/PULL_REQUEST_TEMPLATE.md)
 6. Link the issue in your PR description, for example `Closes #39`
 
@@ -600,6 +761,19 @@ see [`RELEASES.md`](./RELEASES.md). You don't need to do anything for this beyon
 [Conventional Commits](https://www.conventionalcommits.org/) subjects (`feat: ...`, `fix: ...`,
 etc.) in your PRs; version bumps are computed from those.
 
+Every PR title is automatically checked by the
+[`Release Checks`](.github/workflows/release-checks.yml) CI workflow. To
+validate your PR title locally before pushing:
+
+```bash
+PR_TITLE="feat(sdk): add payments resource" \
+  node scripts/release/check-release-note.mjs
+```
+
+The check fails (exit 1) when the title does not follow Conventional Commits
+format. Rename the PR and re-push to fix it. See [`RELEASES.md`](./RELEASES.md)
+for the full format reference and local reproduction steps.
+
 ## Issue and PR Templates
 
 Use the templates already included in the repo when filing new work:
@@ -609,3 +783,15 @@ Use the templates already included in the repo when filing new work:
 - Pull requests: [`.github/PULL_REQUEST_TEMPLATE.md`](./.github/PULL_REQUEST_TEMPLATE.md)
 
 These templates are meant to capture the runtime, environment, and test details we need to review changes quickly.
+
+### Contributor Metadata Testing
+
+To run the tests for the contributor issue metadata parser, use:
+```bash
+node --test scripts/parse-issue-metadata.test.mjs
+```
+
+To test parsing a markdown file locally:
+```bash
+node scripts/parse-issue-metadata.mjs path/to/markdown.md
+```

@@ -64,7 +64,9 @@
 #[cfg(all(test, not(target_arch = "wasm32")))]
 extern crate std;
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env,
+};
 
 // ── Error types ─────────────────────────────────────────────────────────────
 
@@ -105,8 +107,8 @@ pub enum ContractError {
     AccountingOverflow = 14,
     /// The epoch has already been recovered; cannot recover twice.
     AlreadyRecovered = 15,
-    /// Claim share inputs differ from the split recorded for the epoch.
-    InconsistentShareData = 16,
+    /// Supplied patron shares do not sum to 100%.
+    InvalidPatronShares = 16,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
@@ -482,7 +484,7 @@ impl TalosDividends {
             .and_then(|s| s.checked_add(treasury_share))
             .ok_or(ContractError::Overflow)?;
         if share_sum != 100 {
-            return Err(ContractError::NotAPatron);
+            return Err(ContractError::InvalidPatronShares);
         }
 
         // Resolve claimant role from supplied patron addresses.
@@ -666,7 +668,13 @@ mod tests {
 
     // ── Test helpers ─────────────────────────────────────────────────────────
 
-    fn setup() -> (Env, Address, Address, Address, TalosDividendsClient<'static>) {
+    fn setup() -> (
+        Env,
+        Address,
+        Address,
+        Address,
+        TalosDividendsClient<'static>,
+    ) {
         let env = Env::default();
         env.ledger().with_mut(|li| {
             li.timestamp = 1_000;
@@ -686,8 +694,7 @@ mod tests {
                     sub_invokes: &[],
                 },
             }])
-            .initialize(&admin, &registry)
-            .unwrap();
+            .initialize(&admin, &registry);
 
         (env, contract_id, admin, registry, client)
     }
@@ -724,10 +731,22 @@ mod tests {
         admin: &Address,
         talos_id: u32,
     ) -> u64 {
-        commit_epoch(env, contract_id, client, admin, talos_id, 10_000, 7_200)
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "commit_epoch",
+                    args: (admin.clone(), talos_id, 10_000_i128, 7_200_u64).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .commit_epoch(admin, &talos_id, &10_000_i128, &7_200_u64)
     }
 
     /// Helper: perform a claim with provided patron addresses and shares.
+    /// Returns the allocation on success; panics if the contract returns an error.
+    /// For negative-path tests, call `try_claim_dividend` directly.
     #[allow(clippy::too_many_arguments)]
     fn do_claim_with_shares(
         env: &Env,
@@ -739,10 +758,7 @@ mod tests {
         creator: &Address,
         investor: &Address,
         treasury: &Address,
-        creator_share: u32,
-        investor_share: u32,
-        treasury_share: u32,
-    ) -> Result<i128, ContractError> {
+    ) -> i128 {
         client
             .mock_auths(&[MockAuth {
                 address: claimant,
@@ -770,8 +786,12 @@ mod tests {
             )
     }
 
+    /// Like `do_claim` but uses `try_claim_dividend` to surface errors.
+    /// Returns the raw soroban-sdk 21 result: `Ok(Ok(allocation))` on success,
+    /// `Ok(Err(_))` when the contract returns an error, `Err(_)` on host error.
+    /// Assertions should use the `Err(Ok(ContractError::...))` pattern.
     #[allow(clippy::too_many_arguments)]
-    fn do_claim(
+    fn try_do_claim(
         env: &Env,
         contract_id: &Address,
         client: &TalosDividendsClient<'static>,
@@ -781,11 +801,33 @@ mod tests {
         creator: &Address,
         investor: &Address,
         treasury: &Address,
-    ) -> Result<i128, ContractError> {
-        do_claim_with_shares(
-            env, contract_id, client, claimant, talos_id, epoch_id, creator, investor, treasury,
-            60, 25, 15,
-        )
+    ) -> Result<Result<i128, soroban_sdk::Error>, Result<ContractError, soroban_sdk::InvokeError>>
+    {
+        client
+            .mock_auths(&[MockAuth {
+                address: claimant,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "claim_dividend",
+                    args: (
+                        claimant.clone(),
+                        talos_id,
+                        epoch_id,
+                        creator.clone(),
+                        investor.clone(),
+                        treasury.clone(),
+                        60_u32,
+                        25_u32,
+                        15_u32,
+                    )
+                        .into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_claim_dividend(
+                claimant, &talos_id, &epoch_id, creator, investor, treasury, &60_u32, &25_u32,
+                &15_u32,
+            )
     }
 
     // ── version() ────────────────────────────────────────────────────────────
@@ -937,8 +979,7 @@ mod tests {
         let (addr, topics, data) = events.get(0).unwrap();
         assert_eq!(addr, contract_id);
 
-        let sym: Symbol =
-            TryFromVal::try_from_val(&env, &topics.get(0).unwrap()).expect("symbol");
+        let sym: Symbol = TryFromVal::try_from_val(&env, &topics.get(0).unwrap()).expect("symbol");
         assert_eq!(sym, symbol_short!("ep_cmt"));
 
         let got_talos_id: u32 =
@@ -963,9 +1004,17 @@ mod tests {
         let treasury = Address::generate(&env);
         let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
 
-        let allocation =
-            do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury)
-                .unwrap();
+        let allocation = do_claim(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+        );
 
         // creator_share = 60%; 10_000 * 60 / 100 = 6_000
         assert_eq!(allocation, 6_000);
@@ -984,9 +1033,17 @@ mod tests {
         let treasury = Address::generate(&env);
         let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
 
-        let allocation =
-            do_claim(&env, &contract_id, &client, &investor, talos_id, epoch_id, &creator, &investor, &treasury)
-                .unwrap();
+        let allocation = do_claim(
+            &env,
+            &contract_id,
+            &client,
+            &investor,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+        );
 
         // investor_share = 25%; 10_000 * 25 / 100 = 2_500
         assert_eq!(allocation, 2_500);
@@ -1001,9 +1058,17 @@ mod tests {
         let treasury = Address::generate(&env);
         let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
 
-        let allocation =
-            do_claim(&env, &contract_id, &client, &treasury, talos_id, epoch_id, &creator, &investor, &treasury)
-                .unwrap();
+        let allocation = do_claim(
+            &env,
+            &contract_id,
+            &client,
+            &treasury,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+        );
 
         // treasury_share = 15%; 10_000 * 15 / 100 = 1_500
         assert_eq!(allocation, 1_500);
@@ -1097,9 +1162,39 @@ mod tests {
         let treasury = Address::generate(&env);
         let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
 
-        let c = do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury).unwrap();
-        let i = do_claim(&env, &contract_id, &client, &investor, talos_id, epoch_id, &creator, &investor, &treasury).unwrap();
-        let t = do_claim(&env, &contract_id, &client, &treasury, talos_id, epoch_id, &creator, &investor, &treasury).unwrap();
+        let c = do_claim(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+        );
+        let i = do_claim(
+            &env,
+            &contract_id,
+            &client,
+            &investor,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+        );
+        let t = do_claim(
+            &env,
+            &contract_id,
+            &client,
+            &treasury,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+        );
 
         // 60 + 25 + 15 = 100%; 6000 + 2500 + 1500 = 10_000
         assert_eq!(c + i + t, 10_000);
@@ -1117,9 +1212,29 @@ mod tests {
         let treasury = Address::generate(&env);
         let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
 
-        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury).unwrap();
-        let second = do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
-        assert_eq!(second, Err(ContractError::AlreadyClaimed));
+        do_claim(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+        );
+        let second = try_do_claim(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+        );
+        assert_eq!(second, Err(Ok(ContractError::AlreadyClaimed)));
     }
 
     #[test]
@@ -1132,8 +1247,53 @@ mod tests {
         let outsider = Address::generate(&env);
         let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
 
-        let res = do_claim(&env, &contract_id, &client, &outsider, talos_id, epoch_id, &creator, &investor, &treasury);
-        assert_eq!(res, Err(ContractError::NotAPatron));
+        let res = try_do_claim(
+            &env,
+            &contract_id,
+            &client,
+            &outsider,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+        );
+        assert_eq!(res, Err(Ok(ContractError::NotAPatron)));
+    }
+
+    #[test]
+    fn claim_with_invalid_shares_returns_error() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "claim_dividend",
+                    args: (
+                        creator.clone(),
+                        talos_id,
+                        epoch_id,
+                        creator.clone(),
+                        creator.clone(),
+                        creator.clone(),
+                        50u32, // creator_share
+                        30u32, // investor_share
+                        30u32, // treasury_share (sums to 110)
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_claim_dividend(
+                &creator, &talos_id, &epoch_id, &creator, &creator, &creator, &50u32, &30u32,
+                &30u32,
+            );
+        assert_eq!(res, Err(Ok(ContractError::InvalidPatronShares)));
     }
 
     #[test]
@@ -1143,8 +1303,18 @@ mod tests {
         let investor = Address::generate(&env);
         let treasury = Address::generate(&env);
 
-        let res = do_claim(&env, &contract_id, &client, &creator, 99u32, 999u64, &creator, &investor, &treasury);
-        assert_eq!(res, Err(ContractError::EpochNotFound));
+        let res = try_do_claim(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            99u32,
+            999u64,
+            &creator,
+            &investor,
+            &treasury,
+        );
+        assert_eq!(res, Err(Ok(ContractError::EpochNotFound)));
     }
 
     #[test]
@@ -1161,8 +1331,18 @@ mod tests {
             li.timestamp = 9_000;
         });
 
-        let res = do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
-        assert_eq!(res, Err(ContractError::EpochExpired));
+        let res = try_do_claim(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+        );
+        assert_eq!(res, Err(Ok(ContractError::EpochExpired)));
     }
 
     #[test]
@@ -1177,7 +1357,17 @@ mod tests {
         // Clear commit event.
         let _ = env.events().all();
 
-        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury).unwrap();
+        do_claim(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+        );
 
         let events = env.events().all();
         let claim_events: std::vec::Vec<_> = events
@@ -1224,8 +1414,7 @@ mod tests {
                     sub_invokes: &[],
                 },
             }])
-            .recover_expired(&admin, &talos_id, &epoch_id)
-            .unwrap();
+            .recover_expired(&admin, &talos_id, &epoch_id);
 
         // No claims were made, so the full amount is recovered.
         assert_eq!(recovered, 10_000);
@@ -1244,7 +1433,17 @@ mod tests {
         let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
 
         // Only creator claims.
-        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury).unwrap();
+        do_claim(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+        );
 
         // Advance past expiry.
         env.ledger().with_mut(|li| {
@@ -1261,8 +1460,7 @@ mod tests {
                     sub_invokes: &[],
                 },
             }])
-            .recover_expired(&admin, &talos_id, &epoch_id)
-            .unwrap();
+            .recover_expired(&admin, &talos_id, &epoch_id);
 
         // 10_000 - 6_000 (creator) = 4_000 unclaimed.
         assert_eq!(recovered, 4_000);
@@ -1309,8 +1507,7 @@ mod tests {
                     sub_invokes: &[],
                 },
             }])
-            .recover_expired(&admin, &talos_id, &epoch_id)
-            .unwrap();
+            .recover_expired(&admin, &talos_id, &epoch_id);
 
         let second = client
             .mock_auths(&[MockAuth {
@@ -1373,8 +1570,7 @@ mod tests {
                     sub_invokes: &[],
                 },
             }])
-            .recover_expired(&admin, &talos_id, &epoch_id)
-            .unwrap();
+            .recover_expired(&admin, &talos_id, &epoch_id);
 
         let events = env.events().all();
         let rcv_events: std::vec::Vec<_> = events
@@ -1419,7 +1615,17 @@ mod tests {
         let treasury = Address::generate(&env);
         let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
 
-        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury).unwrap();
+        do_claim(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+        );
         assert!(client.has_claimed(&epoch_id, &creator));
     }
 
@@ -1441,5 +1647,1066 @@ mod tests {
 
         assert_eq!(client.next_epoch_id(&1u32), 3u64);
         assert_eq!(client.next_epoch_id(&2u32), 2u64);
+    }
+
+    // ── Dividend rounding tests (#612) ───────────────────────────────────────
+    //
+    // `compute_allocation` uses integer (truncating) division:
+    //   allocation = total_amount * share_pct / 100
+    //
+    // These tests verify the observable rounding behaviour through the real
+    // `claim_dividend` entry-point so they exercise the exact same code path
+    // that runs on-chain.  No new contract method is introduced; the tests
+    // use the existing interface.
+    //
+    // Key invariants asserted here:
+    //   1. Exact-divisible amounts produce no rounding loss.
+    //   2. Non-divisible amounts truncate toward zero (floor division).
+    //   3. When all three patrons claim from a non-divisible total their
+    //      allocations may sum to less than total_amount (dust stays in the
+    //      epoch; recoverable by admin after expiry).
+    //   4. A share percentage that rounds the allocation to zero surfaces
+    //      `ZeroAllocation` — not a silent 0-amount claim.
+    //   5. Very large totals near i128::MAX / 100 do not overflow.
+
+    // ── helpers specific to rounding tests ───────────────────────────────────
+
+    /// Commit an epoch with a custom `total_amount` for rounding experiments.
+    fn commit_epoch_with_total(
+        env: &Env,
+        contract_id: &Address,
+        client: &TalosDividendsClient<'static>,
+        admin: &Address,
+        talos_id: u32,
+        total: i128,
+    ) -> u64 {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "commit_epoch",
+                    args: (admin.clone(), talos_id, total, 7_200_u64).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .commit_epoch(admin, &talos_id, &total, &7_200_u64)
+    }
+
+    /// Claim with explicit, custom share percentages (must sum to 100).
+    /// Returns the allocation on success; panics on contract error.
+    /// For negative-path tests, use `try_claim_with_shares`.
+    #[allow(clippy::too_many_arguments)]
+    fn claim_with_shares(
+        env: &Env,
+        contract_id: &Address,
+        client: &TalosDividendsClient<'static>,
+        claimant: &Address,
+        talos_id: u32,
+        epoch_id: u64,
+        creator: &Address,
+        investor: &Address,
+        treasury: &Address,
+        creator_share: u32,
+        investor_share: u32,
+        treasury_share: u32,
+    ) -> i128 {
+        client
+            .mock_auths(&[MockAuth {
+                address: claimant,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "claim_dividend",
+                    args: (
+                        claimant.clone(),
+                        talos_id,
+                        epoch_id,
+                        creator.clone(),
+                        investor.clone(),
+                        treasury.clone(),
+                        creator_share,
+                        investor_share,
+                        treasury_share,
+                    )
+                        .into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .claim_dividend(
+                claimant,
+                &talos_id,
+                &epoch_id,
+                creator,
+                investor,
+                treasury,
+                &creator_share,
+                &investor_share,
+                &treasury_share,
+            )
+    }
+
+    /// Like `claim_with_shares` but returns the raw soroban-sdk 21 result for
+    /// error-path tests.  Assertions should use `Err(Ok(ContractError::...))`.
+    #[allow(clippy::too_many_arguments)]
+    fn try_claim_with_shares(
+        env: &Env,
+        contract_id: &Address,
+        client: &TalosDividendsClient<'static>,
+        claimant: &Address,
+        talos_id: u32,
+        epoch_id: u64,
+        creator: &Address,
+        investor: &Address,
+        treasury: &Address,
+        creator_share: u32,
+        investor_share: u32,
+        treasury_share: u32,
+    ) -> Result<Result<i128, soroban_sdk::Error>, Result<ContractError, soroban_sdk::InvokeError>>
+    {
+        client
+            .mock_auths(&[MockAuth {
+                address: claimant,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "claim_dividend",
+                    args: (
+                        claimant.clone(),
+                        talos_id,
+                        epoch_id,
+                        creator.clone(),
+                        investor.clone(),
+                        treasury.clone(),
+                        creator_share,
+                        investor_share,
+                        treasury_share,
+                    )
+                        .into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_claim_dividend(
+                claimant,
+                &talos_id,
+                &epoch_id,
+                creator,
+                investor,
+                treasury,
+                &creator_share,
+                &investor_share,
+                &treasury_share,
+            )
+    }
+
+    // ── Positive: exact-divisible totals ─────────────────────────────────────
+
+    /// total=10_000, shares 60/25/15 — all divide evenly; no truncation.
+    #[test]
+    fn rounding_exact_divisible_no_truncation() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        // 10_000 * 60 / 100 = 6_000 (exact)
+        // 10_000 * 25 / 100 = 2_500 (exact)
+        // 10_000 * 15 / 100 = 1_500 (exact)
+        let epoch_id =
+            commit_epoch_with_total(&env, &contract_id, &client, &admin, talos_id, 10_000);
+
+        let c = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            60,
+            25,
+            15,
+        );
+        let i = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &investor,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            60,
+            25,
+            15,
+        );
+        let t = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &treasury,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            60,
+            25,
+            15,
+        );
+
+        assert_eq!(c, 6_000, "creator exact share");
+        assert_eq!(i, 2_500, "investor exact share");
+        assert_eq!(t, 1_500, "treasury exact share");
+        assert_eq!(c + i + t, 10_000, "sum equals total when exact");
+    }
+
+    /// total=100, shares 33/33/34 — note 33 divides evenly here.
+    #[test]
+    fn rounding_exact_with_unequal_shares() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 2u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        // 100 * 33 / 100 = 33 (exact)
+        // 100 * 34 / 100 = 34 (exact)
+        let epoch_id = commit_epoch_with_total(&env, &contract_id, &client, &admin, talos_id, 100);
+
+        let c = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            33,
+            33,
+            34,
+        );
+        let i = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &investor,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            33,
+            33,
+            34,
+        );
+        let t = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &treasury,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            33,
+            33,
+            34,
+        );
+
+        assert_eq!(c, 33);
+        assert_eq!(i, 33);
+        assert_eq!(t, 34);
+        assert_eq!(c + i + t, 100);
+    }
+
+    // ── Positive: truncating (floor) division ─────────────────────────────────
+
+    /// total=101, shares 33/33/34 — 101*33/100 = 33 (remainder 33 lost).
+    /// The sum of claims (33+33+34=100) is less than total (101): 1 unit of
+    /// dust remains in the epoch and is recoverable by admin after expiry.
+    #[test]
+    fn rounding_truncation_leaves_dust_in_epoch() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 3u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_epoch_with_total(&env, &contract_id, &client, &admin, talos_id, 101);
+
+        // 101 * 33 / 100 = 33  (remainder 33 discarded)
+        // 101 * 33 / 100 = 33
+        // 101 * 34 / 100 = 34  (remainder 34 discarded)
+        let c = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            33,
+            33,
+            34,
+        );
+        let i = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &investor,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            33,
+            33,
+            34,
+        );
+        let t = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &treasury,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            33,
+            33,
+            34,
+        );
+
+        assert_eq!(c, 33, "33% of 101 truncates to 33");
+        assert_eq!(i, 33, "33% of 101 truncates to 33");
+        assert_eq!(t, 34, "34% of 101 truncates to 34");
+
+        // Intentional: sum < total — 1 unit of dust stays in the epoch.
+        assert_eq!(c + i + t, 100, "sum is total minus dust");
+        let rec = client.get_epoch(&talos_id, &epoch_id).unwrap();
+        assert_eq!(rec.claimed_amount, 100);
+        assert_eq!(
+            rec.total_amount - rec.claimed_amount,
+            1,
+            "1 unit dust remains"
+        );
+    }
+
+    /// total=199, shares 33/33/34 — exercises different remainder pattern.
+    #[test]
+    fn rounding_truncation_199_three_way_split() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 4u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_epoch_with_total(&env, &contract_id, &client, &admin, talos_id, 199);
+
+        // 199 * 33 / 100 = 65  (remainder 67 discarded)
+        // 199 * 33 / 100 = 65
+        // 199 * 34 / 100 = 67  (remainder 66 discarded)
+        let c = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            33,
+            33,
+            34,
+        );
+        let i = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &investor,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            33,
+            33,
+            34,
+        );
+        let t = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &treasury,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            33,
+            33,
+            34,
+        );
+
+        assert_eq!(c, 65, "33% of 199 truncates to 65");
+        assert_eq!(i, 65, "33% of 199 truncates to 65");
+        assert_eq!(t, 67, "34% of 199 truncates to 67");
+
+        let rec = client.get_epoch(&talos_id, &epoch_id).unwrap();
+        assert_eq!(rec.total_amount - rec.claimed_amount, 2, "2 units dust");
+    }
+
+    /// Repeated single-patron epochs to verify truncation is stable across calls.
+    #[test]
+    fn rounding_truncation_single_patron_50_50_split() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 5u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        // total=3, shares 50/25/25 — 3*50/100=1, 3*25/100=0 (ZeroAllocation for investor+treasury)
+        // Use a large enough total so no role gets zero.
+        // total=7, shares 50/30/20 — 7*50=350/100=3, 7*30=210/100=2, 7*20=140/100=1 → sum=6 (1 dust)
+        let epoch_id = commit_epoch_with_total(&env, &contract_id, &client, &admin, talos_id, 7);
+
+        let c = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            50,
+            30,
+            20,
+        );
+        let i = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &investor,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            50,
+            30,
+            20,
+        );
+        let t = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &treasury,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            50,
+            30,
+            20,
+        );
+
+        assert_eq!(c, 3, "50% of 7 truncates to 3");
+        assert_eq!(i, 2, "30% of 7 truncates to 2");
+        assert_eq!(t, 1, "20% of 7 truncates to 1");
+        assert_eq!(c + i + t, 6);
+
+        let rec = client.get_epoch(&talos_id, &epoch_id).unwrap();
+        assert_eq!(rec.total_amount - rec.claimed_amount, 1, "1 unit dust");
+    }
+
+    // ── Boundary: minimum epoch amount ───────────────────────────────────────
+
+    /// total=MIN_EPOCH_AMOUNT=1, share=100/0/0 — only the 100% holder can
+    /// claim; the contract must not reject a valid 1-unit allocation.
+    #[test]
+    fn rounding_min_epoch_amount_full_share_claimable() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 6u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        // With total=1 and creator_share=100, allocation = 1*100/100 = 1.
+        let epoch_id = commit_epoch_with_total(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            talos_id,
+            MIN_EPOCH_AMOUNT,
+        );
+
+        let allocation = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            100,
+            0,
+            0,
+        );
+        assert_eq!(allocation, 1, "1 unit fully claimed with 100% share");
+    }
+
+    /// total=1, share=1/99/0 — 1*1/100=0 → ZeroAllocation.
+    /// Even at MIN_EPOCH_AMOUNT, a small share percentage must not silently
+    /// succeed with a zero transfer.
+    #[test]
+    fn rounding_min_epoch_small_share_returns_zero_allocation() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 7u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_epoch_with_total(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            talos_id,
+            MIN_EPOCH_AMOUNT,
+        );
+
+        // creator_share=1 → 1*1/100 = 0 → ZeroAllocation
+        let res = try_claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            1,
+            0,
+            99,
+        );
+        assert_eq!(
+            res,
+            Err(Ok(ContractError::ZeroAllocation)),
+            "1% of 1 unit must produce ZeroAllocation"
+        );
+    }
+
+    /// total=99, share=1/0/99 — 99*1/100=0 → ZeroAllocation.
+    #[test]
+    fn rounding_99_total_1pct_share_returns_zero_allocation() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 8u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_epoch_with_total(&env, &contract_id, &client, &admin, talos_id, 99);
+
+        let res = try_claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            1,
+            0,
+            99,
+        );
+        assert_eq!(
+            res,
+            Err(Ok(ContractError::ZeroAllocation)),
+            "1% of 99 truncates to 0"
+        );
+    }
+
+    /// total=100, share=1/0/99 — 100*1/100=1 → succeeds (just above ZeroAllocation boundary).
+    #[test]
+    fn rounding_boundary_100_total_1pct_exactly_claimable() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 9u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_epoch_with_total(&env, &contract_id, &client, &admin, talos_id, 100);
+
+        let allocation = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            1,
+            0,
+            99,
+        );
+        assert_eq!(allocation, 1, "1% of 100 = exactly 1");
+    }
+
+    // ── Boundary: large amounts (overflow-safe) ───────────────────────────────
+
+    /// total near i128::MAX / 100 (not overflowing the checked_mul).
+    /// Ensures compute_allocation's overflow guard does not fire for
+    /// legitimate large epoch amounts.
+    #[test]
+    fn rounding_large_total_no_overflow() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 10u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        // i128::MAX ≈ 1.7e38; choose total just below i128::MAX / 100 so
+        // total * 99 fits in i128 without overflow.
+        // i128::MAX / 100 = 1_701_411_834_604_692_317_316_873_037_158_841_057
+        let total: i128 = 1_000_000_000_000_000_000_000_000_000_000_i128; // 10^30
+        let epoch_id =
+            commit_epoch_with_total(&env, &contract_id, &client, &admin, talos_id, total);
+
+        // creator_share=99 → total*99/100 (large but valid)
+        let allocation = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            99,
+            1,
+            0,
+        );
+        assert_eq!(
+            allocation,
+            total * 99 / 100,
+            "large-amount allocation matches manual calculation"
+        );
+
+        let inv = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &investor,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            99,
+            1,
+            0,
+        );
+        assert_eq!(inv, total * 1 / 100);
+    }
+
+    // ── Negative: accounting overflow guard ──────────────────────────────────
+
+    /// The accounting invariant (claimed_amount <= total_amount) must reject
+    /// any claim that would exceed the epoch total, even if the claimant's
+    /// share is valid.  This is hard to trigger in normal operation (shares
+    /// sum to 100 and total distributes ≤ total_amount), but we verify the
+    /// guard path is reachable by crafting a scenario where two claimants
+    /// each hold 100% in separate concurrent epochs — independent epochs so
+    /// we don't actually need to violate arithmetic; instead we verify the
+    /// claimed_amount field never exceeds total_amount across all claims.
+    #[test]
+    fn rounding_claimed_amount_never_exceeds_total() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 11u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id =
+            commit_epoch_with_total(&env, &contract_id, &client, &admin, talos_id, 10_001);
+
+        // shares 60/25/15 → 6000 + 2500 + 1500 = 10_000 (1 dust)
+        let c = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            60,
+            25,
+            15,
+        );
+        let i = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &investor,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            60,
+            25,
+            15,
+        );
+        let t = claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &treasury,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            60,
+            25,
+            15,
+        );
+
+        let rec = client.get_epoch(&talos_id, &epoch_id).unwrap();
+        assert!(
+            rec.claimed_amount <= rec.total_amount,
+            "accounting invariant: claimed <= total"
+        );
+        assert_eq!(c + i + t, rec.claimed_amount);
+    }
+
+    // ── Regression: dust is recoverable after expiry ──────────────────────────
+
+    /// After all patrons claim (leaving truncation dust), the admin can
+    /// recover the remaining dust via `recover_expired`.
+    #[test]
+    fn rounding_dust_recovered_after_expiry() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 12u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        // total=101, 33/33/34 → claims sum to 100, dust=1
+        let epoch_id = commit_epoch_with_total(&env, &contract_id, &client, &admin, talos_id, 101);
+
+        claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            33,
+            33,
+            34,
+        );
+        claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &investor,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            33,
+            33,
+            34,
+        );
+        claim_with_shares(
+            &env,
+            &contract_id,
+            &client,
+            &treasury,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+            33,
+            33,
+            34,
+        );
+
+        // Advance past expiry.
+        env.ledger().with_mut(|li| {
+            li.timestamp = 9_000;
+        });
+
+        let recovered = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "recover_expired",
+                    args: (admin.clone(), talos_id, epoch_id).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .recover_expired(&admin, &talos_id, &epoch_id);
+
+        assert_eq!(recovered, 1, "1 unit of truncation dust is recovered");
+    }
+
+    // ── Budget regression gates (#610) ───────────────────────────────────────
+    //
+    // These tests assert that key entry-points stay within CPU-instruction and
+    // memory-byte ceilings measured on the host (native Rust) target.
+    //
+    // IMPORTANT: The Soroban SDK test runtime underestimates costs relative to
+    // the actual WASM runtime.  The limits below are therefore intentionally
+    // loose — they are regression catches rather than hard production caps.
+    // If an entry-point exceeds a ceiling it means a refactor significantly
+    // increased its resource consumption and the change needs review.
+    //
+    // Measurement pattern:
+    //   1. `env.budget().reset_default()` — zero the counters and re-apply the
+    //      default per-transaction limits so each test is fully isolated.
+    //   2. Execute the entry-point under test.
+    //   3. Assert `cpu_instruction_cost()` and `memory_bytes_cost()` stay below
+    //      the stated ceilings.
+
+    /// CPU/memory ceiling for `initialize`.
+    const BUDGET_CPU_INITIALIZE: u64 = 300_000;
+    const BUDGET_MEM_INITIALIZE: u64 = 60_000;
+
+    /// CPU/memory ceiling for `commit_epoch` (single epoch, default params).
+    const BUDGET_CPU_COMMIT_EPOCH: u64 = 600_000;
+    const BUDGET_MEM_COMMIT_EPOCH: u64 = 100_000;
+
+    /// CPU/memory ceiling for `claim_dividend` (single claim, 60 % share).
+    const BUDGET_CPU_CLAIM: u64 = 800_000;
+    const BUDGET_MEM_CLAIM: u64 = 130_000;
+
+    /// CPU/memory ceiling for `get_epoch` (read-only).
+    const BUDGET_CPU_GET_EPOCH: u64 = 200_000;
+    const BUDGET_MEM_GET_EPOCH: u64 = 50_000;
+
+    #[test]
+    fn budget_initialize_within_limits() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, TalosDividends);
+        let client = TalosDividendsClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let registry = Address::generate(&env);
+
+        env.budget().reset_default();
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "initialize",
+                    args: (admin.clone(), registry.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .initialize(&admin, &registry);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_INITIALIZE,
+            "initialize CPU {} exceeded ceiling {}",
+            cpu,
+            BUDGET_CPU_INITIALIZE,
+        );
+        assert!(
+            mem < BUDGET_MEM_INITIALIZE,
+            "initialize memory {} exceeded ceiling {}",
+            mem,
+            BUDGET_MEM_INITIALIZE,
+        );
+    }
+
+    #[test]
+    fn budget_commit_epoch_within_limits() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+
+        env.budget().reset_default();
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch",
+                    args: (admin.clone(), talos_id, 10_000_i128, 7_200_u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .commit_epoch(&admin, &talos_id, &10_000_i128, &7_200_u64);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_COMMIT_EPOCH,
+            "commit_epoch CPU {} exceeded ceiling {}",
+            cpu,
+            BUDGET_CPU_COMMIT_EPOCH,
+        );
+        assert!(
+            mem < BUDGET_MEM_COMMIT_EPOCH,
+            "commit_epoch memory {} exceeded ceiling {}",
+            mem,
+            BUDGET_MEM_COMMIT_EPOCH,
+        );
+    }
+
+    #[test]
+    fn budget_claim_dividend_within_limits() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        env.budget().reset_default();
+        do_claim(
+            &env,
+            &contract_id,
+            &client,
+            &creator,
+            talos_id,
+            epoch_id,
+            &creator,
+            &investor,
+            &treasury,
+        );
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_CLAIM,
+            "claim_dividend CPU {} exceeded ceiling {}",
+            cpu,
+            BUDGET_CPU_CLAIM,
+        );
+        assert!(
+            mem < BUDGET_MEM_CLAIM,
+            "claim_dividend memory {} exceeded ceiling {}",
+            mem,
+            BUDGET_MEM_CLAIM,
+        );
+    }
+
+    #[test]
+    fn budget_get_epoch_read_within_limits() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        env.budget().reset_default();
+        let _ = client.get_epoch(&talos_id, &epoch_id);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_GET_EPOCH,
+            "get_epoch CPU {} exceeded ceiling {}",
+            cpu,
+            BUDGET_CPU_GET_EPOCH,
+        );
+        assert!(
+            mem < BUDGET_MEM_GET_EPOCH,
+            "get_epoch memory {} exceeded ceiling {}",
+            mem,
+            BUDGET_MEM_GET_EPOCH,
+        );
+    }
+
+    /// Boundary: commit with minimum allowed `total_amount` stays within budget.
+    #[test]
+    fn budget_commit_epoch_minimum_amount_within_limits() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 2u32;
+
+        env.budget().reset_default();
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch",
+                    args: (admin.clone(), talos_id, MIN_EPOCH_AMOUNT, MIN_EXPIRY_SECS)
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .commit_epoch(&admin, &talos_id, &MIN_EPOCH_AMOUNT, &MIN_EXPIRY_SECS);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_COMMIT_EPOCH,
+            "commit_epoch (min amount) CPU {} exceeded ceiling {}",
+            cpu,
+            BUDGET_CPU_COMMIT_EPOCH,
+        );
+        assert!(
+            mem < BUDGET_MEM_COMMIT_EPOCH,
+            "commit_epoch (min amount) memory {} exceeded ceiling {}",
+            mem,
+            BUDGET_MEM_COMMIT_EPOCH,
+        );
+    }
+
+    /// Negative: a rejected `commit_epoch` (zero amount) must also not
+    /// overspend — validation is O(1) and should be cheaper than success.
+    #[test]
+    fn budget_commit_epoch_rejected_does_not_overspend() {
+        let (env, contract_id, admin, _, client) = setup();
+
+        env.budget().reset_default();
+        let _ = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch",
+                    args: (admin.clone(), 1u32, 0_i128, 7_200_u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_commit_epoch(&admin, &1u32, &0_i128, &7_200_u64);
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        // Rejected paths must be no more expensive than the success path.
+        assert!(
+            cpu < BUDGET_CPU_COMMIT_EPOCH,
+            "rejected commit_epoch CPU {} exceeded ceiling {}",
+            cpu,
+            BUDGET_CPU_COMMIT_EPOCH,
+        );
+        assert!(
+            mem < BUDGET_MEM_COMMIT_EPOCH,
+            "rejected commit_epoch memory {} exceeded ceiling {}",
+            mem,
+            BUDGET_MEM_COMMIT_EPOCH,
+        );
     }
 }

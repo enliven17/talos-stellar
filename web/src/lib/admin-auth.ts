@@ -67,3 +67,13 @@ export function verifyInternalSecret(
 
   return { ok: true };
 }
+
+/**
+ * Verifies the `X-Internal-Jobs-Secret` header used by the jobs drain
+ * endpoint, which an external scheduler calls on an interval.
+ */
+export function verifyInternalJobsSecret(
+  request: NextRequest,
+): { ok: true } | { ok: false; response: Response } {
+  return verifyInternalSecret(request, "INTERNAL_JOBS_SECRET", "x-internal-jobs-secret");
+}
