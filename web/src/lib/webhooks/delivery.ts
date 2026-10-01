@@ -32,6 +32,7 @@ import {
   MAX_PAYLOAD_BYTES,
 } from "./config";
 import { isWebhookDeliveryEnabled } from "./config";
+import { safeFetch } from "@/lib/security/ssrf";
 
 // ─── Types ───────────────────────────────────────────────────────
 
@@ -239,7 +240,7 @@ export async function attemptDelivery(
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), DELIVERY_TIMEOUT_MS);
 
-    const response = await fetch(subscription.url, {
+    const response = await safeFetch(subscription.url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
