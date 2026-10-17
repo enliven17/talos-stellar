@@ -163,4 +163,15 @@ export const RATE_LIMIT_POLICIES = {
     limit: envInt("RATE_LIMIT_WRITE_IP_LIMIT", 30),
     windowMs: envInt("RATE_LIMIT_WRITE_WINDOW_MS", 60_000),
   },
+  /**
+   * CSP violation reports (src/app/api/csp-report).  Fire-and-forget
+   * telemetry, so it gets its own bucket: a report-only rollout must never
+   * consume the budget of real client writes coming from the same IP.
+   */
+  cspReport: {
+    keyPrefix: "csp_report",
+    name: "csp-report",
+    limit: envInt("RATE_LIMIT_CSP_REPORT_LIMIT", 120),
+    windowMs: envInt("RATE_LIMIT_CSP_REPORT_WINDOW_MS", 60_000),
+  },
 } satisfies Record<string, EndpointPolicy>;
