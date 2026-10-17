@@ -12,6 +12,8 @@ from typing import Any, Callable, get_type_hints
 from talos_agent import metrics
 from talos_agent.config import Settings, resolve_setting_secret
 from talos_agent.tracing import traced_span
+from talos_agent.tools import context as _context
+from talos_agent.tools.context import ToolContext
 from talos_agent.tools.permissions import (
     EnforcementMode,
     PermissionEnforcer,
@@ -68,6 +70,12 @@ class Tool:
 @dataclass
 class ToolRegistry:
     _tools: dict[str, Tool] = field(default_factory=dict)
+    #: The agent this registry belongs to. When set, every ``execute`` binds it,
+    #: so tools read this agent's API client, database and settings no matter
+    #: what other agents in the process are doing. ``None`` is the shared
+    #: template that ``@tool`` registers into, which runs tools against the
+    #: tool modules' own globals.
+    context: ToolContext | None = None
     _middleware: Any = None  # PolicyMiddleware, injected by build_all_tools
     # Permission manifests are validated here at registration and enforced in
     # execute(). Defaults to AUDIT with no grants: every call is evaluated and
@@ -119,6 +127,16 @@ class ToolRegistry:
             timeout=timeout,
         )
 
+    def for_agent(self, context: ToolContext) -> "ToolRegistry":
+        """A registry with this registry's tools and its own state.
+
+        The tools themselves are shared, because they read their dependencies
+        from whichever context is bound when they run. What is not shared is
+        everything an agent configures: the context, the policy middleware and
+        the permission enforcer.
+        """
+        return ToolRegistry(_tools=dict(self._tools), context=context)
+
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
@@ -129,6 +147,25 @@ class ToolRegistry:
         return [t.to_openai_schema() for t in self._tools.values()]
 
     async def execute(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        approved: bool = False,
+    ) -> Any:
+        if self.context is None:
+            return await self._execute(name, arguments, approved=approved)
+        # Bind this agent's dependencies for the whole call. The binding follows
+        # the call across awaits, into tasks and worker threads it starts, and
+        # is undone afterwards, so concurrent calls from other agents never see
+        # it and this one never sees theirs.
+        token = _context.bind(self.context)
+        try:
+            return await self._execute(name, arguments, approved=approved)
+        finally:
+            _context.reset(token)
+
+    async def _execute(
         self,
         name: str,
         arguments: dict[str, Any],
@@ -315,8 +352,23 @@ def build_all_tools(
     policy_middleware: Any = None,
     job_effect_store: Any = None,
     job_effect_dispatcher: Any = None,
+    context: ToolContext | None = None,
 ) -> ToolRegistry:
-    """Import all tool modules to trigger @tool registrations, then return registry."""
+    """Build one agent's tools from its own dependencies.
+
+    Imports the tool modules (which registers every ``@tool``) and returns a
+    registry that belongs to this agent alone: its own :class:`ToolContext`,
+    policy middleware and permission enforcer. Several agents can therefore
+    build and run tools in one process without sharing any of them.
+
+    ``context`` is for rebuilding an agent's tools, for example after its
+    browser restarts: pass the registry's existing ``context`` and it is
+    updated in place, so tasks the agent already started pick up the new
+    dependencies instead of keeping stale ones.
+
+    The tool modules' own globals are still filled in, as before. They are the
+    defaults for code that calls a tool directly with no context bound.
+    """
     # Import modules so decorators execute
     from talos_agent.tools import browser as _browser_mod  # noqa: F401
     from talos_agent.tools import commerce as _commerce_mod  # noqa: F401
@@ -409,7 +461,24 @@ def build_all_tools(
         ):
             adapter_registry.register(DiscordAdapter(settings))
 
-    # Inject dependencies into tool modules
+    # This agent's dependencies. Tools run through the registry returned below
+    # read these, never the module globals, so another agent building its tools
+    # cannot redirect this agent's calls.
+    if context is None:
+        context = ToolContext()
+    context.update(
+        api=api,
+        db=db,
+        browser=browser,
+        settings=settings,
+        adapter_registry=adapter_registry,
+        job_effect_store=job_effect_store,
+        job_effect_dispatcher=job_effect_dispatcher,
+    )
+
+    # Defaults for direct callers (and for a single agent set up the old way):
+    # the module globals. The last agent to build wins here, which is why agents
+    # must go through their own registry rather than rely on these.
     _internal_mod._db = db
     _web_api_mod._api = api
     _web_api_mod._settings = settings
@@ -436,15 +505,20 @@ def build_all_tools(
     _a2a_composition_mod._db = db
     _a2a_composition_mod._settings = settings
 
+    # The registry this agent runs its tools through. The shared module-level
+    # `registry` only collects the @tool registrations; policy and permissions
+    # are configured per agent so one agent's settings never govern another's.
+    agent_registry = registry.for_agent(context)
+
     # Inject policy middleware into the registry for pre-execution checks
     if policy_middleware is not None:
-        registry.set_middleware(policy_middleware)
+        agent_registry.set_middleware(policy_middleware)
 
     # Resolve permission manifests against the operator's grants. Every tool
     # has already registered by this point, so this re-validates the full set.
-    registry.set_permission_enforcer(build_enforcer(settings))
+    agent_registry.set_permission_enforcer(build_enforcer(settings))
 
-    return registry
+    return agent_registry
 
 
 def build_enforcer(settings: Settings) -> PermissionEnforcer:
