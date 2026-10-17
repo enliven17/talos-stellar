@@ -4,6 +4,7 @@ import "./globals.css";
 import { Header } from "@/components/header";
 import { Providers } from "@/components/providers";
 import { SplashScreen } from "@/components/splash-screen";
+import { THEME_INIT_SCRIPT } from "@/lib/theme";
 
 const ruthie = Ruthie({
   variable: "--font-ruthie",
@@ -22,11 +23,14 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${ruthie.variable} h-full antialiased bg-background`} style={{ colorScheme: "light", backgroundColor: "#FCF8F8" }}>
+    // The theme script below sets `data-theme` on this element before React
+    // hydrates, so the attribute is expected to differ from the server markup.
+    <html lang="en" className={`${ruthie.variable} h-full antialiased bg-background`} suppressHydrationWarning>
       <head>
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="use-credentials" />
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
       </head>
-      <body className="min-h-full flex flex-col bg-background text-foreground font-mono" style={{ backgroundColor: "#FCF8F8" }}>
+      <body className="min-h-full flex flex-col bg-background text-foreground font-mono">
         <SplashScreen />
         <Providers>
           <Header />

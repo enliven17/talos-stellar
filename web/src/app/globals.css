@@ -14,6 +14,106 @@
   /* Nav keeps original brightness */
   --nav-foreground: #2D2D2D;
   --nav-accent: #F5AFAF;
+
+  /* Lets form controls and scrollbars follow the active scheme. */
+  color-scheme: light dark;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+/*
+ * Dark scheme.
+ *
+ * It applies in two cases: the user chose dark with the theme toggle
+ * (`data-theme="dark"`), or the browser prefers dark and the user has not
+ * chosen light. The two blocks below must stay identical; a unit test
+ * (tests/theme-css.unit.test.ts) fails if they drift, and also checks the
+ * WCAG AA contrast of every text colour here against the dark surfaces.
+ *
+ * The first group is the app's own tokens. The second group re-points the few
+ * Tailwind palette steps that components use for text, tints and borders and
+ * that are only legible on a light page (the 500 to 700 text shades, the pale
+ * red banner tint, the gray skeleton and border steps). Overriding the palette
+ * variables here keeps those components unchanged. The status shades that are
+ * already bright (red, green, yellow, blue at 300 to 500) are pinned too, so
+ * their contrast is explicit and testable.
+ */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --background: #171213;
+  --foreground: #F2EBEB;
+  --accent: #F5AFAF;
+  --accent-cta: #F5AFAF;
+  --muted: #A89B9C;
+  --border: #3B3032;
+  --surface: #211A1B;
+  --surface-hover: #2D2325;
+  --nav-foreground: #F2EBEB;
+  --nav-accent: #F5AFAF;
+
+  --color-red-100: #3A1A1C;
+  --color-red-300: #FCA5A5;
+  --color-red-400: #F87171;
+  --color-red-500: #F87171;
+  --color-red-600: #F87171;
+  --color-red-700: #FCA5A5;
+  --color-green-400: #4ADE80;
+  --color-green-500: #22C55E;
+  --color-yellow-300: #FDE047;
+  --color-yellow-400: #FACC15;
+  --color-yellow-500: #EAB308;
+  --color-amber-400: #FBBF24;
+  --color-amber-600: #FBBF24;
+  --color-blue-400: #60A5FA;
+  --color-blue-500: #60A5FA;
+  --color-blue-600: #60A5FA;
+  --color-purple-500: #C084FC;
+  --color-orange-500: #FB923C;
+  --color-gray-200: #2D2325;
+  --color-gray-300: #3B3032;
+  --color-gray-500: #A89B9C;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --background: #171213;
+    --foreground: #F2EBEB;
+    --accent: #F5AFAF;
+    --accent-cta: #F5AFAF;
+    --muted: #A89B9C;
+    --border: #3B3032;
+    --surface: #211A1B;
+    --surface-hover: #2D2325;
+    --nav-foreground: #F2EBEB;
+    --nav-accent: #F5AFAF;
+
+    --color-red-100: #3A1A1C;
+    --color-red-300: #FCA5A5;
+    --color-red-400: #F87171;
+    --color-red-500: #F87171;
+    --color-red-600: #F87171;
+    --color-red-700: #FCA5A5;
+    --color-green-400: #4ADE80;
+    --color-green-500: #22C55E;
+    --color-yellow-300: #FDE047;
+    --color-yellow-400: #FACC15;
+    --color-yellow-500: #EAB308;
+    --color-amber-400: #FBBF24;
+    --color-amber-600: #FBBF24;
+    --color-blue-400: #60A5FA;
+    --color-blue-500: #60A5FA;
+    --color-blue-600: #60A5FA;
+    --color-purple-500: #C084FC;
+    --color-orange-500: #FB923C;
+    --color-gray-200: #2D2325;
+    --color-gray-300: #3B3032;
+    --color-gray-500: #A89B9C;
+  }
 }
 
 @theme inline {
@@ -100,4 +200,3 @@ body {
 .animate-loading-bar {
   animation: loading-bar 1.5s linear infinite;
 }
-
