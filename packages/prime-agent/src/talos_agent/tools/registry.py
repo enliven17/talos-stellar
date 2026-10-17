@@ -328,6 +328,7 @@ def build_all_tools(
     from talos_agent.tools import defi as _defi_mod  # noqa: F401
     from talos_agent.tools import planning as _planning_mod  # noqa: F401
     from talos_agent.tools import a2a_composition as _a2a_composition_mod  # noqa: F401
+    from talos_agent.tools import budget as _budget_mod  # noqa: F401
 
     # Build the channel adapter registry with all configured adapters
     from talos_agent.adapters.capability import (
@@ -435,6 +436,8 @@ def build_all_tools(
     _a2a_composition_mod._api = api
     _a2a_composition_mod._db = db
     _a2a_composition_mod._settings = settings
+    _budget_mod._db = db
+    _budget_mod._settings = settings
 
     # Inject policy middleware into the registry for pre-execution checks
     if policy_middleware is not None:
