@@ -5,6 +5,9 @@ import { AgentAvatar } from '../src/components/agent-avatar';
 import { Header } from '../src/components/header';
 import { SplashScreen } from '../src/components/splash-screen';
 import { FinancialProjectionChart } from '../src/components/financial-projection-chart';
+import { ProposalDetail } from '../src/components/proposals/proposal-detail';
+import { buildTimeline, viewFromChain, viewFromDatabase } from '../src/lib/proposal-detail';
+import { databaseRows, proposals, quorums, votes } from '../tests/fixtures/governance/proposals';
 
 // Initialize JSDOM and globals BEFORE importing axe-core
 const dom = new JSDOM('<!DOCTYPE html><html lang="en"><head><title>Test</title></head><body></body></html>');
@@ -82,7 +85,25 @@ async function main() {
     { name: "AgentAvatar", el: React.createElement(AgentAvatar, { name: "TestAgent" }) },
     { name: "Header", el: React.createElement(Header) },
     { name: "SplashScreen", el: React.createElement(SplashScreen) },
-    { name: "FinancialProjectionChart", el: React.createElement(FinancialProjectionChart, { talosId: "123" }) }
+    { name: "FinancialProjectionChart", el: React.createElement(FinancialProjectionChart, { talosId: "123" }) },
+    ...(["Active", "Approved", "Rejected", "Executed"] as const).map((status) => {
+      const view = viewFromChain(proposals[status], quorums[status], { name: "Growth Agent", id: "talos-1" });
+      return {
+        name: `ProposalDetail (on-chain, ${status})`,
+        el: React.createElement(ProposalDetail, {
+          view,
+          timeline: buildTimeline(view, 5_000),
+          votes: { kind: "ok", votes, nextHref: "/proposals/7?cursor=abc", firstHref: "/proposals/7", incomplete: false },
+        }),
+      };
+    }),
+    (() => {
+      const view = viewFromDatabase(databaseRows.pending);
+      return {
+        name: "ProposalDetail (database, pending)",
+        el: React.createElement(ProposalDetail, { view, timeline: buildTimeline(view), votes: { kind: "not-applicable" } }),
+      };
+    })(),
   ];
 
   for (const comp of components) {
