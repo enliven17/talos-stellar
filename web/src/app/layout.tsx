@@ -46,11 +46,19 @@ export default async function RootLayout({
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
       </head>
       <body className="min-h-full flex flex-col bg-background text-foreground font-mono">
+        <a
+          href="#main-content"
+          className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-50 focus:px-4 focus:py-2 focus:bg-background focus:text-foreground focus:border focus:border-border focus:shadow-md focus:outline-none"
+        >
+          Skip to content
+        </a>
         <SplashScreen />
         <OfflineBanner />
         <Providers initialLocale={locale}>
           <Header />
-          <main className="flex-1">{children}</main>
+          <main id="main-content" tabIndex={-1} className="flex-1 focus:outline-none">
+            {children}
+          </main>
           <footer className="border-t border-border py-8 px-6">
             <div className="max-w-7xl mx-auto flex items-center justify-center text-sm text-muted">
               <span className="font-ruthie text-2xl text-nav-accent">Talos</span>
