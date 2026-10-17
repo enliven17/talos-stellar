@@ -105,6 +105,19 @@ pub struct Checkpoint {
 /// Maximum page size for `get_dividend_snapshots_page`.
 pub const DIVIDEND_PAGE_LIMIT: u32 = 50;
 
+/// Maximum page size for `get_proposals_page`.
+pub const PROPOSAL_PAGE_LIMIT: u32 = 50;
+
+/// A page of proposals and the ID from which to request the next page.
+///
+/// `next_cursor` is `0` when there are no more proposals in the current range.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalsPage {
+    pub proposals: Vec<Proposal>,
+    pub next_cursor: u32,
+}
+
 /// A point-in-time record of per-token revenue distribution for a Talos.
 ///
 /// Each epoch represents one distribution cycle.  `total_usdc` is the gross
@@ -319,18 +332,15 @@ fn emit_quorum_reached(
         .publish((symbol_short!("qrm_rchd"), proposal_id), payload);
 }
 
-// ── Stable interface (v1.1.0) ───────────────────────────────────────
+// ── Stable interface (v1.2.0) ───────────────────────────────────────
 //
-// v1.1.0 adds:
-//   - `ProposalQuorumState` struct and `get_proposal_quorum_state` query
-//   - `EventQuorumReached` typed event emitted once per proposal
-//   - `DataKey::QuorumReached(u32)` idempotency sentinel
-//   - `quorum_state` capability in `interface_features()`
+// v1.1.0 added quorum-state queries and the quorum-reached event.
+// v1.2.0 adds paginated proposal listing and its interface capability.
 //
 // All changes are purely additive.  Existing callers (v1.0.0) remain
 // fully compatible; no storage keys or existing entry-point signatures
 // have been modified.
-pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 1, 0);
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 2, 0);
 
 pub const INTERFACE_NAMESPACE: &str = "TalosGovernance";
 
@@ -339,7 +349,7 @@ pub const INTERFACE_ID: [u8; 32] = [
     0x65, 0x72, 0x6E, 0x61, 0x6E, 0x63, 0x65, 0x00, // "ernance" + zero pad
     // (major, minor, patch) big-endian u32s
     0x00, 0x00, 0x00, 0x01, // major = 1
-    0x00, 0x00, 0x00, 0x01, // minor = 1
+    0x00, 0x00, 0x00, 0x02, // minor = 2
     0x00, 0x00, 0x00, 0x00, // patch = 0
     // reserved
     0x00, 0x00, 0x00, 0x00,
@@ -355,6 +365,7 @@ pub fn features_list() -> &'static [&'static str] {
         "config_admin",       // update_config / cache_token_balance requires admin
         "interface_query",    // version / interface_id / supports_version
         "quorum_state",       // get_proposal_quorum_state / EventQuorumReached
+        "proposal_pagination", // get_proposals_page
     ]
 }
 
@@ -720,6 +731,52 @@ impl TalosGovernance {
         env.storage()
             .persistent()
             .get(&DataKey::Proposal(proposal_id))
+    }
+
+    /// Return a page of proposals, scanning IDs from `start_id` inclusively.
+    ///
+    /// Missing proposal IDs are skipped, so deleted or otherwise absent
+    /// records do not prevent later proposals from appearing. `limit` is
+    /// clamped to [`PROPOSAL_PAGE_LIMIT`] (50). The returned `next_cursor`
+    /// is the next ID to scan, or `0` when the current range is exhausted.
+    /// At most [`PROPOSAL_PAGE_LIMIT`] IDs are scanned per call, so a sparse
+    /// range may return fewer proposals than requested.
+    pub fn get_proposals_page(env: Env, start_id: u32, limit: u32) -> ProposalsPage {
+        let effective_limit = limit.min(PROPOSAL_PAGE_LIMIT);
+        let next_proposal_id: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(1);
+        let mut proposal_id = start_id.max(1);
+        let mut proposals = Vec::new(&env);
+
+        let mut scanned = 0u32;
+        while proposals.len() < effective_limit
+            && scanned < PROPOSAL_PAGE_LIMIT
+            && proposal_id < next_proposal_id
+        {
+            if let Some(proposal) = env
+                .storage()
+                .persistent()
+                .get::<_, Proposal>(&DataKey::Proposal(proposal_id))
+            {
+                proposals.push_back(proposal);
+            }
+            proposal_id = proposal_id.saturating_add(1);
+            scanned += 1;
+        }
+
+        let next_cursor = if proposal_id < next_proposal_id {
+            proposal_id
+        } else {
+            0
+        };
+
+        ProposalsPage {
+            proposals,
+            next_cursor,
+        }
     }
 
     pub fn get_vote(env: Env, proposal_id: u32, voter: Address) -> Option<Vote> {
@@ -1296,6 +1353,41 @@ mod tests {
                 },
             }])
             .create_proposal(proposer, &7_u32, &title, &description)
+    }
+
+    #[test]
+    fn get_proposals_page_skips_missing_ids_and_advances_cursor() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        assert_eq!(
+            create_proposal_with_auth(&env, &contract_id, &client, &proposer),
+            1
+        );
+        assert_eq!(
+            create_proposal_with_auth(&env, &contract_id, &client, &proposer),
+            2
+        );
+        assert_eq!(
+            create_proposal_with_auth(&env, &contract_id, &client, &proposer),
+            3
+        );
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::Proposal(2));
+        });
+
+        let first_page = client.get_proposals_page(&1, &1);
+        assert_eq!(first_page.proposals.len(), 1);
+        assert_eq!(first_page.proposals.get(0).unwrap().id, 1);
+        assert_eq!(first_page.next_cursor, 2);
+
+        let second_page = client.get_proposals_page(&first_page.next_cursor, &1);
+        assert_eq!(second_page.proposals.len(), 1);
+        assert_eq!(second_page.proposals.get(0).unwrap().id, 3);
+        assert_eq!(second_page.next_cursor, 0);
     }
 
     fn cache_balance_with_auth(
@@ -2701,36 +2793,39 @@ mod tests {
         assert!(result.is_none(), "nonexistent proposal must return None");
     }
 
-    /// version() returns (1, 1, 0) after the bump.
+    /// version() returns (1, 2, 0) after the bump.
     #[test]
-    fn version_returns_1_1_0() {
+    fn version_returns_1_2_0() {
         let (env, _contract_id, _admin, _pulse, client) = setup();
         let ver = client.version();
-        assert_eq!(ver, (1u32, 1u32, 0u32));
+        assert_eq!(ver, (1u32, 2u32, 0u32));
     }
 
-    /// supports_version(1, 1, 0) is true; (1, 2, 0) is false.
+    /// Supports this version and backward-compatible 1.x interfaces.
     #[test]
     fn supports_version_compatibility_checks() {
         let (env, _contract_id, _admin, _pulse, client) = setup();
         assert!(client.supports_version(&1, &0, &0), "must support v1.0.0 (backward compat)");
         assert!(client.supports_version(&1, &1, &0), "must support v1.1.0 (exact)");
-        assert!(!client.supports_version(&1, &2, &0), "must not support v1.2.0 (not yet deployed)");
+        assert!(client.supports_version(&1, &2, &0), "must support v1.2.0 (exact)");
+        assert!(!client.supports_version(&1, &3, &0), "must not support v1.3.0 (not yet deployed)");
         assert!(!client.supports_version(&2, &0, &0), "must not support v2.0.0 (major mismatch)");
     }
 
-    /// interface_features includes "quorum_state".
+    /// interface_features includes "quorum_state" and "proposal_pagination".
     #[test]
     fn interface_features_includes_quorum_state() {
         let (env, _contract_id, _admin, _pulse, client) = setup();
         let features = client.interface_features();
         let quorum_sym = soroban_sdk::Symbol::new(&env, "quorum_state");
         assert!(features.contains(&quorum_sym), "interface_features must include quorum_state");
+        let pagination_sym = soroban_sdk::Symbol::new(&env, "proposal_pagination");
+        assert!(features.contains(&pagination_sym), "interface_features must include proposal_pagination");
     }
 
-    /// interface_id golden vector — minor byte is now 0x01.
+    /// interface_id golden vector — minor byte is now 0x02.
     #[test]
-    fn interface_id_golden_vector_v1_1_0() {
+    fn interface_id_golden_vector_v1_2_0() {
         let (env, _contract_id, _admin, _pulse, client) = setup();
         let id = client.interface_id();
         let bytes = id.to_array();
@@ -2738,8 +2833,8 @@ mod tests {
         assert_eq!(&bytes[0..8], &[0x54, 0x61, 0x6C, 0x6F, 0x73, 0x47, 0x6F, 0x76]);
         // Bytes 16-19: major = 1
         assert_eq!(&bytes[16..20], &[0x00, 0x00, 0x00, 0x01]);
-        // Bytes 20-23: minor = 1
-        assert_eq!(&bytes[20..24], &[0x00, 0x00, 0x00, 0x01]);
+        // Bytes 20-23: minor = 2
+        assert_eq!(&bytes[20..24], &[0x00, 0x00, 0x00, 0x02]);
         // Bytes 24-27: patch = 0
         assert_eq!(&bytes[24..28], &[0x00, 0x00, 0x00, 0x00]);
     }
