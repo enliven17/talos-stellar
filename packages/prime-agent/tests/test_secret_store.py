@@ -17,6 +17,7 @@ from talos_agent.secret_store import (
     SecretBusyError,
     SecretConflictError,
     SecretDecryptionError,
+    SecretNotFoundError,
     SecretStore,
     SecretValidationError,
     decode_keyring,
@@ -301,3 +302,115 @@ def test_operator_cli_never_echoes_secret_or_envelope(tmp_path: Path):
     assert secret not in result.output
     assert "TALOS-SECRET" not in result.output
     assert '"status": "active"' in result.output
+
+
+def test_rollback_checkpoint_restores_head_and_is_idempotent(mock_db: LocalDB):
+    store = _store(mock_db)
+    first = _stage_activate(store, "provider.api_key", "before", "before")
+    checkpoint = store.create_rollback_checkpoint(
+        "provider.api_key",
+        request_id="ckpt-1",
+        reason="pre_rotation",
+    )
+    assert checkpoint.active_version == first
+    assert checkpoint.status == "open"
+
+    second = _stage_activate(store, "provider.api_key", "after-bad", "after")
+    assert store.resolve("provider.api_key").value == "after-bad"
+
+    restored = store.rollback_to_checkpoint(
+        "provider.api_key",
+        checkpoint.checkpoint_id,
+        expected_active_version=second,
+        reason="credential_rejected",
+    )
+    assert restored.version == first
+    assert restored.status == "active"
+    assert store.resolve("provider.api_key").value == "before"
+
+    again = store.rollback_to_checkpoint(
+        "provider.api_key",
+        checkpoint.checkpoint_id,
+        expected_active_version=first,
+        reason="credential_rejected",
+    )
+    assert again.version == first
+    listed = store.list_rollback_checkpoints("provider.api_key")
+    assert listed[0].status == "restored"
+
+
+def test_rollback_checkpoint_rejects_stale_cas_and_discarded(mock_db: LocalDB):
+    store = _store(mock_db)
+    first = _stage_activate(store, "groq_api_key", "v1", "v1")
+    checkpoint = store.create_rollback_checkpoint(
+        "groq_api_key", request_id="ckpt-stale"
+    )
+    second = _stage_activate(store, "groq_api_key", "v2", "v2")
+    third = _stage_activate(store, "groq_api_key", "v3", "v3")
+
+    with pytest.raises(SecretConflictError, match="expected 2, found 3"):
+        store.rollback_to_checkpoint(
+            "groq_api_key",
+            checkpoint.checkpoint_id,
+            expected_active_version=second,
+        )
+
+    discarded = store.discard_rollback_checkpoint(
+        "groq_api_key", checkpoint.checkpoint_id, reason="no_longer_needed"
+    )
+    assert discarded.status == "discarded"
+    with pytest.raises(SecretConflictError, match="discarded"):
+        store.rollback_to_checkpoint(
+            "groq_api_key",
+            checkpoint.checkpoint_id,
+            expected_active_version=third,
+        )
+    assert store.resolve("groq_api_key").value == "v3"
+    assert first and second  # versions existed for CAS path
+
+
+def test_activate_with_checkpoint_request_id_is_transactional(mock_db: LocalDB):
+    store = _store(mock_db)
+    first = _stage_activate(store, "openai_api_key", "one", "one")
+    staged = store.stage("openai_api_key", "two", request_id="two")
+    store.activate(
+        "openai_api_key",
+        staged.version,
+        expected_active_version=first,
+        checkpoint_request_id="auto-ckpt",
+    )
+    checkpoints = store.list_rollback_checkpoints("openai_api_key")
+    assert len(checkpoints) == 1
+    assert checkpoints[0].active_version == first
+    assert checkpoints[0].status == "open"
+    # duplicate activate checkpoint request is idempotent via create path on retry stage
+    duplicate = store.create_rollback_checkpoint(
+        "openai_api_key", request_id="auto-ckpt"
+    )
+    assert duplicate.checkpoint_id == checkpoints[0].checkpoint_id
+
+
+def test_checkpoint_missing_and_invalid_inputs(mock_db: LocalDB):
+    store = _store(mock_db)
+    with pytest.raises(SecretNotFoundError):
+        store.create_rollback_checkpoint("missing.secret", request_id="x")
+    _stage_activate(store, "valid_name", "value", "req")
+    with pytest.raises(SecretValidationError, match="request ID"):
+        store.create_rollback_checkpoint("valid_name", request_id="bad id")
+    with pytest.raises(SecretNotFoundError):
+        store.rollback_to_checkpoint(
+            "valid_name", "does-not-exist", expected_active_version=1
+        )
+
+
+def test_checkpoint_audit_never_includes_secret_material(mock_db: LocalDB):
+    store = _store(mock_db)
+    plaintext = "checkpoint-sensitive-token"
+    _stage_activate(store, "provider.api_key", plaintext, "seed")
+    ckpt = store.create_rollback_checkpoint("provider.api_key", request_id="audit-ckpt")
+    events = store.audit_events("provider.api_key")
+    blob = json.dumps(events)
+    assert plaintext not in blob
+    assert ckpt.checkpoint_id in blob
+    assert "TALOS-SECRET" not in blob
+

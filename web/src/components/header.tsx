@@ -8,6 +8,7 @@ import { CopyButton } from "./copy-button";
 
 const NAV_ITEMS = [
   { href: "/agents", label: "Agents", requiresWallet: false },
+  { href: "/marketplace", label: "Marketplace", requiresWallet: false },
   { href: "/activity", label: "Activity", requiresWallet: false },
   { href: "/proposals", label: "Proposals", requiresWallet: false },
   { href: "/playbooks", label: "Playbooks", requiresWallet: false },

@@ -23,6 +23,7 @@ import httpx
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
 from talos_agent.adapters.diagnostics import safe_adapter_diagnostic_fields
+from talos_agent.adapters.snapshots import AdapterHealthSnapshot
 from talos_agent.circuit_breaker import (
     CircuitBreakerConfig,
     CircuitBreakerRegistry,
@@ -112,6 +113,21 @@ class NetworkRule:
             or not 1 <= self.port <= 65535
         ):
             raise ManifestValidationError("network rule port is out of range")
+
+    def matches(self, host: str, port: int, method: str, path: str) -> bool:
+        """Explicit wildcard matching for network rules.
+
+        A rule without an explicit port matches the HTTPS default (443);
+        a rule with a port only matches that exact port.
+        """
+        if not isinstance(host, str) or not isinstance(method, str) or not isinstance(path, str):
+            return False
+        if self.host != host:
+            return False
+        effective_rule_port = self.port if self.port is not None else 443
+        if effective_rule_port != port:
+            return False
+        return method.upper() in self.methods and path.startswith(self.path_prefix)
 
 
 @dataclass(frozen=True)
@@ -551,15 +567,9 @@ class SandboxedHTTPClient:
         if decoded_path.endswith("/") and not path.endswith("/"):
             path += "/"
         normalized_method = method.upper()
+        effective_port = port or 443
         for rule in self._manifest.network:
-            effective_port = port or 443
-            rule_port = rule.port or 443
-            if (
-                host == rule.host
-                and effective_port == rule_port
-                and normalized_method in rule.methods
-                and path.startswith(rule.path_prefix)
-            ):
+            if rule.matches(host, effective_port, normalized_method, path):
                 return
         _denied(self._manifest.adapter_id, "network", normalized_method.lower())
         raise CapabilityDeniedError("adapter network destination denied")
@@ -734,6 +744,10 @@ class AdapterInvocationStore:
                         lease.isoformat(),
                     ),
                 )
+                self._conn.execute(
+                    "UPDATE adapter_invocations SET attempt_count = 1 WHERE operation_id = ?",
+                    (operation_id,),
+                )
                 self._conn.commit()
                 return
             if (
@@ -760,6 +774,10 @@ class AdapterInvocationStore:
                     """,
                     (operation_id,),
                 )
+                self._conn.execute(
+                    "UPDATE adapter_invocations SET attempt_count = attempt_count + 1 WHERE operation_id = ?",
+                    (operation_id,),
+                )
                 self._conn.commit()
                 raise IndeterminateInvocationError(
                     "adapter operation lease expired; reconcile before retry"
@@ -772,6 +790,10 @@ class AdapterInvocationStore:
                 WHERE operation_id = ? AND state = 'failed'
                 """,
                 (owner_id, lease.isoformat(), operation_id),
+            )
+            self._conn.execute(
+                "UPDATE adapter_invocations SET attempt_count = attempt_count + 1 WHERE operation_id = ?",
+                (operation_id,),
             )
             self._conn.commit()
         except sqlite3.OperationalError as exc:
@@ -900,7 +922,8 @@ class SandboxedAdapter(BaseSocialAdapter):
     def get_capabilities(self) -> ChannelCapabilities:
         return self.__adapter.get_capabilities()
 
-    def health_snapshot(self) -> dict[str, bool]:
+    def health_snapshot(self) -> AdapterHealthSnapshot | dict[str, bool]:
+        """Forward the wrapped adapter's own snapshot, typed or legacy, unchanged."""
         snapshot = getattr(self.__adapter, "health_snapshot", None)
         return snapshot() if callable(snapshot) else {}
 

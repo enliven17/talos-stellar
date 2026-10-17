@@ -1,12 +1,19 @@
 {
   "contracts": [
     "TalosRegistry",
-    "TalosNameService"
+    "TalosNameService",
+    "TalosGovernance"
   ],
   "description": "Supported on-disk storage schema versions. Latest matches storage_migration::SCHEMA_TIMELOCK_DEFAULTS. Add new version by appending and regenerating fixtures.",
-  "latest": 2,
+  "latest": 3,
   "supported": [
     1,
-    2
-  ]
+    2,
+    3
+  ],
+  "changelog": {
+    "1": "Genesis schema. Registry: Talos, PatronUpdate, NameRecord, TalosName, CreatorOf. Governance: GovernanceBundle (no TimelockConfig).",
+    "2": "Added explicit TimelockConfig to GovernanceBundle. Additive: metadata field on Talos (Option<String>).",
+    "3": "TalosGovernance v1.1.0: adds DataKey::QuorumReached(u32) idempotency sentinel. Written once when a proposal first crosses the quorum threshold. Purely additive — existing keys and entry-points are unchanged. Companion EventQuorumReached (topic: qrm_rchd) is emitted at most once per proposal."
+  }
 }

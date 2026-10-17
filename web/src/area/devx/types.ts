@@ -8,6 +8,8 @@ export interface BenchmarkConfig {
   varianceThreshold: number;
   memoryThresholdMb: number;
   cpuThresholdPercent: number;
+  performanceBudgetMs?: number;
+  p99ThresholdMs?: number;
   artifactDir: string;
   trendWindow: number;
 }
@@ -309,4 +311,52 @@ export interface EnvStateTransition {
   prNumber: number;
   detail?: string;
   failureMode?: string;
+}
+
+
+export type PropertySuiteName = "datasets" | "metrics" | "thresholds" | "schedule";
+
+export interface PropertyScheduleConfig {
+  enabled: boolean;
+  /** Five-field cron (UTC by default), e.g. "27 5 * * *" */
+  cron: string;
+  timezone: string;
+  iterations: number;
+  /** Explicit seed, or null to derive from the UTC calendar day */
+  seed: number | null;
+  suites: PropertySuiteName[];
+  timeoutMs: number;
+  failClosed: boolean;
+  artifactDir: string;
+  maxCounterexamples: number;
+}
+
+export interface PropertyCounterexample {
+  property: string;
+  suite: PropertySuiteName;
+  iteration: number;
+  seed: number;
+  detail: string;
+}
+
+export interface PropertySuiteResult {
+  suite: PropertySuiteName;
+  properties: number;
+  passed: number;
+  failed: number;
+  iterations: number;
+  seed: number;
+  counterexamples: PropertyCounterexample[];
+  ok: boolean;
+}
+
+export interface PropertyRunSummary {
+  ok: boolean;
+  skipped: boolean;
+  reason?: string;
+  seed: number;
+  suites: PropertySuiteResult[];
+  startedAt: string;
+  completedAt: string;
+  schedule: string;
 }

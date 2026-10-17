@@ -53,6 +53,7 @@ export interface EventFixture {
   event: string;
   contract: string;
   ledger_sequence: number;
+  tx_index_in_ledger: number;
   tx_hash: string;
   event_index_in_tx: number;
   topics: ScValJson[];
@@ -169,7 +170,16 @@ export function parseFixtureSet(raw: Json): FixtureSet {
   if (!Array.isArray(raw.malformed)) {
     fail(MalformedEventError, "malformed must be an array");
   }
-  return raw as FixtureSet;
+  const set = { ...raw, fixtures: [] } as FixtureSet;
+  set.fixtures = raw.fixtures.map((fixture: Json) => parseEventFixture(fixture, set));
+
+  const cursors = new Set<string>();
+  for (const fixture of set.fixtures) {
+    const cursor = `${fixture.ledger_sequence}:${fixture.tx_index_in_ledger}:${fixture.event_index_in_tx}`;
+    if (cursors.has(cursor)) fail(MalformedEventError, `duplicate event cursor ${cursor}`);
+    cursors.add(cursor);
+  }
+  return set;
 }
 
 function validateCatalogEvent(event: string, entry: CatalogEvent): void {
@@ -208,6 +218,9 @@ export function parseEventFixture(raw: Json, set: FixtureSet): EventFixture {
   const family = raw.family as EventFamily;
   const event = raw.event as string;
   const entry = catalogEntry(set, family, event);
+  if (raw.contract !== entry.contract) {
+    fail(MalformedEventError, `event ${event}: contract does not match the catalog`);
+  }
 
   const topics = raw.topics as ScValJson[];
   if (!Array.isArray(topics) || topics.length < 1) {
@@ -251,6 +264,11 @@ export function parseEventFixture(raw: Json, set: FixtureSet): EventFixture {
     }
   });
 
+  for (const field of ["ledger_sequence", "tx_index_in_ledger", "event_index_in_tx"] as const) {
+    if (!Number.isInteger(raw[field]) || raw[field] < 0 || raw[field] > 0xffff_ffff) {
+      fail(MalformedEventError, `event ${event}: ${field} must be a u32`);
+    }
+  }
   const decoded = decodeData(set, family, event, data);
   return {
     id: raw.id as string,
@@ -258,6 +276,7 @@ export function parseEventFixture(raw: Json, set: FixtureSet): EventFixture {
     event,
     contract: raw.contract as string,
     ledger_sequence: raw.ledger_sequence as number,
+    tx_index_in_ledger: raw.tx_index_in_ledger as number,
     tx_hash: raw.tx_hash as string,
     event_index_in_tx: raw.event_index_in_tx as number,
     topics,
@@ -379,7 +398,14 @@ function matches(query: ValidatedQuery, fixture: EventFixture): boolean {
  */
 export function queryEvents(set: FixtureSet, query: EventQuery): QueryResult {
   const q = validateQuery(set, query);
-  const all = set.fixtures.filter((f) => matches(q, f));
+  const all = set.fixtures
+    .filter((f) => matches(q, f))
+    .sort((a, b) => {
+      if (a.ledger_sequence !== b.ledger_sequence) return a.ledger_sequence < b.ledger_sequence ? -1 : 1;
+      if (a.tx_index_in_ledger !== b.tx_index_in_ledger) return a.tx_index_in_ledger < b.tx_index_in_ledger ? -1 : 1;
+      if (a.event_index_in_tx !== b.event_index_in_tx) return a.event_index_in_tx < b.event_index_in_tx ? -1 : 1;
+      return a.id.localeCompare(b.id);
+    });
 
   const pageSize = q.pageSize;
   const total = all.length;

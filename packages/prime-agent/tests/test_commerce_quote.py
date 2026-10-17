@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,6 +10,7 @@ import pytest
 from talos_agent.clock import FakeClock
 from talos_agent.commerce_quote import (
     EXPIRED_QUOTE,
+    INSUFFICIENT_VALIDITY,
     INVALID_QUOTE,
     MISSING_QUOTE_EXPIRY,
     enforce_commerce_quote_expiry,
@@ -232,3 +233,32 @@ class TestPurchaseServiceQuoteExpiry:
 
         assert result.get("status") == "submitted"
         mock_sign.assert_called_once()
+
+
+class TestPurchaseServiceClockSkewPolicy:
+    """The purchase path applies the x402 clock-skew policy (issue #563)."""
+
+    @pytest.mark.asyncio
+    async def test_refuses_quote_that_would_expire_mid_flight(self):
+        soon = (
+            (datetime.now(timezone.utc) + timedelta(seconds=1))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        details = {
+            "price": 1.0,
+            "payee": "GDEST...",
+            "quote": {"amount": "1.000000", "expiresAt": soon},
+        }
+        mock_api, mock_db, mock_settings, mock_signer, mock_sign = _mock_purchase_env(details)
+
+        with patch("talos_agent.tools.commerce._api", mock_api), patch(
+            "talos_agent.tools.commerce._db", mock_db
+        ), patch("talos_agent.tools.commerce._settings", mock_settings), patch(
+            "talos_agent.tools.commerce._get_signer", return_value=mock_signer
+        ):
+            result = await purchase_service("other-talos", "analytics", "{}")
+
+        assert result["code"] == INSUFFICIENT_VALIDITY
+        mock_sign.assert_not_called()
+        mock_api.submit_commerce.assert_not_called()

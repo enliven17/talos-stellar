@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { verifyAdminKey } from "@/lib/admin-auth";
 import { getJob, requeue } from "@/lib/jobs";
@@ -6,7 +7,7 @@ import { getJob, requeue } from "@/lib/jobs";
 // resets attempts to 0, clears lastError, sets runAt to now. No-op error
 // (409) if the job is pending/leased/completed — only terminal-failure
 // states are eligible, so this can't be used to double-run a completed job.
-export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+async function _POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const auth = verifyAdminKey(request);
   if (!auth.ok) return auth.response;
 
@@ -27,3 +28,5 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);

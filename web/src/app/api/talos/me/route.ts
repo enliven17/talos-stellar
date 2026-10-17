@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { tlsTalos } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { withTraceContext } from "@/lib/tracing";
+import { resolveTalosFromRequest } from "@/lib/auth";
 
 // GET /api/talos/me — Resolve TALOS from API key (Bearer token)
 async function handleGet(request: NextRequest) {

@@ -38,11 +38,23 @@ dependency_unavailable — external dependency (browser, horizon, web API) is no
 timeout                — health probe timed out before completing.
 internal_error         — probe raised an unexpected internal exception.
 network_error          — network or connection error encountered.
+
+Adapter snapshot contract
+--------------------------
+Each probe reads its adapter's ``health_snapshot()`` return value through
+``_snapshot_field``/``_snapshot_bool``, which accept either a typed
+``*HealthSnapshot`` dataclass from :mod:`talos_agent.adapters.snapshots`
+(the preferred, statically-checkable contract for new/updated adapters) or a
+legacy ``dict[str, bool]``. A missing field, a ``None`` snapshot, or a
+snapshot call that raises all fall back to introspecting the adapter's own
+private attributes — a probe never crashes or hangs on a misbehaving
+``health_snapshot()``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import datetime
 import enum
 import re
@@ -170,6 +182,52 @@ async def _run_with_timeout(
         )
 
 
+_MISSING = object()
+"""Sentinel distinguishing "field absent from snapshot" from "field present and falsy"."""
+
+
+def _call_health_snapshot(adapter: object) -> object:
+    """Call ``adapter.health_snapshot()`` and return its raw result.
+
+    Returns ``None`` when the adapter has no callable ``health_snapshot``, or
+    when calling it raises — a misbehaving adapter's snapshot must never crash
+    a probe. Callers pass the result straight to :func:`_snapshot_field`.
+    """
+    snapshot_fn = getattr(adapter, "health_snapshot", None)
+    if not callable(snapshot_fn):
+        return None
+    try:
+        return snapshot_fn()
+    except Exception:  # noqa: BLE001 — a broken snapshot must not crash the probe
+        return None
+
+
+def _snapshot_field(snapshot: object, field_name: str) -> object:
+    """Read *field_name* off a health snapshot, typed or legacy.
+
+    Supports the typed ``*HealthSnapshot`` dataclasses in
+    :mod:`talos_agent.adapters.snapshots` (attribute access) as well as the
+    legacy ``dict[str, bool]`` shape some adapters may still return, so
+    migrating an adapter to the typed contract is non-breaking for callers.
+
+    Returns the sentinel :data:`_MISSING` when *field_name* is absent from
+    either shape (including when *snapshot* is ``None`` or an unrecognised
+    type), so callers can fall back to their own default without confusing
+    "absent" with "present but false".
+    """
+    if dataclasses.is_dataclass(snapshot) and not isinstance(snapshot, type):
+        return getattr(snapshot, field_name, _MISSING)
+    if isinstance(snapshot, dict):
+        return snapshot.get(field_name, _MISSING)
+    return _MISSING
+
+
+def _snapshot_bool(snapshot: object, field_name: str, fallback: object) -> bool:
+    """Return ``bool(snapshot.<field_name>)``, or ``bool(fallback)`` if absent."""
+    value = _snapshot_field(snapshot, field_name)
+    return bool(value) if value is not _MISSING else bool(fallback)
+
+
 # ── Discord probe ─────────────────────────────────────────────────────────────
 
 
@@ -187,24 +245,10 @@ class DiscordProbe:
     async def probe(self) -> ProbeResult:
         a = self._adapter
         adapter_name = getattr(a, "channel_name", "Discord")
-        snapshot_fn = getattr(a, "health_snapshot", None)
-        snapshot = snapshot_fn() if callable(snapshot_fn) else {}
-        snapshot = snapshot if isinstance(snapshot, dict) else {}
-        has_webhook = bool(
-            snapshot["has_webhook"]
-            if "has_webhook" in snapshot
-            else getattr(a, "_webhook_url", "")
-        )
-        has_token = bool(
-            snapshot["has_token"]
-            if "has_token" in snapshot
-            else getattr(a, "_bot_token", "")
-        )
-        has_channel = bool(
-            snapshot["has_channel"]
-            if "has_channel" in snapshot
-            else getattr(a, "_channel_id", "")
-        )
+        snapshot = _call_health_snapshot(a)
+        has_webhook = _snapshot_bool(snapshot, "has_webhook", getattr(a, "_webhook_url", ""))
+        has_token = _snapshot_bool(snapshot, "has_token", getattr(a, "_bot_token", ""))
+        has_channel = _snapshot_bool(snapshot, "has_channel", getattr(a, "_channel_id", ""))
 
         if has_webhook or (has_token and has_channel):
             return ProbeResult(
@@ -262,19 +306,9 @@ class TelegramProbe:
     async def probe(self) -> ProbeResult:
         a = self._adapter
         adapter_name = getattr(a, "channel_name", "Telegram")
-        snapshot_fn = getattr(a, "health_snapshot", None)
-        snapshot = snapshot_fn() if callable(snapshot_fn) else {}
-        snapshot = snapshot if isinstance(snapshot, dict) else {}
-        has_token = bool(
-            snapshot["has_token"]
-            if "has_token" in snapshot
-            else getattr(a, "_bot_token", "")
-        )
-        has_chat = bool(
-            snapshot["has_chat"]
-            if "has_chat" in snapshot
-            else getattr(a, "_chat_id", "")
-        )
+        snapshot = _call_health_snapshot(a)
+        has_token = _snapshot_bool(snapshot, "has_token", getattr(a, "_bot_token", ""))
+        has_chat = _snapshot_bool(snapshot, "has_chat", getattr(a, "_chat_id", ""))
 
         if has_token and has_chat:
             return ProbeResult(
@@ -328,30 +362,19 @@ class XProbe:
     async def probe(self) -> ProbeResult:
         a = self._adapter
         adapter_name = getattr(a, "channel_name", "X")
-        snapshot_fn = getattr(a, "health_snapshot", None)
-        snapshot = snapshot_fn() if callable(snapshot_fn) else {}
-        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        snapshot = _call_health_snapshot(a)
         settings = getattr(a, "_settings", None)
-        has_username = bool(
-            snapshot["has_username"]
-            if "has_username" in snapshot
-            else getattr(settings, "x_username", "")
-        )
+        has_username = _snapshot_bool(snapshot, "has_username", getattr(settings, "x_username", ""))
+
         from talos_agent.config import resolve_setting_secret
 
-        has_password = bool(
-            snapshot["has_password"]
-            if "has_password" in snapshot
-            else resolve_setting_secret(settings, "x_password")
+        has_password = _snapshot_bool(
+            snapshot, "has_password", resolve_setting_secret(settings, "x_password")
         )
         has_creds = has_username and has_password
 
         browser: object | None = getattr(a, "_browser", None)
-        browser_live = bool(
-            snapshot["browser_live"]
-            if "browser_live" in snapshot
-            else _browser_is_live(browser)
-        )
+        browser_live = _snapshot_bool(snapshot, "browser_live", _browser_is_live(browser))
 
         if not has_creds:
             return ProbeResult(
@@ -471,20 +494,10 @@ class StellarPaymentProbe:
                 error_category=ErrorCategory.NONE,
             )
 
-        snapshot_fn = getattr(s, "health_snapshot", None)
-        snapshot = snapshot_fn() if callable(snapshot_fn) else {}
-        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        snapshot = _call_health_snapshot(s)
 
-        has_api = bool(
-            snapshot["has_api"]
-            if "has_api" in snapshot
-            else getattr(s, "_api", None) is not None
-        )
-        initialized = bool(
-            snapshot["initialized"]
-            if "initialized" in snapshot
-            else getattr(s, "_initialized", False)
-        )
+        has_api = _snapshot_bool(snapshot, "has_api", getattr(s, "_api", None) is not None)
+        initialized = _snapshot_bool(snapshot, "initialized", getattr(s, "_initialized", False))
 
         if not has_api:
             return ProbeResult(
@@ -531,24 +544,12 @@ class X402PaymentProbe:
                 error_category=ErrorCategory.NONE,
             )
 
-        snapshot_fn = getattr(s, "health_snapshot", None)
-        snapshot = snapshot_fn() if callable(snapshot_fn) else {}
-        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        snapshot = _call_health_snapshot(s)
 
-        has_api = bool(
-            snapshot["has_api"]
-            if "has_api" in snapshot
-            else getattr(s, "_api", None) is not None
-        )
-        initialized = bool(
-            snapshot["initialized"]
-            if "initialized" in snapshot
-            else getattr(s, "_initialized", False)
-        )
-        has_wallet = bool(
-            snapshot["has_wallet"]
-            if "has_wallet" in snapshot
-            else bool(getattr(s, "_wallet_address", None))
+        has_api = _snapshot_bool(snapshot, "has_api", getattr(s, "_api", None) is not None)
+        initialized = _snapshot_bool(snapshot, "initialized", getattr(s, "_initialized", False))
+        has_wallet = _snapshot_bool(
+            snapshot, "has_wallet", bool(getattr(s, "_wallet_address", None))
         )
 
         if not has_api:

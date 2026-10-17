@@ -187,17 +187,15 @@ describe("GET /api/activity — limit validation", () => {
     expect(fetchActivityTransactions).toHaveBeenCalledWith(25, null);
   });
 
-  it("clamps limit=200 to max=100", async () => {
+  // Public analytics endpoints reject (rather than clamp) oversized limits
+  // so a client can't silently receive fewer rows than it asked for (#491).
+  it("rejects limit=200 above max=100 with 400", async () => {
     const { fetchActivityTransactions } = await import("@/app/api/activity/query");
     vi.clearAllMocks();
-    // Re-mock to ensure fresh call count
-    const { fetchActivityStats } = await import("@/app/api/activity/query");
-    (fetchActivityStats as ReturnType<typeof vi.fn>).mockResolvedValue({ total: 0 });
-    (fetchActivityTransactions as ReturnType<typeof vi.fn>).mockResolvedValue({ transactions: [], nextCursor: null });
 
     const res = await activityGET(req("/api/activity", { limit: "200" }));
-    expect(res.status).toBe(200);
-    expect(fetchActivityTransactions).toHaveBeenCalledWith(100, null);
+    expect(res.status).toBe(400);
+    expect(fetchActivityTransactions).not.toHaveBeenCalled();
   });
 });
 

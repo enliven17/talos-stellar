@@ -282,11 +282,45 @@ export const decideApprovalSchema = z.object({
 
 // --- Transfer (Stellar USDC) ---
 
-export const transferSchema = z.object({
-  to: z.string().min(1), // Stellar public key (G...)
-  amount: z.number().positive(),
-  currency: z.string().optional().default("USDC"),
-});
+const canonicalTransferAmountSchema = z
+  .string()
+  .regex(
+    /^(?:0|[1-9][0-9]{0,11})\.[0-9]{2}$/,
+    "amount must use canonical decimal notation with exactly two fractional digits",
+  )
+  .refine((amount) => amount !== "0.00", "amount must be greater than zero")
+  .refine(
+    (amount) => {
+      // Compare textually so validation never rounds a protocol amount through
+      // JavaScript's floating-point number representation.
+      const [whole, fraction] = amount.split(".");
+      if (whole.length < 12) return true;
+      if (whole < "922337203685") return true;
+      return whole === "922337203685" && fraction <= "47";
+    },
+    "amount exceeds the Stellar maximum",
+  );
+
+export const transferSchema = z
+  .object({
+    // These exact values form the canonical signed transfer payload.
+    agent: z.string().min(1).max(128),
+    destination: z
+      .string()
+      .regex(/^G[A-Z2-7]{55}$/, "destination must be a canonical Stellar G-address"),
+    asset: z.literal("USDC"),
+    amount: canonicalTransferAmountSchema,
+    nonce: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/, "nonce must be 32 bytes encoded as lowercase hexadecimal"),
+    expiry: z
+      .string()
+      .regex(/^[1-9][0-9]{9,12}$/, "expiry must be Unix seconds in canonical decimal notation"),
+    signature: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/, "signature must be a lowercase hexadecimal HMAC-SHA256 digest"),
+  })
+  .strict();
 
 // --- Patrons ---
 
@@ -423,6 +457,8 @@ export const signPaymentSchema = z.object({
   payee: z.string().min(1), // Stellar public key of payee
   amount: z.union([z.string(), z.number()]),
   assetCode: stellarAssetCodeSchema.optional().default("USDC"),
+  // Typed asset; when present its code takes precedence over assetCode.
+  asset: optionalStellarAssetField,
 });
 
 // --- Buy Token ---
@@ -474,6 +510,38 @@ export const updateApiKeySchema = z.object({
   name: z.string().min(1).max(100).optional(),
   scopes: z.array(z.enum(VALID_SCOPE_VALUES)).min(1).optional(),
   expiresAt: z.string().datetime().nullable().optional(),
+});
+
+
+// --- Commerce job lease / progress ---
+
+export const claimJobSchema = z.object({
+  ttlSeconds: z.number().int().positive().max(3600).optional(),
+});
+
+export const heartbeatJobSchema = z.object({
+  fencingToken: z.number().int().nonnegative(),
+});
+
+export const releaseJobSchema = z.object({
+  fencingToken: z.number().int().nonnegative(),
+});
+
+export const extendLeaseSchema = z.object({
+  fencingToken: z.number().int().nonnegative(),
+  extendSeconds: z.number().int().min(1).max(3600),
+});
+
+export const submitJobResultSchema = z.object({
+  result: z.record(z.string(), z.unknown()),
+  fencingToken: z.number().int().nonnegative().optional(),
+});
+
+export const reportJobProgressSchema = z.object({
+  percent: z.number().min(0).max(100).optional(),
+  stage: z.string().min(1).max(64).optional(),
+  message: z.string().min(1).max(280).optional(),
+  fencingToken: z.number().int().nonnegative().optional(),
 });
 
 /**

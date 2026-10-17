@@ -19,7 +19,7 @@ emitted bytes (otherwise the deployed WASM has been tampered with).
 |-------------------------|--------------------|-----------------------|--------------------------------------|
 | `TalosRegistry`         | `(1, 1, 0)`        | `"TalosRegistry"`     | `54 61 6C 6F 73 52 65 67 69 73 74 72 79 00 00 00` ("TalosRegistry\0\0\0") |
 | `TalosNameService`      | `(1, 1, 0)`        | `"TalosNameService"`  | `54 61 6C 6F 73 4E 61 6D 65 53 65 72 76 69 63 65` ("TalosNameService") |
-| `TalosGovernance`       | `(1, 0, 0)`        | `"TalosGovernance"`   | `54 61 6C 6F 73 47 6F 76 65 72 6E 61 6E 63 65 00` ("TalosGovernance\0") |
+| `TalosGovernance`       | `(1, 1, 0)`        | `"TalosGovernance"`   | `54 61 6C 6F 73 47 6F 76 65 72 6E 61 6E 63 65 00` ("TalosGovernance\0") |
 
 A new contract added later MUST keep `major = 1` until a hard upgrade is
 scheduled — bumping `major` is a deployment-grade event and operators
@@ -36,6 +36,7 @@ all contract instances of the same WASM).
 |-----------------------------------------|----------------------------|-----------------------------------------------------------------|
 | `version() -> (u32, u32, u32)`          | `(major, minor, patch)`    | SemVer of the deployed WASM. Compile-time constant.             |
 | `interface_id() -> BytesN<32>`          | 32-byte ID                 | Stable identifier content-derived from (namespace, version).    |
+| `deployment_manifest_digest() -> BytesN<32>` | 32-byte digest     | Stable deployment digest derived from the canonical manifest values. |
 | `supports_version(maj, min, patch) -> bool` | `bool`                 | True iff deployed >= requested. See §3.                         |
 | `interface_features() -> Vec<Symbol>`   | list of capability tags    | Stable capability markers for feature gating (see §4).          |
 | `deprecated_entry_count() -> u32`\*     | count of legacy entries    | Telemetry hook; lets indexers enumerate the deprecation table.  |
@@ -45,7 +46,22 @@ all contract instances of the same WASM).
 direct-admin path to deprecate, so its table is empty by design and the
 helper is omitted intentionally.
 
-## 3. SemVer compatibility rule (`supports_version`)
+## 3. Deployment manifest digest
+
+Each contract also exposes a read-only `deployment_manifest_digest()` endpoint
+that returns a stable 32-byte digest derived from the canonical deployment
+manifest values already published by the contract: the `INTERFACE_ID`, the
+contract semver tuple, the capability list, and the canonical event schema
+version. The digest is intentionally not stored in ledger state; it is
+recomputed from the same source-of-truth values used by all other interface
+queries so operators and contributors can compare deployments without creating
+an additional, diverging registry of state.
+
+The digest is safe to call repeatedly and is fully backward compatible with
+older callers because it is additive: existing clients ignore it while new
+operators can use it to confirm a deployment matches the expected manifest.
+
+## 4. SemVer compatibility rule (`supports_version`)
 
 ```
 actual.major == required.major
@@ -64,7 +80,7 @@ The rule is intentionally strict on the upper end: a caller pinning
 `patch` higher than deployed will get `false` so they don't accidentally
 mis-rely on a bug fix that isn't there.
 
-## 4. Capability catalogue
+## 5. Capability catalogue
 
 Capabilities are stable feature markers exposed via
 `interface_features()`. They are **stable strings**: appending a new
@@ -103,8 +119,9 @@ is a `major` bump.
 | `vote_weighting`    | Snapshot-based token-weighted voting.                        |
 | `config_admin`      | `update_config` / `cache_token_balance` (admin only).        |
 | `interface_query`   | `version` / `interface_id` / `supports_version`.             |
+| `quorum_state`      | `get_proposal_quorum_state` query; `EventQuorumReached` emitted once per proposal when quorum is first crossed. |
 
-## 5. Deprecation table
+## 6. Deprecation table
 
 When a deployment has timelock enabled (`min_delay > 0`), the direct
 admin paths below become deprecated and must be replaced with the
@@ -128,7 +145,7 @@ window open after a timelock upgrade.
 `minor` release (≥ 6 weeks), then drop the entry-point entirely on a
 subsequent `major` bump.
 
-## 6. `INTERFACE_ID` derivation (golden vectors)
+## 7. `INTERFACE_ID` derivation (golden vectors)
 
 Each contract emits a 32-byte `INTERFACE_ID` from its WASM binary.
 The bytes are content-derived from the pair
@@ -178,7 +195,14 @@ to align the byte slices at canonical boundaries.
 00 00 00 01 00 00 00 00   00 00 00 00 00 00 00 00
 ```
 
-## 7. Cross-contract compatibility
+#### TalosGovernance `(1, 1, 0)` @ `"TalosGovernance"` _(current)_
+
+```
+54 61 6C 6F 73 47 6F 76   65 72 6E 61 6E 63 65 00
+00 00 00 01 00 00 00 01   00 00 00 00 00 00 00 00
+```
+
+## 8. Cross-contract compatibility
 
 `TalosNameService` depends on the configured `RegistryContract` to
 resolve `creator_of` for incoming name registrations. To make this
@@ -198,7 +222,7 @@ Both telemetry events are privacy-safe: no caller or value data is
 exposed; only structural compatibility information (success + version,
 or failure + flag).
 
-## 8. Verification
+## 9. Verification
 
 Local reproduction:
 
@@ -218,7 +242,7 @@ The tests will:
    `propose_admin_emits_dep_path_*`, `set_registry_contract_emits_dep_path_*`).
 6. Verify cross-contract compatibility (`assert_registry_compatible_returns_true_for_real_registry`).
 
-## 9. Rollout and rollback
+## 10. Rollout and rollback
 
 This change is **additive** for callers:
 
@@ -239,7 +263,7 @@ entry-point symbols — Soroban CLI rejects invokes against unknown
 entry-points, so clients calling them will simply fail with a clear
 error rather than hitting silent misbehaviour.
 
-## 10. Operator runbook
+## 11. Operator runbook
 
 | Symptom                                         | Cause                                                | Action                                                                                              |
 |-------------------------------------------------|------------------------------------------------------|------------------------------------------------------------------------------------------------------|

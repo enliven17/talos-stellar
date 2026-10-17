@@ -42,13 +42,31 @@ See [`talos_registry`](../talos_registry/src/lib.rs) (`schema_version`,
   retried with a fix), not to restore prior on-chain state. An operator
   rolling back must confirm the target version's data shape is actually
   compatible with the entry-points that will run against it.
+- **Dry-run.** `dry_run(e, current, from, to)` returns a `MigrationDryRun`
+  describing what a forward migration *would* do, without taking the lock,
+  writing storage, appending history, or emitting events. It mirrors
+  `begin_migration`'s checks in the same order, so `applicable == true`
+  means the real call would succeed and `error_code` otherwise carries the
+  numeric code of the exact `MigrationError` the real call would return
+  (`plan.error()` decodes it back to the typed enum). When the contract is
+  already at `to`, the plan is reported as an up-to-date no-op (`steps == 0`,
+  `applicable == true`, `error_code == None`) rather than a `NotForward`
+  rejection, so callers can treat "nothing to do" as success. It is always
+  safe to call, including while another migration holds the lock.
+- **Explicit version gating.** `validate_migration_target(current, target, max_supported)`
+  validates that an explicit target version is at least `current` (rejecting
+  backwards jumps with `NotForward`) and at most `max_supported` (rejecting
+  unsupported forward targets with `TargetExceedsMax`). `dry_run_to(e, current, target, max_supported)`
+  simulates migrating to an explicit target version, predicting step counts and
+  rejections. Contracts use `is_step_within_target(step_to, target_version)`
+  to safely gate intermediate migration steps.
 
 ## Adding a migration step to a contract
 
 1. Pick the next schema version (`to = current_max + 1`).
 2. In the host contract, add a branch to its migration dispatcher:
    ```rust
-   if current == FROM_VERSION {
+   if current == FROM_VERSION && target_version >= TO_VERSION {
        storage_migration::begin_migration(&e, current, FROM_VERSION, TO_VERSION)
            .unwrap_or_else(|_| panic!("migration out of order or in progress"));
 
@@ -60,8 +78,8 @@ See [`talos_registry`](../talos_registry/src/lib.rs) (`schema_version`,
    }
    ```
 3. Gate the dispatcher entry point behind the contract's existing admin
-   authorization (see `talos_registry::run_migrations`, which requires the
-   protocol wallet to `require_auth()`).
+   authorization (see `talos_registry::run_migrations` and `talos_registry::run_migrations_to`,
+   which require the protocol wallet to `require_auth()`).
 4. Add a fixture test that: applies the step from a fresh/previous state,
    asserts the resulting data shape, asserts a second call is a no-op, and
    (if relevant) asserts the step is rejected when called out of order.
@@ -72,6 +90,9 @@ See [`talos_registry`](../talos_registry/src/lib.rs) (`schema_version`,
 - **Apply pending migrations:** call `run_migrations()` (admin-authorized).
   Safe to call repeatedly — it stops once the contract is at the latest
   known version.
+- **Apply migrations up to an explicit version:** call `run_migrations_to(target_version)`
+  (admin-authorized). Stops execution after reaching `target_version`, leaving
+  subsequent migrations unapplied.
 - **Inspect history:** `migration_history_len()` /
   `migration_record_at(index)` for a chronological audit trail, or watch for
   `sch_mig` / `sch_rbk` events.

@@ -141,7 +141,7 @@ describe("stellarAssetSchema (discriminated union)", () => {
   it("accepts a native asset via the discriminated union", () => {
     const result = stellarAssetSchema.safeParse({ type: "native" });
     expect(result.success).toBe(true);
-    if (result.success && result.data.type === "native") {
+    if (result.success && "type" in result.data && result.data.type === "native") {
       expect(result.data.type).toBe("native");
     }
   });
@@ -153,7 +153,7 @@ describe("stellarAssetSchema (discriminated union)", () => {
       issuer: OTHER_VALID_KEY,
     });
     expect(result.success).toBe(true);
-    if (result.success && result.data.type === "issued") {
+    if (result.success && "type" in result.data && result.data.type === "issued") {
       expect(result.data.code).toBe("MITOS");
       expect(result.data.issuer).toBe(OTHER_VALID_KEY);
     }

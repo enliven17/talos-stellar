@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsApprovals, tlsTalos } from "@/db/schema";
@@ -7,7 +8,7 @@ import { parseAnalyticsLimit } from "@/lib/analytics-limits";
 
 // GET /api/proposals — All proposals across all Talos, newest first
 // Optional ?status=pending|approved|rejected filter, optional ?limit=1..100 (default 50)
-export async function GET(request: NextRequest) {
+async function _GET(request: NextRequest) {
   const searchParams = new URL(request.url).searchParams;
   const status = searchParams.get("status");
   const parsedLimit = parseAnalyticsLimit(searchParams.get("limit"), 50, 100);
@@ -41,3 +42,5 @@ export async function GET(request: NextRequest) {
     return internalError(request);
   }
 }
+
+export const GET = withRequestId(_GET);

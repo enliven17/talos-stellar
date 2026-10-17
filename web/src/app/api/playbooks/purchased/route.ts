@@ -1,10 +1,11 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsPlaybookPurchases } from "@/db/schema";
 import { eq } from "drizzle-orm";
 
 // GET /api/playbooks/purchased?wallet=G... — Playbooks purchased by wallet
-export async function GET(request: NextRequest) {
+async function _GET(request: NextRequest) {
   try {
     const wallet = request.nextUrl.searchParams.get("wallet");
 
@@ -48,3 +49,5 @@ export async function GET(request: NextRequest) {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withRequestId(_GET);

@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsApiAuditLogs } from "@/db/schema";
@@ -7,7 +8,7 @@ import { regenerateKeySchema, parseBody } from "@/lib/schemas";
 
 // POST /api/talos/:id/regenerate-key — Regenerate API key (invalidates old key)
 // Requires Stellar ED25519 signature proof of wallet ownership.
-export async function POST(
+async function _POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -60,7 +61,7 @@ export async function POST(
     const newApiKey = `tlk_${randomBytes(24).toString("hex")}`;
 
     // Atomic transaction: invalidate old key, set new key, write audit log
-    await db.transaction(async (tx: any) => {
+    await db.transaction(async (tx) => {
       await tx
         .update(tlsTalos)
         .set({ apiKey: newApiKey })
@@ -86,3 +87,5 @@ export async function POST(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);

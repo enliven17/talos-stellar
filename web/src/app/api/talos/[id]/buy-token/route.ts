@@ -6,6 +6,7 @@ import { NextResponse } from "next/server";
 import { getAccountInfo, getNetworkPassphrase, getUSDCIssuer } from "@/lib/stellar";
 import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
 import { logger } from "@/lib/logger";
+import { registerTx } from "@/lib/reconciler";
 
 /**
  * Buy Mitos tokens from a Talos.
@@ -34,8 +35,8 @@ import { logger } from "@/lib/logger";
  * 6. Commit side effects in a single DB transaction (patron upsert + revenue
  *    insert + purchase status=completed + cached response)
  */
-export async function POST(
-  request: Request,
+async function _POST(
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
@@ -400,8 +401,22 @@ export async function POST(
     replayed: false,
   }, "buy-token purchase committed");
 
+  // Register the payment txHash with the finality reconciler so it can track
+  // on-chain settlement and apply repair if the tx is later found to be failed
+  // or expired.  Fire-and-forget: a registration failure never blocks the caller.
+  registerTx({
+    txHash,
+    sourceType: "token_purchase",
+    sourceId: txHash,           // tls_token_purchases PK is the txHash itself
+    expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000), // 2 h window
+  }).catch((err) =>
+    logger.error({ err, txHash, talosId: id }, "reconciler_register_tx_failed"),
+  );
+
   const successRes = NextResponse.json(responseBody);
   successRes.headers.set("Idempotency-Key", txHash);
   successRes.headers.set("X-Idempotent-Replayed", "false");
   return successRes;
 }
+
+export const POST = withRequestId(_POST);

@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPatrons, tlsActivities, tlsRevenues } from "@/db/schema";
@@ -6,7 +7,7 @@ import { badRequest, internalError } from "@/lib/api-response";
 import { parseLimit, LEADERBOARD_DEFAULT_LIMIT, LEADERBOARD_MAX_LIMIT, MAX_CURSOR_LENGTH } from "@/lib/limits";
 
 // GET /api/leaderboard — Ranking data with cursor-based pagination
-export async function GET(request: NextRequest) {
+async function _GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const cursor = searchParams.get("cursor");
@@ -126,3 +127,5 @@ revenueSum.total}, 0)`,
     return internalError(request);
   }
 }
+
+export const GET = withRequestId(_GET);

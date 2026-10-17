@@ -157,7 +157,10 @@ export function loadSbomDocument(filepath: string): SbomDocument | null {
     }
     return {
       format,
-      specVersion: checked.specVersion || checked.spdxVersion || "unknown",
+      specVersion:
+        ("specVersion" in checked && checked.specVersion) ||
+        ("spdxVersion" in checked && checked.spdxVersion) ||
+        "unknown",
       generatedAt: new Date().toISOString(),
       toolName: "talos-devx-sbom-validator",
       toolVersion: "1.0.0",

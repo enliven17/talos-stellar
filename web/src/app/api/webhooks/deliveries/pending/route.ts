@@ -8,6 +8,7 @@
  *   - Lease has expired (available for re-claim)
  */
 
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsWebhookDeliveries } from "@/db/schema";
@@ -40,7 +41,7 @@ const pendingQuerySchema = z.object({
 
 // ─── GET /api/webhooks/deliveries/pending ────────────────────────
 
-export async function GET(request: NextRequest) {
+async function _GET(request: NextRequest) {
   if (!isWebhookDeliveryEnabled()) {
     return Response.json({
       jobs: [],
@@ -109,3 +110,5 @@ export async function GET(request: NextRequest) {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withRequestId(_GET);

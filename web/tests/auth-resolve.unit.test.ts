@@ -90,7 +90,7 @@ describe("verifyAgentApiKey - Scoped Authorization", () => {
     const hashed = hashApiKey(rawKey);
 
     const selectTalosMock = mockSelectChain([{ id: "t1", legacyApiKey: null }]);
-    const selectKeysMock = mockSelectChain([{ id: "k1", scopes: ["wallet:read"], expiresAt: null }]);
+    const selectKeysMock = mockSelectChain([{ id: "k1", scopes: ["wallet:read"], expiresAt: null, status: "active" }]);
     const updateMock = { set: vi.fn().mockReturnThis(), where: vi.fn().mockReturnThis(), execute: vi.fn().mockResolvedValue({}) };
     const insertMock = { values: vi.fn().mockResolvedValue({}) };
 
@@ -109,7 +109,7 @@ describe("verifyAgentApiKey - Scoped Authorization", () => {
     const rawKey = "talos_sk_test_123456789";
 
     const selectTalosMock = mockSelectChain([{ id: "t1", legacyApiKey: null }]);
-    const selectKeysMock = mockSelectChain([{ id: "k1", scopes: ["activity:write"], expiresAt: null }]);
+    const selectKeysMock = mockSelectChain([{ id: "k1", scopes: ["activity:write"], expiresAt: null, status: "active" }]);
     const updateMock = { set: vi.fn().mockReturnThis(), where: vi.fn().mockReturnThis(), execute: vi.fn().mockResolvedValue({}) };
     const insertMock = { values: vi.fn().mockResolvedValue({}) };
 
@@ -133,7 +133,7 @@ describe("verifyAgentApiKey - Scoped Authorization", () => {
     const rawKey = "talos_sk_test_admin";
 
     const selectTalosMock = mockSelectChain([{ id: "t1", legacyApiKey: null }]);
-    const selectKeysMock = mockSelectChain([{ id: "k1", scopes: ["admin"], expiresAt: null }]);
+    const selectKeysMock = mockSelectChain([{ id: "k1", scopes: ["admin"], expiresAt: null, status: "active" }]);
     const updateMock = { set: vi.fn().mockReturnThis(), where: vi.fn().mockReturnThis(), execute: vi.fn().mockResolvedValue({}) };
     const insertMock = { values: vi.fn().mockResolvedValue({}) };
 
@@ -156,6 +156,7 @@ describe("verifyAgentApiKey - Scoped Authorization", () => {
       id: "k1",
       scopes: ["wallet:read"],
       expiresAt: new Date("2020-01-01"),
+      status: "active",
     }]);
     const insertMock = { values: vi.fn().mockResolvedValue({}) };
 

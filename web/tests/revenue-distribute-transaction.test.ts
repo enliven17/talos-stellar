@@ -1,5 +1,5 @@
 import { vi, describe, it, expect, beforeEach } from "vitest";
-import { POST as distributePOST } from "../src/app/api/talos/[id]/revenue/distribute/route";
+import { GET as distributePreviewGET, POST as distributePOST } from "../src/app/api/talos/[id]/revenue/distribute/route";
 import { NextRequest } from "next/server";
 import { tlsDividends } from "../src/db/schema";
 
@@ -295,5 +295,127 @@ describe("Revenue Distribution Transaction Safety Tests", () => {
       // Verify transaction was only called once (first request)
       expect(mockDb.transaction).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe("Revenue distribution validation and preview", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.STELLAR_OPERATOR_SECRET_KEY = "test_secret_key";
+    mockDb.select.mockImplementation(() => mockSelectChain([]));
+  });
+
+  const params = { params: Promise.resolve({ id: "agent_1" }) };
+
+  it("rejects a request without requesterPublicKey", async () => {
+    const response = await distributePOST(
+      new NextRequest("http://localhost/api/talos/agent_1/revenue/distribute", {
+        method: "POST",
+        body: JSON.stringify({ distributionId: "dist_missing_requester" }),
+      }),
+      params,
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "requesterPublicKey is required" });
+  });
+
+  it("returns 404 when the Talos does not exist", async () => {
+    mockDb.query.tlsTalos.findFirst.mockResolvedValue(null);
+
+    const response = await distributePOST(
+      new NextRequest("http://localhost/api/talos/agent_1/revenue/distribute", {
+        method: "POST",
+        body: JSON.stringify({ requesterPublicKey: "GCREATOR" }),
+      }),
+      params,
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  it("rejects a requester who is neither creator nor operator", async () => {
+    mockDb.query.tlsTalos.findFirst.mockResolvedValue({
+      id: "agent_1",
+      creatorPublicKey: "GCREATOR",
+      investorShare: 25,
+    });
+    mockDb.query.tlsDividends.findFirst.mockResolvedValue(null);
+
+    const response = await distributePOST(
+      new NextRequest("http://localhost/api/talos/agent_1/revenue/distribute", {
+        method: "POST",
+        body: JSON.stringify({ requesterPublicKey: "GUNAUTHORIZED" }),
+      }),
+      params,
+    );
+
+    expect(response.status).toBe(403);
+  });
+
+  it("returns a zero-valued preview without dividing by zero for a zero-pulse patron", async () => {
+    mockDb.query.tlsTalos.findFirst.mockResolvedValue({
+      id: "agent_1",
+      investorShare: null,
+    });
+    mockDb.select
+      .mockReturnValueOnce(mockSelectChain([{ total: "100" }]))
+      .mockReturnValueOnce(mockSelectChain([
+        { stellarPublicKey: "GZERO", pulseAmount: 0, status: "active" },
+      ]));
+
+    const response = await distributePreviewGET(
+      new NextRequest("http://localhost/api/talos/agent_1/revenue/distribute"),
+      params,
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.investorSharePercent).toBe(25);
+    expect(body.breakdown).toEqual([
+      {
+        stellarPublicKey: "GZERO",
+        pulseAmount: 0,
+        sharePercent: "0",
+        estimatedUsdc: "0",
+      },
+    ]);
+  });
+
+  it("returns 404 when previewing a missing Talos", async () => {
+    mockDb.query.tlsTalos.findFirst.mockResolvedValue(null);
+
+    const response = await distributePreviewGET(
+      new NextRequest("http://localhost/api/talos/missing/revenue/distribute"),
+      params,
+    );
+
+    expect(response.status).toBe(404);
+  });
+  it("returns a privacy-safe 500 when the POST storage dependency fails", async () => {
+    mockDb.query.tlsTalos.findFirst.mockRejectedValue(new Error("database unavailable"));
+
+    const response = await distributePOST(
+      new NextRequest("http://localhost/api/talos/agent_1/revenue/distribute", {
+        method: "POST",
+        body: JSON.stringify({ requesterPublicKey: "GCREATOR" }),
+      }),
+      params,
+    );
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "Internal server error" });
+  });
+
+  it("returns a privacy-safe 500 when the preview storage dependency fails", async () => {
+    mockDb.query.tlsTalos.findFirst.mockRejectedValue(new Error("database unavailable"));
+
+    const response = await distributePreviewGET(
+      new NextRequest("http://localhost/api/talos/agent_1/revenue/distribute"),
+      params,
+    );
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "Internal server error" });
   });
 });

@@ -146,6 +146,79 @@ The stack exposes:
 - Health endpoint: http://localhost:3000/api/health
 - Mock Stellar service: http://localhost:4010/health
 
+## Mock Stellar Service Fault Injection
+
+The mock Stellar service supports fault injection for testing error handling, retry logic, and resilience. This feature is disabled by default and can be enabled via environment variables.
+
+### Environment Variables
+
+Set these variables in `docker-compose.yml` or via command line:
+
+```bash
+FAULT_INJECTION_ENABLED=true        # Enable fault injection (default: false)
+FAULT_LATENCY_MS=500               # Add latency to responses in milliseconds (default: 0)
+FAULT_ERROR_RATE=0.5               # Rate of 5xx errors (0.0-1.0, default: 0)
+FAULT_TIMEOUT_RATE=0.1             # Rate of timeouts (no response) (0.0-1.0, default: 0)
+FAULT_MALFORMED_RATE=0.2           # Rate of malformed JSON responses (0.0-1.0, default: 0)
+```
+
+### Usage Examples
+
+```bash
+# Set environment variables before starting the stack
+export FAULT_INJECTION_ENABLED=true
+export FAULT_LATENCY_MS=500
+pnpm stack:up
+
+# Or set directly in docker-compose.yml under mock-stellar environment section
+# Then restart the service
+docker compose restart mock-stellar
+
+# Test with multiple fault types
+export FAULT_INJECTION_ENABLED=true
+export FAULT_LATENCY_MS=200
+export FAULT_ERROR_RATE=0.1
+export FAULT_TIMEOUT_RATE=0.05
+pnpm stack:up
+```
+
+### Testing
+
+Run the fault injection test suite:
+
+```bash
+pnpm test:mock-stellar-faults
+```
+
+This test covers:
+- Positive cases: fault injection when enabled
+- Negative cases: no faults when disabled
+- Boundary cases: zero rates, maximum rates (1.0)
+- Regression cases: existing endpoints still work correctly
+- Privacy safety: no sensitive data logged
+
+### Privacy & Safety
+
+Fault injection logging is privacy-safe:
+- Only fault types and rates are logged (no request bodies, secrets, or sensitive data)
+- Fault injection is disabled by default
+- Must be explicitly enabled via environment variables
+- Designed for local development and testing environments only
+
+The web container applies migrations and seeds the repeatable local Talos and marketplace dataset during startup. To seed an already-running local database again:
+
+```bash
+pnpm web:db:seed
+```
+
+The seed command refuses non-local database hosts and production processes. An intentional override requires `ALLOW_UNSAFE_DB_SEED=true`; never use that override with production credentials or endpoints. The seed contains demo public identifiers only, and repeated runs replace the seed-owned rows with the same logical dataset.
+
+To remove the local database and all seeded data, run:
+
+```bash
+pnpm stack:reset
+```
+
 To include the optional prime-agent profile:
 
 ```bash
@@ -212,21 +285,30 @@ RTO targets, runbooks, and rollback procedures.
 
 ## Health check
 
-`GET /api/health` — returns `200` when all dependencies are reachable, `503` when any check fails.
+`GET /api/health` (alias of `/api/health/ready`) separates **degraded readiness** from **hard failure**:
+
+- `200` + `status: "ok"` — all dependencies healthy (`ready: true`)
+- `200` + `status: "degraded"` — soft dependency failed (Horizon); keep traffic (`ready: true`)
+- `503` + `status: "unavailable"` — critical dependency failed (DB); remove from LB (`ready: false`)
+
+Liveness (`GET /api/health/live`) never inspects dependencies and must not be used to restart on Horizon/DB blips.
 
 ```jsonc
 // 200 OK
-{ "ok": true,  "checks": { "db": "ok",    "stellar": "ok"    }, "ts": "2026-06-25T12:00:00.000Z" }
+{ "ok": true, "status": "ok", "ready": true, "checks": { "db": "ok", "stellar": "ok" }, "ts": "2026-06-25T12:00:00.000Z" }
 
-// 503 Service Unavailable (Supabase paused)
-{ "ok": false, "checks": { "db": "error", "stellar": "ok"    }, "ts": "..." }
+// 200 Degraded (Horizon down — soft)
+{ "ok": false, "status": "degraded", "ready": true, "checks": { "db": "ok", "stellar": "error" }, "ts": "..." }
+
+// 503 Unavailable (DB down — critical)
+{ "ok": false, "status": "unavailable", "ready": false, "checks": { "db": "error", "stellar": "ok" }, "ts": "..." }
 ```
 
 Probes:
-- **db** — `SELECT 1` against Postgres, 2 s timeout
-- **stellar** — `GET` to Horizon RPC (`STELLAR_HORIZON_URL` or testnet fallback), 3 s timeout
+- **db** (critical) — `SELECT 1` against Postgres, 2 s timeout
+- **stellar** (soft) — `GET` to Horizon RPC (`STELLAR_HORIZON_URL` or testnet fallback), 3 s timeout
 
 Response is always `Cache-Control: no-store`.
 
-**Recommended monitoring** — wire a free [UptimeRobot](https://uptimerobot.com) or [Better Uptime](https://betteruptime.com) monitor to `GET /api/health` on a 1-minute interval. Set an email or Telegram alert on any non-200 response so outages like the 2026-05-22 Supabase pause are caught in seconds, not 30 minutes.
+**Recommended monitoring** — wire a free [UptimeRobot](https://uptimerobot.com) or [Better Uptime](https://betteruptime.com) monitor to `GET /api/health` on a 1-minute interval. Alert on HTTP 503 for outages, and also inspect `status: "degraded"` in the JSON body so Horizon issues are visible without being treated as hard liveness failures.
 

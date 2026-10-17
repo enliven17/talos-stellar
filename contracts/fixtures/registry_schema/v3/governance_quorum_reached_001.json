@@ -1,0 +1,15 @@
+{
+  "meta": {
+    "additive_fields": ["quorum_reached"],
+    "contract": "TalosGovernance",
+    "generator": "scripts/generate-registry-fixtures.mjs v3",
+    "kind": "QuorumReachedSentinel",
+    "schema_version": 3
+  },
+  "storage_key": {
+    "type": "QuorumReached",
+    "proposal_id": 7
+  },
+  "value": true,
+  "description": "DataKey::QuorumReached(proposal_id) idempotency sentinel. Written once (value=true) on the first vote that brings votes_cast to or above quorum_threshold. Prevents re-emitting EventQuorumReached for subsequent votes on the same proposal. This key is additive — existing proposals without this key behave as if it is absent (not yet reached quorum); the sentinel is only written when quorum is first crossed. Rollback: deleting this key resets the idempotency guard for the proposal (re-emission would occur on next qualifying vote). Operators SHOULD NOT delete this key in production."
+}

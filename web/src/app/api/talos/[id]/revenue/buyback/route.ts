@@ -1,9 +1,11 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsRevenues } from "@/db/schema";
 import { and, eq, sum } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
+import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
 
 
 /**
@@ -15,7 +17,7 @@ import { verifyAgentApiKey } from "@/lib/auth";
  *
  * Auth: Bearer token with revenue:write scope (scoped key or legacy).
  */
-export async function POST(
+async function _POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -115,7 +117,7 @@ export async function POST(
  * GET /api/talos/:id/revenue/buyback
  * Preview: treasury balance + buyback stats
  */
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -148,8 +150,7 @@ export async function GET(
         const [mitosCode, mitosIssuer] = talos.stellarAssetCode.split(":");
         const { Horizon } = await import("@stellar/stellar-sdk");
         const server = new Horizon.Server("https://horizon-testnet.stellar.org");
-        const OPERATOR = process.env.STELLAR_OPERATOR_PUBLIC_KEY;
-        const account = await server.loadAccount(OPERATOR);
+        const account = await server.loadAccount(OPERATOR_PUBLIC_KEY);
         const balance = (account.balances as Array<{ asset_code?: string; asset_issuer?: string; balance?: string }>).find(
           b => b.asset_code === mitosCode && b.asset_issuer === mitosIssuer,
         );
@@ -171,3 +172,6 @@ export async function GET(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);
+export const GET = withRequestId(_GET);

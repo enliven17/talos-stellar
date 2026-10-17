@@ -36,7 +36,11 @@ describe("toPrivacySafeAgentError", () => {
   it("redacts JWTs, long hex, and Stellar secret keys (negative)", () => {
     const jwt =
       "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0In0.signaturepart";
-    expect(toPrivacySafeAgentError(`bad token ${jwt}`)).toContain("[redacted]");
+    // Avoid words like "token" here: those trip the stricter SECRETISH
+    // fallback before the JWT redaction regex is exercised.
+    const redactedJwt = toPrivacySafeAgentError(`bad value ${jwt}`);
+    expect(redactedJwt).toContain("[redacted]");
+    expect(redactedJwt).not.toContain(jwt);
 
     const hex = "a".repeat(40);
     expect(toPrivacySafeAgentError(`proof ${hex}`)).toContain("[redacted]");

@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { redactSensitiveQueryFields } from "./redact";
 
 const LOCAL_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
@@ -112,4 +113,41 @@ export function getPublicBaseUrl(reqOrHeaders: Request | NextRequest | Headers):
   // production default to https unless the proxy explicitly forwarded http.
   const protocol = forwardedProto ?? (isLocal && isLocalHostname(candidate.hostname) ? "http" : "https");
   return `${protocol}://${candidate.host}`;
+}
+
+/**
+ * Build a public-facing request URL for logs, redirects, and operator-facing
+ * diagnostics. Uses {@link getPublicBaseUrl} for the origin and redacts
+ * sensitive query fields so secrets, seeds, payment proofs, and media keys
+ * never appear in the clear.
+ *
+ * The pathname and non-sensitive query params are preserved so existing
+ * callers that correlate by path / filter still work.
+ */
+export function getPublicRequestUrl(req: Request | NextRequest): string {
+  const base = getPublicBaseUrl(req);
+  let pathname = "/";
+  let search = "";
+  let hash = "";
+
+  try {
+    const parsed = new URL(req.url);
+    pathname = parsed.pathname || "/";
+    search = parsed.search || "";
+    hash = parsed.hash || "";
+  } catch {
+    // Malformed request URL — return the trusted base only (privacy-safe).
+    return base;
+  }
+
+  return redactSensitiveQueryFields(`${base}${pathname}${search}${hash}`);
+}
+
+/**
+ * Redact sensitive query fields on an already-absolute public URL.
+ * Thin wrapper kept next to {@link getPublicBaseUrl} so call sites that build
+ * share / callback URLs have a single import path.
+ */
+export function toSafePublicUrl(url: string): string {
+  return redactSensitiveQueryFields(url);
 }

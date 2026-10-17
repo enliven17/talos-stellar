@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsDividends } from "@/db/schema";
@@ -16,7 +17,7 @@ import { parseAnalyticsLimit } from "@/lib/analytics-limits";
  * Public read (consistent with revenue history + RLS anon_read policy).
  * Returns distributions with bounded limit (default 50, max 100), newest first.
  */
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -71,7 +72,7 @@ export async function GET(
  *   breakdown    — optional per-patron array
  *   status       — "completed" | "pending" | "failed"
  */
-export async function POST(
+async function _POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -140,3 +141,6 @@ export async function POST(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withRequestId(_GET);
+export const POST = withRequestId(_POST);

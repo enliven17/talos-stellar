@@ -57,7 +57,10 @@ async function handlePost(
     // Reconstruct and verify the exact canonical payload. No caller-supplied
     // message is accepted, so recipient/asset/amount substitutions invalidate
     // the signature before any transfer is created.
-    if (!verifyTransferSignature(signedPayload, auth.talos.apiKey!, signature)) {
+    // The HMAC key is the API key the caller just authenticated with;
+    // verifyAgentApiKey guarantees the header is present and valid here.
+    const apiKey = request.headers.get("authorization")!.slice("Bearer ".length);
+    if (!verifyTransferSignature(signedPayload, apiKey, signature)) {
       return Response.json(
         { error: "Invalid transfer signature" },
         { status: 403 },

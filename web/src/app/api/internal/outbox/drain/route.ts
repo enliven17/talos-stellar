@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { verifyInternalSecret } from "@/lib/admin-auth";
 import { dispatchOnce, outboxConfig } from "@/lib/outbox";
@@ -17,7 +18,7 @@ import "@/lib/outbox/consumers";
  *
  * No-op (200, summary:null) when OUTBOX_ENABLED is false.
  */
-export async function POST(request: NextRequest) {
+async function _POST(request: NextRequest) {
   const auth = verifyInternalSecret(request, "OUTBOX_DISPATCH_SECRET", "x-outbox-dispatch-secret");
   if (!auth.ok) return auth.response;
 
@@ -33,3 +34,5 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);

@@ -30,6 +30,13 @@ export interface RateLimitResult {
   remaining: number;
   /** Unix milliseconds when the window resets */
   resetAt: number;
+  /**
+   * Human-readable policy bucket that produced this result.
+   * One of: "auth" | "read" | "write-key" | "write-ip"
+   * Exposed as the `X-RateLimit-Policy` response header so contributors
+   * and operators can identify which quota applies to their request.
+   */
+  policy?: string;
 }
 
 /**
@@ -68,18 +75,21 @@ export async function rateLimit(
 export function rateLimitResponse(result: RateLimitResult): Response {
   const retryAfterSec = Math.max(1, Math.ceil((result.resetAt - Date.now()) / 1_000));
 
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-RateLimit-Limit": String(result.limit),
+    "X-RateLimit-Remaining": String(result.remaining),
+    "X-RateLimit-Reset": String(Math.ceil(result.resetAt / 1_000)),
+    "Retry-After": String(retryAfterSec),
+  };
+
+  if (result.policy) {
+    headers["X-RateLimit-Policy"] = result.policy;
+  }
+
   return new Response(
     JSON.stringify({ error: "Too many requests" }),
-    {
-      status: 429,
-      headers: {
-        "Content-Type": "application/json",
-        "X-RateLimit-Limit": String(result.limit),
-        "X-RateLimit-Remaining": String(result.remaining),
-        "X-RateLimit-Reset": String(Math.ceil(result.resetAt / 1_000)),
-        "Retry-After": String(retryAfterSec),
-      },
-    },
+    { status: 429, headers },
   );
 }
 
@@ -94,6 +104,9 @@ export function applyRateLimitHeaders(
     "X-RateLimit-Reset",
     String(Math.ceil(result.resetAt / 1_000)),
   );
+  if (result.policy) {
+    response.headers.set("X-RateLimit-Policy", result.policy);
+  }
   return response;
 }
 
@@ -105,6 +118,11 @@ export function applyRateLimitHeaders(
 export interface EndpointPolicy {
   /** Bucket key prefix written to the shared store */
   keyPrefix: string;
+  /**
+   * Human-readable policy name surfaced as `X-RateLimit-Policy`.
+   * Stable string clients can key off to detect bucket changes.
+   */
+  name: string;
   limit: number;
   windowMs: number;
 }
@@ -120,24 +138,28 @@ export const RATE_LIMIT_POLICIES = {
   /** Sensitive auth / account-management endpoints */
   auth: {
     keyPrefix: "auth",
+    name: "auth",
     limit: envInt("RATE_LIMIT_AUTH_LIMIT", 20),
     windowMs: envInt("RATE_LIMIT_AUTH_WINDOW_MS", 60_000),
   },
   /** Read (GET) endpoints per IP */
   read: {
     keyPrefix: "read",
+    name: "read",
     limit: envInt("RATE_LIMIT_READ_LIMIT", 100),
     windowMs: envInt("RATE_LIMIT_READ_WINDOW_MS", 60_000),
   },
   /** Write endpoints keyed by API key */
   writeKey: {
     keyPrefix: "write_key",
+    name: "write-key",
     limit: envInt("RATE_LIMIT_WRITE_KEY_LIMIT", 30),
     windowMs: envInt("RATE_LIMIT_WRITE_WINDOW_MS", 60_000),
   },
   /** Write endpoints keyed by IP (unauthenticated) */
   writeIp: {
     keyPrefix: "write_ip",
+    name: "write-ip",
     limit: envInt("RATE_LIMIT_WRITE_IP_LIMIT", 30),
     windowMs: envInt("RATE_LIMIT_WRITE_WINDOW_MS", 60_000),
   },

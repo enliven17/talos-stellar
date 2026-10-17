@@ -12,6 +12,9 @@ from typing import Any
 
 from rich.console import Console
 
+from talos_agent.adapters.snapshots import X402HealthSnapshot
+from talos_agent.redact import redact_text as _redact_text
+
 console = Console()
 
 
@@ -54,13 +57,13 @@ class X402Signer:
     def address(self) -> str | None:
         return self._wallet_address
 
-    def health_snapshot(self) -> dict[str, bool]:
+    def health_snapshot(self) -> X402HealthSnapshot:
         """Return in-process readiness snapshot for health probes (side-effect free)."""
-        return {
-            "has_api": self._api is not None,
-            "initialized": bool(self._initialized),
-            "has_wallet": bool(self._wallet_address),
-        }
+        return X402HealthSnapshot(
+            has_api=self._api is not None,
+            initialized=bool(self._initialized),
+            has_wallet=bool(self._wallet_address),
+        )
 
     async def sign_payment(
         self,
@@ -86,7 +89,7 @@ class X402Signer:
             )
 
             if not result or "error" in result:
-                err_detail = result.get("details", "") if result else ""
+                err_detail = _redact_text(result.get("details", "") if result else "")
                 return {"error": f"{result.get('error', 'Signing request failed')} {err_detail}".strip()}
 
             return {
@@ -98,4 +101,4 @@ class X402Signer:
                 "amount": amount,
             }
         except Exception as e:
-            return {"error": f"Signing failed: {e}"}
+            return {"error": f"Signing failed: {_redact_text(str(e))}"}

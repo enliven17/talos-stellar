@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsApiKeys } from "@/db/schema";
@@ -7,7 +8,7 @@ import { parseBody } from "@/lib/schemas";
 import { createApiKeySchema } from "@/lib/schemas";
 
 // GET /api/talos/:id/api-keys — List all keys (metadata only, no hashes)
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -39,7 +40,7 @@ export async function GET(
 
 // POST /api/talos/:id/api-keys — Create a new scoped key
 // Returns the raw key ONCE. It cannot be retrieved again.
-export async function POST(
+async function _POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -82,3 +83,6 @@ export async function POST(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withRequestId(_GET);
+export const POST = withRequestId(_POST);

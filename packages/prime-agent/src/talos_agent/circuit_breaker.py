@@ -113,10 +113,15 @@ class CircuitBreakerConfig:
     window_size: float = 60.0
     """Rolling window size in seconds for failure counting."""
 
-    retry_budget: int = 3
-    """Number of retries permitted for one adapter invocation."""
+    retry_budget: int = 0
+    """Number of retries permitted for one adapter invocation.
 
-    backoff_initial: float = 1.0
+    Defaults to 0 (fail fast) so adapters without an explicit retry
+    configuration keep their pre-budget invocation semantics; operators opt
+    in per adapter via ``TALOS_ADAPTER_RETRY_CONFIGS``.
+    """
+
+    backoff_initial: float = 0.5
     """Initial exponential backoff delay in seconds."""
 
     backoff_max: float = 30.0

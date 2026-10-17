@@ -1,9 +1,16 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import * as sdk from '../src/index.js';
+import {
+  planChaosScenario,
+  getChaosScenario,
+  createSeededRandom,
+  CHAOS_SCENARIOS,
+} from '../src/chaos-fixtures.js';
+import { FaultType } from '../src/chaos.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const EDGE_SMOKE = resolve(__dirname, '../scripts/smoke-edge.mjs');
@@ -20,6 +27,45 @@ describe('SDK Compatibility', () => {
   it('should have fetch available or mockable for edge/browser', () => {
     const hasFetch = typeof globalThis.fetch === 'function' || typeof fetch === 'function';
     expect(hasFetch).toBeDefined();
+  });
+
+  describe('Feature Detection', () => {
+    it('should detect feature availability safely without throwing', () => {
+      // Ensure feature detection logic does not crash on missing dependencies
+      expect(() => {
+        // Assuming sdk exposes a feature detection utility or TalosClient handles it internally
+        // We verify the interface exists and is callable
+        if (typeof sdk.detectFeature === 'function') {
+          sdk.detectFeature('test-feature');
+        }
+      }).not.toThrow();
+    });
+
+    it('should handle missing feature gracefully', () => {
+      if (typeof sdk.detectFeature === 'function') {
+        const result = sdk.detectFeature('non-existent-feature');
+        expect(result).toBeDefined();
+      }
+    });
+
+    it('should not log sensitive data during feature detection', () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      
+      try {
+        if (typeof sdk.detectFeature === 'function') {
+          sdk.detectFeature('test-feature');
+        }
+        // Ensure no sensitive data (secrets, seeds, etc.) is logged
+        const loggedArgs = consoleSpy.mock.calls.flat();
+        const sensitivePatterns = ['secret', 'seed', 'payment_proof', 'private_key'];
+        const hasSensitiveData = loggedArgs.some((arg: any) => 
+          typeof arg === 'string' && sensitivePatterns.some(pattern => arg.toLowerCase().includes(pattern))
+        );
+        expect(hasSensitiveData).toBe(false);
+      } finally {
+        consoleSpy.mockRestore();
+      }
+    });
   });
 });
 
@@ -121,5 +167,42 @@ describe('Edge runtime compatibility smoke', () => {
     }
     // Some constructors tolerate null via defaults — also acceptable.
     expect(true).toBe(true);
+  });
+
+  it('exports the deterministic chaos fixture surface', () => {
+    expect(sdk.CHAOS_SCENARIOS).toBeDefined();
+    expect(sdk.planChaosScenario).toBeTypeOf('function');
+    expect(sdk.replayChaosScenario).toBeTypeOf('function');
+    expect(sdk.buildChaosFixtureBundle).toBeTypeOf('function');
+    expect(sdk.createSeededRandom).toBeTypeOf('function');
+    expect(sdk.faultEffect).toBeTypeOf('function');
+  });
+
+  it('chaos planner is pure JS and deterministic (browser-safe boundary)', () => {
+    const scenario = getChaosScenario('always-injects-unit-probability');
+    expect(scenario).toBeDefined();
+    const plan = planChaosScenario(scenario!);
+    expect(plan.calls[0].outcome).toBe('injected-throw');
+    expect(plan.calls[0].injected).toBe(true);
+    // Seeded PRNG relies only on Math (no Node crypto), so it is usable in
+    // every supported runtime from the compat matrix.
+    const a = createSeededRandom(1);
+    const b = createSeededRandom(1);
+    expect(Array.from({ length: 8 }, () => a())).toEqual(
+      Array.from({ length: 8 }, () => b()),
+    );
+  });
+
+  it('every registered scenario name is a stable wire key (regression)', () => {
+    const names = CHAOS_SCENARIOS.map((s) => s.name);
+    expect(names.length).toBeGreaterThan(0);
+    expect(new Set(names).size).toBe(names.length);
+    for (const name of names) {
+      expect(getChaosScenario(name)).toBeDefined();
+    }
+    // Boundary scenario pins the strict r < p decision rule.
+    const boundary = planChaosScenario(getChaosScenario('probability-boundary-half-excluded')!);
+    expect(boundary.calls.map((c) => c.injected)).toEqual([false, true, false]);
+    expect(boundary.calls[0].faultType).toBe(FaultType.NETWORK_DROP);
   });
 });

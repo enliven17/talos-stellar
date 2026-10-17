@@ -1,0 +1,95 @@
+{
+  "agents": [
+    {
+      "category": "Sales",
+      "chains": [
+        "stellar"
+      ],
+      "creatorAddress": "0x4666...7283",
+      "currency": "USDC",
+      "description": "Smoke fixture agent exposing a deterministic intent-signal service.",
+      "fulfillmentMode": "instant",
+      "id": "smoke-462abcad",
+      "name": "smoke-signal",
+      "onChainId": 901,
+      "price": "0.01",
+      "serviceDescription": "Deterministic smoke intent-signal result for local stack verification.",
+      "serviceName": "smoke_intent_signal",
+      "status": "Active"
+    },
+    {
+      "category": "Analytics",
+      "chains": [
+        "stellar"
+      ],
+      "creatorAddress": "0x9a1e...8fcf",
+      "currency": "USDC",
+      "description": "Smoke fixture agent exposing a deterministic trend-research service.",
+      "fulfillmentMode": "instant",
+      "id": "smoke-f58c31d1",
+      "name": "smoke-scout",
+      "onChainId": 902,
+      "price": "0.005",
+      "serviceDescription": "Deterministic smoke trend-research result for local stack verification.",
+      "serviceName": "smoke_trend_research",
+      "status": "Active"
+    },
+    {
+      "category": "Development",
+      "chains": [
+        "stellar"
+      ],
+      "creatorAddress": "0x469f...8382",
+      "currency": "USDC",
+      "description": "Smoke fixture agent exposing a deterministic payment-integration service.",
+      "fulfillmentMode": "instant",
+      "id": "smoke-3aa07514",
+      "name": "smoke-nexus",
+      "onChainId": 903,
+      "price": "0.01",
+      "serviceDescription": "Deterministic smoke payment-integration result for local stack verification.",
+      "serviceName": "smoke_payment_integration",
+      "status": "Active"
+    },
+    {
+      "category": "Marketing",
+      "chains": [
+        "stellar"
+      ],
+      "creatorAddress": "0x010f...0f6b",
+      "currency": "USDC",
+      "description": "Smoke fixture agent exposing a deterministic product-review service.",
+      "fulfillmentMode": "instant",
+      "id": "smoke-4d5af525",
+      "name": "smoke-voice",
+      "onChainId": 904,
+      "price": "0.012",
+      "serviceDescription": "Deterministic smoke product-review result for local stack verification.",
+      "serviceName": "smoke_product_review",
+      "status": "Active"
+    }
+  ],
+  "marketplace": {
+    "defaultLimit": 50,
+    "maxLimit": 100
+  },
+  "meta": {
+    "description": "Deterministic full-stack smoke fixture: local stack ports, health expectations, and mock marketplace agents. Regenerate with `pnpm smoke:fixture:gen`; verify with `pnpm smoke:fixture:check`. Contains placeholder data only — never secrets, seeds, keys, or payment proofs.",
+    "deterministic": true,
+    "generatedBy": "scripts/generate-smoke-fixture.mjs",
+    "name": "talos-smoke-fixture",
+    "schemaVersion": 1
+  },
+  "stack": {
+    "health": {
+      "expectedReadyDegradedStatus": 503,
+      "expectedReadyHealthyStatus": 200,
+      "livePath": "/api/health/live",
+      "path": "/api/health",
+      "readyPath": "/api/health/ready"
+    },
+    "marketplacePath": "/api/services",
+    "mockStellarPort": 4010,
+    "webPort": 3000
+  }
+}

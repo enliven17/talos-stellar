@@ -10,6 +10,7 @@ from rich.console import Console
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
 from talos_agent.adapters.capability import SecretProvider
+from talos_agent.adapters.snapshots import XHealthSnapshot
 from talos_agent.config import resolve_setting_secret
 
 if TYPE_CHECKING:
@@ -100,7 +101,7 @@ class XAdapter(BaseSocialAdapter):
             supports_analytics=True,
         )
 
-    def health_snapshot(self) -> dict[str, bool]:
+    def health_snapshot(self) -> XHealthSnapshot:
         live_check = getattr(self._browser, "is_live", None)
         if callable(live_check):
             browser_live = bool(live_check())
@@ -109,11 +110,11 @@ class XAdapter(BaseSocialAdapter):
             browser_live = bool(
                 stagehand is not None and getattr(stagehand, "page", None) is not None
             )
-        return {
-            "has_username": bool(self._username),
-            "has_password": bool(self._password),
-            "browser_live": browser_live,
-        }
+        return XHealthSnapshot(
+            has_username=bool(self._username),
+            has_password=bool(self._password),
+            browser_live=browser_live,
+        )
 
     # ── Auth ─────────────────────────────────────────────────
 

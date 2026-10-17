@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsQuotaConfigs } from "@/db/schema";
@@ -47,7 +48,7 @@ import {
  * The response intentionally includes disabled resources so operators can
  * see all available quota slots even before they are enabled.
  */
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -136,7 +137,7 @@ export async function GET(
  *   notes?: string,          // Admin notes
  * }
  */
-export async function PATCH(
+async function _PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -250,3 +251,6 @@ export async function PATCH(
     },
   });
 }
+
+export const GET = withRequestId(_GET);
+export const PATCH = withRequestId(_PATCH);

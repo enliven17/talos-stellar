@@ -16,8 +16,8 @@ from enum import Enum
 from typing import Any, Callable
 
 from talos_agent.circuit_breaker import CircuitBreakerOpen, cb_registry
-from talos_agent.http import _sanitize_response_text
-from talos_agent.telemetry import _is_sensitive_key
+from talos_agent.redact import is_sensitive_key as _is_sensitive_key
+from talos_agent.redact import redact_text as _sanitize_response_text
 
 logger = logging.getLogger(__name__)
 

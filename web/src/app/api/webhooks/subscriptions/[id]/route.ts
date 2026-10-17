@@ -6,6 +6,7 @@
  * DELETE /api/webhooks/subscriptions/:id  — Delete subscription
  */
 
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsWebhookSubscriptions } from "@/db/schema";
@@ -46,7 +47,7 @@ const updateSubscriptionSchema = z
 
 // ─── GET /api/webhooks/subscriptions/:id ─────────────────────────
 
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -100,7 +101,7 @@ export async function GET(
 
 // ─── PATCH /api/webhooks/subscriptions/:id ───────────────────────
 
-export async function PATCH(
+async function _PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -116,7 +117,7 @@ export async function PATCH(
     if (error) return error;
 
     // Build update payload
-    const updateData: Record<string, unknown> = {};
+    const updateData: Partial<typeof tlsWebhookSubscriptions.$inferInsert> = {};
 
     if (data.url !== undefined) updateData.url = data.url;
     if (data.eventTypes !== undefined) updateData.eventTypes = data.eventTypes;
@@ -181,7 +182,7 @@ export async function PATCH(
 
     const [updated] = await db
       .update(tlsWebhookSubscriptions)
-      .set(updateData as any)
+      .set(updateData)
       .where(
         and(
           eq(tlsWebhookSubscriptions.id, id),
@@ -219,7 +220,7 @@ export async function PATCH(
 
 // ─── DELETE /api/webhooks/subscriptions/:id ──────────────────────
 
-export async function DELETE(
+async function _DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -256,3 +257,7 @@ export async function DELETE(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withRequestId(_GET);
+export const PATCH = withRequestId(_PATCH);
+export const DELETE = withRequestId(_DELETE);

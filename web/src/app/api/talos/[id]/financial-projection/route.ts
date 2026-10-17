@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsRevenues, tlsActivities, tlsPatrons } from "@/db/schema";
@@ -26,7 +27,7 @@ interface FinancialProjection {
 }
 
 // GET /api/talos/:id/financial-projection - AI-driven financial projections
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -238,3 +239,5 @@ Generate projections for the next 12 months.`;
     );
   }
 }
+
+export const GET = withRequestId(_GET);
