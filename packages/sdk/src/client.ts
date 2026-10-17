@@ -1018,6 +1018,20 @@ export class TalosClient {
     return this.request("/api/talos/me", { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
+  /**
+   * Check whether an agent name is available for registration.
+   */
+  async checkNameAvailability(
+    name: string,
+    options?: ReadOptions,
+  ): Promise<{ available: boolean; reason?: string }> {
+    return this.request("/api/talos/check-name", {
+      params: { name },
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
   async createTalos(params: CreateTalosParams): Promise<TalosCreated> {
     return this.request("/api/talos", {
       method: "POST",
