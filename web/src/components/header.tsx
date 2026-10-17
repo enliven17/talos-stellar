@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { href: "/activity", label: "Activity", requiresWallet: false },
   { href: "/proposals", label: "Proposals", requiresWallet: false },
   { href: "/playbooks", label: "Playbooks", requiresWallet: false },
+  { href: "/webhooks", label: "Webhooks", requiresWallet: false },
   { href: "/leaderboard", label: "Leaderboard", requiresWallet: false },
   { href: "/docs", label: "Docs", requiresWallet: false, highlight: true },
 ];
