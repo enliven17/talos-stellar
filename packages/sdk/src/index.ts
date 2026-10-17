@@ -100,6 +100,35 @@ export {
   globalChaosInjector,
 } from "./chaos.js";
 
+// ── Contract readers ──────────────────────────────────────────────────────
+
+export {
+  RegistryReader,
+  NameServiceReader,
+  TESTNET_RPC_URL,
+  TESTNET_REGISTRY_CONTRACT_ID,
+  TESTNET_NAME_SERVICE_CONTRACT_ID,
+  TESTNET_NETWORK_PASSPHRASE,
+} from "./contracts.js";
+export type {
+  OnChainTalos,
+  ContractPatron,
+  ContractKernel,
+  ContractPulse,
+  ContractVersion,
+  ContractReaderOptions,
+  RegistryReaderOptions,
+  NameServiceReaderOptions,
+} from "./contracts.js";
+
+// ── Contract reader errors ────────────────────────────────────────────────
+
+export {
+  TalosContractError,
+  TalosContractNotFoundError,
+  TalosContractSimulateError,
+} from "./errors.js";
+
 // ── Runtime compatibility matrix ──────────────────────────────────────────────
 
 export {

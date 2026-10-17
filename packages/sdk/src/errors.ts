@@ -649,3 +649,39 @@ export function classifyTransportError(
   const safeBody = truncate(message.replace(/\s+/g, " ").trim());
   return new TalosTransportError(0, safeBody, path, { message, cause });
 }
+
+// ── Contract reader errors ─────────────────────────────────────────────────
+
+/**
+ * Base class for errors surfaced by {@link RegistryReader} and
+ * {@link NameServiceReader}. Extends {@link TalosAPIError} so existing
+ * `instanceof TalosAPIError` guards continue to work.
+ */
+export class TalosContractError extends TalosAPIError {
+  constructor(message: string, options: TalosAPIErrorOptions = {}) {
+    super(0, message, "soroban", { ...options, code: "api_error" });
+    this.name = "TalosContractError";
+  }
+}
+
+/**
+ * A requested on-chain resource (Talos ID, name, etc.) was not found.
+ * Maps to a `not_found_error` code for consistent switch-style handling.
+ */
+export class TalosContractNotFoundError extends TalosContractError {
+  constructor(message: string, options: TalosAPIErrorOptions = {}) {
+    super(message, { ...options, code: "not_found_error" });
+    this.name = "TalosContractNotFoundError";
+  }
+}
+
+/**
+ * The Soroban `simulateTransaction` call returned a contract or RPC-level
+ * error. Inspect `cause` for the raw RPC error object.
+ */
+export class TalosContractSimulateError extends TalosContractError {
+  constructor(message: string, options: TalosAPIErrorOptions = {}) {
+    super(message, options);
+    this.name = "TalosContractSimulateError";
+  }
+}
