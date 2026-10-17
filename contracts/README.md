@@ -786,7 +786,7 @@ The pause control logic lives in a shared library crate (`pause-control`) used b
 | Domain | ID | Guarded functions |
 |--------|----|-------------------|
 | `PAUSE_NAME_REGISTRATION` | 5 | `register_name` |
-| `PAUSE_NAME_CONFIG` | 6 | `set_admin`, `set_registry_contract`, `set_timelock_config`, `schedule_action`, `cancel_action`, `touch_all_ttl`, `extend_ttl_batch` |
+| `PAUSE_NAME_CONFIG` | 6 | `set_admin`, `set_registry_contract`, `set_timelock_config`, `schedule_action`, `cancel_action`, `touch_all_ttl` (legacy), `extend_ttl_batch` |
 
 #### TalosGovernance
 
