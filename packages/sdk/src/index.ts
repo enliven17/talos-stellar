@@ -252,3 +252,6 @@ export {
   GENERATED_TYPES_PACKAGE,
 } from "./provenance.js";
 export type { GeneratedTypesProvenance } from "./provenance.js";
+
+// ── Contract Events ───────────────────────────────────────────────────────────
+export * from "./contract-events.js";

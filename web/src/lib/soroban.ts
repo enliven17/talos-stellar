@@ -17,12 +17,15 @@ const STELLAR_SOROBAN_RPC =
 export const TALOS_REGISTRY_CONTRACT_ID =
   process.env.NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT ?? "";
 
+export const TALOS_NAME_SERVICE_CONTRACT_ID =
+  process.env.NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT ?? "";
 
+export const TALOS_GOVERNANCE_CONTRACT_ID =
+  process.env.NEXT_PUBLIC_TALOS_GOVERNANCE_CONTRACT ?? "";
 
-// Dummy keypair used as source account for read-only Soroban simulations.
-// Keypair.random() guarantees a valid Ed25519 public key that always satisfies
-// the SDK's key-format checks, unlike any hardcoded string which would be
-// rejected by stricter validation. No signing key is required for read-only calls.
+export const TALOS_DIVIDENDS_CONTRACT_ID =
+  process.env.NEXT_PUBLIC_TALOS_DIVIDENDS_CONTRACT ?? "";
+
 let DUMMY_ACCOUNT_PUBLIC: string | null = null;
 
 async function getDummyAccountPublicKey(): Promise<string> {
@@ -32,8 +35,6 @@ async function getDummyAccountPublicKey(): Promise<string> {
   }
   return DUMMY_ACCOUNT_PUBLIC;
 }
-export const TALOS_NAME_SERVICE_CONTRACT_ID =
-  process.env.NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT ?? "";
 
 export const STELLAR_TESTNET = {
   networkPassphrase: "Test SDF Network ; September 2015",

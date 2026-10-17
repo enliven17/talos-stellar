@@ -1001,3 +1001,38 @@ export const tlsBackupRuns = pgTable(
   ],
 );
 
+// ─── Contract Events (Indexed On-Chain Truth) ─────────────────────
+
+export const tlsContractEvents = pgTable(
+  "tls_contract_events",
+  {
+    id: text("id").primaryKey(),                     // Event ID from Soroban RPC (unique on event id)
+    contractId: text("contract_id").notNull(),       // Emitting contract address/id
+    ledger: integer("ledger").notNull(),              // Ledger sequence
+    ledgerClosedAt: timestamp("ledger_closed_at", { mode: "date", precision: 3 }),
+    txHash: text("tx_hash").notNull(),               // Transaction hash
+    topic: text("topic").notNull(),                   // Event type symbol / topic[0]
+    topics: jsonb("topics"),                          // Raw or decoded topics
+    data: jsonb("data"),                              // Raw data
+    decodedPayload: jsonb("decoded_payload"),         // Decoded payload
+    eventVersion: integer("event_version"),           // Schema / event version if present
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tls_contract_events_id_unique").on(t.id),
+    index("tls_contract_events_contract_id_idx").on(t.contractId),
+    index("tls_contract_events_ledger_idx").on(t.ledger),
+    index("tls_contract_events_topic_idx").on(t.topic),
+    index("tls_contract_events_tx_hash_idx").on(t.txHash),
+  ],
+);
+
+export const tlsEventCursor = pgTable(
+  "tls_event_cursor",
+  {
+    id: text("id").primaryKey().default("default"),
+    lastLedger: integer("last_ledger").notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date", precision: 3 }).notNull().defaultNow().$onUpdate(() => new Date()),
+  },
+);
+
