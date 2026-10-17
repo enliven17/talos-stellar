@@ -162,7 +162,14 @@ export function ProposalsClient() {
                     [{p.status.toUpperCase()}]
                   </span>
                 </div>
-                <h3 className="text-sm font-bold text-foreground">{p.title}</h3>
+                <h3 className="text-sm font-bold text-foreground">
+                  <Link
+                    href={`/proposals/${p.id}`}
+                    className="hover:text-accent transition-colors"
+                  >
+                    {p.title}
+                  </Link>
+                </h3>
                 {p.description && (
                   <p className="text-xs text-muted mt-1 leading-relaxed">{p.description}</p>
                 )}
