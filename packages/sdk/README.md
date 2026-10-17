@@ -414,7 +414,7 @@ working — new behavior is purely additive.
 | 403 | `TalosForbiddenError` | `forbidden` | no | — |
 | 404 | `TalosNotFoundError` | `not_found_error` | no | — |
 | 409 | `TalosConflictError` | `conflict_error` | no | `data.detail?: string` |
-| 429 | `TalosRateLimitError` | `rate_limit_error` | yes | `retryAfterMs?`, `limit?`, `remaining?`, `resetAt?` |
+| 429 | `TalosRateLimitError` | `rate_limit_error` | yes | `retryAfterMs?`, `limit?`, `remaining?`, `resetAt?`, `rateLimit?` |
 | 500 | `TalosServerError` | `server_error` | no | — |
 | 502/503/504 | `TalosServerRetryableError` | `server_error` | yes | — |
 | network | `TalosTransportError` | `transport_error` | yes | `cause?: unknown` |
@@ -437,6 +437,10 @@ Every error also exposes:
   on **any** error status (not just 429 — a 503 during a maintenance window
   is a common real-world source per RFC 9110 §10.2.3), independent of
   whether that status is otherwise `isRetryable`.
+- `rateLimit?` — parsed `X-RateLimit-Limit` / `X-RateLimit-Remaining` /
+  `X-RateLimit-Reset` counters for **every** error status that carries them
+  (`{ limit?, remaining?, resetAt? }`, with `resetAt` in epoch milliseconds).
+  `undefined` when the response sent none of those headers.
 - `requestId?` — `x-request-id` header for log correlation.
 - `headers` — sanitized snapshot (`x-request-id`, `retry-after`,
   `www-authenticate`, `x-ratelimit-*`).
@@ -541,6 +545,45 @@ const client = new TalosClient({
 });
 ```
 
+### Rate-Limit Observability
+
+The API advertises quota state on every response via `X-RateLimit-Limit`,
+`X-RateLimit-Remaining`, and `X-RateLimit-Reset`. The SDK parses those headers
+into a typed `RateLimitInfo` so callers can throttle themselves *before*
+hitting a 429 — no need to re-read raw headers.
+
+```typescript
+import { TalosClient } from "@talos-protocol/sdk";
+
+const client = new TalosClient({
+  baseUrl: "https://talos-stellar.vercel.app",
+  apiKey: process.env.TALOS_KEY!,
+  onResponse: ({ status, method, path, rateLimit }) => {
+    if (!rateLimit?.remaining) return;
+    metrics.gauge("talos_sdk.rate_limit_remaining", rateLimit.remaining, {
+      method,
+      path,
+      status: String(status),
+    });
+  },
+});
+
+await client.listTaloses({ limit: 10 });
+client.getLastRateLimit(); // → { limit: 100, remaining: 99, resetAt: 1_700_000_000_000 }
+```
+
+- `onResponse` fires for **every** HTTP response — success or failure, and once
+  per retry attempt — with `{ path, method, status, attempt, durationMs, rateLimit? }`.
+- On 429s the same snapshot is available as `error.rateLimit` (and
+  `TalosRateLimitError.limit` / `.remaining` / `.resetAt`), and on
+  `onError` events as `event.rateLimit`.
+- `client.getLastRateLimit()` returns the most recent snapshot seen; responses
+  without the headers leave the previous value intact.
+- `parseRateLimit(headers)` is exported for callers that manage their own
+  `fetch` calls.
+- Headers are optional: a response that omits them yields `undefined` rather
+  than throwing.
+
 **Retry semantics (deterministic & bounded):**
 - Only retries when `err.isRetryable === true` (429, 502/503/504, transport,
   timeout).
@@ -576,8 +619,8 @@ This version is **fully backward-compatible**:
   their prior behavior. Read the new `apiMessage` and `apiCode` fields for the
   corresponding server-envelope values; `requestId`, retry headers, and
   `TalosValidationError.issues` remain supported.
-- New fields (`code`, `isRetryable`, `retryAfterMs`, `requestId`, `headers`,
-  `data`) are additive.
+- New fields (`code`, `isRetryable`, `retryAfterMs`, `rateLimit`, `requestId`,
+  `headers`, `data`) are additive.
 - `retryAfterMs` is now populated for every error status that carries a
   `Retry-After` header, not only 429 — this can only add a previously-`undefined`
   value, so it does not change behavior for any existing check of the form
