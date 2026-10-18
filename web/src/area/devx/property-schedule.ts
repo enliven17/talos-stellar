@@ -260,7 +260,6 @@ export function shouldRunPropertySchedule(
   config: PropertyScheduleConfig,
   eventName: string,
 ): boolean {
-  if (!config.enabled) return false;
   if (!eventName || typeof eventName !== "string") {
     throw new PropertyScheduleError("invalid_event", "eventName is required");
   }
@@ -268,6 +267,7 @@ export function shouldRunPropertySchedule(
   if (!e) {
     throw new PropertyScheduleError("invalid_event", "eventName must not be empty");
   }
+  if (!config.enabled) return false;
   // Nightly cron + manual + PR/push verification of the property suites.
   return e === "schedule" || e === "workflow_dispatch" || e === "pull_request" || e === "push";
 }
