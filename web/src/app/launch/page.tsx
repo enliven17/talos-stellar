@@ -36,11 +36,13 @@ export default function LaunchPage() {
   );
 }
 
-function LaunchForm() {
+export function LaunchForm() {
   const { address } = useWallet();
   const { signTransaction } = useStellarWallet();
   const router = useRouter();
   const [step, setStep] = useState(0);
+  const [submittedSteps, setSubmittedSteps] = useState<Record<number, boolean>>({});
+  const isStepSubmitted = !!submittedSteps[step];
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({
@@ -133,6 +135,19 @@ function LaunchForm() {
           && form.agentName.length >= 3 && nameAvailable === true;
       default:
         return true;
+    }
+  };
+
+  const handleNextOrSubmit = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setSubmittedSteps((prev) => ({ ...prev, [step]: true }));
+    if (!canNext()) {
+      return;
+    }
+    if (step < 5) {
+      setStep(step + 1);
+    } else {
+      handleLaunch();
     }
   };
 
@@ -434,7 +449,7 @@ function LaunchForm() {
   }
 
   return (
-    <div className="max-w-3xl mx-auto px-6 py-12">
+    <form onSubmit={handleNextOrSubmit} noValidate data-testid="launch-form" className="max-w-3xl mx-auto px-6 py-12">
       <div className="mb-8 flex items-end justify-between">
         <div>
           <div className="text-xs text-muted mb-2">[TALOS GENESIS]</div>
@@ -501,15 +516,44 @@ function LaunchForm() {
             <p className="text-sm text-muted mb-6">
               Register your product. Your Prime Agent will handle GTM and service delivery.
             </p>
-            <Field label="Product Name" value={form.productName} onChange={(v) => update("productName", v)} placeholder="e.g. ImageGen Pro" />
-            <Field label="Description" value={form.productDesc} onChange={(v) => update("productDesc", v)} placeholder="What does your product do? Who is it for?" multiline />
+            <Field
+              id="launch-input-product-name"
+              label="Product Name"
+              value={form.productName}
+              onChange={(v) => update("productName", v)}
+              placeholder="e.g. ImageGen Pro"
+              required
+              isInvalid={isStepSubmitted && !form.productName.trim()}
+              error={isStepSubmitted && !form.productName.trim() ? "Product name is required" : null}
+            />
+            <Field
+              id="launch-input-description"
+              label="Description"
+              value={form.productDesc}
+              onChange={(v) => update("productDesc", v)}
+              placeholder="What does your product do? Who is it for?"
+              multiline
+              required
+              isInvalid={isStepSubmitted && !form.productDesc.trim()}
+              error={isStepSubmitted && !form.productDesc.trim() ? "Description is required" : null}
+            />
             <div>
-              <label className="block text-xs text-muted mb-2">Category</label>
+              <label htmlFor="launch-input-category" className="block text-xs text-muted mb-2">
+                Category
+                <span className="text-accent ml-1" aria-hidden="true">*</span>
+              </label>
               <select
+                id="launch-input-category"
                 value={form.category}
                 onChange={(e) => update("category", e.target.value)}
+                required
+                aria-required="true"
+                aria-invalid={isStepSubmitted && !form.category ? "true" : "false"}
+                aria-describedby={isStepSubmitted && !form.category ? "launch-input-category-error" : undefined}
                 data-testid="launch-input-category"
-                className="w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground focus:outline-none focus:border-accent"
+                className={`w-full bg-background border px-4 py-2.5 text-sm text-foreground focus:outline-none focus:border-accent ${
+                  isStepSubmitted && !form.category ? "border-red-600" : "border-border"
+                }`}
               >
                 <option value="marketing">Marketing</option>
                 <option value="development">Development</option>
@@ -522,6 +566,11 @@ function LaunchForm() {
                 <option value="support">Support</option>
                 <option value="education">Education</option>
               </select>
+              {isStepSubmitted && !form.category && (
+                <p id="launch-input-category-error" role="alert" className="text-xs text-red-600 mt-1 font-medium">
+                  Category is required
+                </p>
+              )}
             </div>
 
             <div className="pt-4 mt-2 border-t border-border">
@@ -530,18 +579,49 @@ function LaunchForm() {
                 Define the paid service your agent offers to other agents via the x402 protocol. Optional — you can add this later.
               </p>
               <div className="space-y-4">
-                <Field label="Service Name" value={form.serviceName} onChange={(v) => update("serviceName", v)} placeholder="e.g. SEO Content Generation" />
-                <Field label="Service Description" value={form.serviceDescription} onChange={(v) => update("serviceDescription", v)} placeholder="What does this service do? What input/output should callers expect?" multiline />
+                <Field
+                  id="launch-input-service-name"
+                  label="Service Name"
+                  value={form.serviceName}
+                  onChange={(v) => update("serviceName", v)}
+                  placeholder="e.g. SEO Content Generation"
+                />
+                <Field
+                  id="launch-input-service-description"
+                  label="Service Description"
+                  value={form.serviceDescription}
+                  onChange={(v) => update("serviceDescription", v)}
+                  placeholder="What does this service do? What input/output should callers expect?"
+                  multiline
+                />
                 <div>
-                  <label className="block text-xs text-muted mb-2">Price per Request (USDC)</label>
+                  <label htmlFor="launch-input-service-price" className="block text-xs text-muted mb-2">
+                    Price per Request (USDC)
+                  </label>
                   <input
+                    id="launch-input-service-price"
                     type="number"
                     value={form.servicePrice}
                     onChange={(e) => update("servicePrice", e.target.value)}
                     placeholder="e.g. 5.00"
+                    aria-invalid={
+                      form.servicePrice !== "" && (isNaN(Number(form.servicePrice)) || Number(form.servicePrice) < 0)
+                        ? "true"
+                        : "false"
+                    }
+                    aria-describedby={
+                      form.servicePrice !== "" && (isNaN(Number(form.servicePrice)) || Number(form.servicePrice) < 0)
+                        ? "launch-input-service-price-error"
+                        : undefined
+                    }
                     data-testid="launch-input-service-price"
                     className="w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent"
                   />
+                  {form.servicePrice !== "" && (isNaN(Number(form.servicePrice)) || Number(form.servicePrice) < 0) && (
+                    <p id="launch-input-service-price-error" role="alert" className="text-xs text-red-600 mt-1 font-medium">
+                      Price must be a valid positive number
+                    </p>
+                  )}
                 </div>
               </div>
             </div>
@@ -555,14 +635,18 @@ function LaunchForm() {
               The Creator is your Stellar public key. It is permanently linked to this TALOS and cannot be changed.
             </p>
             <div>
-              <label className="block text-xs text-muted mb-2">Creator Public Key (Stellar)</label>
-              <div
+              <label htmlFor="creator-wallet-display" className="block text-xs text-muted mb-2">
+                Creator Public Key (Stellar)
+              </label>
+              <output
+                id="creator-wallet-display"
                 data-testid="creator-wallet-display"
-                className="w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground/70 font-mono select-all break-all"
+                aria-describedby="launch-creator-wallet-help"
+                className="block w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground/70 font-mono select-all break-all"
               >
                 {form.creatorWallet || address || "—"}
-              </div>
-              <p className="text-xs text-muted mt-1">This Stellar public key will be registered as the TALOS Creator on-chain.</p>
+              </output>
+              <p id="launch-creator-wallet-help" className="text-xs text-muted mt-1">This Stellar public key will be registered as the TALOS Creator on-chain.</p>
             </div>
             <div className="p-4 border border-border bg-background">
               <div className="text-xs text-accent mb-2">[REVENUE MODEL]</div>
@@ -583,19 +667,85 @@ function LaunchForm() {
             <p className="text-sm text-muted mb-6">
               Configure your TALOS&apos;s Mitos token on Stellar.
             </p>
-            <Field label="Token Name" value={form.tokenName} onChange={(v) => update("tokenName", v)} placeholder="e.g. ImageGen Mitos" />
-            <div>
-              <Field label="Token Symbol (Stellar Asset Code)" value={form.tokenSymbol} onChange={(v) => update("tokenSymbol", v.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8))} placeholder="e.g. IMGS" />
-              <p className="text-xs text-muted mt-1">2-8 characters, letters and numbers only. Used as Stellar asset code.</p>
-            </div>
-            <div>
-              <Field label="Total Supply" value={form.totalSupply} onChange={(v) => update("totalSupply", v)} type="number" />
-              <p className="text-xs text-muted mt-1">Max 100,000,000</p>
-            </div>
-            <div>
-              <Field label="Initial Price (USDC)" value={form.initialPrice} onChange={(v) => update("initialPrice", v)} type="number" />
-              <p className="text-xs text-muted mt-1">Price per Pulse token in USDC on Stellar</p>
-            </div>
+            <Field
+              id="launch-input-token-name"
+              label="Token Name"
+              value={form.tokenName}
+              onChange={(v) => update("tokenName", v)}
+              placeholder="e.g. ImageGen Mitos"
+              required
+              isInvalid={isStepSubmitted && !form.tokenName.trim()}
+              error={isStepSubmitted && !form.tokenName.trim() ? "Token name is required" : null}
+            />
+            <Field
+              id="launch-input-token-symbol"
+              label="Token Symbol (Stellar Asset Code)"
+              value={form.tokenSymbol}
+              onChange={(v) => update("tokenSymbol", v.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8))}
+              placeholder="e.g. IMGS"
+              required
+              helpText="2-8 characters, letters and numbers only. Used as Stellar asset code."
+              isInvalid={
+                isStepSubmitted &&
+                (form.tokenSymbol.trim().length < 2 ||
+                  form.tokenSymbol.trim().length > 8 ||
+                  !/^[A-Za-z][A-Za-z0-9]*$/.test(form.tokenSymbol.trim()))
+              }
+              error={
+                isStepSubmitted &&
+                (form.tokenSymbol.trim().length < 2 ||
+                  form.tokenSymbol.trim().length > 8 ||
+                  !/^[A-Za-z][A-Za-z0-9]*$/.test(form.tokenSymbol.trim()))
+                  ? "Token symbol must be 2-8 alphanumeric characters"
+                  : null
+              }
+            />
+            <Field
+              id="launch-input-total-supply"
+              label="Total Supply"
+              value={form.totalSupply}
+              onChange={(v) => update("totalSupply", v)}
+              type="number"
+              required
+              helpText="Max 100,000,000"
+              isInvalid={
+                isStepSubmitted &&
+                (!form.totalSupply ||
+                  Number(form.totalSupply) <= 0 ||
+                  Number(form.totalSupply) > 100_000_000)
+              }
+              error={
+                isStepSubmitted &&
+                (!form.totalSupply ||
+                  Number(form.totalSupply) <= 0 ||
+                  Number(form.totalSupply) > 100_000_000)
+                  ? "Total supply must be between 1 and 100,000,000"
+                  : null
+              }
+            />
+            <Field
+              id="launch-input-initial-price"
+              label="Initial Price (USDC)"
+              value={form.initialPrice}
+              onChange={(v) => update("initialPrice", v)}
+              type="number"
+              required
+              helpText="Price per Pulse token in USDC on Stellar"
+              isInvalid={
+                isStepSubmitted &&
+                (!form.initialPrice ||
+                  Number(form.initialPrice) <= 0 ||
+                  Number(form.initialPrice) > 1_000_000)
+              }
+              error={
+                isStepSubmitted &&
+                (!form.initialPrice ||
+                  Number(form.initialPrice) <= 0 ||
+                  Number(form.initialPrice) > 1_000_000)
+                  ? "Initial price must be between 0.000001 and 1,000,000"
+                  : null
+              }
+            />
           </div>
         )}
 
@@ -605,8 +755,28 @@ function LaunchForm() {
             <p className="text-sm text-muted mb-6">
               Set the governance rules for your agent.
             </p>
-            <Field label="Approval Threshold (USDC)" value={form.approvalThreshold} onChange={(v) => update("approvalThreshold", v)} type="number" placeholder="Transactions above this require approval" />
-            <Field label="GTM Budget (USDC/month)" value={form.gtmBudget} onChange={(v) => update("gtmBudget", v)} type="number" placeholder="Monthly budget for GTM activities" />
+            <Field
+              id="launch-input-approval-threshold"
+              label="Approval Threshold (USDC)"
+              value={form.approvalThreshold}
+              onChange={(v) => update("approvalThreshold", v)}
+              type="number"
+              placeholder="Transactions above this require approval"
+              required
+              isInvalid={isStepSubmitted && (!form.approvalThreshold || Number(form.approvalThreshold) < 0)}
+              error={isStepSubmitted && (!form.approvalThreshold || Number(form.approvalThreshold) < 0) ? "Approval threshold is required" : null}
+            />
+            <Field
+              id="launch-input-gtm-budget"
+              label="GTM Budget (USDC/month)"
+              value={form.gtmBudget}
+              onChange={(v) => update("gtmBudget", v)}
+              type="number"
+              placeholder="Monthly budget for GTM activities"
+              required
+              isInvalid={isStepSubmitted && (!form.gtmBudget || Number(form.gtmBudget) < 0)}
+              error={isStepSubmitted && (!form.gtmBudget || Number(form.gtmBudget) < 0) ? "GTM budget is required" : null}
+            />
           </div>
         )}
 
@@ -617,9 +787,13 @@ function LaunchForm() {
               Configure your AI agent&apos;s personality and targets.
             </p>
             <div>
-              <label className="block text-xs text-muted mb-2">Agent Identity (immutable)</label>
+              <label htmlFor="launch-input-agent-identity" className="block text-xs text-muted mb-2">
+                Agent Identity (immutable)
+                <span className="text-accent ml-1" aria-hidden="true">*</span>
+              </label>
               <div className="flex items-center gap-2">
                 <input
+                  id="launch-input-agent-identity"
                   type="text"
                   value={form.agentName}
                   onChange={(e) => {
@@ -628,47 +802,106 @@ function LaunchForm() {
                     checkNameAvailability(v);
                   }}
                   placeholder="e.g. marketbot"
+                  required
+                  aria-required="true"
+                  aria-invalid={
+                    nameAvailable === false || (isStepSubmitted && (form.agentName.length < 3 || nameAvailable !== true))
+                      ? "true"
+                      : "false"
+                  }
+                  aria-describedby="launch-agent-identity-status launch-agent-identity-help"
                   data-testid="launch-input-agent-identity"
-                  className="flex-1 bg-background border border-border px-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent"
+                  className={`flex-1 bg-background border px-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent ${
+                    nameAvailable === false || (isStepSubmitted && (form.agentName.length < 3 || nameAvailable !== true))
+                      ? "border-red-600"
+                      : "border-border"
+                  }`}
                 />
                 <span className="text-sm text-muted">.talos</span>
               </div>
-              <div className="mt-1.5 text-xs">
+              <div id="launch-agent-identity-status" role="status" aria-live="polite" className="mt-1.5 text-xs">
                 {nameChecking && <span className="text-muted">Checking...</span>}
                 {!nameChecking && nameAvailable === true && form.agentName.length >= 3 && (
                   <span className="text-accent font-bold">{form.agentName}.talos is available</span>
                 )}
                 {!nameChecking && nameAvailable === false && (
-                  <span className="text-red-600 font-bold">{form.agentName}.talos is taken</span>
+                  <span role="alert" className="text-red-600 font-bold">{form.agentName}.talos is taken</span>
                 )}
                 {!nameChecking && nameAvailable === null && form.agentName.length > 0 && form.agentName.length < 3 && (
                   <span className="text-muted">Minimum 3 characters</span>
                 )}
+                {isStepSubmitted && !form.agentName && (
+                  <span role="alert" className="text-red-600 font-bold">Agent identity is required</span>
+                )}
               </div>
-              <p className="text-xs text-muted mt-1">This is your agent&apos;s permanent on-chain identity. It cannot be changed after registration.</p>
+              <p id="launch-agent-identity-help" className="text-xs text-muted mt-1">This is your agent&apos;s permanent on-chain identity. It cannot be changed after registration.</p>
             </div>
-            <Field label="Persona" value={form.persona} onChange={(v) => update("persona", v)} placeholder="e.g. A sharp, witty tech commentator" multiline />
-            <Field label="Target Audience" value={form.targetAudience} onChange={(v) => update("targetAudience", v)} placeholder="e.g. Indie developers building SaaS products" />
+            <Field
+              id="launch-input-persona"
+              label="Persona"
+              value={form.persona}
+              onChange={(v) => update("persona", v)}
+              placeholder="e.g. A sharp, witty tech commentator"
+              multiline
+              required
+              isInvalid={isStepSubmitted && !form.persona.trim()}
+              error={isStepSubmitted && !form.persona.trim() ? "Persona is required" : null}
+            />
+            <Field
+              id="launch-input-target-audience"
+              label="Target Audience"
+              value={form.targetAudience}
+              onChange={(v) => update("targetAudience", v)}
+              placeholder="e.g. Indie developers building SaaS products"
+              required
+              isInvalid={isStepSubmitted && !form.targetAudience.trim()}
+              error={isStepSubmitted && !form.targetAudience.trim() ? "Target audience is required" : null}
+            />
             <div>
-              <label className="block text-xs text-muted mb-2">Tone</label>
+              <label htmlFor="launch-input-tone" className="block text-xs text-muted mb-2">
+                Tone
+                <span className="text-accent ml-1" aria-hidden="true">*</span>
+              </label>
               <select
+                id="launch-input-tone"
                 value={form.tone}
                 onChange={(e) => update("tone", e.target.value)}
+                required
+                aria-required="true"
+                aria-invalid={isStepSubmitted && !form.tone ? "true" : "false"}
+                aria-describedby={isStepSubmitted && !form.tone ? "launch-input-tone-error" : undefined}
                 data-testid="launch-input-tone"
-                className="w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground focus:outline-none focus:border-accent"
+                className={`w-full bg-background border px-4 py-2.5 text-sm text-foreground focus:outline-none focus:border-accent ${
+                  isStepSubmitted && !form.tone ? "border-red-600" : "border-border"
+                }`}
               >
                 <option value="professional">Professional</option>
                 <option value="casual">Casual</option>
                 <option value="witty">Witty</option>
                 <option value="technical">Technical</option>
               </select>
+              {isStepSubmitted && !form.tone && (
+                <p id="launch-input-tone-error" role="alert" className="text-xs text-red-600 mt-1 font-medium">
+                  Tone is required
+                </p>
+              )}
             </div>
             <div>
-              <label className="block text-xs text-muted mb-2">GTM Channels</label>
-              <div className="flex flex-wrap gap-2">
+              <span id="launch-gtm-channels-label" className="block text-xs text-muted mb-2">
+                GTM Channels
+                <span className="text-accent ml-1" aria-hidden="true">*</span>
+              </span>
+              <div
+                role="group"
+                aria-labelledby="launch-gtm-channels-label"
+                aria-describedby={isStepSubmitted && form.channels.length === 0 ? "launch-gtm-channels-error" : undefined}
+                className="flex flex-wrap gap-2"
+              >
                 {CHANNELS.map((ch) => (
                   <button
+                    type="button"
                     key={ch}
+                    aria-pressed={form.channels.includes(ch)}
                     onClick={() => {
                       const channels = form.channels.includes(ch)
                         ? form.channels.filter((c) => c !== ch)
@@ -686,6 +919,11 @@ function LaunchForm() {
                   </button>
                 ))}
               </div>
+              {isStepSubmitted && form.channels.length === 0 && (
+                <p id="launch-gtm-channels-error" role="alert" className="text-xs text-red-600 mt-1 font-medium">
+                  Select at least one channel
+                </p>
+              )}
             </div>
           </div>
         )}
@@ -758,6 +996,7 @@ function LaunchForm() {
       {/* Navigation */}
       <div className="flex justify-between">
         <button
+          type="button"
           onClick={() => setStep(Math.max(0, step - 1))}
           disabled={step === 0}
           data-testid="launch-back-button"
@@ -767,16 +1006,17 @@ function LaunchForm() {
         </button>
         {step < 5 ? (
           <button
-            onClick={() => setStep(step + 1)}
-            disabled={!canNext()}
+            type="submit"
+            onClick={handleNextOrSubmit}
             data-testid="launch-next-button"
-            className="px-6 py-2.5 text-sm bg-accent text-background font-medium hover:bg-foreground transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-default"
+            className="px-6 py-2.5 text-sm bg-accent text-background font-medium hover:bg-foreground transition-colors cursor-pointer"
           >
             Next
           </button>
         ) : (
           <button
-            onClick={handleLaunch}
+            type="submit"
+            onClick={handleNextOrSubmit}
             disabled={submitting}
             data-testid="launch-submit-button"
             className="px-8 py-2.5 text-sm bg-accent text-background font-medium hover:bg-foreground transition-colors disabled:opacity-50"
@@ -785,7 +1025,7 @@ function LaunchForm() {
           </button>
         )}
       </div>
-    </div>
+    </form>
   );
 }
 
@@ -796,6 +1036,11 @@ function Field({
   placeholder = "",
   type = "text",
   multiline = false,
+  id: customId,
+  required = false,
+  error = null,
+  helpText,
+  isInvalid = false,
 }: {
   label: string;
   value: string;
@@ -803,31 +1048,70 @@ function Field({
   placeholder?: string;
   type?: string;
   multiline?: boolean;
+  id?: string;
+  required?: boolean;
+  error?: string | null;
+  helpText?: string;
+  isInvalid?: boolean;
 }) {
-  const testId = `launch-input-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
-  const cls =
-    "w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent";
+  const defaultSlug = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const testId = `launch-input-${defaultSlug}`;
+  const id = customId || testId;
+  const errorId = `${id}-error`;
+  const helpId = `${id}-help`;
+  const describedBy = [
+    error ? errorId : null,
+    helpText ? helpId : null,
+  ].filter(Boolean).join(" ") || undefined;
+
+  const cls = `w-full bg-background border px-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent ${
+    isInvalid ? "border-red-600 focus:border-red-600" : "border-border"
+  }`;
+
   return (
     <div>
-      <label className="block text-xs text-muted mb-2">{label}</label>
+      <label htmlFor={id} className="block text-xs text-muted mb-2">
+        {label}
+        {required && <span className="text-accent ml-1" aria-hidden="true">*</span>}
+      </label>
       {multiline ? (
         <textarea
+          id={id}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
           rows={3}
+          required={required}
+          aria-required={required ? "true" : undefined}
+          aria-invalid={isInvalid ? "true" : "false"}
+          aria-describedby={describedBy}
           data-testid={testId}
           className={`${cls} resize-none`}
         />
       ) : (
         <input
+          id={id}
           type={type}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
+          required={required}
+          aria-required={required ? "true" : undefined}
+          aria-invalid={isInvalid ? "true" : "false"}
+          aria-describedby={describedBy}
           data-testid={testId}
           className={cls}
         />
+      )}
+      {error && (
+        <p id={errorId} role="alert" className="text-xs text-red-600 mt-1 font-medium">
+          {error}
+        </p>
+      )}
+      {helpText && (
+        <p id={helpId} className="text-xs text-muted mt-1">
+          {helpText}
+        </p>
       )}
     </div>
   );
