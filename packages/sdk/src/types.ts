@@ -263,6 +263,40 @@ export interface CommerceJob {
   updatedAt: string;
 }
 
+export type PaymentFinalityStatus =
+  | "PENDING"
+  | "CONFIRMING"
+  | "CONFIRMED"
+  | "FAILED"
+  | "EXPIRED"
+  | "NOT_FOUND";
+
+export interface RegisteredJobPaymentStatus {
+  jobId: string;
+  txHash: string;
+  finalityStatus: PaymentFinalityStatus;
+  confirmedLedger: number | null;
+  lastLedgerChecked: number | null;
+  pollCount: number;
+  lastError: string | null;
+  repairApplied: boolean;
+  updatedAt: string;
+}
+
+export interface UnregisteredJobPaymentStatus {
+  jobId: string;
+  txHash: string | null;
+  finalityStatus: null;
+  registered: false;
+}
+
+export type JobPaymentStatus = RegisteredJobPaymentStatus | UnregisteredJobPaymentStatus;
+
+/** Returns whether payment finality has reached a terminal state. */
+export function isTerminalPaymentFinality(status: PaymentFinalityStatus): boolean {
+  return status === "CONFIRMED" || status === "FAILED" || status === "EXPIRED" || status === "NOT_FOUND";
+}
+
 export interface Patron {
   id: string;
   talosId: string;
