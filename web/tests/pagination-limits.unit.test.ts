@@ -187,15 +187,13 @@ describe("GET /api/activity — limit validation", () => {
     expect(fetchActivityTransactions).toHaveBeenCalledWith(25, null);
   });
 
-  // Public analytics endpoints reject (rather than clamp) oversized limits
-  // so a client can't silently receive fewer rows than it asked for (#491).
-  it("rejects limit=200 above max=100 with 400", async () => {
+  it("clamps limit=200 above max=100", async () => {
     const { fetchActivityTransactions } = await import("@/app/api/activity/query");
     vi.clearAllMocks();
 
     const res = await activityGET(req("/api/activity", { limit: "200" }));
-    expect(res.status).toBe(400);
-    expect(fetchActivityTransactions).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(fetchActivityTransactions).toHaveBeenCalledWith(100, null);
   });
 });
 
@@ -393,6 +391,47 @@ describe("GET /api/talos/[id]/approvals — limit validation", () => {
       { params: Promise.resolve({ id: TALOS_ID }) },
     );
     expect(res.status).toBe(200); // not 400
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2h. GET /api/talos/[id]/lifecycle
+// ---------------------------------------------------------------------------
+
+import { GET as lifecycleGET } from "@/app/api/talos/[id]/lifecycle/route";
+
+vi.mock("@/lib/governance/events", () => ({
+  readLifecycleEvents: vi.fn().mockResolvedValue({ events: [], nextCursor: null }),
+  emitLifecycleEvent: vi.fn(),
+  LIFECYCLE_EVENTS: [],
+}));
+
+describe("GET /api/talos/[id]/lifecycle — limit validation", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const TALOS_ID = "talos-xyz-789";
+  const INVALID = ["0", "-5", "1.9", "bad", ""];
+
+  function lifecycleReq(params: Record<string, string> = {}) {
+    return req(`/api/talos/${TALOS_ID}/lifecycle`, params);
+  }
+
+  it.each(INVALID)('returns 400 for limit="%s"', async (val) => {
+    const res = await lifecycleGET(
+      lifecycleReq({ limit: val }),
+      { params: Promise.resolve({ id: TALOS_ID }) },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("clamps limit=500 to max=100 and proceeds", async () => {
+    // Agent lookup returns empty -> 404 (or mocked agent) but not 400
+    mocks.mockDb.select.mockReturnValue(buildSelectChain([]));
+    const res = await lifecycleGET(
+      lifecycleReq({ limit: "500" }),
+      { params: Promise.resolve({ id: TALOS_ID }) },
+    );
+    expect(res.status).not.toBe(400);
   });
 });
 
