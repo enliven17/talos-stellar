@@ -3,7 +3,7 @@ import { NextRequest } from "next/server";
 import { GET } from "@/app/api/talos/check-name/route";
 import { db } from "@/db";
 import { isNameAvailableOnChain } from "@/lib/soroban";
-import { TALOS_NAME_MIN_LENGTH, TALOS_NAME_MAX_LENGTH } from "@/lib/limits";
+import { TALOS_NAME_MIN_LENGTH, TALOS_NAME_MAX_LENGTH } from "@/lib/parse-limit";
 
 vi.mock("@/db", () => ({
   db: {

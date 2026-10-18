@@ -5,7 +5,7 @@ import { tlsTalos, tlsPatrons, tlsActivities, tlsRevenues } from "@/db/schema";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { calculateMarketCap } from "@/lib/market-cap";
 import { badRequest, internalError } from "@/lib/api-response";
-import { parseLimit, LEADERBOARD_DEFAULT_LIMIT, LEADERBOARD_MAX_LIMIT, MAX_CURSOR_LENGTH } from "@/lib/limits";
+import { parseLimit, LEADERBOARD_DEFAULT_LIMIT, LEADERBOARD_MAX_LIMIT, MAX_CURSOR_LENGTH } from "@/lib/parse-limit";
 import {
   queryLeaderboardPage,
   refreshLeaderboardAggregates,

@@ -4,7 +4,7 @@ import { db } from "@/db";
 import { tlsTalos } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { isNameAvailableOnChain } from "@/lib/soroban";
-import { TALOS_NAME_MIN_LENGTH, TALOS_NAME_MAX_LENGTH } from "@/lib/limits";
+import { TALOS_NAME_MIN_LENGTH, TALOS_NAME_MAX_LENGTH } from "@/lib/parse-limit";
 
 // GET /api/talos/check-name?name=foo
 async function _GET(request: NextRequest) {

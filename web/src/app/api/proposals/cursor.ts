@@ -1,4 +1,4 @@
-import { MAX_CURSOR_LENGTH } from "@/lib/limits";
+import { MAX_CURSOR_LENGTH } from "@/lib/parse-limit";
 
 /**
  * Opaque keyset cursor for /api/proposals.
