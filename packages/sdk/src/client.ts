@@ -1025,6 +1025,17 @@ export class TalosClient {
     });
   }
 
+  async checkNameAvailability(
+    name: string,
+    options?: ReadOptions,
+  ): Promise<{ available: boolean; reason?: string }> {
+    return this.request("/api/talos/check-name", {
+      params: { name },
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
   // ── Activity ───────────────────────────────────────────────
 
   async listActivities(params?: ActivityPageOptions): Promise<ActivityPage> {

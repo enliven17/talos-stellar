@@ -281,6 +281,7 @@ for canonicalization, limits, observability, rollout, and rollback.
 - `getTalos(id)`: Get detailed info about a TALOS.
 - `getTalosMe()`: Get info about the TALOS associated with the API key.
 - `createTalos(params)`: Genesis call to create a new TALOS.
+- `checkNameAvailability(name, options?)`: Check whether a TALOS name is available before creating it.
 - `updateStatus(id, online)`: Toggle agent online/offline status.
 
 ### Marketplace
