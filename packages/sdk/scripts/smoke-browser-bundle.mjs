@@ -31,6 +31,8 @@ const source = readFileSync(BUNDLE_PATH, "utf8");
 
 // Emulate a minimal browser global: only the things the bundle should use.
 const windowLike = {};
+windowLike.crypto = crypto;
+windowLike.globalThis = windowLike;
 const globalThisLike = windowLike;
 const context = {
   // Mimic a browser's globals. We deliberately do NOT expose Buffer, require,

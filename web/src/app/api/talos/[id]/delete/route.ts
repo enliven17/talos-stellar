@@ -1,5 +1,4 @@
 import { withRequestId } from "@/lib/with-request-id";
-import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPatrons, tlsActivities, tlsApprovals, tlsCommerceJobs, tlsCommerceServices, tlsPlaybooks } from "@/db/schema";
 import { eq } from "drizzle-orm";
@@ -10,10 +9,11 @@ import { agentMutationTags } from "@/lib/cache-tags";
 // POST /api/talos/:id/delete - Privacy deletion (soft delete, preserves historical links)
 // Requires Stellar ED25519 signature proof of wallet ownership.
 async function _POST(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  request: Request,
+  context?: { params: Promise<{ id: string }> },
 ) {
-  const { id } = await params;
+  const pathname = new URL(request.url).pathname.split("/").filter(Boolean);
+  const { id } = await (context?.params ?? Promise.resolve({ id: pathname[3] ?? "" }));
 
   try {
     const parsed = await parseBody(request, deleteAgentSchema);
@@ -23,7 +23,7 @@ async function _POST(
 
     // Verify the message contains the TALOS ID to prevent replay across TALOSes
     if (!message.includes(id)) {
-      for (const tag of agentMutationTags(id)) revalidateTag(tag);
+      for (const tag of agentMutationTags(id)) revalidateTag(tag, "max");
     return Response.json(
         { error: "Signature message must contain the TALOS ID" },
         { status: 400 }

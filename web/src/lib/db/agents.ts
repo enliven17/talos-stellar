@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
-import { db } from './client'; // Assuming a standard drizzle client export
-import { agents } from './schema'; // Assuming schema definition
+import { db } from '@/db';
+import { tlsTalos as agents } from '@/db/schema';
 
 export interface AgentDetail {
   id: string;

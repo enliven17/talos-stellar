@@ -108,7 +108,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [18.x, 20.x, 22.x]
+        # Vitest 4 depends on Node APIs first available in Node 20. Runtime
+        # compatibility for Node 18 remains covered by the smoke-test jobs.
+        node-version: [20.x, 22.x]
     steps:
       - uses: actions/checkout@v4
       - name: Use Node.js ${{ matrix.node-version }}

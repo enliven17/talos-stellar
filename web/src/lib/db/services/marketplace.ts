@@ -1,5 +1,5 @@
 import { eq, and, ilike, inArray, count } from 'drizzle-orm';
-import { db } from '../db';
+import { db } from '@/db';
 import { capabilities, marketplaceItems, itemCapabilities } from '../schema/marketplace';
 import type { CapabilityFilter, MarketplaceSearchResult, MarketplaceSearchResponse } from '@/app/api/marketplace/search/types';
 
@@ -34,7 +34,7 @@ export async function searchMarketplaceItems(
     const offset = (page - 1) * limit;
     const safeQuery = `%${query}%`;
 
-    let results = [];
+    let results: (typeof marketplaceItems.$inferSelect)[] = [];
     let totalCount = 0;
 
     if (capabilityIds.length > 0) {

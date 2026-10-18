@@ -19,13 +19,13 @@ export function healthLivenessSuite(): BenchmarkOptions[] {
   return [
     {
       label: "health-liveness",
-      fn: () => { liveGET(); },
+      fn: () => { liveGET(mockRequest("http://localhost:3000/api/health/live")); },
       config,
     },
     {
       label: "health-liveness-json",
       fn: async () => {
-        const res = liveGET();
+        const res = await liveGET(mockRequest("http://localhost:3000/api/health/live"));
         await res.json();
       },
       config,

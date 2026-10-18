@@ -104,7 +104,7 @@ interface EcosystemMetrics {
   };
 }
 
-async function _GET(req: NextRequest) {
+async function _GET(req: Request) {
   // For now, this is a public endpoint for ecosystem-wide metrics.
   // If authorization is needed, uncomment the following:
   // const wallet = req.nextUrl.searchParams.get("wallet");

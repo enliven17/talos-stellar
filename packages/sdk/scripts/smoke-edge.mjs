@@ -20,6 +20,7 @@ import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
 import { resolve, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
+import { Networks } from "@stellar/stellar-sdk";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SDK_ROOT = resolve(__dirname, "..");
@@ -36,6 +37,9 @@ const edgeGlobal = {
   TextEncoder,
   TextDecoder,
   crypto,
+  // The flattened ESM smoke loader strips package imports; provide the
+  // immutable constants used during SDK module initialization.
+  Networks,
   fetch: () => {
     throw new Error("fetch should not be called during edge import smoke test");
   },
@@ -166,7 +170,13 @@ const files = [];
     else if (full.endsWith(".js")) files.push(full);
   }
 })(ESM_DIR);
-files.sort();
+files.sort((left, right) => {
+  // Fixture module initialization references the enum declared by chaos.js.
+  // Preserve that dependency when flattening ESM modules into one script.
+  const priority = (path) =>
+    path.endsWith("/chaos.js") ? 0 : path.endsWith("/chaos-fixtures.js") ? 1 : 2;
+  return priority(left) - priority(right) || left.localeCompare(right);
+});
 
 console.log(`[compat:edge] concatenating ${files.length} ESM files`);
 
@@ -178,6 +188,10 @@ const IMPORT_LINE =
   /^import\s+(?:(?:\{[^}]*\}|\*\s+as\s+[A-Za-z0-9_$]+|[A-Za-z0-9_$]+(?:\s*,\s*\{[^}]*\})?)\s+from\s+)?["']([^"']+)["'];?\s*$/;
 
 function stripImportsExports(src) {
+  // TypeScript may pretty-print named re-exports across multiple lines (and
+  // preserve comments inside the list). Remove those module-only blocks
+  // before the line-based declaration shim below.
+  src = src.replace(/^export\s+\{[\s\S]*?\}\s+from\s+["'][^"']+["'];?/gm, "");
   const lines = src.split(/\r?\n/);
   const out = [];
   const deferred = [];
