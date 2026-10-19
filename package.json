@@ -4,6 +4,8 @@
   "license": "AGPL-3.0-only",
   "scripts": {
     "dev": "pnpm --dir web dev",
+    "doctor": "node scripts/doctor.mjs",
+    "doctor:test": "node --test scripts/doctor.test.mjs",
     "build": "pnpm --dir web build",
     "lint": "pnpm --dir web lint",
     "web:install": "pnpm --dir web install",
