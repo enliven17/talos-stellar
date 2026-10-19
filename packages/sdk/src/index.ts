@@ -9,7 +9,6 @@ export type {
   TalosErrorEvent,
   ReadOptions,
   WriteOptions,
-  ReadOptions,
 } from "./client.js";
 
 // ── Pagination ─────────────────────────────────────────────────────

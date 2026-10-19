@@ -374,12 +374,12 @@ export async function runCli(
       });
 
       let summaryText = "";
-      const items = result.items || [];
+      const items = result.data || [];
       if (items.length === 0) {
         summaryText = "No services found.";
       } else {
         summaryText = items
-          .map((s, idx) => `${idx + 1}. ${s.serviceName} (${s.category || "Uncategorized"}) - ${s.price} USDC [Talos: ${s.talosId || "N/A"}]`)
+          .map((s, idx) => `${idx + 1}. ${s.serviceName} (${("category" in s && typeof s.category === "string" ? s.category : "Uncategorized")}) - ${s.price} USDC [Talos: ${s.talosId || "N/A"}]`)
           .join("\n");
       }
 

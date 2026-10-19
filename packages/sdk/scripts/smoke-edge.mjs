@@ -25,8 +25,6 @@ import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
 import { resolve, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
-import { Networks } from "@stellar/stellar-sdk";
-
 import { Keypair, StrKey, Networks } from "@stellar/stellar-sdk";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -49,7 +47,6 @@ const edgeGlobal = {
   crypto,
   // The flattened ESM smoke loader strips package imports; provide the
   // immutable constants used during SDK module initialization.
-  Networks,
   fetch: () => {
     throw new Error("fetch should not be called during edge import smoke test");
   },
@@ -177,7 +174,10 @@ const files = [];
     const full = join(dir, entry);
     const s = statSync(full);
     if (s.isDirectory()) walk(full);
-    else if (full.endsWith(".js")) files.push(full);
+    // The CLI entry is built as a self-contained bundle and is not part of
+    // the SDK export surface. Including it here duplicates every bundled
+    // declaration when the remaining ESM modules are flattened below.
+    else if (full.endsWith(".js") && !full.endsWith("/cli.js")) files.push(full);
   }
 })(ESM_DIR);
 files.sort((left, right) => {

@@ -35,11 +35,11 @@ const shippedPackage = JSON.parse(
 
 const TESTING_SUBPATH = "./testing";
 const TESTING_IMPORT = "./dist/esm/testing/index.js";
-const TESTING_REQUIRE = "./dist/cjm/testing/index.cjs";
+const TESTING_REQUIRE = "./dist/cjs/testing/index.cjs";
 const TESTING_TYPES = "./dist/esm/testing/index.d.ts";
 
 /** A minimal manifest that satisfies every rule, used as a mutation base. */
-declare function basePackage(overrides?: Record<string, unknown>): Record<string, unknown> {
+function basePackage(overrides?: Record<string, unknown>): Record<string, unknown> {
   return {
     name: "@talos-protocol/sdk",
     version: "0.1.0",
@@ -50,7 +50,7 @@ declare function basePackage(overrides?: Record<string, unknown>): Record<string
     exports: {
       ".": {
         import: "./dist/esm/index.js",
-        require: "./dist/cjm/index.cjs",
+        require: "./dist/cjs/index.cjs",
         types: "./dist/esm/index.d.ts",
         browser: "./dist/browser/sdk.bundle.js",
       },
@@ -100,7 +100,7 @@ describe("Export map — shipped manifest (positive)", () => {
       unknown
     >;
     expect(root.import).toBe("./dist/esm/index.js");
-    expect(root.require).toBe("./dist/cjm/index.cjs");
+    expect(root.require).toBe("./dist/cjs/index.cjs");
     expect(root.import).not.toBe(root.require);
   });
 
@@ -135,12 +135,12 @@ describe("Export map — testing subpath", () => {
   const testing = exports[TESTING_SUBPATH] as Record<string, unknown> | undefined;
 
   it("declares the ./testing subpath", () => {
-    expect(testing).toBeTypeof("object");
+    expect(testing).toBeTypeOf("object");
   });
 
   it("wires import, require and types for the testing subpath", () => {
     expect(testing!.import).toBe(TESTING_IMPORT);
-    expect(testing!.require).toBe(TESTING_REQUIREA);
+    expect(testing!.require).toBe(TESTING_REQUIRE);
     expect(testing!.types).toBe(TESTING_TYPES);
   });
 
@@ -156,7 +156,9 @@ describe("Export map — testing subpath", () => {
 
   it("validates the testing subpath with the shared rules", () => {
     const result = validateExportMap(shippedPackage);
-    const testingTargets = result.targets.filter((t) => t.subpath === TESTING_SUBPATH);
+    const testingTargets = result.subpaths
+      .filter((entry) => entry.subpath === TESTING_SUBPATH)
+      .flatMap((entry) => entry.targets);
     expect(testingTargets.map((t) => t.condition).sort()).toEqual(["import","require","types"]);
   });
 });
@@ -220,7 +222,7 @@ describe("Export map — missing and malformed input (negative)", () => {
     expectError(result, '"./"');
   });
 
-  it("rejects an emptty target", () => {
+  it("rejects an empty target", () => {
     const result = validateRoot({
       import: "",
       require: "./dist/cjs/index.cjs",

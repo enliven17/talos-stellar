@@ -48,7 +48,9 @@ function runDrift(...args) {
   const result = spawnSync(
     process.execPath,
     [SCRIPT, ...args],
-    { encoding: "utf8", timeout: 30_000 },
+    // Exercise CLI/JSON behavior without recursively running real package
+    // manager installs (which mutate the checkout and require network access).
+    { encoding: "utf8", timeout: 5_000, env: { ...process.env, PATH: "" } },
   );
   return {
     status: result.status,

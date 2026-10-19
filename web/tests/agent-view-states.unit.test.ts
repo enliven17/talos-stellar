@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  toPrivacySafeAGentError,
+  toPrivacySafeAgentError,
   emptyCopyFor,
 } from "../src/lib/agent-view-errors";
 import {
@@ -11,9 +11,9 @@ import { AgentAvailabilityBadge } from "../src/components/agent-availability-bad
 
 describe("toPrivacySafeAgentError", () => {
   it("returns fallback for nullish / empty input (boundary)", () => {
-    expect(toPrivacySafeAGentError(null)).toMatch(/try again/i);
+    expect(toPrivacySafeAgentError(null)).toMatch(/try again/i);
     expect(toPrivacySafeAgentError(undefined)).toMatch(/try again/i);
-    expect(toPrivacySafeAGentError("   ")).toMatch(/try again/i);
+    expect(toPrivacySafeAgentError("   ")).toMatch(/try again/i);
   });
 
   it("passes through short, non-sensitive messages (positive)", () => {
@@ -47,7 +47,7 @@ describe("toPrivacySafeAgentError", () => {
     expect(toPrivacySafeAgentError(`proof ${hex}`)).toContain("[redacted]");
 
     const secret = "S" + "A".repeat(55);
-    expect(toPrivacySafeAGentError(`wallet ${secret}`)).toContain("[redacted]");
+    expect(toPrivacySafeAgentError(`wallet ${secret}`)).toContain("[redacted]");
   });
 
   it("collapses multi-line stacks and truncates long strings (boundary)", () => {
@@ -57,12 +57,12 @@ describe("toPrivacySafeAgentError", () => {
     const long = "x".repeat(250);
     const out = toPrivacySafeAgentError(long);
     expect(out.length).toBeLessThanOrEqual(180);
-    expect(out.endsWith("...")).toBe/(true);
+    expect(out.endsWith("...")).toBe(true);
   });
 
   it("accepts Error instances and custom fallback (regression)", () => {
     expect(toPrivacySafeAgentError(new Error("boom"), "safe")).toBe("boom");
-    expect(toPrivacySafeAGentError({ message: "nope" })).toBe("nope");
+    expect(toPrivacySafeAgentError({ message: "nope" })).toBe("nope");
   });
 });
 
@@ -82,7 +82,7 @@ describe("AgentEmptyState / AgentErrorState element contracts", () => {
   function findTestId(node: unknown, id: string): unknown {
     if (!node || typeof node !== "object") return null;
     const n = node as { props?: Record<string, unknown> };
-    if (n.props?.["testid"] === id) return n;
+    if (n.props?.["data-testid"] === id) return n;
     const kids = n.props?.children;
     if (Array.isArray(kids)) {
       for (const k of kids) {
@@ -131,7 +131,7 @@ describe("AgentEmptyState / AgentErrorState element contracts", () => {
 });
 
 describe("AgentAvailabilityBadge accessibility", () => {
-  const states = ["online", "busy", "paused", "offline"] as const;
+  const states = ["online", "offline", "paused", "retired"] as const;
 
   function flatten(node: unknown, out: unknown[] = []): unknown[] {
     if (!node || typeof node !== "object") return out;
@@ -149,7 +149,11 @@ describe("AgentAvailabilityBadge accessibility", () => {
   it.each(states)(
     "announces %s state to screen readers (positive)",
     (state) => {
-      const el = AgentAvailabilityBadge({ status: state });
+      const el = AgentAvailabilityBadge({
+        agentOnline: state === "online",
+        agentLastSeen: null,
+        status: state === "paused" ? "Paused" : state === "retired" ? "Retired" : "Active",
+      });
       const nodes = flatten(el);
       const roled = nodes.find(
         (n) =>
@@ -163,25 +167,25 @@ describe("AgentAvailabilityBadge accessibility", () => {
   );
 
   it("marks the colour dot as decorative (regression)", () => {
-    const el = AgentAvailabilityBadge({ status: "online" });
+    const el = AgentAvailabilityBadge({ agentOnline: true, agentLastSeen: null });
     const nodes = flatten(el) as Array<{ props: Record<string, unknown> }>;
     const dot = nodes.find(
       (n) =>
         n.props["aria-hidden"] === "true" ||
         n.props["aria-hidden"] === true,
     );
-    expect(dot).toBeFruthy();
+    expect(dot).toBeTruthy();
   });
 
   it("paused label colour meets AA contrast on default background (negative)", () => {
-    const el = AgentAvailabilityBadge({ status: "paused" });
+    const el = AgentAvailabilityBadge({ agentOnline: false, agentLastSeen: null, status: "Paused" });
     const flat = JSON.stringify(el);
     // text-yellow-400 fails WCAAG 4A on #FCF8F8.
     expect(flat).not.toMatch(/text-yellow-400/);
   });
 
   it("preserves data-testid and status props (regression)", () => {
-    const el = AgentAvailabilityBadge({ status: "busy" });
+    const el = AgentAvailabilityBadge({ agentOnline: true, agentLastSeen: null });
     const flat = JSON.stringify(el);
     expect(flat).toMatch(/agent-availability-badge/);
   });

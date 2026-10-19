@@ -330,19 +330,16 @@ describe("buy-token route — reconciler wiring", () => {
 describe("jobs route — reconciler wiring", () => {
   // select() call order in POST /jobs:
   //   Promise.all => [0] service query, [1] talos query
-  //   [2] idempotency key lookup
-  //   [3] txHash dupe check
+  //   [2] txHash dupe check (these requests do not supply an idempotency key)
   function setupSelectResults({
     service = makeService(),
     talos = makeTalos(),
-    idempotencyRow = [] as any[],
     dupeRow = [] as any[],
   } = {}) {
     mocks._selectCallCount = 0;
     mocks._selectResults = [
       service ? [service] : [],
       talos ? [talos] : [],
-      idempotencyRow,
       dupeRow,
     ];
   }

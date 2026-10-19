@@ -8,6 +8,10 @@ jobs:
   provision:
     runs-on: ubuntu-latest
     environment: preview
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
     
     steps:
       - name: Checkout repository
