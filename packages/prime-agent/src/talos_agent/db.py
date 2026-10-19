@@ -794,6 +794,42 @@ class LocalDB:
         ).fetchone()
         return float(row["total"]) if row else 0.0
 
+    def get_spending_by_category_today(self) -> dict[str, float]:
+        """Today's spending per category. Same day boundary as ``get_spending_today``."""
+        rows = self._conn.execute(
+            "SELECT category, SUM(amount) as total FROM spending_log "
+            "WHERE date(created_at) = date('now') GROUP BY category "
+            "ORDER BY total DESC, category ASC"
+        ).fetchall()
+        return {row["category"]: float(row["total"]) for row in rows}
+
+    def get_spending_by_category_period(self, days: int = 30) -> dict[str, float]:
+        """Spending per category over the last ``days`` days. Same window as ``get_spending_period``."""
+        rows = self._conn.execute(
+            "SELECT category, SUM(amount) as total FROM spending_log "
+            "WHERE created_at >= datetime('now', ?) GROUP BY category "
+            "ORDER BY total DESC, category ASC",
+            (f"-{days} days",),
+        ).fetchall()
+        return {row["category"]: float(row["total"]) for row in rows}
+
+    def get_pending_approval_totals(self) -> dict:
+        """Count and amount of approvals still waiting for a decision.
+
+        Same rows as ``get_pending_approvals``. An approval with no amount is
+        counted but adds nothing to the total, and is reported separately.
+        """
+        row = self._conn.execute(
+            "SELECT COUNT(*) as cnt, COALESCE(SUM(amount), 0) as total, "
+            "COALESCE(SUM(CASE WHEN amount IS NULL THEN 1 ELSE 0 END), 0) as unpriced "
+            "FROM approval_cache WHERE status = 'pending'"
+        ).fetchone()
+        return {
+            "count": int(row["cnt"]),
+            "total": float(row["total"]),
+            "without_amount": int(row["unpriced"]),
+        }
+
     # ── Content Performance ─────────────────────────────────
 
     def record_performance(
