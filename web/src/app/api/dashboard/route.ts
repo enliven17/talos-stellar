@@ -5,14 +5,14 @@ import { eq, or, inArray } from "drizzle-orm";
 import { withTimeout, TimeoutError } from "@/lib/timeout";
 import { withRequestId } from "@/lib/with-request-id";
 
-async function _GET(req: NextRequest) {
-  const wallet = req.nextUrl.searchParams.get("wallet");
-  if (!wallet) {
-    return NextResponse.json({ error: "wallet parameter required" }, { status: 400 });
-  }
+import { parseStellarPublicKeyParam } from "@/lib/stellar-keys";
 
-  // Stellar public keys are case-sensitive; compare exactly.
-  const addr = wallet;
+async function _GET(req: NextRequest) {
+  const walletResult = parseStellarPublicKeyParam(req.nextUrl.searchParams.get("wallet"));
+  if (!walletResult.ok) {
+    return walletResult.response;
+  }
+  const addr = walletResult.publicKey;
 
   // Add timeout for patron query
   let patronTalosIds = [];
