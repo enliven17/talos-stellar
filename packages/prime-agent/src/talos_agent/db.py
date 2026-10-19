@@ -719,6 +719,12 @@ class LocalDB:
         )
         self._conn.commit()
 
+    def count_pending_commerce_jobs(self) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) as cnt FROM commerce_queue WHERE status = 'pending'"
+        ).fetchone()
+        return row["cnt"] if row else 0
+
     # ── Approval Cache ─────────────────────────────────────
 
     def cache_approval(self, approval_id: str, type_: str, title: str, description: str | None, amount: float | None) -> None:
