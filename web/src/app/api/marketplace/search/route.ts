@@ -16,9 +16,13 @@ export async function GET(request: NextRequest) {
 
     let capabilityIds: string[] = [];
     if (capabilitiesParam) {
-      const parsed = JSON.parse(capabilitiesParam);
-      if (Array.isArray(parsed)) {
-        capabilityIds = parsed.filter((id: unknown) => typeof id === 'string' && id.length > 0);
+      try {
+        const parsed = JSON.parse(capabilitiesParam);
+        if (Array.isArray(parsed)) {
+          capabilityIds = parsed.filter((id: unknown): id is string => typeof id === 'string' && id.length > 0);
+        }
+      } catch {
+        capabilityIds = capabilitiesParam.split(',').map((id) => id.trim()).filter((id) => id.length > 0);
       }
     }
 

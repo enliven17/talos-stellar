@@ -1,6 +1,6 @@
 import { eq, and, ilike, inArray, count } from 'drizzle-orm';
 import { db } from '@/db';
-import { capabilities, marketplaceItems, itemCapabilities } from '../schema/marketplace';
+import { capabilities, marketplaceItems, itemCapabilities } from '@/db/schema';
 import type { CapabilityFilter, MarketplaceSearchResult, MarketplaceSearchResponse } from '@/app/api/marketplace/search/types';
 
 export async function getCapabilityFilters(): Promise<CapabilityFilter[]> {
@@ -8,106 +8,56 @@ export async function getCapabilityFilters(): Promise<CapabilityFilter[]> {
     const filters = await db
       .select()
       .from(capabilities)
-      .where(eq(capabilities.isActive, true))
-      .orderBy(capabilities.name);
-
-    return filters.map((cap) => ({
-      id: cap.id,
-      name: cap.name,
-      description: cap.description,
-      category: cap.category,
-      isActive: cap.isActive,
-    }));
+      .orderBy(capabilities.sortOrder);
+    return filters as CapabilityFilter[];
   } catch (error) {
-    console.error('Failed to fetch capability filters:', error);
-    throw new Error('Failed to fetch capability filters');
+    console.error('getCapabilityFilters error:', error);
+    return [];
   }
 }
 
-export async function searchMarketplaceItems(
-  query: string,
-  capabilityIds: string[],
-  page: number,
-  limit: number
-): Promise<MarketplaceSearchResponse> {
+export async function searchMarketplace(opts: {
+  search: string;
+  category?: string;
+  capability?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<MarketplaceSearchResponse> {
+  const { search, category, capability, limit = 20, offset = 0 } = opts;
   try {
-    const offset = (page - 1) * limit;
-    const safeQuery = `%${query}%`;
-
-    let results: (typeof marketplaceItems.$inferSelect)[] = [];
-    let totalCount = 0;
-
-    if (capabilityIds.length > 0) {
-      const itemIds = await db
-        .select({ id: marketplaceItems.id })
-        .from(marketplaceItems)
-        .innerJoin(itemCapabilities, eq(marketplaceItems.id, itemCapabilities.itemId))
-        .where(
-          and(
-            ilike(marketplaceItems.title, safeQuery),
-            inArray(itemCapabilities.capabilityId, capabilityIds)
-          )
-        )
-        .groupBy(marketplaceItems.id);
-
-      const ids = itemIds.map((item) => item.id);
-
-      if (ids.length > 0) {
-        results = await db
-          .select()
-          .from(marketplaceItems)
-          .where(inArray(marketplaceItems.id, ids))
-          .limit(limit)
-          .offset(offset);
-
-        const countResult = await db
-          .select({ count: count() })
-          .from(marketplaceItems)
-          .where(inArray(marketplaceItems.id, ids));
-
-        totalCount = countResult[0].count;
-      }
-    } else {
-      results = await db
-        .select()
-        .from(marketplaceItems)
-        .where(ilike(marketplaceItems.title, safeQuery))
-        .limit(limit)
-        .offset(offset);
-
-      const countResult = await db
-        .select({ count: count() })
-        .from(marketplaceItems)
-        .where(ilike(marketplaceItems.title, safeQuery));
-
-      totalCount = countResult[0].count;
-    }
-
-    const capabilitiesList = await getCapabilityFilters();
-
-    const mappedResults: MarketplaceSearchResult[] = results.map((item) => ({
-      id: item.id,
-      title: item.title,
-      description: item.description,
-      capabilities: [],
-      price: item.price,
-      currency: item.currency,
-      provider: item.provider,
-      rating: item.rating,
-      createdAt: item.createdAt.toISOString(),
-    }));
+    const [result] = await db
+      .select({
+        id: marketplaceItems.id,
+        name: marketplaceItems.name,
+        description: marketplaceItems.description,
+        category: marketplaceItems.category,
+        capability: marketplaceItems.capability,
+        price: marketplaceItems.price,
+        imageUrl: marketplaceItems.imageUrl,
+        slug: marketplaceItems.slug,
+        featured: marketplaceItems.featured,
+        createdAt: marketplaceItems.createdAt,
+        updatedAt: marketplaceItems.updatedAt,
+      })
+      .from(marketplaceItems)
+      .where(
+        and(
+          ilike(marketplaceItems.name, `%${search}%`),
+          category ? eq(marketplaceItems.category, category) : undefined,
+          capability ? eq(marketplaceItems.capability, capability) : undefined,
+        ),
+      )
+      .limit(limit)
+      .offset(offset);
 
     return {
-      results: mappedResults,
-      total: totalCount,
-      page,
+      items: result ? [result] : [],
+      total: result ? 1 : 0,
       limit,
-      filters: {
-        capabilities: capabilitiesList,
-      },
+      offset,
     };
   } catch (error) {
-    console.error('Failed to search marketplace items:', error);
-    throw new Error('Failed to search marketplace items');
+    console.error('searchMarketplace error:', error);
+    throw error;
   }
 }
