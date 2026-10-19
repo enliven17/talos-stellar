@@ -16,6 +16,7 @@ from talos_agent.commerce_quote import (
     enforce_commerce_quote_expiry,
     quote_expiry_iso,
 )
+from talos_agent.tools import context as _context
 from talos_agent.tools.registry import tool
 
 if TYPE_CHECKING:
@@ -31,6 +32,12 @@ _settings: Settings = None  # type: ignore[assignment]
 _signer: X402Signer | None = None
 _job_effect_store: JobEffectStore | None = None
 _job_effect_dispatcher: JobEffectDispatcher | None = None
+
+
+def _deps():
+    """This agent's dependencies: the bound ToolContext, else this module's globals."""
+    return _context.resolve(globals())
+
 
 ALL_CATEGORIES = [
     "Sales", "Marketing", "Analytics", "Development", "Research",
@@ -52,10 +59,10 @@ def price_to_usdc_units(price_str: str) -> int:
 
 
 def _get_signer() -> X402Signer:
-    global _signer
-    if _signer is None or _signer._api is not _api:
-        _signer = X402Signer(_api)
-    return _signer
+    deps = _deps()
+    if deps.signer is None or deps.signer._api is not deps.api:
+        deps.signer = X402Signer(deps.api)
+    return deps.signer
 
 
 @tool(
@@ -66,7 +73,7 @@ def _get_signer() -> X402Signer:
 async def discover_services(target: str = "") -> dict:
     import random
     category = random.choice(ALL_CATEGORIES)
-    services = await _api.discover_services(
+    services = await _deps().api.discover_services(
         category=category,
         target=target or None,
     )
@@ -84,9 +91,9 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
         payload_dict = {}
 
     # Budget check — refuse if monthly spending would exceed GTM budget
-    talos_config = _db.get_talos_config()
+    talos_config = _deps().db.get_talos_config()
     gtm_budget = float((talos_config or {}).get("gtmBudget", 200))
-    spent_month = _db.get_spending_period(30)
+    spent_month = _deps().db.get_spending_period(30)
     # We'll check against actual price after 402, but pre-check with budget headroom
     if spent_month >= gtm_budget:
         return {
@@ -97,7 +104,7 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
         }
 
     # Step 1: GET service → expect 402
-    response = await _api.get_service(talos_id, service_type=service_type or None)
+    response = await _deps().api.get_service(talos_id, service_type=service_type or None)
 
     if response.status_code != 402:
         return {"error": f"Expected 402, got {response.status_code}", "body": response.text[:200]}
@@ -151,10 +158,10 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
         }
 
     # Check approval threshold
-    threshold = float(_settings.approval_threshold)
+    threshold = float(_deps().settings.approval_threshold)
     if price > threshold:
-        result = await _api.create_approval(
-            _settings.talos_id,
+        result = await _deps().api.create_approval(
+            _deps().settings.talos_id,
             type_="transaction",
             title=f"x402 purchase from Talos {talos_id}: ${price}",
             description=f"Service: {service_type}, Payload: {payload}",
@@ -185,7 +192,7 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
         return sign_result
 
     # Step 3: POST with X-PAYMENT header
-    submit_result = await _api.submit_commerce(
+    submit_result = await _deps().api.submit_commerce(
         talos_id,
         payment_header=sign_result["payment_header"],
         payload=payload_dict,
@@ -205,10 +212,10 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
     expiry_iso = quote_expiry_iso(payment_details)
     if expiry_iso:
         tracked_payload.setdefault("_quote_expires_at", expiry_iso)
-    _db.add_commerce_job(job_id, talos_id, service_type, tracked_payload)
+    _deps().db.add_commerce_job(job_id, talos_id, service_type, tracked_payload)
 
     # Record spending against GTM budget
-    _db.record_spending(
+    _deps().db.record_spending(
         amount=float(price),
         category="x402_purchase",
         description=f"Service from Talos {talos_id}: {service_type}",
@@ -216,7 +223,7 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
 
     # Instant fulfillment: result is already in the response
     if submit_result.get("status") == "completed" and submit_result.get("result"):
-        _db.update_commerce_status(job_id, "completed")
+        _deps().db.update_commerce_status(job_id, "completed")
         return {
             "status": "completed",
             "job_id": job_id,
@@ -240,20 +247,20 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
     "Poll for the result of a purchased service. Returns the result or 'pending' status.",
 )
 async def poll_service_result(job_id: str) -> dict:
-    result = await _api.get_job_result(job_id)
+    result = await _deps().api.get_job_result(job_id)
 
     if not result:
         return {"status": "pending", "job_id": job_id}
 
     status = result.get("status", "pending")
     if status == "completed":
-        _db.update_commerce_status(job_id, "completed")
+        _deps().db.update_commerce_status(job_id, "completed")
 
         # If it's a playbook, save it
         job_result = result.get("result", {})
         if isinstance(job_result, dict) and "templates" in job_result:
             name = job_result.get("name", f"Playbook from job {job_id}")
-            _db.save_playbook(name, job_result, source_talos=result.get("talosId"))
+            _deps().db.save_playbook(name, job_result, source_talos=result.get("talosId"))
             return {
                 "status": "completed",
                 "type": "playbook",
@@ -277,11 +284,11 @@ async def apply_playbook(playbook_name: str) -> dict:
     except ValueError as exc:
         return {"error": str(exc)}
 
-    row = _db.find_playbook_by_name(normalized_name)
+    row = _deps().db.find_playbook_by_name(normalized_name)
     if not row:
         return {"error": f"No playbook found named '{normalized_name}'"}
 
-    _db.apply_playbook(row["id"])
+    _deps().db.apply_playbook(row["id"])
 
     return {
         "status": "applied",
@@ -302,14 +309,14 @@ _claimed_jobs_lock: asyncio.Lock | None = None
 
 
 def _get_claimed_jobs_lock() -> asyncio.Lock:
-    global _claimed_jobs_lock
-    if _claimed_jobs_lock is None:
-        _claimed_jobs_lock = asyncio.Lock()
-    return _claimed_jobs_lock
+    deps = _deps()
+    if deps.claimed_jobs_lock is None:
+        deps.claimed_jobs_lock = asyncio.Lock()
+    return deps.claimed_jobs_lock
 
 
 def get_claimed_jobs_copy() -> dict[str, int]:
-    return dict(_claimed_jobs)
+    return dict(_deps().claimed_jobs)
 
 
 async def set_claimed_job(
@@ -333,10 +340,10 @@ async def set_claimed_job(
         Optional server-reported expiry; used for accurate pruning on restore.
     """
     async with _get_claimed_jobs_lock():
-        _claimed_jobs[job_id] = fencing_token
-        if _db is not None:
+        _deps().claimed_jobs[job_id] = fencing_token
+        if _deps().db is not None:
             try:
-                _db.upsert_claimed_job(
+                _deps().db.upsert_claimed_job(
                     job_id,
                     fencing_token,
                     ttl_seconds=ttl_seconds,
@@ -354,10 +361,10 @@ async def set_claimed_job(
 async def remove_claimed_job(job_id: str) -> None:
     """Remove a job claim from memory *and* from the DB."""
     async with _get_claimed_jobs_lock():
-        _claimed_jobs.pop(job_id, None)
-        if _db is not None:
+        _deps().claimed_jobs.pop(job_id, None)
+        if _deps().db is not None:
             try:
-                _db.delete_claimed_job(job_id)
+                _deps().db.delete_claimed_job(job_id)
             except Exception as _exc:  # pragma: no cover  # noqa: BLE001
                 import logging as _logging
                 _logging.getLogger(__name__).warning(
@@ -374,11 +381,11 @@ async def release_claimed_jobs() -> tuple[int, int]:
     normal restore reconciliation can retry/verify ownership on the next run.
     Only aggregate counts are logged to avoid exposing job payloads or proofs.
     """
-    if _api is None or _db is None:
+    if _deps().api is None or _deps().db is None:
         return 0, 0
 
     try:
-        claims = _db.get_all_claimed_jobs()
+        claims = _deps().db.get_all_claimed_jobs()
     except Exception as exc:  # pragma: no cover - defensive shutdown path
         log.warning("job_shutdown_claim_read_failed", error_type=type(exc).__name__)
         return 0, 1
@@ -387,7 +394,7 @@ async def release_claimed_jobs() -> tuple[int, int]:
     failed = 0
     for claim in claims:
         try:
-            response = await _api.release_job(
+            response = await _deps().api.release_job(
                 claim["job_id"],
                 claim["fencing_token"],
             )
@@ -421,14 +428,14 @@ async def release_claimed_jobs() -> tuple[int, int]:
     "Check for incoming x402 service requests that Other Taloses have purchased from us. Returns pending jobs available to fulfill.",
 )
 async def get_pending_jobs() -> dict:
-    if _job_effect_store is not None:
+    if _deps().job_effect_store is not None:
         try:
-            jobs = await _api.get_pending_jobs()
+            jobs = await _deps().api.get_pending_jobs()
         except Exception:
             jobs = []
         for job in jobs:
             try:
-                _job_effect_store.ingest(job)
+                _deps().job_effect_store.ingest(job)
             except Exception as exc:
                 from talos_agent.job_effects import JobEffectError
 
@@ -436,12 +443,12 @@ async def get_pending_jobs() -> dict:
                     log.warning("job_inbox_rejected", error_code=exc.code)
                     continue
                 raise
-        durable_jobs = _job_effect_store.pending_jobs()
+        durable_jobs = _deps().job_effect_store.pending_jobs()
         if not durable_jobs:
             return {"status": "no_pending_jobs", "count": 0}
         return {"jobs": durable_jobs, "count": len(durable_jobs)}
 
-    jobs = await _api.get_pending_jobs()
+    jobs = await _deps().api.get_pending_jobs()
     if not jobs:
         return {"status": "no_pending_jobs", "count": 0}
     summary = [
@@ -465,7 +472,7 @@ async def get_pending_jobs() -> dict:
     "Call this before working on a job, then call fulfill_job with the result.",
 )
 async def claim_job(job_id: str, ttl_seconds: int = 300) -> dict:
-    if _job_effect_store is not None:
+    if _deps().job_effect_store is not None:
         if (
             not isinstance(ttl_seconds, int)
             or isinstance(ttl_seconds, bool)
@@ -477,12 +484,12 @@ async def claim_job(job_id: str, ttl_seconds: int = 300) -> dict:
         # first preserves the invariant that remote leases always have a local
         # owner and payload record.
         await get_pending_jobs()
-    result = await _api.claim_job(job_id, ttl_seconds=ttl_seconds)
+    result = await _deps().api.claim_job(job_id, ttl_seconds=ttl_seconds)
     if not result:
         return {"error": f"Failed to claim job {job_id} — it may be leased by another worker"}
     fencing_token = result.get("fencingToken")
-    if fencing_token is not None and _job_effect_store is not None:
-        _job_effect_store.mark_claimed(
+    if fencing_token is not None and _deps().job_effect_store is not None:
+        _deps().job_effect_store.mark_claimed(
             job_id,
             fencing_token=fencing_token,
             lease_expires_at=result.get("leaseExpiresAt"),
@@ -524,11 +531,11 @@ async def fulfill_job(job_id: str, result: str = "{}") -> dict:
     except json.JSONDecodeError:
         result_dict = {"text": result}
 
-    if _job_effect_store is not None and _job_effect_dispatcher is not None:
+    if _deps().job_effect_store is not None and _deps().job_effect_dispatcher is not None:
         try:
-            effect_id = _job_effect_store.prepare_effect(job_id, result_dict)
-            await _job_effect_dispatcher.dispatch_once()
-            effect = _job_effect_store.effect_status(effect_id)
+            effect_id = _deps().job_effect_store.prepare_effect(job_id, result_dict)
+            await _deps().job_effect_dispatcher.dispatch_once()
+            effect = _deps().job_effect_store.effect_status(effect_id)
         except Exception as exc:
             from talos_agent.job_effects import JobEffectError
 
@@ -554,11 +561,11 @@ async def fulfill_job(job_id: str, result: str = "{}") -> dict:
             "effect_state": effect["state"],
         }
 
-    fencing_token = _claimed_jobs.get(job_id, 0)
-    response = await _api.submit_job_result(job_id, result_dict, fencing_token=fencing_token)
+    fencing_token = _deps().claimed_jobs.get(job_id, 0)
+    response = await _deps().api.submit_job_result(job_id, result_dict, fencing_token=fencing_token)
     if response:
         await remove_claimed_job(job_id)
-        _db.add_activity("commerce", f"Fulfilled job {job_id}", "x402")
+        _deps().db.add_activity("commerce", f"Fulfilled job {job_id}", "x402")
         return {"status": "fulfilled", "job_id": job_id}
     return {"error": f"Failed to submit result for job {job_id}"}
 
@@ -577,8 +584,8 @@ async def generate_playbook(
 ) -> dict:
     """Generate a playbook from agent's accumulated GTM data and publish it."""
     # Gather agent's activity data for playbook content
-    recent_content = _db.get_recent_content(50)
-    active_playbook = _db.get_active_playbook()
+    recent_content = _deps().db.get_recent_content(50)
+    active_playbook = _deps().db.get_active_playbook()
 
     # Compile content history into structured playbook
     content_by_channel: dict[str, list[str]] = {}
@@ -611,7 +618,7 @@ async def generate_playbook(
             playbook_content["hashtags"] = existing["hashtags"]
 
     # Compute basic metrics from activity
-    conn = _db._conn
+    conn = _deps().db._conn
     total_posts = conn.execute(
         "SELECT COUNT(*) as cnt FROM activity_log WHERE type = 'post'"
     ).fetchone()
@@ -635,7 +642,7 @@ async def generate_playbook(
     )
 
     # Publish to marketplace via API
-    result = await _api.publish_playbook(
+    result = await _deps().api.publish_playbook(
         title=title,
         category=category,
         channel=channel,
@@ -671,8 +678,8 @@ async def register_service(
     price: float,
     wallet_address: str = "",
 ) -> dict:
-    result = await _api.register_service(
-        _settings.talos_id,
+    result = await _deps().api.register_service(
+        _deps().settings.talos_id,
         service_name=service_name,
         description=description,
         price=price,
@@ -697,9 +704,9 @@ async def evaluate_marketplace_bid(
     min_acceptable_price_usdc: float,
 ) -> dict:
     """Evaluate a bid using current budget state and price thresholds."""
-    talos_config = _db.get_talos_config()
+    talos_config = _deps().db.get_talos_config()
     gtm_budget = float((talos_config or {}).get("gtmBudget", 200))
-    spent_month = _db.get_spending_period(30)
+    spent_month = _deps().db.get_spending_period(30)
     budget_remaining = gtm_budget - spent_month
     budget_tight = budget_remaining < (gtm_budget * 0.15)
 
