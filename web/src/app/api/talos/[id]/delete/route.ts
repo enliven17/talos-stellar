@@ -42,7 +42,7 @@ async function _POST(
       }
 
       if (talos.deletedAt) {
-        return { error: "TALOS already deleted", status: 400 };
+        return { error: "TALOS already deleted", status: 409 };
       }
 
       // Only the creator wallet can delete

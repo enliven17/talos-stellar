@@ -9,7 +9,8 @@
     "lint": "eslint",
     "test": "vitest run",
     "test:payment-coverage": "vitest run --config vitest.payment-coverage.config.ts --coverage",
-    "test:unit": "vitest run tests/health.test.ts tests/*.unit.test.ts tests/sse.test.ts",
+    "test:unit": "vitest run tests/health.test.ts tests/security-headers.test.ts tests/*.unit.test.ts tests/sse.test.ts",
+    "test:security-headers": "vitest run tests/security-headers.test.ts",
     "test:e2e": "vitest run tests/api-e2e.test.ts tests/outbox-e2e.test.ts",
     "test:load": "vitest run tests/load/",
     "test:openapi": "vitest run tests/openapi-snapshot.test.ts",
@@ -54,6 +55,8 @@
     "@opentelemetry/sdk-trace-base": "^1.30.1",
     "@opentelemetry/sdk-trace-node": "^1.30.1",
     "@tailwindcss/postcss": "^4",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
     "@types/jsdom": "^30.0.0",
     "@types/node": "^20",
     "@types/pg": "^8.20.0",
@@ -71,7 +74,6 @@
     "tsx": "^4.21.0",
     "typescript": "^5",
     "undici": "^8.9.0",
-    "vitest": "^4.1.2",
-    "zod-to-json-schema": "3.24.5"
+    "vitest": "^4.1.2"
   }
 }

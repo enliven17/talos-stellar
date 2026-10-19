@@ -14,8 +14,14 @@ Install these before you start working locally:
 - Python 3.11 or newer
 - `uv`
 - Rust stable toolchain and `cargo`
-- Soroban CLI, installed as `stellar` via `cargo install --locked stellar-cli --features opt`
+- Docker (for `scripts/local-stack.sh`)
+- Optional: Soroban CLI, installed as `stellar` via `cargo install --locked stellar-cli --features opt`
 - [`gitleaks`](https://github.com/gitleaks/gitleaks) secret scanner — `brew install gitleaks`, or download a binary from the [releases page](https://github.com/gitleaks/gitleaks/releases) (required for `pnpm run secrets:check`)
+
+Before starting, run `pnpm doctor` to check the required local tool versions
+and the Rust Wasm target. The optional Stellar CLI is reported as a warning;
+missing or outdated required tools make the command exit with a non-zero code.
+Run its mocked platform-independent checks with `pnpm doctor:test`.
 
 For the Rust contracts, also add the Wasm target:
 

@@ -257,7 +257,7 @@ describe("Retired Agent Preservation - Issue #315", () => {
         }),
       });
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(409);
       const body = await res.json();
       expect(body.error).toBe("TALOS already deleted");
     });

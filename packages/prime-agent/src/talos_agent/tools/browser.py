@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from rich.console import Console
 
+from talos_agent.tools import context as _context
 from talos_agent.tools.registry import tool
 
 if TYPE_CHECKING:
@@ -22,6 +23,12 @@ _browser: BrowserSession = None  # type: ignore[assignment]
 _settings: Settings = None  # type: ignore[assignment]
 _adapter_registry: AdapterRegistry = None  # type: ignore[assignment]
 
+
+def _deps():
+    """This agent's dependencies: the bound ToolContext, else this module's globals."""
+    return _context.resolve(globals())
+
+
 BROWSER_TIMEOUT = 90  # seconds per browser action
 
 # Bound how long cancellation cleanup may block before giving up.
@@ -34,22 +41,22 @@ def _reset_adapter_session_state() -> int:
     Returns the number of adapters whose login/session flags were reset.
     """
     reset = 0
-    if _adapter_registry is None:
+    if _deps().adapter_registry is None:
         return reset
 
     adapters = []
-    raw = getattr(_adapter_registry, "_adapters", None)
+    raw = getattr(_deps().adapter_registry, "_adapters", None)
     if isinstance(raw, dict):
         adapters = list(raw.values())
     else:
         try:
-            for name in _adapter_registry.available_channels():
-                adapter = _adapter_registry.get(name)
+            for name in _deps().adapter_registry.available_channels():
+                adapter = _deps().adapter_registry.get(name)
                 if adapter is not None:
                     adapters.append(adapter)
         except Exception:
             try:
-                x_adapter = _adapter_registry.get("X")
+                x_adapter = _deps().adapter_registry.get("X")
             except Exception:
                 x_adapter = None
             if x_adapter is not None:
@@ -68,9 +75,9 @@ async def cleanup_browser_sessions_on_cancellation() -> dict:
     Idempotent: safe when the browser was never started, already closed, or
     Stagehand fails during teardown. Never logs secrets or session payloads.
     """
-    global _browser
 
-    browser = _browser
+    deps = _deps()
+    browser = deps.browser
     if browser is None:
         reset = _reset_adapter_session_state()
         return {
@@ -115,7 +122,7 @@ async def cleanup_browser_sessions_on_cancellation() -> dict:
         except Exception:
             pass
 
-    _browser = None
+    deps.browser = None
     reset = _reset_adapter_session_state()
     console.print("[yellow]Browser session cleaned up after cancellation.[/yellow]")
     return {
@@ -130,7 +137,7 @@ def _browser_safe(fn: Callable) -> Callable:
 
     @functools.wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> dict:
-        if _browser is None:
+        if _deps().browser is None:
             return {"error": "Browser session not initialized"}
         try:
             return await asyncio.wait_for(fn(*args, **kwargs), timeout=BROWSER_TIMEOUT)
@@ -141,11 +148,11 @@ def _browser_safe(fn: Callable) -> Callable:
             if "session" in str(e).lower() or "closed" in str(e).lower() or "500" in str(e):
                 try:
                     # Reset session-dependent state on all adapters that track login
-                    if _adapter_registry:
-                        x_adapter = _adapter_registry.get("X")
+                    if _deps().adapter_registry:
+                        x_adapter = _deps().adapter_registry.get("X")
                         if x_adapter and hasattr(x_adapter, "_logged_in"):
                             x_adapter._logged_in = False
-                    await _browser.reconnect()
+                    await _deps().browser.reconnect()
                     return await asyncio.wait_for(fn(*args, **kwargs), timeout=BROWSER_TIMEOUT)
                 except Exception as retry_err:
                     return {"error": f"Browser reconnect failed: {type(retry_err).__name__}: {retry_err}"}
@@ -157,7 +164,7 @@ def _browser_safe(fn: Callable) -> Callable:
 async def _dismiss_cookie_banner() -> None:
     """Dismiss a generic cookie consent banner (Google, etc.)."""
     try:
-        await _browser.act(
+        await _deps().browser.act(
             "Click the 'Accept all cookies' button at the bottom of the page. "
             "It is a dark button with white text that says 'Accept all cookies'."
         )
@@ -173,10 +180,10 @@ async def _dismiss_cookie_banner() -> None:
 async def search_web(query: str) -> dict:
     import urllib.parse
     search_url = f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}&hl=en"
-    await _browser.goto(search_url)
+    await _deps().browser.goto(search_url)
     await asyncio.sleep(3)
     await _dismiss_cookie_banner()
-    results = await _browser.extract(
+    results = await _deps().browser.extract(
         "Extract the title, URL, and summary snippet of the top 5 search results",
     )
     return {"query": query, "results": results}
@@ -185,8 +192,8 @@ async def search_web(query: str) -> dict:
 @tool("browse_page", "Visit a URL and extract information based on instructions")
 @_browser_safe
 async def browse_page(url: str, instruction: str) -> dict:
-    await _browser.goto(url)
-    data = await _browser.extract(instruction)
+    await _deps().browser.goto(url)
+    data = await _deps().browser.extract(instruction)
     return {"url": url, "data": data}
 
 
@@ -197,7 +204,7 @@ async def browse_page(url: str, instruction: str) -> dict:
 @tool("post_to_x", "Post a tweet on X (Twitter). Content MUST be under 280 characters, plain text only.")
 @_browser_safe
 async def post_to_x(content: str) -> dict:
-    adapter = _adapter_registry.get("X") if _adapter_registry else None
+    adapter = _deps().adapter_registry.get("X") if _deps().adapter_registry else None
     if not adapter:
         return {"error": "X adapter not configured"}
     result = await adapter.post(content)
@@ -207,7 +214,7 @@ async def post_to_x(content: str) -> dict:
 @tool("check_x_mentions", "Check X notifications/mentions and return unread items")
 @_browser_safe
 async def check_x_mentions() -> dict:
-    adapter = _adapter_registry.get("X") if _adapter_registry else None
+    adapter = _deps().adapter_registry.get("X") if _deps().adapter_registry else None
     if not adapter:
         return {"error": "X adapter not configured"}
     mentions = await adapter.get_mentions()
@@ -217,7 +224,7 @@ async def check_x_mentions() -> dict:
 @tool("reply_on_x", "Reply to a specific tweet on X")
 @_browser_safe
 async def reply_on_x(tweet_url: str, content: str) -> dict:
-    adapter = _adapter_registry.get("X") if _adapter_registry else None
+    adapter = _deps().adapter_registry.get("X") if _deps().adapter_registry else None
     if not adapter:
         return {"error": "X adapter not configured"}
     result = await adapter.reply(tweet_url, content)
@@ -227,7 +234,7 @@ async def reply_on_x(tweet_url: str, content: str) -> dict:
 @tool("search_x", "Search X for keywords and extract relevant posts")
 @_browser_safe
 async def search_x(query: str) -> dict:
-    adapter = _adapter_registry.get("X") if _adapter_registry else None
+    adapter = _deps().adapter_registry.get("X") if _deps().adapter_registry else None
     if not adapter:
         return {"error": "X adapter not configured"}
     results = await adapter.search(query)
@@ -241,7 +248,7 @@ async def search_x(query: str) -> dict:
 )
 @_browser_safe
 async def check_post_performance(content_snippet: str) -> dict:
-    adapter = _adapter_registry.get("X") if _adapter_registry else None
+    adapter = _deps().adapter_registry.get("X") if _deps().adapter_registry else None
     if not adapter:
         return {"error": "X adapter not configured"}
     return await adapter.get_post_performance(content_snippet)
@@ -253,7 +260,7 @@ async def check_post_performance(content_snippet: str) -> dict:
 )
 @_browser_safe
 async def get_profile_stats() -> dict:
-    adapter = _adapter_registry.get("X") if _adapter_registry else None
+    adapter = _deps().adapter_registry.get("X") if _deps().adapter_registry else None
     if not adapter:
         return {"error": "X adapter not configured"}
     return await adapter.get_profile_stats()
