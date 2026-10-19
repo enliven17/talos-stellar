@@ -7,6 +7,7 @@ export type {
   RetryPolicyOptions,
   RetryOptions,
   TalosErrorEvent,
+  ReadOptions,
   WriteOptions,
 } from "./client.js";
 
