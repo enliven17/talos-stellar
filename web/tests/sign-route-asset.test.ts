@@ -1,6 +1,6 @@
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import { POST as signPOST } from "../src/app/api/talos/[id]/sign/route";
-import { createTalosSchema } from "../src/lib/schemas";
+import { createTalosSchema, MAX_MONEY_AMOUNT } from "../src/lib/schemas";
 
 // Real Stellar public keys with verified CRC16 checksums
 const VALID_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
@@ -147,7 +147,7 @@ describe("POST /api/talos/:id/sign — asset field pair tests", () => {
 
     expect(response.status).toBe(400);
     const body = await response.json();
-    expect(body.error).toBe("Validation failed");
+    expect(body.message).toBe("Validation failed");
     expect(signMocks.signX402Payment).not.toHaveBeenCalled();
   });
 
@@ -223,6 +223,38 @@ describe("POST /api/talos/:id/sign — asset field pair tests", () => {
       expect.objectContaining({ assetCode: "USDC" }),
     );
   });
+
+  it("rejects an amount exceeding MAX_MONEY_AMOUNT (string) with 400", async () => {
+    const response = await signPOST(
+      signRequest({ payee: "GPAYEE", amount: "1000000000001" }) as never,
+      { params: Promise.resolve({ id: SIGN_ID }) },
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects an amount exceeding MAX_MONEY_AMOUNT (number) with 400", async () => {
+    const response = await signPOST(
+      signRequest({ payee: "GPAYEE", amount: MAX_MONEY_AMOUNT }) as never,
+      { params: Promise.resolve({ id: SIGN_ID }) },
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects an over-precise amount with 7 decimal places with 400", async () => {
+    const response = await signPOST(
+      signRequest({ payee: "GPAYEE", amount: "1.0000001" }) as never,
+      { params: Promise.resolve({ id: SIGN_ID }) },
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects scientific notation in amount with 400", async () => {
+    const response = await signPOST(
+      signRequest({ payee: "GPAYEE", amount: "1e7" }) as never,
+      { params: Promise.resolve({ id: SIGN_ID }) },
+    );
+    expect(response.status).toBe(400);
+  });
 });
 
 // ── Create Talos route tests for stellarAssetCode ──────────────────
@@ -235,7 +267,7 @@ describe("POST /api/talos — stellarAssetCode pair tests", () => {
     name: "Test Agent",
     category: "Development",
     description: "A test agent",
-    creatorPublicKey: "GCREATOR",
+    creatorPublicKey: VALID_ISSUER,
     signature: "sig",
     message: "msg",
   };

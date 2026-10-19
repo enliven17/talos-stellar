@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
 import type { tlsDividends } from "@/db/schema";
+import { MAX_MONEY_AMOUNT } from "@/lib/schemas";
 
 // ── Test double types ─────────────────────────────────────────────
 // The route is called as `GET(req, ctx)` / `POST(req, ctx)` where `ctx`
@@ -158,6 +159,30 @@ describe("POST /api/talos/[id]/dividends", () => {
   it("rejects a non-positive amount with 400", async () => {
     const ctx: RouteContext = { params };
     const res = await POST(postReq({ amount: 0 }, "Bearer good-key"), ctx);
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects an amount exceeding MAX_MONEY_AMOUNT with 400 (string)", async () => {
+    const ctx: RouteContext = { params };
+    const res = await POST(postReq({ amount: "1000000000001" }, "Bearer good-key"), ctx);
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects an amount exceeding MAX_MONEY_AMOUNT with 400 (number)", async () => {
+    const ctx: RouteContext = { params };
+    const res = await POST(postReq({ amount: MAX_MONEY_AMOUNT }, "Bearer good-key"), ctx);
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects an over-precise amount with 7 decimal places with 400", async () => {
+    const ctx: RouteContext = { params };
+    const res = await POST(postReq({ amount: "1.0000001" }, "Bearer good-key"), ctx);
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects scientific notation with 400", async () => {
+    const ctx: RouteContext = { params };
+    const res = await POST(postReq({ amount: "1e7" }, "Bearer good-key"), ctx);
     expect(res.status).toBe(400);
   });
 
