@@ -1,0 +1,89 @@
+name: Lockfile Drift Check
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lockfile-drift:
+    name: Verify lockfile sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── pnpm setup (for root + web workspaces) ──────────────────────────
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+          package-manager: pnpm
+
+      # ── uv setup (for prime-agent) ──────────────────────────────────────
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: packages/prime-agent/uv.lock
+
+      # ── Rust setup (for contracts) ──────────────────────────────────────
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # ── Install workspace dependencies (root pnpm-lock.yaml covers all) ──
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # ── Verify web lockfile separately (has its own pnpm-lock.yaml) ──────
+      - name: Verify web lockfile
+        working-directory: web
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # ── Verify prime-agent lockfile ─────────────────────────────────────
+      - name: Verify prime-agent lockfile
+        working-directory: packages/prime-agent
+        run: uv sync --frozen --all-extras --all-groups
+
+      # ── Verify contracts lockfile ───────────────────────────────────────
+      - name: Verify contracts lockfile
+        working-directory: contracts
+        run: cargo check --locked --workspace
+
+      # ── Run the unified drift check script (validates all lockfiles) ─────
+      - name: Run lockfile drift gate
+        run: node scripts/check-lockfile-drift.mjs
+
+  # ── Test the drift check script itself ─────────────────────────────────
+  lockfile-drift-test:
+    name: Lockfile drift script self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run lockfile drift script tests
+        run: node --test scripts/check-lockfile-drift.test.mjs

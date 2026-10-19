@@ -41,29 +41,31 @@ export default function CapabilityFilter({ onFilterChange }: CapabilityFilterPro
   };
 
   if (loading) {
-    return <div className="p-4">Loading filters...</div>;
+    return <div className="p-4" role="status">Loading filters...</div>;
   }
 
   if (error) {
-    return <div className="p-4 text-red-500">Error loading filters: {error}</div>;
+    return <div className="p-4 text-red-500" role="alert">Error loading filters: {error}</div>;
   }
 
   return (
     <div className="p-4 border rounded">
-      <h3 className="text-lg font-semibold mb-2">Capabilities</h3>
-      <div className="space-y-2">
-        {filters.map((filter) => (
-          <label key={filter.id} className="flex items-center space-x-2">
-            <input
-              type="checkbox"
-              checked={selected.includes(filter.id)}
-              onChange={() => handleToggle(filter.id)}
-              className="rounded border-gray-300"
-            />
-            <span>{filter.name}</span>
-          </label>
-        ))}
-      </div>
+      <fieldset className="border-0 p-0 m-0">
+        <legend className="text-lg font-semibold mb-2">Capabilities</legend>
+        <div className="space-y-2">
+          {filters.map((filter) => (
+            <label key={filter.id} className="flex items-center space-x-2">
+              <input
+                type="checkbox"
+                checked={selected.includes(filter.id)}
+                onChange={() => handleToggle(filter.id)}
+                className="rounded border-gray-300"
+              />
+              <span>{filter.name}</span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
     </div>
   );
 }

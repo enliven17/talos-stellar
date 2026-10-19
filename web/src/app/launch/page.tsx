@@ -12,6 +12,7 @@ import {
   TALOS_NAME_SERVICE_CONTRACT_ID,
 } from "@/lib/soroban";
 import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
+import { TALOS_NAME_MIN_LENGTH, TALOS_NAME_MAX_LENGTH } from "@/lib/limits";
 
 
 const STEPS = [
@@ -83,8 +84,13 @@ function LaunchForm() {
 
   const checkNameAvailability = useCallback((name: string) => {
     if (nameCheckTimer.current) clearTimeout(nameCheckTimer.current);
-    if (!name || name.length < 3) {
+    if (!name || name.length < TALOS_NAME_MIN_LENGTH) {
       setNameAvailable(null);
+      setNameChecking(false);
+      return;
+    }
+    if (name.length > TALOS_NAME_MAX_LENGTH) {
+      setNameAvailable(false);
       setNameChecking(false);
       return;
     }
@@ -130,7 +136,9 @@ function LaunchForm() {
         return form.approvalThreshold && form.gtmBudget;
       case 4:
         return form.persona && form.targetAudience && form.channels.length > 0
-          && form.agentName.length >= 3 && nameAvailable === true;
+          && form.agentName.length >= TALOS_NAME_MIN_LENGTH
+          && form.agentName.length <= TALOS_NAME_MAX_LENGTH
+          && nameAvailable === true;
       default:
         return true;
     }
@@ -635,14 +643,17 @@ function LaunchForm() {
               </div>
               <div className="mt-1.5 text-xs">
                 {nameChecking && <span className="text-muted">Checking...</span>}
-                {!nameChecking && nameAvailable === true && form.agentName.length >= 3 && (
+                {!nameChecking && nameAvailable === true && form.agentName.length >= TALOS_NAME_MIN_LENGTH && (
                   <span className="text-accent font-bold">{form.agentName}.talos is available</span>
                 )}
-                {!nameChecking && nameAvailable === false && (
+                {!nameChecking && nameAvailable === false && form.agentName.length <= TALOS_NAME_MAX_LENGTH && (
                   <span className="text-red-600 font-bold">{form.agentName}.talos is taken</span>
                 )}
-                {!nameChecking && nameAvailable === null && form.agentName.length > 0 && form.agentName.length < 3 && (
-                  <span className="text-muted">Minimum 3 characters</span>
+                {!nameChecking && form.agentName.length > TALOS_NAME_MAX_LENGTH && (
+                  <span className="text-red-600 font-bold">Name must be at most {TALOS_NAME_MAX_LENGTH} characters</span>
+                )}
+                {!nameChecking && nameAvailable === null && form.agentName.length > 0 && form.agentName.length < TALOS_NAME_MIN_LENGTH && (
+                  <span className="text-muted">Minimum {TALOS_NAME_MIN_LENGTH} characters</span>
                 )}
               </div>
               <p className="text-xs text-muted mt-1">This is your agent&apos;s permanent on-chain identity. It cannot be changed after registration.</p>

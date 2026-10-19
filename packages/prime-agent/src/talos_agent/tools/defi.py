@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from talos_agent.tools import context as _context
 from talos_agent.tools.registry import tool
 
 if TYPE_CHECKING:
@@ -15,6 +16,11 @@ if TYPE_CHECKING:
 _api: TalosAPIClient = None  # type: ignore[assignment]
 _db: LocalDB = None  # type: ignore[assignment]
 _settings: Settings = None  # type: ignore[assignment]
+
+
+def _deps():
+    """This agent's dependencies: the bound ToolContext, else this module's globals."""
+    return _context.resolve(globals())
 
 
 @tool(
@@ -46,10 +52,10 @@ async def request_defi_loan(
         Loan request status with tracking information
     """
     # Check approval threshold
-    threshold = float(_settings.approval_threshold)
+    threshold = float(_deps().settings.approval_threshold)
     if amount > threshold:
-        result = await _api.create_approval(
-            _settings.talos_id,
+        result = await _deps().api.create_approval(
+            _deps().settings.talos_id,
             type_="transaction",
             title=f"DeFi loan request: {amount} {loan_asset} from {platform}",
             description=f"Collateral: {collateral_asset}, Duration: {duration_days} days. Purpose: {purpose}",
@@ -69,7 +75,7 @@ async def request_defi_loan(
     # In a real implementation, this would interact with the lending platform's API
     # For now, we'll track the loan request in the database
     
-    loan_id = _db.create_loan(
+    loan_id = _deps().db.create_loan(
         platform=platform,
         amount=amount,
         collateral_asset=collateral_asset,
@@ -80,7 +86,7 @@ async def request_defi_loan(
     )
     
     # Record as spending for budget tracking
-    _db.record_spending(
+    _deps().db.record_spending(
         amount=amount,
         category="defi_loan",
         description=f"Loan from {platform}: {purpose}",
@@ -105,7 +111,7 @@ async def request_defi_loan(
 )
 async def get_active_loans() -> dict:
     """Get all active loans being tracked."""
-    loans = _db.get_active_loans()
+    loans = _deps().db.get_active_loans()
     return {
         "count": len(loans),
         "loans": loans,
@@ -126,7 +132,7 @@ async def repay_loan(loan_id: int, amount: float | None = None) -> dict:
     Returns:
         Repayment status
     """
-    loan = _db.get_loan_by_id(loan_id)
+    loan = _deps().db.get_loan_by_id(loan_id)
     if not loan:
         return {"error": f"Loan {loan_id} not found"}
     
@@ -141,10 +147,10 @@ async def repay_loan(loan_id: int, amount: float | None = None) -> dict:
         return {"error": f"Repayment amount {amount} exceeds outstanding {loan['outstanding_amount']}"}
     
     # Check approval threshold for repayment
-    threshold = float(_settings.approval_threshold)
+    threshold = float(_deps().settings.approval_threshold)
     if amount > threshold:
-        result = await _api.create_approval(
-            _settings.talos_id,
+        result = await _deps().api.create_approval(
+            _deps().settings.talos_id,
             type_="transaction",
             title=f"Loan repayment: {amount} {loan['loan_asset']} to {loan['platform']}",
             description=f"Repaying loan {loan_id}. Outstanding before: {loan['outstanding_amount']}",
@@ -158,7 +164,7 @@ async def repay_loan(loan_id: int, amount: float | None = None) -> dict:
         }
     
     # Process repayment
-    _db.record_repayment(loan_id, amount)
+    _deps().db.record_repayment(loan_id, amount)
     
     return {
         "status": "repayment_recorded",
