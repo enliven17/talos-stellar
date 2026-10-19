@@ -84,6 +84,8 @@ These are returned by the `storage_migration` library used by the registry, not 
 | Registry, Governance, Name service | `ttl bounds: min_age exceeds max_age`; `ttl bounds: max_keys must be greater than zero`; `ttl bounds: max_keys exceeds MAX_BATCH_KEYS` | `extend_ttl_batch` bounds were rejected by the shared `ttl-manager` validator before any storage read or write. |
 | Governance | `Already initialized` | Initialization already completed. |
 | Governance | `Quorum must be positive`; `Consensus threshold must be 1..10000 bps`; `Voting period must be positive` | Initial or updated configuration is outside bounds. |
+| Governance | `Proposal threshold cannot be negative` | `proposal_threshold` in `initialize`/`update_config` is below zero; supply a non-negative threshold. |
+| Governance | `Insufficient voting power to create proposal` | Proposer's voting power at the snapshot ledger is below `proposal_threshold`; acquire stake or use an eligible account. |
 | Governance | `Title cannot be empty`; `Description cannot be empty` | Proposal metadata is missing. |
 | Governance | `Proposal is not active`; `Voting period has ended`; `Voting period has not ended`; `Proposal is not approved` | Proposal state or timing disallows the operation. |
 | Governance | `Already voted on this proposal`; `No voting power` | Voter already voted or has no eligible weight. |

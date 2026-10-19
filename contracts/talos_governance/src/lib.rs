@@ -68,6 +68,7 @@ pub struct GovernanceConfig {
     pub consensus_threshold: i128,
     pub voting_period_ledgers: u32,
     pub pulse_token_address: Address,
+    pub proposal_threshold: i128,
 }
 
 #[contracttype]
@@ -384,6 +385,7 @@ impl TalosGovernance {
         quorum_threshold: i128,
         consensus_threshold: i128,
         voting_period_ledgers: u32,
+        proposal_threshold: i128,
     ) {
         admin.require_auth();
 
@@ -399,12 +401,16 @@ impl TalosGovernance {
         if voting_period_ledgers == 0 {
             panic!("Voting period must be positive");
         }
+        if proposal_threshold < 0 {
+            panic!("Proposal threshold cannot be negative");
+        }
 
         let config = GovernanceConfig {
             quorum_threshold,
             consensus_threshold,
             voting_period_ledgers,
             pulse_token_address,
+            proposal_threshold,
         };
 
         env.storage().persistent().set(&DataKey::Admin, &admin);
@@ -438,6 +444,10 @@ impl TalosGovernance {
         let config = Self::require_config(&env);
         let current_ledger = env.ledger().sequence();
         let snapshot_ledger = current_ledger.saturating_sub(10);
+        let proposer_power = Self::get_past_votes(&env, proposer.clone(), snapshot_ledger);
+        if proposer_power < config.proposal_threshold {
+            panic!("Insufficient voting power to create proposal");
+        }
         let proposal_id = Self::next_proposal_id(env.clone());
         let end_ledger = current_ledger + config.voting_period_ledgers;
 
@@ -587,6 +597,9 @@ impl TalosGovernance {
         }
         if config.voting_period_ledgers == 0 {
             panic!("Voting period must be positive");
+        }
+        if config.proposal_threshold < 0 {
+            panic!("Proposal threshold cannot be negative");
         }
         env.storage().persistent().set(&DataKey::Config, &config);
     }
