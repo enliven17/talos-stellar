@@ -48,7 +48,7 @@ if /I "%COMMAND%"=="reset-data" (
     set "DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/talos"
   )
   pnpm --dir web run db:reset-test-data %2 %3 %4 %5 %6 %7 %8 %9
-  exit /b 0
+  exit /b !ERRORLEVEL!
 )
 
 echo Usage: %~nx0 {up^|down^|logs^|reset^|reset-data}
