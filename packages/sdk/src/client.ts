@@ -7,6 +7,18 @@ import type {
   Activity,
   ReportRevenueParams,
   Revenue,
+  Dividend,
+  DividendBreakdownEntry,
+  DividendStatus,
+  RecordDividendParams,
+  RecordDividendRequest,
+  ListDividendsOptions,
+  Patron,
+  BecomePatronParams,
+  BecomePatronRequest,
+  RevokePatronParams,
+  RevokePatronRequest,
+  ListPatronsOptions,
   CreateApprovalParams,
   Approval,
   RegisterServiceParams,
@@ -70,6 +82,20 @@ import {
 // Legacy import path: `import { TalosAPIError } from "./client.js"`.
 export { TalosAPIError };
 export { generateIdempotencyKey, validateIdempotencyKey, IdempotencyConflictError };
+export type {
+  Dividend,
+  DividendBreakdownEntry,
+  DividendStatus,
+  RecordDividendParams,
+  RecordDividendRequest,
+  ListDividendsOptions,
+  Patron,
+  BecomePatronParams,
+  BecomePatronRequest,
+  RevokePatronParams,
+  RevokePatronRequest,
+  ListPatronsOptions,
+};
 
 /**
  * Status-code driven retry policy (Retry-After aware). Enabled by default
@@ -1073,6 +1099,80 @@ export class TalosClient {
 
   async getTalosRevenues(talosId: string, options?: ReadOptions): Promise<Revenue[]> {
     return this.request(`/api/talos/${talosId}/revenue`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
+  }
+
+  // ── Dividends ──────────────────────────────────────────────
+
+  async listDividends(
+    talosId: string,
+    options?: ListDividendsOptions,
+  ): Promise<Dividend[]> {
+    const { signal, timeoutMs, limit } = options ?? {};
+    const params: RequestParams | undefined =
+      limit !== undefined ? { limit } : undefined;
+    return this.request(`/api/talos/${talosId}/dividends`, {
+      params,
+      signal,
+      timeoutMs,
+    });
+  }
+
+  async recordDividend(
+    talosId: string,
+    params: RecordDividendParams,
+    options?: WriteOptions,
+  ): Promise<Dividend> {
+    return this.request(`/api/talos/${talosId}/dividends`, {
+      method: "POST",
+      body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  // ── Patrons ────────────────────────────────────────────────
+
+  async listPatrons(
+    talosId: string,
+    options?: ListPatronsOptions,
+  ): Promise<Patron[]> {
+    const { signal, timeoutMs, limit } = options ?? {};
+    const params: RequestParams | undefined =
+      limit !== undefined ? { limit } : undefined;
+    return this.request(`/api/talos/${talosId}/patrons`, {
+      params,
+      signal,
+      timeoutMs,
+    });
+  }
+
+  async becomePatron(
+    talosId: string,
+    params: BecomePatronParams,
+    options?: WriteOptions,
+  ): Promise<Patron> {
+    return this.request(`/api/talos/${talosId}/patrons`, {
+      method: "POST",
+      body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  async revokePatron(
+    talosId: string,
+    params: RevokePatronParams,
+    options?: WriteOptions,
+  ): Promise<Patron> {
+    return this.request(`/api/talos/${talosId}/patrons`, {
+      method: "DELETE",
+      body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
   }
 
   // ── Approvals ──────────────────────────────────────────────

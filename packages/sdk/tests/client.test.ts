@@ -25,6 +25,12 @@ import {
   resolveNetworkConfig,
   normalizeNetworkId,
   NETWORK_PASSPHRASES,
+  generateIdempotencyKey,
+  type Dividend,
+  type RecordDividendParams,
+  type Patron,
+  type BecomePatronParams,
+  type RevokePatronParams,
 } from "../src/index.js";
 
 describe("TalosClient - Request/Response Behavior", () => {
@@ -1568,6 +1574,405 @@ describe("Typed SDK Error Hierarchy", () => {
       } as Response);
       const c = new TalosClient({ baseUrl: "http://localhost:3000" });
       await expect(c.getTalos("1")).rejects.toThrow("502");
+    });
+  });
+
+  describe("Dividends and Patrons API", () => {
+    const client = new TalosClient({ baseUrl: "http://localhost:3000", apiKey: "test-key" });
+
+    const mockDividend: Dividend = {
+      id: "div-1",
+      talosId: "talos-1",
+      amount: "25.500000",
+      currency: "USDC",
+      patronCount: 4,
+      totalPulse: 100000,
+      source: "revenue-share",
+      txHash: "tx-abc-123",
+      breakdown: [
+        {
+          stellarPublicKey: "GABC1234567890123456789012345678901234567890123456789012",
+          pulseAmount: 50000,
+          amount: "12.75",
+          txHash: "tx-abc-123",
+        },
+      ],
+      status: "completed",
+      createdAt: "2026-10-19T12:00:00.000Z",
+    };
+
+    const mockPatron: Patron = {
+      id: "pat-1",
+      talosId: "talos-1",
+      stellarPublicKey: "GABC1234567890123456789012345678901234567890123456789012",
+      role: "Investor",
+      pulseAmount: 50000,
+      share: "5.00",
+      status: "active",
+      createdAt: "2026-10-19T12:00:00.000Z",
+      updatedAt: "2026-10-19T12:00:00.000Z",
+    };
+
+    describe("listDividends", () => {
+      it("lists dividend distributions for a TALOS", async () => {
+        vi.mocked(fetch).mockResolvedValue({
+          ok: true,
+          json: async () => [mockDividend],
+        } as Response);
+
+        const result = await client.listDividends("talos-1");
+
+        expect(fetch).toHaveBeenCalledWith(
+          "http://localhost:3000/api/talos/talos-1/dividends",
+          expect.objectContaining({
+            method: "GET",
+          }),
+        );
+        expect(result).toEqual([mockDividend]);
+      });
+
+      it("forwards limit query parameter when provided", async () => {
+        vi.mocked(fetch).mockResolvedValue({
+          ok: true,
+          json: async () => [mockDividend],
+        } as Response);
+
+        await client.listDividends("talos-1", { limit: 25 });
+
+        expect(fetch).toHaveBeenCalledWith(
+          "http://localhost:3000/api/talos/talos-1/dividends?limit=25",
+          expect.objectContaining({
+            method: "GET",
+          }),
+        );
+      });
+
+      it("maps 400 invalid limit response to TalosValidationError", async () => {
+        vi.mocked(fetch).mockResolvedValue({
+          ok: false,
+          status: 400,
+          headers: new Headers(),
+          text: async () =>
+            JSON.stringify({
+              code: "VALIDATION_ERROR",
+              message: "Invalid limit parameter",
+              issues: ["limit: must be between 1 and 100"],
+            }),
+        } as Response);
+
+        await expect(client.listDividends("talos-1", { limit: 500 })).rejects.toMatchObject({
+          name: "TalosValidationError",
+          status: 400,
+          code: "validation_error",
+          path: "/api/talos/talos-1/dividends",
+          issues: ["limit: must be between 1 and 100"],
+        });
+        await expect(client.listDividends("talos-1", { limit: 500 })).rejects.toBeInstanceOf(
+          TalosValidationError,
+        );
+      });
+    });
+
+    describe("recordDividend", () => {
+      const recordParams: RecordDividendParams = {
+        amount: "25.50",
+        currency: "USDC",
+        patronCount: 4,
+        totalPulse: 100000,
+        source: "revenue-share",
+        txHash: "tx-abc-123",
+        breakdown: [
+          {
+            stellarPublicKey: "GABC1234567890123456789012345678901234567890123456789012",
+            pulseAmount: 50000,
+            amount: "12.75",
+            txHash: "tx-abc-123",
+          },
+        ],
+        status: "completed",
+      };
+
+      it("records a dividend distribution via POST", async () => {
+        vi.mocked(fetch).mockResolvedValue({
+          ok: true,
+          status: 201,
+          json: async () => mockDividend,
+        } as Response);
+
+        const result = await client.recordDividend("talos-1", recordParams);
+
+        expect(fetch).toHaveBeenCalledWith(
+          "http://localhost:3000/api/talos/talos-1/dividends",
+          expect.objectContaining({
+            method: "POST",
+            body: JSON.stringify(recordParams),
+          }),
+        );
+        const headers = vi.mocked(fetch).mock.calls[0]?.[1]?.headers as
+          | Record<string, string>
+          | undefined;
+        expect(headers?.["Idempotency-Key"]).toBeUndefined();
+        expect(result).toEqual(mockDividend);
+      });
+
+      it("sends Idempotency-Key header when provided", async () => {
+        vi.mocked(fetch).mockResolvedValue({
+          ok: true,
+          status: 201,
+          json: async () => mockDividend,
+        } as Response);
+
+        const key = generateIdempotencyKey();
+        await client.recordDividend("talos-1", recordParams, { idempotencyKey: key });
+
+        const headers = vi.mocked(fetch).mock.calls[0]?.[1]?.headers as
+          | Record<string, string>
+          | undefined;
+        expect(headers).toHaveProperty("Idempotency-Key", key);
+      });
+
+      it("maps 400 validation error to TalosValidationError", async () => {
+        vi.mocked(fetch).mockResolvedValue({
+          ok: false,
+          status: 400,
+          headers: new Headers(),
+          text: async () =>
+            JSON.stringify({
+              code: "VALIDATION_ERROR",
+              message: "Validation failed",
+              issues: ["amount: Too small: expected number to be >0"],
+            }),
+        } as Response);
+
+        await expect(
+          client.recordDividend("talos-1", { amount: 0 }),
+        ).rejects.toBeInstanceOf(TalosValidationError);
+        await expect(
+          client.recordDividend("talos-1", { amount: 0 }),
+        ).rejects.toMatchObject({
+          status: 400,
+          code: "validation_error",
+          path: "/api/talos/talos-1/dividends",
+          issues: ["amount: Too small: expected number to be >0"],
+        });
+      });
+    });
+
+    describe("listPatrons", () => {
+      it("lists active patrons for a TALOS", async () => {
+        vi.mocked(fetch).mockResolvedValue({
+          ok: true,
+          json: async () => [mockPatron],
+        } as Response);
+
+        const result = await client.listPatrons("talos-1");
+
+        expect(fetch).toHaveBeenCalledWith(
+          "http://localhost:3000/api/talos/talos-1/patrons",
+          expect.objectContaining({
+            method: "GET",
+          }),
+        );
+        expect(result).toEqual([mockPatron]);
+      });
+
+      it("forwards limit query parameter when provided", async () => {
+        vi.mocked(fetch).mockResolvedValue({
+          ok: true,
+          json: async () => [mockPatron],
+        } as Response);
+
+        await client.listPatrons("talos-1", { limit: 15 });
+
+        expect(fetch).toHaveBeenCalledWith(
+          "http://localhost:3000/api/talos/talos-1/patrons?limit=15",
+          expect.objectContaining({
+            method: "GET",
+          }),
+        );
+      });
+
+      it("maps 400 invalid limit response to TalosValidationError", async () => {
+        vi.mocked(fetch).mockResolvedValue({
+          ok: false,
+          status: 400,
+          headers: new Headers(),
+          text: async () =>
+            JSON.stringify({
+              code: "VALIDATION_ERROR",
+              message: "Invalid limit parameter",
+              issues: ["limit: must be between 1 and 100"],
+            }),
+        } as Response);
+
+        await expect(client.listPatrons("talos-1", { limit: -1 })).rejects.toBeInstanceOf(
+          TalosValidationError,
+        );
+        await expect(client.listPatrons("talos-1", { limit: -1 })).rejects.toMatchObject({
+          status: 400,
+          code: "validation_error",
+          path: "/api/talos/talos-1/patrons",
+          issues: ["limit: must be between 1 and 100"],
+        });
+      });
+    });
+
+    describe("becomePatron", () => {
+      const becomeParams: BecomePatronParams = {
+        stellarPublicKey: "GABC1234567890123456789012345678901234567890123456789012",
+        pulseAmount: 50000,
+        signature: "base64-sig-proof",
+        message: "talos-1:register-patron",
+      };
+
+      it("registers a patron via POST and passes signature proof through", async () => {
+        vi.mocked(fetch).mockResolvedValue({
+          ok: true,
+          status: 201,
+          json: async () => mockPatron,
+        } as Response);
+
+        const result = await client.becomePatron("talos-1", becomeParams);
+
+        expect(fetch).toHaveBeenCalledWith(
+          "http://localhost:3000/api/talos/talos-1/patrons",
+          expect.objectContaining({
+            method: "POST",
+            body: JSON.stringify(becomeParams),
+          }),
+        );
+        const headers = vi.mocked(fetch).mock.calls[0]?.[1]?.headers as
+          | Record<string, string>
+          | undefined;
+        expect(headers?.["Idempotency-Key"]).toBeUndefined();
+        expect(result).toEqual(mockPatron);
+      });
+
+      it("sends Idempotency-Key header when provided", async () => {
+        vi.mocked(fetch).mockResolvedValue({
+          ok: true,
+          status: 201,
+          json: async () => mockPatron,
+        } as Response);
+
+        const key = generateIdempotencyKey();
+        await client.becomePatron("talos-1", becomeParams, { idempotencyKey: key });
+
+        const headers = vi.mocked(fetch).mock.calls[0]?.[1]?.headers as
+          | Record<string, string>
+          | undefined;
+        expect(headers).toHaveProperty("Idempotency-Key", key);
+      });
+
+      it("maps 400 validation error to TalosValidationError", async () => {
+        vi.mocked(fetch).mockResolvedValue({
+          ok: false,
+          status: 400,
+          headers: new Headers(),
+          text: async () =>
+            JSON.stringify({
+              code: "VALIDATION_ERROR",
+              message: "Validation failed",
+              issues: [
+                "pulseAmount: Too small: expected number to be >0",
+                "signature: invalid or missing sensitive field",
+              ],
+            }),
+        } as Response);
+
+        await expect(
+          client.becomePatron("talos-1", {
+            ...becomeParams,
+            pulseAmount: 0,
+            signature: "",
+          }),
+        ).rejects.toBeInstanceOf(TalosValidationError);
+        await expect(
+          client.becomePatron("talos-1", {
+            ...becomeParams,
+            pulseAmount: 0,
+            signature: "",
+          }),
+        ).rejects.toMatchObject({
+          status: 400,
+          code: "validation_error",
+          path: "/api/talos/talos-1/patrons",
+        });
+      });
+    });
+
+    describe("revokePatron", () => {
+      const revokeParams: RevokePatronParams = {
+        stellarPublicKey: "GABC1234567890123456789012345678901234567890123456789012",
+        signature: "base64-sig-proof",
+        message: "talos-1:revoke-patron",
+      };
+
+      it("revokes patron status via DELETE and passes signature proof through", async () => {
+        const revokedPatron: Patron = { ...mockPatron, status: "revoked" };
+        vi.mocked(fetch).mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => revokedPatron,
+        } as Response);
+
+        const result = await client.revokePatron("talos-1", revokeParams);
+
+        expect(fetch).toHaveBeenCalledWith(
+          "http://localhost:3000/api/talos/talos-1/patrons",
+          expect.objectContaining({
+            method: "DELETE",
+            body: JSON.stringify(revokeParams),
+          }),
+        );
+        const headers = vi.mocked(fetch).mock.calls[0]?.[1]?.headers as
+          | Record<string, string>
+          | undefined;
+        expect(headers?.["Idempotency-Key"]).toBeUndefined();
+        expect(result).toEqual(revokedPatron);
+      });
+
+      it("sends Idempotency-Key header when provided", async () => {
+        const revokedPatron: Patron = { ...mockPatron, status: "revoked" };
+        vi.mocked(fetch).mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => revokedPatron,
+        } as Response);
+
+        const key = generateIdempotencyKey();
+        await client.revokePatron("talos-1", revokeParams, { idempotencyKey: key });
+
+        const headers = vi.mocked(fetch).mock.calls[0]?.[1]?.headers as
+          | Record<string, string>
+          | undefined;
+        expect(headers).toHaveProperty("Idempotency-Key", key);
+      });
+
+      it("maps 400 validation error to TalosValidationError", async () => {
+        vi.mocked(fetch).mockResolvedValue({
+          ok: false,
+          status: 400,
+          headers: new Headers(),
+          text: async () =>
+            JSON.stringify({
+              code: "VALIDATION_ERROR",
+              message: "Signature message must contain the TALOS id and the action 'revoke-patron'",
+              issues: ["message: invalid or missing sensitive field"],
+            }),
+        } as Response);
+
+        await expect(
+          client.revokePatron("talos-1", { ...revokeParams, message: "invalid" }),
+        ).rejects.toBeInstanceOf(TalosValidationError);
+        await expect(
+          client.revokePatron("talos-1", { ...revokeParams, message: "invalid" }),
+        ).rejects.toMatchObject({
+          status: 400,
+          code: "validation_error",
+          path: "/api/talos/talos-1/patrons",
+        });
+      });
     });
   });
 });

@@ -38,6 +38,67 @@ export interface ReportRevenueParams {
   txHash?: string;
 }
 
+export type DividendStatus = "completed" | "pending" | "failed";
+
+export interface DividendBreakdownEntry {
+  stellarPublicKey: string;
+  pulseAmount?: number;
+  amount?: string | number;
+  txHash?: string | null;
+}
+
+export interface RecordDividendParams {
+  amount: string | number;
+  currency?: string;
+  patronCount?: number;
+  totalPulse?: number;
+  source?: string;
+  txHash?: string | null;
+  breakdown?: DividendBreakdownEntry[];
+  status?: DividendStatus;
+}
+
+export type RecordDividendRequest = RecordDividendParams;
+
+export interface ListDividendsOptions {
+  limit?: number;
+  signal?: AbortSignal;
+  /**
+   * Per-request timeout in milliseconds. Overrides the client-level
+   * `timeoutMs` for this single call. `0` disables the timeout for this call
+   * regardless of the client default. Surfaces as `TalosTimeoutError`.
+   */
+  timeoutMs?: number;
+}
+
+export interface BecomePatronParams {
+  stellarPublicKey: string;
+  pulseAmount: number;
+  signature: string;
+  message: string;
+}
+
+export type BecomePatronRequest = BecomePatronParams;
+
+export interface RevokePatronParams {
+  stellarPublicKey: string;
+  signature: string;
+  message: string;
+}
+
+export type RevokePatronRequest = RevokePatronParams;
+
+export interface ListPatronsOptions {
+  limit?: number;
+  signal?: AbortSignal;
+  /**
+   * Per-request timeout in milliseconds. Overrides the client-level
+   * `timeoutMs` for this single call. `0` disables the timeout for this call
+   * regardless of the client default. Surfaces as `TalosTimeoutError`.
+   */
+  timeoutMs?: number;
+}
+
 export interface CreateApprovalParams {
   type: "transaction" | "strategy" | "policy" | "channel";
   title: string;
@@ -232,6 +293,25 @@ export interface Revenue {
   source: string;
   txHash?: string;
   createdAt: string;
+}
+
+export interface Dividend {
+  id: string;
+  talosId: string;
+  amount: string;
+  currency: string;
+  patronCount: number;
+  totalPulse: number;
+  source: string;
+  txHash?: string | null;
+  breakdown?: DividendBreakdownEntry[] | null;
+  status: string;
+  distributionId?: string | null;
+  retryCount?: number;
+  lastError?: string | null;
+  retryable?: boolean;
+  createdAt: string;
+  updatedAt?: string;
 }
 
 export interface CommerceService {
