@@ -4,7 +4,7 @@ import {
   fetchActivityTransactions,
   InvalidActivityCursorError,
 } from "./query";
-import { parseLimit, ACTIVITY_DEFAULT_LIMIT, ACTIVITY_MAX_LIMIT } from "@/lib/limits";
+import { parseLimit, ACTIVITY_DEFAULT_LIMIT, ACTIVITY_MAX_LIMIT } from "@/lib/parse-limit";
 import { errorResponse } from "@/lib/api-response";
 import { withRequestId } from "@/lib/with-request-id";
 
