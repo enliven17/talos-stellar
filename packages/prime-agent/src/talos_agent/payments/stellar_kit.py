@@ -28,6 +28,9 @@ from talos_agent.payments.stellar_retry import (
 
 _HORIZON_URL = os.getenv("STELLAR_HORIZON_URL", "https://horizon-testnet.stellar.org")
 
+#: Default timeout (seconds) for Horizon HTTP requests.
+_DEFAULT_HORIZON_TIMEOUT = 30.0
+
 console = Console()
 
 
@@ -36,17 +39,36 @@ class StellarKit:
 
     Read operations use Stellar Horizon (public, no key needed).
     Write operations are forwarded to Web, which handles signing.
+
+    A single :class:`httpx.AsyncClient` is created during :meth:`initialize`
+    and reused across all Horizon requests so that connection pooling and TLS
+    sessions are shared.  The client is closed in :meth:`close`, which must
+    be awaited during graceful shutdown.
     """
 
-    def __init__(self, api_client: Any):
+    def __init__(self, api_client: Any, *, horizon_timeout: float = _DEFAULT_HORIZON_TIMEOUT):
         self._api = api_client
         self._initialized = False
+        self._horizon_timeout = horizon_timeout
+        self._client: httpx.AsyncClient | None = None
 
     async def initialize(self) -> None:
         if self._initialized:
             return
+        self._client = httpx.AsyncClient(timeout=self._horizon_timeout)
         self._initialized = True
         console.print("[green]Stellar proxy ready (via Web API + Horizon).[/green]")
+
+    async def close(self) -> None:
+        """Close the shared Horizon HTTP client.
+
+        Must be awaited during graceful shutdown to avoid unclosed-client
+        warnings and to release the underlying connection pool cleanly.
+        """
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+        self._initialized = False
 
     @property
     def available(self) -> bool:
@@ -66,19 +88,25 @@ class StellarKit:
             acct = account_id or (talos.get("stellarAccountId", "") if talos else "")
             if not acct:
                 return {"error": "No Stellar account configured"}
-            # Horizon is public — no auth needed
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            # Reuse the shared client; fall back to a temporary one if not
+            # initialized (e.g. called in tests without initialize()).
+            client = self._client or httpx.AsyncClient(timeout=self._horizon_timeout)
+            close_after = self._client is None
+            try:
                 r = await request_with_retry(
                     lambda: client.get(f"{_HORIZON_URL}/accounts/{acct}"),
                     provider="talos_web_api",
                 )
-                if r.status_code == 200:
-                    data = r.json()
-                    balance = data.get("balances", [])
-                    xlm_balance = next((b for b in balance if b.get("asset_type") == "native"), None)
-                    if xlm_balance:
-                        return {"balance_xlm": float(xlm_balance["balance"]), "account": acct}
-                    return {"balance_xlm": 0, "account": acct}
+            finally:
+                if close_after:
+                    await client.aclose()
+            if r.status_code == 200:
+                data = r.json()
+                balance = data.get("balances", [])
+                xlm_balance = next((b for b in balance if b.get("asset_type") == "native"), None)
+                if xlm_balance:
+                    return {"balance_xlm": float(xlm_balance["balance"]), "account": acct}
+                return {"balance_xlm": 0, "account": acct}
             return attach_stellar_failure(
                 None,
                 classify_stellar_failure(status_code=r.status_code),
@@ -92,17 +120,22 @@ class StellarKit:
     async def get_token_balance(self, account_id: str, token_id: str) -> dict[str, Any]:
         """Query Stellar asset balance via Horizon."""
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            client = self._client or httpx.AsyncClient(timeout=self._horizon_timeout)
+            close_after = self._client is None
+            try:
                 r = await request_with_retry(
                     lambda: client.get(f"{_HORIZON_URL}/accounts/{account_id}"),
                     provider="talos_web_api",
                 )
-                if r.status_code == 200:
-                    data = r.json()
-                    balances = data.get("balances", [])
-                    token_balance = next((b for b in balances if b.get("asset_code") == token_id), None)
-                    balance = float(token_balance["balance"]) if token_balance else 0
-                    return {"balance": balance, "token_id": token_id, "account": account_id}
+            finally:
+                if close_after:
+                    await client.aclose()
+            if r.status_code == 200:
+                data = r.json()
+                balances = data.get("balances", [])
+                token_balance = next((b for b in balances if b.get("asset_code") == token_id), None)
+                balance = float(token_balance["balance"]) if token_balance else 0
+                return {"balance": balance, "token_id": token_id, "account": account_id}
             return attach_stellar_failure(
                 None,
                 classify_stellar_failure(status_code=r.status_code),
