@@ -15,6 +15,7 @@ import { logger } from "@/lib/logger";
 import { z } from "zod/v4";
 import { parseBody } from "@/lib/schemas";
 import { rotateWebhookSecret } from "@/lib/webhooks/rotation";
+import { validateUrl } from "@/lib/security/ssrf";
 
 // ─── Auth helper ─────────────────────────────────────────────────
 
@@ -115,6 +116,17 @@ async function _PATCH(
 
     const { data, error } = await parseBody(request, updateSubscriptionSchema);
     if (error) return error;
+
+    if (data.url !== undefined) {
+      try {
+        await validateUrl(data.url);
+      } catch (err) {
+        return Response.json(
+          { error: "Validation failed", issues: [`url: ${err instanceof Error ? err.message : "Invalid URL"}`] },
+          { status: 400 }
+        );
+      }
+    }
 
     // Build update payload
     const updateData: Partial<typeof tlsWebhookSubscriptions.$inferInsert> = {};
