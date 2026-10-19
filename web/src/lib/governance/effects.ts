@@ -1,5 +1,4 @@
-
-/**
+/*
  * Concrete side effects for the durable provisioning workflows.
  *
  * Every `run` here is written to converge, not to assume it is running for the
@@ -7,10 +6,9 @@
  * existing value instead of creating a second one. That is what makes a retry
  * after an ambiguous failure (timeout, process kill, duplicate delivery) safe.
  *
- * Every `compensate` is written to be safe when the matching `run` only
- * partially applied, and safe to call twice.
+ * Every `compensate` and `compensate` is written to be safe when the matching `run`
+ * only partially applied, and safe to call twice.
  */
-
 import { randomBytes } from "crypto";
 
 import { and, eq, isNull } from "drizzle-orm";
@@ -22,7 +20,6 @@ import { logger } from "@/lib/logger";
 import type { ProvisioningEffects, StepContext } from "./provisioning";
 
 async function loadAgent(talosId: string) {
-
   return db
     .select({
       id: tlsTalos.id,
@@ -38,7 +35,6 @@ async function loadAgent(talosId: string) {
     .then((r) => r[0] ?? null);
 }
 
-
 export const databaseEffects: ProvisioningEffects = {
   /**
    * Allocate the agent's Stellar wallet. The public key is persisted; the
@@ -47,7 +43,6 @@ export const databaseEffects: ProvisioningEffects = {
    */
   async createWallet(ctx: StepContext) {
     const agent = await loadAgent(ctx.talosId);
-
     if (!agent) throw new Error("agent not found");
 
     if (agent.agentWalletId) {
@@ -58,7 +53,6 @@ export const databaseEffects: ProvisioningEffects = {
     const { createAgentKeypair } = await import("@/lib/stellar");
     const keypair = await createAgentKeypair();
 
-
     await db
       .update(tlsTalos)
       .set({ agentWalletId: keypair.publicKey, agentWalletAddress: keypair.publicKey })
@@ -68,7 +62,6 @@ export const databaseEffects: ProvisioningEffects = {
     // Re-read rather than trusting the update: a concurrent attempt may have
     // won the CAS, and its key is the one of record.
     const settled = await loadAgent(ctx.talosId);
-
     return { walletPublicKey: settled?.agentWalletId ?? keypair.publicKey, reused: false };
   },
 
@@ -79,7 +72,6 @@ export const databaseEffects: ProvisioningEffects = {
    */
   async releaseWallet(ctx: StepContext) {
     await db
-
       .update(tlsTalos)
       .set({ agentWalletId: null, agentWalletAddress: null })
       .where(eq(tlsTalos.id, ctx.talosId));
@@ -97,7 +89,6 @@ export const databaseEffects: ProvisioningEffects = {
    */
   async issueCredentials(ctx: StepContext) {
     const agent = await loadAgent(ctx.talosId);
-
     if (!agent) throw new Error("agent not found");
     if (agent.apiKey) return { credentialIssued: true, reused: true };
 
@@ -111,7 +102,6 @@ export const databaseEffects: ProvisioningEffects = {
     await db.update(tlsTalos).set({ apiKey: null }).where(eq(tlsTalos.id, ctx.talosId));
   },
 
-
   /**
    * Point the agent's registered services at the wallet allocated by the
    * wallet step, so payments route to the account this run provisioned.
@@ -120,7 +110,6 @@ export const databaseEffects: ProvisioningEffects = {
    */
   async registerServices(ctx: StepContext) {
     const wallet = ctx.outputs.wallet?.walletPublicKey;
-
     if (typeof wallet !== "string" || !wallet) {
       throw new Error("wallet step produced no public key");
     }
@@ -129,7 +118,6 @@ export const databaseEffects: ProvisioningEffects = {
       .select({ id: tlsCommerceServices.id, stellarPublicKey: tlsCommerceServices.stellarPublicKey })
       .from(tlsCommerceServices)
       .where(eq(tlsCommerceServices.talosId, ctx.talosId));
-
 
     await db
       .update(tlsCommerceServices)
@@ -144,7 +132,6 @@ export const databaseEffects: ProvisioningEffects = {
 
   async deregisterServices(ctx: StepContext) {
     const previous = ctx.outputs.services?.previousKeys;
-
     if (!Array.isArray(previous)) return;
 
     for (const entry of previous as { id: string; stellarPublicKey: string }[]) {
@@ -158,7 +145,6 @@ export const databaseEffects: ProvisioningEffects = {
   /** Bring the agent online and let it accept work. */
   async startRuntime(ctx: StepContext) {
     await db
-
       .update(tlsTalos)
       .set({ status: "Active", agentOnline: true, agentLastSeen: new Date() })
       .where(eq(tlsTalos.id, ctx.talosId));
@@ -173,7 +159,6 @@ export const databaseEffects: ProvisioningEffects = {
    */
   async stopRuntime(ctx: StepContext) {
     await db
-
       .update(tlsTalos)
       .set({ agentOnline: false, agentLastSeen: new Date() })
       .where(eq(tlsTalos.id, ctx.talosId));
@@ -185,8 +170,4 @@ export const databaseEffects: ProvisioningEffects = {
         and(eq(tlsCommerceJobs.talosId, ctx.talosId), eq(tlsCommerceJobs.status, "pending")),
       );
   },
-
 };
-
-
-
