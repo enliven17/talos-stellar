@@ -61,6 +61,22 @@ pub struct Proposal {
     pub created_at: u64,
 }
 
+/// Default number of ledgers prior to proposal creation at which voting power is snapshotted.
+///
+/// An offset is used so that voting power is evaluated at a ledger sequence before
+/// the proposal was submitted. This prevents flash-loan or same-ledger front-running
+/// attacks where an account acquires tokens in the same ledger as proposal creation,
+/// exercises proposal creation / voting rights with temporarily borrowed funds, and
+/// exits in the same transaction or block. On Stellar's ~5-second ledger cadence,
+/// 10 ledgers represents an offset of approximately 50 seconds.
+pub const DEFAULT_SNAPSHOT_OFFSET_LEDGERS: u32 = 10;
+
+/// Maximum allowed snapshot offset in ledgers (~7 days on a 5-second ledger cadence).
+///
+/// Bounding the maximum offset prevents misconfigurations where proposals attempt to
+/// snapshot state beyond the ledger retention or historical checkpoint window.
+pub const MAX_SNAPSHOT_OFFSET_LEDGERS: u32 = 120_960;
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GovernanceConfig {
@@ -68,6 +84,7 @@ pub struct GovernanceConfig {
     pub consensus_threshold: i128,
     pub voting_period_ledgers: u32,
     pub pulse_token_address: Address,
+    pub snapshot_offset_ledgers: Option<u32>,
 }
 
 #[contracttype]
@@ -483,6 +500,7 @@ impl TalosGovernance {
             consensus_threshold,
             voting_period_ledgers,
             pulse_token_address,
+            snapshot_offset_ledgers: None,
         };
 
         env.storage().persistent().set(&DataKey::Admin, &admin);
@@ -540,7 +558,10 @@ impl TalosGovernance {
 
         let config = Self::require_config(&env);
         let current_ledger = env.ledger().sequence();
-        let snapshot_ledger = current_ledger.saturating_sub(10);
+        let snapshot_offset = config
+            .snapshot_offset_ledgers
+            .unwrap_or(DEFAULT_SNAPSHOT_OFFSET_LEDGERS);
+        let snapshot_ledger = current_ledger.saturating_sub(snapshot_offset);
         let proposal_id = Self::next_proposal_id(env.clone());
         let end_ledger = current_ledger + config.voting_period_ledgers;
 
@@ -690,6 +711,11 @@ impl TalosGovernance {
         }
         if config.voting_period_ledgers == 0 {
             panic!("Voting period must be positive");
+        }
+        if let Some(offset) = config.snapshot_offset_ledgers {
+            if offset > MAX_SNAPSHOT_OFFSET_LEDGERS {
+                panic!("Snapshot offset exceeds maximum allowed");
+            }
         }
         env.storage().persistent().set(&DataKey::Config, &config);
     }
@@ -1977,6 +2003,7 @@ mod tests {
             consensus_threshold: 6_000,
             voting_period_ledgers: 30,
             pulse_token_address: pulse,
+            snapshot_offset_ledgers: None,
         };
 
         client
@@ -2085,6 +2112,7 @@ mod tests {
             consensus_threshold: 6_000,
             voting_period_ledgers: 30,
             pulse_token_address: pulse,
+            snapshot_offset_ledgers: None,
         };
         let res = client
             .mock_auths(&[MockAuth {
@@ -2284,6 +2312,7 @@ mod tests {
             consensus_threshold: 5_000,
             voting_period_ledgers: 20,
             pulse_token_address: pulse,
+            snapshot_offset_ledgers: None,
         };
         let rando = Address::generate(&env);
         let result = client.try_update_config(&rando, &config);
@@ -3285,5 +3314,118 @@ mod tests {
             "rejected create_proposal memory {} exceeded ceiling {}",
             mem, BUDGET_MEM_CREATE_PROPOSAL,
         );
+    }
+
+    // ── Snapshot Offset Configuration ────────────────────────────────
+
+    /// Confirms that by default, snapshot_ledger equals start_ledger - DEFAULT_SNAPSHOT_OFFSET_LEDGERS.
+    #[test]
+    fn proposal_snapshot_ledger_equals_start_ledger_minus_default_offset() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).expect("Proposal not found");
+
+        assert_eq!(
+            proposal.snapshot_ledger,
+            proposal.start_ledger - DEFAULT_SNAPSHOT_OFFSET_LEDGERS,
+            "snapshot_ledger must equal start_ledger minus default offset"
+        );
+    }
+
+    /// Admin can tune snapshot_offset_ledgers per deployment via GovernanceConfig.
+    #[test]
+    fn proposal_snapshot_ledger_respects_custom_configured_offset() {
+        let (env, contract_id, admin, pulse, client) = setup();
+        let custom_offset = 25_u32;
+        let config = GovernanceConfig {
+            quorum_threshold: 100,
+            consensus_threshold: 5_100,
+            voting_period_ledgers: 20,
+            pulse_token_address: pulse,
+            snapshot_offset_ledgers: Some(custom_offset),
+        };
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_config",
+                    args: (admin.clone(), config.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_config(&admin, &config);
+
+        let proposer = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).expect("Proposal not found");
+
+        assert_eq!(
+            proposal.snapshot_ledger,
+            proposal.start_ledger - custom_offset,
+            "snapshot_ledger must equal start_ledger minus custom configured offset"
+        );
+    }
+
+    /// update_config rejects snapshot_offset_ledgers exceeding MAX_SNAPSHOT_OFFSET_LEDGERS.
+    #[test]
+    #[should_panic(expected = "Snapshot offset exceeds maximum allowed")]
+    fn update_config_rejects_excessive_snapshot_offset() {
+        let (env, contract_id, admin, pulse, client) = setup();
+        let config = GovernanceConfig {
+            quorum_threshold: 100,
+            consensus_threshold: 5_100,
+            voting_period_ledgers: 20,
+            pulse_token_address: pulse,
+            snapshot_offset_ledgers: Some(MAX_SNAPSHOT_OFFSET_LEDGERS + 1),
+        };
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_config",
+                    args: (admin.clone(), config.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_config(&admin, &config);
+    }
+
+    /// When current ledger sequence is less than the offset, saturating_sub prevents underflow.
+    #[test]
+    fn proposal_snapshot_ledger_saturates_at_zero_if_ledger_below_offset() {
+        let env = Env::default();
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 5;
+            li.timestamp = 1_000;
+        });
+        let contract_id = env.register_contract(None, TalosGovernance);
+        let client = TalosGovernanceClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let pulse = Address::generate(&env);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "initialize",
+                    args: (admin.clone(), pulse.clone(), 100_i128, 5_100_i128, 20_u32).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .initialize(&admin, &pulse, &100_i128, &5_100_i128, &20_u32);
+
+        let proposer = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).expect("Proposal not found");
+
+        assert_eq!(proposal.start_ledger, 5);
+        assert_eq!(proposal.snapshot_ledger, 0);
     }
 }
