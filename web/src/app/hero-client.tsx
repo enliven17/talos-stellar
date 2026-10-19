@@ -37,8 +37,21 @@ export function HeroClient() {
     let frame = 0;
     let animId: number;
 
+    // Canvas cannot use CSS variables directly, so the page background is read
+    // from the active theme. It is refreshed twice a second rather than every
+    // frame, which is quick enough to follow the theme toggle.
+    let background = "#FCF8F8";
+    function readBackground() {
+      const value = getComputedStyle(document.documentElement)
+        .getPropertyValue("--background")
+        .trim();
+      if (value) background = value;
+    }
+    readBackground();
+
     function draw() {
-      ctx!.fillStyle = "#FCF8F8";
+      if (frame % 30 === 0) readBackground();
+      ctx!.fillStyle = background;
       ctx!.fillRect(0, 0, W, H);
       ctx!.font = `${fontSize}px monospace`;
 

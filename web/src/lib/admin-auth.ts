@@ -35,7 +35,9 @@ export function verifyAdminKey(
   }
 
   const token = authHeader.slice(7);
-  if (token.length !== expected.length || !timingSafeEqual(Buffer.from(token), Buffer.from(expected))) {
+  const tokenBuf = Buffer.from(token);
+  const expectedBuf = Buffer.from(expected);
+  if (tokenBuf.byteLength !== expectedBuf.byteLength || !timingSafeEqual(tokenBuf, expectedBuf)) {
     return { ok: false, response: Response.json({ error: "Invalid admin API key" }, { status: 403 }) };
   }
 
@@ -61,7 +63,9 @@ export function verifyInternalSecret(
   }
 
   const token = request.headers.get(headerName) ?? "";
-  if (token.length !== expected.length || !timingSafeEqual(Buffer.from(token), Buffer.from(expected))) {
+  const tokenBuf = Buffer.from(token);
+  const expectedBuf = Buffer.from(expected);
+  if (tokenBuf.byteLength !== expectedBuf.byteLength || !timingSafeEqual(tokenBuf, expectedBuf)) {
     return { ok: false, response: Response.json({ error: "Invalid or missing secret" }, { status: 403 }) };
   }
 

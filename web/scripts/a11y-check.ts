@@ -4,6 +4,7 @@ import { renderToString } from 'react-dom/server';
 import { AgentAvatar } from '../src/components/agent-avatar';
 import { Header } from '../src/components/header';
 import { SplashScreen } from '../src/components/splash-screen';
+import { ThemeToggle } from '../src/components/theme-toggle';
 import { FinancialProjectionChart } from '../src/components/financial-projection-chart';
 
 // Initialize JSDOM and globals BEFORE importing axe-core
@@ -82,15 +83,22 @@ async function main() {
     { name: "AgentAvatar", el: React.createElement(AgentAvatar, { name: "TestAgent" }) },
     { name: "Header", el: React.createElement(Header) },
     { name: "SplashScreen", el: React.createElement(SplashScreen) },
+    { name: "ThemeToggle", el: React.createElement(ThemeToggle) },
     { name: "FinancialProjectionChart", el: React.createElement(FinancialProjectionChart, { talosId: "123" }) }
   ];
 
-  for (const comp of components) {
-    console.log(`      Testing ${comp.name}...`);
-    if (!await runCheck(comp.el, false)) {
-      success = false;
+  // Every component is checked under both colour schemes. The scheme is the
+  // same `data-theme` attribute the stylesheet and the theme toggle use.
+  for (const scheme of ["light", "dark"] as const) {
+    document.documentElement.setAttribute("data-theme", scheme);
+    for (const comp of components) {
+      console.log(`      Testing ${comp.name} (${scheme} scheme)...`);
+      if (!await runCheck(comp.el, false)) {
+        success = false;
+      }
     }
   }
+  document.documentElement.removeAttribute("data-theme");
   
   console.log("[2/2] Running negative/boundary testing (inaccessible component)...");
   const badComponent = React.createElement("div", null, 

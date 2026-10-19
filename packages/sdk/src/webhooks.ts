@@ -92,7 +92,6 @@ export interface VerifyWebhookOptions {
    * Passing a value shorter than `toleranceSeconds` throws
    * {@link TalosWebhookError} with code `REPLAY_MISCONFIGURED`.
    */
-  replayWindowSeconds?: number;
   /** Optional store to prevent replay attacks by recording processed event IDs. */
   replayStore?: ReplayStore;
   /** The event ID from the payload, required if replayStore is used. */
@@ -329,7 +328,6 @@ export class TalosWebhook {
       signatureHeader,
       secret,
       toleranceSeconds = 300,
-      replayWindowSeconds,
       replayStore,
       eventId,
       logger,
@@ -362,8 +360,9 @@ export class TalosWebhook {
           "Webhook verification misconfigured: replayWindowSeconds is shorter than toleranceSeconds",
           { replayWindowSeconds, toleranceSeconds },
         );
+        const detail = replayWindowSeconds <= 0 ? "must be a positive integer and " : "";
         throw new TalosWebhookError(
-          `replayWindowSeconds (${replayWindowSeconds}) must be >= toleranceSeconds (${toleranceSeconds}) to prevent replay attacks after dedup entry expiry`,
+          `replayWindowSeconds (${replayWindowSeconds}) ${detail}must be >= toleranceSeconds (${toleranceSeconds}) to prevent replay attacks after dedup entry expiry`,
           "REPLAY_MISCONFIGURED",
         );
       }

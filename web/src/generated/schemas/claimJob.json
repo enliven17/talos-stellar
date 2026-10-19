@@ -1,3 +1,11 @@
 {
-  "type": "string"
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "ttlSeconds": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 3600
+    }
+  }
 }

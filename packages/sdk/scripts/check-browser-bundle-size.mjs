@@ -8,6 +8,8 @@
  *   1. The config parses and passes the shared rules (scripts/bundle-size-lib.mjs).
  *   2. The bundle file exists and is non-empty.
  *   3. Raw and gzip byte sizes are at or below the configured ceilings.
+ *   4. Testing utilities (`@talos-protocol/sdk/testing`) are not bundled into the
+ *      browser bundle — they must not leak into production bundles.
  *
  * gzip is measured with Node's built-in zlib, so no external tools are needed.
  *
@@ -35,6 +37,27 @@ const gzip = promisify(gzipCallback);
 const here = dirname(fileURLToPath(import.meta.url));
 const SDK_ROOT = resolve(here, "..");
 const CONFIG_PATH = join(SDK_ROOT, "bundle-size.config.json");
+
+/**
+ * Markers that must not appear in the browser bundle. The testing subpath is
+ * developer-only; if any of these leak into the bundle, consumers would ship
+ * mocking helpers to production.
+ */
+const TESTING_BANNED_MARKERS = [
+  // Public subpath identifier.
+  "@talos-protocol/sdk/testing",
+  // Source module path fragments that would only appear if testing code was
+  // bundled.
+  "src/testing/",
+  "/testing/index",
+  // Exported factory names from the testing subpath.
+  "createMockFetch",
+  // Preset builders exported from the testing subpath.
+  "createX402ChallengeResponse",
+  "createJobLifecycleResponses",
+  "createPaginatedResponse",
+  "createErrorEnvelope",
+];
 
 function log(message) {
   console.log(`[check:bundle-size] ${message}`);
@@ -80,6 +103,21 @@ function reportViolation(violation, allowOverBudget) {
   }
 }
 
+/**
+ * Scan the built browser bundle for testing-utility markers. Returns the
+ * markers that were found so the caller can report them as violations.
+ */
+function findTestingLeaks(source) {
+  const text = source.toString("utf8");
+  const leaks = [];
+  for (const marker of TESTING_BANNED_MARKERS) {
+    if (text.includes(marker)) {
+      leaks.push(marker);
+    }
+  }
+  return leaks;
+}
+
 async function main() {
   const allowOverBudget = parseAllowOverBudget(process.argv.slice(2));
 
@@ -118,6 +156,17 @@ async function main() {
   for (const violation of violations) {
     reportViolation(violation, allowOverBudget);
   }
+
+  // Testing utilities must never be bundled into the browser bundle. This is
+  // always a hard failure — no tolerance flag applies.
+  const leaks = findTestingLeaks(source);
+  if (leaks.length > 0) {
+    fail(
+      `browser bundle includes testing utilities (${leaks.join(", ")}) — the ` +
+        `@talos-protocol/sdk/testing subpath must be excluded from main and browser bundles`,
+    );
+  }
+  pass("testing utilities are excluded from the browser bundle");
 
   if (!ok) {
     const withinTolerance =

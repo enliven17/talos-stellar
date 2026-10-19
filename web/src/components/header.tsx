@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useStellarWallet } from "./providers";
+import { ThemeToggle } from "./theme-toggle";
 
 const NAV_ITEMS = [
   { href: "/agents", label: "Agents", requiresWallet: false },
@@ -11,6 +12,7 @@ const NAV_ITEMS = [
   { href: "/activity", label: "Activity", requiresWallet: false },
   { href: "/proposals", label: "Proposals", requiresWallet: false },
   { href: "/playbooks", label: "Playbooks", requiresWallet: false },
+  { href: "/webhooks", label: "Webhooks", requiresWallet: false },
   { href: "/leaderboard", label: "Leaderboard", requiresWallet: false },
   { href: "/docs", label: "Docs", requiresWallet: false, highlight: true },
 ];
@@ -65,6 +67,7 @@ export function Header() {
 
         {/* Right: desktop actions + mobile hamburger */}
         <div className="flex items-center gap-2 sm:gap-3">
+          <ThemeToggle />
           {/* Desktop only */}
           {isConnected && (
             <Link
