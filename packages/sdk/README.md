@@ -53,6 +53,29 @@ under `scripts/` keep them in sync. Because `import` precedes `browser` in the
 map, condition-order-sensitive resolvers select the ESM build; the check below
 warns about that ordering so the intent stays visible.
 
+### Server-only subpaths
+
+The root barrel re-exports `client.ts`, which imports `@stellar/stellar-sdk`.
+A handler that only verifies webhooks or decodes the event stream does not need
+that, so three subpaths are published for it:
+
+| Subpath | ESM | CJS | Types |
+| --- | --- | --- | --- |
+| `@talos-protocol/sdk/webhooks` | `dist/esm/webhooks.js` | `dist/cjs/webhooks.cjs` | `dist/esm/webhooks.d.ts` |
+| `@talos-protocol/sdk/events` | `dist/esm/events.js` | `dist/cjs/events.cjs` | `dist/esm/events.d.ts` |
+| `@talos-protocol/sdk/errors` | `dist/esm/errors.js` | `dist/cjs/errors.cjs` | `dist/esm/errors.d.ts` |
+
+```ts
+import { verifyWebhook } from "@talos-protocol/sdk/webhooks";
+```
+
+None of these modules reaches `@stellar/stellar-sdk` — directly or
+transitively — so bundling one for an edge or serverless target keeps the
+Stellar SDK out of the artifact (about 18 KB for `webhooks` against roughly
+2 MB for the client). `tests/subpath-exports.test.ts` asserts that with an
+esbuild metafile, and `npm run compat:edge` loads each published subpath
+bundle into a sandbox with no Node globals.
+
 ### Verifying the export map
 
 ```bash

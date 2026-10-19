@@ -11,6 +11,21 @@
       "require": "./dist/cjs/index.cjs",
       "types": "./dist/esm/index.d.ts",
       "browser": "./dist/browser/sdk.bundle.js"
+    },
+    "./webhooks": {
+      "types": "./dist/esm/webhooks.d.ts",
+      "import": "./dist/esm/webhooks.js",
+      "require": "./dist/cjs/webhooks.cjs"
+    },
+    "./events": {
+      "types": "./dist/esm/events.d.ts",
+      "import": "./dist/esm/events.js",
+      "require": "./dist/cjs/events.cjs"
+    },
+    "./errors": {
+      "types": "./dist/esm/errors.d.ts",
+      "import": "./dist/esm/errors.js",
+      "require": "./dist/cjs/errors.cjs"
     }
   },
   "bin": {

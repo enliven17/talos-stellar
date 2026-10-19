@@ -4,7 +4,10 @@
  * These tests run without a build. They assert that `package.json` wires up
  * the CJS (`require`) and ESM (`import`) entry points correctly, that the
  * `types` and `browser` conditions stay coherent, and that every target is
- * actually included in the published tarball via the `files` allow-list.
+ * actually included in the published tarball via the `files` allow-list — for
+ * the root barrel and for each server-only subpath (`./webhooks`, `./events`,
+ * `./errors`). That the subpaths really stay free of the Stellar SDK is proved
+ * separately in `tests/subpath-exports.test.ts`.
  *
  * The runtime half of the same contract — resolving through Node's real
  * exports map and comparing the two module surfaces — lives in
@@ -19,6 +22,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   REQUIRED_CONDITIONS,
+  REQUIRED_SUBPATHS,
+  ROOT_SUBPATH,
   isTargetCoveredByFiles,
   validateExportMap,
 } from "../scripts/export-map-lib.mjs";
@@ -275,6 +280,117 @@ describe("Export map — boundary and optional conditions", () => {
     expect(Array.isArray(result.warnings)).toBe(true);
     expect(Array.isArray(result.targets)).toBe(true);
     expect(typeof result.ok).toBe("boolean");
+  });
+});
+
+describe("Export map — subpath entries", () => {
+  const rootSpec = () => (basePackage().exports as Record<string, unknown>)[ROOT_SUBPATH];
+
+  /** A manifest whose root is intact and which declares one extra subpath. */
+  function withSubpath(subpath: string, spec: unknown) {
+    return basePackage({ exports: { [ROOT_SUBPATH]: rootSpec(), [subpath]: spec } });
+  }
+
+  const shippedExports = shippedPackage.exports as Record<string, unknown>;
+  const shippedSubpaths = Object.keys(shippedExports);
+  const shippedResult = validateExportMap(shippedPackage);
+
+  it("declares every required server-only subpath", () => {
+    for (const subpath of REQUIRED_SUBPATHS) {
+      expect(shippedSubpaths).toContain(subpath);
+    }
+  });
+
+  it("validates one entry per declared subpath, root first", () => {
+    expect(shippedResult.subpaths.map((entry) => entry.subpath)).toEqual(shippedSubpaths);
+    expect(shippedResult.targets).toEqual(shippedResult.subpaths[0].targets);
+  });
+
+  it("publishes each subpath as its own types, ESM and CJS artifact", () => {
+    for (const subpath of REQUIRED_SUBPATHS) {
+      const entry = shippedResult.subpaths.find((candidate) => candidate.subpath === subpath);
+      expect(entry, `${subpath} is missing from the export map`).toBeDefined();
+      expect(entry?.targets.map((target) => target.condition)).toEqual([
+        "types",
+        "import",
+        "require",
+      ]);
+      expect(entry?.targets[0].target.endsWith(".d.ts")).toBe(true);
+    }
+  });
+
+  it("reports no condition-ordering problem on the subpaths", () => {
+    const warnings = shippedResult.warnings.join("\n");
+    for (const subpath of REQUIRED_SUBPATHS) {
+      expect(warnings).not.toContain(JSON.stringify(subpath));
+    }
+  });
+
+  it("rejects a subpath written as a string shorthand", () => {
+    const result = validateExportMap(withSubpath("./webhooks", "./dist/esm/webhooks.js"));
+    expectError(result, 'exports["./webhooks"] must be a conditional object');
+  });
+
+  it("rejects a subpath whose ESM and CJS targets collide", () => {
+    const result = validateExportMap(
+      withSubpath("./events", {
+        types: "./dist/esm/events.d.ts",
+        import: "./dist/esm/events.js",
+        require: "./dist/esm/events.js",
+      }),
+    );
+    expectError(
+      result,
+      'exports["./events"] must resolve "import" (ESM) and "require" (CJS) to different',
+    );
+  });
+
+  it("rejects a subpath target that escapes the package root", () => {
+    const result = validateExportMap(
+      withSubpath("./errors", {
+        types: "./dist/esm/errors.d.ts",
+        import: "../outside/errors.js",
+        require: "./dist/cjs/errors.cjs",
+      }),
+    );
+    expectError(result, 'exports["./errors"].import must not escape the package root');
+  });
+
+  it("rejects a subpath target excluded by the files allow-list", () => {
+    const result = validateExportMap(
+      basePackage({
+        files: ["dist/esm"],
+        exports: {
+          [ROOT_SUBPATH]: rootSpec(),
+          "./webhooks": {
+            types: "./dist/esm/webhooks.d.ts",
+            import: "./dist/esm/webhooks.js",
+            require: "./dist/cjs/webhooks.cjs",
+          },
+        },
+      }),
+    );
+    expectError(
+      result,
+      'export target "./dist/cjs/webhooks.cjs" is not covered by the published',
+    );
+  });
+
+  it("warns instead of failing on an unrecognised subpath condition", () => {
+    const result = validateExportMap(
+      withSubpath("./webhooks", {
+        types: "./dist/esm/webhooks.d.ts",
+        import: "./dist/esm/webhooks.js",
+        require: "./dist/cjs/webhooks.cjs",
+        worker: "./dist/esm/webhooks.js",
+      }),
+    );
+    expect(result.ok).toBe(true);
+    expect(result.warnings.join("\n")).toContain('unrecognised export condition "worker"');
+  });
+
+  it("keeps the rules per entry, so a root-only manifest still validates", () => {
+    expect(validateExportMap(basePackage()).ok).toBe(true);
   });
 });
 

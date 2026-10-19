@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 from talos_agent.db import normalize_playbook_name
 from talos_agent.observability import log
-from talos_agent.payments import USDC_TESTNET_ISSUER
+from talos_agent.payments import (
+    USDC_DECIMALS,
+    USDC_TESTNET_ISSUER,
+    USDC_UNIT_SCALE,
+)
 from talos_agent.payments.x402_signer import X402Signer
 from talos_agent.commerce_quote import (
     DEFAULT_X402_CLOCK_SKEW_POLICY,
@@ -45,17 +50,32 @@ ALL_CATEGORIES = [
 ]
 
 
+# Non-negative decimal with at most USDC_DECIMALS fractional digits, e.g.
+# "10", "1.05", "0.000001". Rejects signs, exponents, whitespace, empty input
+# and over-precise fractions rather than silently normalising them.
+_PRICE_PATTERN = re.compile(rf"\A\d+(?:\.\d{{1,{USDC_DECIMALS}}})?\Z")
+
+
 def price_to_usdc_units(price_str: str) -> int:
-    """Convert a decimal price string to USDC smallest units (6 decimals).
+    """Convert a decimal price string to USDC smallest units (USDC_DECIMALS decimals).
 
     Uses string-based arithmetic to avoid IEEE 754 floating-point rounding
     errors (e.g. ``1.05 * 1_000_000`` → ``1049999`` in float math).
+
+    Raises:
+        ValueError: if the price is not a non-negative decimal with at most
+            ``USDC_DECIMALS`` fractional digits. Truncating or mis-parsing a
+            quote would sign a payment for the wrong amount, so malformed
+            input fails loudly instead.
     """
-    parts = str(price_str).split(".")
-    whole = parts[0]
-    frac = parts[1] if len(parts) > 1 else ""
-    frac = frac[:6].ljust(6, "0")  # Pad/truncate to exactly 6 decimal places
-    return int(whole + frac)
+    price = str(price_str)
+    if not _PRICE_PATTERN.match(price):
+        raise ValueError(
+            f"Invalid price {price!r}: expected a non-negative decimal with at "
+            f"most {USDC_DECIMALS} fractional digits"
+        )
+    whole, _, frac = price.partition(".")
+    return int(whole) * USDC_UNIT_SCALE + int(frac.ljust(USDC_DECIMALS, "0"))
 
 
 def _get_signer() -> X402Signer:
@@ -178,8 +198,15 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
     signer = _get_signer()
     await signer.initialize()
 
-    # Convert price to USDC smallest unit (6 decimals) — string-based to avoid float rounding
-    amount_units = price_to_usdc_units(str(price))
+    # Convert price to USDC smallest unit (6 decimals) — string-based to avoid float rounding.
+    # A malformed quote fails here rather than being signed at a silently truncated amount.
+    try:
+        amount_units = price_to_usdc_units(str(price))
+    except ValueError:
+        return {
+            "error": f"Commerce quote price is malformed: {price}",
+            "code": "INVALID_QUOTE",
+        }
 
     sign_result = await signer.sign_payment(
         payee=payee,
