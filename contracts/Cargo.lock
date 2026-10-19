@@ -1536,6 +1536,8 @@ version = "0.1.0"
 dependencies = [
  "pause-control",
  "proptest",
+ "serde",
+ "serde_json",
  "soroban-sdk",
  "talos-registry",
  "ttl-manager",

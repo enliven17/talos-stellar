@@ -434,7 +434,7 @@ pub fn check_registry_compatible(
 }
 
 // ── Validation ──────────────────────────────────────────────────────
-fn validate_name(name: &String) -> bool {
+pub(crate) fn validate_name(name: &String) -> bool {
     let len = name.len();
     if len < 3 || len > 32 {
         return false;
@@ -1646,6 +1646,7 @@ mod property_tests {
         Address, Env, IntoVal,
     };
     use std::string::String as StdString;
+    use soroban_sdk::TryFromVal;
 
     fn setup() -> (
         Env,
@@ -2004,6 +2005,41 @@ mod tests {
 
     fn s(env: &Env, value: &str) -> String {
         String::from_str(env, value)
+    }
+
+    #[test]
+    fn shared_validation_vectors() {
+        let vectors_json = include_str!("../../fixtures/name-validation-vectors.json");
+        let vectors: serde_json::Value = serde_json::from_str(vectors_json).expect("Invalid JSON fixture");
+
+        let valid_names = vectors["valid_names"].as_array().expect("valid_names must be array");
+        for entry in valid_names {
+            let name = entry["name"].as_str().expect("name must be string");
+            let result = validate_name(&String::from_str(&Env::default(), name));
+            assert!(result, "valid name '{}' should pass validation", name);
+        }
+
+        let invalid_names = vectors["invalid_names"].as_array().expect("invalid_names must be array");
+        for entry in invalid_names {
+            let name = entry["name"].as_str().expect("name must be string");
+            let result = validate_name(&String::from_str(&Env::default(), name));
+            assert!(!result, "invalid name '{}' should fail validation (reason: {})", name, entry["reason"].as_str().unwrap_or("unknown"));
+        }
+    }
+
+    #[test]
+    fn shared_canonicalization_vectors() {
+        let env = Env::default();
+        let vectors_json = include_str!("../../fixtures/name-validation-vectors.json");
+        let vectors: serde_json::Value = serde_json::from_str(vectors_json).expect("Invalid JSON fixture");
+
+        let canonicalization_vectors = vectors["canonicalization_vectors"].as_array().expect("canonicalization_vectors must be array");
+        for entry in canonicalization_vectors {
+            let input = entry["input"].as_str().expect("input must be string");
+            let expected = entry["canonicalized"].as_str().expect("canonicalized must be string");
+            let result = canonicalize_name(&env, &String::from_str(&env, input));
+            assert_eq!(result, String::from_str(&env, expected), "canonicalization mismatch for '{}': expected '{}', got '{}'", input, expected, result);
+        }
     }
 
     fn patron(env: &Env, creator: &Address) -> Patron {
@@ -2611,7 +2647,10 @@ mod tests {
     #[test]
     fn invalid_name_rejected() {
         let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
-        let invalid_name = s(&env, "ab");
+        let vectors_json = include_str!("../../fixtures/name-validation-vectors.json");
+        let vectors: serde_json::Value = serde_json::from_str(vectors_json).expect("Invalid JSON fixture");
+
+        let invalid_name = s(&env, vectors["invalid_names"][0]["name"].as_str().unwrap());
         let owner = Address::generate(&env);
 
         let result = client
@@ -2634,7 +2673,10 @@ mod tests {
         let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
         let owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
-        let valid_name = s(&env, "alpha-1");
+        let vectors_json = include_str!("../../fixtures/name-validation-vectors.json");
+        let vectors: serde_json::Value = serde_json::from_str(vectors_json).expect("Invalid JSON fixture");
+
+        let valid_name = s(&env, vectors["valid_names"][0]["name"].as_str().unwrap());
         let talos_id = create_talos_with_auth(
             &env,
             &registry_client,
@@ -2662,14 +2704,14 @@ mod tests {
     fn rejects_invalid_name_patterns() {
         let (env, _registry_contract, contract_id, _admin, _registry_client, client) = setup();
         let owner = Address::generate(&env);
-        let invalid_names = [
-            s(&env, "Alpha"),
-            s(&env, "bad--name"),
-            s(&env, "-bad"),
-            s(&env, "bad-"),
-        ];
+        let vectors_json = include_str!("../../fixtures/name-validation-vectors.json");
+        let vectors: serde_json::Value = serde_json::from_str(vectors_json).expect("Invalid JSON fixture");
 
-        for invalid_name in invalid_names {
+        let invalid_names = vectors["invalid_names"].as_array().unwrap();
+        let test_names = &invalid_names[1..5]; // Test a few specific patterns
+
+        for entry in test_names {
+            let invalid_name = s(&env, entry["name"].as_str().unwrap());
             let result = client
                 .mock_auths(&[MockAuth {
                     address: &owner,
