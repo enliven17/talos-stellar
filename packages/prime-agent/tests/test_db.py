@@ -78,6 +78,18 @@ class TestCommerceLifecycle:
         assert len(rows) == 1
         assert rows[0]["talos_id"] == "c1"
 
+    def test_count_pending_commerce_jobs_empty(self, mock_db: LocalDB):
+        assert mock_db.count_pending_commerce_jobs() == 0
+
+    def test_count_pending_commerce_jobs_mixed_statuses(self, mock_db: LocalDB):
+        mock_db.add_commerce_job("job-1", "client-1", "research")
+        mock_db.add_commerce_job("job-2", "client-2", "analysis")
+        mock_db.add_commerce_job("job-3", "client-3", "summary")
+        mock_db.update_commerce_status("job-2", "completed")
+        mock_db.update_commerce_status("job-3", "failed")
+
+        assert mock_db.count_pending_commerce_jobs() == 1
+
 
 class TestPlaybookLookup:
     def test_find_playbook_by_name_returns_exact_match(self, mock_db: LocalDB):

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from rich.console import Console
 
 from talos_agent.agent.loop import get_openai_client
+from talos_agent.tools import context as _context
 from talos_agent.tools.registry import tool
 
 if TYPE_CHECKING:
@@ -21,13 +22,18 @@ _db: LocalDB = None  # type: ignore[assignment]
 _settings: Settings = None  # type: ignore[assignment]
 
 
+def _deps():
+    """This agent's dependencies: the bound ToolContext, else this module's globals."""
+    return _context.resolve(globals())
+
+
 @tool(
     "measure_recent_posts",
     "Measure engagement for recent posts that haven't been measured yet. "
     "Call check_post_performance for each, then store results. Returns list of unmeasured posts.",
 )
 async def measure_recent_posts() -> dict:
-    unmeasured = _db.get_unmeasured_content(10)
+    unmeasured = _deps().db.get_unmeasured_content(10)
     if not unmeasured:
         return {"status": "all_measured", "count": 0}
     return {
@@ -62,7 +68,7 @@ async def record_performance(
     impressions: int = 0,
     followers_at: int = 0,
 ) -> dict:
-    _db.record_performance(
+    _deps().db.record_performance(
         content_id=content_id,
         channel=channel,
         likes=likes,
@@ -81,9 +87,9 @@ async def record_performance(
     "Call this after measuring posts to learn from the data.",
 )
 async def run_performance_review() -> dict:
-    top = _db.get_top_performing_content(5)
-    summary = _db.get_performance_summary(7)
-    recent = _db.get_content_with_performance(20)
+    top = _deps().db.get_top_performing_content(5)
+    summary = _deps().db.get_performance_summary(7)
+    recent = _deps().db.get_content_with_performance(20)
 
     if not recent or summary.get("total_posts", 0) == 0:
         return {"status": "insufficient_data", "message": "Not enough performance data yet. Measure more posts first."}
@@ -105,9 +111,9 @@ async def run_performance_review() -> dict:
         ],
     }
 
-    client = get_openai_client(_settings.llm_api_key, _settings.llm_base_url)
+    client = get_openai_client(_deps().settings.llm_api_key, _deps().settings.llm_base_url)
     response = await client.chat.completions.create(
-        model=_settings.llm_model,
+        model=_deps().settings.llm_model,
         messages=[
             {
                 "role": "system",
@@ -138,7 +144,7 @@ async def run_performance_review() -> dict:
     # Save learnings to DB
     saved_learnings = []
     for learning in analysis.get("learnings", []):
-        lid = _db.save_learning(
+        lid = _deps().db.save_learning(
             category=learning.get("category", "general"),
             insight=learning.get("insight", ""),
             evidence=learning.get("evidence", ""),
@@ -149,7 +155,7 @@ async def run_performance_review() -> dict:
 
     # Save audience insights
     for seg in analysis.get("audience_segments", []):
-        _db.upsert_audience_insight(
+        _deps().db.upsert_audience_insight(
             segment=seg.get("segment", "unknown"),
             description=seg.get("description", ""),
             engagement_score=seg.get("engagement_score", 0.0),
@@ -168,13 +174,13 @@ async def run_performance_review() -> dict:
 
 @tool("get_learnings", "Get active strategy learnings to inform content creation")
 async def get_learnings(limit: int = 10) -> dict:
-    learnings = _db.get_active_learnings(limit)
+    learnings = _deps().db.get_active_learnings(limit)
     return {"learnings": learnings, "count": len(learnings)}
 
 
 @tool("get_audience_insights", "Get audience segment insights to inform targeting")
 async def get_audience_insights() -> dict:
-    insights = _db.get_audience_insights(5)
+    insights = _deps().db.get_audience_insights(5)
     return {"segments": insights, "count": len(insights)}
 
 
@@ -183,10 +189,10 @@ async def get_audience_insights() -> dict:
     "Get a full performance dashboard: weekly summary, top posts, learnings, and audience segments.",
 )
 async def get_performance_dashboard() -> dict:
-    summary = _db.get_performance_summary(7)
-    top = _db.get_top_performing_content(3)
-    learnings = _db.get_active_learnings(5)
-    audience = _db.get_audience_insights(3)
+    summary = _deps().db.get_performance_summary(7)
+    top = _deps().db.get_top_performing_content(3)
+    learnings = _deps().db.get_active_learnings(5)
+    audience = _deps().db.get_audience_insights(3)
 
     return {
         "weekly_summary": summary,
@@ -202,17 +208,17 @@ async def get_performance_dashboard() -> dict:
     "Creates a new playbook from data-driven insights rather than buying one externally.",
 )
 async def evolve_strategy() -> dict:
-    learnings = _db.get_active_learnings(15)
-    top = _db.get_top_performing_content(10)
-    audience = _db.get_audience_insights(5)
-    summary = _db.get_performance_summary(14)
+    learnings = _deps().db.get_active_learnings(15)
+    top = _deps().db.get_top_performing_content(10)
+    audience = _deps().db.get_audience_insights(5)
+    summary = _deps().db.get_performance_summary(14)
 
     if not learnings:
         return {"status": "no_learnings", "message": "Run performance reviews first to accumulate learnings."}
 
-    client = get_openai_client(_settings.llm_api_key, _settings.llm_base_url)
+    client = get_openai_client(_deps().settings.llm_api_key, _deps().settings.llm_base_url)
     response = await client.chat.completions.create(
-        model=_settings.llm_model,
+        model=_deps().settings.llm_model,
         messages=[
             {
                 "role": "system",
@@ -258,19 +264,19 @@ async def evolve_strategy() -> dict:
         return {"status": "failed", "error": "Could not generate playbook"}
 
     name = playbook_data.get("name", "Auto-Evolved Strategy")
-    _db.save_playbook(name, playbook_data, source_talos="self")
+    _deps().db.save_playbook(name, playbook_data, source_talos="self")
 
     # Auto-apply the new playbook
-    row = _db._conn.execute(
+    row = _deps().db._conn.execute(
         "SELECT id FROM playbooks WHERE name = ? ORDER BY purchased_at DESC LIMIT 1",
         (name,),
     ).fetchone()
     if row:
-        _db.apply_playbook(row["id"])
+        _deps().db.apply_playbook(row["id"])
 
     # Mark learnings as applied
     for learning in learnings:
-        _db.mark_learning_applied(learning["id"])
+        _deps().db.mark_learning_applied(learning["id"])
 
     return {
         "status": "evolved",
@@ -287,7 +293,7 @@ async def evolve_strategy() -> dict:
     "Returns eviction counts only — never insight text.",
 )
 async def evict_expired_learnings() -> dict:
-    result = _db.evict_expired_learnings()
+    result = _deps().db.evict_expired_learnings()
     return {
         "status": "ok",
         "evicted": result["evicted"],

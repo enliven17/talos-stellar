@@ -24,7 +24,7 @@
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { zodToJsonSchema } from "zod-to-json-schema";
+import { z } from "zod/v4";
 
 // ── Import all Zod schemas ────────────────────────────────────────────────────
 
@@ -182,17 +182,11 @@ mkdirSync(OUT_DIR, { recursive: true });
 const manifest: Array<{ name: string; file: string; routes: readonly string[] }> = [];
 
 for (const entry of schemas) {
-  const jsonSchema = zodToJsonSchema(entry.schema, {
-    name: entry.name,
-    $refStrategy: "none", // inline all refs — simpler for the runtime validator
-    target: "jsonSchema7",
+  const extracted = z.toJSONSchema(entry.schema, {
+    target: "draft-07",
+    io: "input",
+    unrepresentable: "any",
   });
-
-  // zodToJsonSchema wraps in { definitions: { <name>: ... } } when name is given
-  // Extract the actual schema object
-  const extracted =
-    (jsonSchema as { definitions?: Record<string, unknown> }).definitions?.[entry.name] ??
-    jsonSchema;
 
   const fileName = `${entry.name}.json`;
   const filePath = join(OUT_DIR, fileName);
