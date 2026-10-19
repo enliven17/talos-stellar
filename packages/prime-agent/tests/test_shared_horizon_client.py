@@ -168,7 +168,6 @@ async def test_repeated_balance_calls_reuse_single_client():
     await kit.initialize()
 
     client_ids: set[int] = set()
-    original_get = httpx.AsyncClient.get
 
     async def patched_get(self_: httpx.AsyncClient, url: str, **kwargs):
         client_ids.add(id(self_))

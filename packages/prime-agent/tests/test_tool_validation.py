@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,8 +9,6 @@ import pytest
 from talos_agent.tools.registry import (
     CODE_INVALID_ARGUMENTS,
     ToolRegistry,
-    ValidationError,
-    ValidationResult,
     validate_tool_arguments,
 )
 

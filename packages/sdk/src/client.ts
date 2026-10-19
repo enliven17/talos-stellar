@@ -45,7 +45,6 @@ import {
   parseRetryAfter as parseRetryAfterHeader,
   redactEventPath,
   diagnoseBuyerProof,
-  TalosTransportError,
 } from "./errors.js";
 import {
   generateIdempotencyKey,
@@ -1024,17 +1023,6 @@ export class TalosClient {
     return this.request("/api/talos", {
       method: "POST",
       body: JSON.stringify(params),
-    });
-  }
-
-  async checkNameAvailability(
-    name: string,
-    options?: ReadOptions,
-  ): Promise<{ available: boolean; reason?: string }> {
-    return this.request("/api/talos/check-name", {
-      params: { name },
-      signal: options?.signal,
-      timeoutMs: options?.timeoutMs,
     });
   }
 

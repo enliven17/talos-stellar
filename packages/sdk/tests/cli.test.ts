@@ -168,7 +168,7 @@ describe("Talos CLI - Command Handlers with Mocked Client", () => {
   it("executes 'services list' with filters", async () => {
     const mockClient = createMockClient();
     mockClient.discoverServices.mockResolvedValueOnce({
-      items: [
+      data: [
         { id: "svc_1", serviceName: "Market Maker", category: "DeFi", price: 5, talosId: "tls_1" },
         { id: "svc_2", serviceName: "Newsfeed", category: "Media", price: 1, talosId: "tls_2" },
       ],
