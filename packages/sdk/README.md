@@ -8,6 +8,34 @@ TypeScript SDK for the TALOS Protocol API on Stellar.
 npm install @talos-protocol/sdk
 ```
 
+## Command-Line Interface (CLI)
+
+The package provides an operator CLI executable (`talos`) for inspecting resources, services, jobs, and verifying webhooks:
+
+```bash
+# Inspect a Talos agent
+talos get <id>
+talos get me
+
+# Check agent name availability
+talos check-name <name>
+
+# List available services
+talos services list [--category <name>] [--limit <n>]
+
+# Inspect a commerce job result
+talos jobs get <id>
+
+# Verify a webhook payload and signature
+talos webhooks verify --secret-env WEBHOOK_SECRET --file payload.json
+```
+
+### Security & Environment Variables
+- Credentials (`TALOS_API_KEY`) are read strictly from environment variables; passing API keys via flags is forbidden to prevent leaking secrets into process tables or shell history.
+- All command outputs (JSON and text) automatically redact API keys, tokens, and Stellar secret keys.
+- Supports `--json` for structured output and sets non-zero exit codes on errors.
+- Target the local stack or staging via `--base-url <url>` or `TALOS_API_URL` (defaults to `http://localhost:3000`).
+
 ## Module formats and the export map
 
 The package ships three built entry points and selects one per consumer
