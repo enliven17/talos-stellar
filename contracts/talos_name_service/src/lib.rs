@@ -12,6 +12,9 @@
 mod upgrade_simulation_tests;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod name_validation_proptests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
 extern crate std;
 
 use soroban_sdk::{
@@ -118,6 +121,14 @@ pub const MAX_REVERSE_PAGE_SIZE: u32 = 50;
 /// A sparse registry (many IDs with no name) can exhaust the window before
 /// filling the page; callers should detect `next_start == 0` and stop.
 pub const MAX_REVERSE_SCAN_WINDOW: u32 = 500;
+
+/// Maximum number of Talos IDs visited in a single legacy [`TalosNameService::touch_all_ttl`] invocation.
+///
+/// Bounded to [`ttl_manager::DEFAULT_MAX_BATCH_KEYS`] (200) to ensure administrative TTL maintenance
+/// calls do not exceed the Soroban per-transaction resource budget (CPU instructions and memory limits).
+/// Callers managing larger ID spaces should transition to [`TalosNameService::extend_ttl_batch`] to resume
+/// maintenance across bounded pages.
+pub const MAX_TOUCH_ALL_KEYS: u32 = ttl_manager::DEFAULT_MAX_BATCH_KEYS;
 
 /// A page of reverse-lookup results from [`TalosNameService::names_page`].
 #[contracttype]
@@ -466,32 +477,35 @@ fn validate_name(name: &String) -> bool {
     true
 }
 
-/// Canonicalize a caller-supplied name before validation and storage.
+/// Why a caller-supplied name cannot be canonicalized.
+enum CanonicalizeError {
+    /// More than 64 bytes before trimming.
+    InputTooLong,
+    /// Nothing is left after trimming (empty or all whitespace).
+    Empty,
+    /// More than 32 bytes are left after trimming.
+    TooLongAfterTrim,
+}
+
+/// Canonicalize a caller-supplied name, reporting a name that cannot be
+/// canonicalized as an error instead of panicking.
 ///
 /// Canonicalization rules (applied left-to-right, in order):
 ///   1. **Trim** leading and trailing ASCII whitespace (space U+0020, tab U+0009,
 ///      newline U+000A, carriage-return U+000D).
 ///   2. **Lowercase** any ASCII uppercase letters (A-Z → a-z).
 ///
-/// After canonicalization the result is a valid candidate for `validate_name`.
-/// Callers that pass an already-lowercase, no-whitespace name observe no change.
-///
-/// # Panics
-/// Panics with `"Name cannot be empty after canonicalization"` if the input is
-/// all whitespace or empty — a privacy-safe error with no caller-supplied value.
-///
-/// # no_std compatibility
 /// Operates entirely on a 64-byte stack buffer (max name byte length after
 /// trim is bounded at 32; input is capped at 64 bytes to absorb leading/trailing
-/// whitespace without heap allocation).
-pub(crate) fn canonicalize_name(env: &Env, name: &String) -> String {
+/// whitespace without heap allocation), so it is `no_std` safe.
+fn try_canonicalize_name(env: &Env, name: &String) -> Result<String, CanonicalizeError> {
     let raw_len = name.len() as usize;
     // Allocate a buffer large enough for the raw input plus whitespace slack.
     // Names are bounded at 32 bytes; with up to 16 bytes of surrounding whitespace
     // the raw input is at most 64 bytes before we even look at it.
     const BUF: usize = 64;
     if raw_len > BUF {
-        panic!("Name exceeds maximum input length for canonicalization");
+        return Err(CanonicalizeError::InputTooLong);
     }
     let mut buf = [0u8; BUF];
     name.copy_into_slice(&mut buf[..raw_len]);
@@ -507,20 +521,53 @@ pub(crate) fn canonicalize_name(env: &Env, name: &String) -> String {
     }
 
     if start == end {
-        panic!("Name cannot be empty after canonicalization");
+        return Err(CanonicalizeError::Empty);
     }
 
     // Step 2: lowercase in-place
     let mut out = [0u8; 32];
     let trimmed_len = end - start;
     if trimmed_len > 32 {
-        panic!("Name exceeds maximum byte length after canonicalization");
+        return Err(CanonicalizeError::TooLongAfterTrim);
     }
     for (i, b) in buf[start..end].iter().enumerate() {
         out[i] = b.to_ascii_lowercase();
     }
 
-    String::from_bytes(env, &out[..trimmed_len])
+    Ok(String::from_bytes(env, &out[..trimmed_len]))
+}
+
+/// Canonicalize a caller-supplied name before validation and storage.
+///
+/// Applies the rules of [`try_canonicalize_name`] (trim ASCII whitespace, then
+/// lowercase ASCII `A-Z`). After canonicalization the result is a valid
+/// candidate for `validate_name`. Callers that pass an already-lowercase,
+/// no-whitespace name observe no change.
+///
+/// Used by the entry points that must refuse a malformed name (`register_name`
+/// and `canonicalize`). The read-only lookups (`resolve_name`,
+/// `is_name_available`) call [`try_canonicalize_name`] instead, so a name that
+/// cannot exist is "not found" or "not available" and never a failed call.
+///
+/// # Panics
+/// With a privacy-safe message that carries no caller-supplied value:
+/// - `"Name cannot be empty after canonicalization"` if the input is empty or
+///   all whitespace.
+/// - `"Name exceeds maximum input length for canonicalization"` if the input
+///   is longer than 64 bytes.
+/// - `"Name exceeds maximum byte length after canonicalization"` if more than
+///   32 bytes remain after trimming.
+pub(crate) fn canonicalize_name(env: &Env, name: &String) -> String {
+    match try_canonicalize_name(env, name) {
+        Ok(canonical) => canonical,
+        Err(CanonicalizeError::InputTooLong) => {
+            panic!("Name exceeds maximum input length for canonicalization")
+        }
+        Err(CanonicalizeError::Empty) => panic!("Name cannot be empty after canonicalization"),
+        Err(CanonicalizeError::TooLongAfterTrim) => {
+            panic!("Name exceeds maximum byte length after canonicalization")
+        }
+    }
 }
 
 // ── Contract ────────────────────────────────────────────────────────
@@ -771,8 +818,9 @@ impl TalosNameService {
     ///   2. Lowercase ASCII uppercase letters (A-Z → a-z).
     ///
     /// # Panics
-    /// - `"Name cannot be empty after canonicalization"` — if input is all whitespace.
+    /// - `"Name cannot be empty after canonicalization"` — if input is empty or all whitespace.
     /// - `"Name exceeds maximum input length for canonicalization"` — if input > 64 bytes.
+    /// - `"Name exceeds maximum byte length after canonicalization"` — if more than 32 bytes remain after trimming.
     pub fn canonicalize(e: Env, name: String) -> String {
         canonicalize_name(&e, &name)
     }
@@ -1274,10 +1322,15 @@ impl TalosNameService {
     }
 
     /// Resolve a name to a Talos ID.
-    /// Returns None if the name doesn't exist.
+    /// Returns None if the name doesn't exist, including input that cannot be
+    /// a name at all (empty, all whitespace, or too long).
     pub fn resolve_name(e: Env, name: String) -> Option<u32> {
-        // Canonicalize so "Vega" and "vega" resolve to the same record.
-        let name = canonicalize_name(&e, &name);
+        // Canonicalize so "Vega" and "vega" resolve to the same record. Input
+        // that cannot be canonicalized cannot be registered either, so it
+        // resolves to nothing instead of failing the read.
+        let Ok(name) = try_canonicalize_name(&e, &name) else {
+            return None;
+        };
         e.storage().persistent().get(&DataKey::NameRecord(name))
     }
 
@@ -1358,10 +1411,15 @@ impl TalosNameService {
     }
 
     /// Check if a name is available.
+    /// Returns false for a name that is invalid, including input that cannot be
+    /// canonicalized (empty, all whitespace, or too long).
     pub fn is_name_available(e: Env, name: String) -> bool {
         // Canonicalize before availability check so mixed-case inputs agree
-        // with the stored canonical form.
-        let name = canonicalize_name(&e, &name);
+        // with the stored canonical form. Input that cannot be canonicalized is
+        // not a valid name, so it is not available.
+        let Ok(name) = try_canonicalize_name(&e, &name) else {
+            return false;
+        };
         if !validate_name(&name) {
             return false;
         }
@@ -1409,11 +1467,18 @@ impl TalosNameService {
         }
     }
 
-    /// Batch-touch admin keys plus name records for talos IDs (admin only).
+    /// [Legacy] Batch-touch admin keys plus name records for talos IDs (admin only).
     ///
-    /// The name-record sweep is bounded by the renewal age window; use
-    /// [`TalosNameService::extend_ttl_batch`] to pass explicit bounds and a
-    /// per-call key cap.
+    /// Sweeps name records for talos IDs in `[1, min(max_talos_id + 1, 1 + MAX_TOUCH_ALL_KEYS))`
+    /// using [`ttl_manager::TtlBounds::renewal`]. The iteration count is capped at
+    /// [`MAX_TOUCH_ALL_KEYS`] so that large caller-supplied `max_talos_id` values do not exceed
+    /// the transaction resource budget.
+    ///
+    /// This function is superseded by [`TalosNameService::extend_ttl_batch`], which provides
+    /// bounded paging, explicit limits, and custom age windows so callers can resume maintenance
+    /// across batches without risking budget exhaustion.
+    ///
+    /// Returns the total number of keys touched (administrative keys plus renewed name records).
     ///
     /// # Authorization
     /// Requires the admin to sign.
@@ -1446,11 +1511,20 @@ impl TalosNameService {
             touched += 1;
         }
 
-        let sweep = Self::sweep_name_records(
-            &e,
-            &ttl_manager::TtlBounds::renewal(),
-            1..max_talos_id.saturating_add(1),
+        let bounds = ttl_manager::TtlBounds::new(
+            ttl_manager::RENEWAL_THRESHOLD,
+            u32::MAX,
+            MAX_TOUCH_ALL_KEYS,
         );
+        let range = ttl_manager::bounded_range(
+            1,
+            max_talos_id,
+            &bounds,
+            max_talos_id.saturating_add(1),
+        )
+        .unwrap_or_else(|err| panic!("{}", err.message()));
+
+        let sweep = Self::sweep_name_records(&e, &bounds, range);
         touched += sweep.touched;
 
         ttl_manager::emit_ttl_batch(&e, touched, touched, 0);
@@ -4454,6 +4528,174 @@ mod tests {
             .touch_all_ttl(&10);
         assert_eq!(after, 3);
     }
+
+    /// Regression: `touch_all_ttl` caps iteration count at [`MAX_TOUCH_ALL_KEYS`] so large
+    /// inputs (such as MAX_TOUCH_ALL_KEYS + 1, 1_000_000, and u32::MAX) no longer
+    /// exceed the resource budget.
+    #[test]
+    fn touch_all_ttl_large_input_bounded_by_max_touch_all_keys() {
+        let (env, registry_contract, contract_id, admin, registry_client, client) =
+            setup_at(ttl_manager::RENEWAL_THRESHOLD + 1);
+
+        // Register a name at talos_id = 1
+        register_one_name(
+            &env,
+            &contract_id,
+            &registry_contract,
+            &client,
+            &registry_client,
+        );
+
+        // Set a name at talos_id = 205 (which is strictly above MAX_TOUCH_ALL_KEYS = 200)
+        let second_id = MAX_TOUCH_ALL_KEYS + 5;
+        let second_name = s(&env, "above-cap");
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::TalosName(second_id), &second_name);
+            env.storage()
+                .persistent()
+                .set(&DataKey::NameRecord(second_name.clone()), &second_id);
+        });
+
+        let initial_last_touched_205: u32 = env
+            .as_contract(&contract_id, || {
+                env.storage()
+                    .persistent()
+                    .get(&DataKey::LastTouched(second_id))
+            })
+            .unwrap_or(0);
+
+        // Boundary: exact cap (MAX_TOUCH_ALL_KEYS)
+        let exact = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "touch_all_ttl",
+                    args: (MAX_TOUCH_ALL_KEYS,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .touch_all_ttl(&MAX_TOUCH_ALL_KEYS);
+        // 2 admin keys + 1 registered name record within [1..=200] = 3
+        assert_eq!(exact, 3);
+
+        // Reset LastTouched for talos_id = 1 so it is eligible again without jumping ledger sequence
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().remove(&DataKey::LastTouched(1));
+        });
+
+        // Boundary: MAX_TOUCH_ALL_KEYS + 1 (clamped to MAX_TOUCH_ALL_KEYS = 200, second_id is still not touched)
+        let above_cap = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "touch_all_ttl",
+                    args: (MAX_TOUCH_ALL_KEYS + 1,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .touch_all_ttl(&(MAX_TOUCH_ALL_KEYS + 1));
+        assert_eq!(above_cap, 3);
+
+        // Reset LastTouched for talos_id = 1 so it is eligible again
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().remove(&DataKey::LastTouched(1));
+        });
+
+        // Boundary: large input (1_000_000)
+        let million = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "touch_all_ttl",
+                    args: (1_000_000u32,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .touch_all_ttl(&1_000_000);
+        assert_eq!(million, 3);
+
+        // Reset LastTouched for talos_id = 1 so it is eligible again
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().remove(&DataKey::LastTouched(1));
+        });
+
+        // Boundary: u32::MAX
+        let max_val = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "touch_all_ttl",
+                    args: (u32::MAX,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .touch_all_ttl(&u32::MAX);
+        assert_eq!(max_val, 3);
+
+        // Assert that talos_id > MAX_TOUCH_ALL_KEYS was NEVER visited or touched
+        let final_last_touched_205: u32 = env
+            .as_contract(&contract_id, || {
+                env.storage()
+                    .persistent()
+                    .get(&DataKey::LastTouched(second_id))
+            })
+            .unwrap_or(0);
+        assert_eq!(
+            final_last_touched_205,
+            initial_last_touched_205,
+            "entry beyond MAX_TOUCH_ALL_KEYS must not be touched"
+        );
+    }
+
+    /// Boundary: `touch_all_ttl` handles boundary values correctly (0, 1, small range).
+    #[test]
+    fn touch_all_ttl_boundary_values() {
+        let (env, registry_contract, contract_id, admin, registry_client, client) =
+            setup_at(ttl_manager::RENEWAL_THRESHOLD + 1);
+
+        // 1. max_talos_id = 0 (empty sweep): refreshes only the 2 admin keys.
+        let zero = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "touch_all_ttl",
+                    args: (0u32,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .touch_all_ttl(&0);
+        assert_eq!(zero, 2);
+
+        // Register name at talos_id = 1
+        register_one_name(
+            &env,
+            &contract_id,
+            &registry_contract,
+            &client,
+            &registry_client,
+        );
+
+        // 2. max_talos_id = 1: visits talos_id = 1, refreshes 2 admin keys + 1 record = 3.
+        let one = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "touch_all_ttl",
+                    args: (1u32,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .touch_all_ttl(&1);
+        assert_eq!(one, 3);
+    }
     // ── Name collision & rename rules (Issue #619) ──────────────────
     //
     // `register_name` doubles as a rename: it replaces the caller's current
@@ -5785,6 +6027,9 @@ mod tests {
     const BUDGET_CPU_NAME_OF: u64          =  200_000;
     const BUDGET_MEM_NAME_OF: u64          =   50_000;
 
+    const BUDGET_CPU_TOUCH_ALL_TTL: u64    = 10_000_000;
+    const BUDGET_MEM_TOUCH_ALL_TTL: u64    =  3_500_000;
+
     #[test]
     fn budget_initialize_within_limits() {
         let env = Env::default();
@@ -5953,6 +6198,86 @@ mod tests {
             mem < BUDGET_MEM_REGISTER_NAME,
             "rejected register_name memory {} exceeded ceiling {}",
             mem, BUDGET_MEM_REGISTER_NAME,
+        );
+    }
+
+    /// Budget: verify `touch_all_ttl` with boundary values (0, 1, MAX_TOUCH_ALL_KEYS,
+    /// MAX_TOUCH_ALL_KEYS + 1, 1_000_000, and u32::MAX) stays within the budget ceilings,
+    /// and that large inputs cost virtually the same as MAX_TOUCH_ALL_KEYS (O(1) in max_talos_id).
+    #[test]
+    fn budget_touch_all_ttl_boundary_values() {
+        let (env, registry_contract, contract_id, admin, registry_client, client) =
+            setup_at(ttl_manager::RENEWAL_THRESHOLD + 1);
+        register_one_name(
+            &env,
+            &contract_id,
+            &registry_contract,
+            &client,
+            &registry_client,
+        );
+
+        let boundaries = [
+            0u32,
+            1u32,
+            MAX_TOUCH_ALL_KEYS,
+            MAX_TOUCH_ALL_KEYS + 1,
+            1_000_000u32,
+            u32::MAX,
+        ];
+
+        let mut costs = [(0u64, 0u64); 6];
+
+        for (idx, &boundary) in boundaries.iter().enumerate() {
+            env.budget().reset_default();
+            let _ = client
+                .mock_auths(&[MockAuth {
+                    address: &admin,
+                    invoke: &MockAuthInvoke {
+                        contract: &contract_id,
+                        fn_name: "touch_all_ttl",
+                        args: (boundary,).into_val(&env),
+                        sub_invokes: &[],
+                    },
+                }])
+                .touch_all_ttl(&boundary);
+
+            let cpu = env.budget().cpu_instruction_cost();
+            let mem = env.budget().memory_bytes_cost();
+
+            assert!(
+                cpu < BUDGET_CPU_TOUCH_ALL_TTL,
+                "touch_all_ttl({}) CPU {} exceeded ceiling {}",
+                boundary,
+                cpu,
+                BUDGET_CPU_TOUCH_ALL_TTL,
+            );
+            assert!(
+                mem < BUDGET_MEM_TOUCH_ALL_TTL,
+                "touch_all_ttl({}) memory {} exceeded ceiling {}",
+                boundary,
+                mem,
+                BUDGET_MEM_TOUCH_ALL_TTL,
+            );
+
+            costs[idx] = (cpu, mem);
+        }
+
+        // Verify that u32::MAX (index 5) and 1_000_000 (index 4) cost no more than
+        // MAX_TOUCH_ALL_KEYS + 1 (index 3) plus small overhead, proving O(1) in max_talos_id.
+        let cpu_cap = costs[2].0; // MAX_TOUCH_ALL_KEYS cost
+        let cpu_million = costs[4].0;
+        let cpu_max = costs[5].0;
+        assert!(
+            cpu_million <= cpu_cap + 10_000,
+            "1_000_000 cost ({}) should not exceed cap cost ({}) significantly",
+            cpu_million,
+            cpu_cap
+        );
+        assert!(
+            cpu_max <= cpu_cap + 10_000,
+            "u32::MAX cost ({}) should not exceed cap cost ({}) significantly",
+            cpu_max,
+            cpu_cap
         );
     }
 

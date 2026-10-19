@@ -39,18 +39,45 @@ const mockSelectChain = (result: unknown) => {
   return chain;
 };
 
-function signBody(body: string) {
-  return createHmac("sha256", WEBHOOK_SECRET).update(body).digest("hex");
+function signPayload(timestamp: string | number, body: string) {
+  return createHmac("sha256", WEBHOOK_SECRET).update(`${timestamp}.${body}`).digest("hex");
 }
 
-function buildRequest(body: Record<string, unknown>, signature = signBody(JSON.stringify(body))) {
+function buildRequest(
+  body: Record<string, unknown>,
+  options?: {
+    timestamp?: string | number | null;
+    signature?: string | null;
+  },
+) {
+  const rawBody = JSON.stringify(body);
+  const currentTimestamp = Math.floor(Date.now() / 1000);
+  const timestamp =
+    options && "timestamp" in options ? options.timestamp : currentTimestamp;
+
+  const signature =
+    options && "signature" in options
+      ? options.signature
+      : timestamp !== null && timestamp !== undefined
+        ? signPayload(timestamp, rawBody)
+        : null;
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+
+  if (timestamp !== null && timestamp !== undefined) {
+    headers["X-Signature-Timestamp"] = String(timestamp);
+  }
+
+  if (signature !== null && signature !== undefined) {
+    headers["X-Signature"] = signature;
+  }
+
   return new NextRequest("http://localhost:3000/api/commerce/cross-chain-webhook", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Signature": signature,
-    },
-    body: JSON.stringify(body),
+    headers,
+    body: rawBody,
   });
 }
 
@@ -83,6 +110,84 @@ describe("POST /api/commerce/cross-chain-webhook", () => {
 
     expect(response.status).toBe(401);
     expect(mockDb.select).not.toHaveBeenCalled();
+  });
+
+  it("rejects requests with missing X-Signature-Timestamp header", async () => {
+    const body = { talosId: "agent_1" };
+    const rawBody = JSON.stringify(body);
+    const legacySignature = createHmac("sha256", WEBHOOK_SECRET).update(rawBody).digest("hex");
+
+    const request = new NextRequest("http://localhost:3000/api/commerce/cross-chain-webhook", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Signature": legacySignature,
+      },
+      body: rawBody,
+    });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(401);
+    const resBody = await response.json();
+    expect(resBody.error).toBe("Missing or invalid webhook timestamp");
+    expect(mockDb.select).not.toHaveBeenCalled();
+  });
+
+  it("rejects requests with stale timestamps outside tolerance", async () => {
+    const body = { talosId: "agent_1" };
+    const staleTimestamp = Math.floor(Date.now() / 1000) - 301; // older than 5 minutes (300s)
+    const request = buildRequest(body, { timestamp: staleTimestamp });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(401);
+    const resBody = await response.json();
+    expect(resBody.error).toBe("Webhook timestamp outside tolerance");
+    expect(mockDb.select).not.toHaveBeenCalled();
+  });
+
+  it("rejects requests with future timestamps outside tolerance", async () => {
+    const body = { talosId: "agent_1" };
+    const futureTimestamp = Math.floor(Date.now() / 1000) + 301; // more than 5 minutes in the future
+    const request = buildRequest(body, { timestamp: futureTimestamp });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(401);
+    const resBody = await response.json();
+    expect(resBody.error).toBe("Webhook timestamp outside tolerance");
+    expect(mockDb.select).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid signature even with fresh timestamp", async () => {
+    const body = { talosId: "agent_1" };
+    const now = Math.floor(Date.now() / 1000);
+    const request = buildRequest(body, { timestamp: now, signature: "invalidhex123456" });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(401);
+    const resBody = await response.json();
+    expect(resBody.error).toBe("Invalid webhook signature");
+    expect(mockDb.select).not.toHaveBeenCalled();
+  });
+
+  it("respects custom CROSS_CHAIN_WEBHOOK_TOLERANCE_SECONDS if configured", async () => {
+    process.env.CROSS_CHAIN_WEBHOOK_TOLERANCE_SECONDS = "60";
+    try {
+      const body = { talosId: "agent_1" };
+      const timestamp = Math.floor(Date.now() / 1000) - 70; // outside 60s, inside 300s
+      const request = buildRequest(body, { timestamp });
+
+      const response = await POST(request);
+
+      expect(response.status).toBe(401);
+      const resBody = await response.json();
+      expect(resBody.error).toBe("Webhook timestamp outside tolerance");
+    } finally {
+      delete process.env.CROSS_CHAIN_WEBHOOK_TOLERANCE_SECONDS;
+    }
   });
 
   it("rejects invalid webhook payloads after signature verification", async () => {

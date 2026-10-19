@@ -34,6 +34,9 @@ const windowLike = {};
 windowLike.crypto = crypto;
 windowLike.globalThis = windowLike;
 const globalThisLike = windowLike;
+windowLike.window = windowLike;
+windowLike.self = windowLike;
+windowLike.globalThis = globalThisLike;
 const context = {
   // Mimic a browser's globals. We deliberately do NOT expose Buffer, require,
   // __dirname, etc. — this catches accidental Node-only usage in the SDK's
@@ -43,7 +46,6 @@ const context = {
   window: windowLike,
   self: windowLike,
   globalThis: globalThisLike,
-  self: windowLike,
   TextEncoder,
   TextDecoder,
   btoa,

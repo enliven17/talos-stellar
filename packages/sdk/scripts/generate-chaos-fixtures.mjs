@@ -26,7 +26,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SDK_ROOT = resolve(here, "..");
@@ -42,7 +42,7 @@ if (!existsSync(ESM_ENTRY)) {
 
 let sdk;
 try {
-  sdk = await import(ESM_ENTRY);
+  sdk = await import(pathToFileURL(ESM_ENTRY).href);
 } catch (err) {
   console.error(`Could not import the built ESM entry: ${err?.message ?? err}`);
   process.exit(1);
@@ -70,7 +70,7 @@ function sortKeys(value) {
 const canonical = JSON.stringify(sortKeys(bundle), null, 2) + "\n";
 
 if (isCheck) {
-  const current = existsSync(FIXTURE_PATH) ? readFileSync(FIXTURE_PATH, "utf8") : "";
+  const current = existsSync(FIXTURE_PATH) ? readFileSync(FIXTURE_PATH, "utf8").replace(/\r\n/g, "\n") : "";
   if (current !== canonical) {
     console.error(
       "Fixture drift: tests/fixtures/chaos-scenarios.json is stale. Run: npm run fixtures:gen",

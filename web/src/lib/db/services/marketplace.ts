@@ -65,7 +65,7 @@ export async function searchMarketplaceItems(
           .from(marketplaceItems)
           .where(inArray(marketplaceItems.id, ids));
 
-        totalCount = countResult[0].count;
+        totalCount = Number(countResult[0]?.count ?? 0);
       }
     } else {
       results = await db
@@ -80,7 +80,7 @@ export async function searchMarketplaceItems(
         .from(marketplaceItems)
         .where(ilike(marketplaceItems.title, safeQuery));
 
-      totalCount = countResult[0].count;
+      totalCount = Number(countResult[0]?.count ?? 0);
     }
 
     const capabilitiesList = await getCapabilityFilters();
@@ -94,7 +94,7 @@ export async function searchMarketplaceItems(
       currency: item.currency,
       provider: item.provider,
       rating: item.rating,
-      createdAt: item.createdAt.toISOString(),
+      createdAt: (item.createdAt instanceof Date ? item.createdAt : new Date(item.createdAt)).toISOString(),
     }));
 
     return {

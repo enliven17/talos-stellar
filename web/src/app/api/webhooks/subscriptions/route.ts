@@ -17,6 +17,7 @@ import { logger } from "@/lib/logger";
 import { z } from "zod/v4";
 import { parseBody } from "@/lib/schemas";
 import { encryptSecret } from "@/lib/webhooks/signing";
+import { validateUrl } from "@/lib/security/ssrf";
 
 // ─── Auth helper (same pattern as jobs routes) ───────────────────
 
@@ -59,6 +60,15 @@ async function _POST(request: NextRequest) {
 
     const { data, error } = await parseBody(request, createSubscriptionSchema);
     if (error) return error;
+
+    try {
+      await validateUrl(data.url);
+    } catch (err) {
+      return Response.json(
+        { error: "Validation failed", issues: [`url: ${err instanceof Error ? err.message : "Invalid URL"}`] },
+        { status: 400 }
+      );
+    }
 
     // Encrypt the secret at rest
     let secretCiphertext: string;

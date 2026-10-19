@@ -7,7 +7,9 @@ export type {
   RetryPolicyOptions,
   RetryOptions,
   TalosErrorEvent,
+  ReadOptions,
   WriteOptions,
+  ReadOptions,
 } from "./client.js";
 
 // ── Pagination ─────────────────────────────────────────────────────
@@ -82,6 +84,19 @@ export * from "./a2a-intent.js";
 export * from "./a2a-validation.js";
 export * from "./a2a-operations.js";
 export * from "./seller-quote.js";
+export {
+  DEFAULT_SELLER_QUOTE_TTL_SECONDS,
+  SellerQuoteError,
+  constructSellerQuote,
+  constructSellerPaymentDetails,
+  toCanonicalDecimalAmount,
+} from "./seller-quote.js";
+export type {
+  ConstructSellerQuoteParams,
+  ConstructSellerPaymentDetailsParams,
+  SellerPaymentDetails,
+  SellerQuoteErrorCode,
+} from "./seller-quote.js";
 export {
   TalosEventStream,
   TalosStreamError,
@@ -242,3 +257,12 @@ export {
   GENERATED_TYPES_PACKAGE,
 } from "./provenance.js";
 export type { GeneratedTypesProvenance } from "./provenance.js";
+
+// ── Drift detection ──────────────────────────────────────────────────────────
+export { DriftDetector, DriftError } from "./drift.js";
+export type {
+  DriftMode,
+  UnknownFieldPolicy,
+  DriftViolation,
+  DriftDetectorOptions,
+} from "./drift.js";
