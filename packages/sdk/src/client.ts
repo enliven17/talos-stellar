@@ -37,6 +37,7 @@ import {
 } from "./pagination.js";
 import {
   TalosAPIError,
+  TalosTransportError,
   TalosPaymentError,
   classifyTransportError,
   errorFromResponse,
@@ -496,10 +497,6 @@ export class TalosClient {
       options.baseUrl ?? "https://talos-stellar.vercel.app"
     ).replace(/\/$/, "");
     this.headers = { "Content-Type": "application/json" };
-    this.fetchOverride = options.fetch;
-    this.timeoutMs = options.timeoutMs;
-    this.onError = options.onError;
-    this.chaosInjector = options.chaosInjector;
     if (options.apiKey) {
       this.headers["Authorization"] = `Bearer ${options.apiKey}`;
     }
