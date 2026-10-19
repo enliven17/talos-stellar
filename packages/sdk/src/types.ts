@@ -416,3 +416,91 @@ export interface BuyerProofDiagnostics {
  * are available. Must not throw; exceptions are silently swallowed.
  */
 export type BuyerProofDiagnosticCallback = (diag: BuyerProofDiagnostics) => void;
+
+// ── Agent lifecycle & governance status ──────────────────────────
+
+/**
+ * The three lifecycle statuses exposed via `PATCH /api/talos/:id/status`.
+ *
+ * These map onto the legacy `tls_talos.status` column and are the only values
+ * the server accepts for `lifecycleStatus`. Defining a closed union lets the
+ * compiler reject typos and unknown states at compile time (acceptance
+ * criterion: "Invalid statuses are compile-time errors").
+ *
+ * The richer state machine in `docs/AGENT_LIFECYCLE.md` (proposed,
+ * provisioning, retiring, …) is driven through `POST /api/talos/:id/lifecycle`
+ * which is out of scope for this SDK surface; retirement signature flows are
+ * explicitly out of scope per issue #1010.
+ */
+export type LifecycleStatus = "Active" | "Paused" | "Retired";
+
+/**
+ * Options for {@link TalosClient.setLifecycleStatus}.
+ *
+ * `governanceApproved` is forwarded to the server so that `Retired` can satisfy
+ * the 403 retirement guard in `PATCH /api/talos/:id/status`. It is a compile-time
+ * boolean rather than a free-form flag so callers cannot forget to set it.
+ */
+export interface SetLifecycleStatusOptions {
+  /**
+   * Required (and must be `true`) when `status === "Retired"`. The server
+   * returns `403` with "Retirement requires explicit governance confirmation"
+   * when this is omitted or `false` on a retire request.
+   */
+  governanceApproved?: boolean;
+}
+
+/**
+ * Response shape for `PATCH /api/talos/:id/status` when `lifecycleStatus` is
+ * supplied. Mirrors the JSON returned by `web/src/app/api/talos/[id]/status/route.ts`.
+ */
+export interface LifecycleStatusResponse {
+  id: string;
+  status: string;
+  agentOnline: boolean;
+  agentLastSeen: string;
+}
+
+/**
+ * One row from the keyset-paginated `events` array returned by
+ * `GET /api/talos/:id/lifecycle`. The fields mirror the `LifecycleEventRow`
+ * shape produced by `web/src/lib/governance/events.ts` (serialized to JSON).
+ */
+export interface LifecycleEvent {
+  id: string;
+  sequence: number;
+  eventType: string;
+  fromState: string | null;
+  toState: string;
+  actorId: string;
+  actorRole: string;
+  jobId: string | null;
+  stepName: string | null;
+  detail: unknown;
+  createdAt: string;
+}
+
+/**
+ * Query options for {@link TalosClient.listLifecycleEvents}.
+ *
+ * The endpoint uses keyset pagination keyed on `sequence` (newest first). We
+ * expose `cursor` (the numeric `before` value as a string) plus `limit` so the
+ * method composes with the existing {@link CursorRequestOptions} / async
+ * iterator infrastructure.
+ */
+export interface LifecycleEventsOptions extends CursorRequestOptions {
+  /** Stellar G-address of the viewer; surfaces `allowedActions` server-side. */
+  viewer?: string;
+}
+
+/**
+ * Normalized cursor-paginated page of lifecycle events.
+ *
+ * The server response nests `events` under an `events` key and returns a
+ * numeric `nextCursor`; this type aligns the shape with {@link CursorPage} so
+ * {@link createPaginationIterator} works out of the box.
+ */
+export interface LifecycleEventsPage {
+  data: LifecycleEvent[];
+  nextCursor: string | null;
+}

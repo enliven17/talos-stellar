@@ -26,6 +26,12 @@ import type {
   CursorRequestOptions,
   ActivityPage,
   ActivityPageOptions,
+  LifecycleStatus,
+  LifecycleStatusResponse,
+  SetLifecycleStatusOptions,
+  LifecycleEvent,
+  LifecycleEventsOptions,
+  LifecycleEventsPage,
 } from "./types.js";
 import {
   AsyncPaginationIterator,
@@ -1106,6 +1112,111 @@ export class TalosClient {
     await this.request(`/api/talos/${talosId}/status`, {
       method: "PATCH",
       body: JSON.stringify({ agentOnline: online }),
+    });
+  }
+
+  // ── Lifecycle (governance status & event history) ─────────
+
+  /**
+   * Fetch a single page of lifecycle transition events for a Talos agent.
+   *
+   * Calls `GET /api/talos/:id/lifecycle`, which returns the current state and a
+   * keyset-paginated `events` array (newest first, keyed on `sequence`). This
+   * method normalizes the server response into a {@link CursorPage}-compatible
+   * {@link LifecycleEventsPage} so it composes with the rest of the SDK
+   * pagination helpers.
+   *
+   * Pagination is keyset-based: pass the previous page's `nextCursor` as
+   * `cursor` to fetch the next page of older events.
+   *
+   * @example
+   * ```ts
+   * const page = await client.listLifecycleEvents("talos-1", { limit: 25 });
+   * for (const event of page.data) {
+   *   console.log(event.sequence, event.eventType, event.toState);
+   * }
+   * if (page.nextCursor) {
+   *   const next = await client.listLifecycleEvents("talos-1", { cursor: page.nextCursor });
+   * }
+   * ```
+   */
+  async listLifecycleEvents(
+    talosId: string,
+    options?: LifecycleEventsOptions,
+  ): Promise<LifecycleEventsPage> {
+    const { signal, timeoutMs, cursor, limit, viewer } = options ?? {};
+    const params: Record<string, string | number | boolean> = {};
+    if (cursor !== undefined) params.before = cursor;
+    if (limit !== undefined) params.limit = limit;
+    if (viewer !== undefined) params.viewer = viewer;
+
+    // The server nests events under `events` and returns a numeric nextCursor.
+    // Normalize into the CursorPage shape so createPaginationIterator works.
+    const response = await this.request<{
+      events: LifecycleEvent[];
+      nextCursor: number | null;
+    }>(`/api/talos/${talosId}/lifecycle`, { params, signal, timeoutMs });
+
+    return {
+      data: response.events ?? [],
+      nextCursor: response.nextCursor != null ? String(response.nextCursor) : null,
+    };
+  }
+
+  /**
+   * Async iterator over lifecycle transition events for a Talos agent.
+   *
+   * Wraps {@link listLifecycleEvents} and yields individual {@link LifecycleEvent}
+   * items across pages until the cursor is exhausted or `maxPages` is hit.
+   *
+   * @example
+   * ```ts
+   * for await (const event of client.paginateLifecycleEvents("talos-1", { limit: 50 })) {
+   *   console.log(event.sequence, event.eventType);
+   * }
+   * ```
+   */
+  paginateLifecycleEvents(
+    talosId: string,
+    options?: AsyncPaginationIteratorOptions & LifecycleEventsOptions,
+  ): AsyncPaginationIterator<LifecycleEvent> {
+    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
+    return createPaginationIterator<LifecycleEvent>(
+      (opts) => this.listLifecycleEvents(talosId, { ...cursorOptions, ...opts }),
+      { maxPages, signal, timeoutMs },
+    );
+  }
+
+  /**
+   * Update the governance lifecycle status of a Talos agent.
+   *
+   * Calls `PATCH /api/talos/:id/status` with `{ lifecycleStatus, governanceApproved }`.
+   * The server validates `lifecycleStatus` against the allowed set
+   * (Active | Paused | Retired); because {@link LifecycleStatus} is a closed
+   * union, an invalid status is a compile-time error at the call site.
+   *
+   * Setting the status to `"Retired"` requires `options.governanceApproved === true`
+   * — the server returns `403` ("Retirement requires explicit governance
+   * confirmation") otherwise. Retirement signature flows are out of scope for
+   * this method (see issue #1010).
+   *
+   * @example
+   * ```ts
+   * await client.setLifecycleStatus("talos-1", "Paused");
+   * await client.setLifecycleStatus("talos-1", "Retired", { governanceApproved: true });
+   * ```
+   */
+  async setLifecycleStatus(
+    talosId: string,
+    status: LifecycleStatus,
+    options?: SetLifecycleStatusOptions,
+  ): Promise<LifecycleStatusResponse> {
+    return this.request(`/api/talos/${talosId}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        lifecycleStatus: status,
+        governanceApproved: options?.governanceApproved,
+      }),
     });
   }
 
