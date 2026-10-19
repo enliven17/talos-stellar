@@ -13,6 +13,11 @@
  * Then it asserts the ESM SDK can be evaluated in that restricted environment
  * and its exported classes can be instantiated without touching Node APIs —
  * proving the SDK is safe to load inside an Edge worker.
+ *
+ * Finally every declared subpath export (`./webhooks`, `./events`, `./errors`)
+ * is bundled the way a serverless build would bundle it and loaded in the same
+ * sandbox, proving a webhook handler can be deployed without the client or the
+ * Stellar SDK.
  */
 
 import { strict as assert } from "node:assert";
@@ -343,6 +348,85 @@ if (typeof sdk.TalosClient === "function") {
     console.log("  + TalosClient({}) threw explicit Error (acceptable):", err.name);
   }
 }
+
+// ── Subpath entries: server-only bundles in the same sandbox ─────────
+//
+// The `./webhooks`, `./events` and `./errors` subpaths exist so an edge handler
+// can verify a webhook or decode an event stream without the client and without
+// `@stellar/stellar-sdk`. Each declared subpath is bundled exactly as a
+// serverless build would (esbuild, browser platform) and the resulting bundle
+// must (a) contain no Stellar SDK code, and (b) evaluate inside the Node-free
+// sandbox above with its documented exports intact.
+const SUBPATH_CONTRACT = new Map([
+  ["./webhooks", ["TalosWebhook", "TalosWebhookError", "parseWebhookEvent", "verifyWebhook"]],
+  ["./events", ["InMemorySeenStore", "TalosEventStream", "TalosStreamError", "negotiateSchemaVersion"]],
+  ["./errors", ["TalosAPIError", "errorFromResponse", "parseRetryAfter"]],
+]);
+
+async function checkSubpathEntries() {
+  let esbuild;
+  try {
+    esbuild = await import("esbuild");
+  } catch {
+    console.log("[compat:edge] esbuild is not installed — skipping subpath bundle checks");
+    return;
+  }
+
+  const pkg = JSON.parse(readFileSync(resolve(SDK_ROOT, "package.json"), "utf8"));
+  const subpaths = Object.keys(pkg.exports ?? {}).filter((subpath) => subpath !== ".");
+  assert.ok(subpaths.length > 0, "package.json declares no subpath exports");
+
+  for (const subpath of subpaths) {
+    const spec = pkg.exports[subpath];
+    const target = typeof spec === "string" ? spec : spec?.import;
+    assert.ok(target, `${subpath} declares no ESM ("import") entry point`);
+
+    const absolute = resolve(SDK_ROOT, target);
+    assert.ok(
+      existsSync(absolute),
+      `${subpath} ESM target ${target} is missing — run "npm run build" first`,
+    );
+
+    const result = await esbuild.build({
+      entryPoints: [absolute],
+      bundle: true,
+      write: false,
+      format: "iife",
+      globalName: "__SUBPATH__",
+      platform: "browser",
+      target: "es2020",
+      legalComments: "none",
+      metafile: true,
+      logLevel: "silent",
+    });
+
+    const inputs = Object.keys(result.metafile.inputs);
+    const heavy = inputs.filter((file) => file.includes("stellar-sdk"));
+    assert.ok(
+      heavy.length === 0,
+      `${subpath} must bundle without @stellar/stellar-sdk (pulled in ${heavy.join(", ")})`,
+    );
+
+    const code = result.outputFiles[0].text;
+    vm.runInContext(`this.__SUBPATH__ = undefined;\n${code}`, ctx, {
+      filename: `sdk-edge${subpath.replace(/[^a-z]/gi, "-")}.js`,
+      timeout: 15_000,
+      displayErrors: true,
+    });
+
+    const mod = ctx.__SUBPATH__;
+    assert.ok(mod && typeof mod === "object", `${subpath} produced no namespace in the sandbox`);
+    for (const name of SUBPATH_CONTRACT.get(subpath) ?? []) {
+      assert.ok(name in mod, `${subpath} is missing ${name} in the edge sandbox`);
+    }
+    console.log(
+      `  + ${subpath} -> ${inputs.length} modules, ${code.length} bytes, ` +
+        `no Stellar SDK, ${Object.keys(mod).length} exports OK (edge sandbox)`,
+    );
+  }
+}
+
+await checkSubpathEntries();
 
 console.log("[compat:edge] ALL CHECKS PASSED");
 process.exit(0);

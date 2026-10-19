@@ -339,7 +339,6 @@ export class TalosWebhook {
       replayWindowSeconds,
       replayStore,
       eventId,
-      replayWindowSeconds,
       logger,
       chaosInjector,
     } = options;
