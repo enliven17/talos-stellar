@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, get_type_hints
+from typing import Any, Callable, Mapping, get_type_hints
 
 from talos_agent import metrics
 from talos_agent.config import Settings, resolve_setting_secret
+from talos_agent.redact import redact_text
 from talos_agent.tracing import traced_span
+from talos_agent.tools import context as _context
+from talos_agent.tools.context import ToolContext
 from talos_agent.tools.permissions import (
     EnforcementMode,
     PermissionEnforcer,
@@ -19,8 +23,16 @@ from talos_agent.tools.permissions import (
     ToolPermissions,
 )
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
 MAX_TOOL_TIMEOUT_SECONDS = 300.0
+
+MAX_VALIDATION_ERRORS = 10
+MAX_ERROR_MESSAGE_LEN = 1000
+MAX_VALUE_REPR_LEN = 100
+
+CODE_INVALID_ARGUMENTS = "INVALID_TOOL_ARGUMENTS"
 
 
 class _ToolTimeoutError(Exception):
@@ -38,6 +50,266 @@ def _validate_tool_timeout(timeout: float | None) -> float:
             f"{MAX_TOOL_TIMEOUT_SECONDS}; got {timeout}"
         )
     return timeout
+
+
+@dataclass(frozen=True)
+class ValidationError:
+    """A single schema validation failure for a tool argument."""
+
+    parameter: str
+    message: str
+    expected: str | None = None
+    actual: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "parameter": self.parameter,
+            "message": redact_text(self.message),
+        }
+        if self.expected is not None:
+            result["expected"] = self.expected
+        if self.actual is not None:
+            result["actual"] = self.actual
+        return result
+
+
+@dataclass
+class ValidationResult:
+    """Outcome of validating and safely coercing tool call arguments."""
+
+    is_valid: bool
+    coerced_arguments: dict[str, Any] = field(default_factory=dict)
+    errors: list[ValidationError] = field(default_factory=list)
+
+    def to_error_dict(self, tool_name: str) -> dict[str, Any]:
+        """Produce a bounded, redacted error dict for the LLM tool-call response."""
+        error_messages = [e.message for e in self.errors[:MAX_VALIDATION_ERRORS]]
+        summary = "; ".join(error_messages)
+        if len(self.errors) > MAX_VALIDATION_ERRORS:
+            summary += f" (and {len(self.errors) - MAX_VALIDATION_ERRORS} more errors)"
+
+        redacted_summary = redact_text(summary)
+        if len(redacted_summary) > MAX_ERROR_MESSAGE_LEN:
+            redacted_summary = redacted_summary[: MAX_ERROR_MESSAGE_LEN - 3] + "..."
+
+        return {
+            "error": f"Invalid arguments for tool '{tool_name}': {redacted_summary}",
+            "code": CODE_INVALID_ARGUMENTS,
+            "tool": tool_name,
+            "validation_errors": [
+                e.to_dict() for e in self.errors[:MAX_VALIDATION_ERRORS]
+            ],
+        }
+
+
+def _validate_and_coerce_value(
+    param_name: str,
+    val: Any,
+    expected_type: str | list[str],
+    prop_schema: dict[str, Any],
+) -> tuple[Any, ValidationError | None]:
+    """Validate a single value against expected JSON schema type, applying safe coercions.
+
+    Safe Coercion Policy:
+    ---------------------
+    - Integer-valued floats (e.g. 10.0 -> 10) are safely coerced for integer parameters
+      when within IEEE-754 exact integer range (-2^53 <= val <= 2^53).
+    - Tuples are converted to lists for array parameters.
+    - String amounts, non-integer floats, and cross-type values (e.g. bool for int/number)
+      are NEVER coerced and are strictly rejected.
+    """
+    types = [expected_type] if isinstance(expected_type, str) else list(expected_type)
+
+    for t in types:
+        if t == "string":
+            if isinstance(val, str):
+                return val, None
+        elif t == "integer":
+            if isinstance(val, bool):
+                # In Python bool is a subclass of int, but in JSON it is boolean
+                continue
+            if isinstance(val, int):
+                return val, None
+            # Explicitly safe coercion: integer-valued float (e.g. 10.0 -> 10)
+            if isinstance(val, float) and math.isfinite(val) and val.is_integer():
+                if -9007199254740992 <= val <= 9007199254740992:
+                    return int(val), None
+        elif t == "number":
+            if isinstance(val, bool):
+                continue
+            if isinstance(val, (int, float)) and math.isfinite(val):
+                return val, None
+        elif t == "boolean":
+            if isinstance(val, bool):
+                return val, None
+        elif t == "array":
+            if isinstance(val, (list, tuple)):
+                items_schema = prop_schema.get("items")
+                coerced_list = list(val)
+                if isinstance(items_schema, dict) and "type" in items_schema:
+                    item_type = items_schema["type"]
+                    new_list = []
+                    item_err = None
+                    for idx, item in enumerate(coerced_list):
+                        c_item, err = _validate_and_coerce_value(
+                            f"{param_name}[{idx}]", item, item_type, items_schema
+                        )
+                        if err is not None:
+                            item_err = err
+                            break
+                        new_list.append(c_item)
+                    if item_err is not None:
+                        return None, item_err
+                    return new_list, None
+                return coerced_list, None
+        elif t == "object":
+            if isinstance(val, dict):
+                return val, None
+        elif t == "null":
+            if val is None:
+                return None, None
+
+    # No type matched: build bounded & redacted error
+    actual_type = type(val).__name__
+    if isinstance(val, bool):
+        actual_type = "boolean"
+    elif isinstance(val, float) and not math.isfinite(val):
+        actual_type = "non-finite float"
+
+    type_str = ", ".join(types) if isinstance(expected_type, list) else str(expected_type)
+    val_repr = redact_text(str(val))
+    if len(val_repr) > MAX_VALUE_REPR_LEN:
+        val_repr = val_repr[: MAX_VALUE_REPR_LEN - 3] + "..."
+
+    return None, ValidationError(
+        parameter=param_name,
+        message=f"Parameter '{param_name}' must be of type {type_str}, got {actual_type} ({val_repr})",
+        expected=type_str,
+        actual=actual_type,
+    )
+
+
+def validate_tool_arguments(
+    parameters_schema: dict[str, Any] | None,
+    arguments: Any,
+) -> ValidationResult:
+    """Validate decoded tool arguments against the tool parameters JSON schema.
+
+    Enforces:
+    - arguments is a Mapping (dict)
+    - All required properties are present and non-null (unless schema allows null)
+    - Unknown parameters (extra keys) are rejected unless additionalProperties is true
+    - Types match schema with explicitly safe coercions (e.g. integer-valued floats)
+
+    Time Complexity: O(N + R) where N is number of arguments and R is required fields.
+    Space Complexity: O(N) bounded auxiliary space.
+    """
+    if not isinstance(arguments, Mapping):
+        actual_type = type(arguments).__name__
+        return ValidationResult(
+            is_valid=False,
+            errors=[
+                ValidationError(
+                    parameter="<arguments>",
+                    message=f"Tool arguments must be a dictionary/object, got {actual_type}",
+                    expected="object",
+                    actual=actual_type,
+                )
+            ],
+        )
+
+    if not parameters_schema or not isinstance(parameters_schema, dict):
+        return ValidationResult(is_valid=True, coerced_arguments=dict(arguments))
+
+    properties = parameters_schema.get("properties")
+    if properties is None or not isinstance(properties, dict):
+        properties = {}
+
+    required_fields = set(parameters_schema.get("required", []))
+    allow_additional = bool(parameters_schema.get("additionalProperties", False))
+
+    errors: list[ValidationError] = []
+    coerced: dict[str, Any] = {}
+
+    # 1. Missing required parameters
+    for req_field in sorted(required_fields):
+        if req_field not in arguments:
+            errors.append(
+                ValidationError(
+                    parameter=req_field,
+                    message=f"Missing required parameter '{req_field}'",
+                    expected="present",
+                    actual="missing",
+                )
+            )
+        elif arguments[req_field] is None:
+            prop_schema = properties.get(req_field, {})
+            allowed_types = prop_schema.get("type")
+            is_nullable = (
+                allowed_types == "null"
+                or (isinstance(allowed_types, (list, tuple)) and "null" in allowed_types)
+            )
+            if not is_nullable:
+                errors.append(
+                    ValidationError(
+                        parameter=req_field,
+                        message=f"Required parameter '{req_field}' cannot be null",
+                        expected="non-null",
+                        actual="null",
+                    )
+                )
+
+    # 2. Reject unknown parameters (extra keys)
+    if not allow_additional:
+        for key in sorted(arguments.keys()):
+            if key not in properties:
+                allowed_desc = (
+                    f"one of {sorted(properties.keys())}"
+                    if properties
+                    else "no parameters"
+                )
+                errors.append(
+                    ValidationError(
+                        parameter=key,
+                        message=f"Unknown parameter '{key}'",
+                        expected=allowed_desc,
+                        actual="unexpected parameter",
+                    )
+                )
+
+    # 3. Type checking & safe coercion
+    for key, val in arguments.items():
+        if key not in properties:
+            continue
+
+        prop_schema = properties[key]
+        if not isinstance(prop_schema, dict):
+            coerced[key] = val
+            continue
+
+        expected_type = prop_schema.get("type")
+        if expected_type is None:
+            coerced[key] = val
+            continue
+
+        if val is None:
+            if key in required_fields:
+                continue  # already flagged above if non-nullable
+            coerced[key] = None
+            continue
+
+        coerced_val, type_err = _validate_and_coerce_value(
+            key, val, expected_type, prop_schema
+        )
+        if type_err is not None:
+            errors.append(type_err)
+        else:
+            coerced[key] = coerced_val
+
+    if errors:
+        return ValidationResult(is_valid=False, errors=errors)
+
+    return ValidationResult(is_valid=True, coerced_arguments=coerced)
 
 
 @dataclass
@@ -68,12 +340,20 @@ class Tool:
 @dataclass
 class ToolRegistry:
     _tools: dict[str, Tool] = field(default_factory=dict)
+    #: The agent this registry belongs to. When set, every ``execute`` binds it,
+    #: so tools read this agent's API client, database and settings no matter
+    #: what other agents in the process are doing. ``None`` is the shared
+    #: template that ``@tool`` registers into, which runs tools against the
+    #: tool modules' own globals.
+    context: ToolContext | None = None
     _middleware: Any = None  # PolicyMiddleware, injected by build_all_tools
     # Permission manifests are validated here at registration and enforced in
     # execute(). Defaults to AUDIT with no grants: every call is evaluated and
     # recorded, none are blocked, so enabling this module changes no behaviour
     # until an operator opts into ENFORCE.
     _enforcer: PermissionEnforcer = field(default_factory=PermissionEnforcer)
+    # Callback for telemetry/policy validation events.
+    _validation_sink: Callable[[dict[str, Any]], None] | None = None
 
     def __len__(self) -> int:
         return len(self._tools)
@@ -93,6 +373,12 @@ class ToolRegistry:
             enforcer.register(tool.name, tool.permissions)
         self._enforcer = enforcer
 
+    def set_validation_sink(
+        self, sink: Callable[[dict[str, Any]], None] | None
+    ) -> None:
+        """Register a callback to capture tool argument validation events."""
+        self._validation_sink = sink
+
     @property
     def permissions(self) -> PermissionEnforcer:
         return self._enforcer
@@ -110,6 +396,24 @@ class ToolRegistry:
         # manifest, so the problem surfaces at import rather than first call.
         timeout = _validate_tool_timeout(timeout)
         self._enforcer.register(name, permissions)
+
+        # Fallback to function signature schema if empty parameters provided
+        # for a function that expects arguments.
+        if (
+            (
+                not parameters
+                or (
+                    isinstance(parameters, dict)
+                    and not parameters.get("properties")
+                    and not parameters.get("required")
+                )
+            )
+            and callable(fn)
+        ):
+            derived = _fn_to_json_schema(fn)
+            if derived.get("properties"):
+                parameters = derived
+
         self._tools[name] = Tool(
             name=name,
             description=description,
@@ -118,6 +422,16 @@ class ToolRegistry:
             permissions=permissions,
             timeout=timeout,
         )
+
+    def for_agent(self, context: ToolContext) -> "ToolRegistry":
+        """A registry with this registry's tools and its own state.
+
+        The tools themselves are shared, because they read their dependencies
+        from whichever context is bound when they run. What is not shared is
+        everything an agent configures: the context, the policy middleware and
+        the permission enforcer.
+        """
+        return ToolRegistry(_tools=dict(self._tools), context=context)
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
@@ -128,7 +442,64 @@ class ToolRegistry:
     def openai_schemas(self) -> list[dict]:
         return [t.to_openai_schema() for t in self._tools.values()]
 
+    def validate_arguments(self, tool: Tool, arguments: Any) -> ValidationResult:
+        """Validate decoded arguments against tool parameters JSON schema."""
+        return validate_tool_arguments(tool.parameters, arguments)
+
+    def _record_validation_event(
+        self,
+        name: str,
+        errors: list[ValidationError],
+        raw_arguments: Any,
+    ) -> None:
+        """Emit a structured policy/telemetry event for rejected arguments."""
+        event = {
+            "event": "tool_argument_validation_failed",
+            "tool": name,
+            "timestamp": time.time(),
+            "error_count": len(errors),
+            "errors": [e.to_dict() for e in errors[:MAX_VALIDATION_ERRORS]],
+            "rejected_parameters": [e.parameter for e in errors],
+        }
+
+        if self._validation_sink is not None:
+            try:
+                self._validation_sink(event)
+            except Exception:
+                logger.exception("Validation event sink failed for tool %s", name)
+
+        logger.warning(
+            "tool_validation_failed tool=%s errors=%d rejected_params=%s",
+            name,
+            len(errors),
+            event["rejected_parameters"],
+        )
+
+        try:
+            metrics.record_tool_call(name, "error", 0.0)
+        except Exception:
+            pass
+
     async def execute(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        approved: bool = False,
+    ) -> Any:
+        if self.context is None:
+            return await self._execute(name, arguments, approved=approved)
+        # Bind this agent's dependencies for the whole call. The binding follows
+        # the call across awaits, into tasks and worker threads it starts, and
+        # is undone afterwards, so concurrent calls from other agents never see
+        # it and this one never sees theirs.
+        token = _context.bind(self.context)
+        try:
+            return await self._execute(name, arguments, approved=approved)
+        finally:
+            _context.reset(token)
+
+    async def _execute(
         self,
         name: str,
         arguments: dict[str, Any],
@@ -139,12 +510,24 @@ class ToolRegistry:
         if not tool:
             return {"error": f"Unknown tool: {name}"}
 
+        # ── Parameter schema validation ─────────────────────────────
+        # Validates decoded arguments against tool parameters JSON schema
+        # before permissions, policy engine, or tool code run.
+        validation_result = self.validate_arguments(tool, arguments)
+        if not validation_result.is_valid:
+            self._record_validation_event(
+                name, validation_result.errors, arguments
+            )
+            return validation_result.to_error_dict(name)
+
+        validated_arguments = validation_result.coerced_arguments
+
         # ── Permission manifest check ───────────────────────────────
         # Runs before the policy engine: a tool that is not permitted to touch
         # a resource should never reach the rules that reason about how it
         # touches it. Unlike the policy check below, a failure here is not
         # swallowed — an enforcer that cannot decide must not default to allow.
-        decision = self._enforcer.check(name, arguments, approved=approved)
+        decision = self._enforcer.check(name, validated_arguments, approved=approved)
         if not decision.allowed:
             return {
                 "error": decision.reason,
@@ -161,7 +544,9 @@ class ToolRegistry:
                     _GATED_ACTIONS,
                 )
                 if name in _GATED_ACTIONS:
-                    result = self._middleware.evaluate_action(name, arguments)
+                    result = self._middleware.evaluate_action(
+                        name, validated_arguments
+                    )
                     if result.decision.value == "deny":
                         return {
                             "error": "Policy denied this action",
@@ -189,14 +574,19 @@ class ToolRegistry:
         try:
             with traced_span(
                 f"tool.{name}",
-                {"tool.name": name, "tool.arg_keys": list(arguments.keys())},
+                {
+                    "tool.name": name,
+                    "tool.arg_keys": list(validated_arguments.keys()),
+                },
             ):
                 async def _invoke_tool() -> Any:
                     try:
                         if inspect.iscoroutinefunction(tool.fn):
-                            result = await tool.fn(**arguments)
+                            result = await tool.fn(**validated_arguments)
                         else:
-                            result = await asyncio.to_thread(tool.fn, **arguments)
+                            result = await asyncio.to_thread(
+                                tool.fn, **validated_arguments
+                            )
                         if inspect.isawaitable(result):
                             result = await result
                         return result
@@ -270,7 +660,10 @@ _TYPE_MAP = {
 
 def _fn_to_json_schema(fn: Callable) -> dict:
     """Extract JSON Schema parameters from function signature + type hints."""
-    hints = get_type_hints(fn)
+    try:
+        hints = get_type_hints(fn)
+    except Exception:
+        hints = getattr(fn, "__annotations__", {})
     sig = inspect.signature(fn)
     properties: dict[str, Any] = {}
     required: list[str] = []
@@ -289,9 +682,19 @@ def _fn_to_json_schema(fn: Callable) -> dict:
             if type(None) in args:
                 is_optional = True
                 hint = next(a for a in args if a is not type(None))
+                origin = getattr(hint, "__origin__", None)
 
-        json_type = _TYPE_MAP.get(hint, "string")
+        lookup_type = origin if origin in _TYPE_MAP else hint
+        json_type = _TYPE_MAP.get(lookup_type, "string")
         prop: dict[str, Any] = {"type": json_type}
+
+        # Handle array item hints e.g. list[str]
+        if lookup_type is list and hasattr(hint, "__args__") and hint.__args__:
+            item_hint = hint.__args__[0]
+            item_origin = getattr(item_hint, "__origin__", None)
+            item_lookup = item_origin if item_origin in _TYPE_MAP else item_hint
+            item_json_type = _TYPE_MAP.get(item_lookup, "string")
+            prop["items"] = {"type": item_json_type}
 
         # Use default as description hint
         if param.default is not inspect.Parameter.empty and param.default is not None:
@@ -315,8 +718,23 @@ def build_all_tools(
     policy_middleware: Any = None,
     job_effect_store: Any = None,
     job_effect_dispatcher: Any = None,
+    context: ToolContext | None = None,
 ) -> ToolRegistry:
-    """Import all tool modules to trigger @tool registrations, then return registry."""
+    """Build one agent's tools from its own dependencies.
+
+    Imports the tool modules (which registers every ``@tool``) and returns a
+    registry that belongs to this agent alone: its own :class:`ToolContext`,
+    policy middleware and permission enforcer. Several agents can therefore
+    build and run tools in one process without sharing any of them.
+
+    ``context`` is for rebuilding an agent's tools, for example after its
+    browser restarts: pass the registry's existing ``context`` and it is
+    updated in place, so tasks the agent already started pick up the new
+    dependencies instead of keeping stale ones.
+
+    The tool modules' own globals are still filled in, as before. They are the
+    defaults for code that calls a tool directly with no context bound.
+    """
     # Import modules so decorators execute
     from talos_agent.tools import browser as _browser_mod  # noqa: F401
     from talos_agent.tools import commerce as _commerce_mod  # noqa: F401
@@ -328,6 +746,7 @@ def build_all_tools(
     from talos_agent.tools import defi as _defi_mod  # noqa: F401
     from talos_agent.tools import planning as _planning_mod  # noqa: F401
     from talos_agent.tools import a2a_composition as _a2a_composition_mod  # noqa: F401
+    from talos_agent.tools import budget as _budget_mod  # noqa: F401
 
     # Build the channel adapter registry with all configured adapters
     from talos_agent.adapters.capability import (
@@ -409,7 +828,24 @@ def build_all_tools(
         ):
             adapter_registry.register(DiscordAdapter(settings))
 
-    # Inject dependencies into tool modules
+    # This agent's dependencies. Tools run through the registry returned below
+    # read these, never the module globals, so another agent building its tools
+    # cannot redirect this agent's calls.
+    if context is None:
+        context = ToolContext()
+    context.update(
+        api=api,
+        db=db,
+        browser=browser,
+        settings=settings,
+        adapter_registry=adapter_registry,
+        job_effect_store=job_effect_store,
+        job_effect_dispatcher=job_effect_dispatcher,
+    )
+
+    # Defaults for direct callers (and for a single agent set up the old way):
+    # the module globals. The last agent to build wins here, which is why agents
+    # must go through their own registry rather than rely on these.
     _internal_mod._db = db
     _web_api_mod._api = api
     _web_api_mod._settings = settings
@@ -435,16 +871,23 @@ def build_all_tools(
     _a2a_composition_mod._api = api
     _a2a_composition_mod._db = db
     _a2a_composition_mod._settings = settings
+    _budget_mod._db = db
+    _budget_mod._settings = settings
+
+    # The registry this agent runs its tools through. The shared module-level
+    # `registry` only collects the @tool registrations; policy and permissions
+    # are configured per agent so one agent's settings never govern another's.
+    agent_registry = registry.for_agent(context)
 
     # Inject policy middleware into the registry for pre-execution checks
     if policy_middleware is not None:
-        registry.set_middleware(policy_middleware)
+        agent_registry.set_middleware(policy_middleware)
 
     # Resolve permission manifests against the operator's grants. Every tool
     # has already registered by this point, so this re-validates the full set.
-    registry.set_permission_enforcer(build_enforcer(settings))
+    agent_registry.set_permission_enforcer(build_enforcer(settings))
 
-    return registry
+    return agent_registry
 
 
 def build_enforcer(settings: Settings) -> PermissionEnforcer:

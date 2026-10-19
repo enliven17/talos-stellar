@@ -46,3 +46,9 @@ export const PROPOSALS_MAX_LIMIT = 100;
 
 export const DASHBOARD_DEFAULT_LIMIT = 20;
 export const DASHBOARD_MAX_LIMIT = 100;
+
+export const TALOS_NAME_MIN_LENGTH = 3;
+export const TALOS_NAME_MAX_LENGTH = 32;
+export const MIN_NAME_LENGTH = TALOS_NAME_MIN_LENGTH;
+export const MAX_NAME_LENGTH = TALOS_NAME_MAX_LENGTH;
+

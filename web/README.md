@@ -133,6 +133,10 @@ CI runs the same snapshot test and fails if `/api/docs/openapi.json` differs fro
 
 A durable, Postgres-backed outbox so a domain mutation and the event describing it can never diverge (atomic write, lease-based dispatch, retry/backoff, retention). Disabled by default (`OUTBOX_ENABLED=false`). See **[OUTBOX.md](./OUTBOX.md)**.
 
+## Stellar Payment Reconciler
+
+A background reconciler and finality state machine that verifies submitted Stellar payment transactions against Horizon, applies idempotent downstream repairs to commerce jobs and token purchases, and provides operator inspection endpoints. Disabled by default (`RECONCILER_ENABLED=false`). See **[RECONCILER.md](./RECONCILER.md)**.
+
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
 ## Learn More

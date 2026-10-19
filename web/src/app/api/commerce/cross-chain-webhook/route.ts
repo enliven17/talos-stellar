@@ -17,16 +17,62 @@ function buildPaymentSignature(sourceChain: string, paymentReference: string) {
   return `crosschain:${normalizeChain(sourceChain)}:${paymentReference}`;
 }
 
+// POST /api/commerce/cross-chain-webhook
+// Simulates a bridge receiver (e.g. CCIP/CCTP) notifying Stellar-side commerce once
+// a payment on another chain is complete. Verified payments create or transition a
+// commerce job to pending (async fulfillment) or completed (instant fulfillment).
+//
+// Authentication:
+//   - Requires HMAC SHA-256 signature in X-Signature
+//   - Requires Unix timestamp (seconds or milliseconds) in X-Signature-Timestamp
+//   - Timestamp must be within configurable tolerance (CROSS_CHAIN_WEBHOOK_TOLERANCE_SECONDS, default 300s)
+//   - Signature is computed over `${timestamp}.${rawBody}` with CROSS_CHAIN_WEBHOOK_SECRET
+//
+// Migration path for callers / simulators:
+//   Previous versions signed rawBody only with header `X-Signature: <hex>`.
+//   Callers must now include `X-Signature-Timestamp: <timestamp>` and compute
+//   the HMAC signature over `<timestamp>.<rawBody>`.
+const DEFAULT_TIMESTAMP_TOLERANCE_SECONDS = 300; // 5 minutes
+
 function parseSignature(header: string | null) {
   if (!header) return null;
   return header.trim().replace(/^sha256=/i, "");
 }
 
-function isValidWebhookSignature(rawBody: string, signatureHeader: string | null, secret: string) {
+function parseWebhookTimestamp(timestampHeader: string | null): number | null {
+  if (!timestampHeader) return null;
+  const trimmed = timestampHeader.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+
+  // Normalise to seconds if provided in milliseconds
+  return trimmed.length > 10 ? Math.floor(parsed / 1000) : parsed;
+}
+
+function isTimestampWithinTolerance(
+  timestampSeconds: number,
+  toleranceSeconds: number = DEFAULT_TIMESTAMP_TOLERANCE_SECONDS,
+  nowSeconds: number = Math.floor(Date.now() / 1000),
+): boolean {
+  return Math.abs(nowSeconds - timestampSeconds) <= toleranceSeconds;
+}
+
+function isValidWebhookSignature(
+  rawBody: string,
+  timestampHeader: string | null,
+  signatureHeader: string | null,
+  secret: string,
+) {
   const providedSignature = parseSignature(signatureHeader);
   if (!providedSignature) return false;
 
-  const expectedSignature = createHmac("sha256", secret).update(rawBody).digest("hex");
+  const timestamp = timestampHeader?.trim();
+  if (!timestamp) return false;
+
+  const signedPayload = `${timestamp}.${rawBody}`;
+  const expectedSignature = createHmac("sha256", secret).update(signedPayload).digest("hex");
 
   try {
     const provided = Buffer.from(providedSignature, "hex");
@@ -49,14 +95,6 @@ function validationErrorResponse(issues: string[]) {
   );
 }
 
-// POST /api/commerce/cross-chain-webhook
-// Simulates a bridge receiver (e.g. CCIP/CCTP) notifying Stellar-side commerce once
-// a payment on another chain is complete. Verified payments create or transition a
-// commerce job to pending (async fulfillment) or completed (instant fulfillment).
-//
-// Authentication:
-//   - Requires HMAC SHA-256 signature in X-Signature
-//   - Signature is computed over the raw request body with CROSS_CHAIN_WEBHOOK_SECRET
 async function _POST(request: NextRequest) {
   try {
     const webhookSecret = process.env.CROSS_CHAIN_WEBHOOK_SECRET;
@@ -65,8 +103,24 @@ async function _POST(request: NextRequest) {
       return Response.json({ error: "Webhook authentication is not configured" }, { status: 500 });
     }
 
+    const timestampHeader = request.headers.get("x-signature-timestamp");
+    const timestampSeconds = parseWebhookTimestamp(timestampHeader);
+    if (timestampSeconds === null) {
+      return Response.json({ error: "Missing or invalid webhook timestamp" }, { status: 401 });
+    }
+
+    const toleranceConfig = Number(process.env.CROSS_CHAIN_WEBHOOK_TOLERANCE_SECONDS);
+    const toleranceSeconds =
+      Number.isFinite(toleranceConfig) && toleranceConfig > 0
+        ? toleranceConfig
+        : DEFAULT_TIMESTAMP_TOLERANCE_SECONDS;
+
+    if (!isTimestampWithinTolerance(timestampSeconds, toleranceSeconds)) {
+      return Response.json({ error: "Webhook timestamp outside tolerance" }, { status: 401 });
+    }
+
     const rawBody = await request.text();
-    if (!isValidWebhookSignature(rawBody, request.headers.get("x-signature"), webhookSecret)) {
+    if (!isValidWebhookSignature(rawBody, timestampHeader, request.headers.get("x-signature"), webhookSecret)) {
       return Response.json({ error: "Invalid webhook signature" }, { status: 401 });
     }
 

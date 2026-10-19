@@ -4,6 +4,8 @@
   "license": "AGPL-3.0-only",
   "scripts": {
     "dev": "pnpm --dir web dev",
+    "doctor": "node scripts/doctor.mjs",
+    "doctor:test": "node --test scripts/doctor.test.mjs",
     "build": "pnpm --dir web build",
     "lint": "pnpm --dir web lint",
     "web:install": "pnpm --dir web install",
@@ -25,10 +27,14 @@
     "migrations:check": "node scripts/check-migration-drift.mjs",
     "migrations:check:strict": "node scripts/check-migration-drift.mjs --strict",
     "test:migration-drift": "bash scripts/check-migration-drift.test.sh",
+    "lockfile:check": "node scripts/check-lockfile-drift.mjs",
+    "lockfile:check:json": "node scripts/check-lockfile-drift.mjs --json",
+    "test:lockfile-drift": "node --test scripts/check-lockfile-drift.test.mjs",
     "licenses:report": "node scripts/generate-license-report.mjs",
     "licenses:test": "node --test scripts/generate-license-report.test.mjs",
     "sbom:verify": "node scripts/verify-sbom.mjs",
-    "test:sbom-verify": "node --test scripts/verify-sbom.test.mjs"
+    "test:sbom-verify": "node --test scripts/verify-sbom.test.mjs",
+    "test:contracts-readme": "node --test scripts/verify-contracts-readme.test.mjs"
   },
   "dependencies": {
     "next": "16.2.2"

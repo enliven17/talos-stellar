@@ -121,6 +121,15 @@ is a `major` bump.
 | `interface_query`   | `version` / `interface_id` / `supports_version`.             |
 | `quorum_state`      | `get_proposal_quorum_state` query; `EventQuorumReached` emitted once per proposal when quorum is first crossed. |
 
+#### Storage & Input Bounds
+
+To prevent unbounded storage writes and spam when creating proposals, `TalosGovernance::create_proposal` enforces strict maximum byte lengths:
+
+- `MAX_TITLE_LEN`: `128` bytes (non-empty, maximum 128 bytes)
+- `MAX_DESCRIPTION_LEN`: `2048` bytes (non-empty, maximum 2048 bytes)
+
+Inputs at the limit succeed; inputs exceeding the limit (or empty) are rejected before writing to persistent storage.
+
 ## 6. Deprecation table
 
 When a deployment has timelock enabled (`min_delay > 0`), the direct

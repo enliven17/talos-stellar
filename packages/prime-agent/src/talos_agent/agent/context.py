@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from talos_agent.db import LocalDB
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -35,12 +38,9 @@ class AgentContext:
         # Count pending commerce jobs (as service provider)
         pending_jobs_count = 0
         try:
-            rows = db._conn.execute(
-                "SELECT COUNT(*) as cnt FROM commerce_queue WHERE status = 'pending'"
-            ).fetchone()
-            pending_jobs_count = rows["cnt"] if rows else 0
+            pending_jobs_count = db.count_pending_commerce_jobs()
         except Exception:
-            pass
+            logger.exception("Failed to count pending commerce jobs from database")
 
         gtm_budget = float(talos_config.get("gtmBudget", 200))
 
