@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
+
+from stellar_sdk import StrKey
 
 from talos_agent.tools import context as _context
 from talos_agent.tools.registry import tool
@@ -17,10 +20,36 @@ _api: TalosAPIClient = None  # type: ignore[assignment]
 _db: LocalDB = None  # type: ignore[assignment]
 _settings: Settings = None  # type: ignore[assignment]
 
+_MIN_DURATION_DAYS = 1
+_MAX_DURATION_DAYS = 365
+
 
 def _deps():
     """This agent's dependencies: the bound ToolContext, else this module's globals."""
     return _context.resolve(globals())
+
+
+def _is_valid_positive_amount(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value) and value > 0
+    except (TypeError, OverflowError):
+        return False
+
+
+def _is_valid_duration_days(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    return _MIN_DURATION_DAYS <= value <= _MAX_DURATION_DAYS
+
+
+def _is_valid_repayment_address(value: object) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, str):
+        return False
+    return StrKey.is_valid_ed25519_public_key(value)
 
 
 @tool(
@@ -51,6 +80,22 @@ async def request_defi_loan(
     Returns:
         Loan request status with tracking information
     """
+    if not _is_valid_positive_amount(amount):
+        return {"error": "Loan amount must be a finite number greater than 0"}
+
+    if not _is_valid_duration_days(duration_days):
+        return {
+            "error": (
+                f"Loan duration_days must be an integer between "
+                f"{_MIN_DURATION_DAYS} and {_MAX_DURATION_DAYS}"
+            )
+        }
+
+    if not _is_valid_repayment_address(repayment_address):
+        return {
+            "error": "Invalid repayment_address: must be a valid Stellar Ed25519 public key"
+        }
+
     # Check approval threshold
     threshold = float(_deps().settings.approval_threshold)
     if amount > threshold:
@@ -132,6 +177,9 @@ async def repay_loan(loan_id: int, amount: float | None = None) -> dict:
     Returns:
         Repayment status
     """
+    if amount is not None and not _is_valid_positive_amount(amount):
+        return {"error": "Repayment amount must be a finite number greater than 0"}
+
     loan = _deps().db.get_loan_by_id(loan_id)
     if not loan:
         return {"error": f"Loan {loan_id} not found"}
@@ -142,6 +190,9 @@ async def repay_loan(loan_id: int, amount: float | None = None) -> dict:
     # If amount not specified, repay full outstanding
     if amount is None:
         amount = loan["outstanding_amount"]
+
+    if not _is_valid_positive_amount(amount):
+        return {"error": "Repayment amount must be a finite number greater than 0"}
     
     if amount > loan["outstanding_amount"]:
         return {"error": f"Repayment amount {amount} exceeds outstanding {loan['outstanding_amount']}"}
