@@ -43,7 +43,7 @@ async function _POST(
   const { id } = await params;
   const body = await request.json();
 
-  const { buyerPublicKey, amount, txHash } = body as {
+  const { buyerPublicKey, amount: rawAmount, txHash } = body as {
     buyerPublicKey?: string;
     amount?: number;
     txHash?: string;
@@ -52,12 +52,18 @@ async function _POST(
   if (!buyerPublicKey || typeof buyerPublicKey !== "string") {
     return NextResponse.json({ error: "buyerPublicKey is required" }, { status: 400 });
   }
-  if (!amount || typeof amount !== "number" || amount <= 0) {
-    return NextResponse.json({ error: "amount must be a positive number" }, { status: 400 });
-  }
   if (!txHash) {
     return NextResponse.json({ error: "txHash is required — submit USDC payment first" }, { status: 400 });
   }
+
+  // Validate amount via the shared money-amount schema (positive, finite, < 10^12, ≤ 6 d.p.)
+  const { buyTokenSchema } = await import("@/lib/schemas");
+  const amountParse = buyTokenSchema.safeParse({ buyerPublicKey, amount: rawAmount });
+  if (!amountParse.success) {
+    const msg = amountParse.error.issues[0]?.message ?? "amount is invalid";
+    return NextResponse.json({ error: msg }, { status: 400 });
+  }
+  const amount = amountParse.data.amount;
 
   // ── Talos lookup ─────────────────────────────────────────────────
   const talos = await db.query.tlsTalos.findFirst({

@@ -2,6 +2,7 @@ import { vi, describe, it, expect, beforeEach } from "vitest";
 import { POST } from "../src/app/api/talos/[id]/buy-token/route";
 import { Keypair, Asset, TransactionBuilder, Operation, Networks, Account } from "@stellar/stellar-sdk";
 import { OPERATOR_PUBLIC_KEY } from "../src/lib/stellar-config";
+import { MAX_MONEY_AMOUNT } from "../src/lib/schemas";
 
 // Use vi.hoisted to declare mock functions so they are hoisted along with the vi.mock calls,
 // preventing any TypeScript linting or execution scoping warnings.
@@ -400,5 +401,62 @@ describe("POST /api/talos/[id]/buy-token — Verification Tests", () => {
     expect(body.mitosTxHash).toBe("mitos-transfer-tx-hash");
     expect(body.totalCost).toBe(totalCost);
     expect(mockInsert).toHaveBeenCalled();
+  });
+
+  it("returns 400 Bad Request if amount exceeds MAX_MONEY_AMOUNT", async () => {
+    const request = new Request("http://localhost/api/talos/agent-id/buy-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        buyerPublicKey: "GDN5AZ5KL6ZUN4W7SLRUXA3ZXCF4V6POZPV2QKDVDHM7QAN6R54IB3BV",
+        amount: MAX_MONEY_AMOUNT,
+        txHash: "valid-tx-hash",
+      }),
+    });
+    const params = Promise.resolve({ id: "agent-id" });
+    const response = await POST(request, { params });
+    expect(response.status).toBe(400);
+  });
+
+  it("returns 400 Bad Request if amount has more than 6 decimal places", async () => {
+    const request = new Request("http://localhost/api/talos/agent-id/buy-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        buyerPublicKey: "GDN5AZ5KL6ZUN4W7SLRUXA3ZXCF4V6POZPV2QKDVDHM7QAN6R54IB3BV",
+        amount: 1.0000001,
+        txHash: "valid-tx-hash",
+      }),
+    });
+    const params = Promise.resolve({ id: "agent-id" });
+    const response = await POST(request, { params });
+    expect(response.status).toBe(400);
+  });
+
+  it("returns 400 Bad Request if amount is zero or negative", async () => {
+    const requestZero = new Request("http://localhost/api/talos/agent-id/buy-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        buyerPublicKey: "GDN5AZ5KL6ZUN4W7SLRUXA3ZXCF4V6POZPV2QKDVDHM7QAN6R54IB3BV",
+        amount: 0,
+        txHash: "valid-tx-hash",
+      }),
+    });
+    const params = Promise.resolve({ id: "agent-id" });
+    const resZero = await POST(requestZero, { params });
+    expect(resZero.status).toBe(400);
+
+    const requestNeg = new Request("http://localhost/api/talos/agent-id/buy-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        buyerPublicKey: "GDN5AZ5KL6ZUN4W7SLRUXA3ZXCF4V6POZPV2QKDVDHM7QAN6R54IB3BV",
+        amount: -10,
+        txHash: "valid-tx-hash",
+      }),
+    });
+    const resNeg = await POST(requestNeg, { params });
+    expect(resNeg.status).toBe(400);
   });
 });
