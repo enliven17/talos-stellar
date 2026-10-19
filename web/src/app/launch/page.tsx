@@ -12,6 +12,7 @@ import {
   TALOS_NAME_SERVICE_CONTRACT_ID,
 } from "@/lib/soroban";
 import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
+import { validateName } from "@/lib/name-validation";
 
 
 const STEPS = [
@@ -100,7 +101,7 @@ function LaunchForm() {
         ]);
         setNameAvailable(onChainAvailable && dbResult);
       } catch {
-        const valid = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(name) && !/--/.test(name);
+        const valid = validateName(name);
         setNameAvailable(valid);
       } finally {
         setNameChecking(false);
