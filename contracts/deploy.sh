@@ -13,15 +13,43 @@
 
 set -euo pipefail
 
-NETWORK="${1:-testnet}"
-SOURCE="${3:-deployer}"  # default key name in stellar keys store
+usage() {
+  echo "Usage: $0 [testnet|mainnet] [--source <key-name>]" >&2
+}
 
-# Detect --source flag
-for i in "$@"; do
-  case $i in
-    --source) SOURCE="${@:$((${#@}+1))}";;  # next arg
+NETWORK="testnet"
+SOURCE="deployer"  # default key name in stellar keys store
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --source)
+      if [[ $# -lt 2 ]]; then
+        echo "✗  --source requires a value" >&2
+        usage
+        exit 1
+      fi
+      SOURCE="$2"
+      shift 2
+      ;;
+    testnet|mainnet)
+      NETWORK="$1"
+      shift
+      ;;
+    *)
+      echo "✗  Unknown argument: $1" >&2
+      usage
+      exit 1
+      ;;
   esac
 done
+
+# DRY_RUN=1 prints the resolved network/source and exits, without building
+# or touching the network. Used by scripts/deploy.test.sh.
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+  echo "NETWORK=$NETWORK"
+  echo "SOURCE=$SOURCE"
+  exit 0
+fi
 
 echo "▶  Building Soroban contracts (release)..."
 cargo build --target wasm32-unknown-unknown --release 2>&1 | tail -5
