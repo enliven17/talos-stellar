@@ -9,10 +9,13 @@
     "amount": {
       "anyOf": [
         {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         {
-          "type": "number"
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 999999999999
         }
       ]
     },
