@@ -85,6 +85,7 @@ pub struct GovernanceConfig {
     pub voting_period_ledgers: u32,
     pub pulse_token_address: Address,
     pub snapshot_offset_ledgers: Option<u32>,
+    pub quorum_bps: Option<u32>,
 }
 
 #[contracttype]
@@ -98,6 +99,8 @@ pub enum DataKey {
     TokenBalanceSnapshot(u32, Address),
     Checkpoint(Address, u32),
     CheckpointCount(Address),
+    TotalSupplyCheckpoint(u32),
+    TotalSupplyCheckpointCount,
     Delegation(Address),
     LastTouched(u32),
     /// Monotonic counter for dividend epochs (1-based).
@@ -501,6 +504,7 @@ impl TalosGovernance {
             voting_period_ledgers,
             pulse_token_address,
             snapshot_offset_ledgers: None,
+            quorum_bps: None,
         };
 
         env.storage().persistent().set(&DataKey::Admin, &admin);
@@ -703,8 +707,17 @@ impl TalosGovernance {
     pub fn update_config(env: Env, admin: Address, config: GovernanceConfig) {
         pause_control::check_not_paused(&env, PAUSE_GOVERNANCE_CONFIG);
         Self::require_admin(&env, &admin);
-        if config.quorum_threshold <= 0 {
-            panic!("Quorum must be positive");
+        if let Some(bps) = config.quorum_bps {
+            if bps == 0 || bps > 10_000 {
+                panic!("Quorum bps must be 1..10000");
+            }
+            if config.quorum_threshold < 0 {
+                panic!("Quorum threshold cannot be negative");
+            }
+        } else {
+            if config.quorum_threshold <= 0 {
+                panic!("Quorum must be positive");
+            }
         }
         if config.consensus_threshold <= 0 || config.consensus_threshold > 10_000 {
             panic!("Consensus threshold must be 1..10000 bps");
@@ -943,7 +956,7 @@ impl TalosGovernance {
             .expect("Contract not initialized");
 
         let votes_cast = proposal.yes_votes + proposal.no_votes;
-        let quorum_threshold = config.quorum_threshold;
+        let quorum_threshold = Self::compute_quorum_threshold(&env, &config, proposal.snapshot_ledger);
         let quorum_met = votes_cast >= quorum_threshold;
 
         let approval_bps = if votes_cast > 0 {
@@ -1291,6 +1304,77 @@ impl TalosGovernance {
         found.votes
     }
 
+    pub fn get_past_total_supply(env: &Env, ledger: u32) -> i128 {
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalSupplyCheckpointCount)
+            .unwrap_or(0);
+        if count == 0 {
+            return 0;
+        }
+
+        // Check latest
+        let latest_ck: Checkpoint = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalSupplyCheckpoint(count - 1))
+            .unwrap();
+        if latest_ck.ledger <= ledger {
+            return latest_ck.votes;
+        }
+
+        // Check earliest
+        let earliest_ck: Checkpoint = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalSupplyCheckpoint(0))
+            .unwrap();
+        if earliest_ck.ledger > ledger {
+            return 0;
+        }
+
+        // Binary search
+        let mut low = 0;
+        let mut high = count - 1;
+        while low < high {
+            let mid = high - (high - low) / 2;
+            let ck: Checkpoint = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TotalSupplyCheckpoint(mid))
+                .unwrap();
+            if ck.ledger == ledger {
+                return ck.votes;
+            } else if ck.ledger < ledger {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        let found: Checkpoint = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalSupplyCheckpoint(low))
+            .unwrap();
+        found.votes
+    }
+
+    fn compute_quorum_threshold(env: &Env, config: &GovernanceConfig, snapshot_ledger: u32) -> i128 {
+        if let Some(bps) = config.quorum_bps {
+            let supply = Self::get_past_total_supply(env, snapshot_ledger);
+            // Integer ceiling division so quorum is reached exactly at the configured share:
+            // ceil(supply * bps / 10_000) = (supply * bps + 9_999) / 10_000
+            if supply <= 0 {
+                0
+            } else {
+                (supply * (bps as i128) + 9_999) / 10_000
+            }
+        } else {
+            config.quorum_threshold
+        }
+    }
+
     pub fn delegate(env: Env, delegator: Address, delegatee: Address) {
         pause_control::check_not_paused(&env, PAUSE_GOVERNANCE_CONFIG);
         delegator.require_auth();
@@ -1302,28 +1386,97 @@ impl TalosGovernance {
         Self::require_admin(&env, &admin);
         let current_ledger = env.ledger().sequence();
         let count: u32 = env.storage().persistent().get(&DataKey::CheckpointCount(account.clone())).unwrap_or(0);
-        
+
+        let old_balance = if count > 0 {
+            let last_ck: Checkpoint = env.storage().persistent().get(&DataKey::Checkpoint(account.clone(), count - 1)).unwrap();
+            last_ck.votes
+        } else {
+            0
+        };
+        let delta = new_balance - old_balance;
+
         if count > 0 {
             let mut last_ck: Checkpoint = env.storage().persistent().get(&DataKey::Checkpoint(account.clone(), count - 1)).unwrap();
             if last_ck.ledger == current_ledger {
                 last_ck.votes = new_balance;
                 env.storage().persistent().set(&DataKey::Checkpoint(account.clone(), count - 1), &last_ck);
-                return;
+            } else {
+                let ck = Checkpoint {
+                    ledger: current_ledger,
+                    votes: new_balance,
+                };
+                env.storage().persistent().set(&DataKey::Checkpoint(account.clone(), count), &ck);
+                env.storage().persistent().set(&DataKey::CheckpointCount(account.clone()), &(count + 1));
             }
+        } else {
+            let ck = Checkpoint {
+                ledger: current_ledger,
+                votes: new_balance,
+            };
+            env.storage().persistent().set(&DataKey::Checkpoint(account.clone(), count), &ck);
+            env.storage().persistent().set(&DataKey::CheckpointCount(account.clone()), &(count + 1));
         }
-        
-        let ck = Checkpoint {
-            ledger: current_ledger,
-            votes: new_balance,
+
+        // Track total supply checkpoints alongside per-account ones
+        let total_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalSupplyCheckpointCount)
+            .unwrap_or(0);
+        let prev_total_supply = if total_count > 0 {
+            let last_total_ck: Checkpoint = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TotalSupplyCheckpoint(total_count - 1))
+                .unwrap();
+            last_total_ck.votes
+        } else {
+            0
         };
-        env.storage().persistent().set(&DataKey::Checkpoint(account.clone(), count), &ck);
-        env.storage().persistent().set(&DataKey::CheckpointCount(account.clone()), &(count + 1));
+        let new_total_supply = prev_total_supply + delta;
+
+        if total_count > 0 {
+            let mut last_total_ck: Checkpoint = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TotalSupplyCheckpoint(total_count - 1))
+                .unwrap();
+            if last_total_ck.ledger == current_ledger {
+                last_total_ck.votes = new_total_supply;
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::TotalSupplyCheckpoint(total_count - 1), &last_total_ck);
+            } else {
+                let total_ck = Checkpoint {
+                    ledger: current_ledger,
+                    votes: new_total_supply,
+                };
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::TotalSupplyCheckpoint(total_count), &total_ck);
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::TotalSupplyCheckpointCount, &(total_count + 1));
+            }
+        } else {
+            let total_ck = Checkpoint {
+                ledger: current_ledger,
+                votes: new_total_supply,
+            };
+            env.storage()
+                .persistent()
+                .set(&DataKey::TotalSupplyCheckpoint(total_count), &total_ck);
+            env.storage()
+                .persistent()
+                .set(&DataKey::TotalSupplyCheckpointCount, &(total_count + 1));
+        }
     }
 
     fn update_status_if_quorum(env: &Env, proposal: &mut Proposal) {
         let config = Self::require_config(env);
         let total_votes = proposal.yes_votes + proposal.no_votes;
-        if total_votes >= config.quorum_threshold {
+        let quorum_threshold = Self::compute_quorum_threshold(env, &config, proposal.snapshot_ledger);
+        if total_votes >= quorum_threshold {
             // Emit EventQuorumReached exactly once per proposal — write a
             // sentinel before emitting so a re-entrant call cannot double-fire.
             let sentinel_key = DataKey::QuorumReached(proposal.id);
@@ -1343,7 +1496,7 @@ impl TalosGovernance {
                     env,
                     proposal.id,
                     total_votes,
-                    config.quorum_threshold,
+                    quorum_threshold,
                     approval_bps,
                 );
             }
@@ -1355,7 +1508,8 @@ impl TalosGovernance {
     fn finalize_status(env: &Env, proposal: &mut Proposal) {
         let config = Self::require_config(env);
         let total_votes = proposal.yes_votes + proposal.no_votes;
-        if total_votes < config.quorum_threshold {
+        let quorum_threshold = Self::compute_quorum_threshold(env, &config, proposal.snapshot_ledger);
+        if total_votes < quorum_threshold {
             proposal.status = ProposalStatus::Rejected;
             return;
         }
@@ -2004,6 +2158,7 @@ mod tests {
             voting_period_ledgers: 30,
             pulse_token_address: pulse,
             snapshot_offset_ledgers: None,
+            quorum_bps: None,
         };
 
         client
@@ -2113,6 +2268,7 @@ mod tests {
             voting_period_ledgers: 30,
             pulse_token_address: pulse,
             snapshot_offset_ledgers: None,
+            quorum_bps: None,
         };
         let res = client
             .mock_auths(&[MockAuth {
@@ -2313,6 +2469,7 @@ mod tests {
             voting_period_ledgers: 20,
             pulse_token_address: pulse,
             snapshot_offset_ledgers: None,
+            quorum_bps: None,
         };
         let rando = Address::generate(&env);
         let result = client.try_update_config(&rando, &config);
@@ -3345,6 +3502,7 @@ mod tests {
             voting_period_ledgers: 20,
             pulse_token_address: pulse,
             snapshot_offset_ledgers: Some(custom_offset),
+            quorum_bps: None,
         };
 
         client
@@ -3381,6 +3539,7 @@ mod tests {
             voting_period_ledgers: 20,
             pulse_token_address: pulse,
             snapshot_offset_ledgers: Some(MAX_SNAPSHOT_OFFSET_LEDGERS + 1),
+            quorum_bps: None,
         };
 
         client
@@ -3427,5 +3586,358 @@ mod tests {
 
         assert_eq!(proposal.start_ledger, 5);
         assert_eq!(proposal.snapshot_ledger, 0);
+    }
+
+    // ── Issue #950: quorum_bps mode and snapshot total supply checkpoints tests ──
+
+    #[test]
+    fn bps_mode_reaches_quorum_exactly_at_configured_share() {
+        let (env, contract_id, admin, pulse, client) = setup();
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+
+        // Set voting power at ledger 100
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_voting_power",
+                    args: (admin.clone(), alice.clone(), 600_i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_voting_power(&admin, &alice, &600_i128);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_voting_power",
+                    args: (admin.clone(), bob.clone(), 400_i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_voting_power(&admin, &bob, &400_i128);
+
+        // Total supply at ledger 100 is 1000
+        assert_eq!(client.get_past_total_supply(&100), 1000);
+
+        // Configure 50% quorum (5000 bps)
+        let config = GovernanceConfig {
+            quorum_threshold: 0,
+            consensus_threshold: 5_000,
+            voting_period_ledgers: 20,
+            pulse_token_address: pulse,
+            snapshot_offset_ledgers: Some(0), // snapshot at start_ledger
+            quorum_bps: Some(5_000),
+        };
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_config",
+                    args: (admin.clone(), config.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_config(&admin, &config);
+
+        // Move to ledger 110 and create proposal
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 110;
+        });
+
+        let proposer = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        // Effective quorum threshold should be exactly 500 (50% of 1000)
+        let q_state = client.get_proposal_quorum_state(&proposal_id).unwrap();
+        assert_eq!(q_state.quorum_threshold, 500);
+        assert!(!q_state.quorum_met);
+
+        // Bob votes 400 reject (below 500 quorum)
+        client
+            .mock_auths(&[MockAuth {
+                address: &bob,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "vote",
+                    args: (bob.clone(), proposal_id, VoteChoice::Reject).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .vote(&bob, &proposal_id, &VoteChoice::Reject);
+
+        let p = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(p.status, ProposalStatus::Active);
+        let q_state2 = client.get_proposal_quorum_state(&proposal_id).unwrap();
+        assert_eq!(q_state2.votes_cast, 400);
+        assert!(!q_state2.quorum_met);
+
+        // Alice votes 600 approve -> total votes = 1000 >= 500 quorum -> approved
+        client
+            .mock_auths(&[MockAuth {
+                address: &alice,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "vote",
+                    args: (alice.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .vote(&alice, &proposal_id, &VoteChoice::Approve);
+
+        let p_final = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(p_final.status, ProposalStatus::Approved);
+        let q_state3 = client.get_proposal_quorum_state(&proposal_id).unwrap();
+        assert_eq!(q_state3.votes_cast, 1000);
+        assert!(q_state3.quorum_met);
+    }
+
+    #[test]
+    fn bps_mode_quorum_is_unaffected_by_supply_changes_after_snapshot() {
+        let (env, contract_id, admin, pulse, client) = setup();
+        let alice = Address::generate(&env);
+
+        // Ledger 100: Alice has 1_000 voting power
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_voting_power",
+                    args: (admin.clone(), alice.clone(), 1_000_i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_voting_power(&admin, &alice, &1_000_i128);
+
+        // Configure 25% quorum (2500 bps)
+        let config = GovernanceConfig {
+            quorum_threshold: 0,
+            consensus_threshold: 5_000,
+            voting_period_ledgers: 20,
+            pulse_token_address: pulse,
+            snapshot_offset_ledgers: Some(0),
+            quorum_bps: Some(2_500),
+        };
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_config",
+                    args: (admin.clone(), config.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_config(&admin, &config);
+
+        // Move to ledger 110: create proposal (snapshot_ledger = 110, total supply at 110 is 1_000)
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 110;
+        });
+
+        let proposer = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        let q_before = client.get_proposal_quorum_state(&proposal_id).unwrap();
+        assert_eq!(q_before.quorum_threshold, 250); // 25% of 1_000
+
+        // Move to ledger 120 (after snapshot): Mint additional 9_000 tokens to Alice (total supply = 10_000)
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 120;
+        });
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_voting_power",
+                    args: (admin.clone(), alice.clone(), 10_000_i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_voting_power(&admin, &alice, &10_000_i128);
+
+        assert_eq!(client.get_past_total_supply(&120), 10_000);
+        assert_eq!(client.get_past_total_supply(&110), 1_000);
+
+        // Proposal snapshot quorum state MUST still reflect snapshot_ledger (110) quorum of 250
+        let q_after = client.get_proposal_quorum_state(&proposal_id).unwrap();
+        assert_eq!(q_after.quorum_threshold, 250);
+    }
+
+    #[test]
+    fn total_supply_checkpoints_update_correctly_on_multiple_accounts_and_same_ledger() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+
+        // Ledger 100: Alice gets 500
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_voting_power",
+                    args: (admin.clone(), alice.clone(), 500_i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_voting_power(&admin, &alice, &500_i128);
+
+        // Same ledger 100: Bob gets 300
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_voting_power",
+                    args: (admin.clone(), bob.clone(), 300_i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_voting_power(&admin, &bob, &300_i128);
+
+        // Same ledger 100: Alice updated from 500 to 700 (delta +200)
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_voting_power",
+                    args: (admin.clone(), alice.clone(), 700_i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_voting_power(&admin, &alice, &700_i128);
+
+        assert_eq!(client.get_past_total_supply(&99), 0);
+        assert_eq!(client.get_past_total_supply(&100), 1000); // 700 + 300
+
+        // Move to ledger 105: Bob reduced from 300 to 100 (delta -200)
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 105;
+        });
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_voting_power",
+                    args: (admin.clone(), bob.clone(), 100_i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_voting_power(&admin, &bob, &100_i128);
+
+        assert_eq!(client.get_past_total_supply(&100), 1000);
+        assert_eq!(client.get_past_total_supply(&104), 1000);
+        assert_eq!(client.get_past_total_supply(&105), 800);
+        assert_eq!(client.get_past_total_supply(&110), 800);
+    }
+
+    #[test]
+    fn config_validation_rejects_invalid_quorum_bps() {
+        let (env, contract_id, admin, pulse, client) = setup();
+
+        // 0 bps is rejected
+        let config_zero = GovernanceConfig {
+            quorum_threshold: 0,
+            consensus_threshold: 5_000,
+            voting_period_ledgers: 20,
+            pulse_token_address: pulse.clone(),
+            snapshot_offset_ledgers: None,
+            quorum_bps: Some(0),
+        };
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_config",
+                    args: (admin.clone(), config_zero.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_config(&admin, &config_zero);
+        assert!(res.is_err());
+
+        // > 10_000 bps is rejected
+        let config_excess = GovernanceConfig {
+            quorum_threshold: 0,
+            consensus_threshold: 5_000,
+            voting_period_ledgers: 20,
+            pulse_token_address: pulse.clone(),
+            snapshot_offset_ledgers: None,
+            quorum_bps: Some(10_001),
+        };
+        let res2 = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_config",
+                    args: (admin.clone(), config_excess.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_config(&admin, &config_excess);
+        assert!(res2.is_err());
+
+        // Negative quorum_threshold with quorum_bps is rejected
+        let config_neg = GovernanceConfig {
+            quorum_threshold: -1,
+            consensus_threshold: 5_000,
+            voting_period_ledgers: 20,
+            pulse_token_address: pulse,
+            snapshot_offset_ledgers: None,
+            quorum_bps: Some(5_000),
+        };
+        let res3 = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_config",
+                    args: (admin.clone(), config_neg.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_config(&admin, &config_neg);
+        assert!(res3.is_err());
+    }
+
+    #[test]
+    fn property_test_ceiling_division_reaches_quorum_at_exact_share() {
+        // Test various supply and bps combinations
+        let cases = [
+            (1_000_i128, 5_000_u32, 500_i128),
+            (100_i128, 3_333_u32, 34_i128),     // ceil(33.33) = 34
+            (1_000_i128, 1_u32, 1_i128),        // ceil(0.1) = 1
+            (10_000_i128, 10_000_u32, 10_000_i128),
+            (7_i128, 5_000_u32, 4_i128),        // ceil(3.5) = 4
+        ];
+
+        for (supply, bps, expected_threshold) in cases {
+            let actual = (supply * (bps as i128) + 9_999) / 10_000;
+            assert_eq!(
+                actual, expected_threshold,
+                "Failed for supply={}, bps={}",
+                supply, bps
+            );
+            // Verify votes just below threshold do not satisfy quorum
+            assert!(actual - 1 < expected_threshold);
+            // Verify votes exactly at threshold do satisfy quorum
+            assert!(actual >= expected_threshold);
+        }
     }
 }
