@@ -66,7 +66,9 @@ function isValidWebhookSignature(
   secret: string,
 ) {
   const providedSignature = parseSignature(signatureHeader);
-  if (!providedSignature) return false;
+  if (!/^[0-9a-f]{64}$/i.test(providedSignature)) {
+    return false;
+  }
 
   const timestamp = timestampHeader?.trim();
   if (!timestamp) return false;

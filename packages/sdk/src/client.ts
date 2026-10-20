@@ -27,6 +27,14 @@ import type {
   ActivityPage,
   ActivityPageOptions,
   JobPaymentStatus,
+  WebhookSubscription,
+  WebhookSubscriptionPage,
+  CreateWebhookSubscriptionParams,
+  ListWebhookSubscriptionsParams,
+  DeleteWebhookSubscriptionResult,
+  RotateWebhookSecretParams,
+  RotateWebhookSecretResult,
+  FinalizeWebhookSecretRotationResult,
 } from "./types.js";
 import {
   AsyncPaginationIterator,
@@ -222,20 +230,6 @@ export interface ReadOptions {
    * regardless of the client default. Surfaces as `TalosTimeoutError`.
    */
   timeoutMs?: number;
-}
-
-/**
- * Per-call options for write methods (POST / PATCH).
- *
- * Supplying an `idempotencyKey` sends an `Idempotency-Key` header on every
- * attempt and makes the call retry-eligible, since the server de-duplicates
- * a request whose first attempt already committed.
- */
-export interface WriteOptions {
-  /** Optional idempotency key (UUID v4 recommended). Max 128 bytes. */
-  idempotencyKey?: string;
-  /** AbortSignal for cancellation. */
-  signal?: AbortSignal;
 }
 
 /** Structured event emitted to {@link TalosClientOptions.onError}. */
@@ -1504,6 +1498,100 @@ export class TalosClient {
     options?: WriteOptions,
   ): Promise<Playbook> {
     return this.request("/api/playbooks", {
+      method: "POST",
+      body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  // ── Webhook subscriptions ───────────────────────────────────
+
+  /**
+   * Create a webhook subscription. The `secret` in `params` is sent once to
+   * configure signing and is never echoed back in the response.
+   */
+  async createWebhookSubscription(
+    params: CreateWebhookSubscriptionParams,
+    options?: WriteOptions,
+  ): Promise<WebhookSubscription> {
+    return this.request("/api/webhooks/subscriptions", {
+      method: "POST",
+      body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  async listWebhookSubscriptions(
+    params?: ListWebhookSubscriptionsParams,
+  ): Promise<WebhookSubscriptionPage> {
+    const { signal, timeoutMs, ...query } = params ?? {};
+    return this.request("/api/webhooks/subscriptions", {
+      params: query,
+      signal,
+      timeoutMs,
+    });
+  }
+
+  /**
+   * Async iterator for paginated webhook subscriptions.
+   *
+   * @example
+   * ```ts
+   * for await (const sub of client.paginateWebhookSubscriptions({ active: true })) {
+   *   console.log(sub.id, sub.url);
+   * }
+   * ```
+   */
+  paginateWebhookSubscriptions(
+    options?: AsyncPaginationIteratorOptions & ListWebhookSubscriptionsParams,
+  ): AsyncPaginationIterator<WebhookSubscription> {
+    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
+    return createPaginationIterator<WebhookSubscription>(
+      (opts) => this.listWebhookSubscriptions({ ...cursorOptions, ...opts }),
+      { maxPages, signal, timeoutMs },
+    );
+  }
+
+  async deleteWebhookSubscription(
+    id: string,
+    options?: WriteOptions,
+  ): Promise<DeleteWebhookSubscriptionResult> {
+    return this.request(`/api/webhooks/subscriptions/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * Rotate (or finalize the rotation of) a webhook subscription's signing
+   * secret. Pass `{ generate: true }` to have the server generate a secret
+   * (returned once in `result.secret`), `{ secret }` to supply your own, or
+   * `{ finalize: true }` to clear the previous secret early. The resolved
+   * secret is never logged by the SDK; callers that log the result should
+   * route it through {@link redactSecrets} first.
+   */
+  async rotateWebhookSecret(
+    id: string,
+    params: RotateWebhookSecretParams & { finalize: true },
+    options?: WriteOptions,
+  ): Promise<FinalizeWebhookSecretRotationResult>;
+  async rotateWebhookSecret(
+    id: string,
+    params?: RotateWebhookSecretParams,
+    options?: WriteOptions,
+  ): Promise<RotateWebhookSecretResult>;
+  async rotateWebhookSecret(
+    id: string,
+    params: RotateWebhookSecretParams = {},
+    options?: WriteOptions,
+  ): Promise<RotateWebhookSecretResult | FinalizeWebhookSecretRotationResult> {
+    return this.request(`/api/webhooks/subscriptions/${encodeURIComponent(id)}/rotate`, {
       method: "POST",
       body: JSON.stringify(params),
       idempotencyKey: options?.idempotencyKey,
