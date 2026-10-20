@@ -499,7 +499,12 @@ impl TalosDividends {
             return Err(ContractError::EpochExpired);
         }
 
-        // Enforce claim window.
+        // Enforce claim window. Inclusive of `deadline` itself — claims are
+        // accepted for `now <= deadline`, so this is the exact complement of
+        // `recover_expired`'s `now <= deadline` rejection below: the two
+        // windows meet at `deadline` but never overlap. See the boundary
+        // tests in `mod tests` (`claim_succeeds_exactly_at_deadline`,
+        // `recover_fails_exactly_at_deadline`, etc.) for the pinned behavior.
         let now = env.ledger().timestamp();
         let deadline = record
             .created_at
@@ -616,6 +621,11 @@ impl TalosDividends {
             return Err(ContractError::AlreadyRecovered);
         }
 
+        // Strictly after `deadline` — recovery is only accepted once `now >
+        // deadline`, i.e. the exact complement of `claim_dividend`'s
+        // inclusive `now <= deadline` acceptance above. At `now == deadline`
+        // the claim window still owns the instant, so recovery correctly
+        // rejects here; see the boundary tests in `mod tests`.
         let now = env.ledger().timestamp();
         let deadline = record
             .created_at
@@ -1884,6 +1894,186 @@ mod tests {
             }])
             .try_recover_expired(&admin, &talos_id, &epoch_id);
         assert_eq!(res, Err(Ok(ContractError::EpochNotExpired)));
+    }
+
+    // ── Boundary semantics: claim_dividend vs. recover_expired ─────────────────
+    //
+    // `claim_dividend` rejects when `now > deadline` (so it ACCEPTS exactly at
+    // `deadline`), while `recover_expired` rejects when `now <= deadline` (so
+    // it ACCEPTS only strictly after `deadline`). The two conditions are
+    // complements of each other around the same `deadline` value, so the
+    // claim window and the recovery window never overlap: for every `now`,
+    // at most one of {claim, recover} can succeed. These tests pin that
+    // invariant down at `deadline - 1`, `deadline`, and `deadline + 1` so a
+    // future edit to either boundary check trips a test instead of silently
+    // opening a window where both (or neither) succeed.
+    //
+    // With `created_at = 1_000` and `expiry_secs = 7_200` (the defaults from
+    // `commit_default_epoch`), `deadline = 8_200`.
+
+    /// Helper: `try_recover_expired` with the admin auth already mocked.
+    /// Mirrors `try_do_claim`'s result shape so both boundary checks compare
+    /// the same way: `Ok(Ok(amount))` on success, `Err(Ok(ContractError::X))`
+    /// on a contract-level rejection.
+    fn try_recover(
+        env: &Env,
+        contract_id: &Address,
+        client: &TalosDividendsClient<'static>,
+        admin: &Address,
+        talos_id: u32,
+        epoch_id: u64,
+    ) -> Result<Result<i128, soroban_sdk::Error>, Result<ContractError, soroban_sdk::InvokeError>>
+    {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "recover_expired",
+                    args: (admin.clone(), talos_id, epoch_id).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_recover_expired(admin, &talos_id, &epoch_id)
+    }
+
+    #[test]
+    fn claim_succeeds_at_deadline_minus_one() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 8_199; // deadline (8_200) - 1
+        });
+
+        let res = try_do_claim(
+            &env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor,
+            &treasury,
+        );
+        assert!(res.is_ok() && res.unwrap().is_ok());
+    }
+
+    #[test]
+    fn claim_succeeds_exactly_at_deadline() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 8_200; // == deadline — claim window is inclusive
+        });
+
+        let res = try_do_claim(
+            &env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor,
+            &treasury,
+        );
+        assert!(res.is_ok() && res.unwrap().is_ok());
+    }
+
+    #[test]
+    fn claim_fails_at_deadline_plus_one() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 8_201; // deadline (8_200) + 1
+        });
+
+        let res = try_do_claim(
+            &env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor,
+            &treasury,
+        );
+        assert_eq!(res, Err(Ok(ContractError::EpochExpired)));
+    }
+
+    #[test]
+    fn recover_fails_at_deadline_minus_one() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 8_199; // deadline (8_200) - 1
+        });
+
+        let res = try_recover(&env, &contract_id, &client, &admin, talos_id, epoch_id);
+        assert_eq!(res, Err(Ok(ContractError::EpochNotExpired)));
+    }
+
+    #[test]
+    fn recover_fails_exactly_at_deadline() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 8_200; // == deadline — claim window still owns this instant
+        });
+
+        let res = try_recover(&env, &contract_id, &client, &admin, talos_id, epoch_id);
+        assert_eq!(res, Err(Ok(ContractError::EpochNotExpired)));
+    }
+
+    #[test]
+    fn recover_succeeds_at_deadline_plus_one() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 8_201; // deadline (8_200) + 1
+        });
+
+        let res = try_recover(&env, &contract_id, &client, &admin, talos_id, epoch_id);
+        assert_eq!(res, Ok(Ok(10_000)));
+    }
+
+    #[test]
+    fn claim_and_recover_never_both_succeed_at_any_boundary() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        // deadline = created_at (1_000) + expiry_secs (7_200) = 8_200.
+        for &ts in &[8_199u64, 8_200u64, 8_201u64] {
+            // Fresh epoch per timestamp so a successful claim/recover in one
+            // iteration can't influence the next.
+            env.ledger().with_mut(|li| {
+                li.timestamp = 1_000;
+            });
+            let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+            env.ledger().with_mut(|li| {
+                li.timestamp = ts;
+            });
+
+            let claim_res = try_do_claim(
+                &env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor,
+                &treasury,
+            );
+            let claim_ok = matches!(claim_res, Ok(Ok(_)));
+
+            let recover_res = try_recover(&env, &contract_id, &client, &admin, talos_id, epoch_id);
+            let recover_ok = matches!(recover_res, Ok(Ok(_)));
+
+            assert!(
+                !(claim_ok && recover_ok),
+                "claim and recover both succeeded at ts={ts} (deadline=8_200)"
+            );
+        }
     }
 
     #[test]
