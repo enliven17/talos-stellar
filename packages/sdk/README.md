@@ -290,6 +290,56 @@ await TalosWebhook.verify({
 - **"Timestamp outside tolerance zone"**: Check your server's NTP clock synchronization. If events are genuinely delayed, increase `toleranceSeconds`.
 - **"Signature mismatch"**: Ensure you are passing the *raw* request body (unparsed bytes) to the `payload` option. Frameworks like Express often parse JSON automatically; you need to bypass it or capture the raw buffer. This also surfaces if a `v1=` signature value isn't a well-formed hex string (even length, `0-9a-fA-F` only) — the SDK rejects malformed or non-canonical hex rather than attempting a partial decode.
 
+#### Managing Subscriptions
+
+`TalosWebhook` / `verifyWebhook` above handle *inbound* delivery verification. To create, list, delete, or rotate the subscriptions that produce those deliveries, use the corresponding `TalosClient` methods:
+
+```typescript
+import { TalosClient } from '@talos-protocol/sdk';
+
+const client = new TalosClient({ apiKey: process.env.TALOS_API_KEY });
+
+// Create — the secret is written once and never echoed back.
+const subscription = await client.createWebhookSubscription({
+  url: "https://example.com/webhooks/talos",
+  secret: process.env.TALOS_WEBHOOK_SECRET!, // 16-256 chars
+  eventTypes: ["revenue.recorded", "approval.completed"],
+});
+
+// List (cursor-paginated) — or use `client.paginateWebhookSubscriptions()`.
+const page = await client.listWebhookSubscriptions({ active: true, limit: 50 });
+
+// Delete.
+await client.deleteWebhookSubscription(subscription.id);
+```
+
+**Secret rotation** is zero-downtime: the previous secret stays valid for a grace window so `TalosWebhook.verify` (passed an array of secrets) keeps accepting deliveries signed with either key until the window elapses or you finalize early.
+
+```typescript
+// Let the server generate a new secret. It is returned exactly once —
+// store it immediately and never log the response as-is.
+const rotated = await client.rotateWebhookSecret(subscription.id, { generate: true });
+console.log(rotated.secret); // whsec_... — capture and persist this now
+
+// ...or supply your own secret, with a custom grace window (seconds):
+await client.rotateWebhookSecret(subscription.id, {
+  secret: process.env.TALOS_WEBHOOK_SECRET_NEXT!,
+  graceSeconds: 3600,
+});
+
+// During the grace window, verify with both secrets:
+await TalosWebhook.verify({
+  payload: rawBody,
+  signatureHeader: header,
+  secret: [process.env.TALOS_WEBHOOK_SECRET_NEXT!, process.env.TALOS_WEBHOOK_SECRET!],
+});
+
+// Once all consumers have switched, finalize early to drop the old secret:
+await client.rotateWebhookSecret(subscription.id, { finalize: true });
+```
+
+If you log the result of `createWebhookSubscription` / `rotateWebhookSecret` yourself, run it through `redactSecrets` (exported from `@talos-protocol/sdk`) first — the SDK never logs these values internally, and its own `onError` hook already redacts `secret`-shaped fields in failure responses.
+
 ### Stellar Helpers
 
 ```typescript
