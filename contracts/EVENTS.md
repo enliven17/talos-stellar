@@ -76,6 +76,9 @@ is idempotent per cursor (see §4).
 | (`vote`, proposal_id: u32) | (voter: Address, choice: VoteChoice, weight: i128) |
 | (`prop_stat`, proposal_id: u32) | status: ProposalStatus |
 | (`qrm_rchd`, proposal_id: u32) | (proposal_id: u32, votes_cast: i128, quorum_threshold: i128, approval_bps: i128) |
+| (`adm_prp`,) | EventAdminProposed | admin transfer proposed |
+| (`adm_acc`,) | EventAdminAccepted | admin transfer accepted |
+| (`adm_cnl`,) | EventAdminTransferCancelled | admin transfer cancelled |
 
 `qrm_rchd` is emitted **at most once** per proposal, on the first vote that brings `votes_cast` to or above `quorum_threshold`. A `DataKey::QuorumReached(proposal_id)` sentinel prevents re-emission for subsequent votes.
 

@@ -55,6 +55,7 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
   - **Quorum & consensus thresholds**: Configurable quorum floor (`quorum_threshold`) and approval consensus threshold (`consensus_threshold` in basis points).
   - **Quorum state monitoring**: Pure read-only query `get_proposal_quorum_state` calculates realtime votes cast, quorum percentage, approval basis points, and consensus progress.
   - **One-time quorum event**: Emits `qrm_rchd` exactly once when `total_votes >= quorum_threshold`, guarded by an on-chain idempotency sentinel (`DataKey::QuorumReached`).
+  - **Two-step admin transfer** (`propose_admin` / `accept_admin` / `cancel_admin_transfer` / `get_pending_admin`), mirroring the registry's admin rotation with `adm_prp` / `adm_acc` / `adm_cnl` events.
   - **Dividend distribution snapshots**: Administrator records periodic dividend distribution snapshots (`record_dividend_snapshot`) with sequential epoch numbering, `total_usdc`, `per_token_usdc`, and ledger timestamps; paginated retrieval via `get_dividend_snapshots_page`.
   - **Scoped emergency pause controls**: Domain-scoped pausing via `pause_domain`, `unpause_domain`, `is_domain_paused`, and `get_domain_pause_status`:
     - `PAUSE_PROPOSAL_CREATION` (Domain `7`): Guards `create_proposal`.
@@ -69,6 +70,10 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
   - `pulse_token_address` (`Address`): Contract address of the Pulse token used for balance snapshots and vote weight calculation.
 - **Entry Points**:
   - `initialize(admin, pulse_token_address, quorum_threshold, consensus_threshold, voting_period_ledgers)`: One-time contract initialization (admin auth).
+  - `propose_admin(admin, new_admin)`: Propose a new admin (current admin auth); replaced nominations override earlier ones.
+  - `accept_admin()`: Accept the admin role as the pending nominee (pending admin auth); the previous admin loses all rights immediately.
+  - `cancel_admin_transfer(admin)`: Cancel an in-progress admin transfer (current admin auth).
+  - `get_pending_admin() -> Option<Address>`: Read the pending admin address, if any.
   - `create_proposal(proposer, talos_id, title, description) -> u32`: Create a new proposal with title and description (proposer auth; rejects empty title/description).
   - `vote(voter, proposal_id, choice)`: Cast an `Approve` or `Reject` vote weighted by snapshot balance (voter auth; rejects double voting, zero balance, or ended voting period).
   - `finalize_proposal(proposal_id)`: Finalize status to `Approved` or `Rejected` after voting period ends (permissionless).
