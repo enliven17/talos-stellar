@@ -23,8 +23,7 @@ async function _POST(
 
     // Verify the message contains the TALOS ID to prevent replay across TALOSes
     if (!message.includes(id)) {
-      for (const tag of agentMutationTags(id)) revalidateTag(tag);
-    return Response.json(
+      return Response.json(
         { error: "Signature message must contain the TALOS ID" },
         { status: 400 }
       );
@@ -123,6 +122,8 @@ async function _POST(
     if ("error" in result) {
       return Response.json({ error: result.error }, { status: result.status });
     }
+
+    for (const tag of agentMutationTags(id)) revalidateTag(tag);
 
     return Response.json({
       id: result.data.id,

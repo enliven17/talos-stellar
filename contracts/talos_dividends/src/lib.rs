@@ -61,7 +61,7 @@
 //!
 //! ## Version
 //!
-//! `CONTRACT_VERSION = (1, 1, 0)`
+//! `CONTRACT_VERSION = (1, 2, 0)`
 
 #![no_std]
 
@@ -69,7 +69,8 @@
 extern crate std;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
+    Symbol, Vec,
 };
 
 // ── Error types ─────────────────────────────────────────────────────────────
@@ -212,6 +213,40 @@ const MIN_EPOCH_AMOUNT: i128 = 1;
 /// - **minor** — backwards-compatible new entry-point or field
 /// - **patch** — bug-fix with no observable ABI change
 pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 2, 0);
+
+pub const INTERFACE_NAMESPACE: &str = "TalosDividends";
+
+pub const INTERFACE_ID: [u8; 32] = [
+    0x54, 0x61, 0x6C, 0x6F, 0x73, 0x44, 0x69, 0x76, // "TalosDiv"
+    0x69, 0x64, 0x65, 0x6E, 0x64, 0x73, 0x00, 0x00, // "idends" + zero pad
+    0x00, 0x00, 0x00, 0x01, // major = 1
+    0x00, 0x00, 0x00, 0x02, // minor = 2
+    0x00, 0x00, 0x00, 0x00, // patch = 0
+    0x00, 0x00, 0x00, 0x00, // reserved
+];
+
+pub fn features_list() -> &'static [&'static str] {
+    &[
+        "epoch_commitment",
+        "pull_claims",
+        "expiry_recovery",
+        "rounding_dust",
+        "interface_query",
+    ]
+}
+
+pub fn version_supports(actual: (u32, u32, u32), required: (u32, u32, u32)) -> bool {
+    if actual.0 != required.0 {
+        return false;
+    }
+    if actual.1 > required.1 {
+        return true;
+    }
+    if actual.1 < required.1 {
+        return false;
+    }
+    actual.2 >= required.2
+}
 
 // ── Events ───────────────────────────────────────────────────────────────────
 //
@@ -698,6 +733,23 @@ impl TalosDividends {
     /// cannot be altered by any post-deployment state write.
     pub fn version(_env: Env) -> (u32, u32, u32) {
         CONTRACT_VERSION
+    }
+
+    pub fn interface_id(env: Env) -> BytesN<32> {
+        BytesN::from_array(&env, &INTERFACE_ID)
+    }
+
+    pub fn supports_version(env: Env, major: u32, minor: u32, patch: u32) -> bool {
+        let _ = env;
+        version_supports(CONTRACT_VERSION, (major, minor, patch))
+    }
+
+    pub fn interface_features(env: Env) -> Vec<Symbol> {
+        let mut features = Vec::new(&env);
+        for feature in features_list() {
+            features.push_back(Symbol::new(&env, feature));
+        }
+        features
     }
 
     // ── Two-step admin transfer ──────────────────────────────────────
@@ -1248,7 +1300,7 @@ mod tests {
     #[test]
     fn version_returns_compile_time_constant() {
         let (env, contract_id, _, _, client) = setup();
-        assert_eq!(client.version(), (1u32, 1u32, 0u32));
+        assert_eq!(client.version(), (1u32, 2u32, 0u32));
         let _ = (env, contract_id);
     }
 
@@ -1257,6 +1309,40 @@ mod tests {
         let (env, contract_id, _, _, client) = setup();
         assert_eq!(client.version(), CONTRACT_VERSION);
         let _ = (env, contract_id);
+    }
+
+    #[test]
+    fn interface_id_matches_pinned_golden_vector() {
+        let (_, _, _, _, client) = setup();
+        let expected = [
+            0x54, 0x61, 0x6C, 0x6F, 0x73, 0x44, 0x69, 0x76, 0x69, 0x64, 0x65, 0x6E, 0x64, 0x73,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(INTERFACE_NAMESPACE, "TalosDividends");
+        assert_eq!(INTERFACE_ID, expected);
+        assert_eq!(client.interface_id().to_array(), expected);
+    }
+
+    #[test]
+    fn supports_version_checks_major_minor_and_patch() {
+        let (_, _, _, _, client) = setup();
+        assert!(client.supports_version(&1, &0, &0));
+        assert!(client.supports_version(&1, &1, &0));
+        assert!(client.supports_version(&1, &2, &0));
+        assert!(!client.supports_version(&1, &1, &1));
+        assert!(!client.supports_version(&1, &3, &0));
+        assert!(!client.supports_version(&2, &0, &0));
+    }
+
+    #[test]
+    fn interface_features_lists_dividends_capabilities() {
+        let (env, _, _, _, client) = setup();
+        let features = client.interface_features();
+        for feature in features_list() {
+            assert!(features.contains(&Symbol::new(&env, feature)));
+        }
+        assert_eq!(features.len(), features_list().len() as u32);
     }
 
     // ── initialize() ─────────────────────────────────────────────────────────

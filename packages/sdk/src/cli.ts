@@ -374,7 +374,7 @@ export async function runCli(
       });
 
       let summaryText = "";
-      const items = result.items || [];
+      const items = result.data || [];
       if (items.length === 0) {
         summaryText = "No services found.";
       } else {

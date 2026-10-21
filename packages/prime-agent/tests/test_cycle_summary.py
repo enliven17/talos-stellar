@@ -10,7 +10,6 @@ Acceptance criteria verified:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import tempfile
 import uuid
@@ -21,7 +20,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from talos_agent.agent.loop import (
-    CYCLE_SUMMARY_KEEP_LAST,
     _emit_cycle_summary,
 )
 from talos_agent.db import LocalDB
@@ -168,8 +166,6 @@ def test_emit_cycle_summary_with_none_db_does_not_raise():
 
 def test_emit_cycle_summary_emits_structlog_event(capfd):
     """_emit_cycle_summary emits a log event (structlog in test mode)."""
-    events: list[dict] = []
-
     import structlog
 
     # Capture structlog events without full pipeline
@@ -277,7 +273,7 @@ async def test_agent_loop_emits_exactly_one_summary_per_successful_cycle():
         with patch("talos_agent.agent.loop.call_with_retry") as mock_retry:
             mock_retry.side_effect = [first_response, done_response]
 
-            messages = await agent_loop(
+            await agent_loop(
                 settings=settings,
                 tools=tools,
                 talos_config=talos_config,
