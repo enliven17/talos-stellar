@@ -7,6 +7,7 @@ import { AgentAvatar } from "@/components/agent-avatar";
 import { AgentAvailabilityBadge } from "@/components/agent-availability-badge";
 import { AgentEmptyState } from "@/components/agent-view-states";
 import { ScopedApiKeysPanel } from "@/components/scoped-api-keys-panel";
+import { AgentPurchasesSection } from "@/components/agent-purchases-section";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER as STELLAR_USDC_ISSUER } from "@/lib/stellar-config";
 
 
@@ -72,7 +73,7 @@ interface TalosDetail {
   recentJobs: RecentJob[];
 }
 
-const TABS = ["Overview", "Services", "Activity", "Patrons", "Revenue", "Governance", "Agent"] as const;
+const TABS = ["Overview", "Services", "Activity", "Patrons", "Revenue", "Purchases", "Governance", "Agent"] as const;
 type Tab = (typeof TABS)[number];
 
 const TYPE_ICONS: Record<string, string> = {
@@ -1074,6 +1075,16 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
           }
           onLoadBuybackPreview={loadBuybackPreview}
           onBuyback={handleBuyback}
+        />
+      )}
+
+      {tab === "Purchases" && (
+        <AgentPurchasesSection
+          talosId={talos.id}
+          isOwner={isAgentOwner}
+          address={address ?? null}
+          signMessage={signMessage}
+          connect={connect}
         />
       )}
 

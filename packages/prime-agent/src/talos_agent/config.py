@@ -338,6 +338,30 @@ class Settings(BaseSettings):
     # Empty means "use the legacy grant set", which matches pre-manifest behaviour.
     tool_permission_grants: dict = Field(default_factory=dict, description="Operator-approved capability grants for tools")
 
+    # Dry-run mode (Issue #976) — off by default, safe for production.
+    # When enabled, all outbound write requests (API writes, transfers, social
+    # adapter posts/replies) are suppressed and recorded instead.  Read-only
+    # calls (balance queries, status checks) are not affected.
+    dry_run: bool = Field(
+        default=False,
+        validation_alias="TALOS_DRY_RUN",
+        description=(
+            "Block all external side effects and record suppressed calls. "
+            "Safe for testing full agent cycles without touching production. "
+            "Incompatible with production API keys (tls_…) unless "
+            "TALOS_DRY_RUN_ALLOW_PRODUCTION_KEYS=1 is also set."
+        ),
+    )
+    dry_run_allow_production_keys: bool = Field(
+        default=False,
+        validation_alias="TALOS_DRY_RUN_ALLOW_PRODUCTION_KEYS",
+        description=(
+            "Bypass the dry-run vs. production-key conflict guard. "
+            "Only set this if you deliberately want dry-run with a real API key "
+            "(e.g. read-only audits). Never set in normal CI."
+        ),
+    )
+
     # Agent behaviour
     agent_cycle_interval: int = Field(default=30, description="Seconds between agent cycles")
     polling_interval: int = Field(default=10, description="Seconds between API polls")

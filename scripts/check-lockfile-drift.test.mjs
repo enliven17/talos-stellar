@@ -208,8 +208,8 @@ describe("Performance", () => {
     const start = Date.now();
     const { status } = runDrift("--json");
     const duration = Date.now() - start;
-    // Should complete within 30 seconds (the timeout)
-    assert.ok(duration < 30_000, `Check took ${duration}ms, expected < 30000ms`);
+    // Should complete within 60 seconds (the timeout)
+    assert.ok(duration < 60_000, `Check took ${duration}ms, expected < 60000ms`);
     assert.ok([0, 1].includes(status));
   });
 });

@@ -10,6 +10,8 @@ import {
   jsonb,
   index,
   uniqueIndex,
+  doublePrecision,
+  pgMaterializedView,
   uuid,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
@@ -1016,6 +1018,17 @@ export const tlsBackupRuns = pgTable(
   ],
 );
 
+// ─── Leaderboard aggregates (materialized view, created in drizzle/0021_*.sql) ───
+
+export const tlsLeaderboardAggregates = pgMaterializedView(
+  "tls_leaderboard_aggregates",
+  {
+    talosId: text("talosId").notNull(),
+    patronCount: integer("patronCount").notNull(),
+    activityCount: integer("activityCount").notNull(),
+    totalRevenue: doublePrecision("totalRevenue").notNull(),
+  },
+).existing();
 // ─── Marketplace ───────────────────────────────────────────────────
 
 export const capabilities = pgTable("capabilities", {

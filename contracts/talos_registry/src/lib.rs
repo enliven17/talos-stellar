@@ -35,6 +35,12 @@ use soroban_sdk::{
 use storage_migration;
 use ttl_manager;
 
+use events::{
+    emit_admin_accepted, emit_admin_cancelled, emit_admin_proposed, emit_allowlist_added,
+    emit_allowlist_removed, emit_deprecated_call, emit_patron_updated, emit_protocol_fee_changed,
+    emit_talos_created, emit_talos_paused, emit_talos_resumed,
+};
+
 // ── Event Schema Version ────────────────────────────────────────────
 
 /// Major event-schema version supported by this contract.
@@ -519,7 +525,7 @@ pub const MAX_METADATA_BYTES: u32 = 200;
 
 /// Pre-migration-system baseline. Every TalosRegistry instance, including
 /// ones deployed before this framework existed, is treated as starting here.
-const SCHEMA_GENESIS: u32 = 1;
+pub(crate) const SCHEMA_GENESIS: u32 = 1;
 /// v1 -> v2: persist an explicit `TimelockConfig` default so future reads
 /// no longer depend on `get_timelock_config`'s implicit `unwrap_or` fallback.
 const SCHEMA_TIMELOCK_DEFAULTS: u32 = 2;

@@ -9,6 +9,7 @@ import { FinancialProjectionChart } from '../src/components/financial-projection
 import { ProposalDetail } from '../src/components/proposals/proposal-detail';
 import { buildTimeline, viewFromChain, viewFromDatabase } from '../src/lib/proposal-detail';
 import { databaseRows, proposals, quorums, votes } from '../tests/fixtures/governance/proposals';
+import { JobsClient } from '../src/app/admin/jobs/jobs-client';
 
 // Initialize JSDOM and globals BEFORE importing axe-core
 const dom = new JSDOM('<!DOCTYPE html><html lang="en"><head><title>Test</title></head><body></body></html>');
@@ -106,6 +107,7 @@ async function main() {
         el: React.createElement(ProposalDetail, { view, timeline: buildTimeline(view), votes: { kind: "not-applicable" } }),
       };
     })(),
+    { name: "JobsClient", el: React.createElement(JobsClient) }
   ];
 
   // Every component is checked under both colour schemes. The scheme is the
