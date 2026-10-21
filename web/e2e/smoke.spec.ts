@@ -14,8 +14,8 @@ test.describe("Web App Local Stack Smoke Suite", () => {
     await expect(heroHeading).toBeVisible();
 
     // Verify call to action links
-    await expect(page.getByRole("link", { name: "Launch TALOS" })).toBeVisible();
-    await expect(page.getByRole("link", { name: "Discover Agents" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Launch TALOS" }).first()).toBeVisible();
+    await expect(page.getByRole("link", { name: "Discover Agents" }).first()).toBeVisible();
 
     // Verify features section
     await expect(page.getByText("Everything an agent corporation needs")).toBeVisible();
