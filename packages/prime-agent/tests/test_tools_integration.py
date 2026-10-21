@@ -343,6 +343,103 @@ class TestStellarPulseTokens:
     """Test Pulse token operations."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("name", "symbol", "initial_supply", "expected_error"),
+        [
+            (
+                "",
+                "GOVERN",
+                1_000_000,
+                "name must be between 1 and 32 characters",
+            ),
+            (
+                "   ",
+                "GOVERN",
+                1_000_000,
+                "name must be between 1 and 32 characters",
+            ),
+            (
+                "A" * 33,
+                "GOVERN",
+                1_000_000,
+                "name must be between 1 and 32 characters",
+            ),
+            (
+                "Governance Token",
+                "",
+                1_000_000,
+                "symbol must be 1-12 alphanumeric characters",
+            ),
+            (
+                "Governance Token",
+                "GOVERN1234567",
+                1_000_000,
+                "symbol must be 1-12 alphanumeric characters",
+            ),
+            (
+                "Governance Token",
+                "GOV-ERN",
+                1_000_000,
+                "symbol must be 1-12 alphanumeric characters",
+            ),
+            (
+                "Governance Token",
+                "GÖVERN",
+                1_000_000,
+                "symbol must be 1-12 alphanumeric characters",
+            ),
+            (
+                "Governance Token",
+                "GOVERN",
+                0,
+                "initial_supply must be greater than 0",
+            ),
+            (
+                "Governance Token",
+                "GOVERN",
+                -1,
+                "initial_supply must be greater than 0",
+            ),
+        ],
+    )
+    async def test_create_pulse_token_rejects_invalid_inputs_without_approval(
+        self,
+        mock_settings: Settings,
+        name: str,
+        symbol: str,
+        initial_supply: int,
+        expected_error: str,
+    ):
+        mock_api = AsyncMock()
+
+        with patch(
+            "talos_agent.tools.stellar._api", mock_api
+        ), patch("talos_agent.tools.stellar._settings", mock_settings):
+            from talos_agent.tools.stellar import create_pulse_token
+
+            result = await create_pulse_token(name, symbol, initial_supply)
+
+        assert result == {"error": expected_error}
+        mock_api.create_approval.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_pulse_token_accepts_maximum_name_and_symbol_lengths(
+        self, mock_settings: Settings
+    ):
+        mock_api = AsyncMock()
+        mock_api.create_approval = AsyncMock(return_value={"id": "approval-789"})
+
+        with patch(
+            "talos_agent.tools.stellar._api", mock_api
+        ), patch("talos_agent.tools.stellar._settings", mock_settings):
+            from talos_agent.tools.stellar import create_pulse_token
+
+            result = await create_pulse_token("N" * 32, "S" * 12, 1)
+
+        assert result["status"] == "approval_requested"
+        mock_api.create_approval.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_create_pulse_token_requires_approval(self, mock_settings: Settings):
         """create_pulse_token always requires Creator approval."""
         mock_api = AsyncMock()

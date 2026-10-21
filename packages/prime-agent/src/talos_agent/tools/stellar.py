@@ -6,6 +6,7 @@ Stellar Horizon. The Agent never holds private keys.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from talos_agent.payments.stellar_kit import StellarKit
@@ -71,8 +72,15 @@ async def get_xlm_balance() -> dict:
     return await kit.get_balance()
 
 
-@tool("create_pulse_token", "Request Pulse (equity) token creation. Requires Creator approval on Dashboard.")
+@tool("create_pulse_token", "Request Pulse (equity) token creation. Name must be 1-32 characters and symbol 1-12 alphanumeric characters. Requires Creator approval on Dashboard.")
 async def create_pulse_token(name: str, symbol: str, initial_supply: int = 1000000) -> dict:
+    if not name.strip() or len(name) > 32:
+        return {"error": "name must be between 1 and 32 characters"}
+    if re.fullmatch(r"[A-Za-z0-9]{1,12}", symbol) is None:
+        return {"error": "symbol must be 1-12 alphanumeric characters"}
+    if initial_supply <= 0:
+        return {"error": "initial_supply must be greater than 0"}
+
     result = await _deps().api.create_approval(
         _deps().settings.talos_id,
         type_="transaction",
