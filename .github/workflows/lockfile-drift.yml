@@ -37,7 +37,7 @@ jobs:
 
       # ── uv setup (for prime-agent) ──────────────────────────────────────
       - name: Setup uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: packages/prime-agent/uv.lock
