@@ -3821,7 +3821,7 @@ mod tests {
         let (env, contract_id, admin, _registry, client) = setup();
         let talos_id = 1u32;
         env.ledger().with_mut(|li| {
-            li.sequence = 100;
+            li.sequence_number = 100;
         });
 
         let epoch_id = commit_epoch(&env, &contract_id, &client, &admin, talos_id, 10_000, 86_400);
@@ -3833,7 +3833,7 @@ mod tests {
 
         // Advance ledger and claim dividend
         env.ledger().with_mut(|li| {
-            li.sequence = 250;
+            li.sequence_number = 250;
             li.timestamp = 2_000;
         });
 
@@ -3885,21 +3885,21 @@ mod tests {
         let (env, contract_id, admin, _registry, client) = setup();
         let talos_id = 1u32;
         env.ledger().with_mut(|li| {
-            li.sequence = 10;
+            li.sequence_number = 10;
         });
 
         let epoch_id = commit_epoch(&env, &contract_id, &client, &admin, talos_id, 10_000, 86_400);
 
         // Near touch (below threshold) -> skipped
         env.ledger().with_mut(|li| {
-            li.sequence = 10 + ttl_manager::RENEWAL_THRESHOLD - 1;
+            li.sequence_number = 10 + ttl_manager::RENEWAL_THRESHOLD - 1;
         });
         let touched = client.touch_epoch(&talos_id, &epoch_id);
         assert!(!touched);
 
         // At or above threshold -> touched
         env.ledger().with_mut(|li| {
-            li.sequence = 10 + ttl_manager::RENEWAL_THRESHOLD;
+            li.sequence_number = 10 + ttl_manager::RENEWAL_THRESHOLD;
         });
         let touched2 = client.touch_epoch(&talos_id, &epoch_id);
         assert!(touched2);
@@ -3920,7 +3920,7 @@ mod tests {
         let (env, contract_id, admin, _registry, client) = setup();
         let talos_id = 1u32;
         env.ledger().with_mut(|li| {
-            li.sequence = 100;
+            li.sequence_number = 100;
         });
 
         let ep1 = commit_epoch(&env, &contract_id, &client, &admin, talos_id, 1_000, 86_400);
@@ -3929,7 +3929,7 @@ mod tests {
 
         // Set LastTouched for ep1 to age 300, ep2 to age 150, ep3 to age 50
         env.ledger().with_mut(|li| {
-            li.sequence = 1000;
+            li.sequence_number = 1000;
         });
         env.as_contract(&contract_id, || {
             env.storage().persistent().set(&DataKey::LastTouched(talos_id, ep1), &700u32); // age = 300
@@ -3976,7 +3976,7 @@ mod tests {
         let expiry_secs = MAX_EXPIRY_SECS; // 365 days (~6.3 million ledgers at 5s/ledger)
 
         env.ledger().with_mut(|li| {
-            li.sequence = 1_000;
+            li.sequence_number = 1_000;
             li.timestamp = 10_000;
         });
 
@@ -3984,7 +3984,7 @@ mod tests {
 
         // Advance ledger by 2_500_000 ledgers (~145 days, within expiry)
         env.ledger().with_mut(|li| {
-            li.sequence = 1_000 + 2_500_000;
+            li.sequence_number = 1_000 + 2_500_000;
             li.timestamp = 10_000 + (2_500_000 * 5);
         });
 
@@ -3994,7 +3994,7 @@ mod tests {
 
         // Advance ledger another 2_500_000 ledgers (~290 days total, still within MAX_EXPIRY_SECS)
         env.ledger().with_mut(|li| {
-            li.sequence = 1_000 + 5_000_000;
+            li.sequence_number = 1_000 + 5_000_000;
             li.timestamp = 10_000 + (5_000_000 * 5);
         });
 
@@ -4049,14 +4049,14 @@ mod tests {
         let (env, contract_id, admin, _registry, client) = setup();
         let talos_id = 1u32;
         env.ledger().with_mut(|li| {
-            li.sequence = 100;
+            li.sequence_number = 100;
         });
 
         let ep = commit_epoch(&env, &contract_id, &client, &admin, talos_id, 10_000, 86_400);
 
         // Advance sequence near critical threshold
         env.ledger().with_mut(|li| {
-            li.sequence = 100 + ttl_manager::CRITICAL_THRESHOLD + 10;
+            li.sequence_number = 100 + ttl_manager::CRITICAL_THRESHOLD + 10;
         });
 
         let (min_age, max_age, warn, crit, total) = client.get_storage_health(&talos_id);

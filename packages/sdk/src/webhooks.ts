@@ -342,6 +342,7 @@ export class TalosWebhook {
       eventId,
       logger,
       chaosInjector,
+      replayWindowSeconds,
     } = options;
 
     // Replay-window guard: replayWindowSeconds must cover the full tolerance

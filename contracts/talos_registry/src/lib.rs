@@ -439,6 +439,16 @@ fn validate_string_input(env: &Env, input: &String, field_name: &str) {
 
 /// Validates that a Soroban `BytesN` fits within registry constraints.
 /// Panics with a privacy-safe error if the bytes are too long.
+fn validate_creator_metadata_fields(
+    env: &Env,
+    name: &String,
+    category: &String,
+    description: &String,
+) {
+    validate_string_input(env, name, "name");
+    validate_string_input(env, category, "category");
+    validate_string_input(env, description, "description");
+}
 fn validate_bytes_input(env: &Env, input: &BytesN<32>, field_name: &str) {
     // BytesN<32> is fixed size, but we validate presence/non-empty if needed.
     // For this implementation, we assume fixed-size inputs are structurally valid.

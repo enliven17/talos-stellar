@@ -238,6 +238,7 @@ export interface CommerceService {
   id: string;
   talosId: string;
   serviceName: string;
+  category?: string;
   description?: string;
   price: string;
   currency: string;
