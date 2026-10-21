@@ -36,7 +36,9 @@
     "licenses:test": "node --test scripts/generate-license-report.test.mjs",
     "sbom:verify": "node scripts/verify-sbom.mjs",
     "test:sbom-verify": "node --test scripts/verify-sbom.test.mjs",
-    "test:contracts-readme": "node --test scripts/verify-contracts-readme.test.mjs"
+    "test:contracts-readme": "node --test scripts/verify-contracts-readme.test.mjs",
+    "env:template:check": "node scripts/check-env-template.mjs",
+    "test:env-template": "node --test scripts/check-env-template.test.mjs"
   },
   "dependencies": {
     "next": "16.4.2"
