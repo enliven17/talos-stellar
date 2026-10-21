@@ -139,7 +139,7 @@
       "idx": 19,
       "version": "7",
       "when": 1754074800000,
-      "tag": "0021_add_contract_events",
+      "tag": "0021_add_marketplace_tables",
       "breakpoints": true
     }
   ]

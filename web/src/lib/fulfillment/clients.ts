@@ -36,24 +36,48 @@ export async function searchWeb(query: string): Promise<string> {
   return parts.join("\n\n");
 }
 
+let cachedGroqClient: OpenAI | null = null;
+let cachedGroqKey: string | null = null;
+let cachedOpenAIClient: OpenAI | null = null;
+let cachedOpenAIKey: string | null = null;
+
+export function resetLLMClients(): void {
+  cachedGroqClient = null;
+  cachedGroqKey = null;
+  cachedOpenAIClient = null;
+  cachedOpenAIKey = null;
+}
+
 // LLM client — Groq preferred (free), OpenAI fallback
 export function getLLMClient(): OpenAI {
   const groqKey = process.env.GROQ_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
 
   if (groqKey) {
-    return new OpenAI({
-      apiKey: groqKey,
-      baseURL: "https://api.groq.com/openai/v1",
-    });
+    if (!cachedGroqClient || cachedGroqKey !== groqKey) {
+      cachedGroqClient = new OpenAI({
+        apiKey: groqKey,
+        baseURL: "https://api.groq.com/openai/v1",
+      });
+      cachedGroqKey = groqKey;
+    }
+    return cachedGroqClient;
   }
   if (openaiKey) {
-    return new OpenAI({ apiKey: openaiKey });
+    if (!cachedOpenAIClient || cachedOpenAIKey !== openaiKey) {
+      cachedOpenAIClient = new OpenAI({ apiKey: openaiKey });
+      cachedOpenAIKey = openaiKey;
+    }
+    return cachedOpenAIClient;
   }
   throw new Error("Neither GROQ_API_KEY nor OPENAI_API_KEY is set");
 }
 
-function getLLMModel(): string {
+export function getLLMModel(): string {
+  const override = process.env.FULFILLMENT_LLM_MODEL?.trim();
+  if (override) {
+    return override;
+  }
   return process.env.GROQ_API_KEY ? "llama-3.3-70b-versatile" : "gpt-4o";
 }
 
