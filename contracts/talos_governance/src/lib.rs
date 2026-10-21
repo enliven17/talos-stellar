@@ -618,6 +618,24 @@ impl TalosGovernance {
             }
         }
 
+        // Validate talos_id if a registry contract is configured.
+        // For registry-unset deployments, the check is explicitly skipped to preserve
+        // backwards compatibility with unconfigured or legacy deployments.
+        if let Some(registry) = env
+            .storage()
+            .persistent()
+            .get::<_, Address>(&DataKey::RegistryContract)
+        {
+            let is_active: bool = env.invoke_contract(
+                &registry,
+                &Symbol::new(&env, "is_active"),
+                soroban_sdk::vec![&env, talos_id.into_val(&env)],
+            );
+            if !is_active {
+                panic!("Talos is not active or does not exist");
+            }
+        }
+
         let config = Self::require_config(&env);
         let current_ledger = env.ledger().sequence();
         let snapshot_offset = config
