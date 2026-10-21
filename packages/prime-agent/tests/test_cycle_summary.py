@@ -263,12 +263,11 @@ async def test_agent_loop_emits_exactly_one_summary_per_successful_cycle():
         first_response = _make_openai_response(tool_calls=[tool_call])
         done_response = _make_openai_response(content="All done.")
 
-        context = AgentContext()
+        talos_config = {"id": "agent-1"}
+        context = AgentContext.from_db(db, talos_config)
         tools = MagicMock()
         tools.openai_schemas.return_value = [{"name": "get_balance"}]
         tools.execute = AsyncMock(return_value={"balance_xlm": 100.0})
-
-        talos_config = {"id": "agent-1"}
 
         with patch("talos_agent.agent.loop.call_with_retry") as mock_retry:
             mock_retry.side_effect = [first_response, done_response]
@@ -310,11 +309,10 @@ async def test_agent_loop_emits_exactly_one_summary_per_error_cycle():
             max_iterations=5,
         )
 
-        context = AgentContext()
+        talos_config = {"id": "agent-err"}
+        context = AgentContext.from_db(db, talos_config)
         tools = MagicMock()
         tools.openai_schemas.return_value = []
-
-        talos_config = {"id": "agent-err"}
 
         with patch("talos_agent.agent.loop.call_with_retry") as mock_retry:
             mock_retry.side_effect = RuntimeError("LLM exploded")
@@ -364,12 +362,11 @@ async def test_agent_loop_summary_tool_names_contain_no_raw_args():
         first_response = _make_openai_response(tool_calls=[tool_call])
         done_response = _make_openai_response(content="Done.")
 
-        context = AgentContext()
+        talos_config = {"id": "agent-safe"}
+        context = AgentContext.from_db(db, talos_config)
         tools = MagicMock()
         tools.openai_schemas.return_value = [{"name": "transfer_xlm"}]
         tools.execute = AsyncMock(return_value={"status": "submitted"})
-
-        talos_config = {"id": "agent-safe"}
 
         with patch("talos_agent.agent.loop.call_with_retry") as mock_retry:
             mock_retry.side_effect = [first_response, done_response]

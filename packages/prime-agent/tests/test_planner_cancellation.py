@@ -336,7 +336,7 @@ class TestPlanPurchaseCancellation:
         mock_db = MagicMock()
         original_db = mod._db
 
-        async def _cancel_fetch(**kwargs):
+        async def _cancel_fetch(*args, **kwargs):
             raise asyncio.CancelledError()
 
         try:

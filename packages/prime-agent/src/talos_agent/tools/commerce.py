@@ -179,7 +179,7 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
 
     # Check approval threshold
     threshold = float(_deps().settings.approval_threshold)
-    if price > threshold:
+    if float(price) > threshold:
         result = await _deps().api.create_approval(
             _deps().settings.talos_id,
             type_="transaction",

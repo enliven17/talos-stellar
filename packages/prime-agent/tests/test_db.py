@@ -261,3 +261,27 @@ class TestDividendLifecycle:
         mock_db.record_dividend("GABC123", "VEGA", 10.0, tx_hash="txabc123")
         history = mock_db.get_dividend_history()
         assert history[0]["tx_hash"] == "txabc123"
+
+
+class TestContentHistoryLifecycle:
+    def test_add_content_returns_id(self, mock_db: LocalDB):
+        cid = mock_db.add_content("New post content", "X")
+        assert isinstance(cid, int)
+        assert cid > 0
+
+    def test_get_content_found(self, mock_db: LocalDB):
+        cid = mock_db.add_content("Found post", "telegram")
+        post = mock_db.get_content(cid)
+        assert post is not None
+        assert post["id"] == cid
+        assert post["content"] == "Found post"
+        assert post["channel"] == "telegram"
+
+    def test_get_content_not_found(self, mock_db: LocalDB):
+        assert mock_db.get_content(9999) is None
+
+    def test_content_exists(self, mock_db: LocalDB):
+        cid = mock_db.add_content("Check exists", "discord")
+        assert mock_db.content_exists(cid) is True
+        assert mock_db.content_exists(9999) is False
+
