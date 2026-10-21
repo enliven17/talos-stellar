@@ -760,6 +760,8 @@ bash scripts/ci-contract-cache.test.sh
 5. Open a pull request using the template in [`.github/PULL_REQUEST_TEMPLATE.md`](./.github/PULL_REQUEST_TEMPLATE.md)
 6. Link the issue in your PR description, for example `Closes #39`
 
+**Note:** PR descriptions belong in the GitHub PR itself, not as markdown files in the repository. Do not add PR description files (e.g., `pr-*.md` or `pr-description.md`) to the repository root or elsewhere in the codebase.
+
 ## Releases
 
 Versioning, changelogs, and tagging for `web`, `sdk`, `agent`, and `contracts` are automated —
