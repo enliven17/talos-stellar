@@ -26,15 +26,17 @@ import type {
   CursorRequestOptions,
   ActivityPage,
   ActivityPageOptions,
-  JobPaymentStatus,
-  WebhookSubscription,
-  WebhookSubscriptionPage,
-  CreateWebhookSubscriptionParams,
-  ListWebhookSubscriptionsParams,
-  DeleteWebhookSubscriptionResult,
-  RotateWebhookSecretParams,
-  RotateWebhookSecretResult,
-  FinalizeWebhookSecretRotationResult,
+  Proposal,
+  ProposalStatus,
+  ListProposalsParams,
+  MarketplaceSearchResponse,
+  MarketplaceSearchResult,
+  MarketplaceSearchParams,
+  CapabilityFilter,
+} from "./types.js";
+import {
+  PROPOSAL_STATUSES,
+  isValidProposalStatus,
 } from "./types.js";
 import {
   AsyncPaginationIterator,
@@ -47,12 +49,15 @@ import {
   TalosAPIError,
   TalosTransportError,
   TalosPaymentError,
+  TalosTransportError,
   classifyTransportError,
   errorFromResponse,
+  parseRateLimit,
   parseX402Challenge,
   parseRetryAfter as parseRetryAfterHeader,
   redactEventPath,
   diagnoseBuyerProof,
+  type RateLimitInfo,
 } from "./errors.js";
 import {
   generateIdempotencyKey,
@@ -78,6 +83,16 @@ import {
 // Legacy import path: `import { TalosAPIError } from "./client.js"`.
 export { TalosAPIError };
 export { generateIdempotencyKey, validateIdempotencyKey, IdempotencyConflictError };
+export type {
+  Proposal,
+  ProposalStatus,
+  ListProposalsParams,
+  MarketplaceSearchResponse,
+  MarketplaceSearchResult,
+  MarketplaceSearchParams,
+  CapabilityFilter,
+};
+export { PROPOSAL_STATUSES, isValidProposalStatus };
 
 /**
  * Status-code driven retry policy (Retry-After aware). Enabled by default
@@ -132,6 +147,38 @@ export type ResolvedRetryPolicy = Readonly<Required<RetryPolicyOptions>>;
 export type ResolvedRetryOptions = Readonly<Required<RetryOptions>>;
 
 /**
+ * Options for the opt-in in-flight GET deduplication feature.
+ *
+ * When {@link TalosClientOptions.dedupeInFlightGets} is `true` (or this
+ * object), concurrent calls to the **same** GET URL with the **same**
+ * authorization identity are coalesced into a single fetch. The shared
+ * promise is dropped from the map the moment it settles, so the next call
+ * after settlement always issues a fresh request.
+ *
+ * **AbortSignal semantics**: deduplication does NOT share `AbortSignal`
+ * instances. If the deduped call is aborted, only that caller's
+ * `AbortSignal` fires — the shared network request continues for any other
+ * concurrent callers that did not abort. This is intentional: aborting one
+ * consumer must not cancel a request that other live callers are waiting on.
+ *
+ * **Non-GET requests** are never deduped regardless of this setting.
+ */
+export interface DedupeInFlightGetsOptions {
+  /**
+   * Upper bound on the number of concurrent in-flight GET keys tracked.
+   * Once the map reaches this size, new requests bypass deduplication
+   * rather than evicting existing entries. Default 256.
+   */
+  maxInFlight?: number;
+  /**
+   * Optional observer invoked each time a deduplicated request is served
+   * from a shared in-flight promise (i.e. *not* the first caller). Must not
+   * throw; invoked fire-and-forget.
+   */
+  onDedupe?: (event: { url: string; method: string }) => void;
+}
+
+/**
  * Client configuration. All fields are optional; defaults match the prior
  * behavior for backward compatibility.
  */
@@ -175,8 +222,17 @@ export interface TalosClientOptions {
   /**
    * Optional observer invoked once per failed SDK call (after retries are
    * exhausted). Must not throw; invoked fire-and-forget.
+   *
+   * The event carries the parsed `X-RateLimit-*` counters (when present) so
+   * failure handling can react to quota state without re-reading headers.
    */
   onError?: (event: TalosErrorEvent) => void;
+  /**
+   * Optional observer invoked once for **every** HTTP response (successful or
+   * not, including each retry attempt) with the parsed `X-RateLimit-*`
+   * counters. Must not throw; invoked fire-and-forget.
+   */
+  onResponse?: (event: TalosResponseEvent) => void;
   /** Optional fetch implementation. Defaults to the global `fetch` (resolved lazily). */
   fetch?: typeof fetch;
   /** Optional fault injector for chaos testing. Faults fire before each fetch. */
@@ -239,6 +295,25 @@ export interface TalosErrorEvent {
   method: string;
   attempt: number;
   durationMs: number;
+  /** Parsed `X-RateLimit-*` counters from the failing response, when present. */
+  rateLimit?: RateLimitInfo;
+}
+
+/** Structured event emitted to {@link TalosClientOptions.onResponse}. */
+export interface TalosResponseEvent {
+  path: string;
+  method: string;
+  /** HTTP status code of the response. */
+  status: number;
+  /** 1-based attempt number that produced this response. */
+  attempt: number;
+  /** Wall-clock duration of the attempt in milliseconds. */
+  durationMs: number;
+  /**
+   * Parsed `X-RateLimit-*` counters. `undefined` when the response carried no
+   * (parseable) rate-limit headers.
+   */
+  rateLimit?: RateLimitInfo;
 }
 
 type RequestParams = Record<string, string | number | boolean>;
@@ -470,6 +545,9 @@ function applyJitter(delay: number, jitter: number): number {
  * timeout, idempotency keys, request signing, chaos injection and bounded
  * auto-retry.
  */
+/** Default cap on the number of tracked in-flight GET keys. */
+const DEFAULT_MAX_IN_FLIGHT = 256;
+
 export class TalosClient {
   private baseUrl: string;
   private headers: Record<string, string>;
@@ -478,6 +556,13 @@ export class TalosClient {
   private readonly networkConfig?: ResolvedNetworkConfig;
   private readonly timeoutMs?: number;
   private readonly onError?: (event: TalosErrorEvent) => void;
+  private readonly onResponse?: (event: TalosResponseEvent) => void;
+  /**
+   * Most recent parsed `X-RateLimit-*` snapshot. Updated by every response
+   * that carried counters; responses without them leave the previous value
+   * intact so callers can still read the last quota they observed.
+   */
+  private lastRateLimit?: RateLimitInfo;
   /**
    * Optional fetch override. `undefined` means `globalThis.fetch` is read
    * lazily on every call so `vi.stubGlobal("fetch", …)` keeps working.
@@ -485,6 +570,23 @@ export class TalosClient {
   private readonly fetchOverride?: typeof fetch;
   private readonly chaosInjector?: ChaosInjector;
   private signer?: SigningController;
+
+  // ── In-flight GET deduplication ────────────────────────────
+  /**
+   * Resolved options for the in-flight deduplication feature, or `null`
+   * when the feature is disabled (the default).
+   */
+  private readonly dedupeOptions: Required<DedupeInFlightGetsOptions> | null;
+  /**
+   * Map from dedup key → shared in-flight promise. Entries are removed the
+   * moment the shared promise settles so the next caller always issues a
+   * fresh request.
+   *
+   * Key format: `<METHOD> <URL>\n<auth-identity>`
+   * where auth-identity is either the Authorization header value or `""`.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private readonly inFlightGets: Map<string, Promise<any>>;
 
   constructor(options: TalosClientOptions = {}) {
     // An explicit `retry` config without `retryPolicy` opts out of the
@@ -498,6 +600,7 @@ export class TalosClient {
     });
     this.timeoutMs = options.timeoutMs;
     this.onError = options.onError;
+    this.onResponse = options.onResponse;
     this.fetchOverride = options.fetch;
     this.chaosInjector = options.chaosInjector;
     this.baseUrl = (
@@ -508,6 +611,26 @@ export class TalosClient {
       this.headers["Authorization"] = `Bearer ${options.apiKey}`;
     }
     if (options.signer) this.signer = new SigningController(options.signer, options.signing);
+
+    // Resolve in-flight deduplication options.
+    if (options.dedupeInFlightGets) {
+      const raw: DedupeInFlightGetsOptions =
+        typeof options.dedupeInFlightGets === "object" ? options.dedupeInFlightGets : {};
+      const maxInFlight = raw.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT;
+      if (!Number.isInteger(maxInFlight) || maxInFlight < 1) {
+        throw new RangeError("dedupeInFlightGets.maxInFlight must be a positive integer");
+      }
+      if (raw.onDedupe !== undefined && typeof raw.onDedupe !== "function") {
+        throw new TypeError("dedupeInFlightGets.onDedupe must be a function");
+      }
+      this.dedupeOptions = {
+        maxInFlight,
+        onDedupe: raw.onDedupe ?? (() => { /* no-op */ }),
+      };
+    } else {
+      this.dedupeOptions = null;
+    }
+    this.inFlightGets = new Map();
   }
 
   /**
@@ -532,6 +655,19 @@ export class TalosClient {
    */
   getNetworkConfig(): ResolvedNetworkConfig | undefined {
     return this.networkConfig;
+  }
+
+  /**
+   * Counters from the most recent response that carried `X-RateLimit-*`
+   * headers, or `undefined` when none has been observed yet.
+   *
+   * Responses that omit the headers (or send values that cannot be parsed)
+   * leave the previous snapshot in place, so this reflects the last known
+   * quota state. Pair it with `onResponse` when you need per-response
+   * granularity.
+   */
+  getLastRateLimit(): RateLimitInfo | undefined {
+    return this.lastRateLimit;
   }
 
   /**
@@ -582,6 +718,20 @@ export class TalosClient {
       });
     }
     return fetchFn;
+  }
+
+  /**
+   * Build the deduplication key for a GET request. Returns `null` when the
+   * feature is disabled, the method is not GET, or the in-flight map is
+   * already at capacity.
+   */
+  private dedupeKey(method: string, url: string): string | null {
+    if (!this.dedupeOptions || method !== "GET") return null;
+    if (this.inFlightGets.size >= this.dedupeOptions.maxInFlight) return null;
+    // Include the Authorization identity so different API keys do not share
+    // each other's responses.
+    const auth = this.headers["Authorization"] ?? "";
+    return `GET ${url}\n${auth}`;
   }
 
   // ── Internal helpers ───────────────────────────────────────
@@ -845,6 +995,36 @@ export class TalosClient {
     return null;
   }
 
+  /**
+   * Record the parsed `X-RateLimit-*` counters from a response and notify the
+   * `onResponse` observer. Never throws: a misbehaving observer must not be
+   * able to break a request.
+   */
+  private observeResponse(
+    path: string,
+    method: string,
+    status: number,
+    attempt: number,
+    durationMs: number,
+    headers: Headers | Record<string, string> | undefined | null,
+  ): void {
+    const rateLimit = parseRateLimit(headers);
+    if (rateLimit !== undefined) this.lastRateLimit = rateLimit;
+    if (!this.onResponse) return;
+    try {
+      this.onResponse({
+        path: redactEventPath(path),
+        method,
+        status,
+        attempt,
+        durationMs,
+        ...(rateLimit !== undefined ? { rateLimit } : {}),
+      });
+    } catch {
+      // Fire-and-forget.
+    }
+  }
+
   private notifyError(event: TalosErrorEvent): void {
     if (!this.onError) return;
     try {
@@ -906,6 +1086,7 @@ export class TalosClient {
     let lastError: TalosAPIError | undefined;
     let attempt = 1;
     for (; attempt <= maxAttempts; attempt += 1) {
+      const attemptStartedAt = Date.now();
       if (this.chaosInjector) await this.injectChaos();
 
       const baseHeaders = this.mergeHeaders(requestInit.headers, extraHeaders);
@@ -928,6 +1109,10 @@ export class TalosClient {
         } catch (cause) {
           throw classifyTransportError(cause, path);
         }
+
+        // Surface rate-limit counters for every response, including the
+        // attempts that are about to fail and be retried.
+        this.observeResponse(path, method, res.status, attempt, Date.now() - attemptStartedAt, res.headers);
 
         if (res.ok) {
           // Malformed JSON on a 2xx intentionally propagates the raw parse error.
@@ -969,6 +1154,7 @@ export class TalosClient {
       method,
       attempt: Math.min(attempt, maxAttempts),
       durationMs: Date.now() - startedAt,
+      ...(finalError.rateLimit !== undefined ? { rateLimit: finalError.rateLimit } : {}),
     });
     throw finalError;
   }
@@ -1229,6 +1415,7 @@ export class TalosClient {
       : baseHeaders;
     const timeout = this.acquireTimeoutController(signal, callTimeoutMs);
     const effectiveSignal = timeout?.signal ?? signal;
+    const challengeAttemptStartedAt = Date.now();
     let res: Response;
     try {
       res = await this.resolveFetch()(url, {
@@ -1237,6 +1424,16 @@ export class TalosClient {
         body,
         ...(effectiveSignal ? { signal: effectiveSignal } : {}),
       });
+      // The challenge probe is a response too — surface its counters so a
+      // caller throttling on quota sees every hop of the x402 flow.
+      this.observeResponse(
+        path,
+        "POST",
+        res.status,
+        1,
+        Date.now() - challengeAttemptStartedAt,
+        res.headers,
+      );
     } catch (cause) {
       throw classifyTransportError(cause, path);
     } finally {
@@ -1506,97 +1703,69 @@ export class TalosClient {
     });
   }
 
-  // ── Webhook subscriptions ───────────────────────────────────
+  // ── Governance Proposals ───────────────────────────────────
 
   /**
-   * Create a webhook subscription. The `secret` in `params` is sent once to
-   * configure signing and is never echoed back in the response.
+   * List governance proposals across all Talos agents, newest first.
+   *
+   * Validates `status` client-side against documented values (`pending`, `approved`, `rejected`)
+   * and throws a `RangeError` before sending the request if invalid.
    */
-  async createWebhookSubscription(
-    params: CreateWebhookSubscriptionParams,
-    options?: WriteOptions,
-  ): Promise<WebhookSubscription> {
-    return this.request("/api/webhooks/subscriptions", {
-      method: "POST",
-      body: JSON.stringify(params),
-      idempotencyKey: options?.idempotencyKey,
-      signal: options?.signal,
-      timeoutMs: options?.timeoutMs,
-    });
-  }
+  async listProposals(
+    params?: ListProposalsParams,
+    options?: ReadOptions,
+  ): Promise<Proposal[]> {
+    if (params?.status !== undefined && !isValidProposalStatus(params.status)) {
+      throw new RangeError(
+        `Invalid proposal status "${params.status}". Documented values are: ${PROPOSAL_STATUSES.join(", ")}`,
+      );
+    }
 
-  async listWebhookSubscriptions(
-    params?: ListWebhookSubscriptionsParams,
-  ): Promise<WebhookSubscriptionPage> {
-    const { signal, timeoutMs, ...query } = params ?? {};
-    return this.request("/api/webhooks/subscriptions", {
-      params: query,
+    const { signal: paramSignal, timeoutMs: paramTimeout, ...queryRest } = params ?? {};
+    const signal = options?.signal ?? paramSignal;
+    const timeoutMs = options?.timeoutMs ?? paramTimeout;
+
+    const query: RequestParams = {};
+    if (queryRest.status !== undefined) query.status = queryRest.status;
+    if (queryRest.limit !== undefined) query.limit = queryRest.limit;
+
+    return this.request<Proposal[]>("/api/proposals", {
+      params: Object.keys(query).length > 0 ? query : undefined,
       signal,
       timeoutMs,
     });
   }
 
+  // ── Marketplace ────────────────────────────────────────────
+
   /**
-   * Async iterator for paginated webhook subscriptions.
+   * Search marketplace items and filter by capabilities.
    *
-   * @example
-   * ```ts
-   * for await (const sub of client.paginateWebhookSubscriptions({ active: true })) {
-   *   console.log(sub.id, sub.url);
-   * }
-   * ```
+   * Formats `capabilities` as JSON-encoded array matching `/api/marketplace/search` query contract.
    */
-  paginateWebhookSubscriptions(
-    options?: AsyncPaginationIteratorOptions & ListWebhookSubscriptionsParams,
-  ): AsyncPaginationIterator<WebhookSubscription> {
-    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
-    return createPaginationIterator<WebhookSubscription>(
-      (opts) => this.listWebhookSubscriptions({ ...cursorOptions, ...opts }),
-      { maxPages, signal, timeoutMs },
-    );
-  }
+  async searchMarketplace(
+    params?: MarketplaceSearchParams,
+    options?: ReadOptions,
+  ): Promise<MarketplaceSearchResponse> {
+    const { signal: paramSignal, timeoutMs: paramTimeout, ...queryRest } = params ?? {};
+    const signal = options?.signal ?? paramSignal;
+    const timeoutMs = options?.timeoutMs ?? paramTimeout;
 
-  async deleteWebhookSubscription(
-    id: string,
-    options?: WriteOptions,
-  ): Promise<DeleteWebhookSubscriptionResult> {
-    return this.request(`/api/webhooks/subscriptions/${encodeURIComponent(id)}`, {
-      method: "DELETE",
-      idempotencyKey: options?.idempotencyKey,
-      signal: options?.signal,
-      timeoutMs: options?.timeoutMs,
-    });
-  }
+    const query: RequestParams = {};
+    if (queryRest.q !== undefined) query.q = queryRest.q;
+    if (queryRest.capabilities !== undefined) {
+      query.capabilities = Array.isArray(queryRest.capabilities)
+        ? JSON.stringify(queryRest.capabilities)
+        : String(queryRest.capabilities);
+    }
+    if (queryRest.limit !== undefined) query.limit = queryRest.limit;
+    if (queryRest.page !== undefined) query.page = queryRest.page;
 
-  /**
-   * Rotate (or finalize the rotation of) a webhook subscription's signing
-   * secret. Pass `{ generate: true }` to have the server generate a secret
-   * (returned once in `result.secret`), `{ secret }` to supply your own, or
-   * `{ finalize: true }` to clear the previous secret early. The resolved
-   * secret is never logged by the SDK; callers that log the result should
-   * route it through {@link redactSecrets} first.
-   */
-  async rotateWebhookSecret(
-    id: string,
-    params: RotateWebhookSecretParams & { finalize: true },
-    options?: WriteOptions,
-  ): Promise<FinalizeWebhookSecretRotationResult>;
-  async rotateWebhookSecret(
-    id: string,
-    params?: RotateWebhookSecretParams,
-    options?: WriteOptions,
-  ): Promise<RotateWebhookSecretResult>;
-  async rotateWebhookSecret(
-    id: string,
-    params: RotateWebhookSecretParams = {},
-    options?: WriteOptions,
-  ): Promise<RotateWebhookSecretResult | FinalizeWebhookSecretRotationResult> {
-    return this.request(`/api/webhooks/subscriptions/${encodeURIComponent(id)}/rotate`, {
-      method: "POST",
-      body: JSON.stringify(params),
-      idempotencyKey: options?.idempotencyKey,
-      signal: options?.signal,
-      timeoutMs: options?.timeoutMs,
+    return this.request<MarketplaceSearchResponse>("/api/marketplace/search", {
+      params: Object.keys(query).length > 0 ? query : undefined,
+      signal,
+      timeoutMs,
     });
   }
 }
+

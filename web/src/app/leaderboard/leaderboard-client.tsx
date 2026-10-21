@@ -53,19 +53,21 @@ interface ApiEntry {
   name: string;
   category: string;
   status: string;
-  pulsePrice: string;
+  pulsePrice: string | null;
   totalSupply: number;
   patronCount: number;
   activityCount: number;
   totalRevenue: number;
-  marketCap: number;
+  marketCap: number | null;
 }
 
 function formatRevenue(revenue: number): string {
   return `$${revenue.toLocaleString()}`;
 }
 
-function formatMarketCap(marketCap: number): string {
+function formatMarketCap(marketCap: number | null): string {
+  if (marketCap === null || !Number.isFinite(marketCap)) return "—";
+
   return marketCap >= 1_000_000
     ? `$${(marketCap / 1_000_000).toFixed(1)}M`
     : `$${(marketCap / 1000).toFixed(0)}K`;

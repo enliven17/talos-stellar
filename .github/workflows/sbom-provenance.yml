@@ -155,7 +155,7 @@ jobs:
           version: 10.0.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: pnpm
@@ -203,7 +203,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
 
@@ -515,7 +515,7 @@ jobs:
 
       - name: Upload SBOMs to GitHub Release
         if: inputs.upload_release == true && startsWith(github.ref, 'refs/tags/sdk-v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             ${{ steps.cyclonedx.outputs.cdx-json }}
@@ -556,7 +556,7 @@ jobs:
           python-version: "3.11"
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
 
       - name: Install dependencies
         working-directory: packages/prime-agent
@@ -775,7 +775,7 @@ jobs:
 
       - name: Upload to GitHub Release
         if: inputs.upload_release == true && startsWith(github.ref, 'refs/tags/agent-v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             ${{ steps.cyclonedx.outputs.cdx-json }}
@@ -1078,7 +1078,7 @@ jobs:
 
       - name: Upload to GitHub Release
         if: inputs.upload_release == true && startsWith(github.ref, 'refs/tags/contracts-v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             ${{ steps.cyclonedx.outputs.cdx-json }}
@@ -1122,7 +1122,7 @@ jobs:
           version: 10.0.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: pnpm
@@ -1306,7 +1306,7 @@ jobs:
 
       - name: Upload to GitHub Release
         if: inputs.upload_release == true && startsWith(github.ref, 'refs/tags/web-v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             ${{ steps.cyclonedx.outputs.cdx-json }}

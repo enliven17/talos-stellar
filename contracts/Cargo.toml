@@ -4,10 +4,12 @@ members = [
     "talos_registry",
     "talos_name_service",
     "talos_governance",
+    "talos_dividends",
     "ttl_manager",
     "storage_migration",
     "talos_dividends",
     "indexer_fixtures",
+    "integration_tests",
 ]
 
 [workspace.dependencies]

@@ -343,6 +343,103 @@ class TestStellarPulseTokens:
     """Test Pulse token operations."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("name", "symbol", "initial_supply", "expected_error"),
+        [
+            (
+                "",
+                "GOVERN",
+                1_000_000,
+                "name must be between 1 and 32 characters",
+            ),
+            (
+                "   ",
+                "GOVERN",
+                1_000_000,
+                "name must be between 1 and 32 characters",
+            ),
+            (
+                "A" * 33,
+                "GOVERN",
+                1_000_000,
+                "name must be between 1 and 32 characters",
+            ),
+            (
+                "Governance Token",
+                "",
+                1_000_000,
+                "symbol must be 1-12 alphanumeric characters",
+            ),
+            (
+                "Governance Token",
+                "GOVERN1234567",
+                1_000_000,
+                "symbol must be 1-12 alphanumeric characters",
+            ),
+            (
+                "Governance Token",
+                "GOV-ERN",
+                1_000_000,
+                "symbol must be 1-12 alphanumeric characters",
+            ),
+            (
+                "Governance Token",
+                "GÖVERN",
+                1_000_000,
+                "symbol must be 1-12 alphanumeric characters",
+            ),
+            (
+                "Governance Token",
+                "GOVERN",
+                0,
+                "initial_supply must be greater than 0",
+            ),
+            (
+                "Governance Token",
+                "GOVERN",
+                -1,
+                "initial_supply must be greater than 0",
+            ),
+        ],
+    )
+    async def test_create_pulse_token_rejects_invalid_inputs_without_approval(
+        self,
+        mock_settings: Settings,
+        name: str,
+        symbol: str,
+        initial_supply: int,
+        expected_error: str,
+    ):
+        mock_api = AsyncMock()
+
+        with patch(
+            "talos_agent.tools.stellar._api", mock_api
+        ), patch("talos_agent.tools.stellar._settings", mock_settings):
+            from talos_agent.tools.stellar import create_pulse_token
+
+            result = await create_pulse_token(name, symbol, initial_supply)
+
+        assert result == {"error": expected_error}
+        mock_api.create_approval.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_pulse_token_accepts_maximum_name_and_symbol_lengths(
+        self, mock_settings: Settings
+    ):
+        mock_api = AsyncMock()
+        mock_api.create_approval = AsyncMock(return_value={"id": "approval-789"})
+
+        with patch(
+            "talos_agent.tools.stellar._api", mock_api
+        ), patch("talos_agent.tools.stellar._settings", mock_settings):
+            from talos_agent.tools.stellar import create_pulse_token
+
+            result = await create_pulse_token("N" * 32, "S" * 12, 1)
+
+        assert result["status"] == "approval_requested"
+        mock_api.create_approval.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_create_pulse_token_requires_approval(self, mock_settings: Settings):
         """create_pulse_token always requires Creator approval."""
         mock_api = AsyncMock()
@@ -446,6 +543,26 @@ class TestWebAPIReportActivity:
             assert result["id"] == "activity-123"
             mock_api.report_activity.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_report_activity_invalid_type(self, mock_settings: Settings):
+        """report_activity rejects unknown activity type without API call."""
+        mock_api = AsyncMock(spec=TalosAPIClient)
+
+        with patch(
+            "talos_agent.tools.web_api._api", mock_api
+        ), patch("talos_agent.tools.web_api._settings", mock_settings):
+            from talos_agent.tools.web_api import report_activity
+
+            result = await report_activity(
+                type="unknown_action",
+                content="Hello world",
+                channel="X",
+            )
+
+            assert "error" in result
+            assert "Invalid activity type" in result["error"]
+            mock_api.report_activity.assert_not_called()
+
 
 class TestWebAPIApprovalWorkflow:
     """Test approval request and checking."""
@@ -519,7 +636,35 @@ class TestWebAPIRevenueReporting:
     @pytest.mark.asyncio
     async def test_report_revenue(self, mock_settings: Settings):
         """report_revenue submits earnings record."""
-        mock_api = AsyncMock()
+        mock_api = AsyncMock(spec=TalosAPIClient)
+        mock_api.report_revenue = AsyncMock(
+            return_value={"id": "revenue-record", "amount": 50.0}
+        )
+
+        valid_tx = "a" * 64
+        with patch(
+            "talos_agent.tools.web_api._api", mock_api
+        ), patch("talos_agent.tools.web_api._settings", mock_settings):
+            from talos_agent.tools.web_api import report_revenue
+
+            result = await report_revenue(
+                amount=50.0,
+                source="playbook_sale",
+                tx_hash=valid_tx,
+            )
+
+            assert result["id"] == "revenue-record"
+            mock_api.report_revenue.assert_called_once_with(
+                mock_settings.talos_id,
+                amount=50.0,
+                source="playbook_sale",
+                tx_hash=valid_tx,
+            )
+
+    @pytest.mark.asyncio
+    async def test_report_revenue_empty_tx_hash(self, mock_settings: Settings):
+        """report_revenue allows empty or omitted tx_hash."""
+        mock_api = AsyncMock(spec=TalosAPIClient)
         mock_api.report_revenue = AsyncMock(
             return_value={"id": "revenue-record", "amount": 50.0}
         )
@@ -532,8 +677,135 @@ class TestWebAPIRevenueReporting:
             result = await report_revenue(
                 amount=50.0,
                 source="playbook_sale",
-                tx_hash="tx-2024-001",
             )
 
             assert result["id"] == "revenue-record"
             mock_api.report_revenue.assert_called_once()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DeFi Tool Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDeFiToolSpending:
+    """Test spending and budget tracking for DeFi loan borrowing and repayments."""
+
+    @pytest.mark.asyncio
+    async def test_borrow_does_not_record_spending(
+        self, mock_settings: Settings, mock_db: LocalDB
+    ):
+        """Borrowing does not record spending or increase spending_period (GTM budget unaffected)."""
+        mock_settings.approval_threshold = 1000.0
+        mock_api = AsyncMock()
+
+        assert mock_db.get_spending_period(30) == 0.0
+        assert mock_db.get_spending_today() == 0.0
+
+        with patch("talos_agent.tools.defi._api", mock_api), patch(
+            "talos_agent.tools.defi._db", mock_db
+        ), patch("talos_agent.tools.defi._settings", mock_settings):
+            from talos_agent.tools.defi import request_defi_loan
+
+            res = await request_defi_loan(
+                platform="aave",
+                amount=500.0,
+                collateral_asset="USDC",
+                loan_asset="USDC",
+                duration_days=30,
+                purpose="Operational liquidity",
+            )
+
+            assert res["status"] == "requested"
+            assert res["amount"] == 500.0
+
+            # Spending totals must remain 0.0 after borrow
+            assert mock_db.get_spending_period(30) == 0.0
+            assert mock_db.get_spending_today() == 0.0
+
+            # Verify no spending_log records were created
+            row = mock_db._conn.execute(
+                "SELECT COUNT(*) as cnt FROM spending_log"
+            ).fetchone()
+            assert row["cnt"] == 0
+
+    @pytest.mark.asyncio
+    async def test_repay_records_spending_defi_repayment(
+        self, mock_settings: Settings, mock_db: LocalDB
+    ):
+        """Repaying records spending with category defi_repayment and increases spending_period."""
+        mock_settings.approval_threshold = 1000.0
+        mock_api = AsyncMock()
+
+        # Create active loan directly
+        loan_id = mock_db.create_loan(
+            platform="aave",
+            amount=500.0,
+            collateral_asset="USDC",
+            loan_asset="USDC",
+            duration_days=30,
+            purpose="Operational liquidity",
+        )
+
+        assert mock_db.get_spending_period(30) == 0.0
+        assert mock_db.get_spending_today() == 0.0
+
+        with patch("talos_agent.tools.defi._api", mock_api), patch(
+            "talos_agent.tools.defi._db", mock_db
+        ), patch("talos_agent.tools.defi._settings", mock_settings):
+            from talos_agent.tools.defi import repay_loan
+
+            repay_res = await repay_loan(loan_id=loan_id, amount=150.0)
+
+            assert repay_res["status"] == "repayment_recorded"
+            assert repay_res["amount"] == 150.0
+            assert repay_res["remaining"] == 350.0
+
+            # Spending period and today should increase by 150.0
+            assert mock_db.get_spending_period(30) == 150.0
+            assert mock_db.get_spending_today() == 150.0
+
+            # Verify spending_log entry category
+            row = mock_db._conn.execute(
+                "SELECT amount, category, description FROM spending_log ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            assert row["amount"] == 150.0
+            assert row["category"] == "defi_repayment"
+
+    @pytest.mark.asyncio
+    async def test_borrow_and_repay_budget_lifecycle(
+        self, mock_settings: Settings, mock_db: LocalDB
+    ):
+        """Full borrow and repay cycle asserts spending before, between, and after."""
+        mock_settings.approval_threshold = 1000.0
+        mock_api = AsyncMock()
+
+        with patch("talos_agent.tools.defi._api", mock_api), patch(
+            "talos_agent.tools.defi._db", mock_db
+        ), patch("talos_agent.tools.defi._settings", mock_settings):
+            from talos_agent.tools.defi import repay_loan, request_defi_loan
+
+            # Before borrow
+            assert mock_db.get_spending_period(30) == 0.0
+
+            # Borrow 300 USDC
+            borrow_res = await request_defi_loan(
+                platform="compound",
+                amount=300.0,
+                collateral_asset="USDC",
+                loan_asset="USDC",
+                duration_days=14,
+            )
+            loan_id = borrow_res["loan_id"]
+
+            # After borrow, spending remains unchanged
+            assert mock_db.get_spending_period(30) == 0.0
+
+            # First partial repayment of 100
+            await repay_loan(loan_id=loan_id, amount=100.0)
+            assert mock_db.get_spending_period(30) == 100.0
+
+            # Full repayment of the remaining 200
+            await repay_loan(loan_id=loan_id, amount=200.0)
+            assert mock_db.get_spending_period(30) == 300.0
+

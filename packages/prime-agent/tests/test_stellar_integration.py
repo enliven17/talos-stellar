@@ -74,7 +74,8 @@ class TestStellarKitBalanceQueries:
         await kit.initialize()
         result = await kit.get_balance()
 
-        assert result["balance_xlm"] == 100.5
+        assert result["balance_xlm"] == "100.5000000"
+        assert str(result["balance_xlm_decimal"]) == "100.5000000"
         assert (
             result["account"]
             == "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
@@ -110,7 +111,7 @@ class TestStellarKitBalanceQueries:
         await kit.initialize()
         result = await kit.get_balance()
 
-        assert result["balance_xlm"] == 0
+        assert result["balance_xlm"] == "0.0000000"
 
     @pytest.mark.asyncio
     @respx.mock
@@ -126,6 +127,70 @@ class TestStellarKitBalanceQueries:
 
         assert "error" in result
         assert "No Stellar account" in result["error"]
+
+    # ── Account-ID validation (issue #893) ──────────────────────────────────
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_id",
+        [
+            "../ledgers",                          # path traversal
+            "../../etc/passwd",                    # deep path traversal
+            "http://evil.example.com",             # URL injection
+            "SCZANGBA5YELQU563LZUAQDPQ63DXVQEMD6DKYL7VQNUXT7OACN7JXHW",  # secret key (S…)
+            "notanaccountid",                       # plain string
+            "",                                    # empty
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF" + "X" * 5,  # too long
+            "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",  # invalid checksum
+        ],
+    )
+    async def test_get_balance_invalid_account_id_never_calls_http(
+        self, bad_id: str
+    ):
+        """get_balance returns invalid_account error without making any HTTP call."""
+        mock_api = AsyncMock()
+        mock_api.get_talos = AsyncMock(
+            return_value={"stellarAccountId": bad_id}
+        )
+        mock_api._talos_id = "test-talos"
+
+        kit = StellarKit(mock_api)
+        await kit.initialize()
+
+        # No respx mock registered — any real HTTP call would raise an error
+        with respx.mock(assert_all_called=False):
+            result = await kit.get_balance(bad_id)
+
+        assert result.get("error") == "invalid_account"
+        # Confirm no HTTP routes were matched (i.e. none were called)
+        assert respx.calls.call_count == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_id",
+        [
+            "../ledgers",
+            "../../etc/passwd",
+            "http://evil.example.com",
+            "SCZANGBA5YELQU563LZUAQDPQ63DXVQEMD6DKYL7VQNUXT7OACN7JXHW",
+            "notanaccountid",
+            "",
+            "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+        ],
+    )
+    async def test_get_token_balance_invalid_account_id_never_calls_http(
+        self, bad_id: str
+    ):
+        """get_token_balance returns invalid_account error without making any HTTP call."""
+        mock_api = AsyncMock()
+        kit = StellarKit(mock_api)
+        await kit.initialize()
+
+        with respx.mock(assert_all_called=False):
+            result = await kit.get_token_balance(bad_id, "USDC")
+
+        assert result.get("error") == "invalid_account"
+        assert respx.calls.call_count == 0
 
     @pytest.mark.asyncio
     @respx.mock
@@ -159,7 +224,8 @@ class TestStellarKitBalanceQueries:
             "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV", "PULSE"
         )
 
-        assert result["balance"] == 1000.0
+        assert result["balance"] == "1000.0000000"
+        assert str(result["balance_decimal"]) == "1000.0000000"
         assert result["token_id"] == "PULSE"
 
     @pytest.mark.asyncio
@@ -184,7 +250,7 @@ class TestStellarKitBalanceQueries:
             "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV", "NOTFOUND"
         )
 
-        assert result["balance"] == 0
+        assert result["balance"] == "0.0000000"
 
 
 class TestStellarKitTransfers:
