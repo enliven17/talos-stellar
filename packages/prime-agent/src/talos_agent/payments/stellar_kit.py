@@ -18,6 +18,7 @@ from typing import Any
 
 import httpx
 from rich.console import Console
+from stellar_sdk import StrKey
 
 from talos_agent.adapters.snapshots import StellarHealthSnapshot
 from talos_agent.http import request_with_retry
@@ -32,6 +33,18 @@ _SEVEN_DECIMALS = Decimal("0.0000001")
 
 #: Default timeout (seconds) for Horizon HTTP requests.
 _DEFAULT_HORIZON_TIMEOUT = 30.0
+
+
+def _validate_account_id(account_id: str) -> bool:
+    """Return True if *account_id* is a valid Stellar account identifier.
+
+    Accepts classic Ed25519 public keys (G…) and muxed accounts (M…).
+    Rejects anything else — empty strings, path-traversal fragments, secret
+    keys, contract IDs, etc. — so that callers never interpolate untrusted
+    input into a Horizon URL.
+    """
+    return StrKey.is_valid_ed25519_public_key(account_id) or StrKey.is_valid_med25519_public_key(account_id)
+
 
 console = Console()
 
@@ -110,6 +123,8 @@ class StellarKit:
             acct = account_id or (talos.get("stellarAccountId", "") if talos else "")
             if not acct:
                 return {"error": "No Stellar account configured"}
+            if not _validate_account_id(acct):
+                return {"error": "invalid_account", "account": acct}
             # Reuse the shared client; fall back to a temporary one if not
             # initialized (e.g. called in tests without initialize()).
             client = self._client or httpx.AsyncClient(timeout=self._horizon_timeout)
@@ -142,6 +157,8 @@ class StellarKit:
     async def get_token_balance(self, account_id: str, token_id: str) -> dict[str, Any]:
         """Query Stellar asset balance via Horizon."""
         try:
+            if not _validate_account_id(account_id):
+                return {"error": "invalid_account", "account": account_id}
             client = self._client or httpx.AsyncClient(timeout=self._horizon_timeout)
             close_after = self._client is None
             try:
