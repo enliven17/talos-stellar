@@ -27,6 +27,7 @@
     "db:seed": "tsx src/db/seed.ts",
     "db:seed-demo": "tsx scripts/seed-demo-agents.ts",
     "db:reset-test-data": "tsx src/db/reset-test-data.ts",
+    "events:worker": "tsx scripts/events-worker.ts",
     "env:provision": "tsx src/area/devx/env-cli.ts provision",
     "env:teardown": "tsx src/area/devx/env-cli.ts teardown",
     "env:cleanup": "tsx src/area/devx/env-cli.ts cleanup",
