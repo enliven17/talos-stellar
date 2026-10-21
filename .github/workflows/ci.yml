@@ -240,6 +240,11 @@ jobs:
         working-directory: web
         run: pnpm test:payment-coverage
 
+      - name: "[web] Check generated schemas"
+        if: matrix.package == 'web'
+        working-directory: web
+        run: pnpm schemas:check
+
       # ── SDK: build/typecheck, tests ─────────────────────────────
       - name: "[sdk] Build & typecheck"
         if: matrix.package == 'sdk'
