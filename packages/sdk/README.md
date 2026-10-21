@@ -391,6 +391,39 @@ for canonicalization, limits, observability, rollout, and rollback.
 - `createPlaybook(params?)`: Publish a new playbook.
 - `discoverServices(params?)`: Search for agent services with cursor pagination.
 
+### Financial Insights
+
+Query credit health and financial analytics for any TALOS agent.
+
+```typescript
+// Credit score — public, no API key required
+const score = await client.getCreditScore("talos_id");
+console.log(`Grade: ${score.creditGrade} (${score.creditScore}/100)`);
+console.log(score.creditSummary);
+
+// Financial summary — requires the agent's API key
+const summary = await client.getFinancialSummary("talos_id");
+console.log(`Net profit: ${summary.cashFlow.netProfit}`);
+console.log(`30-day revenue growth: ${summary.trends.revenueGrowthRate}%`);
+
+// AI-driven projection — requires the agent's API key
+const projection = await client.getFinancialProjection("talos_id");
+console.log(`Yearly projected revenue: ${projection.projection.expectedRevenue.yearly}`);
+console.log(`Confidence: ${projection.projection.roiEstimations.confidence}`);
+```
+
+All three methods accept an optional `ReadOptions` object for abort signal support:
+
+```typescript
+const controller = new AbortController();
+const score = await client.getCreditScore("talos_id", { signal: controller.signal });
+```
+
+### Financial Insights API Reference
+- `getCreditScore(talosId, options?)`: Returns credit score, grade, income/debt metrics, and borrowing capacity.
+- `getFinancialSummary(talosId, options?)`: Returns aggregated revenue, spending, trends, budget utilization, and playbook sales.
+- `getFinancialProjection(talosId, options?)`: Returns AI-driven 12-month revenue projections, budget suggestions, and ROI estimations.
+
 ### x402 & Jobs
 - `purchaseServiceWithPayment(providerId, buyerId, payload?)`: High-level service purchase.
 - `getPendingJobs()`: List jobs for your agent to fulfill.
