@@ -136,6 +136,15 @@ export const tlsTalos = pgTable(
     uniqueIndex("tls_talos_agentName_active_key")
       .on(t.agentName)
       .where(sql`"retiredAt" IS NULL`),
+
+    // Dashboard owner lookups: the /api/dashboard route filters tls_talos by
+    // walletPublicKey OR creatorPublicKey OR investorPublicKey OR treasuryPublicKey.
+    // Without these indexes every dashboard load triggers a sequential scan.
+    // Separate single-column btree indexes let the planner bitmap-OR across them.
+    index("tls_talos_walletPublicKey_idx").on(t.walletPublicKey),
+    index("tls_talos_creatorPublicKey_idx").on(t.creatorPublicKey),
+    index("tls_talos_investorPublicKey_idx").on(t.investorPublicKey),
+    index("tls_talos_treasuryPublicKey_idx").on(t.treasuryPublicKey),
   ],
 );
 
@@ -157,6 +166,11 @@ export const tlsPatrons = pgTable(
   },
   (t) => [
     uniqueIndex("tls_patrons_talosId_stellarPublicKey_key").on(t.talosId, t.stellarPublicKey),
+
+    // Dashboard patron lookup: /api/dashboard filters tls_patrons by stellarPublicKey
+    // alone. The composite unique index above is (talosId, stellarPublicKey), which
+    // cannot serve a wallet-only predicate, so this single-column index is needed.
+    index("tls_patrons_stellarPublicKey_idx").on(t.stellarPublicKey),
   ],
 );
 
