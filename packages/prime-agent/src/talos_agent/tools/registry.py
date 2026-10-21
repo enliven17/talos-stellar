@@ -324,7 +324,7 @@ class Tool:
     timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
-        self.timeout = _validate_tool_timeout(self.timeout)
+        self.timeout = validate_tool_timeout(self.timeout)
 
     def to_openai_schema(self) -> dict:
         return {
@@ -394,7 +394,7 @@ class ToolRegistry:
     ) -> None:
         # Raises ManifestValidationError for a declared-but-unenforceable
         # manifest, so the problem surfaces at import rather than first call.
-        timeout = _validate_tool_timeout(timeout)
+        timeout = validate_tool_timeout(timeout)
         self._enforcer.register(name, permissions)
 
         # Fallback to function signature schema if empty parameters provided
@@ -600,17 +600,10 @@ class ToolRegistry:
         except asyncio.CancelledError:
             outcome = "cancelled"
             raise
-        except asyncio.TimeoutError:
+        except ToolTimeoutError:
             outcome = "timeout"
-            return {
-                "error": "Tool execution timed out",
-                "code": "TOOL_TIMEOUT",
-                "tool": name,
-                "timeout_seconds": tool.timeout,
-            }
+            raise
         except Exception as e:
-            if isinstance(e, _ToolTimeoutError) and e.__cause__ is not None:
-                e = e.__cause__
             outcome = "error"
             return {"error": f"{type(e).__name__}: {e}"}
         finally:
