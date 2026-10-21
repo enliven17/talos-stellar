@@ -385,6 +385,37 @@ export interface ReadOptions {
   timeoutMs?: number;
 }
 
+/**
+ * Options for {@link TalosClient.waitForJobResult}.
+ *
+ * Polls `getJobResult` with exponential backoff + jitter until the job
+ * reaches a terminal state (`completed`, `failed`, or `cancelled`), a
+ * caller-supplied `signal` is aborted, or `timeoutMs` elapses.
+ */
+export interface WaitForJobResultOptions {
+  /**
+   * Initial polling interval in milliseconds. Default 500.
+   * Doubles on each poll up to `maxIntervalMs`.
+   */
+  intervalMs?: number;
+  /**
+   * Upper bound on the polling interval in milliseconds. Default 10_000.
+   * `Retry-After` headers from 429 responses are capped here too.
+   */
+  maxIntervalMs?: number;
+  /**
+   * Overall wall-clock timeout in milliseconds for the entire wait loop.
+   * Surfaces as {@link TalosTimeoutError} when exceeded. No default (waits
+   * indefinitely unless a signal is also provided).
+   */
+  timeoutMs?: number;
+  /**
+   * Caller-supplied AbortSignal. Aborting cancels the next scheduled poll
+   * and rejects the promise with {@link TalosTimeoutError}.
+   */
+  signal?: AbortSignal;
+}
+
 /** Structured event emitted to {@link TalosClientOptions.onError}. */
 export interface TalosErrorEvent {
   error: TalosAPIError;
@@ -1746,6 +1777,121 @@ export class TalosClient {
       `/api/talos/${encodeURIComponent(talosId)}/jobs/${encodeURIComponent(jobId)}/payment-status`,
       { signal: options?.signal, timeoutMs: options?.timeoutMs },
     );
+  }
+
+  /**
+   * Poll `getJobResult` with exponential back-off and jitter until the job
+   * reaches a terminal state or the timeout / abort fires.
+   *
+   * Resolution rules:
+   *   - `completed`  → resolves with the {@link CommerceJob}
+   *   - `failed`     → rejects with the {@link CommerceJob} as the `cause`
+   *                    inside a {@link TalosAPIError}
+   *   - `cancelled`  → same as `failed`
+   *   - Timeout      → rejects with {@link TalosTimeoutError}
+   *   - Abort signal → rejects with {@link TalosTimeoutError}
+   *
+   * Network errors from `getJobResult` are surfaced immediately without
+   * retry (the outer retry policy on the client handles those individually).
+   *
+   * After the promise settles (any outcome) **no timers remain running**.
+   *
+   * @param jobId   - Job ID to poll.
+   * @param options - Polling configuration (intervals, timeout, signal).
+   */
+  async waitForJobResult(
+    jobId: string,
+    options: WaitForJobResultOptions = {},
+  ): Promise<CommerceJob> {
+    const {
+      intervalMs = 500,
+      maxIntervalMs = 10_000,
+      timeoutMs,
+      signal: callerSignal,
+    } = options;
+
+    const path = `/api/jobs/${jobId}/result`;
+
+    // Reject immediately if the signal is already aborted.
+    if (callerSignal?.aborted) {
+      throw new TalosTimeoutError(0, "Request aborted", path, {
+        message: "waitForJobResult aborted before starting",
+      });
+    }
+
+    // Optional wall-clock deadline.
+    const deadline = timeoutMs != null ? Date.now() + timeoutMs : null;
+
+    // Abort controller for the overall wait. Linked to both the caller's
+    // signal (if any) and the optional wall-clock deadline timer.
+    const loopController = new AbortController();
+    const loopSignal = loopController.signal;
+
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    let abortReason: "timeout" | "signal" | undefined;
+
+    const onCallerAbort = () => {
+      abortReason = "signal";
+      loopController.abort();
+    };
+
+    if (deadline !== null) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new TalosTimeoutError(0, `Job ${jobId} wait timed out`, path, {
+          message: `waitForJobResult timed out after ${timeoutMs}ms`,
+        });
+      }
+      deadlineTimer = setTimeout(() => {
+        abortReason = "timeout";
+        loopController.abort();
+      }, remaining);
+    }
+
+    callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+
+    try {
+      let currentIntervalMs = Math.max(0, intervalMs);
+
+      while (true) {
+        // Check abort before every poll.
+        if (loopSignal.aborted) {
+          const reason = abortReason === "timeout"
+            ? `waitForJobResult timed out after ${timeoutMs}ms`
+            : "waitForJobResult aborted";
+          throw new TalosTimeoutError(0, reason, path, { message: reason });
+        }
+
+        // Perform a single poll. Respect the loopSignal so an abort during
+        // the network call surfaces promptly.
+        const job = await this.getJobResult(jobId, { signal: loopSignal });
+
+        if (job.status === "completed") {
+          return job;
+        }
+
+        if (job.status === "failed" || job.status === "cancelled") {
+          throw new TalosAPIError(0, `Job ${jobId} ended with status: ${job.status}`, path, {
+            message: `Job ${jobId} ended with status: ${job.status}`,
+            code: "api_error",
+            cause: job,
+          });
+        }
+
+        // Job is still pending. Wait before the next poll.
+        await this.wait(currentIntervalMs, loopSignal);
+
+        // Exponential back-off capped at maxIntervalMs, with jitter.
+        currentIntervalMs = Math.min(
+          Math.round(currentIntervalMs * 2 * (0.75 + 0.25 * Math.random())),
+          maxIntervalMs,
+        );
+      }
+    } finally {
+      // Always clear timers and listeners so nothing leaks.
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      callerSignal?.removeEventListener("abort", onCallerAbort);
+    }
   }
 
   // ── Leaderboard ────────────────────────────────────────────
