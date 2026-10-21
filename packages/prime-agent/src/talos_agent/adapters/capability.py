@@ -791,10 +791,6 @@ class AdapterInvocationStore:
                 """,
                 (owner_id, lease.isoformat(), operation_id),
             )
-            self._conn.execute(
-                "UPDATE adapter_invocations SET attempt_count = attempt_count + 1 WHERE operation_id = ?",
-                (operation_id,),
-            )
             self._conn.commit()
         except sqlite3.OperationalError as exc:
             if self._conn.in_transaction:
