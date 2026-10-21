@@ -40,7 +40,7 @@ def _get_kit() -> StellarKit:
 
 
 @tool("transfer_xlm", "Transfer XLM to a Stellar account (dividends, payments). Auto-checks approval threshold.")
-async def transfer_xlm(to_account: str, amount: float, reason: str = "") -> dict:
+async def transfer_xlm(to_account: str, amount: float | str, reason: str = "") -> dict:
     kit = _get_kit()
     await kit.initialize()
 
@@ -50,18 +50,18 @@ async def transfer_xlm(to_account: str, amount: float, reason: str = "") -> dict
         result = await _deps().api.create_approval(
             _deps().settings.talos_id,
             type_="transaction",
-            title=f"XLM transfer: {amount} to {to_account}",
+            title=f"XLM transfer: {formatted_amount} to {to_account}",
             description=reason,
-            amount=amount,
+            amount=float(formatted_amount),
         )
         return {
             "status": "approval_requested",
             "approval_id": result.get("id") if result else None,
-            "amount": amount,
+            "amount": formatted_amount,
             "to": to_account,
         }
 
-    return await kit.transfer_xlm(to_account, amount)
+    return await kit.transfer_xlm(to_account, formatted_amount)
 
 
 @tool("get_xlm_balance", "Check XLM balance for the Talos account via Horizon")

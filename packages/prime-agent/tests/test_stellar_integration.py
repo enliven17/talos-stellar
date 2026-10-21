@@ -74,7 +74,8 @@ class TestStellarKitBalanceQueries:
         await kit.initialize()
         result = await kit.get_balance()
 
-        assert result["balance_xlm"] == 100.5
+        assert result["balance_xlm"] == "100.5000000"
+        assert str(result["balance_xlm_decimal"]) == "100.5000000"
         assert (
             result["account"]
             == "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
@@ -110,7 +111,7 @@ class TestStellarKitBalanceQueries:
         await kit.initialize()
         result = await kit.get_balance()
 
-        assert result["balance_xlm"] == 0
+        assert result["balance_xlm"] == "0.0000000"
 
     @pytest.mark.asyncio
     @respx.mock
@@ -159,7 +160,8 @@ class TestStellarKitBalanceQueries:
             "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV", "PULSE"
         )
 
-        assert result["balance"] == 1000.0
+        assert result["balance"] == "1000.0000000"
+        assert str(result["balance_decimal"]) == "1000.0000000"
         assert result["token_id"] == "PULSE"
 
     @pytest.mark.asyncio
@@ -184,7 +186,7 @@ class TestStellarKitBalanceQueries:
             "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV", "NOTFOUND"
         )
 
-        assert result["balance"] == 0
+        assert result["balance"] == "0.0000000"
 
 
 class TestStellarKitTransfers:

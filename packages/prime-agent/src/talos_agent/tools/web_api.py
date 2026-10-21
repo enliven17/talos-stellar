@@ -64,4 +64,6 @@ async def report_revenue(amount: float, source: str, tx_hash: str = "") -> dict:
         source=source,
         tx_hash=tx_hash or None,
     )
-    return result or {"status": "reported"}
+    if result:
+        return result
+    return {"status": "reported", "amount": formatted_amount}
