@@ -26,6 +26,15 @@ import type {
   CursorRequestOptions,
   ActivityPage,
   ActivityPageOptions,
+  JobPaymentStatus,
+  WebhookSubscription,
+  WebhookSubscriptionPage,
+  CreateWebhookSubscriptionParams,
+  ListWebhookSubscriptionsParams,
+  DeleteWebhookSubscriptionResult,
+  RotateWebhookSecretParams,
+  RotateWebhookSecretResult,
+  FinalizeWebhookSecretRotationResult,
 } from "./types.js";
 import {
   AsyncPaginationIterator,
@@ -36,6 +45,7 @@ import {
 } from "./pagination.js";
 import {
   TalosAPIError,
+  TalosTransportError,
   TalosPaymentError,
   classifyTransportError,
   errorFromResponse,
@@ -174,12 +184,6 @@ export interface TalosClientOptions {
   /** Opt-in request signer. Omitting it preserves the legacy wire format. */
   signer?: RequestSigner;
   signing?: SigningControllerOptions;
-  /** Fetch implementation override for tests, middleware, and Node runtimes. */
-  fetch?: typeof globalThis.fetch;
-  retryPolicy?: RetryPolicyOptions;
-  timeoutMs?: number;
-  onError?: (event: TalosErrorEvent) => void;
-  chaosInjector?: ChaosInjector;
 }
 
 /**
@@ -481,11 +485,6 @@ export class TalosClient {
   private readonly fetchOverride?: typeof fetch;
   private readonly chaosInjector?: ChaosInjector;
   private signer?: SigningController;
-  private readonly fetchOverride?: typeof globalThis.fetch;
-  private readonly retryPolicy: Required<RetryOptions>;
-  private readonly timeoutMs?: number;
-  private readonly onError?: (event: TalosErrorEvent) => void;
-  private readonly chaosInjector?: ChaosInjector;
 
   constructor(options: TalosClientOptions = {}) {
     // An explicit `retry` config without `retryPolicy` opts out of the
@@ -505,10 +504,6 @@ export class TalosClient {
       options.baseUrl ?? "https://talos-stellar.vercel.app"
     ).replace(/\/$/, "");
     this.headers = { "Content-Type": "application/json" };
-    this.fetchOverride = options.fetch;
-    this.timeoutMs = options.timeoutMs;
-    this.onError = options.onError;
-    this.chaosInjector = options.chaosInjector;
     if (options.apiKey) {
       this.headers["Authorization"] = `Bearer ${options.apiKey}`;
     }
@@ -1018,6 +1013,20 @@ export class TalosClient {
     return this.request("/api/talos/me", { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
+  /**
+   * Check whether an agent name is available for registration.
+   */
+  async checkNameAvailability(
+    name: string,
+    options?: ReadOptions,
+  ): Promise<{ available: boolean; reason?: string }> {
+    return this.request("/api/talos/check-name", {
+      params: { name },
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
   async createTalos(params: CreateTalosParams): Promise<TalosCreated> {
     return this.request("/api/talos", {
       method: "POST",
@@ -1404,6 +1413,22 @@ export class TalosClient {
     return this.request(`/api/jobs/${jobId}/result`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
+  /**
+   * Get the on-chain payment finality status for a commerce job.
+   *
+    * @throws `TalosNotFoundError` when the job does not belong to `talosId` or does not exist.
+   */
+  async getJobPaymentStatus(
+    talosId: string,
+    jobId: string,
+    options?: ReadOptions,
+  ): Promise<JobPaymentStatus> {
+    return this.request(
+      `/api/talos/${encodeURIComponent(talosId)}/jobs/${encodeURIComponent(jobId)}/payment-status`,
+      { signal: options?.signal, timeoutMs: options?.timeoutMs },
+    );
+  }
+
   // ── Leaderboard ────────────────────────────────────────────
 
   async getLeaderboard(
@@ -1473,6 +1498,100 @@ export class TalosClient {
     options?: WriteOptions,
   ): Promise<Playbook> {
     return this.request("/api/playbooks", {
+      method: "POST",
+      body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  // ── Webhook subscriptions ───────────────────────────────────
+
+  /**
+   * Create a webhook subscription. The `secret` in `params` is sent once to
+   * configure signing and is never echoed back in the response.
+   */
+  async createWebhookSubscription(
+    params: CreateWebhookSubscriptionParams,
+    options?: WriteOptions,
+  ): Promise<WebhookSubscription> {
+    return this.request("/api/webhooks/subscriptions", {
+      method: "POST",
+      body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  async listWebhookSubscriptions(
+    params?: ListWebhookSubscriptionsParams,
+  ): Promise<WebhookSubscriptionPage> {
+    const { signal, timeoutMs, ...query } = params ?? {};
+    return this.request("/api/webhooks/subscriptions", {
+      params: query,
+      signal,
+      timeoutMs,
+    });
+  }
+
+  /**
+   * Async iterator for paginated webhook subscriptions.
+   *
+   * @example
+   * ```ts
+   * for await (const sub of client.paginateWebhookSubscriptions({ active: true })) {
+   *   console.log(sub.id, sub.url);
+   * }
+   * ```
+   */
+  paginateWebhookSubscriptions(
+    options?: AsyncPaginationIteratorOptions & ListWebhookSubscriptionsParams,
+  ): AsyncPaginationIterator<WebhookSubscription> {
+    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
+    return createPaginationIterator<WebhookSubscription>(
+      (opts) => this.listWebhookSubscriptions({ ...cursorOptions, ...opts }),
+      { maxPages, signal, timeoutMs },
+    );
+  }
+
+  async deleteWebhookSubscription(
+    id: string,
+    options?: WriteOptions,
+  ): Promise<DeleteWebhookSubscriptionResult> {
+    return this.request(`/api/webhooks/subscriptions/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * Rotate (or finalize the rotation of) a webhook subscription's signing
+   * secret. Pass `{ generate: true }` to have the server generate a secret
+   * (returned once in `result.secret`), `{ secret }` to supply your own, or
+   * `{ finalize: true }` to clear the previous secret early. The resolved
+   * secret is never logged by the SDK; callers that log the result should
+   * route it through {@link redactSecrets} first.
+   */
+  async rotateWebhookSecret(
+    id: string,
+    params: RotateWebhookSecretParams & { finalize: true },
+    options?: WriteOptions,
+  ): Promise<FinalizeWebhookSecretRotationResult>;
+  async rotateWebhookSecret(
+    id: string,
+    params?: RotateWebhookSecretParams,
+    options?: WriteOptions,
+  ): Promise<RotateWebhookSecretResult>;
+  async rotateWebhookSecret(
+    id: string,
+    params: RotateWebhookSecretParams = {},
+    options?: WriteOptions,
+  ): Promise<RotateWebhookSecretResult | FinalizeWebhookSecretRotationResult> {
+    return this.request(`/api/webhooks/subscriptions/${encodeURIComponent(id)}/rotate`, {
       method: "POST",
       body: JSON.stringify(params),
       idempotencyKey: options?.idempotencyKey,

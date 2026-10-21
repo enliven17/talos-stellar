@@ -14,6 +14,7 @@ from talos_agent.payments.stellar_retry import (
     classify_stellar_failure,
     classify_stellar_result,
 )
+from talos_agent.tools import context as _context
 from talos_agent.tools.registry import tool
 
 if TYPE_CHECKING:
@@ -26,11 +27,16 @@ _api: TalosAPIClient = None  # type: ignore[assignment]
 _stellar_kit: StellarKit | None = None
 
 
+def _deps():
+    """This agent's dependencies: the bound ToolContext, else this module's globals."""
+    return _context.resolve(globals())
+
+
 def _get_kit() -> StellarKit:
-    global _stellar_kit
-    if _stellar_kit is None:
-        _stellar_kit = StellarKit(_api)
-    return _stellar_kit
+    deps = _deps()
+    if deps.stellar_kit is None:
+        deps.stellar_kit = StellarKit(deps.api)
+    return deps.stellar_kit
 
 
 @tool("transfer_xlm", "Transfer XLM to a Stellar account (dividends, payments). Auto-checks approval threshold.")
@@ -39,10 +45,10 @@ async def transfer_xlm(to_account: str, amount: float, reason: str = "") -> dict
     await kit.initialize()
 
     # Check threshold
-    threshold = float(_settings.approval_threshold)
+    threshold = float(_deps().settings.approval_threshold)
     if amount > threshold:
-        result = await _api.create_approval(
-            _settings.talos_id,
+        result = await _deps().api.create_approval(
+            _deps().settings.talos_id,
             type_="transaction",
             title=f"XLM transfer: {amount} to {to_account}",
             description=reason,
@@ -67,8 +73,8 @@ async def get_xlm_balance() -> dict:
 
 @tool("create_pulse_token", "Request Pulse (equity) token creation. Requires Creator approval on Dashboard.")
 async def create_pulse_token(name: str, symbol: str, initial_supply: int = 1000000) -> dict:
-    result = await _api.create_approval(
-        _settings.talos_id,
+    result = await _deps().api.create_approval(
+        _deps().settings.talos_id,
         type_="transaction",
         title=f"Create Pulse token: {name} ({symbol})",
         description=f"Initial supply: {initial_supply}. Token creation handled by Web via Soroban.",
@@ -92,11 +98,11 @@ async def airdrop_pulse(token_id: str, recipients: str) -> dict:
         return {"error": "recipients must be valid JSON: [{account: '...', amount: N}, ...]"}
 
     total_amount = sum(r.get("amount", 0) for r in recipient_list)
-    threshold = float(_settings.approval_threshold)
+    threshold = float(_deps().settings.approval_threshold)
 
     if total_amount > threshold:
-        result = await _api.create_approval(
-            _settings.talos_id,
+        result = await _deps().api.create_approval(
+            _deps().settings.talos_id,
             type_="transaction",
             title=f"Pulse airdrop: token {token_id}, total {total_amount}",
             description=f"Recipients: {recipients}",
@@ -114,7 +120,7 @@ async def airdrop_pulse(token_id: str, recipients: str) -> dict:
         acct = r.get("account", "")
         amt = r.get("amount", 0)
         if acct and amt > 0:
-            res = await _api.request_transfer(
+            res = await _deps().api.request_transfer(
                 to_account=acct, amount=amt, currency="native", token_id=token_id
             )
             failure = classify_stellar_result(res)
@@ -127,7 +133,7 @@ async def airdrop_pulse(token_id: str, recipients: str) -> dict:
 
 @tool("execute_approved_transfer", "Execute a previously approved XLM or token transfer. Call after check_approval returns 'approved'.")
 async def execute_approved_transfer(to_account: str, amount: float, currency: str = "XLM", token_id: str = "") -> dict:
-    result = await _api.request_transfer(
+    result = await _deps().api.request_transfer(
         to_account=to_account,
         amount=amount,
         currency=currency,

@@ -81,13 +81,13 @@ export function AgentAvailabilityBadge({
 
   // Compute dot colour:
   //  - online + active  → accent green
-  //  - paused           → yellow/amber
-  //  - retired          → red/muted
-  //  - offline          → grey
+  //  - paused           → amber (contrast-safe on light background)
+  //  - retired          → muted red
+  //  - offline          → muted grey
   const dotColor = isRetired
     ? "bg-red-500/60"
     : isPaused
-      ? "bg-yellow-400"
+      ? "bg-amber-600"
       : agentOnline
         ? "bg-accent"
         : "bg-muted/40";
@@ -100,10 +100,13 @@ export function AgentAvailabilityBadge({
         ? "ONLINE"
         : "OFFLINE";
 
+  // Label colours chosen to meet WCAAG AA (4.5:1) on the default
+  // light `#FCF7F8` background.  Amber-700 is used for PAUSED instead
+  // of yellow-400, which failed contrast.
   const labelColor = isRetired
-    ? "text-red-400"
+    ? "text-red-700"
     : isPaused
-      ? "text-yellow-400"
+      ? "text-amber-700"
       : agentOnline
         ? "text-accent font-bold"
         : "text-muted";
@@ -112,10 +115,14 @@ export function AgentAvailabilityBadge({
     <span
       className={`inline-flex items-center ${sz.gap}`}
       data-testid="agent-availability-badge"
+      role="status"
+      aria-live="polite"
       aria-label={`Agent is ${labelText.toLowerCase()}`}
     >
-      {/* Pulsing dot when online */}
-      <span className="relative inline-flex">
+      {/* Pulsing dot when online.  The dot is purely decorative and
+          hidden from assistive technology; the visible label text carries
+          the status semantics. */}
+      <span className="relative inline-flex" aria-hidden="true">
         <span className={`${sz.dot} rounded-full ${dotColor}`} />
         {agentOnline && !isRetired && !isPaused && (
           <span

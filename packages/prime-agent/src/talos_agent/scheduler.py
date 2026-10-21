@@ -511,6 +511,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
     from talos_agent.agent.prompt import build_learning_prompt
     from talos_agent.browser.session import BrowserSession
     from talos_agent.payments.stellar_kit import StellarKit
+    from talos_agent.tools import context as tool_context_module
     from talos_agent.tools.registry import build_all_tools
 
     job_effect_store = None
@@ -595,16 +596,23 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                             policy_middleware=policy_middleware)
     console.print(f"[green]Registered {len(tools)} tools.[/green]")
 
+    # Bind this agent's dependencies to this task. Everything the agent starts
+    # from here on (its cycle, heartbeat and queue tasks, shutdown cleanup)
+    # inherits the binding, so code that reaches into the tool modules directly,
+    # outside a registry call, still sees this agent's API client and database
+    # and not another agent's in the same process.
+    tool_context = tools.context
+    tool_context_module.bind(tool_context)
+
     # Initialize StellarKit for balance checks
     stellar = StellarKit(api)
     await stellar.initialize()
 
     # ── Adapter health snapshot (#421) ──────────────────────────────────
     from talos_agent.adapters.health import AdapterHealthReporter
-    from talos_agent.tools.publishing import _adapter_registry
 
     adapter_health_reporter = AdapterHealthReporter(
-        registry=_adapter_registry,
+        registry=tool_context.adapter_registry,
         browser=browser,
         stellar_kit=stellar,
     )
@@ -685,6 +693,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                     db=db,
                     browser=replacement,
                     settings=settings,
+                    context=tool_context,
                 )
                 previous = browser
                 browser = replacement
@@ -745,6 +754,7 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                     settings=settings,
                     job_effect_store=job_effect_store,
                     job_effect_dispatcher=job_effect_dispatcher,
+                    context=tool_context,
                 )
                 
                 console.print(f"[bold green]Browser reconnection event logged successfully on attempt {browser_restart_attempts}.[/bold green]")
@@ -1033,12 +1043,12 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             TelegramQueueWorker,
             TelegramSendQueue,
         )
-        from talos_agent.tools import publishing as _publishing_tools
 
         telegram_queue_worker = TelegramQueueWorker(
             TelegramSendQueue(db, TelegramQueueConfig.from_settings(settings)),
-            # Read lazily: build_all_tools replaces the registry after browser recovery.
-            lambda: _publishing_tools._adapter_registry,
+            # Read lazily: browser recovery rebuilds the adapters in this agent's
+            # context, in place.
+            lambda: tool_context.adapter_registry,
             idle_interval=settings.telegram_queue_drain_interval_seconds,
         )
 

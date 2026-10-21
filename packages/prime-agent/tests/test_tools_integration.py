@@ -76,11 +76,12 @@ class TestCommercePriceConversion:
 
         assert price_to_usdc_units("1.05") == 1_050_000
 
-    def test_price_to_usdc_units_truncates_beyond_six_decimals(self):
-        """price_to_usdc_units truncates values beyond 6 decimals."""
+    def test_price_to_usdc_units_rejects_beyond_six_decimals(self):
+        """price_to_usdc_units refuses fractions finer than USDC supports."""
         from talos_agent.tools.commerce import price_to_usdc_units
 
-        assert price_to_usdc_units("1.1234567") == 1_123_456
+        with pytest.raises(ValueError, match="Invalid price"):
+            price_to_usdc_units("1.1234567")
 
     def test_price_to_usdc_units_whole_number(self):
         """price_to_usdc_units handles whole numbers."""
