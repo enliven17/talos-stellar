@@ -26,15 +26,17 @@ import type {
   CursorRequestOptions,
   ActivityPage,
   ActivityPageOptions,
-  JobPaymentStatus,
-  WebhookSubscription,
-  WebhookSubscriptionPage,
-  CreateWebhookSubscriptionParams,
-  ListWebhookSubscriptionsParams,
-  DeleteWebhookSubscriptionResult,
-  RotateWebhookSecretParams,
-  RotateWebhookSecretResult,
-  FinalizeWebhookSecretRotationResult,
+  Proposal,
+  ProposalStatus,
+  ListProposalsParams,
+  MarketplaceSearchResponse,
+  MarketplaceSearchResult,
+  MarketplaceSearchParams,
+  CapabilityFilter,
+} from "./types.js";
+import {
+  PROPOSAL_STATUSES,
+  isValidProposalStatus,
 } from "./types.js";
 import {
   AsyncPaginationIterator,
@@ -81,6 +83,16 @@ import {
 // Legacy import path: `import { TalosAPIError } from "./client.js"`.
 export { TalosAPIError };
 export { generateIdempotencyKey, validateIdempotencyKey, IdempotencyConflictError };
+export type {
+  Proposal,
+  ProposalStatus,
+  ListProposalsParams,
+  MarketplaceSearchResponse,
+  MarketplaceSearchResult,
+  MarketplaceSearchParams,
+  CapabilityFilter,
+};
+export { PROPOSAL_STATUSES, isValidProposalStatus };
 
 /**
  * Status-code driven retry policy (Retry-After aware). Enabled by default
@@ -1691,97 +1703,69 @@ export class TalosClient {
     });
   }
 
-  // ── Webhook subscriptions ───────────────────────────────────
+  // ── Governance Proposals ───────────────────────────────────
 
   /**
-   * Create a webhook subscription. The `secret` in `params` is sent once to
-   * configure signing and is never echoed back in the response.
+   * List governance proposals across all Talos agents, newest first.
+   *
+   * Validates `status` client-side against documented values (`pending`, `approved`, `rejected`)
+   * and throws a `RangeError` before sending the request if invalid.
    */
-  async createWebhookSubscription(
-    params: CreateWebhookSubscriptionParams,
-    options?: WriteOptions,
-  ): Promise<WebhookSubscription> {
-    return this.request("/api/webhooks/subscriptions", {
-      method: "POST",
-      body: JSON.stringify(params),
-      idempotencyKey: options?.idempotencyKey,
-      signal: options?.signal,
-      timeoutMs: options?.timeoutMs,
-    });
-  }
+  async listProposals(
+    params?: ListProposalsParams,
+    options?: ReadOptions,
+  ): Promise<Proposal[]> {
+    if (params?.status !== undefined && !isValidProposalStatus(params.status)) {
+      throw new RangeError(
+        `Invalid proposal status "${params.status}". Documented values are: ${PROPOSAL_STATUSES.join(", ")}`,
+      );
+    }
 
-  async listWebhookSubscriptions(
-    params?: ListWebhookSubscriptionsParams,
-  ): Promise<WebhookSubscriptionPage> {
-    const { signal, timeoutMs, ...query } = params ?? {};
-    return this.request("/api/webhooks/subscriptions", {
-      params: query,
+    const { signal: paramSignal, timeoutMs: paramTimeout, ...queryRest } = params ?? {};
+    const signal = options?.signal ?? paramSignal;
+    const timeoutMs = options?.timeoutMs ?? paramTimeout;
+
+    const query: RequestParams = {};
+    if (queryRest.status !== undefined) query.status = queryRest.status;
+    if (queryRest.limit !== undefined) query.limit = queryRest.limit;
+
+    return this.request<Proposal[]>("/api/proposals", {
+      params: Object.keys(query).length > 0 ? query : undefined,
       signal,
       timeoutMs,
     });
   }
 
+  // ── Marketplace ────────────────────────────────────────────
+
   /**
-   * Async iterator for paginated webhook subscriptions.
+   * Search marketplace items and filter by capabilities.
    *
-   * @example
-   * ```ts
-   * for await (const sub of client.paginateWebhookSubscriptions({ active: true })) {
-   *   console.log(sub.id, sub.url);
-   * }
-   * ```
+   * Formats `capabilities` as JSON-encoded array matching `/api/marketplace/search` query contract.
    */
-  paginateWebhookSubscriptions(
-    options?: AsyncPaginationIteratorOptions & ListWebhookSubscriptionsParams,
-  ): AsyncPaginationIterator<WebhookSubscription> {
-    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
-    return createPaginationIterator<WebhookSubscription>(
-      (opts) => this.listWebhookSubscriptions({ ...cursorOptions, ...opts }),
-      { maxPages, signal, timeoutMs },
-    );
-  }
+  async searchMarketplace(
+    params?: MarketplaceSearchParams,
+    options?: ReadOptions,
+  ): Promise<MarketplaceSearchResponse> {
+    const { signal: paramSignal, timeoutMs: paramTimeout, ...queryRest } = params ?? {};
+    const signal = options?.signal ?? paramSignal;
+    const timeoutMs = options?.timeoutMs ?? paramTimeout;
 
-  async deleteWebhookSubscription(
-    id: string,
-    options?: WriteOptions,
-  ): Promise<DeleteWebhookSubscriptionResult> {
-    return this.request(`/api/webhooks/subscriptions/${encodeURIComponent(id)}`, {
-      method: "DELETE",
-      idempotencyKey: options?.idempotencyKey,
-      signal: options?.signal,
-      timeoutMs: options?.timeoutMs,
-    });
-  }
+    const query: RequestParams = {};
+    if (queryRest.q !== undefined) query.q = queryRest.q;
+    if (queryRest.capabilities !== undefined) {
+      query.capabilities = Array.isArray(queryRest.capabilities)
+        ? JSON.stringify(queryRest.capabilities)
+        : String(queryRest.capabilities);
+    }
+    if (queryRest.limit !== undefined) query.limit = queryRest.limit;
+    if (queryRest.page !== undefined) query.page = queryRest.page;
 
-  /**
-   * Rotate (or finalize the rotation of) a webhook subscription's signing
-   * secret. Pass `{ generate: true }` to have the server generate a secret
-   * (returned once in `result.secret`), `{ secret }` to supply your own, or
-   * `{ finalize: true }` to clear the previous secret early. The resolved
-   * secret is never logged by the SDK; callers that log the result should
-   * route it through {@link redactSecrets} first.
-   */
-  async rotateWebhookSecret(
-    id: string,
-    params: RotateWebhookSecretParams & { finalize: true },
-    options?: WriteOptions,
-  ): Promise<FinalizeWebhookSecretRotationResult>;
-  async rotateWebhookSecret(
-    id: string,
-    params?: RotateWebhookSecretParams,
-    options?: WriteOptions,
-  ): Promise<RotateWebhookSecretResult>;
-  async rotateWebhookSecret(
-    id: string,
-    params: RotateWebhookSecretParams = {},
-    options?: WriteOptions,
-  ): Promise<RotateWebhookSecretResult | FinalizeWebhookSecretRotationResult> {
-    return this.request(`/api/webhooks/subscriptions/${encodeURIComponent(id)}/rotate`, {
-      method: "POST",
-      body: JSON.stringify(params),
-      idempotencyKey: options?.idempotencyKey,
-      signal: options?.signal,
-      timeoutMs: options?.timeoutMs,
+    return this.request<MarketplaceSearchResponse>("/api/marketplace/search", {
+      params: Object.keys(query).length > 0 ? query : undefined,
+      signal,
+      timeoutMs,
     });
   }
 }
+
