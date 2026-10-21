@@ -315,6 +315,19 @@ class Settings(BaseSettings):
     # Policy engine (disabled by default — backward compatible)
     policy_engine_enabled: bool = Field(default=False, description="Enable the declarative policy engine for autonomous actions")
 
+    # Demo commerce mode (Issue #879) — disabled by default.
+    # When enabled, the system prompt includes aggressive purchasing instructions
+    # ("buy immediately", demo-environment notices, BE AGGRESSIVE).
+    # Production deployments must leave this off.
+    demo_commerce_mode: bool = Field(
+        default=False,
+        description=(
+            "Emit aggressive demo-purchasing guidance in the system prompt "
+            "(buy-immediately instructions, demo-environment notice, BE AGGRESSIVE). "
+            "Off by default — safe for production. Enable only for live demos."
+        ),
+    )
+
     # Tool permission manifests (audit-only by default — backward compatible).
     # "off" disables the check entirely, "audit" evaluates and logs without
     # blocking, "enforce" denies calls that exceed their manifest or grants.

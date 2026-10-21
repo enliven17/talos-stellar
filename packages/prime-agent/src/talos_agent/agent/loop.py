@@ -200,7 +200,7 @@ async def _legacy_agent_loop(
     """Original agent loop — Groq preferred, OpenAI fallback."""
     client = get_openai_client(settings.llm_api_key, settings.llm_base_url)
 
-    system_prompt = system_prompt_override or build_system_prompt(talos_config, context)
+    system_prompt = system_prompt_override or build_system_prompt(talos_config, context, settings)
     tool_schemas = tools.openai_schemas()
 
     messages: list[dict] = [
@@ -326,7 +326,7 @@ async def _routed_agent_loop(
     policy = RoutingPolicy(registry)
     usage_tracker = UsageTracker(registry) if settings.routing_budget_enabled else None
 
-    system_prompt = system_prompt_override or build_system_prompt(talos_config, context)
+    system_prompt = system_prompt_override or build_system_prompt(talos_config, context, settings)
     tool_schemas = tools.openai_schemas()
     has_tools = bool(tool_schemas)
 
