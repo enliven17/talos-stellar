@@ -97,7 +97,7 @@ export type DriftValidationResult =
 
 /**
  * Minimal JSON Schema subset supported by the validator.
- * We only need Draft-07 features that zod-to-json-schema emits.
+ * We only need Draft-07 features emitted by the native Zod converter.
  */
 export interface JsonSchemaObject {
   type?: string | string[];

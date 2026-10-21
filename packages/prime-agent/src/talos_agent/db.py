@@ -529,6 +529,34 @@ CREATE TABLE IF NOT EXISTS replay_events (
 CREATE INDEX IF NOT EXISTS idx_replay_events_session ON replay_events(session_id);
         """,
     ),
+    (
+        13,
+        # Cycle summaries: one row per completed agent cycle (including error
+        # cycles).  Tool arguments are NEVER stored here — only redacted tool
+        # names, counts, and structured outcome fields that are safe to log per
+        # LOGGING_POLICY.md.  Older rows are pruned by
+        # LocalDB.prune_old_cycle_summaries once the table grows beyond the
+        # configured keep_last limit.
+        """
+CREATE TABLE IF NOT EXISTS cycle_summaries (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    talos_id        TEXT NOT NULL DEFAULT '',
+    cycle_id        TEXT NOT NULL,
+    started_at      TEXT NOT NULL,
+    ended_at        TEXT NOT NULL,
+    duration_ms     REAL NOT NULL DEFAULT 0,
+    tool_calls      INTEGER NOT NULL DEFAULT 0,
+    tool_names      TEXT NOT NULL DEFAULT '[]',
+    error_type      TEXT,
+    error_category  TEXT,
+    outcome         TEXT NOT NULL DEFAULT 'completed',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_cycle_summaries_talos_id
+    ON cycle_summaries(talos_id, created_at DESC);
+        """,
+    ),
 ]
 
 
@@ -691,6 +719,12 @@ class LocalDB:
         )
         self._conn.commit()
 
+    def count_pending_commerce_jobs(self) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) as cnt FROM commerce_queue WHERE status = 'pending'"
+        ).fetchone()
+        return row["cnt"] if row else 0
+
     # ── Approval Cache ─────────────────────────────────────
 
     def cache_approval(self, approval_id: str, type_: str, title: str, description: str | None, amount: float | None) -> None:
@@ -793,6 +827,42 @@ class LocalDB:
             (f"-{days} days",),
         ).fetchone()
         return float(row["total"]) if row else 0.0
+
+    def get_spending_by_category_today(self) -> dict[str, float]:
+        """Today's spending per category. Same day boundary as ``get_spending_today``."""
+        rows = self._conn.execute(
+            "SELECT category, SUM(amount) as total FROM spending_log "
+            "WHERE date(created_at) = date('now') GROUP BY category "
+            "ORDER BY total DESC, category ASC"
+        ).fetchall()
+        return {row["category"]: float(row["total"]) for row in rows}
+
+    def get_spending_by_category_period(self, days: int = 30) -> dict[str, float]:
+        """Spending per category over the last ``days`` days. Same window as ``get_spending_period``."""
+        rows = self._conn.execute(
+            "SELECT category, SUM(amount) as total FROM spending_log "
+            "WHERE created_at >= datetime('now', ?) GROUP BY category "
+            "ORDER BY total DESC, category ASC",
+            (f"-{days} days",),
+        ).fetchall()
+        return {row["category"]: float(row["total"]) for row in rows}
+
+    def get_pending_approval_totals(self) -> dict:
+        """Count and amount of approvals still waiting for a decision.
+
+        Same rows as ``get_pending_approvals``. An approval with no amount is
+        counted but adds nothing to the total, and is reported separately.
+        """
+        row = self._conn.execute(
+            "SELECT COUNT(*) as cnt, COALESCE(SUM(amount), 0) as total, "
+            "COALESCE(SUM(CASE WHEN amount IS NULL THEN 1 ELSE 0 END), 0) as unpriced "
+            "FROM approval_cache WHERE status = 'pending'"
+        ).fetchone()
+        return {
+            "count": int(row["cnt"]),
+            "total": float(row["total"]),
+            "without_amount": int(row["unpriced"]),
+        }
 
     # ── Content Performance ─────────────────────────────────
 
@@ -1377,6 +1447,114 @@ class LocalDB:
             run_checkpoint=run_checkpoint,
             run_quick_check=run_quick_check,
         )
+
+    # ── Cycle Summaries (#1002) ────────────────────────────
+
+    def save_cycle_summary(
+        self,
+        *,
+        talos_id: str,
+        cycle_id: str,
+        started_at: str,
+        ended_at: str,
+        duration_ms: float,
+        tool_calls: int,
+        tool_names: list[str],
+        error_type: str | None = None,
+        error_category: str | None = None,
+        outcome: str = "completed",
+    ) -> int:
+        """Persist one cycle summary row. Returns the new row id."""
+        cursor = self._conn.execute(
+            """INSERT INTO cycle_summaries
+               (talos_id, cycle_id, started_at, ended_at, duration_ms,
+                tool_calls, tool_names, error_type, error_category, outcome)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                talos_id,
+                cycle_id,
+                started_at,
+                ended_at,
+                duration_ms,
+                tool_calls,
+                json.dumps(tool_names),
+                error_type,
+                error_category,
+                outcome,
+            ),
+        )
+        self._conn.commit()
+        return cursor.lastrowid
+
+    def get_recent_cycle_summaries(
+        self,
+        talos_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Return recent cycle summaries, newest first.
+
+        When *talos_id* is given only that agent's rows are returned.
+        """
+        if talos_id:
+            rows = self._conn.execute(
+                """SELECT id, talos_id, cycle_id, started_at, ended_at, duration_ms,
+                          tool_calls, tool_names, error_type, error_category, outcome,
+                          created_at
+                   FROM cycle_summaries WHERE talos_id = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (talos_id, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT id, talos_id, cycle_id, started_at, ended_at, duration_ms,
+                          tool_calls, tool_names, error_type, error_category, outcome,
+                          created_at
+                   FROM cycle_summaries
+                   ORDER BY created_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["tool_names"] = json.loads(d["tool_names"])
+            except (TypeError, ValueError):
+                d["tool_names"] = []
+            result.append(d)
+        return result
+
+    def prune_old_cycle_summaries(
+        self,
+        talos_id: str | None = None,
+        keep_last: int = 200,
+    ) -> int:
+        """Delete all but the *keep_last* most-recent cycle summary rows.
+
+        When *talos_id* is given, pruning is scoped to that agent only.
+        Returns the number of rows deleted.
+        """
+        if keep_last <= 0:
+            raise ValueError("keep_last must be a positive integer")
+
+        if talos_id:
+            rows = self._conn.execute(
+                "SELECT id FROM cycle_summaries WHERE talos_id = ? "
+                "ORDER BY created_at DESC",
+                (talos_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT id FROM cycle_summaries ORDER BY created_at DESC"
+            ).fetchall()
+
+        ids_to_delete = [r["id"] for r in rows[keep_last:]]
+        if ids_to_delete:
+            self._conn.executemany(
+                "DELETE FROM cycle_summaries WHERE id = ?",
+                [(rid,) for rid in ids_to_delete],
+            )
+            self._conn.commit()
+        return len(ids_to_delete)
 
     # ── Cleanup ────────────────────────────────────────────
 

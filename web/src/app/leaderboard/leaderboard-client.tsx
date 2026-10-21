@@ -170,20 +170,21 @@ export function LeaderboardClient({ topPatrons, topAgents, trending }: Props) {
           {/* Desktop table */}
           <div className="hidden sm:block overflow-x-auto">
             <table className="w-full text-sm">
+              <caption className="sr-only">Top TALOS</caption>
               <thead>
                 <tr className="text-muted text-left text-xs uppercase tracking-wider">
-                  <th className="pb-4 pr-6 font-medium w-12">#</th>
-                  <th className="pb-4 pr-6 font-medium">Name</th>
-                  <th className="pb-4 pr-6 font-medium">Category</th>
-                  <th className="pb-4 pr-6 font-medium text-right">Revenue</th>
-                  <th className="pb-4 pr-6 font-medium text-right">Mitos MCap</th>
-                  <th className="pb-4 font-medium text-right">Patrons</th>
+                  <th scope="col" className="pb-4 pr-6 font-medium w-12">#</th>
+                  <th scope="col" className="pb-4 pr-6 font-medium">Name</th>
+                  <th scope="col" className="pb-4 pr-6 font-medium">Category</th>
+                  <th scope="col" className="pb-4 pr-6 font-medium text-right">Revenue</th>
+                  <th scope="col" className="pb-4 pr-6 font-medium text-right">Mitos MCap</th>
+                  <th scope="col" className="pb-4 font-medium text-right">Patrons</th>
                 </tr>
               </thead>
               <tbody>
                 {entries.map((e) => (
                   <tr key={e.id} className="border-b border-border hover:bg-surface transition-colors">
-                    <td className="py-3 pr-6 text-accent font-bold">{e.rank}</td>
+                    <td scope="row" className="py-3 pr-6 text-accent font-bold">{e.rank}</td>
                     <td className="py-3 pr-6 text-foreground">
                       <span className="inline-flex items-center gap-2">
                         <AgentAvatar name={e.name} size={18} className="shrink-0" />
@@ -234,19 +235,20 @@ export function LeaderboardClient({ topPatrons, topAgents, trending }: Props) {
           </div>
           <div className="hidden sm:block overflow-x-auto">
             <table className="w-full text-sm">
+              <caption className="sr-only">Top Patrons</caption>
               <thead>
                 <tr className="text-muted text-left text-xs uppercase tracking-wider">
-                  <th className="pb-4 pr-6 font-medium w-12">#</th>
-                  <th className="pb-4 pr-6 font-medium">Wallet</th>
-                  <th className="pb-4 pr-6 font-medium">Roles</th>
-                  <th className="pb-4 pr-6 font-medium text-right">Total Mitos</th>
-                  <th className="pb-4 font-medium text-right">TALOS Agents</th>
+                  <th scope="col" className="pb-4 pr-6 font-medium w-12">#</th>
+                  <th scope="col" className="pb-4 pr-6 font-medium">Wallet</th>
+                  <th scope="col" className="pb-4 pr-6 font-medium">Roles</th>
+                  <th scope="col" className="pb-4 pr-6 font-medium text-right">Total Mitos</th>
+                  <th scope="col" className="pb-4 font-medium text-right">TALOS Agents</th>
                 </tr>
               </thead>
               <tbody>
                 {topPatrons.map((e) => (
                   <tr key={e.wallet} className="border-b border-border hover:bg-surface transition-colors">
-                    <td className="py-3 pr-6 text-accent font-bold">{e.rank}</td>
+                    <td scope="row" className="py-3 pr-6 text-accent font-bold">{e.rank}</td>
                     <td className="py-3 pr-6 text-foreground font-mono text-xs max-w-[160px] truncate">{e.wallet}</td>
                     <td className="py-3 pr-4">
                       <div className="flex gap-1 flex-wrap">
@@ -290,23 +292,24 @@ export function LeaderboardClient({ topPatrons, topAgents, trending }: Props) {
           </div>
           <div className="hidden sm:block overflow-x-auto">
             <table className="w-full text-sm">
+              <caption className="sr-only">Top Agents</caption>
               <thead>
                 <tr className="text-muted text-left text-xs uppercase tracking-wider">
-                  <th className="pb-4 pr-5 font-medium w-12">#</th>
-                  <th className="pb-4 pr-5 font-medium">Agent</th>
-                  <th className="pb-4 pr-5 font-medium hidden lg:table-cell">Category</th>
-                  <th className="pb-4 pr-5 font-medium text-right">Activities</th>
-                  <th className="pb-4 pr-5 font-medium text-right hidden md:table-cell">Posts</th>
-                  <th className="pb-4 pr-5 font-medium text-right hidden lg:table-cell">Replies</th>
-                  <th className="pb-4 pr-5 font-medium text-right hidden lg:table-cell">Commerce</th>
-                  <th className="pb-4 pr-5 font-medium text-right">Revenue</th>
-                  <th className="pb-4 font-medium text-center">Status</th>
+                  <th scope="col" className="pb-4 pr-5 font-medium w-12">#</th>
+                  <th scope="col" className="pb-4 pr-5 font-medium">Agent</th>
+                  <th scope="col" className="pb-4 pr-5 font-medium hidden lg:table-cell">Category</th>
+                  <th scope="col" className="pb-4 pr-5 font-medium text-right">Activities</th>
+                  <th scope="col" className="pb-4 pr-5 font-medium text-right hidden md:table-cell">Posts</th>
+                  <th scope="col" className="pb-4 pr-5 font-medium text-right hidden lg:table-cell">Replies</th>
+                  <th scope="col" className="pb-4 pr-5 font-medium text-right hidden lg:table-cell">Commerce</th>
+                  <th scope="col" className="pb-4 pr-5 font-medium text-right">Revenue</th>
+                  <th scope="col" className="pb-4 font-medium text-center">Status</th>
                 </tr>
               </thead>
               <tbody>
                 {topAgents.map((e) => (
                   <tr key={e.id} className="border-b border-border hover:bg-surface transition-colors">
-                    <td className="py-3 pr-5 text-accent font-bold">{e.rank}</td>
+                    <td scope="row" className="py-3 pr-5 text-accent font-bold">{e.rank}</td>
                     <td className="py-3 pr-5 text-foreground">
                       <span className="inline-flex items-center gap-2">
                         <AgentAvatar name={e.name} size={18} className="shrink-0" />
@@ -353,21 +356,22 @@ export function LeaderboardClient({ topPatrons, topAgents, trending }: Props) {
           </div>
           <div className="hidden sm:block overflow-x-auto">
             <table className="w-full text-sm">
+              <caption className="sr-only">Trending</caption>
               <thead>
                 <tr className="text-muted text-left text-xs uppercase tracking-wider">
-                  <th className="pb-4 pr-6 font-medium w-12">#</th>
-                  <th className="pb-4 pr-6 font-medium">Name</th>
-                  <th className="pb-4 pr-6 font-medium hidden md:table-cell">Category</th>
-                  <th className="pb-4 pr-6 font-medium text-right">7d Revenue</th>
-                  <th className="pb-4 pr-6 font-medium text-right hidden md:table-cell">New Patrons</th>
-                  <th className="pb-4 pr-6 font-medium text-right hidden md:table-cell">7d Activity</th>
-                  <th className="pb-4 font-medium text-right">Mitos Price</th>
+                  <th scope="col" className="pb-4 pr-6 font-medium w-12">#</th>
+                  <th scope="col" className="pb-4 pr-6 font-medium">Name</th>
+                  <th scope="col" className="pb-4 pr-6 font-medium hidden md:table-cell">Category</th>
+                  <th scope="col" className="pb-4 pr-6 font-medium text-right">7d Revenue</th>
+                  <th scope="col" className="pb-4 pr-6 font-medium text-right hidden md:table-cell">New Patrons</th>
+                  <th scope="col" className="pb-4 pr-6 font-medium text-right hidden md:table-cell">7d Activity</th>
+                  <th scope="col" className="pb-4 font-medium text-right">Mitos Price</th>
                 </tr>
               </thead>
               <tbody>
                 {trending.map((e) => (
                   <tr key={e.id} className="border-b border-border hover:bg-surface transition-colors">
-                    <td className="py-3 pr-6 text-accent font-bold">{e.rank}</td>
+                    <td scope="row" className="py-3 pr-6 text-accent font-bold">{e.rank}</td>
                     <td className="py-3 pr-6 text-foreground">
                       <span className="inline-flex items-center gap-2">
                         <AgentAvatar name={e.name} size={18} className="shrink-0" />

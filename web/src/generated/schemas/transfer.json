@@ -1,3 +1,45 @@
 {
-  "type": "string"
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "agent": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "destination": {
+      "type": "string",
+      "pattern": "^G[A-Z2-7]{55}$"
+    },
+    "asset": {
+      "type": "string",
+      "const": "USDC"
+    },
+    "amount": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]{0,11})\\.[0-9]{2}$"
+    },
+    "nonce": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "expiry": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{9,12}$"
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "required": [
+    "agent",
+    "destination",
+    "asset",
+    "amount",
+    "nonce",
+    "expiry",
+    "signature"
+  ],
+  "additionalProperties": false
 }

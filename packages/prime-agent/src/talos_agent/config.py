@@ -182,6 +182,11 @@ class Settings(BaseSettings):
     channel_configs: dict = Field(default_factory=dict, description="Per-channel credentials map")
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    telegram_parse_mode: str = Field(
+        default="none",
+        description="Telegram message parse mode: none, HTML, or MarkdownV2.",
+        validation_alias="TALOS_TELEGRAM_PARSE_MODE",
+    )
 
     # Telegram send queue (opt-in; when disabled the adapter sends directly, as before).
     # Defaults follow Telegram's documented limits: ~1 msg/s per chat, 20 msgs/min per group.

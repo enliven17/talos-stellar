@@ -11,13 +11,33 @@
       "require": "./dist/cjs/index.cjs",
       "types": "./dist/esm/index.d.ts",
       "browser": "./dist/browser/sdk.bundle.js"
+    },
+    "./webhooks": {
+      "types": "./dist/esm/webhooks.d.ts",
+      "import": "./dist/esm/webhooks.js",
+      "require": "./dist/cjs/webhooks.cjs"
+    },
+    "./events": {
+      "types": "./dist/esm/events.d.ts",
+      "import": "./dist/esm/events.js",
+      "require": "./dist/cjs/events.cjs"
+    },
+    "./errors": {
+      "types": "./dist/esm/errors.d.ts",
+      "import": "./dist/esm/errors.js",
+      "require": "./dist/cjs/errors.cjs"
     }
   },
+  "bin": {
+    "talos": "./bin/talos.js"
+  },
   "files": [
-    "dist"
+    "dist",
+    "bin"
   ],
   "scripts": {
-    "build": "npm run build:esm && npm run build:cjs && npm run build:browser",
+    "build": "npm run build:esm && npm run build:cjs && npm run build:browser && npm run build:cli",
+    "build:cli": "node scripts/build-cli.mjs",
     "build:esm": "tsc -p tsconfig.json",
     "build:cjs": "tsc -p tsconfig.cjs.json && node scripts/rename-cjs.mjs",
     "build:browser": "node scripts/bundle-browser.mjs",
