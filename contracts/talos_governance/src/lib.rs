@@ -18,6 +18,83 @@ use soroban_sdk::{
 use ttl_manager;
 use pause_control;
 
+// ── ProposalAction (#913) ────────────────────────────────────────────
+//
+// An optional typed action that can be attached to a governance proposal.
+// When `execute_proposal` is called on an Approved proposal that carries an
+// action, the contract performs the action via a cross-contract call and emits
+// an `EventProposalExecuted` event with the outcome.
+//
+// Title-only proposals (no action) remain valid: their `action` field is `None`
+// and execution simply transitions the status to `Executed`.
+//
+// Supported actions
+// -----------------
+// `PauseTalos`   – calls `deactivate_talos(talos_id, governance_address)` on
+//                  the registry.  The governance contract must be the
+//                  PauseController for the target Talos.
+// `ResumeTalos`  – calls `activate_talos(talos_id, governance_address)` on
+//                  the registry.  The governance contract must be the
+//                  ResumeController for the target Talos.
+// `UpdateConfig` – updates the local GovernanceConfig with the supplied
+//                  values; no external call is needed.
+//
+// Failure model
+// -------------
+// If the cross-contract call panics (e.g., because the governance address is
+// not the authorised controller), the host traps and the entire
+// `execute_proposal` invocation is rolled back.  The proposal therefore stays
+// in `Approved` status and can be retried once the on-chain permissions are
+// corrected.  This is intentional: it makes the failure observable and
+// retryable rather than silently swallowing errors.
+
+/// Typed executable payload for a governance proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProposalAction {
+    /// Deactivate (pause) a Talos via the registry.  The governance contract
+    /// must have been set as the PauseController for `talos_id` on the registry.
+    PauseTalos {
+        registry: Address,
+        talos_id: u32,
+    },
+    /// Reactivate (resume) a Talos via the registry.  The governance contract
+    /// must have been set as the ResumeController for `talos_id` on the registry.
+    ResumeTalos {
+        registry: Address,
+        talos_id: u32,
+    },
+    /// Replace the local GovernanceConfig numeric parameters with new values.
+    /// The `pulse_token_address` is preserved from the existing config.
+    UpdateConfig {
+        quorum_threshold: i128,
+        consensus_threshold: i128,
+        voting_period_ledgers: u32,
+    },
+}
+
+/// Emitted when a proposal with an action is executed.
+///
+/// `success` is always `true` — a failed cross-contract call traps the host
+/// and the event is never published, so subscribers can assume success.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventProposalExecuted {
+    pub proposal_id: u32,
+    pub action_tag: Symbol,
+    pub success: bool,
+}
+
+fn emit_proposal_executed(env: &Env, proposal_id: u32, action_tag: Symbol) {
+    let payload = EventProposalExecuted {
+        proposal_id,
+        action_tag: action_tag.clone(),
+        success: true,
+    };
+    env.events()
+        .publish((symbol_short!("prop_exec"), proposal_id), payload);
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VoteChoice {
@@ -60,6 +137,9 @@ pub struct Proposal {
     pub no_votes: i128,
     pub total_voters: u32,
     pub created_at: u64,
+    /// Optional typed action to execute when this proposal is approved.
+    /// `None` means this is a signal/record-only proposal with no on-chain effect.
+    pub action: Option<ProposalAction>,
 }
 
 /// Default number of ledgers prior to proposal creation at which voting power is snapshotted.
@@ -619,6 +699,7 @@ impl TalosGovernance {
             no_votes: 0,
             total_voters: 0,
             created_at: env.ledger().timestamp(),
+            action: None,
         };
 
         env.storage()
@@ -742,11 +823,177 @@ impl TalosGovernance {
             panic!("Proposal is not approved");
         }
 
+        // Dispatch the typed action, if any.  A failed cross-contract call
+        // traps the host and rolls back this invocation, leaving the proposal
+        // in `Approved` status so it can be retried.
+        if let Some(action) = &proposal.action {
+            Self::dispatch_action(&env, proposal_id, action.clone());
+        }
+
         proposal.status = ProposalStatus::Executed;
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
         emit_proposal_status_changed(&env, proposal_id, ProposalStatus::Executed);
+    }
+
+    /// Dispatch a `ProposalAction` for the given proposal.
+    ///
+    /// Cross-contract calls are synchronous on Soroban: if the callee panics
+    /// the host traps and the entire invocation is rolled back, leaving the
+    /// proposal in `Approved` status (retryable once the root cause is fixed).
+    fn dispatch_action(env: &Env, proposal_id: u32, action: ProposalAction) {
+        let self_addr = env.current_contract_address();
+
+        match action {
+            ProposalAction::PauseTalos { registry, talos_id } => {
+                // Call deactivate_talos(talos_id, self_addr) on the registry.
+                // The governance contract must be set as the PauseController
+                // for this Talos on the registry contract.
+                let _: () = env.invoke_contract(
+                    &registry,
+                    &Symbol::new(env, "deactivate_talos"),
+                    soroban_sdk::vec![
+                        env,
+                        talos_id.into_val(env),
+                        self_addr.into_val(env),
+                    ],
+                );
+                emit_proposal_executed(env, proposal_id, Symbol::new(env, "PauseTalos"));
+            }
+            ProposalAction::ResumeTalos { registry, talos_id } => {
+                // Call activate_talos(talos_id, self_addr) on the registry.
+                // The governance contract must be set as the ResumeController
+                // for this Talos on the registry contract.
+                let _: () = env.invoke_contract(
+                    &registry,
+                    &Symbol::new(env, "activate_talos"),
+                    soroban_sdk::vec![
+                        env,
+                        talos_id.into_val(env),
+                        self_addr.into_val(env),
+                    ],
+                );
+                emit_proposal_executed(env, proposal_id, Symbol::new(env, "ResumeTalos"));
+            }
+            ProposalAction::UpdateConfig {
+                quorum_threshold,
+                consensus_threshold,
+                voting_period_ledgers,
+            } => {
+                // Validate the incoming config values.
+                if quorum_threshold <= 0 {
+                    panic!("Quorum must be positive");
+                }
+                if consensus_threshold <= 0 || consensus_threshold > 10_000 {
+                    panic!("Consensus threshold must be 1..10000 bps");
+                }
+                if voting_period_ledgers == 0 {
+                    panic!("Voting period must be positive");
+                }
+
+                // Read the current config to preserve pulse_token_address and
+                // snapshot_offset_ledgers (UpdateConfig only changes numeric thresholds).
+                let existing: GovernanceConfig = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::Config)
+                    .expect("Contract not initialized");
+
+                let new_config = GovernanceConfig {
+                    quorum_threshold,
+                    consensus_threshold,
+                    voting_period_ledgers,
+                    pulse_token_address: existing.pulse_token_address,
+                    snapshot_offset_ledgers: existing.snapshot_offset_ledgers,
+                };
+                env.storage().persistent().set(&DataKey::Config, &new_config);
+                emit_proposal_executed(env, proposal_id, Symbol::new(env, "UpdateConfig"));
+            }
+        }
+    }
+
+    /// Create a proposal carrying an optional typed action.
+    ///
+    /// This is an additive entry-point: `create_proposal` (action-less) remains
+    /// unchanged for backward compatibility.  Callers that want an executable
+    /// proposal use this variant instead.
+    pub fn create_proposal_with_action(
+        env: Env,
+        proposer: Address,
+        talos_id: u32,
+        title: String,
+        description: String,
+        action: Option<ProposalAction>,
+    ) -> u32 {
+        pause_control::check_not_paused(&env, PAUSE_PROPOSAL_CREATION);
+
+        proposer.require_auth();
+
+        if title.len() == 0 {
+            panic!("Title cannot be empty");
+        }
+        if title.len() > MAX_TITLE_LEN {
+            panic!("Title exceeds maximum length");
+        }
+        if description.len() == 0 {
+            panic!("Description cannot be empty");
+        }
+        if description.len() > MAX_DESCRIPTION_LEN {
+            panic!("Description exceeds maximum length");
+        }
+
+        // Cross-contract verification (same as create_proposal).
+        if let Some(registry) = env
+            .storage()
+            .persistent()
+            .get::<_, Address>(&DataKey::RegistryContract)
+        {
+            let is_active: bool = env.invoke_contract(
+                &registry,
+                &Symbol::new(&env, "is_active"),
+                soroban_sdk::vec![&env, talos_id.into_val(&env)],
+            );
+            if !is_active {
+                panic!("Talos is not active or does not exist");
+            }
+        }
+
+        let config = Self::require_config(&env);
+        let current_ledger = env.ledger().sequence();
+        let snapshot_offset = config
+            .snapshot_offset_ledgers
+            .unwrap_or(DEFAULT_SNAPSHOT_OFFSET_LEDGERS);
+        let snapshot_ledger = current_ledger.saturating_sub(snapshot_offset);
+        let proposal_id = Self::next_proposal_id(env.clone());
+        let end_ledger = current_ledger + config.voting_period_ledgers;
+
+        let proposal = Proposal {
+            id: proposal_id,
+            talos_id,
+            proposer: proposer.clone(),
+            title,
+            description,
+            snapshot_ledger,
+            start_ledger: current_ledger,
+            end_ledger,
+            status: ProposalStatus::Active,
+            yes_votes: 0,
+            no_votes: 0,
+            total_voters: 0,
+            created_at: env.ledger().timestamp(),
+            action,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
+        env.storage()
+            .persistent()
+            .set(&DataKey::NextProposalId, &(proposal_id + 1));
+
+        emit_proposal_created(&env, proposal_id, talos_id, proposer, snapshot_ledger, end_ledger);
+        proposal_id
     }
 
     pub fn cache_token_balance(
@@ -4382,5 +4629,257 @@ mod tests {
         let (_, _, data) = cancel_events[0].clone();
         let payload: EventAdminTransferCancelled = soroban_sdk::FromVal::from_val(&env, &data);
         assert_eq!(payload.pending_admin, new_admin);
+    }
+
+    // ── ProposalAction tests (#913) ───────────────────────────────────────
+
+    /// Helper: create an action proposal, vote it to Approved, return the proposal id.
+    fn create_and_approve_action_proposal(
+        env: &Env,
+        contract_id: &Address,
+        client: &TalosGovernanceClient<'static>,
+        admin: &Address,
+        proposer: &Address,
+        action: Option<ProposalAction>,
+    ) -> u32 {
+        let voter = Address::generate(env);
+
+        let proposal_id = client
+            .mock_auths(&[MockAuth {
+                address: proposer,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "create_proposal_with_action",
+                    args: (
+                        proposer.clone(),
+                        7_u32,
+                        s(env, "Action proposal"),
+                        s(env, "Governs on-chain action."),
+                        action.clone(),
+                    )
+                        .into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .create_proposal_with_action(
+                proposer,
+                &7_u32,
+                &s(env, "Action proposal"),
+                &s(env, "Governs on-chain action."),
+                &action,
+            );
+
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        // Cache enough balance to reach quorum (100) and consensus (51 %)
+        cache_balance_with_auth(env, contract_id, client, admin, proposal.snapshot_ledger, &voter, 200);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &voter,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "vote",
+                    args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .vote(&voter, &proposal_id, &VoteChoice::Approve);
+
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Approved);
+        proposal_id
+    }
+
+    /// A title-only proposal (no action) still executes and transitions to Executed.
+    #[test]
+    fn execute_title_only_proposal_transitions_to_executed() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        cache_balance_with_auth(
+            &env, &contract_id, &client, &admin,
+            proposal.snapshot_ledger, &voter, 200,
+        );
+        client
+            .mock_auths(&[MockAuth {
+                address: &voter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "vote",
+                    args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .vote(&voter, &proposal_id, &VoteChoice::Approve);
+
+        client.execute_proposal(&proposal_id);
+
+        let executed = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(executed.status, ProposalStatus::Executed);
+        assert!(executed.action.is_none(), "title-only proposal must have no action");
+    }
+
+    /// create_proposal_with_action stores the action field on the proposal.
+    #[test]
+    fn create_proposal_with_action_stores_action() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let fake_registry = Address::generate(&env);
+
+        let action = Some(ProposalAction::PauseTalos {
+            registry: fake_registry.clone(),
+            talos_id: 42,
+        });
+
+        let proposal_id = client
+            .mock_auths(&[MockAuth {
+                address: &proposer,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_proposal_with_action",
+                    args: (
+                        proposer.clone(),
+                        7_u32,
+                        s(&env, "Pause Talos 42"),
+                        s(&env, "Emergency pause."),
+                        action.clone(),
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .create_proposal_with_action(
+                &proposer,
+                &7_u32,
+                &s(&env, "Pause Talos 42"),
+                &s(&env, "Emergency pause."),
+                &action,
+            );
+
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(
+            proposal.action,
+            Some(ProposalAction::PauseTalos {
+                registry: fake_registry,
+                talos_id: 42,
+            })
+        );
+    }
+
+    /// An UpdateConfig action updates the stored config on execution.
+    #[test]
+    fn execute_update_config_action_applies_new_config() {
+        let (env, contract_id, admin, pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        let action = Some(ProposalAction::UpdateConfig {
+            quorum_threshold: 200,
+            consensus_threshold: 6_000,
+            voting_period_ledgers: 40,
+        });
+
+        let proposal_id =
+            create_and_approve_action_proposal(&env, &contract_id, &client, &admin, &proposer, action);
+
+        client.execute_proposal(&proposal_id);
+
+        let executed = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(executed.status, ProposalStatus::Executed);
+
+        let config = client.get_config().unwrap();
+        assert_eq!(config.quorum_threshold, 200);
+        assert_eq!(config.consensus_threshold, 6_000);
+        assert_eq!(config.voting_period_ledgers, 40);
+        assert_eq!(config.pulse_token_address, pulse, "pulse address must be preserved");
+    }
+
+    /// Executing an UpdateConfig proposal emits prop_exec and prop_stat(Executed) events.
+    #[test]
+    fn execute_update_config_emits_exec_and_status_events() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        let action = Some(ProposalAction::UpdateConfig {
+            quorum_threshold: 150,
+            consensus_threshold: 5_500,
+            voting_period_ledgers: 30,
+        });
+
+        let proposal_id =
+            create_and_approve_action_proposal(&env, &contract_id, &client, &admin, &proposer, action);
+
+        client.execute_proposal(&proposal_id);
+
+        let events = env.events().all();
+
+        // prop_exec event must be present
+        let exec_event = events.iter().find(|(cid, topics, _)| {
+            if *cid != contract_id { return false; }
+            if let Some(t0) = topics.get(0) {
+                let sym: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &t0);
+                sym == symbol_short!("prop_exec")
+            } else { false }
+        });
+        assert!(exec_event.is_some(), "prop_exec event must be emitted");
+
+        let (_, _, exec_data) = exec_event.unwrap();
+        let exec_payload: EventProposalExecuted = soroban_sdk::FromVal::from_val(&env, &exec_data);
+        assert_eq!(exec_payload.proposal_id, proposal_id);
+        assert!(exec_payload.success);
+
+        // prop_stat(Executed) must also be emitted
+        let executed_stat = events.iter().find(|(cid, topics, data)| {
+            if *cid != contract_id { return false; }
+            if let Some(t0) = topics.get(0) {
+                let sym: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &t0);
+                if sym != symbol_short!("prop_stat") { return false; }
+                let p: EventProposalStatusChanged = soroban_sdk::FromVal::from_val(&env, data);
+                p.status == ProposalStatus::Executed
+            } else { false }
+        });
+        assert!(executed_stat.is_some(), "prop_stat(Executed) must be emitted");
+    }
+
+    /// An UpdateConfig with invalid quorum panics at execution time.
+    #[test]
+    #[should_panic(expected = "Quorum must be positive")]
+    fn execute_update_config_invalid_quorum_is_rejected() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        let action = Some(ProposalAction::UpdateConfig {
+            quorum_threshold: 0,
+            consensus_threshold: 5_000,
+            voting_period_ledgers: 20,
+        });
+
+        let proposal_id =
+            create_and_approve_action_proposal(&env, &contract_id, &client, &admin, &proposer, action);
+
+        client.execute_proposal(&proposal_id);
+    }
+
+    /// A proposal can only be executed once; the second call sees Executed status.
+    #[test]
+    fn execute_proposal_only_once() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        let action = Some(ProposalAction::UpdateConfig {
+            quorum_threshold: 200,
+            consensus_threshold: 5_500,
+            voting_period_ledgers: 25,
+        });
+
+        let proposal_id =
+            create_and_approve_action_proposal(&env, &contract_id, &client, &admin, &proposer, action);
+
+        client.execute_proposal(&proposal_id);
+
+        let result = client.try_execute_proposal(&proposal_id);
+        assert!(result.is_err(), "second execute must fail");
     }
 }
