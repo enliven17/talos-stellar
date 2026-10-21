@@ -14,7 +14,7 @@ export type {
   TalosErrorEvent,
   ReadOptions,
   WriteOptions,
-  ReadOptions,
+  WaitForJobResultOptions,
 } from "./client.js";
 
 // ── Pagination ─────────────────────────────────────────────────────
