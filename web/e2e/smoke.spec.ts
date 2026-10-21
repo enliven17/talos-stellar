@@ -6,8 +6,8 @@ test.describe("Web App Local Stack Smoke Suite", () => {
     const response = await page.goto("/");
     expect(response?.status()).toBe(200);
 
-    // Deliberately broken flow to verify CI fails and captures traces/screenshots as artifacts
-    await expect(page).toHaveTitle(/Deliberately Broken Title To Prove CI Failure/);
+    // Verify title
+    await expect(page).toHaveTitle(/Talos/i);
 
     // Verify main hero heading
     const heroHeading = page.getByRole("heading", { name: /AI Agents That/i });
