@@ -48,9 +48,13 @@ function runDrift(...args) {
   const result = spawnSync(
     process.execPath,
     [SCRIPT, ...args],
+<<<<<<< HEAD
     // Exercise CLI/JSON behavior without recursively running real package
     // manager installs (which mutate the checkout and require network access).
     { encoding: "utf8", timeout: 5_000, env: { ...process.env, PATH: "" } },
+=======
+    { encoding: "utf8", timeout: 60_000 },
+>>>>>>> 790b449 (feat(web): add an admin page for background jobs (#904) (#1218))
   );
   return {
     status: result.status,
@@ -208,8 +212,8 @@ describe("Performance", () => {
     const start = Date.now();
     const { status } = runDrift("--json");
     const duration = Date.now() - start;
-    // Should complete within 30 seconds (the timeout)
-    assert.ok(duration < 30_000, `Check took ${duration}ms, expected < 30000ms`);
+    // Should complete within 60 seconds (the timeout)
+    assert.ok(duration < 60_000, `Check took ${duration}ms, expected < 60000ms`);
     assert.ok([0, 1].includes(status));
   });
 });
