@@ -933,6 +933,7 @@ def build_all_tools(
     _learning_mod._db = db
     _learning_mod._settings = settings
     _publishing_mod._adapter_registry = adapter_registry
+    _publishing_mod.set_publish_timeout(settings.publish_timeout_seconds)
     _defi_mod._api = api
     _defi_mod._db = db
     _defi_mod._settings = settings

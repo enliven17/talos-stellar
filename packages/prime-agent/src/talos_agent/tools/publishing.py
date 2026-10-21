@@ -35,10 +35,11 @@ def _publish_safe(fn: Callable) -> Callable:
     async def wrapper(*args: Any, **kwargs: Any) -> dict:
         if _deps().adapter_registry is None:
             return {"error": "Adapter registry not initialized"}
+        timeout = _publish_timeout
         try:
-            return await asyncio.wait_for(fn(*args, **kwargs), timeout=_TIMEOUT)
+            return await asyncio.wait_for(fn(*args, **kwargs), timeout=timeout)
         except asyncio.TimeoutError:
-            return {"error": f"Publishing action timed out after {_TIMEOUT}s"}
+            return {"error": f"Publishing action timed out after {timeout:g}s"}
         except Exception as e:
             return {"error": f"{type(e).__name__}: {e}"}
 
