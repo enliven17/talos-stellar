@@ -7,6 +7,7 @@ import { AgentAvatar } from "@/components/agent-avatar";
 import { AgentLifecyclePanel } from "@/components/agent-lifecycle-panel";
 import { AgentAvailabilityBadge } from "@/components/agent-availability-badge";
 import { AgentEmptyState } from "@/components/agent-view-states";
+import { ScopedApiKeysPanel } from "@/components/scoped-api-keys-panel";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER as STELLAR_USDC_ISSUER } from "@/lib/stellar-config";
 
 
@@ -49,6 +50,7 @@ interface TalosDetail {
   pulsePrice: string;
   totalSupply: number;
   creatorPublicKey: string | null;
+  walletPublicKey: string | null;
   agentWalletAddress: string | null;
   persona: string;
   targetAudience: string;
@@ -91,7 +93,10 @@ const JOB_STATUS_STYLES: Record<string, string> = {
 export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
   const [tab, setTab] = useState<Tab>("Overview");
   const [patronStatus, setPatronStatus] = useState<"none" | "loading" | "patron">("none");
-  const { isConnected, connect, address, signTransaction } = useWallet();
+  const { isConnected, connect, address, signTransaction, signMessage } = useWallet();
+  const isAgentOwner = Boolean(
+    address && (address === talos.creatorPublicKey || address === talos.walletPublicKey)
+  );
 
   const minRequired = talos.minPatronPulse ?? Math.floor(talos.totalSupply * 0.001);
 
@@ -1370,6 +1375,13 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       {/* ─── Agent Tab ──────────────────────────────────── */}
       {tab === "Agent" && (
         <div className="space-y-6">
+          {isAgentOwner && address && (
+            <ScopedApiKeysPanel
+              talosId={talos.id}
+              address={address}
+              signMessage={signMessage}
+            />
+          )}
           <div className="bg-surface border border-border p-6">
             <div className="flex items-center justify-between mb-6">
               <div className="text-xs text-muted">[PRIME AGENT STATUS]</div>

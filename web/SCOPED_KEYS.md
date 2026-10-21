@@ -58,6 +58,14 @@ curl -X DELETE https://your-api.com/api/talos/{id}/api-keys/{keyId} \
   -H "Authorization: Bearer <admin_key>"
 ```
 
+Key-management requests accept either an `admin` API key or a Stellar wallet
+signature from the agent's creator or wallet address. Browser requests bind the
+signature to the agent, HTTP method, and a short-lived timestamp using the
+message `talos:{id}:api-keys:{method}:{timestamp}` and send it in the
+`x-talos-owner-address`, `x-talos-owner-message`, and
+`x-talos-owner-signature` headers. The signature is verified server-side and
+must be no more than five minutes old.
+
 ## Migration from Legacy Keys
 
 1. **Run the migration script** to copy existing plaintext keys into the scoped keys table as admin-scoped hashed keys:
