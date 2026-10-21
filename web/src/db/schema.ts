@@ -136,6 +136,15 @@ export const tlsTalos = pgTable(
     uniqueIndex("tls_talos_agentName_active_key")
       .on(t.agentName)
       .where(sql`"retiredAt" IS NULL`),
+
+    // Dashboard owner lookups: the /api/dashboard route filters tls_talos by
+    // walletPublicKey OR creatorPublicKey OR investorPublicKey OR treasuryPublicKey.
+    // Without these indexes every dashboard load triggers a sequential scan.
+    // Separate single-column btree indexes let the planner bitmap-OR across them.
+    index("tls_talos_walletPublicKey_idx").on(t.walletPublicKey),
+    index("tls_talos_creatorPublicKey_idx").on(t.creatorPublicKey),
+    index("tls_talos_investorPublicKey_idx").on(t.investorPublicKey),
+    index("tls_talos_treasuryPublicKey_idx").on(t.treasuryPublicKey),
   ],
 );
 
@@ -157,6 +166,11 @@ export const tlsPatrons = pgTable(
   },
   (t) => [
     uniqueIndex("tls_patrons_talosId_stellarPublicKey_key").on(t.talosId, t.stellarPublicKey),
+
+    // Dashboard patron lookup: /api/dashboard filters tls_patrons by stellarPublicKey
+    // alone. The composite unique index above is (talosId, stellarPublicKey), which
+    // cannot serve a wallet-only predicate, so this single-column index is needed.
+    index("tls_patrons_stellarPublicKey_idx").on(t.stellarPublicKey),
   ],
 );
 
@@ -1037,3 +1051,36 @@ export const itemCapabilities = pgTable("item_capabilities", {
   createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
 });
 
+
+// ─── Idempotency Keys (general-purpose reservation store) ────────
+//
+// Backs web/src/lib/idempotency/reservation-store.ts. One row per
+// in-flight or completed cross-cutting idempotent operation. Complements
+// the per-domain idempotency already embedded in tls_commerce_jobs and
+// tls_token_purchases with a reusable primitive for any operation that
+// needs request deduplication without coupling to a specific domain table.
+//
+// States:
+//   reserved  — a request is currently executing the guarded operation
+//   completed — the operation finished; `result` holds the replay payload
+//
+// Expired rows (expiresAt < now) are treated as free and periodically
+// removed by the cleanup job.
+
+export const tlsIdempotencyKeys = pgTable(
+  "tls_idempotency_keys",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    key: text("key").notNull().unique(),
+    payloadHash: text("payloadHash").notNull(),
+    status: text("status").notNull().default("reserved"),  // "reserved" | "completed"
+    result: jsonb("result"),
+    expiresAt: timestamp("expiresAt", { mode: "date", precision: 3 }).notNull(),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    index("tls_idempotency_keys_expiresAt_idx").on(t.expiresAt),
+  ],
+);

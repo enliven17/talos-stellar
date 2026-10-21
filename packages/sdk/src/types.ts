@@ -451,81 +451,85 @@ export interface BuyerProofDiagnostics {
  */
 export type BuyerProofDiagnosticCallback = (diag: BuyerProofDiagnostics) => void;
 
-// ── Webhook subscriptions ───────────────────────────────────────────────────
-//
-// Management of outbound webhook subscriptions (create/list/delete/rotate).
-// Distinct from `webhooks.ts`, which verifies *inbound* webhook deliveries.
-// The plaintext signing secret is never returned except as the one-time
-// `secret` field on {@link RotateWebhookSecretResult} when the server
-// generates it (`generate: true`).
+// ── Governance Proposals ─────────────────────────────────────────
 
-export interface WebhookSubscription {
+export const PROPOSAL_STATUSES = ["pending", "approved", "rejected"] as const;
+export type ProposalStatus = (typeof PROPOSAL_STATUSES)[number];
+
+export function isValidProposalStatus(status: unknown): status is ProposalStatus {
+  return typeof status === "string" && (PROPOSAL_STATUSES as readonly string[]).includes(status);
+}
+
+export interface ListProposalsParams {
+  status?: ProposalStatus | (string & {});
+  limit?: number;
+  signal?: AbortSignal;
+  /**
+   * Per-request timeout in milliseconds. Overrides the client-level
+   * `timeoutMs` for this single call. `0` disables the timeout for this call
+   * regardless of the client default. Surfaces as `TalosTimeoutError`.
+   */
+  timeoutMs?: number;
+}
+
+export interface Proposal {
   id: string;
-  /** Present on the create response; omitted from list/detail responses. */
-  talosId?: string;
-  url: string;
-  eventTypes: string[];
-  description?: string | null;
-  active: boolean;
-  signatureVersion: number;
+  talosId: string;
+  talosName: string;
+  type: string;
+  title: string;
+  description: string | null;
+  amount: string | null;
+  status: ProposalStatus | string;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  txHash: string | null;
   createdAt: string;
-  updatedAt: string;
 }
 
-/** Subscription detail shape returned by GET/PATCH (adds rotation metadata). */
-export interface WebhookSubscriptionDetail extends WebhookSubscription {
-  secretRotatedAt?: string | null;
-  previousSecretExpiresAt?: string | null;
-  rotationActive: boolean;
-}
+// ── Marketplace Search ───────────────────────────────────────────
 
-export interface CreateWebhookSubscriptionParams {
-  url: string;
-  /** Signing secret (16–256 chars). Never echoed back by the API. */
-  secret: string;
-  eventTypes: string[];
-  description?: string;
-}
-
-export interface ListWebhookSubscriptionsParams extends CursorRequestOptions {
-  active?: boolean;
-}
-
-export type WebhookSubscriptionPage = CursorPage<WebhookSubscription>;
-
-export interface DeleteWebhookSubscriptionResult {
-  deleted: true;
+export interface CapabilityFilter {
   id: string;
+  name: string;
+  description: string;
+  category: string;
+  isActive: boolean;
 }
 
-/**
- * Rotate the signing secret with a grace window (dual-sign, no downtime),
- * or finalize an in-progress rotation early by passing `finalize: true`.
- * Exactly one of `secret`, `generate`, or `finalize` must be provided.
- */
-export interface RotateWebhookSecretParams {
-  /** Caller-supplied new secret (16–256 chars). Mutually exclusive with `generate`/`finalize`. */
-  secret?: string;
-  /** Have the server generate a random secret, returned once in the result. */
-  generate?: boolean;
-  /** Grace window (seconds) during which the previous secret remains valid. */
-  graceSeconds?: number;
-  /** Clear the previous secret early instead of rotating. */
-  finalize?: boolean;
-}
-
-export interface RotateWebhookSecretResult {
+export interface MarketplaceSearchResult {
   id: string;
-  secretRotatedAt: string;
-  previousSecretExpiresAt: string;
-  graceSeconds: number;
-  /** Present only when `generate: true` was passed — shown once, never logged. */
-  secret?: string;
-  rotationActive: true;
+  title: string;
+  description: string;
+  capabilities: string[];
+  price: number;
+  currency: string;
+  provider: string;
+  rating: number;
+  createdAt: string;
 }
 
-export interface FinalizeWebhookSecretRotationResult {
-  id: string;
-  previousSecretCleared: boolean;
-  rotationActive: false;
+export interface MarketplaceSearchResponse {
+  results: MarketplaceSearchResult[];
+  total: number;
+  page: number;
+  limit: number;
+  filters: {
+    capabilities: CapabilityFilter[];
+  };
 }
+
+export interface MarketplaceSearchParams {
+  q?: string;
+  capabilities?: string[] | string;
+  limit?: number;
+  page?: number;
+  signal?: AbortSignal;
+  /**
+   * Per-request timeout in milliseconds. Overrides the client-level
+   * `timeoutMs` for this single call. `0` disables the timeout for this call
+   * regardless of the client default. Surfaces as `TalosTimeoutError`.
+   */
+  timeoutMs?: number;
+}
+

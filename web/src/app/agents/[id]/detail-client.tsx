@@ -7,6 +7,7 @@ import { AgentAvatar } from "@/components/agent-avatar";
 import { AgentLifecyclePanel } from "@/components/agent-lifecycle-panel";
 import { AgentAvailabilityBadge } from "@/components/agent-availability-badge";
 import { AgentEmptyState } from "@/components/agent-view-states";
+import { ScopedApiKeysPanel } from "@/components/scoped-api-keys-panel";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER as STELLAR_USDC_ISSUER } from "@/lib/stellar-config";
 
 
@@ -49,6 +50,7 @@ interface TalosDetail {
   pulsePrice: string;
   totalSupply: number;
   creatorPublicKey: string | null;
+  walletPublicKey: string | null;
   agentWalletAddress: string | null;
   persona: string;
   targetAudience: string;
@@ -91,7 +93,10 @@ const JOB_STATUS_STYLES: Record<string, string> = {
 export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
   const [tab, setTab] = useState<Tab>("Overview");
   const [patronStatus, setPatronStatus] = useState<"none" | "loading" | "patron">("none");
-  const { isConnected, connect, address, signTransaction } = useWallet();
+  const { isConnected, connect, address, signTransaction, signMessage } = useWallet();
+  const isAgentOwner = Boolean(
+    address && (address === talos.creatorPublicKey || address === talos.walletPublicKey)
+  );
 
   const minRequired = talos.minPatronPulse ?? Math.floor(talos.totalSupply * 0.001);
 
@@ -776,6 +781,18 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                   <span className="text-muted">Network</span>
                   <span className="text-foreground">Stellar Network</span>
                 </div>
+                <div className="flex justify-between items-center gap-2">
+                  <span className="text-muted shrink-0">Talos ID</span>
+                  <span className="text-foreground font-mono truncate max-w-[55%]">
+                    {talos.id.length > 20 ? `${talos.id.slice(0, 10)}...${talos.id.slice(-6)}` : talos.id}
+                  </span>
+                  <CopyButton
+                    value={talos.id}
+                    label="Copy Talos ID"
+                    confirmText="Copied!"
+                    size="sm"
+                  />
+                </div>
                 <div className="flex justify-between gap-2">
                   <span className="text-muted shrink-0">Asset Code</span>
                   <span className="text-foreground font-mono truncate text-right">
@@ -785,9 +802,15 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                   </span>
                 </div>
                 {talos.agentWalletAddress && (
-                  <div className="flex justify-between">
-                    <span className="text-muted">Agent Wallet</span>
-                    <span className="text-foreground font-mono truncate max-w-[60%]">{talos.agentWalletAddress.slice(0, 8)}...{talos.agentWalletAddress.slice(-4)}</span>
+                  <div className="flex justify-between items-center gap-2">
+                    <span className="text-muted shrink-0">Agent Wallet</span>
+                    <span className="text-foreground font-mono truncate max-w-[55%]">{talos.agentWalletAddress.slice(0, 8)}...{talos.agentWalletAddress.slice(-4)}</span>
+                    <CopyButton
+                      value={talos.agentWalletAddress}
+                      label="Copy agent wallet address"
+                      confirmText="Copied!"
+                      size="sm"
+                    />
                   </div>
                 )}
                 <div className="flex justify-between">
@@ -848,7 +871,15 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                   </div>
                   <div>
                     <span className="text-muted text-xs">Wallet</span>
-                    <p className="text-foreground mt-1 font-mono text-xs truncate">{talos.service.stellarPublicKey}</p>
+                    <div className="text-foreground mt-1 font-mono text-xs truncate flex items-center gap-1">
+                      <span className="truncate">{talos.service.stellarPublicKey}</span>
+                      <CopyButton
+                        value={talos.service.stellarPublicKey}
+                        label="Copy service wallet address"
+                        confirmText="Copied!"
+                        size="sm"
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1344,6 +1375,13 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       {/* ─── Agent Tab ──────────────────────────────────── */}
       {tab === "Agent" && (
         <div className="space-y-6">
+          {isAgentOwner && address && (
+            <ScopedApiKeysPanel
+              talosId={talos.id}
+              address={address}
+              signMessage={signMessage}
+            />
+          )}
           <div className="bg-surface border border-border p-6">
             <div className="flex items-center justify-between mb-6">
               <div className="text-xs text-muted">[PRIME AGENT STATUS]</div>
@@ -1423,8 +1461,14 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                 </div>
                 <p className="text-sm text-foreground mb-2">Purchase Complete</p>
                 <p className="text-xs text-muted mb-4">{buyResult.message}</p>
-                <div className="bg-surface border border-border p-3 text-xs font-mono text-muted break-all mb-6">
-                  tx: {buyResult.txHash.slice(0, 18)}...{buyResult.txHash.slice(-8)}
+                <div className="bg-surface border border-border p-3 text-xs font-mono text-muted break-all mb-6 flex items-center gap-2">
+                  <span className="break-all">tx: {buyResult.txHash.slice(0, 18)}...{buyResult.txHash.slice(-8)}</span>
+                  <CopyButton
+                    value={buyResult.txHash}
+                    label="Copy transaction hash"
+                    confirmText="Copied!"
+                    size="sm"
+                  />
                 </div>
                 <button
                   onClick={closeBuyModal}
@@ -1528,11 +1572,23 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                 <div className="w-12 h-12 mx-auto mb-4 border border-green-400/40 flex items-center justify-center text-green-400 text-lg">&#10003;</div>
                 <p className="text-sm text-foreground mb-2">Job Submitted</p>
                 <p className="text-xs text-muted mb-4">The agent will process your request. Poll for results using your job ID.</p>
-                <div className="bg-surface border border-border p-3 text-xs font-mono text-muted break-all mb-2">
-                  job: {serviceResult.jobId}
+                <div className="bg-surface border border-border p-3 text-xs font-mono text-muted break-all mb-2 flex items-center gap-2">
+                  <span className="break-all">job: {serviceResult.jobId}</span>
+                  <CopyButton
+                    value={serviceResult.jobId}
+                    label="Copy job id"
+                    confirmText="Copied!"
+                    size="sm"
+                  />
                 </div>
-                <div className="bg-surface border border-border p-3 text-xs font-mono text-muted break-all mb-6">
-                  tx: {serviceResult.txHash.slice(0, 18)}...{serviceResult.txHash.slice(-8)}
+                <div className="bg-surface border border-border p-3 text-xs font-mono text-muted break-all mb-6 flex items-center gap-2">
+                  <span className="break-all">tx: {serviceResult.txHash.slice(0, 18)}...{serviceResult.txHash.slice(-8)}</span>
+                  <CopyButton
+                    value={serviceResult.txHash}
+                    label="Copy transaction hash"
+                    confirmText="Copied!"
+                    size="sm"
+                  />
                 </div>
                 {serviceResult.status === "completed" && serviceResult.result ? (
                   <div className="bg-surface border border-accent/20 p-4 text-left mb-4">
