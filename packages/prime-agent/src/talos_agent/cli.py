@@ -106,8 +106,18 @@ def start(talos_id: str | None, env_file: str):
 
 
 @main.command()
-@click.option("--api-key", prompt="Talos API Key", help="API key issued at Talos creation")
-@click.option("--openai-key", prompt="OpenAI API Key", help="OpenAI API key")
+@click.option(
+    "--api-key",
+    prompt="Talos API Key",
+    hide_input=True,
+    help="API key issued at Talos creation",
+)
+@click.option(
+    "--openai-key",
+    prompt="OpenAI API Key",
+    hide_input=True,
+    help="OpenAI API key",
+)
 def config(api_key: str, openai_key: str):
     """Configure agent credentials (saved to ~/.talos-agent/config.json)."""
     if Settings().secret_rotation_enabled:
@@ -120,7 +130,7 @@ def config(api_key: str, openai_key: str):
 
     existing = {}
     if cfg_path.exists():
-        existing = json.loads(cfg_path.read_text())
+        existing = json.loads(cfg_path.read_text(encoding="utf-8"))
 
     existing.update({
         k: v for k, v in {
@@ -129,7 +139,19 @@ def config(api_key: str, openai_key: str):
         }.items() if v
     })
 
-    cfg_path.write_text(json.dumps(existing, indent=2))
+    content = json.dumps(existing, indent=2)
+    # Write file with mode 0o600 (owner read/write only) on POSIX.
+    # Note on Windows: Windows NTFS uses Access Control Lists (ACLs) rather than
+    # POSIX permission bits. os.chmod only controls the read-only attribute on
+    # Windows and does not restrict file access permissions to the owner.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(cfg_path, flags, 0o600)
+    with open(fd, "w", encoding="utf-8") as f:
+        f.write(content)
+    try:
+        os.chmod(cfg_path, 0o600)
+    except OSError:
+        pass
     console.print(f"[green]Config saved to {cfg_path}[/green]")
 
 
