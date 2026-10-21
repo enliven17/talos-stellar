@@ -9,16 +9,28 @@ const MAX_SIGNATURE_AGE_MS = 5 * 60 * 1000;
 
 export { createApiKeyOwnerMessage };
 
+/**
+ * Verify a wallet-ownership proof for any owner-scoped resource.
+ *
+ * The caller signs `talos:<id>:<resource>:<method>:<timestamp>` with the agent
+ * owner's wallet; the address must match the agent's creator or wallet public
+ * key and the signature must be fresh. `resource` defaults to `api-keys` for
+ * backwards compatibility with the original scoped-key flow.
+ */
 export async function verifyApiKeyOwnerProof(
   request: NextRequest,
   talosId: string,
+  resource = "api-keys",
 ): Promise<boolean> {
   const address = request.headers.get("x-talos-owner-address");
   const message = request.headers.get("x-talos-owner-message");
   const signature = request.headers.get("x-talos-owner-signature");
   if (!address || !message || !signature) return false;
 
-  const match = message.match(/^talos:([^:]+):api-keys:(GET|POST|PATCH|DELETE):(\d{13})$/);
+  const escapedResource = resource.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = message.match(
+    new RegExp(`^talos:([^:]+):${escapedResource}:(GET|POST|PATCH|DELETE):(\\d{13})$`),
+  );
   if (!match || match[1] !== talosId || match[2] !== request.method) return false;
 
   const timestamp = Number(match[3]);
