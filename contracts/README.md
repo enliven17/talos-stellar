@@ -46,6 +46,20 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
   - Events: `name_reg`, `name_reg2`, `tl_sch`, `tl_exec`, `tl_cnl`, `tl_cfg`, `dep_path`, `compat_ok`, `compat_err`
 
 ### 3. TalosGovernance
+- **Purpose**: Token-weighted governance for Talos Protocol
+- **Features**:
+  - Proposal creation for Talos governance decisions
+  - Token-weighted voting based on Pulse token holdings
+  - Snapshot-based vote weight calculation (balances at proposal creation)
+  - Quorum and consensus-based proposal approval/rejection
+  - Configurable voting periods and thresholds
+  - **Two-step admin transfer** (`propose_admin` / `accept_admin` / `cancel_admin_transfer` / `pending_admin`)
+  - **Interface version query** (`version()` — immutable, compile-time constant `(1, 0, 0)`)
+  - **Stable interface identifier** (`interface_id()` returns `BytesN<32>` derived from `"TalosGovernance"` + version)
+  - **Version negotiation** (`supports_version(maj, min, patch)`)
+  - **Capability catalogue** (`interface_features()` returns `Vec<Symbol>`)
+  - Events: `proposal_created`, `vote_cast`, `proposal_status_changed`, `adm_prp`, `adm_acc`, `adm_cnl`
+  - **Scoped emergency pause controls** (`pause_domain` / `unpause_domain` / `is_domain_paused`) with domain-scoped pausing, auto-expiration, and event emission
 
 - **Purpose**: Token-weighted governance for the Talos Protocol, enabling proposals, voting with snapshot weight calculation, delegation, quorum progress tracking, dividend distribution snapshots, and emergency pause controls.
 - **Features**:
@@ -923,7 +937,7 @@ All deployed contracts emit typed Soroban events on every meaningful state chang
 
 ## Two-step Admin Transfer
 
-The protocol wallet (admin) of `TalosRegistry` can only be changed through a two-step handover. A direct one-call replacement is intentionally impossible to prevent permanent loss of control due to a typo or a compromised key.
+The admin of `TalosRegistry` and `TalosGovernance` can only be changed through a two-step handover. A direct one-call replacement is intentionally impossible to prevent permanent loss of control due to a typo or a compromised key.
 
 ### Flow
 
@@ -932,7 +946,7 @@ current admin                      new admin
       │                                │
       │── propose_admin(new_admin) ──► │  (PendingAdmin written; adm_prp emitted)
       │                                │
-      │                 accept_admin() ◄─── │  (ProtocolWallet updated; PendingAdmin removed; adm_acc emitted)
+      │                 accept_admin() ◄─── │  (Admin/ProtocolWallet updated; PendingAdmin removed; adm_acc emitted)
       │                                │
 ```
 
@@ -940,19 +954,19 @@ current admin                      new admin
 
 | Entry-point | Auth required | Effect |
 |-------------|--------------|--------|
-| `propose_admin(new_admin)` | Current admin | Writes `new_admin` to `PendingAdmin` storage. Replaces any existing pending nomination silently. Blocked when `min_delay > 0` — use `schedule_action(ProposeAdmin(...))` instead. |
-| `accept_admin()` | Pending admin | Moves `PendingAdmin` → `ProtocolWallet`; removes `PendingAdmin`. |
+| `propose_admin(new_admin)` | Current admin | Writes `new_admin` to `PendingAdmin` storage. Replaces any existing pending nomination silently. Blocked when `min_delay > 0` in Registry (use timelock) or when `PAUSE_GOVERNANCE_CONFIG` is paused in Governance. |
+| `accept_admin()` | Pending admin | Moves `PendingAdmin` → active admin (`ProtocolWallet` in Registry, `Admin` in Governance); removes `PendingAdmin`. |
 | `cancel_admin_transfer()` | Current admin | Removes `PendingAdmin`; nomination is voided. |
 | `pending_admin()` | None (read-only) | Returns `Option<Address>` — `Some` if a transfer is in progress, `None` otherwise. |
 
 ### Storage compatibility
 
-`PendingAdmin` is a new persistent storage key added to the `DataKey` enum. Existing deployed instances that have never called `propose_admin` will simply have no entry for this key — `pending_admin()` returns `None` and no behaviour changes. The key is written only by `propose_admin` and removed by `accept_admin` or `cancel_admin_transfer`. There are no migrations required.
+`PendingAdmin` is a persistent storage key in the `DataKey` enum. Existing deployed instances that have never called `propose_admin` have no entry for this key — `pending_admin()` returns `None` and no behaviour changes. The key is written only by `propose_admin` and removed by `accept_admin` or `cancel_admin_transfer`. There are no migrations required.
 
 | Key | Type | Lifecycle |
 |-----|------|-----------|
-| `ProtocolWallet` | `Address` | Set by `initialize`; updated by `accept_admin`. Never removed. |
-| `PendingAdmin` *(new)* | `Address` | Written by `propose_admin`; removed by `accept_admin` or `cancel_admin_transfer`. Absent when no transfer is in progress. |
+| `ProtocolWallet` / `Admin` | `Address` | Set by `initialize`; updated by `accept_admin`. Never removed. |
+| `PendingAdmin` | `Address` | Written by `propose_admin`; removed by `accept_admin` or `cancel_admin_transfer`. Absent when no transfer is in progress. |
 
 ### CLI example
 
@@ -1234,7 +1248,7 @@ The pause control logic lives in a shared library crate (`pause-control`) used b
 |--------|----|-------------------|
 | `PAUSE_PROPOSAL_CREATION` | 7 | `create_proposal` |
 | `PAUSE_GOVERNANCE_VOTING` | 8 | `vote` |
-| `PAUSE_GOVERNANCE_CONFIG` | 9 | `update_config`, `cache_token_balance`, `touch_all_ttl`, `extend_ttl_batch` |
+| `PAUSE_GOVERNANCE_CONFIG` | 9 | `update_config`, `propose_admin`, `cache_token_balance`, `touch_all_ttl`, `extend_ttl_batch` |
 
 ### Entry-points
 
