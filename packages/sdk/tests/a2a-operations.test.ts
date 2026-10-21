@@ -111,9 +111,9 @@ describe("A2A Operations - Concurrency Control", () => {
   it("should allow new operations after completion", async () => {
     const fastOperation = vi.fn().mockResolvedValue({ success: true });
     
-    const intent1 = { ...validA2APurchaseIntent, intentId: "intent-1" };
-    const intent2 = { ...validA2APurchaseIntent, intentId: "intent-2" };
-    const intent3 = { ...validA2APurchaseIntent, intentId: "intent-3" };
+    const intent1 = { ...validA2APurchaseIntent, intentId: "intent-1", idempotencyKey: "concurrency-key-1" };
+    const intent2 = { ...validA2APurchaseIntent, intentId: "intent-2", idempotencyKey: "concurrency-key-2" };
+    const intent3 = { ...validA2APurchaseIntent, intentId: "intent-3", idempotencyKey: "concurrency-key-3" };
     
     await manager.submitIntent(intent1, fastOperation);
     await manager.submitIntent(intent2, fastOperation);

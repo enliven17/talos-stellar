@@ -5,8 +5,7 @@
  * and deterministic decisions.
  */
 
-// Note: vitest is a dev dependency. These tests require vitest to run.
-// import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
   validateA2APurchaseIntent,
   validateDeterministicDecision,
@@ -76,7 +75,7 @@ describe("A2A Validation - Format Validators", () => {
   describe("isValidStellarPublicKey", () => {
     it("should accept valid Stellar public keys", () => {
       expect(isValidStellarPublicKey(VALID_STELLAR_PROVIDER)).toBe(true);
-      expect(isValidStellarPublicKey("GABC1234567890ABCDEFGHIJ1234567890ABCDEFGHIJ1234567890AB")).toBe(true);
+      expect(isValidStellarPublicKey("GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW")).toBe(true);
     });
 
     it("should reject invalid Stellar public keys", () => {
