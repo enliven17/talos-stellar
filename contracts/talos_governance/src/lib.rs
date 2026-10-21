@@ -166,6 +166,7 @@ pub struct GovernanceConfig {
     pub voting_period_ledgers: u32,
     pub pulse_token_address: Address,
     pub snapshot_offset_ledgers: Option<u32>,
+    pub quorum_bps: Option<u32>,
 }
 
 #[contracttype]
@@ -180,6 +181,8 @@ pub enum DataKey {
     TokenBalanceSnapshot(u32, Address),
     Checkpoint(Address, u32),
     CheckpointCount(Address),
+    TotalSupplyCheckpoint(u32),
+    TotalSupplyCheckpointCount,
     Delegation(Address),
     LastTouched(u32),
     /// Monotonic counter for dividend epochs (1-based).
@@ -603,6 +606,7 @@ impl TalosGovernance {
             voting_period_ledgers,
             pulse_token_address,
             snapshot_offset_ledgers: None,
+            quorum_bps: None,
         };
 
         env.storage().persistent().set(&DataKey::Admin, &admin);
@@ -1016,8 +1020,17 @@ impl TalosGovernance {
     pub fn update_config(env: Env, admin: Address, config: GovernanceConfig) {
         pause_control::check_not_paused(&env, PAUSE_GOVERNANCE_CONFIG);
         Self::require_admin(&env, &admin);
-        if config.quorum_threshold <= 0 {
-            panic!("Quorum must be positive");
+        if let Some(bps) = config.quorum_bps {
+            if bps == 0 || bps > 10_000 {
+                panic!("Quorum bps must be 1..10000");
+            }
+            if config.quorum_threshold < 0 {
+                panic!("Quorum threshold cannot be negative");
+            }
+        } else {
+            if config.quorum_threshold <= 0 {
+                panic!("Quorum must be positive");
+            }
         }
         if config.consensus_threshold <= 0 || config.consensus_threshold > 10_000 {
             panic!("Consensus threshold must be 1..10000 bps");
@@ -1351,7 +1364,7 @@ impl TalosGovernance {
             .expect("Contract not initialized");
 
         let votes_cast = proposal.yes_votes + proposal.no_votes;
-        let quorum_threshold = config.quorum_threshold;
+        let quorum_threshold = Self::compute_quorum_threshold(&env, &config, proposal.snapshot_ledger);
         let quorum_met = votes_cast >= quorum_threshold;
 
         let approval_bps = if votes_cast > 0 {
@@ -1699,6 +1712,77 @@ impl TalosGovernance {
         found.votes
     }
 
+    pub fn get_past_total_supply(env: &Env, ledger: u32) -> i128 {
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalSupplyCheckpointCount)
+            .unwrap_or(0);
+        if count == 0 {
+            return 0;
+        }
+
+        // Check latest
+        let latest_ck: Checkpoint = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalSupplyCheckpoint(count - 1))
+            .unwrap();
+        if latest_ck.ledger <= ledger {
+            return latest_ck.votes;
+        }
+
+        // Check earliest
+        let earliest_ck: Checkpoint = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalSupplyCheckpoint(0))
+            .unwrap();
+        if earliest_ck.ledger > ledger {
+            return 0;
+        }
+
+        // Binary search
+        let mut low = 0;
+        let mut high = count - 1;
+        while low < high {
+            let mid = high - (high - low) / 2;
+            let ck: Checkpoint = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TotalSupplyCheckpoint(mid))
+                .unwrap();
+            if ck.ledger == ledger {
+                return ck.votes;
+            } else if ck.ledger < ledger {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        let found: Checkpoint = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalSupplyCheckpoint(low))
+            .unwrap();
+        found.votes
+    }
+
+    fn compute_quorum_threshold(env: &Env, config: &GovernanceConfig, snapshot_ledger: u32) -> i128 {
+        if let Some(bps) = config.quorum_bps {
+            let supply = Self::get_past_total_supply(env, snapshot_ledger);
+            // Integer ceiling division so quorum is reached exactly at the configured share:
+            // ceil(supply * bps / 10_000) = (supply * bps + 9_999) / 10_000
+            if supply <= 0 {
+                0
+            } else {
+                (supply * (bps as i128) + 9_999) / 10_000
+            }
+        } else {
+            config.quorum_threshold
+        }
+    }
+
     pub fn delegate(env: Env, delegator: Address, delegatee: Address) {
         pause_control::check_not_paused(&env, PAUSE_GOVERNANCE_CONFIG);
         delegator.require_auth();
@@ -1710,28 +1794,97 @@ impl TalosGovernance {
         Self::require_admin(&env, &admin);
         let current_ledger = env.ledger().sequence();
         let count: u32 = env.storage().persistent().get(&DataKey::CheckpointCount(account.clone())).unwrap_or(0);
-        
+
+        let old_balance = if count > 0 {
+            let last_ck: Checkpoint = env.storage().persistent().get(&DataKey::Checkpoint(account.clone(), count - 1)).unwrap();
+            last_ck.votes
+        } else {
+            0
+        };
+        let delta = new_balance - old_balance;
+
         if count > 0 {
             let mut last_ck: Checkpoint = env.storage().persistent().get(&DataKey::Checkpoint(account.clone(), count - 1)).unwrap();
             if last_ck.ledger == current_ledger {
                 last_ck.votes = new_balance;
                 env.storage().persistent().set(&DataKey::Checkpoint(account.clone(), count - 1), &last_ck);
-                return;
+            } else {
+                let ck = Checkpoint {
+                    ledger: current_ledger,
+                    votes: new_balance,
+                };
+                env.storage().persistent().set(&DataKey::Checkpoint(account.clone(), count), &ck);
+                env.storage().persistent().set(&DataKey::CheckpointCount(account.clone()), &(count + 1));
             }
+        } else {
+            let ck = Checkpoint {
+                ledger: current_ledger,
+                votes: new_balance,
+            };
+            env.storage().persistent().set(&DataKey::Checkpoint(account.clone(), count), &ck);
+            env.storage().persistent().set(&DataKey::CheckpointCount(account.clone()), &(count + 1));
         }
-        
-        let ck = Checkpoint {
-            ledger: current_ledger,
-            votes: new_balance,
+
+        // Track total supply checkpoints alongside per-account ones
+        let total_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalSupplyCheckpointCount)
+            .unwrap_or(0);
+        let prev_total_supply = if total_count > 0 {
+            let last_total_ck: Checkpoint = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TotalSupplyCheckpoint(total_count - 1))
+                .unwrap();
+            last_total_ck.votes
+        } else {
+            0
         };
-        env.storage().persistent().set(&DataKey::Checkpoint(account.clone(), count), &ck);
-        env.storage().persistent().set(&DataKey::CheckpointCount(account.clone()), &(count + 1));
+        let new_total_supply = prev_total_supply + delta;
+
+        if total_count > 0 {
+            let mut last_total_ck: Checkpoint = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TotalSupplyCheckpoint(total_count - 1))
+                .unwrap();
+            if last_total_ck.ledger == current_ledger {
+                last_total_ck.votes = new_total_supply;
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::TotalSupplyCheckpoint(total_count - 1), &last_total_ck);
+            } else {
+                let total_ck = Checkpoint {
+                    ledger: current_ledger,
+                    votes: new_total_supply,
+                };
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::TotalSupplyCheckpoint(total_count), &total_ck);
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::TotalSupplyCheckpointCount, &(total_count + 1));
+            }
+        } else {
+            let total_ck = Checkpoint {
+                ledger: current_ledger,
+                votes: new_total_supply,
+            };
+            env.storage()
+                .persistent()
+                .set(&DataKey::TotalSupplyCheckpoint(total_count), &total_ck);
+            env.storage()
+                .persistent()
+                .set(&DataKey::TotalSupplyCheckpointCount, &(total_count + 1));
+        }
     }
 
     fn update_status_if_quorum(env: &Env, proposal: &mut Proposal) {
         let config = Self::require_config(env);
         let total_votes = proposal.yes_votes + proposal.no_votes;
-        if total_votes >= config.quorum_threshold {
+        let quorum_threshold = Self::compute_quorum_threshold(env, &config, proposal.snapshot_ledger);
+        if total_votes >= quorum_threshold {
             // Emit EventQuorumReached exactly once per proposal — write a
             // sentinel before emitting so a re-entrant call cannot double-fire.
             let sentinel_key = DataKey::QuorumReached(proposal.id);
@@ -1751,7 +1904,7 @@ impl TalosGovernance {
                     env,
                     proposal.id,
                     total_votes,
-                    config.quorum_threshold,
+                    quorum_threshold,
                     approval_bps,
                 );
             }
@@ -1763,7 +1916,8 @@ impl TalosGovernance {
     fn finalize_status(env: &Env, proposal: &mut Proposal) {
         let config = Self::require_config(env);
         let total_votes = proposal.yes_votes + proposal.no_votes;
-        if total_votes < config.quorum_threshold {
+        let quorum_threshold = Self::compute_quorum_threshold(env, &config, proposal.snapshot_ledger);
+        if total_votes < quorum_threshold {
             proposal.status = ProposalStatus::Rejected;
             return;
         }
@@ -2412,6 +2566,7 @@ mod tests {
             voting_period_ledgers: 30,
             pulse_token_address: pulse,
             snapshot_offset_ledgers: None,
+            quorum_bps: None,
         };
 
         client
@@ -2521,6 +2676,7 @@ mod tests {
             voting_period_ledgers: 30,
             pulse_token_address: pulse,
             snapshot_offset_ledgers: None,
+            quorum_bps: None,
         };
         let res = client
             .mock_auths(&[MockAuth {
@@ -2721,6 +2877,7 @@ mod tests {
             voting_period_ledgers: 20,
             pulse_token_address: pulse,
             snapshot_offset_ledgers: None,
+            quorum_bps: None,
         };
         let rando = Address::generate(&env);
         let result = client.try_update_config(&rando, &config);
