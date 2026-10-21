@@ -74,15 +74,15 @@ jobs:
       - name: Start local stack (Postgres & Mock Stellar)
         run: |
           docker compose up -d postgres mock-stellar
-          echo "Waiting for Postgres to become healthy..."
-          timeout 60 bash -c 'until docker compose exec -T postgres pg_isready -U postgres -d talos; do sleep 1; done'
+          echo "Waiting for Postgres to accept connections and queries..."
+          timeout 60 bash -c 'until docker compose exec -T postgres pg_isready -U postgres -d talos && docker compose exec -T postgres psql -U postgres -d talos -c "SELECT 1" > /dev/null 2>&1; do sleep 1; done'
           echo "Waiting for Mock Stellar to become healthy..."
           timeout 60 bash -c 'until curl -sf http://127.0.0.1:4010/health > /dev/null; do sleep 1; done'
           echo "Local stack is ready."
 
       - name: Apply database migrations and seed
         run: |
-          cat web/drizzle/bootstrap-roles.sql | docker compose exec -T postgres psql -U postgres -d talos
+          docker compose exec -T postgres psql -U postgres -d talos < web/drizzle/bootstrap-roles.sql
           pnpm --dir web db:migrate
           pnpm --dir web db:seed
 
