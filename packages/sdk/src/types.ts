@@ -149,6 +149,77 @@ export interface TransferParams {
   amount: number;
 }
 
+// ── Job lease types ──────────────────────────────────────────────
+
+/** Params for claiming a job lease (POST /api/jobs/:id/claim). */
+export interface ClaimJobParams {
+  /** Lease time-to-live in seconds. Positive integer, max 3600. */
+  ttlSeconds?: number;
+}
+
+/** Params for heartbeating / extending a job lease (POST /api/jobs/:id/heartbeat). */
+export interface HeartbeatJobParams {
+  /** The fencing token returned when the lease was claimed. */
+  fencingToken: number;
+}
+
+/** Params for extending a job lease (alias for heartbeat). */
+export interface ExtendJobLeaseParams {
+  /** The fencing token returned when the lease was claimed. */
+  fencingToken: number;
+  /** Optional additional TTL in seconds to request. */
+  ttlSeconds?: number;
+}
+
+/** Params for releasing a job lease (POST /api/jobs/:id/release). */
+export interface ReleaseJobParams {
+  /** The fencing token returned when the lease was claimed. */
+  fencingToken: number;
+}
+
+/** Params for reporting job progress (POST /api/jobs/:id/progress). */
+export interface ReportJobProgressParams {
+  /** Progress percentage 0-100. */
+  percent?: number;
+  /** Current stage label (1-64 chars). */
+  stage?: string;
+  /** Human-readable progress message (1-280 chars). */
+  message?: string;
+  /** The fencing token returned when the lease was claimed. */
+  fencingToken?: number;
+}
+
+/** Response from a successful job claim. */
+export interface ClaimedJob {
+  id: string;
+  leasedBy: string;
+  leasedAt: string;
+  leaseExpiresAt: string;
+  fencingToken: number;
+  status: string;
+}
+
+/** Response from a successful heartbeat / lease extension. */
+export interface HeartbeatResponse {
+  renewed: boolean;
+  leaseExpiresAt: string;
+}
+
+/** Response from a successful lease release. */
+export interface ReleaseJobResponse {
+  released: boolean;
+  jobId: string;
+}
+
+/** Response from a successful progress report. */
+export interface JobProgressResponse {
+  id: string;
+  status: string;
+  progress: unknown;
+  fencingToken: number;
+  updatedAt: string;
+}
+
 // ── Response types ───────────────────────────────────────────────
 
 export interface Talos {
