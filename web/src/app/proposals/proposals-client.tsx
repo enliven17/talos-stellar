@@ -76,6 +76,7 @@ export function ProposalsClient() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [voting, setVoting] = useState<Record<string, boolean>>({});
+  const [voteStatus, setVoteStatus] = useState<string>("");
   // Ignore responses from a previous filter selection that arrive late.
   const requestId = useRef(0);
 
@@ -162,6 +163,7 @@ export function ProposalsClient() {
                 : p,
             ),
           );
+          setVoteStatus(`Proposal "${proposal.title}" ${decision}.`);
         } else {
           alert(data.error || "Vote failed");
         }
@@ -254,6 +256,11 @@ export function ProposalsClient() {
         <div role="alert" className="py-4 text-center text-red-400 text-sm">{error}</div>
       )}
 
+      {/* Live region for vote result announcements */}
+      <div aria-live="polite" className="sr-only">
+        {voteStatus}
+      </div>
+
       {!loading && !error && proposals.length === 0 && (
         <div className="py-16 text-center text-muted text-sm">No proposals found.</div>
       )}
@@ -303,6 +310,7 @@ export function ProposalsClient() {
                   <button
                     disabled={voting[p.id]}
                     onClick={() => handleVote(p, "approved")}
+                    aria-label={`Approve proposal: ${p.title}`}
                     className="text-xs px-3 py-1.5 border border-green-400/30 text-green-400 hover:bg-green-400 hover:text-background transition-colors disabled:opacity-40"
                   >
                     Approve
@@ -310,6 +318,7 @@ export function ProposalsClient() {
                   <button
                     disabled={voting[p.id]}
                     onClick={() => handleVote(p, "rejected")}
+                    aria-label={`Reject proposal: ${p.title}`}
                     className="text-xs px-3 py-1.5 border border-red-400/30 text-red-400 hover:bg-red-400 hover:text-background transition-colors disabled:opacity-40"
                   >
                     Reject
