@@ -5,11 +5,15 @@ on:
     branches: [main]
     paths:
       - 'contracts/**'
+      - 'scripts/check-wasm-size.mjs'
+      - 'scripts/wasm-size-budgets.json'
       - '.github/workflows/contracts-ci.yml'
   push:
     branches: [main]
     paths:
       - 'contracts/**'
+      - 'scripts/check-wasm-size.mjs'
+      - 'scripts/wasm-size-budgets.json'
       - '.github/workflows/contracts-ci.yml'
 
 permissions:

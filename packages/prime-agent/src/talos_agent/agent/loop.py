@@ -46,6 +46,7 @@ from talos_agent.routing.provider import TaskType
 if TYPE_CHECKING:
     from talos_agent.config import Settings
     from talos_agent.db import LocalDB
+    from talos_agent.replay.capture import EventCapture
     from talos_agent.tools.registry import ToolRegistry
 
 console = Console()
@@ -167,6 +168,7 @@ async def agent_loop(
     db: LocalDB,
     system_prompt_override: str | None = None,
     shutdown_event: asyncio.Event | None = None,
+    capture: EventCapture | None = None,
 ) -> list[dict]:
     """Run one agent cycle: LLM decides tools to call until done.
 

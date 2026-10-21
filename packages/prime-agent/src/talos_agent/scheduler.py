@@ -10,8 +10,9 @@ import os
 import random
 import signal
 import uuid
-from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from datetime import datetime, time, timedelta, timezone
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from zoneinfo import ZoneInfo
 
 import structlog
 from rich.console import Console
@@ -39,6 +40,29 @@ from talos_agent.tracing import (
 
 console = Console()
 logger = logging.getLogger(__name__)
+
+
+# ── Clock abstraction ─────────────────────────────────────────────────────────
+
+@runtime_checkable
+class Clock(Protocol):
+    """Minimal injectable clock: return the current UTC time.
+
+    Inject a ``FixedClock`` or ``SteppingClock`` in tests to achieve
+    deterministic coverage without any dependency on wall time.
+    Production code passes a ``SystemClock`` instance (the default).
+    """
+
+    def now_utc(self) -> datetime:
+        """Return the current time as a timezone-aware UTC datetime."""
+        ...
+
+
+class SystemClock:
+    """Production clock — delegates to ``datetime.now(timezone.utc)``."""
+
+    def now_utc(self) -> datetime:
+        return datetime.now(timezone.utc)
 
 SHUTDOWN_GRACE_PERIOD = 10  # seconds before force-exit on second signal
 
@@ -464,6 +488,7 @@ async def _wait_for_restored_deadline(shutdown_event, backoff: DurableBackoff) -
 async def run(settings: Settings, agent_slot: int = 0) -> None:
     """Entry point called by `talos-agent start`. agent_slot used for log prefixes in multi mode."""
     setup_observability()
+    effective_clock = clock if clock is not None else _DEFAULT_CLOCK
     from talos_agent.api_client import TalosAPIClient
     from talos_agent.db import LocalDB, get_db_path
 
@@ -852,7 +877,37 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
                             context=context,
                             db=db,
                             shutdown_event=shutdown_event,
+                            capture=capture,
                         )
+
+                        # ── Flush replay events ───────────────────────────────
+                        if capture is not None and replay_store is not None:
+                            try:
+                                written = replay_store.flush_capture(capture)
+                                replay_store.end_session(
+                                    cycle_id=cycle_id,
+                                    status="complete",
+                                    dropped_events=capture.dropped,
+                                    event_count=written,
+                                )
+                                # Prune old sessions to cap disk usage
+                                replay_store.prune_sessions(
+                                    keep_last=settings.replay_keep_sessions,
+                                    talos_id=settings.talos_id,
+                                )
+                                log.info(
+                                    "replay_session_saved",
+                                    cycle_id=cycle_id,
+                                    events=written,
+                                    dropped=capture.dropped,
+                                )
+                            except Exception as replay_err:
+                                log.warning(
+                                    "replay_flush_error",
+                                    cycle_id=cycle_id,
+                                    error=str(replay_err),
+                                )
+
                         db.update_schedule("agent_cycle")
 
                         # ── Record completion ────────────────────────────────
@@ -1193,8 +1248,13 @@ async def run(settings: Settings, agent_slot: int = 0) -> None:
             try:
                 # Prevent duplicate runs after restart
                 last_run = db.get_last_run("dividend_distribution")
-                if last_run:
-                    elapsed = (datetime.now(timezone.utc) - last_run).total_seconds()
+                if last_run and not check_should_run(
+                    now=effective_clock.now_utc(),
+                    last_run=last_run,
+                    interval_seconds=distribution_interval,
+                    clock=effective_clock,
+                ):
+                    elapsed = (effective_clock.now_utc() - last_run).total_seconds()
                     remaining = distribution_interval - elapsed
                     if remaining > 0:
                         console.print(

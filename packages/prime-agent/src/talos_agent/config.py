@@ -342,7 +342,7 @@ class Settings(BaseSettings):
     polling_interval: int = Field(default=10, description="Seconds between API polls")
     heartbeat_interval: int = Field(default=60, description="Seconds between heartbeats")
     max_iterations: int = Field(default=20, description="Max tool-call iterations per cycle")
-    approval_threshold: Decimal = Field(default=Decimal("10"), description="USD threshold for auto-approval")
+    approval_threshold: Decimal = Field(default=Decimal(10), description="USD threshold for auto-approval")
     browser_headless: bool = Field(default=False, description="Run browser in headless mode")
     auto_repay_loans: bool = Field(default=False, description="Enable automatic loan repayment from treasury")
     tool_timeout_seconds: int = Field(
@@ -434,7 +434,25 @@ class Settings(BaseSettings):
 
     # Dividend distribution
     dividend_distribution_interval: int = Field(default=3600, description="Seconds between dividend distribution checks")
-    dividend_usdc_threshold: Decimal = Field(default=Decimal("100"), description="USDC threshold to trigger dividend distribution")
+    dividend_usdc_threshold: Decimal = Field(default=Decimal(100), description="USDC threshold to trigger dividend distribution")
+
+    # Deterministic replay (disabled by default for safe rollout)
+    replay_enabled: bool = Field(
+        default=False,
+        description="Enable recording of agent cycle events for deterministic replay.",
+    )
+    replay_max_events: int = Field(
+        default=500,
+        description="Maximum events to capture per cycle (excess silently dropped).",
+    )
+    replay_max_payload_bytes: int = Field(
+        default=65536,
+        description="Maximum bytes per event payload; oversized payloads are truncated.",
+    )
+    replay_keep_sessions: int = Field(
+        default=100,
+        description="Number of replay sessions to keep; oldest are pruned automatically.",
+    )
 
     # Execution replay (Issue #235) — disabled by default
     replay_enabled: bool = Field(default=False, description="Enable execution replay recording for incident analysis")

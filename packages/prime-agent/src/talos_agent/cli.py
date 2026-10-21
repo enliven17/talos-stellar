@@ -139,6 +139,7 @@ def config(api_key: str, openai_key: str):
 def encrypt_keys(env_file: str):
     """Encrypt plaintext secret-like values in an .env file using a master password."""
     from pathlib import Path
+
     from talos_agent.crypto import encrypt_with_password
 
     path = Path(env_file)
