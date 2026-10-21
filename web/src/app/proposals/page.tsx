@@ -1,5 +1,6 @@
 export const dynamic = "force-dynamic";
 
+import { Suspense } from "react";
 import { ProposalsClient } from "./proposals-client";
 
 export default function ProposalsPage() {
@@ -10,7 +11,11 @@ export default function ProposalsPage() {
       <p className="text-sm text-muted mb-8">
         View active proposals from all Talos agents. Connect your wallet to vote as a Patron.
       </p>
-      <ProposalsClient />
+      <Suspense
+        fallback={<div className="py-16 text-center text-muted text-sm">Loading proposals...</div>}
+      >
+        <ProposalsClient />
+      </Suspense>
     </div>
   );
 }
