@@ -374,6 +374,7 @@ When deploying this application on Vercel, make sure the following Stellar envir
 - `NEXT_PUBLIC_STELLAR_RPC_URL`: URL of the Soroban RPC server.
 - `NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT`: The registry Soroban contract ID.
 - `NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT`: The name service Soroban contract ID.
+- `NEXT_PUBLIC_TALOS_DIVIDENDS_CONTRACT`: The TalosDividends Soroban contract ID.
 - `NEXT_PUBLIC_STELLAR_WALLET_NETWORK`: Wallet network setting (e.g. `testnet`).
 - `NEXT_PUBLIC_TALOS_CREATION_XLM`: XLM required for Talos creation.
 - `NEXT_PUBLIC_STELLAR_USDC_ISSUER`: USDC token issuer public key.

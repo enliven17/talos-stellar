@@ -4,6 +4,9 @@ import { useState, useEffect, useCallback } from "react";
 import { WalletGate, useWallet } from "@/components/wallet-gate";
 import { AgentAvatar } from "@/components/agent-avatar";
 import { FinancialProjectionChart } from "@/components/financial-projection-chart";
+import {
+  DashboardDividendClaims,
+} from "@/components/dashboard-dividend-claims";
 
 interface DashboardData {
   stats: {
@@ -57,6 +60,7 @@ interface DashboardData {
   }[];
   talosManagement: {
     id: string;
+    onChainId: number | null;
     name: string;
     status: string;
     approvalThreshold: number;
@@ -295,6 +299,8 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
         </div>
       ) : (
         <>
+          <DashboardDividendClaims talos={talosManagement} />
+
           {/* Portfolio Overview */}
           <section className="mb-10">
             <h2 className="text-sm text-muted mb-4 tracking-wide">{/* PORTFOLIO OVERVIEW */}</h2>
