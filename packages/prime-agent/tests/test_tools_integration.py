@@ -537,3 +537,131 @@ class TestWebAPIRevenueReporting:
 
             assert result["id"] == "revenue-record"
             mock_api.report_revenue.assert_called_once()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DeFi Tool Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDeFiToolSpending:
+    """Test spending and budget tracking for DeFi loan borrowing and repayments."""
+
+    @pytest.mark.asyncio
+    async def test_borrow_does_not_record_spending(
+        self, mock_settings: Settings, mock_db: LocalDB
+    ):
+        """Borrowing does not record spending or increase spending_period (GTM budget unaffected)."""
+        mock_settings.approval_threshold = 1000.0
+        mock_api = AsyncMock()
+
+        assert mock_db.get_spending_period(30) == 0.0
+        assert mock_db.get_spending_today() == 0.0
+
+        with patch("talos_agent.tools.defi._api", mock_api), patch(
+            "talos_agent.tools.defi._db", mock_db
+        ), patch("talos_agent.tools.defi._settings", mock_settings):
+            from talos_agent.tools.defi import request_defi_loan
+
+            res = await request_defi_loan(
+                platform="aave",
+                amount=500.0,
+                collateral_asset="USDC",
+                loan_asset="USDC",
+                duration_days=30,
+                purpose="Operational liquidity",
+            )
+
+            assert res["status"] == "requested"
+            assert res["amount"] == 500.0
+
+            # Spending totals must remain 0.0 after borrow
+            assert mock_db.get_spending_period(30) == 0.0
+            assert mock_db.get_spending_today() == 0.0
+
+            # Verify no spending_log records were created
+            row = mock_db._conn.execute(
+                "SELECT COUNT(*) as cnt FROM spending_log"
+            ).fetchone()
+            assert row["cnt"] == 0
+
+    @pytest.mark.asyncio
+    async def test_repay_records_spending_defi_repayment(
+        self, mock_settings: Settings, mock_db: LocalDB
+    ):
+        """Repaying records spending with category defi_repayment and increases spending_period."""
+        mock_settings.approval_threshold = 1000.0
+        mock_api = AsyncMock()
+
+        # Create active loan directly
+        loan_id = mock_db.create_loan(
+            platform="aave",
+            amount=500.0,
+            collateral_asset="USDC",
+            loan_asset="USDC",
+            duration_days=30,
+            purpose="Operational liquidity",
+        )
+
+        assert mock_db.get_spending_period(30) == 0.0
+        assert mock_db.get_spending_today() == 0.0
+
+        with patch("talos_agent.tools.defi._api", mock_api), patch(
+            "talos_agent.tools.defi._db", mock_db
+        ), patch("talos_agent.tools.defi._settings", mock_settings):
+            from talos_agent.tools.defi import repay_loan
+
+            repay_res = await repay_loan(loan_id=loan_id, amount=150.0)
+
+            assert repay_res["status"] == "repayment_recorded"
+            assert repay_res["amount"] == 150.0
+            assert repay_res["remaining"] == 350.0
+
+            # Spending period and today should increase by 150.0
+            assert mock_db.get_spending_period(30) == 150.0
+            assert mock_db.get_spending_today() == 150.0
+
+            # Verify spending_log entry category
+            row = mock_db._conn.execute(
+                "SELECT amount, category, description FROM spending_log ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            assert row["amount"] == 150.0
+            assert row["category"] == "defi_repayment"
+
+    @pytest.mark.asyncio
+    async def test_borrow_and_repay_budget_lifecycle(
+        self, mock_settings: Settings, mock_db: LocalDB
+    ):
+        """Full borrow and repay cycle asserts spending before, between, and after."""
+        mock_settings.approval_threshold = 1000.0
+        mock_api = AsyncMock()
+
+        with patch("talos_agent.tools.defi._api", mock_api), patch(
+            "talos_agent.tools.defi._db", mock_db
+        ), patch("talos_agent.tools.defi._settings", mock_settings):
+            from talos_agent.tools.defi import repay_loan, request_defi_loan
+
+            # Before borrow
+            assert mock_db.get_spending_period(30) == 0.0
+
+            # Borrow 300 USDC
+            borrow_res = await request_defi_loan(
+                platform="compound",
+                amount=300.0,
+                collateral_asset="USDC",
+                loan_asset="USDC",
+                duration_days=14,
+            )
+            loan_id = borrow_res["loan_id"]
+
+            # After borrow, spending remains unchanged
+            assert mock_db.get_spending_period(30) == 0.0
+
+            # First partial repayment of 100
+            await repay_loan(loan_id=loan_id, amount=100.0)
+            assert mock_db.get_spending_period(30) == 100.0
+
+            # Full repayment of the remaining 200
+            await repay_loan(loan_id=loan_id, amount=200.0)
+            assert mock_db.get_spending_period(30) == 300.0
+
