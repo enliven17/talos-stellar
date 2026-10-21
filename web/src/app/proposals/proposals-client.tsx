@@ -1,8 +1,17 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useWallet } from "@/components/wallet-gate";
+import {
+  PROPOSAL_STATUSES,
+  PROPOSAL_TYPES,
+  buildProposalsApiUrl,
+  buildProposalsPageUrl,
+  parseProposalFilters,
+  type ProposalFilters,
+} from "@/lib/proposals-filters";
 
 interface Proposal {
   id: string;
@@ -35,26 +44,101 @@ const STATUS_STYLE: Record<string, string> = {
   rejected: "text-red-400",
 };
 
-const FILTERS = ["all", "pending", "approved", "rejected"] as const;
-type Filter = (typeof FILTERS)[number];
+const FILTERS = ["all", ...PROPOSAL_STATUSES] as const;
+
+interface TalosOption {
+  id: string;
+  name: string;
+}
+
+const SELECT_CLASS =
+  "bg-surface border border-border text-xs text-foreground px-2 py-1 focus:border-accent outline-none";
 
 export function ProposalsClient() {
   const { isConnected, address, connect } = useWallet();
+  const router = useRouter();
+  const searchParams = useSearchParams();
 
-  const [filter, setFilter] = useState<Filter>("all");
+  // The URL is the single source of truth for filters, so they survive reload
+  // and can be shared as links.
+  // Keyed on the query string (not the searchParams object) so effects only
+  // re-run when a filter value actually changes.
+  const query = searchParams.toString();
+  const filters = useMemo(
+    () => parseProposalFilters(new URLSearchParams(query)),
+    [query],
+  );
+
   const [proposals, setProposals] = useState<Proposal[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [talosOptions, setTalosOptions] = useState<TalosOption[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [voting, setVoting] = useState<Record<string, boolean>>({});
+  // Ignore responses from a previous filter selection that arrive late.
+  const requestId = useRef(0);
 
-  const load = useCallback(async (f: Filter) => {
+  const updateFilters = useCallback(
+    (patch: Partial<ProposalFilters>) => {
+      router.replace(buildProposalsPageUrl({ ...filters, ...patch }), { scroll: false });
+    },
+    [router, filters],
+  );
+
+  // First page: runs on mount and whenever any filter in the URL changes.
+  useEffect(() => {
+    const id = ++requestId.current;
     setLoading(true);
-    const url = f === "all" ? "/api/proposals" : `/api/proposals?status=${f}`;
-    const res = await fetch(url);
-    if (res.ok) setProposals(await res.json());
-    setLoading(false);
-  }, []);
+    setError(null);
+    (async () => {
+      try {
+        const res = await fetch(buildProposalsApiUrl(filters));
+        if (id !== requestId.current) return;
+        if (!res.ok) throw new Error("Failed to load proposals");
+        const data = await res.json();
+        if (id !== requestId.current) return;
+        setProposals(data.proposals);
+        setNextCursor(data.nextCursor);
+        if (data.talos) setTalosOptions(data.talos);
+      } catch {
+        if (id === requestId.current) setError("Could not load proposals. Please try again.");
+      } finally {
+        if (id === requestId.current) setLoading(false);
+      }
+    })();
+  }, [filters]);
 
-  useEffect(() => { load(filter); }, [filter, load]);
+  const loadMore = useCallback(async () => {
+    if (!nextCursor || loadingMore) return;
+    const id = requestId.current;
+    setLoadingMore(true);
+    try {
+      const res = await fetch(buildProposalsApiUrl(filters, nextCursor));
+      if (id !== requestId.current) return;
+      if (!res.ok) throw new Error("Failed to load more proposals");
+      const data = await res.json();
+      if (id !== requestId.current) return;
+      setProposals((prev) => {
+        const seen = new Set(prev.map((p) => p.id));
+        return [...prev, ...data.proposals.filter((p: Proposal) => !seen.has(p.id))];
+      });
+      setNextCursor(data.nextCursor);
+    } catch {
+      if (id === requestId.current) setError("Could not load more proposals. Please try again.");
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [filters, nextCursor, loadingMore]);
+
+  // Keep the selected Talos in the dropdown even before options have loaded
+  // (e.g. when arriving from a shared link).
+  const talosSelectOptions = useMemo(() => {
+    if (filters.talosId === "all" || talosOptions.some((t) => t.id === filters.talosId)) {
+      return talosOptions;
+    }
+    return [{ id: filters.talosId, name: filters.talosId }, ...talosOptions];
+  }, [talosOptions, filters.talosId]);
 
   const handleVote = useCallback(
     async (proposal: Proposal, decision: "approved" | "rejected") => {
@@ -96,26 +180,55 @@ export function ProposalsClient() {
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex gap-6 text-sm">
           <span className="text-muted">
-            <span className="text-accent font-bold">{proposals.length}</span> total
+            <span className="text-accent font-bold">{proposals.length}</span> loaded
           </span>
           <span className="text-muted">
             <span className="text-yellow-400 font-bold">{pending}</span> pending
           </span>
         </div>
-        <div className="flex gap-1">
-          {FILTERS.map((f) => (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`px-3 py-1 text-xs border transition-colors ${
-                filter === f
-                  ? "border-accent text-accent"
-                  : "border-border text-muted hover:border-accent/50 hover:text-foreground"
-              }`}
-            >
-              {f}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex gap-1">
+            {FILTERS.map((f) => (
+              <button
+                key={f}
+                onClick={() => updateFilters({ status: f })}
+                aria-pressed={filters.status === f}
+                className={`px-3 py-1 text-xs border transition-colors ${
+                  filters.status === f
+                    ? "border-accent text-accent"
+                    : "border-border text-muted hover:border-accent/50 hover:text-foreground"
+                }`}
+              >
+                {f}
+              </button>
+            ))}
+          </div>
+          <select
+            aria-label="Filter by Talos"
+            value={filters.talosId}
+            onChange={(e) => updateFilters({ talosId: e.target.value })}
+            className={SELECT_CLASS}
+          >
+            <option value="all">All Talos</option>
+            {talosSelectOptions.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}
+              </option>
+            ))}
+          </select>
+          <select
+            aria-label="Filter by type"
+            value={filters.type}
+            onChange={(e) => updateFilters({ type: e.target.value as ProposalFilters["type"] })}
+            className={SELECT_CLASS}
+          >
+            <option value="all">All types</option>
+            {PROPOSAL_TYPES.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -137,7 +250,11 @@ export function ProposalsClient() {
         <div className="py-16 text-center text-muted text-sm">Loading proposals...</div>
       )}
 
-      {!loading && proposals.length === 0 && (
+      {error && (
+        <div role="alert" className="py-4 text-center text-red-400 text-sm">{error}</div>
+      )}
+
+      {!loading && !error && proposals.length === 0 && (
         <div className="py-16 text-center text-muted text-sm">No proposals found.</div>
       )}
 
@@ -162,7 +279,14 @@ export function ProposalsClient() {
                     [{p.status.toUpperCase()}]
                   </span>
                 </div>
-                <h3 className="text-sm font-bold text-foreground">{p.title}</h3>
+                <h3 className="text-sm font-bold text-foreground">
+                  <Link
+                    href={`/proposals/${p.id}`}
+                    className="hover:text-accent transition-colors"
+                  >
+                    {p.title}
+                  </Link>
+                </h3>
                 {p.description && (
                   <p className="text-xs text-muted mt-1 leading-relaxed">{p.description}</p>
                 )}
@@ -219,6 +343,18 @@ export function ProposalsClient() {
             </div>
           </div>
         ))}
+
+      {!loading && nextCursor && (
+        <div className="flex justify-center pt-2">
+          <button
+            onClick={loadMore}
+            disabled={loadingMore}
+            className="px-6 py-2 text-xs border border-border text-muted hover:border-accent/50 hover:text-foreground transition-colors disabled:opacity-40"
+          >
+            {loadingMore ? "Loading..." : "Load more"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

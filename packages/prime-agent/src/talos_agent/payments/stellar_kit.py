@@ -13,10 +13,12 @@ text, seeds, payment proofs, or response bodies are ever surfaced.
 from __future__ import annotations
 
 import os
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
 from rich.console import Console
+from stellar_sdk import StrKey
 
 from talos_agent.adapters.snapshots import StellarHealthSnapshot
 from talos_agent.http import request_with_retry
@@ -27,11 +29,44 @@ from talos_agent.payments.stellar_retry import (
 )
 
 _HORIZON_URL = os.getenv("STELLAR_HORIZON_URL", "https://horizon-testnet.stellar.org")
+_SEVEN_DECIMALS = Decimal("0.0000001")
 
 #: Default timeout (seconds) for Horizon HTTP requests.
 _DEFAULT_HORIZON_TIMEOUT = 30.0
 
+
+def _validate_account_id(account_id: str) -> bool:
+    """Return True if *account_id* is a valid Stellar account identifier.
+
+    Accepts classic Ed25519 public keys (G…) and muxed accounts (M…).
+    Rejects anything else — empty strings, path-traversal fragments, secret
+    keys, contract IDs, etc. — so that callers never interpolate untrusted
+    input into a Horizon URL.
+    """
+    return StrKey.is_valid_ed25519_public_key(account_id) or StrKey.is_valid_med25519_public_key(account_id)
+
+
 console = Console()
+
+
+def to_stellar_amount(value: Decimal | float | int | str) -> Decimal:
+    """Parse a numeric or string value to Decimal with exact precision.
+
+    Float inputs are converted via str(value) to avoid binary float artifacts
+    where possible, while Decimal and string inputs retain exact precision.
+    """
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, (int, str)):
+        return Decimal(str(value).strip())
+    # float input
+    return Decimal(str(value))
+
+
+def format_stellar_amount(amount: Decimal | float | int | str) -> str:
+    """Serialize an on-chain Stellar amount as a string with exactly 7 decimal places."""
+    d = to_stellar_amount(amount)
+    return f"{d.quantize(_SEVEN_DECIMALS):f}"
 
 
 class StellarKit:
@@ -88,6 +123,8 @@ class StellarKit:
             acct = account_id or (talos.get("stellarAccountId", "") if talos else "")
             if not acct:
                 return {"error": "No Stellar account configured"}
+            if not _validate_account_id(acct):
+                return {"error": "invalid_account", "account": acct}
             # Reuse the shared client; fall back to a temporary one if not
             # initialized (e.g. called in tests without initialize()).
             client = self._client or httpx.AsyncClient(timeout=self._horizon_timeout)
@@ -120,6 +157,8 @@ class StellarKit:
     async def get_token_balance(self, account_id: str, token_id: str) -> dict[str, Any]:
         """Query Stellar asset balance via Horizon."""
         try:
+            if not _validate_account_id(account_id):
+                return {"error": "invalid_account", "account": account_id}
             client = self._client or httpx.AsyncClient(timeout=self._horizon_timeout)
             close_after = self._client is None
             try:
@@ -146,7 +185,7 @@ class StellarKit:
                 classify_stellar_failure(exc=exc),
             )
 
-    async def transfer_xlm(self, to_account: str, amount: float) -> dict[str, Any]:
+    async def transfer_xlm(self, to_account: str, amount: Decimal | float | str) -> dict[str, Any]:
         """Request XLM transfer via Web API (Web handles signing).
 
         On failure the returned dict carries ``error`` plus the bounded
@@ -155,8 +194,10 @@ class StellarKit:
         the historical ``{"status": "submitted", ...}`` shape.
         """
         try:
+            dec_amount = to_stellar_amount(amount)
+            formatted_amount = format_stellar_amount(dec_amount)
             result = await self._api.request_transfer(
-                to_account=to_account, amount=amount, currency="XLM"
+                to_account=to_account, amount=formatted_amount, currency="XLM"
             )
         except Exception as exc:
             return attach_stellar_failure(None, classify_stellar_failure(exc=exc))
@@ -166,7 +207,7 @@ class StellarKit:
             return attach_stellar_failure(result, failure)
 
         if result:
-            return {"status": "submitted", "to": to_account, "amount": amount}
+            return {"status": "submitted", "to": to_account, "amount": formatted_amount}
 
         # Empty response with no error payload — surface an unclassified failure.
         return attach_stellar_failure(None, classify_stellar_failure())

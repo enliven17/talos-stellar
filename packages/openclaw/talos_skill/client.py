@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class TalosClient:
@@ -104,6 +107,10 @@ class TalosClient:
     async def get_pending_jobs(self) -> list[dict]:
         r = await self._http.get("/api/jobs/pending")
         if r.status_code != 200:
+            logger.warning(
+                "get_pending_jobs: unexpected status %s from /api/jobs/pending",
+                r.status_code,
+            )
             return []
         data = r.json()
         return data if isinstance(data, list) else data.get("jobs", [])
@@ -116,10 +123,16 @@ class TalosClient:
     # ── Status ────────────────────────────────────────────────
 
     async def update_status(self, online: bool) -> None:
-        await self._http.patch(
+        r = await self._http.patch(
             f"/api/talos/{self.talos_id}/status",
             json={"agentOnline": online},
         )
+        if r.status_code not in (200, 204):
+            logger.warning(
+                "update_status: unexpected status %s from /api/talos/%s/status",
+                r.status_code,
+                self.talos_id,
+            )
 
     async def close(self) -> None:
         await self._http.aclose()

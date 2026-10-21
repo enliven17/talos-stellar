@@ -75,6 +75,17 @@ class StellarHealthSnapshot:
 
 
 @dataclass(frozen=True)
+class MastodonHealthSnapshot:
+    """Readiness snapshot for :class:`~talos_agent.adapters.mastodon.MastodonAdapter`."""
+
+    has_access_token: bool
+    has_instance_url: bool
+
+    def to_dict(self) -> dict[str, bool]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class X402HealthSnapshot:
     """Readiness snapshot for :class:`~talos_agent.payments.x402_signer.X402Signer`."""
 
@@ -89,6 +100,7 @@ class X402HealthSnapshot:
 AdapterHealthSnapshot = (
     DiscordHealthSnapshot
     | TelegramHealthSnapshot
+    | MastodonHealthSnapshot
     | XHealthSnapshot
     | StellarHealthSnapshot
     | X402HealthSnapshot

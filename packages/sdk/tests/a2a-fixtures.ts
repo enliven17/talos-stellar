@@ -15,10 +15,7 @@ import type {
 
 // ── Deterministic Valid Fixtures ───────────────────────────────────────
 
-/**
- * Valid Stellar provider ID
- */
-export const VALID_STELLAR_PROVIDER = "GABC1234567890ABCDEFGHIJ1234567890ABCDEFGHIJ1234567890ABCDEFGHIJ";
+export const VALID_STELLAR_PROVIDER = "GABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVW";
 
 /**
  * Valid Ethereum provider ID
@@ -38,7 +35,7 @@ export const validQuote: Quote = {
   assetCode: "USDC",
   network: "stellar",
   amount: "100.000000",
-  expiresAt: "2026-12-31T23:59:59.000Z",
+  expiresAt: "2026-12-30T23:59:59.000Z",
   signature: "a".repeat(64),
   quoteId: "quote-12345",
 };

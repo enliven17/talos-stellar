@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPatrons, tlsActivities, tlsRevenues } from "@/db/schema";
 import { and, desc, eq, sql } from "drizzle-orm";
+import { calculateMarketCap } from "@/lib/market-cap";
 import { badRequest, internalError } from "@/lib/api-response";
 import { parseLimit, LEADERBOARD_DEFAULT_LIMIT, LEADERBOARD_MAX_LIMIT, MAX_CURSOR_LENGTH } from "@/lib/limits";
 
@@ -111,7 +112,7 @@ revenueSum.total}, 0)`,
       patronCount: c.patronCount ?? 0,
       activityCount: c.activityCount ?? 0,
       totalRevenue: c.totalRevenue ?? 0,
-      marketCap: Number(c.pulsePrice) * c.totalSupply,
+      marketCap: calculateMarketCap(c.pulsePrice, c.totalSupply),
     }));
 
     const lastItem = page[page.length - 1];

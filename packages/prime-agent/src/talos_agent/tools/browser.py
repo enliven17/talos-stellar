@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from rich.console import Console
 
+from talos_agent.security.ssrf import BlockedURLError, assert_public_url
 from talos_agent.tools import context as _context
 from talos_agent.tools.registry import tool
 
@@ -192,6 +193,10 @@ async def search_web(query: str) -> dict:
 @tool("browse_page", "Visit a URL and extract information based on instructions")
 @_browser_safe
 async def browse_page(url: str, instruction: str) -> dict:
+    try:
+        await assert_public_url(url)
+    except BlockedURLError as exc:
+        return {"error": "blocked_url", "reason": str(exc), "url": url}
     await _deps().browser.goto(url)
     data = await _deps().browser.extract(instruction)
     return {"url": url, "data": data}

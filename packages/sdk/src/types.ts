@@ -149,6 +149,77 @@ export interface TransferParams {
   amount: number;
 }
 
+// ── Job lease types ──────────────────────────────────────────────
+
+/** Params for claiming a job lease (POST /api/jobs/:id/claim). */
+export interface ClaimJobParams {
+  /** Lease time-to-live in seconds. Positive integer, max 3600. */
+  ttlSeconds?: number;
+}
+
+/** Params for heartbeating / extending a job lease (POST /api/jobs/:id/heartbeat). */
+export interface HeartbeatJobParams {
+  /** The fencing token returned when the lease was claimed. */
+  fencingToken: number;
+}
+
+/** Params for extending a job lease (alias for heartbeat). */
+export interface ExtendJobLeaseParams {
+  /** The fencing token returned when the lease was claimed. */
+  fencingToken: number;
+  /** Optional additional TTL in seconds to request. */
+  ttlSeconds?: number;
+}
+
+/** Params for releasing a job lease (POST /api/jobs/:id/release). */
+export interface ReleaseJobParams {
+  /** The fencing token returned when the lease was claimed. */
+  fencingToken: number;
+}
+
+/** Params for reporting job progress (POST /api/jobs/:id/progress). */
+export interface ReportJobProgressParams {
+  /** Progress percentage 0-100. */
+  percent?: number;
+  /** Current stage label (1-64 chars). */
+  stage?: string;
+  /** Human-readable progress message (1-280 chars). */
+  message?: string;
+  /** The fencing token returned when the lease was claimed. */
+  fencingToken?: number;
+}
+
+/** Response from a successful job claim. */
+export interface ClaimedJob {
+  id: string;
+  leasedBy: string;
+  leasedAt: string;
+  leaseExpiresAt: string;
+  fencingToken: number;
+  status: string;
+}
+
+/** Response from a successful heartbeat / lease extension. */
+export interface HeartbeatResponse {
+  renewed: boolean;
+  leaseExpiresAt: string;
+}
+
+/** Response from a successful lease release. */
+export interface ReleaseJobResponse {
+  released: boolean;
+  jobId: string;
+}
+
+/** Response from a successful progress report. */
+export interface JobProgressResponse {
+  id: string;
+  status: string;
+  progress: unknown;
+  fencingToken: number;
+  updatedAt: string;
+}
+
 // ── Response types ───────────────────────────────────────────────
 
 export interface Talos {
@@ -238,6 +309,7 @@ export interface CommerceService {
   id: string;
   talosId: string;
   serviceName: string;
+  category?: string;
   description?: string;
   price: string;
   currency: string;
@@ -450,3 +522,86 @@ export interface BuyerProofDiagnostics {
  * are available. Must not throw; exceptions are silently swallowed.
  */
 export type BuyerProofDiagnosticCallback = (diag: BuyerProofDiagnostics) => void;
+
+// ── Governance Proposals ─────────────────────────────────────────
+
+export const PROPOSAL_STATUSES = ["pending", "approved", "rejected"] as const;
+export type ProposalStatus = (typeof PROPOSAL_STATUSES)[number];
+
+export function isValidProposalStatus(status: unknown): status is ProposalStatus {
+  return typeof status === "string" && (PROPOSAL_STATUSES as readonly string[]).includes(status);
+}
+
+export interface ListProposalsParams {
+  status?: ProposalStatus | (string & {});
+  limit?: number;
+  signal?: AbortSignal;
+  /**
+   * Per-request timeout in milliseconds. Overrides the client-level
+   * `timeoutMs` for this single call. `0` disables the timeout for this call
+   * regardless of the client default. Surfaces as `TalosTimeoutError`.
+   */
+  timeoutMs?: number;
+}
+
+export interface Proposal {
+  id: string;
+  talosId: string;
+  talosName: string;
+  type: string;
+  title: string;
+  description: string | null;
+  amount: string | null;
+  status: ProposalStatus | string;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  txHash: string | null;
+  createdAt: string;
+}
+
+// ── Marketplace Search ───────────────────────────────────────────
+
+export interface CapabilityFilter {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  isActive: boolean;
+}
+
+export interface MarketplaceSearchResult {
+  id: string;
+  title: string;
+  description: string;
+  capabilities: string[];
+  price: number;
+  currency: string;
+  provider: string;
+  rating: number;
+  createdAt: string;
+}
+
+export interface MarketplaceSearchResponse {
+  results: MarketplaceSearchResult[];
+  total: number;
+  page: number;
+  limit: number;
+  filters: {
+    capabilities: CapabilityFilter[];
+  };
+}
+
+export interface MarketplaceSearchParams {
+  q?: string;
+  capabilities?: string[] | string;
+  limit?: number;
+  page?: number;
+  signal?: AbortSignal;
+  /**
+   * Per-request timeout in milliseconds. Overrides the client-level
+   * `timeoutMs` for this single call. `0` disables the timeout for this call
+   * regardless of the client default. Surfaces as `TalosTimeoutError`.
+   */
+  timeoutMs?: number;
+}
+

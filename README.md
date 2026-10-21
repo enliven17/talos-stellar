@@ -125,6 +125,15 @@ cargo test --target wasm32-unknown-unknown
 cargo build --target wasm32-unknown-unknown --release
 ```
 
+## One-command testnet bootstrap
+
+```bash
+pnpm stack:up            # local Postgres (or set DATABASE_URL)
+pnpm testnet:bootstrap   # keys, Friendbot, USDC trustline, contracts, web/.env.local, DB migrate + seed, mint
+```
+
+Testnet only, safe to re-run. See [`docs/testnet-bootstrap.md`](docs/testnet-bootstrap.md).
+
 ## One-command local integration stack
 
 The repository now includes a reproducible local stack that starts Postgres, a mock Stellar provider, the web app, and optional agent services with a single command:

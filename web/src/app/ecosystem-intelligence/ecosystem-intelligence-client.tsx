@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { AgentAvatar } from "@/components/agent-avatar";
+import { CommerceNetworkClient } from "./commerce-network-client";
 import {
   BarChart,
   Bar,
@@ -349,6 +350,8 @@ export function EcosystemIntelligenceClient() {
           ))}
         </div>
       </section>
+
+      <CommerceNetworkClient />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-10">
         {/* Supply by Category */}

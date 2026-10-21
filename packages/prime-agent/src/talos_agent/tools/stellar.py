@@ -1,11 +1,12 @@
 """Stellar tools — internal economy (Pulse tokens, XLM dividends, governance).
 
 All operations are proxied through the Talos Web API or read from
-Stellar Mirror Node. The Agent never holds private keys.
+Stellar Horizon. The Agent never holds private keys.
 """
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from talos_agent.payments.stellar_kit import StellarKit
@@ -40,7 +41,7 @@ def _get_kit() -> StellarKit:
 
 
 @tool("transfer_xlm", "Transfer XLM to a Stellar account (dividends, payments). Auto-checks approval threshold.")
-async def transfer_xlm(to_account: str, amount: float, reason: str = "") -> dict:
+async def transfer_xlm(to_account: str, amount: float | str, reason: str = "") -> dict:
     kit = _get_kit()
     await kit.initialize()
 
@@ -50,18 +51,18 @@ async def transfer_xlm(to_account: str, amount: float, reason: str = "") -> dict
         result = await _deps().api.create_approval(
             _deps().settings.talos_id,
             type_="transaction",
-            title=f"XLM transfer: {amount} to {to_account}",
+            title=f"XLM transfer: {formatted_amount} to {to_account}",
             description=reason,
-            amount=amount,
+            amount=float(formatted_amount),
         )
         return {
             "status": "approval_requested",
             "approval_id": result.get("id") if result else None,
-            "amount": amount,
+            "amount": formatted_amount,
             "to": to_account,
         }
 
-    return await kit.transfer_xlm(to_account, amount)
+    return await kit.transfer_xlm(to_account, formatted_amount)
 
 
 @tool("get_xlm_balance", "Check XLM balance for the Talos account via Horizon")
@@ -71,8 +72,15 @@ async def get_xlm_balance() -> dict:
     return await kit.get_balance()
 
 
-@tool("create_pulse_token", "Request Pulse (equity) token creation. Requires Creator approval on Dashboard.")
+@tool("create_pulse_token", "Request Pulse (equity) token creation. Name must be 1-32 characters and symbol 1-12 alphanumeric characters. Requires Creator approval on Dashboard.")
 async def create_pulse_token(name: str, symbol: str, initial_supply: int = 1000000) -> dict:
+    if not name.strip() or len(name) > 32:
+        return {"error": "name must be between 1 and 32 characters"}
+    if re.fullmatch(r"[A-Za-z0-9]{1,12}", symbol) is None:
+        return {"error": "symbol must be 1-12 alphanumeric characters"}
+    if initial_supply <= 0:
+        return {"error": "initial_supply must be greater than 0"}
+
     result = await _deps().api.create_approval(
         _deps().settings.talos_id,
         type_="transaction",
@@ -88,14 +96,14 @@ async def create_pulse_token(name: str, symbol: str, initial_supply: int = 10000
     }
 
 
-@tool("airdrop_pulse", "Distribute Pulse tokens to Patron accounts. Requires Creator approval for large amounts.")
+@tool("airdrop_pulse", "Distribute Pulse tokens to Patron Stellar accounts (G... addresses). Requires Creator approval for large amounts.")
 async def airdrop_pulse(token_id: str, recipients: str) -> dict:
-    """recipients: JSON string of [{account: '0.0.xxx', amount: 1000}, ...]"""
+    """recipients: JSON string of [{"account": "G...", "amount": 1000}, ...]."""
     import json as _json
     try:
         recipient_list = _json.loads(recipients) if isinstance(recipients, str) else recipients
     except _json.JSONDecodeError:
-        return {"error": "recipients must be valid JSON: [{account: '...', amount: N}, ...]"}
+        return {"error": 'recipients must be valid JSON: [{"account": "G...", "amount": N}, ...]'}
 
     total_amount = sum(r.get("amount", 0) for r in recipient_list)
     threshold = float(_deps().settings.approval_threshold)
@@ -149,7 +157,7 @@ async def execute_approved_transfer(to_account: str, amount: float, currency: st
     return attach_stellar_failure(None, classify_stellar_failure())
 
 
-@tool("get_pulse_balance", "Check Pulse token balance for a specific account via Mirror Node")
+@tool("get_pulse_balance", "Check Pulse token balance for a specific Stellar G... account via Horizon")
 async def get_pulse_balance(account_id: str, token_id: str) -> dict:
     kit = _get_kit()
     await kit.initialize()

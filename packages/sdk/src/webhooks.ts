@@ -7,6 +7,7 @@ export class TalosWebhookError extends Error {
     public readonly code:
       | "MISSING_SIGNATURE"
       | "INVALID_HEADER"
+      | "MALFORMED_TIMESTAMP"
       | "TIMESTAMP_TOO_OLD"
       | "TIMESTAMP_TOO_NEW"
       | "SIGNATURE_MISMATCH"
@@ -290,10 +291,16 @@ export class TalosWebhook {
       const value = part.slice(eq + 1).trim();
       if (!value) continue;
       if (key === "t") {
-        const parsed = parseInt(value, 10);
-        if (!Number.isNaN(parsed)) {
-          timestamp = parsed;
+        // Strict integer-only check: reject scientific notation (1e10),
+        // decimals (12.5), empty strings, and values exceeding 13 digits
+        // (> year 2286 in Unix seconds, clearly malformed).
+        if (!/^\d{1,13}$/.test(value)) {
+          throw new TalosWebhookError(
+            `Malformed timestamp value in signature header: "${value}"`,
+            "MALFORMED_TIMESTAMP",
+          );
         }
+        timestamp = parseInt(value, 10);
       } else if (/^v\d+$/.test(key)) {
         const version = parseInt(key.slice(1), 10);
         if (!Number.isNaN(version)) {
@@ -335,12 +342,16 @@ export class TalosWebhook {
       eventId,
       logger,
       chaosInjector,
+      replayWindowSeconds,
     } = options;
 
     // Replay-window guard: replayWindowSeconds must cover the full tolerance
     // window, otherwise a dedup entry can expire while the timestamp is still
     // accepted, opening a replay attack vector.
     if (replayWindowSeconds !== undefined) {
+      // A zero window is only meaningful when clock-drift tolerance is
+      // disabled; with a positive tolerance it can never cover the acceptance
+      // window, so it is rejected alongside negative and non-finite values.
       if (
         !Number.isFinite(replayWindowSeconds) ||
         !Number.isInteger(replayWindowSeconds) ||
