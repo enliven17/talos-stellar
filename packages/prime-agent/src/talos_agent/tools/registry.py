@@ -847,6 +847,7 @@ def build_all_tools(
     # the module globals. The last agent to build wins here, which is why agents
     # must go through their own registry rather than rely on these.
     _internal_mod._db = db
+    _internal_mod._settings = settings
     _web_api_mod._api = api
     _web_api_mod._settings = settings
     _browser_mod._browser = browser

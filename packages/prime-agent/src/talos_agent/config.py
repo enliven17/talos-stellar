@@ -340,6 +340,31 @@ class Settings(BaseSettings):
         description="Maximum seconds for a single external tool call before it is cancelled.",
     )
 
+    # Content history and research note bounds (Issue #974)
+    content_history_max_limit: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        validation_alias="TALOS_CONTENT_HISTORY_MAX_LIMIT",
+        description=(
+            "Hard cap on the limit passed to get_content_history. "
+            "LLM-provided values above this are clamped down to it, "
+            "preventing unbounded rows from entering the prompt context."
+        ),
+    )
+    research_notes_max_bytes: int = Field(
+        default=4096,
+        ge=64,
+        le=131072,
+        validation_alias="TALOS_RESEARCH_NOTES_MAX_BYTES",
+        description=(
+            "Maximum byte length of a research note stored via "
+            "save_research_notes. Longer notes are truncated and a "
+            "truncation marker is appended so downstream consumers "
+            "and the audit trail can tell the difference."
+        ),
+    )
+
     # Job leasing
     job_lease_ttl: int = Field(
         default=300,
