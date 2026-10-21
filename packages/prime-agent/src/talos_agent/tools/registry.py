@@ -658,8 +658,82 @@ _TYPE_MAP = {
 }
 
 
+def _resolve_json_type(hint: Any) -> dict[str, Any]:
+    """Return a JSON Schema fragment for a single (non-Optional) type hint.
+
+    Handles:
+    - Primitives mapped through ``_TYPE_MAP``
+    - ``list[T]`` / ``tuple[T, ...]`` → ``{"type": "array", "items": ...}``
+    - ``dict[K, V]`` → ``{"type": "object"}``
+    - Anything unrecognised → ``{"type": "string"}``
+    """
+    import types as _types
+    import typing as _typing
+
+    origin = _typing.get_origin(hint)
+
+    # list[T] or tuple[T, ...]
+    if origin in (list, tuple):
+        args = _typing.get_args(hint)
+        prop: dict[str, Any] = {"type": "array"}
+        if args:
+            item_hint = args[0]
+            if item_hint is not Ellipsis:
+                prop["items"] = _resolve_json_type(item_hint)
+        return prop
+
+    # dict[K, V]
+    if origin is dict:
+        return {"type": "object"}
+
+    # Bare primitive or other concrete type; try origin first for generics
+    lookup = origin if origin in _TYPE_MAP else hint
+    json_type = _TYPE_MAP.get(lookup, "string")
+    return {"type": json_type}
+
+
+def _unwrap_optional(hint: Any) -> tuple[Any, bool]:
+    """Return ``(inner_hint, is_optional)``.
+
+    Handles both ``typing.Optional[T]`` (``__origin__ is Union``) and the
+    PEP 604 ``T | None`` syntax (``types.UnionType``, Python ≥ 3.10).
+    """
+    import types as _types
+    import typing as _typing
+
+    # PEP 604: float | None  →  types.UnionType
+    if isinstance(hint, _types.UnionType):
+        args = _typing.get_args(hint)
+        non_none = [a for a in args if a is not type(None)]
+        is_optional = type(None) in args
+        if len(non_none) == 1:
+            return non_none[0], is_optional
+        # Multi-type non-None union: fall back to string
+        return str, is_optional
+
+    # typing.Optional[T]  →  typing.Union[T, None]
+    origin = _typing.get_origin(hint)
+    if origin is _typing.Union:
+        args = _typing.get_args(hint)
+        non_none = [a for a in args if a is not type(None)]
+        is_optional = type(None) in args
+        if len(non_none) == 1:
+            return non_none[0], is_optional
+        return str, is_optional
+
+    return hint, False
+
+
 def _fn_to_json_schema(fn: Callable) -> dict:
-    """Extract JSON Schema parameters from function signature + type hints."""
+    """Extract JSON Schema parameters from function signature + type hints.
+
+    Correctly handles:
+    - ``typing.Optional[T]`` (``Union[T, None]``)
+    - PEP 604 ``T | None`` unions (``types.UnionType``, Python ≥ 3.10)
+    - ``list[T]`` / ``tuple[T, ...]`` → ``{"type": "array", "items": ...}``
+    - ``dict`` → ``{"type": "object"}``
+    - Bare primitives via ``_TYPE_MAP``
+    """
     try:
         hints = get_type_hints(fn)
     except Exception:
@@ -672,31 +746,13 @@ def _fn_to_json_schema(fn: Callable) -> dict:
         if param_name in ("self", "cls"):
             continue
         hint = hints.get(param_name, str)
-        # Unwrap Optional
-        origin = getattr(hint, "__origin__", None)
-        if origin is type(None):
-            continue
-        is_optional = False
-        if origin is not None and hasattr(hint, "__args__"):
-            args = hint.__args__
-            if type(None) in args:
-                is_optional = True
-                hint = next(a for a in args if a is not type(None))
-                origin = getattr(hint, "__origin__", None)
 
-        lookup_type = origin if origin in _TYPE_MAP else hint
-        json_type = _TYPE_MAP.get(lookup_type, "string")
-        prop: dict[str, Any] = {"type": json_type}
+        # Unwrap Optional / PEP 604 union, detect is_optional
+        hint, is_optional = _unwrap_optional(hint)
 
-        # Handle array item hints e.g. list[str]
-        if lookup_type is list and hasattr(hint, "__args__") and hint.__args__:
-            item_hint = hint.__args__[0]
-            item_origin = getattr(item_hint, "__origin__", None)
-            item_lookup = item_origin if item_origin in _TYPE_MAP else item_hint
-            item_json_type = _TYPE_MAP.get(item_lookup, "string")
-            prop["items"] = {"type": item_json_type}
+        prop = _resolve_json_type(hint)
 
-        # Use default as description hint
+        # Preserve explicit non-None defaults in the schema
         if param.default is not inspect.Parameter.empty and param.default is not None:
             prop["default"] = param.default
 
