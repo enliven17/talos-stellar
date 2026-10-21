@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.dependencies]
-soroban-sdk = "21.0.0"
+soroban-sdk = "29.0.1"
 stellar-asset-contract = "21.0.0"
 
 [profile.release]
