@@ -84,7 +84,7 @@ jobs:
         run: |
           docker compose exec -T postgres psql -U postgres -d talos < web/drizzle/bootstrap-roles.sql
           pnpm --dir web db:migrate
-          pnpm --dir web db:push --force
+          docker compose exec -T postgres psql -U postgres -d talos < web/drizzle/0010_retired_agent_preservation.sql
           pnpm --dir web db:seed
 
       - name: Get Playwright version
