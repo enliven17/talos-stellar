@@ -33,6 +33,86 @@ main.add_command(checkpoint)
 
 
 @main.command()
+@click.option(
+    "--allow",
+    "allowlist_extra",
+    multiple=True,
+    help="Additional tool name(s) to expose beyond the default read-only allowlist (repeatable).",
+)
+@click.option(
+    "--allow-only",
+    "allowlist_only",
+    multiple=True,
+    help="Expose ONLY these tool names, overriding the default allowlist entirely (repeatable).",
+)
+def mcp(allowlist_extra: tuple[str, ...], allowlist_only: tuple[str, ...]):
+    """Start a stdio MCP server exposing selected agent tools.
+
+    External MCP-compatible clients (Claude Desktop, Cursor, etc.) can
+    list and call the allowlisted tools. Read-only by default; the
+    agent's permission enforcer and policy middleware apply to every
+    call, so even allowlisted tools that trigger gated actions are
+    subject to the same policy checks as the internal agent loop.
+
+    \b
+    Examples:
+      # Default read-only allowlist
+      talos-agent mcp
+
+      # Add specific tools to the default allowlist
+      talos-agent mcp --allow get_xlm_balance --allow get_pulse_balance
+
+      # Expose only a custom set
+      talos-agent mcp --allow-only discover_services --allow-only get_pending_jobs
+    """
+    import asyncio
+
+    from talos_agent.mcp_server import DEFAULT_ALLOWLIST, build_mcp_server
+    from talos_agent.tools.registry import build_all_tools
+
+    settings = Settings()
+    if not settings.talos_api_key and not settings.talos_api_keys:
+        console.print("[yellow]Warning:[/yellow] TALOS_API_KEY not set; some tools may fail at call time.")
+
+    # Build the tool registry with the same DI as the agent loop. Browser
+    # and API client are None-safe for read-only tools; the MCP server does
+    # not need a live browser session for discovery/balance tools.
+    from talos_agent.db import LocalDB
+
+    ensure_app_dir()
+    db = LocalDB()
+
+    try:
+        registry = build_all_tools(
+            api=None,
+            db=db,
+            browser=None,
+            settings=settings,
+        )
+
+        if allowlist_only:
+            allowlist = frozenset(allowlist_only)
+        else:
+            allowlist = frozenset(DEFAULT_ALLOWLIST | set(allowlist_extra))
+
+        server = build_mcp_server(registry, allowlist=allowlist)
+
+        console.print(f"[bold green]MCP server starting[/bold green] ({len(allowlist)} tools exposed)", file=sys.stderr)
+        for name in sorted(allowlist):
+            console.print(f"  - {name}", file=sys.stderr)
+
+        asyncio.run(_run_mcp_stdio(server))
+    finally:
+        db.close()
+
+
+async def _run_mcp_stdio(server) -> None:
+    """Thin async wrapper so the db.close() in the caller still runs."""
+    from talos_agent.mcp_server import run_stdio
+    await run_stdio(server)
+
+
+@main.command()
 @click.option("--talos-id", default=None, help="Talos ID (overrides TALOS_ID in .env)")
 @click.option("--env-file", default=".env", help="Path to .env file")
 def start(talos_id: str | None, env_file: str):
