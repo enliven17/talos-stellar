@@ -39,7 +39,7 @@
     "test:contracts-readme": "node --test scripts/verify-contracts-readme.test.mjs"
   },
   "dependencies": {
-    "next": "16.2.2"
+    "next": "16.4.2"
   },
   "engines": {
     "node": ">=20"
