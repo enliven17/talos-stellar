@@ -198,6 +198,72 @@ backwards-compatible additions.
 
 The helper does not alter event names, topics, data fields, or field order.
 
+### 4. TalosDividends
+- **Purpose**: Pro-rata dividend distribution to Mitos token holders
+- **Features**:
+  - Epoch-based revenue commits (`commit_epoch`)
+  - Pro-rata patron claims (`claim_dividend`)
+  - Stale-epoch recovery (`recover_expired`)
+  - **Scoped pause controls** — see [Pause Domains](#pause-domains) below
+  - Events: `ep_commit`, `div_claim`, `ep_recov`, `pc_pause`, `pc_unpause`
+
+### 5. PauseControl (library crate)
+- **Purpose**: Reusable, domain-scoped pause/unpause primitive for any Soroban contract
+- **Features**:
+  - Named pause domains — freeze only the affected functionality
+  - Temporary storage: pause entries expire automatically with Soroban TTL
+  - `check_not_paused(env, domain)` — guard function, returns `Err(DomainPaused)` when paused
+  - `pause_domain(env, domain)` / `unpause_domain(env, domain)` — state setters
+  - `is_paused(env, domain)` — query helper
+  - Events: `pc_pause`, `pc_unpause`
+
+## Pause Domains
+
+`TalosDividends` uses **scoped pause controls** so operators can freeze only the
+affected operation during an incident without halting unrelated functionality.
+
+### Domain table
+
+| Domain symbol | Entry point(s) gated      | When to use                                           |
+|---------------|---------------------------|-------------------------------------------------------|
+| `"commit"`    | `commit_epoch`            | Halt new epoch commits while investigating a faulty epoch |
+| `"claim"`     | `claim_dividend`          | Halt patron claims while an epoch is under review     |
+
+### Pause / unpause flow
+
+```
+# Halt commits only (claims still work)
+stellar contract invoke --id <CONTRACT_ID> -- pause --admin GADMIN... --domain commit
+
+# Halt claims only (commits still work)
+stellar contract invoke --id <CONTRACT_ID> -- pause --admin GADMIN... --domain claim
+
+# Restore after the incident is resolved
+stellar contract invoke --id <CONTRACT_ID> -- unpause --admin GADMIN... --domain claim
+stellar contract invoke --id <CONTRACT_ID> -- unpause --admin GADMIN... --domain commit
+```
+
+Only the contract **admin** may call `pause` or `unpause`.
+
+### Recovery (`recover_expired`) while paused
+
+`recover_expired` is intentionally **not gated** by any pause domain.
+Recovery is a maintenance operation that marks stale epochs as expired and
+keeps persistent storage healthy; blocking it during an incident would worsen
+the situation rather than contain it.
+
+If a complete operational freeze is needed (including recovery), revoke the
+admin key or deploy an upgraded contract rather than relying on pause domains.
+
+### Raising a pause (adding a new domain)
+
+To add a new domain to an existing contract:
+
+1. Define a `const DOMAIN_XYZ: &str = "xyz"` constant.
+2. Add `check_not_paused(&env, Symbol::new(&env, DOMAIN_XYZ))` at the top of the guarded entry point.
+3. Document the domain in this table.
+4. Add unit tests in the contract's test module.
+
 ## Prerequisites
 
 ```bash
