@@ -14,6 +14,7 @@ Install these before you start working locally:
 - Python 3.11 or newer
 - `uv`
 - Rust stable toolchain and `cargo`
+- `pre-commit` (or install via `uv tool install pre-commit` / `pip install pre-commit`)
 - Docker (for `scripts/local-stack.sh`)
 - Optional: Soroban CLI, installed as `stellar` via `cargo install --locked stellar-cli --features opt`
 - [`gitleaks`](https://github.com/gitleaks/gitleaks) secret scanner — `brew install gitleaks`, or download a binary from the [releases page](https://github.com/gitleaks/gitleaks/releases) (required for `pnpm run secrets:check`)
@@ -124,6 +125,21 @@ To deploy the contracts to testnet, use the provided script from a Bash-compatib
 ```
 
 The script prints the deployed contract IDs that need to be copied into the web app environment file.
+
+### 5. Install pre-commit hooks
+
+To automatically catch formatting, lint, and secret leaks before committing:
+
+```bash
+pre-commit install
+```
+
+To run all configured hooks manually against changed files or all files:
+
+```bash
+pre-commit run
+pre-commit run --all-files
+```
 
 ## Environment Files
 
@@ -784,7 +800,7 @@ bash scripts/ci-contract-cache.test.sh
 1. Create a branch from the latest `main`
 2. Make your changes
 3. Update documentation when setup steps or environment variables change
-4. Run the relevant tests for the area you touched, plus `pnpm run secrets:check` for the local secret scan
+4. Run the relevant tests for the area you touched, plus `pnpm run secrets:check` (or `pre-commit run`) for the local contribution checks
 5. Open a pull request using the template in [`.github/PULL_REQUEST_TEMPLATE.md`](./.github/PULL_REQUEST_TEMPLATE.md)
 6. Link the issue in your PR description, for example `Closes #39`
 
