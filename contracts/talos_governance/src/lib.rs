@@ -32,6 +32,7 @@ pub enum ProposalStatus {
     Approved,
     Rejected,
     Executed,
+    Cancelled,
 }
 
 #[contracttype]
@@ -651,6 +652,32 @@ impl TalosGovernance {
 
         emit_proposal_created(&env, proposal_id, talos_id, proposer, snapshot_ledger, end_ledger);
         proposal_id
+    }
+
+    pub fn cancel_proposal(env: Env, proposer: Address, proposal_id: u32) {
+        proposer.require_auth();
+
+        let mut proposal: Proposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Proposal(proposal_id))
+            .expect("Proposal not found");
+
+        if proposal.proposer != proposer {
+            panic!("Only the proposer can cancel this proposal");
+        }
+        if proposal.status != ProposalStatus::Active {
+            panic!("Only active proposals can be cancelled");
+        }
+        if proposal.total_voters > 0 {
+            panic!("Cannot cancel a proposal that has already received votes");
+        }
+
+        proposal.status = ProposalStatus::Cancelled;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
+        emit_proposal_status_changed(&env, proposal_id, ProposalStatus::Cancelled);
     }
 
     pub fn vote(env: Env, voter: Address, proposal_id: u32, choice: VoteChoice) {
