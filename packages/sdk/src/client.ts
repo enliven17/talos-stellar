@@ -132,6 +132,38 @@ export type ResolvedRetryPolicy = Readonly<Required<RetryPolicyOptions>>;
 export type ResolvedRetryOptions = Readonly<Required<RetryOptions>>;
 
 /**
+ * Options for the opt-in in-flight GET deduplication feature.
+ *
+ * When {@link TalosClientOptions.dedupeInFlightGets} is `true` (or this
+ * object), concurrent calls to the **same** GET URL with the **same**
+ * authorization identity are coalesced into a single fetch. The shared
+ * promise is dropped from the map the moment it settles, so the next call
+ * after settlement always issues a fresh request.
+ *
+ * **AbortSignal semantics**: deduplication does NOT share `AbortSignal`
+ * instances. If the deduped call is aborted, only that caller's
+ * `AbortSignal` fires — the shared network request continues for any other
+ * concurrent callers that did not abort. This is intentional: aborting one
+ * consumer must not cancel a request that other live callers are waiting on.
+ *
+ * **Non-GET requests** are never deduped regardless of this setting.
+ */
+export interface DedupeInFlightGetsOptions {
+  /**
+   * Upper bound on the number of concurrent in-flight GET keys tracked.
+   * Once the map reaches this size, new requests bypass deduplication
+   * rather than evicting existing entries. Default 256.
+   */
+  maxInFlight?: number;
+  /**
+   * Optional observer invoked each time a deduplicated request is served
+   * from a shared in-flight promise (i.e. *not* the first caller). Must not
+   * throw; invoked fire-and-forget.
+   */
+  onDedupe?: (event: { url: string; method: string }) => void;
+}
+
+/**
  * Client configuration. All fields are optional; defaults match the prior
  * behavior for backward compatibility.
  */
@@ -470,6 +502,9 @@ function applyJitter(delay: number, jitter: number): number {
  * timeout, idempotency keys, request signing, chaos injection and bounded
  * auto-retry.
  */
+/** Default cap on the number of tracked in-flight GET keys. */
+const DEFAULT_MAX_IN_FLIGHT = 256;
+
 export class TalosClient {
   private baseUrl: string;
   private headers: Record<string, string>;
@@ -485,6 +520,23 @@ export class TalosClient {
   private readonly fetchOverride?: typeof fetch;
   private readonly chaosInjector?: ChaosInjector;
   private signer?: SigningController;
+
+  // ── In-flight GET deduplication ────────────────────────────
+  /**
+   * Resolved options for the in-flight deduplication feature, or `null`
+   * when the feature is disabled (the default).
+   */
+  private readonly dedupeOptions: Required<DedupeInFlightGetsOptions> | null;
+  /**
+   * Map from dedup key → shared in-flight promise. Entries are removed the
+   * moment the shared promise settles so the next caller always issues a
+   * fresh request.
+   *
+   * Key format: `<METHOD> <URL>\n<auth-identity>`
+   * where auth-identity is either the Authorization header value or `""`.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private readonly inFlightGets: Map<string, Promise<any>>;
 
   constructor(options: TalosClientOptions = {}) {
     // An explicit `retry` config without `retryPolicy` opts out of the
@@ -508,6 +560,26 @@ export class TalosClient {
       this.headers["Authorization"] = `Bearer ${options.apiKey}`;
     }
     if (options.signer) this.signer = new SigningController(options.signer, options.signing);
+
+    // Resolve in-flight deduplication options.
+    if (options.dedupeInFlightGets) {
+      const raw: DedupeInFlightGetsOptions =
+        typeof options.dedupeInFlightGets === "object" ? options.dedupeInFlightGets : {};
+      const maxInFlight = raw.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT;
+      if (!Number.isInteger(maxInFlight) || maxInFlight < 1) {
+        throw new RangeError("dedupeInFlightGets.maxInFlight must be a positive integer");
+      }
+      if (raw.onDedupe !== undefined && typeof raw.onDedupe !== "function") {
+        throw new TypeError("dedupeInFlightGets.onDedupe must be a function");
+      }
+      this.dedupeOptions = {
+        maxInFlight,
+        onDedupe: raw.onDedupe ?? (() => { /* no-op */ }),
+      };
+    } else {
+      this.dedupeOptions = null;
+    }
+    this.inFlightGets = new Map();
   }
 
   /**
@@ -582,6 +654,20 @@ export class TalosClient {
       });
     }
     return fetchFn;
+  }
+
+  /**
+   * Build the deduplication key for a GET request. Returns `null` when the
+   * feature is disabled, the method is not GET, or the in-flight map is
+   * already at capacity.
+   */
+  private dedupeKey(method: string, url: string): string | null {
+    if (!this.dedupeOptions || method !== "GET") return null;
+    if (this.inFlightGets.size >= this.dedupeOptions.maxInFlight) return null;
+    // Include the Authorization identity so different API keys do not share
+    // each other's responses.
+    const auth = this.headers["Authorization"] ?? "";
+    return `GET ${url}\n${auth}`;
   }
 
   // ── Internal helpers ───────────────────────────────────────
