@@ -1,7 +1,7 @@
 """Stellar tools — internal economy (Pulse tokens, XLM dividends, governance).
 
 All operations are proxied through the Talos Web API or read from
-Stellar Mirror Node. The Agent never holds private keys.
+Stellar Horizon. The Agent never holds private keys.
 """
 
 from __future__ import annotations
@@ -88,14 +88,14 @@ async def create_pulse_token(name: str, symbol: str, initial_supply: int = 10000
     }
 
 
-@tool("airdrop_pulse", "Distribute Pulse tokens to Patron accounts. Requires Creator approval for large amounts.")
+@tool("airdrop_pulse", "Distribute Pulse tokens to Patron Stellar accounts (G... addresses). Requires Creator approval for large amounts.")
 async def airdrop_pulse(token_id: str, recipients: str) -> dict:
-    """recipients: JSON string of [{account: '0.0.xxx', amount: 1000}, ...]"""
+    """recipients: JSON string of [{"account": "G...", "amount": 1000}, ...]."""
     import json as _json
     try:
         recipient_list = _json.loads(recipients) if isinstance(recipients, str) else recipients
     except _json.JSONDecodeError:
-        return {"error": "recipients must be valid JSON: [{account: '...', amount: N}, ...]"}
+        return {"error": 'recipients must be valid JSON: [{"account": "G...", "amount": N}, ...]'}
 
     total_amount = sum(r.get("amount", 0) for r in recipient_list)
     threshold = float(_deps().settings.approval_threshold)
@@ -149,7 +149,7 @@ async def execute_approved_transfer(to_account: str, amount: float, currency: st
     return attach_stellar_failure(None, classify_stellar_failure())
 
 
-@tool("get_pulse_balance", "Check Pulse token balance for a specific account via Mirror Node")
+@tool("get_pulse_balance", "Check Pulse token balance for a specific Stellar G... account via Horizon")
 async def get_pulse_balance(account_id: str, token_id: str) -> dict:
     kit = _get_kit()
     await kit.initialize()
