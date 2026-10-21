@@ -29,6 +29,34 @@ For the Rust contracts, also add the Wasm target:
 rustup target add wasm32-unknown-unknown
 ```
 
+## Cross-Package Task Runner
+
+A `justfile` is provided for short, discoverable commands that run the same checks used by CI across all packages. Install `just`:
+
+- **Linux/macOS**: `cargo install just`
+- **Windows**: `winget install casey.just` or `scoop install just`
+
+Run from the repository root:
+
+```bash
+just                    # List all available recipes
+just test-web           # Run web package tests
+just test-sdk           # Run SDK package tests
+just test-agent         # Run prime-agent package tests
+just test-contracts     # Run contracts package tests
+just test-all           # Run all package tests
+just lint-all           # Run lint for all packages
+just stack-up           # Start local integration stack
+just stack-down         # Stop local integration stack
+just stack-logs         # View stack logs
+just stack-reset        # Reset the stack
+just stack-reset-data --yes    # Reset local test data
+```
+
+Each recipe runs the exact command used by the corresponding CI workflow, so local runs match CI behavior. The root `package.json` scripts remain unchanged; `just` is a convenience layer for contributors.
+
+**Windows note**: The `just` tool runs on Windows, but some recipes (e.g., `stack-*`) use Bash scripts. On Windows, use WSL or Git Bash for those commands, or use the equivalent `pnpm` scripts from the root `package.json`.
+
 ## Repository Layout
 
 - `web/` - Next.js application, API routes, and frontend
