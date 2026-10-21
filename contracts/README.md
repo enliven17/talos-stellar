@@ -309,10 +309,25 @@ Option B: Automated Deployment (recommended)
 ./deploy.sh testnet --source deployer
 
 # The script will:
-# 1. Build contracts in release mode
-# 2. Deploy both contracts
-# 3. Initialize TalosNameService
-# 4. Output environment variable assignments
+# 1. Build all four contracts in release mode
+# 2. Deploy TalosRegistry, TalosNameService, TalosGovernance, TalosDividends
+# 3. Initialize each contract (skips already-initialized contracts — idempotent)
+# 4. Output all four environment variable assignments
+
+# Mainnet deployment requires explicit confirmation (--yes or interactive prompt):
+./deploy.sh mainnet --source deployer --yes
+
+# Optional env vars to auto-initialize governance and dividends:
+#   GOVERNANCE_ADMIN=G...         Admin address for TalosGovernance
+#   GOVERNANCE_PULSE_TOKEN=C...   Pulse token contract address
+#   GOVERNANCE_QUORUM_THRESHOLD=100          (default)
+#   GOVERNANCE_CONSENSUS_THRESHOLD=5100      (default, basis points)
+#   GOVERNANCE_VOTING_PERIOD_LEDGERS=17280   (default, ~1 day)
+#   DIVIDENDS_ADMIN=G...          Admin address for TalosDividends
+#
+# Contract IDs are cached under .deploy-ids/<network>/. Re-running the script
+# skips already-deployed contracts. Delete a cache file to force re-deployment:
+#   rm .deploy-ids/testnet/governance_id
 ```
 
 ### Step 4: Post-Deployment Configuration
@@ -435,6 +450,14 @@ stellar contract invoke --id "$GOVERNANCE_CONTRACT" --network testnet -- version
 | `TALOS_PROTOCOL_WALLET` | G-address | Receives 3% protocol fee on Talos creation | `GA3HQZTKR4U...` |
 | `NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT` | C-address | TalosRegistry contract ID | `CBZLPFCWX4QIZ...` |
 | `NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT` | C-address | TalosNameService contract ID | `CBZLPFCWX4QIZ...` |
+| `NEXT_PUBLIC_TALOS_GOVERNANCE_CONTRACT` | C-address | TalosGovernance contract ID | `CBZLPFCWX4QIZ...` |
+| `NEXT_PUBLIC_TALOS_DIVIDENDS_CONTRACT` | C-address | TalosDividends contract ID | `CBZLPFCWX4QIZ...` |
+| `GOVERNANCE_ADMIN` | G-address | Admin address for TalosGovernance `initialize` | `GBZLPFCWX4QIZ...` |
+| `GOVERNANCE_PULSE_TOKEN` | C-address | Pulse token contract for governance voting weight | `CBZLPFCWX4QIZ...` |
+| `GOVERNANCE_QUORUM_THRESHOLD` | integer | Minimum vote weight for quorum (default: `100`) | `100` |
+| `GOVERNANCE_CONSENSUS_THRESHOLD` | integer | Approval basis points to pass (default: `5100`) | `5100` |
+| `GOVERNANCE_VOTING_PERIOD_LEDGERS` | integer | Voting window in ledgers (default: `17280` ≈ 1 day) | `17280` |
+| `DIVIDENDS_ADMIN` | G-address | Admin address for TalosDividends `initialize` | `GBZLPFCWX4QIZ...` |
 
 ### Deployment Checklist
 
@@ -447,8 +470,10 @@ stellar contract invoke --id "$GOVERNANCE_CONTRACT" --network testnet -- version
 - [ ] WASM files exist: `ls target/wasm32-unknown-unknown/release/*.wasm`
 - [ ] TalosRegistry deployed and `version()` returns `[1, 1, 0]`
 - [ ] TalosNameService initialized: `stellar contract invoke --id <NAME_SERVICE_ID> -- is_name_available --name test`
-- [ ] Contract IDs added to `.env.local`
-- [ ] Timelock config set on both contracts (if desired)
+- [ ] TalosGovernance deployed (initialized if `GOVERNANCE_ADMIN` + `GOVERNANCE_PULSE_TOKEN` env vars set)
+- [ ] TalosDividends deployed (initialized if `DIVIDENDS_ADMIN` env var set)
+- [ ] All four contract IDs added to `.env.local`
+- [ ] Timelock config set on registry/name-service contracts (if desired)
 
 ### Troubleshooting
 
