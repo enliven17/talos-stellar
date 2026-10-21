@@ -16,6 +16,7 @@ export type {
   ResolvedRetryPolicy,
   ResolvedRetryOptions,
   TalosErrorEvent,
+  TalosResponseEvent,
   ReadOptions,
   WriteOptions,
 } from "./client.js";
@@ -75,10 +76,15 @@ export {
   sanitizeBody,
   redactSecrets,
   snapshotHeaders,
+  parseRateLimit,
   parseRetryAfter,
   parseX402Challenge,
+  redactEventPath,
+  diagnoseBuyerProof,
   MAX_BODY_BYTES,
 } from "./errors.js";
+<<<<<<< HEAD
+export type { RateLimitInfo, HeaderSource } from "./errors.js";
 
 // ── Domain types ──────────────────────────────────────────────────
 

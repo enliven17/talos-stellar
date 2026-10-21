@@ -341,8 +341,12 @@ export class TalosWebhook {
     // window, otherwise a dedup entry can expire while the timestamp is still
     // accepted, opening a replay attack vector.
     if (replayWindowSeconds !== undefined) {
+      // A zero window is only meaningful when clock-drift tolerance is
+      // disabled; with a positive tolerance it can never cover the acceptance
+      // window, so it is rejected alongside negative and non-finite values.
       if (
         !Number.isFinite(replayWindowSeconds) ||
+<<<<<<< HEAD
         !Number.isInteger(replayWindowSeconds) ||
         replayWindowSeconds < 0 ||
         (replayWindowSeconds === 0 && toleranceSeconds > 0)

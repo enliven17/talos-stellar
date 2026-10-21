@@ -47,12 +47,15 @@ import {
   TalosAPIError,
   TalosTransportError,
   TalosPaymentError,
+  TalosTransportError,
   classifyTransportError,
   errorFromResponse,
+  parseRateLimit,
   parseX402Challenge,
   parseRetryAfter as parseRetryAfterHeader,
   redactEventPath,
   diagnoseBuyerProof,
+  type RateLimitInfo,
 } from "./errors.js";
 import {
   generateIdempotencyKey,
@@ -207,8 +210,17 @@ export interface TalosClientOptions {
   /**
    * Optional observer invoked once per failed SDK call (after retries are
    * exhausted). Must not throw; invoked fire-and-forget.
+   *
+   * The event carries the parsed `X-RateLimit-*` counters (when present) so
+   * failure handling can react to quota state without re-reading headers.
    */
   onError?: (event: TalosErrorEvent) => void;
+  /**
+   * Optional observer invoked once for **every** HTTP response (successful or
+   * not, including each retry attempt) with the parsed `X-RateLimit-*`
+   * counters. Must not throw; invoked fire-and-forget.
+   */
+  onResponse?: (event: TalosResponseEvent) => void;
   /** Optional fetch implementation. Defaults to the global `fetch` (resolved lazily). */
   fetch?: typeof fetch;
   /** Optional fault injector for chaos testing. Faults fire before each fetch. */
@@ -271,6 +283,25 @@ export interface TalosErrorEvent {
   method: string;
   attempt: number;
   durationMs: number;
+  /** Parsed `X-RateLimit-*` counters from the failing response, when present. */
+  rateLimit?: RateLimitInfo;
+}
+
+/** Structured event emitted to {@link TalosClientOptions.onResponse}. */
+export interface TalosResponseEvent {
+  path: string;
+  method: string;
+  /** HTTP status code of the response. */
+  status: number;
+  /** 1-based attempt number that produced this response. */
+  attempt: number;
+  /** Wall-clock duration of the attempt in milliseconds. */
+  durationMs: number;
+  /**
+   * Parsed `X-RateLimit-*` counters. `undefined` when the response carried no
+   * (parseable) rate-limit headers.
+   */
+  rateLimit?: RateLimitInfo;
 }
 
 type RequestParams = Record<string, string | number | boolean>;
@@ -513,6 +544,13 @@ export class TalosClient {
   private readonly networkConfig?: ResolvedNetworkConfig;
   private readonly timeoutMs?: number;
   private readonly onError?: (event: TalosErrorEvent) => void;
+  private readonly onResponse?: (event: TalosResponseEvent) => void;
+  /**
+   * Most recent parsed `X-RateLimit-*` snapshot. Updated by every response
+   * that carried counters; responses without them leave the previous value
+   * intact so callers can still read the last quota they observed.
+   */
+  private lastRateLimit?: RateLimitInfo;
   /**
    * Optional fetch override. `undefined` means `globalThis.fetch` is read
    * lazily on every call so `vi.stubGlobal("fetch", …)` keeps working.
@@ -550,6 +588,7 @@ export class TalosClient {
     });
     this.timeoutMs = options.timeoutMs;
     this.onError = options.onError;
+    this.onResponse = options.onResponse;
     this.fetchOverride = options.fetch;
     this.chaosInjector = options.chaosInjector;
     this.baseUrl = (
@@ -604,6 +643,19 @@ export class TalosClient {
    */
   getNetworkConfig(): ResolvedNetworkConfig | undefined {
     return this.networkConfig;
+  }
+
+  /**
+   * Counters from the most recent response that carried `X-RateLimit-*`
+   * headers, or `undefined` when none has been observed yet.
+   *
+   * Responses that omit the headers (or send values that cannot be parsed)
+   * leave the previous snapshot in place, so this reflects the last known
+   * quota state. Pair it with `onResponse` when you need per-response
+   * granularity.
+   */
+  getLastRateLimit(): RateLimitInfo | undefined {
+    return this.lastRateLimit;
   }
 
   /**
@@ -931,6 +983,36 @@ export class TalosClient {
     return null;
   }
 
+  /**
+   * Record the parsed `X-RateLimit-*` counters from a response and notify the
+   * `onResponse` observer. Never throws: a misbehaving observer must not be
+   * able to break a request.
+   */
+  private observeResponse(
+    path: string,
+    method: string,
+    status: number,
+    attempt: number,
+    durationMs: number,
+    headers: Headers | Record<string, string> | undefined | null,
+  ): void {
+    const rateLimit = parseRateLimit(headers);
+    if (rateLimit !== undefined) this.lastRateLimit = rateLimit;
+    if (!this.onResponse) return;
+    try {
+      this.onResponse({
+        path: redactEventPath(path),
+        method,
+        status,
+        attempt,
+        durationMs,
+        ...(rateLimit !== undefined ? { rateLimit } : {}),
+      });
+    } catch {
+      // Fire-and-forget.
+    }
+  }
+
   private notifyError(event: TalosErrorEvent): void {
     if (!this.onError) return;
     try {
@@ -992,6 +1074,7 @@ export class TalosClient {
     let lastError: TalosAPIError | undefined;
     let attempt = 1;
     for (; attempt <= maxAttempts; attempt += 1) {
+      const attemptStartedAt = Date.now();
       if (this.chaosInjector) await this.injectChaos();
 
       const baseHeaders = this.mergeHeaders(requestInit.headers, extraHeaders);
@@ -1014,6 +1097,10 @@ export class TalosClient {
         } catch (cause) {
           throw classifyTransportError(cause, path);
         }
+
+        // Surface rate-limit counters for every response, including the
+        // attempts that are about to fail and be retried.
+        this.observeResponse(path, method, res.status, attempt, Date.now() - attemptStartedAt, res.headers);
 
         if (res.ok) {
           // Malformed JSON on a 2xx intentionally propagates the raw parse error.
@@ -1055,6 +1142,7 @@ export class TalosClient {
       method,
       attempt: Math.min(attempt, maxAttempts),
       durationMs: Date.now() - startedAt,
+      ...(finalError.rateLimit !== undefined ? { rateLimit: finalError.rateLimit } : {}),
     });
     throw finalError;
   }
@@ -1315,6 +1403,7 @@ export class TalosClient {
       : baseHeaders;
     const timeout = this.acquireTimeoutController(signal, callTimeoutMs);
     const effectiveSignal = timeout?.signal ?? signal;
+    const challengeAttemptStartedAt = Date.now();
     let res: Response;
     try {
       res = await this.resolveFetch()(url, {
@@ -1323,6 +1412,16 @@ export class TalosClient {
         body,
         ...(effectiveSignal ? { signal: effectiveSignal } : {}),
       });
+      // The challenge probe is a response too — surface its counters so a
+      // caller throttling on quota sees every hop of the x402 flow.
+      this.observeResponse(
+        path,
+        "POST",
+        res.status,
+        1,
+        Date.now() - challengeAttemptStartedAt,
+        res.headers,
+      );
     } catch (cause) {
       throw classifyTransportError(cause, path);
     } finally {
