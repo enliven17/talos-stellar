@@ -93,7 +93,9 @@ async function _GET(request: NextRequest) {
   const eventLimit = limitResult.limit;
 
   // Reject before allocating any resources when the pool is full.
-  if (!acquireConnection()) {
+  // The wallet is passed as the per-key so the pool can also enforce a
+  // per-client cap (SSE_MAX_CONNECTIONS_PER_KEY) on top of the global cap.
+  if (!acquireConnection(walletAddr)) {
     return new Response("Too many SSE connections — retry later", {
       status: 503,
       headers: { "Retry-After": "10", "Content-Type": "text/plain" },
@@ -164,7 +166,7 @@ async function _GET(request: NextRequest) {
       function cleanup() {
         if (isClosed) return;
         isClosed = true;
-        releaseConnection();
+        releaseConnection(walletAddr);
         clearInterval(pollTimer);
         clearInterval(pingTimer);
         try {
