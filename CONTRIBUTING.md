@@ -218,6 +218,8 @@ and never logs credentials. See
 [docs/local-test-data-reset.md](./docs/local-test-data-reset.md) for the full
 behavior contract. Regression tests for the shell layer: `bash scripts/local-stack.test.sh`.
 
+For symptoms, root causes, and fixes for common local setup failures (port conflicts, stale volumes, migration journal mismatches, seed guard refusals, and missing environment variables), see the [Local Stack Troubleshooting Guide](./docs/TROUBLESHOOTING.md).
+
 The stack defaults to the web service and a mock Stellar provider. Add the optional prime-agent service with:
 
 ```bash
@@ -702,6 +704,9 @@ Cost limits and TTLs (Time-To-Live) are enforced programmatically. If an environ
 
 ### Troubleshooting
 
+For common local integration stack failures (Docker, port allocation, stale volumes, migration drift, seed guard refusals, or missing environment variables), see the [Local Stack Troubleshooting Guide](./docs/TROUBLESHOOTING.md).
+
+For preview environments specifically:
 - **Database provisioning fails**: Check the GitHub Actions logs for `PR Preview Provision`. Ensure your branch passes linting and type checks, as migration errors often cause provisioning failures.
 - **Preview URL is missing**: Vercel manages the web preview natively. Ensure the Vercel GitHub integration is active for the repository.
 - **Stale data**: The environment is seeded once upon provisioning. If you change the seed script, you may need to close and reopen the PR to provision a fresh database.
