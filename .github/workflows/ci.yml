@@ -28,6 +28,9 @@ jobs:
       - name: Validate operational metrics definitions
         run: node scripts/operational-metrics.test.mjs
 
+      - name: Test testnet bootstrap script
+        run: node --test scripts/testnet-bootstrap.test.mjs
+
       # ── Guard: run the detector's own test suite before it gates CI.
       #    A broken detector must never silently skip package checks.
       - name: Self-test detection script
@@ -88,7 +91,7 @@ jobs:
           version: 10
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: pnpm
@@ -136,7 +139,7 @@ jobs:
 
       - name: Setup Node.js
         if: matrix.package == 'web' || matrix.package == 'sdk'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: pnpm
@@ -155,7 +158,7 @@ jobs:
 
       - name: Setup uv
         if: matrix.package == 'prime-agent'
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: packages/prime-agent/uv.lock
@@ -239,6 +242,11 @@ jobs:
         if: matrix.package == 'web' && !cancelled()
         working-directory: web
         run: pnpm test:payment-coverage
+
+      - name: "[web] Check generated schemas"
+        if: matrix.package == 'web'
+        working-directory: web
+        run: pnpm schemas:check
 
       # ── SDK: build/typecheck, tests ─────────────────────────────
       - name: "[sdk] Build & typecheck"

@@ -99,6 +99,14 @@ export function Header() {
               >
                 {truncatedAddress}
               </span>
+              {publicKey && (
+                <CopyButton
+                  value={publicKey}
+                  label="Copy wallet address"
+                  confirmText="Copied!"
+                  className="px-1.5 py-1"
+                />
+              )}
               <button
                 onClick={disconnect}
                 data-testid="disconnect-wallet-button"
@@ -119,9 +127,19 @@ export function Header() {
 
           {/* Mobile: wallet status pill */}
           {isConnected && (
-            <span className="md:hidden text-xs font-mono text-nav-foreground bg-surface border border-border px-2 py-1">
-              {truncatedAddress}
-            </span>
+            <div className="md:hidden flex items-center gap-1">
+              <span className="text-xs font-mono text-nav-foreground bg-surface border border-border px-2 py-1">
+                {truncatedAddress}
+              </span>
+              {publicKey && (
+                <CopyButton
+                  value={publicKey}
+                  label="Copy wallet address"
+                  confirmText="Copied!"
+                  size="sm"
+                />
+              )}
+            </div>
           )}
 
           {/* Hamburger */}

@@ -15,9 +15,7 @@ async function _GET(req: NextRequest) {
   if (!wallet) {
     return badRequest(req, "wallet parameter required");
   }
-
-  // Stellar public keys are case-sensitive; compare exactly.
-  const addr = wallet;
+  const addr = walletResult.publicKey;
 
   // Add timeout for patron query
   let patronTalosIds = [];

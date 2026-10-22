@@ -173,6 +173,38 @@ describe("POST /api/commerce/cross-chain-webhook", () => {
     expect(mockDb.select).not.toHaveBeenCalled();
   });
 
+  it("rejects non-hex characters in signature without throwing or partially decoding", async () => {
+    const body = { talosId: "agent_1" };
+    const now = Math.floor(Date.now() / 1000);
+    const validSig = signPayload(now, JSON.stringify(body));
+    // Replace characters with non-hex characters e.g. 'z'
+    const nonHexSig = "z".repeat(64);
+    const request = buildRequest(body, { timestamp: now, signature: nonHexSig });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(401);
+    const resBody = await response.json();
+    expect(resBody.error).toBe("Invalid webhook signature");
+    expect(mockDb.select).not.toHaveBeenCalled();
+  });
+
+  it("rejects signature containing trailing non-hex characters or odd length", async () => {
+    const body = { talosId: "agent_1" };
+    const now = Math.floor(Date.now() / 1000);
+    const validSig = signPayload(now, JSON.stringify(body));
+    // Valid 64 hex plus extra garbage or odd length
+    const garbageSig = validSig.slice(0, 63) + "g";
+    const request = buildRequest(body, { timestamp: now, signature: garbageSig });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(401);
+    const resBody = await response.json();
+    expect(resBody.error).toBe("Invalid webhook signature");
+    expect(mockDb.select).not.toHaveBeenCalled();
+  });
+
   it("respects custom CROSS_CHAIN_WEBHOOK_TOLERANCE_SECONDS if configured", async () => {
     process.env.CROSS_CHAIN_WEBHOOK_TOLERANCE_SECONDS = "60";
     try {

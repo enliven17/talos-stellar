@@ -1,0 +1,18 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "feat/issue-947-feat-contracts-require-a-minimum-voting-power",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "feat/issue-947-feat-contracts-require-a-minimum-voting-power": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "feat/issue-947-feat-contracts-require-a-minimum-voting-power",
+    "origin"
+  ]
+}

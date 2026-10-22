@@ -14,6 +14,7 @@ Install these before you start working locally:
 - Python 3.11 or newer
 - `uv`
 - Rust stable toolchain and `cargo`
+- `pre-commit` (or install via `uv tool install pre-commit` / `pip install pre-commit`)
 - Docker (for `scripts/local-stack.sh`)
 - Optional: Soroban CLI, installed as `stellar` via `cargo install --locked stellar-cli --features opt`
 - [`gitleaks`](https://github.com/gitleaks/gitleaks) secret scanner — `brew install gitleaks`, or download a binary from the [releases page](https://github.com/gitleaks/gitleaks/releases) (required for `pnpm run secrets:check`)
@@ -28,6 +29,34 @@ For the Rust contracts, also add the Wasm target:
 ```bash
 rustup target add wasm32-unknown-unknown
 ```
+
+## Cross-Package Task Runner
+
+A `justfile` is provided for short, discoverable commands that run the same checks used by CI across all packages. Install `just`:
+
+- **Linux/macOS**: `cargo install just`
+- **Windows**: `winget install casey.just` or `scoop install just`
+
+Run from the repository root:
+
+```bash
+just                    # List all available recipes
+just test-web           # Run web package tests
+just test-sdk           # Run SDK package tests
+just test-agent         # Run prime-agent package tests
+just test-contracts     # Run contracts package tests
+just test-all           # Run all package tests
+just lint-all           # Run lint for all packages
+just stack-up           # Start local integration stack
+just stack-down         # Stop local integration stack
+just stack-logs         # View stack logs
+just stack-reset        # Reset the stack
+just stack-reset-data --yes    # Reset local test data
+```
+
+Each recipe runs the exact command used by the corresponding CI workflow, so local runs match CI behavior. The root `package.json` scripts remain unchanged; `just` is a convenience layer for contributors.
+
+**Windows note**: The `just` tool runs on Windows, but some recipes (e.g., `stack-*`) use Bash scripts. On Windows, use WSL or Git Bash for those commands, or use the equivalent `pnpm` scripts from the root `package.json`.
 
 ## Repository Layout
 
@@ -96,6 +125,21 @@ To deploy the contracts to testnet, use the provided script from a Bash-compatib
 ```
 
 The script prints the deployed contract IDs that need to be copied into the web app environment file.
+
+### 5. Install pre-commit hooks
+
+To automatically catch formatting, lint, and secret leaks before committing:
+
+```bash
+pre-commit install
+```
+
+To run all configured hooks manually against changed files or all files:
+
+```bash
+pre-commit run
+pre-commit run --all-files
+```
 
 ## Environment Files
 
@@ -173,6 +217,8 @@ It only ever targets a loopback database, requires `--yes` to destroy anything,
 and never logs credentials. See
 [docs/local-test-data-reset.md](./docs/local-test-data-reset.md) for the full
 behavior contract. Regression tests for the shell layer: `bash scripts/local-stack.test.sh`.
+
+For symptoms, root causes, and fixes for common local setup failures (port conflicts, stale volumes, migration journal mismatches, seed guard refusals, and missing environment variables), see the [Local Stack Troubleshooting Guide](./docs/TROUBLESHOOTING.md).
 
 The stack defaults to the web service and a mock Stellar provider. Add the optional prime-agent service with:
 
@@ -658,6 +704,9 @@ Cost limits and TTLs (Time-To-Live) are enforced programmatically. If an environ
 
 ### Troubleshooting
 
+For common local integration stack failures (Docker, port allocation, stale volumes, migration drift, seed guard refusals, or missing environment variables), see the [Local Stack Troubleshooting Guide](./docs/TROUBLESHOOTING.md).
+
+For preview environments specifically:
 - **Database provisioning fails**: Check the GitHub Actions logs for `PR Preview Provision`. Ensure your branch passes linting and type checks, as migration errors often cause provisioning failures.
 - **Preview URL is missing**: Vercel manages the web preview natively. Ensure the Vercel GitHub integration is active for the repository.
 - **Stale data**: The environment is seeded once upon provisioning. If you change the seed script, you may need to close and reopen the PR to provision a fresh database.
@@ -756,9 +805,11 @@ bash scripts/ci-contract-cache.test.sh
 1. Create a branch from the latest `main`
 2. Make your changes
 3. Update documentation when setup steps or environment variables change
-4. Run the relevant tests for the area you touched, plus `pnpm run secrets:check` for the local secret scan
+4. Run the relevant tests for the area you touched, plus `pnpm run secrets:check` (or `pre-commit run`) for the local contribution checks
 5. Open a pull request using the template in [`.github/PULL_REQUEST_TEMPLATE.md`](./.github/PULL_REQUEST_TEMPLATE.md)
 6. Link the issue in your PR description, for example `Closes #39`
+
+**Note:** PR descriptions belong in the GitHub PR itself, not as markdown files in the repository. Do not add PR description files (e.g., `pr-*.md` or `pr-description.md`) to the repository root or elsewhere in the codebase.
 
 ## Releases
 

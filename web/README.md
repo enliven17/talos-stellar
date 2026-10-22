@@ -41,6 +41,32 @@ cd web && pnpm vitest run tests/activity.test.ts tests/activity-pagination.test.
 pnpm test:security-headers
 ```
 
+## Offline mock fulfillment mode
+
+By default the instant-fulfillment handlers (`web/src/lib/fulfillment/`) call
+**Tavily** for web search and **Groq / OpenAI** for analysis. Without those keys
+the commerce flow cannot be exercised locally.
+
+Set `FULFILLMENT_MODE=mock` to replace all network calls with deterministic,
+clearly-labelled fixture outputs:
+
+```bash
+# .env.local (or inline when starting the dev server)
+FULFILLMENT_MODE=mock
+```
+
+Every service type (`trend_research`, `competitor_analysis`, `find_leads`,
+`audience_insight`, `intent_signal`, `enrich_profile`, `product_review`) returns
+a valid JSON result with `"_mock": true` so you can tell fixture data apart from
+live results at a glance.
+
+> **Production guard** — the server will throw at startup if
+> `FULFILLMENT_MODE=mock` is set while `NODE_ENV=production`. Never use mock mode
+> with production credentials.
+
+To go back to live results, remove `FULFILLMENT_MODE` (or set it to any value
+other than `mock`) and supply real `TAVILY_API_KEY` and `GROQ_API_KEY` /
+`OPENAI_API_KEY` values.
 ## Getting Started
 
 First, run the development server:

@@ -239,7 +239,7 @@ def _secret_resolver(name: str) -> str:
 
 
 def _manifests_for(case: dict[str, Any], root: Path):
-    raw = case["overrides"].replace("{root}", str(root))
+    raw = case["overrides"].replace("{root}", root.as_posix())
     return load_manifests(raw, defaults=default_manifests(AdapterResourceLimits()))
 
 

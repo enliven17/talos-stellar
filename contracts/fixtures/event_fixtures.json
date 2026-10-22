@@ -1,5 +1,5 @@
 {
-  "spec_version": "1.3.0",
+  "spec_version": "1.4.0",
   "format": "talos-event-fixtures",
   "description": "Canonical, versioned event-query fixtures for indexers consuming Talos Soroban contract events by topic and ledger range. Consumers load this JSON directly (TypeScript, Python, Rust). Any change that alters decoding MUST bump spec_version and follow the versioning rules in contracts/EVENTS.md.",
   "bounds": {
@@ -118,6 +118,23 @@
           { "position": 1, "type": "i128", "name": "votes_cast" },
           { "position": 2, "type": "i128", "name": "quorum_threshold" },
           { "position": 3, "type": "i128", "name": "approval_bps" }
+        ]
+      },
+      "cfg_upd": {
+        "contract": "talos_governance",
+        "description": "Emitted once after a successful governance configuration update, with old and new values.",
+        "topics": [
+          { "position": 0, "type": "symbol", "name": "event", "description": "event type symbol" }
+        ],
+        "data": [
+          { "position": 0, "type": "i128", "name": "old_quorum_threshold" },
+          { "position": 1, "type": "i128", "name": "new_quorum_threshold" },
+          { "position": 2, "type": "i128", "name": "old_consensus_threshold" },
+          { "position": 3, "type": "i128", "name": "new_consensus_threshold" },
+          { "position": 4, "type": "u32", "name": "old_voting_period_ledgers" },
+          { "position": 5, "type": "u32", "name": "new_voting_period_ledgers" },
+          { "position": 6, "type": "address", "name": "old_pulse_token_address" },
+          { "position": 7, "type": "address", "name": "new_pulse_token_address" }
         ]
       }
     },
@@ -394,6 +411,45 @@
         "ledger_sequence": 100115,
         "topics": { "event": "qrm_rchd", "proposal_id": 7 },
         "data": { "proposal_id": 7, "votes_cast": 100, "quorum_threshold": 100, "approval_bps": 6000 }
+      }
+    },
+    {
+      "id": "governance.cfg_upd.normal",
+      "family": "governance",
+      "event": "cfg_upd",
+      "contract": "talos_governance",
+      "ledger_sequence": 100130,
+      "tx_index_in_ledger": 0,
+      "tx_hash": "18293a4b5c6d7e8f901112131415161718192a2b3c4d5e6f708192a3b4c5d6e7f",
+      "event_index_in_tx": 0,
+      "topics": [
+        { "type": "symbol", "value": "cfg_upd" }
+      ],
+      "data": [
+        { "type": "i128", "value": 100 },
+        { "type": "i128", "value": 250 },
+        { "type": "i128", "value": 5100 },
+        { "type": "i128", "value": 7500 },
+        { "type": "u32", "value": 20 },
+        { "type": "u32", "value": 30 },
+        { "type": "address", "value": "GDURVWHBP27CFBLJKVI2UISXSQU52MJABOJWVFKJKFYWDC6E6GDOTIFW" },
+        { "type": "address", "value": "GAUC4C3V3FNCSJBILLB56MAVMUTOWQR2YQ5P7LTL2SDGC5CQ4D7WHER7" }
+      ],
+      "decoded": {
+        "event": "cfg_upd",
+        "contract": "talos_governance",
+        "ledger_sequence": 100130,
+        "topics": { "event": "cfg_upd" },
+        "data": {
+          "old_quorum_threshold": 100,
+          "new_quorum_threshold": 250,
+          "old_consensus_threshold": 5100,
+          "new_consensus_threshold": 7500,
+          "old_voting_period_ledgers": 20,
+          "new_voting_period_ledgers": 30,
+          "old_pulse_token_address": "GDURVWHBP27CFBLJKVI2UISXSQU52MJABOJWVFKJKFYWDC6E6GDOTIFW",
+          "new_pulse_token_address": "GAUC4C3V3FNCSJBILLB56MAVMUTOWQR2YQ5P7LTL2SDGC5CQ4D7WHER7"
+        }
       }
     },
     {

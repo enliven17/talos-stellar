@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from talos_agent.tools import context as _context
@@ -10,6 +11,17 @@ from talos_agent.tools.registry import tool
 if TYPE_CHECKING:
     from talos_agent.api_client import TalosAPIClient
     from talos_agent.config import Settings
+
+VALID_ACTIVITY_TYPES = frozenset({
+    "post",
+    "research",
+    "reply",
+    "engagement",
+    "commerce",
+    "approval",
+})
+
+_TX_HASH_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 # Injected by registry.build_all_tools
 _api: TalosAPIClient = None  # type: ignore[assignment]
@@ -64,4 +76,6 @@ async def report_revenue(amount: float, source: str, tx_hash: str = "") -> dict:
         source=source,
         tx_hash=tx_hash or None,
     )
-    return result or {"status": "reported"}
+    if result:
+        return result
+    return {"status": "reported", "amount": formatted_amount}
