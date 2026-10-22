@@ -113,7 +113,7 @@ describe("TalosClient.waitForJobResult (#922)", () => {
     const promise = client.waitForJobResult("job-1", { intervalMs: 100 });
 
     // Drive the microtask queue so the first fetch resolves.
-    await vi.runAllTiersAsync();
+    await vi.runAllTimersAsync();
 
     const job = await promise;
     expect(job.status).toBe("completed");
@@ -131,11 +131,11 @@ describe("TalosClient.waitForJobResult (#922)", () => {
     });
 
     // Each wait tick: run timers then let fetch settle.
-    await vi.runAllTiersAsync();
+    await vi.runAllTimersAsync();
     await vi.advanceTimersByTimeAsync(200);
-    await vi.runAllTiersAsync();
+    await vi.runAllTimersAsync();
     await vi.advanceTimersByTimeAsync(400);
-    await vi.runAllTiersAsync();
+    await vi.runAllTimersAsync();
 
     const job = await promise;
     expect(job.status).toBe("completed");
@@ -150,9 +150,10 @@ describe("TalosClient.waitForJobResult (#922)", () => {
     });
 
     const promise = client.waitForJobResult("job-1", { intervalMs: 100 });
-    await vi.runAllTiersAsync();
+    const errPromise = promise.catch((e: unknown) => e);
+    await vi.runAllTimersAsync();
 
-    const err = await promise.catch((e: unknown) => e);
+    const err = await errPromise;
     expect(err).toBeInstanceOf(TalosAPIError);
     expect((err as TalosAPIError).message).toContain("failed");
   });
@@ -164,9 +165,10 @@ describe("TalosClient.waitForJobResult (#922)", () => {
     });
 
     const promise = client.waitForJobResult("job-1", { intervalMs: 100 });
-    await vi.runAllTiersAsync();
+    const errPromise = promise.catch((e: unknown) => e);
+    await vi.runAllTimersAsync();
 
-    const err = await promise.catch((e: unknown) => e);
+    const err = await errPromise;
     expect(err).toBeInstanceOf(TalosAPIError);
     expect((err as TalosAPIError).message).toContain("cancelled");
   });
@@ -182,11 +184,12 @@ describe("TalosClient.waitForJobResult (#922)", () => {
       maxIntervalMs: 300,
     });
 
-    await vi.runAllTiersAsync();
+    const rejection = expect(promise).rejects.toBeInstanceOf(TalosAPIError);
+    await vi.runAllTimersAsync();
     await vi.advanceTimersByTimeAsync(200);
-    await vi.runAllTiersAsync();
+    await vi.runAllTimersAsync();
 
-    await expect(promise).rejects.toBeInstanceOf(TalosAPIError);
+    await rejection;
   });
 
   // ── Timeout ───────────────────────────────────────────────────────────
@@ -202,10 +205,10 @@ describe("TalosClient.waitForJobResult (#922)", () => {
       timeoutMs: 1_000,
     });
 
+    const rejection = expect(promise).rejects.toBeInstanceOf(TalosTimeoutError);
     // Advance past the timeout.
     await vi.advanceTimersByTimeAsync(1_200);
-
-    await expect(promise).rejects.toBeInstanceOf(TalosTimeoutError);
+    await rejection;
   });
 
   it("TalosTimeoutError.code is 'timeout_error' on timeout", async () => {
@@ -219,9 +222,10 @@ describe("TalosClient.waitForJobResult (#922)", () => {
       timeoutMs: 300,
     });
 
+    const errPromise = promise.catch((e: unknown) => e);
     await vi.advanceTimersByTimeAsync(500);
 
-    const err = await promise.catch((e: unknown) => e);
+    const err = await errPromise;
     expect((err as TalosTimeoutError).code).toBe("timeout_error");
   });
 
@@ -237,11 +241,9 @@ describe("TalosClient.waitForJobResult (#922)", () => {
       timeoutMs: 500, // fires before 2nd interval completes
     });
 
-    await vi.runAllTiersAsync();
-    await vi.advanceTimersByTimeAsync(600);
-    await vi.runAllTiersAsync();
-
-    await expect(promise).rejects.toBeInstanceOf(TalosTimeoutError);
+    const rejection = expect(promise).rejects.toBeInstanceOf(TalosTimeoutError);
+    await vi.runAllTimersAsync();
+    await rejection;
   });
 
   // ── Abort ─────────────────────────────────────────────────────────────
@@ -273,7 +275,7 @@ describe("TalosClient.waitForJobResult (#922)", () => {
     });
 
     // Abort after a short delay.
-    await vi.runAllTiersAsync();
+    await vi.runAllTimersAsync();
     controller.abort();
 
     await expect(promise).rejects.toBeInstanceOf(TalosTimeoutError);
@@ -306,7 +308,7 @@ describe("TalosClient.waitForJobResult (#922)", () => {
     });
 
     const promise = client.waitForJobResult("job-1", { intervalMs: 100 });
-    await vi.runAllTiersAsync();
+    await vi.runAllTimersAsync();
     await promise;
 
     // getTimerCount() from fake-timers; after settlement there should be none.
@@ -323,9 +325,10 @@ describe("TalosClient.waitForJobResult (#922)", () => {
       intervalMs: 500,
       timeoutMs: 300,
     });
+    const errPromise = promise.catch(() => {});
 
     await vi.advanceTimersByTimeAsync(500);
-    await promise.catch(() => {});
+    await errPromise;
 
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -342,13 +345,14 @@ describe("TalosClient.waitForJobResult (#922)", () => {
       timeoutMs: 5_000,
       signal: controller.signal,
     });
+    const errPromise = promise.catch(() => {});
 
-    await vi.runAllTiersAsync();
+    await vi.runAllTimersAsync();
     controller.abort();
-    await promise.catch(() => {});
+    await errPromise;
 
     // Flush any remaining timers so the assertion is clean.
-    await vi.runAllTiersAsync();
+    await vi.runAllTimersAsync();
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -375,7 +379,7 @@ describe("TalosClient.waitForJobResult (#922)", () => {
       maxIntervalMs: 300,
     });
 
-    await vi.runAllTiersAsync();
+    await vi.runAllTimersAsync();
     await promise;
 
     for (const d of delays) {

@@ -124,7 +124,7 @@ async function _POST(
       return Response.json({ error: result.error }, { status: result.status });
     }
 
-    for (const tag of agentMutationTags(id)) revalidateTag(tag);
+    for (const tag of agentMutationTags(id)) (revalidateTag as any)(tag);
 
     return Response.json({
       id: result.data.id,

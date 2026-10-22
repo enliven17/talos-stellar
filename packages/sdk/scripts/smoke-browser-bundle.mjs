@@ -96,6 +96,8 @@ const context = {
   Request,
   Response,
   ReadableStream,
+  TextEncoder,
+  TextDecoder,
 };
 vm.createContext(context);
 

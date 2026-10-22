@@ -445,3 +445,6 @@ export const GET = withRequestId((request: NextRequest) =>
   getWithDriftDetection(request, { params: Promise.resolve({}) }),
 );
 export const POST = withRequestId(withDriftDetection("POST /api/talos", _POST));
+
+export { _GET, _POST };
+

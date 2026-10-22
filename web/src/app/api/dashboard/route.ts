@@ -6,16 +6,18 @@ import { withTimeout, TimeoutError } from "@/lib/timeout";
 import { withRequestId } from "@/lib/with-request-id";
 
 import { badRequest, errorResponse, internalError } from "@/lib/api-response";
+import { parseStellarPublicKeyParam } from "@/lib/stellar-keys";
 
 /** Timeout in ms for dashboard database queries (under platform function limit). */
 export const DASHBOARD_QUERY_TIMEOUT_MS = 15_000;
 
 async function _GET(req: NextRequest) {
-  const wallet = req.nextUrl.searchParams.get("wallet");
-  if (!wallet) {
-    return badRequest(req, "wallet parameter required");
+  const walletResult = parseStellarPublicKeyParam(req.nextUrl.searchParams.get("wallet"));
+  if (!walletResult.ok) {
+    return walletResult.response;
   }
   const addr = walletResult.publicKey;
+
 
   // Add timeout for patron query
   let patronTalosIds = [];

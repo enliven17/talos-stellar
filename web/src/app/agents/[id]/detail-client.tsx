@@ -8,7 +8,18 @@ import { AgentAvailabilityBadge } from "@/components/agent-availability-badge";
 import { AgentEmptyState } from "@/components/agent-view-states";
 import { ScopedApiKeysPanel } from "@/components/scoped-api-keys-panel";
 import { AgentPurchasesSection } from "@/components/agent-purchases-section";
+import { CopyButton } from "@/components/copy-button";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER as STELLAR_USDC_ISSUER } from "@/lib/stellar-config";
+import {
+  TabActivity,
+  TabPatrons,
+  TabRevenue,
+  TabGovernance,
+  TabAgent,
+  type Approval,
+  type DistPreview,
+  type BuybackPreview,
+} from "./components";
 
 
 interface ServiceInfo {
@@ -1052,7 +1063,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
         <TabPatrons
           talos={talos}
           minRequired={minRequired}
-          address={address}
+          address={address ?? undefined}
           isConnected={isConnected}
           onBuyToken={openBuyModal}
         />
@@ -1061,7 +1072,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       {tab === "Revenue" && (
         <TabRevenue
           talos={talos}
-          address={address}
+          address={address ?? undefined}
           isConnected={isConnected}
           distPreview={distPreview}
           distLoading={distLoading}
@@ -1070,7 +1081,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
           buybackPreview={buybackPreview}
           buybackLoading={buybackLoading}
           buybackForm={buybackForm}
-          onBuybackFormChange={(field, value) =>
+          onBuybackFormChange={(field: string, value: string) =>
             setBuybackForm((f) => ({ ...f, [field]: value }))
           }
           onLoadBuybackPreview={loadBuybackPreview}
@@ -1091,7 +1102,8 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       {tab === "Governance" && (
         <TabGovernance
           talos={talos}
-          address={address}
+          address={address ?? undefined}
+
           isConnected={isConnected}
           isPatron={isPatron}
           approvals={approvals}
@@ -1103,7 +1115,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
           onVote={handleVote}
           onOpenPropose={() => setProposeOpen(true)}
           onClosePropose={() => setProposeOpen(false)}
-          onProposeFormChange={(field, value) =>
+          onProposeFormChange={(field: string, value: string) =>
             setProposeForm((f) => ({ ...f, [field]: value }))
           }
           onPropose={handlePropose}
@@ -1120,63 +1132,10 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
               signMessage={signMessage}
             />
           )}
-          <div className="bg-surface border border-border p-6">
-            <div className="flex items-center justify-between mb-6">
-              <div className="text-xs text-muted">[PRIME AGENT STATUS]</div>
-              <AgentAvailabilityBadge
-                agentOnline={talos.agentOnline}
-                agentLastSeen={talos.agentLastSeen}
-                status={talos.status}
-                size="sm"
-              />
-            </div>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
-              <div>
-                <span className="text-muted text-xs">Posts Today</span>
-                <p className="text-foreground mt-1">{talos.agentStats.postsToday}</p>
-              </div>
-              <div>
-                <span className="text-muted text-xs">Replies Today</span>
-                <p className="text-foreground mt-1">{talos.agentStats.repliesToday}</p>
-              </div>
-              <div>
-                <span className="text-muted text-xs">Researches Today</span>
-                <p className="text-foreground mt-1">{talos.agentStats.researchesToday}</p>
-              </div>
-              <div>
-                <span className="text-muted text-xs">Jobs Today</span>
-                <p className="text-foreground mt-1">{talos.jobStats.jobsToday}</p>
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-surface border border-border p-6">
-            <div className="text-xs text-muted mb-4">[AGENT CONFIGURATION]</div>
-            <div className="space-y-4 text-sm">
-              <Row label="Persona" value={talos.persona} />
-              <Row label="Target Audience" value={talos.targetAudience} />
-              <Row label="Channels" value={talos.channels.join(", ")} />
-            </div>
-          </div>
-
-          <div className="bg-surface border border-border p-6">
-            <div className="text-xs text-muted mb-4">[LOCAL EXECUTION]</div>
-            <div className="bg-background border border-border p-4 text-xs text-foreground space-y-1 overflow-x-auto font-mono">
-              <div className="text-green-400">$ talos-agent status</div>
-              <div className="text-muted mt-2">TALOS:     {talos.name}</div>
-              <div className="text-muted break-all">Asset:     {talos.stellarAssetCode || talos.tokenSymbol}</div>
-              <div className="text-muted">Network:   Stellar</div>
-              <div className="text-muted">Status:    {talos.agentOnline ? "ONLINE" : "OFFLINE"}</div>
-              {talos.service && (
-                <>
-                  <div className="text-muted">Service:   {talos.service.name}</div>
-                  <div className="text-muted">Price:     {talos.service.price} {talos.service.currency}</div>
-                </>
-              )}
-            </div>
-          </div>
+          <TabAgent talos={talos} />
         </div>
       )}
+
 
       {/* Buy Token Modal */}
       {buyOpen && (
