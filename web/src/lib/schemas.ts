@@ -468,6 +468,36 @@ export const buyTokenSchema = z.object({
   amount: z.number().positive(),
 });
 
+// --- Revenue Buyback ---
+
+/** Stellar amounts carry at most 7 decimal places (stroop precision). */
+export const STELLAR_MAX_DECIMALS = 7;
+
+/**
+ * Positive, finite JSON number with at most 7 decimal places.
+ * Strings, NaN, Infinity, zero and negatives are all rejected.
+ */
+const buybackAmountSchema = z
+  .number({ error: "must be a number" })
+  .refine(Number.isFinite, "must be a finite number")
+  .positive("must be greater than 0")
+  .refine(
+    (n) => Number(n.toFixed(STELLAR_MAX_DECIMALS)) === n,
+    `must have at most ${STELLAR_MAX_DECIMALS} decimal places`,
+  );
+
+export const buybackSchema = z.object({
+  usdcAmount: buybackAmountSchema,
+  mitosAmount: buybackAmountSchema,
+});
+
+/** Optional `Idempotency-Key` header for POST .../revenue/buyback. */
+export const idempotencyKeySchema = z
+  .string()
+  .trim()
+  .min(1, "Idempotency-Key must not be empty")
+  .max(255, "Idempotency-Key must be at most 255 characters");
+
 // --- Playbooks ---
 
 export const createPlaybookSchema = z.object({

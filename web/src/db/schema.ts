@@ -478,6 +478,31 @@ export const tlsTokenPurchases = pgTable(
 );
 
 
+// ─── Buyback Requests (Idempotency Ledger) ───────────────────────
+//
+// One row per (talosId, Idempotency-Key) for POST .../revenue/buyback.
+// Inserted "pending" BEFORE the on-chain transfer so a retry or a concurrent
+// duplicate can never submit a second transfer; flipped to "completed" with
+// the cached response in the same DB transaction that records the revenue row.
+
+export const tlsBuybackRequests = pgTable(
+  "tls_buyback_requests",
+  {
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    idempotencyKey: text("idempotencyKey").notNull(),
+    // sha256 of the validated amounts; detects key reuse with a different body
+    requestHash: text("requestHash").notNull(),
+    // pending | completed | failed
+    status: text("status").notNull().default("pending"),
+    responseBody: jsonb("responseBody"),
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().defaultNow().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("tls_buyback_requests_talosId_idempotencyKey_key").on(t.talosId, t.idempotencyKey),
+  ],
+);
+
 // ─── Webhook Subscriptions ────────────────────────────────────────
 //
 // Each row represents an outbound webhook endpoint that a TALOS has configured

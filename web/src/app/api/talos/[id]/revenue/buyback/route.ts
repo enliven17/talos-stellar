@@ -1,11 +1,14 @@
 import { withRequestId } from "@/lib/with-request-id";
+import { createHash } from "node:crypto";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { withTransactionRetry } from "@/db/db-retry";
-import { tlsTalos, tlsRevenues } from "@/db/schema";
+import { tlsTalos, tlsRevenues, tlsBuybackRequests } from "@/db/schema";
 import { and, eq, sum } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
 import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
+import { errorResponse } from "@/lib/api-response";
+import { parseBody, buybackSchema, idempotencyKeySchema, formatValidationIssues } from "@/lib/schemas";
 
 
 /**
@@ -16,6 +19,18 @@ import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
  * by sending them back to their issuer.
  *
  * Auth: Bearer token with revenue:write scope (scoped key or legacy).
+ *
+ * Validation: body is parsed with `buybackSchema` (positive, finite numbers,
+ * max 7 decimals). Malformed JSON, strings, NaN and negatives return 400.
+ *
+ * Idempotency: send an optional `Idempotency-Key` header. A row is claimed in
+ * `tls_buyback_requests` BEFORE the on-chain transfer, so:
+ *   - replaying a completed key returns the original response, no new transfer
+ *   - a concurrent / in-flight duplicate returns 409
+ *   - reusing a key with different amounts returns 422
+ *   - a transfer Horizon rejected is marked "failed" and may be retried; an
+ *     ambiguous failure (e.g. timeout) stays "pending" so it can never be
+ *     double-submitted.
  */
 async function _POST(
   request: NextRequest,
@@ -27,18 +42,29 @@ async function _POST(
     const auth = await verifyAgentApiKey(request, id, ["revenue:write"]);
     if (!auth.ok) return auth.response;
 
-    const body = await request.json();
-    const { usdcAmount, mitosAmount } = body as {
-      usdcAmount?: number;
-      mitosAmount?: number;
-    };
+    const { data, error } = await parseBody(request, buybackSchema);
+    if (error) return error;
+    const { usdcAmount, mitosAmount } = data;
 
-    if (!usdcAmount || usdcAmount <= 0) {
-      return Response.json({ error: "usdcAmount must be positive" }, { status: 400 });
+    // ── Idempotency-Key header (optional) ──────────────────────────
+    let idempotencyKey: string | null = null;
+    const rawKey = request.headers.get("idempotency-key");
+    if (rawKey !== null) {
+      const parsedKey = idempotencyKeySchema.safeParse(rawKey);
+      if (!parsedKey.success) {
+        return errorResponse(
+          request,
+          400,
+          "VALIDATION_ERROR",
+          "Validation failed",
+          formatValidationIssues(parsedKey.error.issues),
+        );
+      }
+      idempotencyKey = parsedKey.data;
     }
-    if (!mitosAmount || mitosAmount <= 0) {
-      return Response.json({ error: "mitosAmount must be positive" }, { status: 400 });
-    }
+    const requestHash = createHash("sha256")
+      .update(`${usdcAmount}:${mitosAmount}`)
+      .digest("hex");
 
     const talos = await db.query.tlsTalos.findFirst({ where: eq(tlsTalos.id, id) });
     if (!talos) return Response.json({ error: "TALOS not found" }, { status: 404 });
@@ -53,6 +79,66 @@ async function _POST(
       return Response.json({ error: "STELLAR_OPERATOR_SECRET_KEY not configured" }, { status: 500 });
     }
 
+    // ── Idempotency check / claim ──────────────────────────────────
+    if (idempotencyKey) {
+      const existing = await db.query.tlsBuybackRequests.findFirst({
+        where: and(
+          eq(tlsBuybackRequests.talosId, id),
+          eq(tlsBuybackRequests.idempotencyKey, idempotencyKey),
+        ),
+      });
+
+      if (existing) {
+        if (existing.requestHash !== requestHash) {
+          return Response.json(
+            { error: "Idempotency-Key was already used with a different request body" },
+            { status: 422 },
+          );
+        }
+        if (existing.status === "completed" && existing.responseBody) {
+          const replay = Response.json(existing.responseBody, { status: 200 });
+          replay.headers.set("Idempotency-Key", idempotencyKey);
+          replay.headers.set("X-Idempotent-Replayed", "true");
+          return replay;
+        }
+        if (existing.status === "pending") {
+          return Response.json(
+            { error: "A buyback is already in progress for this Idempotency-Key" },
+            { status: 409 },
+          );
+        }
+        // "failed" — the transfer was rejected, so it is safe to retry.
+      }
+
+      try {
+        if (!existing) {
+          await db.insert(tlsBuybackRequests).values({
+            talosId: id,
+            idempotencyKey,
+            requestHash,
+            status: "pending",
+          });
+        } else {
+          await db
+            .update(tlsBuybackRequests)
+            .set({ status: "pending", responseBody: null, updatedAt: new Date() })
+            .where(and(
+              eq(tlsBuybackRequests.talosId, id),
+              eq(tlsBuybackRequests.idempotencyKey, idempotencyKey),
+            ));
+        }
+      } catch (err: unknown) {
+        // Unique violation: a concurrent request claimed this key first.
+        if ((err as { code?: string }).code === "23505") {
+          return Response.json(
+            { error: "A buyback is already in progress for this Idempotency-Key" },
+            { status: 409 },
+          );
+        }
+        throw err;
+      }
+    }
+
     const [mitosCode, mitosIssuer] = assetCode.split(":");
     const {
       Keypair, Asset, TransactionBuilder, Operation, BASE_FEE, Networks, Horizon,
@@ -60,29 +146,56 @@ async function _POST(
 
     const operatorKeypair = Keypair.fromSecret(operatorSecret);
     const server = new Horizon.Server("https://horizon-testnet.stellar.org");
-    const account = await server.loadAccount(operatorKeypair.publicKey());
 
-    const _mitos = new Asset(mitosCode, mitosIssuer);
+    let txHash: string;
+    try {
+      const account = await server.loadAccount(operatorKeypair.publicKey());
 
-    // Build TX: send USDC to burn address (issuer) + burn Mitos (send to issuer)
-    const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: Networks.TESTNET,
-    })
-      // Burn Mitos: send tokens back to issuer (issuer can't spend own tokens = effective burn)
-      .addOperation(Operation.payment({
-        destination: mitosIssuer,
-        asset: _mitos,
-        amount: String(mitosAmount),
-      }))
-      .setTimeout(60)
-      .build();
+      const _mitos = new Asset(mitosCode, mitosIssuer);
 
-    tx.sign(operatorKeypair);
-    const result = await server.submitTransaction(tx);
-    const txHash = result.hash;
+      // Build TX: send USDC to burn address (issuer) + burn Mitos (send to issuer)
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: Networks.TESTNET,
+      })
+        // Burn Mitos: send tokens back to issuer (issuer can't spend own tokens = effective burn)
+        .addOperation(Operation.payment({
+          destination: mitosIssuer,
+          asset: _mitos,
+          amount: String(mitosAmount),
+        }))
+        .setTimeout(60)
+        .build();
 
-    // Record as negative revenue (treasury expense)
+      tx.sign(operatorKeypair);
+      const result = await server.submitTransaction(tx);
+      txHash = result.hash;
+    } catch (err: unknown) {
+      // Only a definitive Horizon rejection proves no transfer happened.
+      // Anything else (timeout, network drop) is ambiguous: leave the row
+      // "pending" so a retry returns 409 instead of risking a second transfer.
+      if (idempotencyKey && (err as { response?: unknown }).response) {
+        await db
+          .update(tlsBuybackRequests)
+          .set({ status: "failed", updatedAt: new Date() })
+          .where(and(
+            eq(tlsBuybackRequests.talosId, id),
+            eq(tlsBuybackRequests.idempotencyKey, idempotencyKey),
+          ));
+      }
+      throw err;
+    }
+
+    const responseBody = {
+      success: true,
+      txHash,
+      mitosBurned: mitosAmount,
+      usdcSpent: usdcAmount,
+      message: `Buyback: burned ${mitosAmount.toLocaleString()} ${mitosCode} tokens. tx: ${txHash.slice(0, 12)}...`,
+    };
+
+    // Record as negative revenue (treasury expense) and, when keyed, flip the
+    // idempotency row to completed with the cached response — atomically.
     await withTransactionRetry(
       async (tx) => {
         await tx.insert(tlsRevenues).values({
@@ -92,17 +205,25 @@ async function _POST(
           source: "buyback",
           txHash,
         });
+        if (idempotencyKey) {
+          await tx
+            .update(tlsBuybackRequests)
+            .set({ status: "completed", responseBody, updatedAt: new Date() })
+            .where(and(
+              eq(tlsBuybackRequests.talosId, id),
+              eq(tlsBuybackRequests.idempotencyKey, idempotencyKey),
+            ));
+        }
       },
       { category: "MONEY" }
     );
 
-    return Response.json({
-      success: true,
-      txHash,
-      mitosBurned: mitosAmount,
-      usdcSpent: usdcAmount,
-      message: `Buyback: burned ${mitosAmount.toLocaleString()} ${mitosCode} tokens. tx: ${txHash.slice(0, 12)}...`,
-    });
+    const res = Response.json(responseBody);
+    if (idempotencyKey) {
+      res.headers.set("Idempotency-Key", idempotencyKey);
+      res.headers.set("X-Idempotent-Replayed", "false");
+    }
+    return res;
   } catch (err: unknown) {
     const e = err as { response?: { data?: { extras?: { result_codes?: { operations?: string[] } } } }; message?: string };
     console.error("[buyback]", e.response?.data ?? e.message ?? err);
