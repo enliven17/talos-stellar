@@ -120,6 +120,7 @@ is a `major` bump.
 | `config_admin`      | `update_config` / `cache_token_balance` (admin only).        |
 | `interface_query`   | `version` / `interface_id` / `supports_version`.             |
 | `quorum_state`      | `get_proposal_quorum_state` query; `EventQuorumReached` emitted once per proposal when quorum is first crossed. |
+| `proposal_threshold`| `create_proposal` requires the proposer's snapshot voting power to meet `proposal_threshold` (default `0` preserves prior behavior). |
 
 #### Storage & Input Bounds
 
@@ -129,6 +130,15 @@ To prevent unbounded storage writes and spam when creating proposals, `TalosGove
 - `MAX_DESCRIPTION_LEN`: `2048` bytes (non-empty, maximum 2048 bytes)
 
 Inputs at the limit succeed; inputs exceeding the limit (or empty) are rejected before writing to persistent storage.
+
+#### Proposal threshold
+
+`TalosGovernance` tracks a `proposal_threshold: i128` in its configuration
+(default `0` for backwards compatibility). `create_proposal` reads the
+proposer's voting power at the snapshot ledger via `get_past_votes` and
+rejects the call with a typed error when the value is below the threshold.
+`initialize` and `update_config` validate that `proposal_threshold >= 0`.
+Deployments that leave the default in place behave exactly as before.
 
 ## 6. Deprecation table
 
@@ -250,6 +260,8 @@ The tests will:
 5. Verify deprecation event flows (`set_protocol_fee_emits_dep_path_*`,
    `propose_admin_emits_dep_path_*`, `set_registry_contract_emits_dep_path_*`).
 6. Verify cross-contract compatibility (`assert_registry_compatible_returns_true_for_real_registry`).
+7. Verify proposal threshold enforcement (`create_proposal_*_threshold_*`)
+   and config validation (`initialize_*_threshold_*`, `update_config_*_threshold_*`).
 
 ## 10. Rollout and rollback
 
