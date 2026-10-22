@@ -13,6 +13,7 @@
     "test:unit": "vitest run tests/health.test.ts tests/security-headers.test.ts tests/*.unit.test.ts tests/sse.test.ts",
     "test:security-headers": "vitest run tests/security-headers.test.ts",
     "test:e2e": "vitest run tests/api-e2e.test.ts tests/outbox-e2e.test.ts",
+    "test:browser": "playwright test",
     "test:load": "vitest run tests/load/",
     "test:openapi": "vitest run tests/openapi-snapshot.test.ts",
     "test:a11y": "tsx scripts/a11y-check.ts",
@@ -57,6 +58,7 @@
   "devDependencies": {
     "@opentelemetry/sdk-trace-base": "^2.12.0",
     "@opentelemetry/sdk-trace-node": "^1.30.1",
+    "@playwright/test": "^1.64.1",
     "@tailwindcss/postcss": "^4",
     "@testing-library/dom": "^10.4.2",
     "@testing-library/react": "^16.3.3",

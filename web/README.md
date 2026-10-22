@@ -41,6 +41,63 @@ cd web && pnpm vitest run tests/activity.test.ts tests/activity-pagination.test.
 pnpm test:security-headers
 ```
 
+## Browser Tests
+
+Playwright browser tests cover critical end-to-end user journeys against the local stack. These tests use a stubbed wallet provider and require no real keys or external network.
+
+### Prerequisites
+
+The local stack must be running before executing browser tests:
+
+1. Start the local stack (from repository root):
+```bash
+./scripts/local-stack.sh up
+```
+
+This starts:
+- Postgres on port 5432
+- Mock Stellar service on port 4010
+- Web server on port 3000
+
+2. Ensure the database is seeded (done automatically by local-stack.sh):
+```bash
+pnpm --dir web db:seed
+```
+
+### Running Browser Tests
+
+```bash
+pnpm --dir web test:browser
+```
+
+**Note:** If the local stack is not running, tests will fail with connection errors. The Playwright config does not auto-start the stack because it requires Docker Compose, which must be run separately.
+
+### Test Coverage
+
+The browser tests (`tests/browser/critical-journeys.spec.ts`) cover:
+
+1. **Browse agents** - Navigate to the agents page and verify seeded agents are displayed
+2. **Launch a Talos** - Complete the multi-step launch flow with demo data
+3. **Discover a service** - View an agent's available services
+4. **Purchase with mocked x402 settlement** - Request a service and trigger payment flow (wallet signing is mocked)
+5. **See job result** - View completed jobs in the activity feed
+6. **Full journey** - End-to-end flow combining all steps
+
+### Test Wallet Provider
+
+Tests inject a mock Stellar wallet provider (`tests/browser/helpers/test-wallet-provider.ts`) that:
+- Provides a deterministic test public key
+- Auto-signs all transactions with mock signatures
+- Requires no wallet extensions or private keys
+
+### Configuration
+
+Playwright configuration is in `playwright.config.ts`:
+- Base URL: `http://localhost:3000`
+- Browser: Chromium (Desktop)
+- Headless mode by default
+- Traces on first retry, screenshots on failure
+
 ## Offline mock fulfillment mode
 
 By default the instant-fulfillment handlers (`web/src/lib/fulfillment/`) call
