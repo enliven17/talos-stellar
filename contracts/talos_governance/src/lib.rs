@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! TalosGovernance - Soroban smart contract for token-weighted governance.
 //!
 //! ## What's new in this branch (#606)
