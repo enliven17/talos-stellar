@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useStellarWallet } from "./providers";
@@ -21,6 +21,20 @@ export function Header() {
   const pathname = usePathname();
   const { isConnected, publicKey, connect, disconnect } = useStellarWallet();
   const [menuOpen, setMenuOpen] = useState(false);
+  const menuToggleRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setMenuOpen(false);
+      menuToggleRef.current?.focus();
+    };
+
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [menuOpen]);
 
   const truncatedAddress = publicKey
     ? `${publicKey.slice(0, 6)}...${publicKey.slice(-4)}`
@@ -147,6 +161,9 @@ export function Header() {
             className="md:hidden flex flex-col justify-center items-center w-8 h-8 gap-1.5 text-foreground"
             onClick={() => setMenuOpen((v) => !v)}
             aria-label={menuOpen ? "Close menu" : "Open menu"}
+            aria-expanded={menuOpen}
+            aria-controls="mobile-menu"
+            ref={menuToggleRef}
             data-testid="mobile-menu-toggle"
           >
             <span
@@ -163,8 +180,11 @@ export function Header() {
       </div>
 
       {/* Mobile dropdown */}
-      {menuOpen && (
-        <div className="md:hidden border-t border-border bg-background absolute top-full left-0 right-0 z-50 shadow-lg">
+      <div
+        id="mobile-menu"
+        hidden={!menuOpen}
+        className="md:hidden border-t border-border bg-background absolute top-full left-0 right-0 z-50 shadow-lg"
+      >
           <nav className="flex flex-col px-4 py-3 gap-0.5">
             {NAV_ITEMS.map((item) => (
               <Link
@@ -226,8 +246,7 @@ export function Header() {
               )}
             </div>
           </nav>
-        </div>
-      )}
+      </div>
     </header>
   );
 }
