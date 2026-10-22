@@ -1,4 +1,5 @@
 #![allow(unused)]
+#![allow(unused)]
 //! TalosGovernance - Soroban smart contract for token-weighted governance.
 //!
 //! ## What's new in this branch (#606)
@@ -168,8 +169,6 @@ pub struct GovernanceConfig {
     pub pulse_token_address: Address,
     pub snapshot_offset_ledgers: Option<u32>,
     pub quorum_bps: Option<u32>,
-    /// Minimum voting power required to create a proposal. 0 disables the check.
-    pub proposal_threshold: i128,
 }
 
 #[contracttype]
@@ -218,14 +217,6 @@ pub const MAX_TITLE_LEN: u32 = 128;
 pub const MAX_DESCRIPTION_LEN: u32 = 2048;
 
 // ── Dividend Snapshot (#598) ─────────────────────────────────────────
-
-// ── Proposal threshold ───────────────────────────────────────────────
-
-/// Typed error returned when a proposer's voting power is below the
-/// configured `proposal_threshold`.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BelowProposalThreshold {}
 
 /// Maximum page size for `get_dividend_snapshots_page`.
 pub const DIVIDEND_PAGE_LIMIT: u32 = 50;
@@ -645,7 +636,6 @@ impl TalosGovernance {
             pulse_token_address,
             snapshot_offset_ledgers: None,
             quorum_bps: None,
-            proposal_threshold: 0,
         };
 
         env.storage().persistent().set(&DataKey::Admin, &admin);
@@ -727,15 +717,6 @@ impl TalosGovernance {
         let snapshot_ledger = current_ledger.saturating_sub(snapshot_offset);
         let proposal_id = Self::next_proposal_id(env.clone());
         let end_ledger = current_ledger + config.voting_period_ledgers;
-
-        // Enforce the minimum voting power required to create a proposal.
-        // A threshold of 0 preserves the historical behaviour (no check).
-        if config.proposal_threshold > 0 {
-            let voting_power = Self::get_past_votes(&env, proposer.clone(), snapshot_ledger);
-            if voting_power < config.proposal_threshold {
-                panic!("Below proposal threshold");
-            }
-        }
 
         let proposal = Proposal {
             id: proposal_id,
@@ -958,8 +939,6 @@ impl TalosGovernance {
                     voting_period_ledgers,
                     pulse_token_address: existing.pulse_token_address,
                     snapshot_offset_ledgers: existing.snapshot_offset_ledgers,
-                    quorum_bps: existing.quorum_bps,
-                    proposal_threshold: existing.proposal_threshold,
                 };
                 env.storage().persistent().set(&DataKey::Config, &new_config);
                 emit_proposal_executed(env, proposal_id, Symbol::new(env, "UpdateConfig"));
@@ -1021,15 +1000,6 @@ impl TalosGovernance {
         let snapshot_ledger = current_ledger.saturating_sub(snapshot_offset);
         let proposal_id = Self::next_proposal_id(env.clone());
         let end_ledger = current_ledger + config.voting_period_ledgers;
-
-        // Enforce the minimum voting power required to create a proposal.
-        // A threshold of 0 preserves the historical behaviour (no check).
-        if config.proposal_threshold > 0 {
-            let voting_power = Self::get_past_votes(&env, proposer.clone(), snapshot_ledger);
-            if voting_power < config.proposal_threshold {
-                panic!("Below proposal threshold");
-            }
-        }
 
         let proposal = Proposal {
             id: proposal_id,
@@ -1101,9 +1071,6 @@ impl TalosGovernance {
             if offset > MAX_SNAPSHOT_OFFSET_LEDGERS {
                 panic!("Snapshot offset exceeds maximum allowed");
             }
-        }
-        if config.proposal_threshold < 0 {
-            panic!("Proposal threshold cannot be negative");
         }
         let old_config = Self::require_config(&env);
         env.storage().persistent().set(&DataKey::Config, &config);
