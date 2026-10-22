@@ -101,6 +101,9 @@ _PERMANENT_ERROR_CODES = frozenset(
         "invalid_request",
         "bad_request",
         "payment_required",
+        "ambiguous_asset",
+        "conflicting_issuer",
+        "invalid_identifier",
     }
 )
 _RETRYABLE_ERROR_CODES = frozenset(

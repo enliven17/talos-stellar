@@ -22,7 +22,12 @@ from stellar_sdk import StrKey
 
 from talos_agent.adapters.snapshots import StellarHealthSnapshot
 from talos_agent.http import request_with_retry
+from talos_agent.payments import (
+    USDC_MAINNET_ISSUER,
+    USDC_TESTNET_ISSUER,
+)
 from talos_agent.payments.stellar_retry import (
+    StellarRetryClass,
     attach_stellar_failure,
     classify_stellar_failure,
     classify_stellar_result,
@@ -81,11 +86,36 @@ class StellarKit:
     be awaited during graceful shutdown.
     """
 
-    def __init__(self, api_client: Any, *, horizon_timeout: float = _DEFAULT_HORIZON_TIMEOUT):
+    def __init__(
+        self,
+        api_client: Any,
+        *,
+        horizon_timeout: float = _DEFAULT_HORIZON_TIMEOUT,
+        usdc_issuer: str | None = None,
+    ):
         self._api = api_client
         self._initialized = False
         self._horizon_timeout = horizon_timeout
         self._client: httpx.AsyncClient | None = None
+        self._usdc_issuer = usdc_issuer
+
+    def resolve_usdc_issuer(self) -> str:
+        """Resolve the configured USDC issuer account ID."""
+        if self._usdc_issuer is not None:
+            return self._usdc_issuer.strip()
+        settings = getattr(self._api, "_settings", None) or getattr(self._api, "settings", None)
+        if settings is not None:
+            configured = getattr(settings, "stellar_usdc_issuer", None)
+            if isinstance(configured, str) and configured.strip():
+                return configured.strip()
+        env_issuer = os.getenv("STELLAR_USDC_ISSUER") or os.getenv("NEXT_PUBLIC_STELLAR_USDC_ISSUER")
+        if env_issuer and env_issuer.strip():
+            return env_issuer.strip()
+        network = os.getenv("STELLAR_NETWORK", "").lower()
+        horizon_url = os.getenv("STELLAR_HORIZON_URL", _HORIZON_URL)
+        if network == "mainnet" or ("horizon.stellar.org" in horizon_url and "testnet" not in horizon_url):
+            return USDC_MAINNET_ISSUER
+        return USDC_TESTNET_ISSUER
 
     async def initialize(self) -> None:
         if self._initialized:
@@ -154,11 +184,85 @@ class StellarKit:
                 classify_stellar_failure(exc=exc),
             )
 
-    async def get_token_balance(self, account_id: str, token_id: str) -> dict[str, Any]:
-        """Query Stellar asset balance via Horizon."""
+    async def get_token_balance(
+        self,
+        account_id: str,
+        token_id: str,
+        issuer: str | None = None,
+    ) -> dict[str, Any]:
+        """Query Stellar asset balance via Horizon.
+
+        Matches by both asset code and asset issuer.
+        token_id may be 'CODE' or 'CODE:ISSUER'. An explicit issuer argument
+        can also be provided. For 'USDC', the issuer defaults to the configured
+        asset setting when omitted.
+        """
         try:
-            if not _validate_account_id(account_id):
-                return {"error": "invalid_account", "account": account_id}
+            token_id = (token_id or "").strip()
+            if not token_id:
+                return {
+                    "error": "Invalid token identifier: empty token_id",
+                    "error_code": "invalid_identifier",
+                    "token_id": token_id,
+                    "account": account_id,
+                    "failure_class": StellarRetryClass.PERMANENT.value,
+                    "failure_code": "invalid_identifier",
+                    "retryable": False,
+                    "indeterminate": False,
+                    "terminal": True,
+                }
+
+            if not account_id:
+                return {"error": "No Stellar account configured"}
+
+            # Parse CODE[:ISSUER]
+            parsed_code: str
+            parsed_issuer: str | None = None
+            if ":" in token_id:
+                parts = token_id.split(":")
+                if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+                    return {
+                        "error": f"Invalid token identifier '{token_id}': expected CODE:ISSUER format",
+                        "error_code": "invalid_identifier",
+                        "token_id": token_id,
+                        "account": account_id,
+                        "failure_class": StellarRetryClass.PERMANENT.value,
+                        "failure_code": "invalid_identifier",
+                        "retryable": False,
+                        "indeterminate": False,
+                        "terminal": True,
+                    }
+                parsed_code = parts[0].strip()
+                parsed_issuer = parts[1].strip()
+            else:
+                parsed_code = token_id
+
+            explicit_issuer = issuer.strip() if (issuer is not None and issuer.strip()) else None
+
+            # Detect conflicting issuer arguments
+            if parsed_issuer and explicit_issuer and parsed_issuer != explicit_issuer:
+                return {
+                    "error": (
+                        f"Conflicting issuer specifications for asset '{parsed_code}': "
+                        f"'{parsed_issuer}' in token_id vs '{explicit_issuer}' in argument"
+                    ),
+                    "error_code": "conflicting_issuer",
+                    "token_id": token_id,
+                    "account": account_id,
+                    "asset_code": parsed_code,
+                    "failure_class": StellarRetryClass.PERMANENT.value,
+                    "failure_code": "conflicting_issuer",
+                    "retryable": False,
+                    "indeterminate": False,
+                    "terminal": True,
+                }
+
+            target_issuer = explicit_issuer or parsed_issuer
+            if not target_issuer and parsed_code.upper() == "USDC":
+                default_issuer = self.resolve_usdc_issuer()
+                if default_issuer:
+                    target_issuer = default_issuer
+
             client = self._client or httpx.AsyncClient(timeout=self._horizon_timeout)
             close_after = self._client is None
             try:
@@ -169,12 +273,89 @@ class StellarKit:
             finally:
                 if close_after:
                     await client.aclose()
+
             if r.status_code == 200:
                 data = r.json()
                 balances = data.get("balances", [])
-                token_balance = next((b for b in balances if b.get("asset_code") == token_id), None)
-                balance = float(token_balance["balance"]) if token_balance else 0
-                return {"balance": balance, "token_id": token_id, "account": account_id}
+
+                code_matches = [
+                    b for b in balances
+                    if b.get("asset_code") == parsed_code
+                    or (isinstance(b.get("asset_code"), str) and b.get("asset_code").upper() == parsed_code.upper())
+                ]
+
+                if target_issuer:
+                    matching = [
+                        b for b in code_matches
+                        if b.get("asset_issuer") == target_issuer
+                    ]
+                    if len(matching) > 1:
+                        return {
+                            "error": (
+                                f"Ambiguous balances: multiple balances match code '{parsed_code}' "
+                                f"and issuer '{target_issuer}'"
+                            ),
+                            "error_code": "ambiguous_asset",
+                            "token_id": token_id,
+                            "account": account_id,
+                            "asset_code": parsed_code,
+                            "asset_issuer": target_issuer,
+                            "matching_issuers": [target_issuer],
+                            "failure_class": StellarRetryClass.PERMANENT.value,
+                            "failure_code": "ambiguous_asset",
+                            "retryable": False,
+                            "indeterminate": False,
+                            "terminal": True,
+                        }
+                    balance = float(matching[0]["balance"]) if matching else 0.0
+                    return {
+                        "balance": balance,
+                        "token_id": token_id,
+                        "account": account_id,
+                        "asset_code": parsed_code,
+                        "asset_issuer": target_issuer,
+                    }
+
+                # When target_issuer is not specified:
+                if len(code_matches) > 1:
+                    matching_issuers = [b.get("asset_issuer", "") for b in code_matches if b.get("asset_issuer")]
+                    return {
+                        "error": (
+                            f"Ambiguous token identifier '{token_id}': multiple assets match code "
+                            f"'{parsed_code}' with different issuers. Specify issuer as CODE:ISSUER or pass issuer."
+                        ),
+                        "error_code": "ambiguous_asset",
+                        "token_id": token_id,
+                        "account": account_id,
+                        "asset_code": parsed_code,
+                        "matching_issuers": matching_issuers,
+                        "failure_class": StellarRetryClass.PERMANENT.value,
+                        "failure_code": "ambiguous_asset",
+                        "retryable": False,
+                        "indeterminate": False,
+                        "terminal": True,
+                    }
+
+                if len(code_matches) == 1:
+                    single = code_matches[0]
+                    balance = float(single.get("balance", 0))
+                    matched_issuer = single.get("asset_issuer")
+                    return {
+                        "balance": balance,
+                        "token_id": token_id,
+                        "account": account_id,
+                        "asset_code": parsed_code,
+                        "asset_issuer": matched_issuer,
+                    }
+
+                return {
+                    "balance": 0.0,
+                    "token_id": token_id,
+                    "account": account_id,
+                    "asset_code": parsed_code,
+                    "asset_issuer": None,
+                }
+
             return attach_stellar_failure(
                 None,
                 classify_stellar_failure(status_code=r.status_code),
@@ -185,7 +366,8 @@ class StellarKit:
                 classify_stellar_failure(exc=exc),
             )
 
-    async def transfer_xlm(self, to_account: str, amount: Decimal | float | str) -> dict[str, Any]:
+
+    async def transfer_xlm(self, to_account: str, amount: float) -> dict[str, Any]:
         """Request XLM transfer via Web API (Web handles signing).
 
         On failure the returned dict carries ``error`` plus the bounded
