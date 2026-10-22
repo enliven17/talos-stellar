@@ -13,24 +13,31 @@ import {
 } from "@/lib/soroban";
 import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
 import { TALOS_NAME_MIN_LENGTH, TALOS_NAME_MAX_LENGTH } from "@/lib/limits";
+import { useTranslation, type MessageKey } from "@/lib/i18n";
 
+interface StepConfig {
+  id: string;
+  key: MessageKey;
+}
 
-const STEPS = [
-  "Product",
-  "Patron",
-  "Mitos",
-  "Kernel",
-  "Agent",
-  "Review",
-] as const;
+const STEPS: StepConfig[] = [
+  { id: "product", key: "launch.steps.product" },
+  { id: "patron", key: "launch.steps.patron" },
+  { id: "mitos", key: "launch.steps.mitos" },
+  { id: "kernel", key: "launch.steps.kernel" },
+  { id: "agent", key: "launch.steps.agent" },
+  { id: "review", key: "launch.steps.review" },
+];
 
 const CHANNELS = ["X (Twitter)", "LinkedIn", "Reddit", "Product Hunt"];
 
 export default function LaunchPage() {
+  const { t } = useTranslation();
+
   return (
     <WalletGate
-      title="Connect Wallet to Launch"
-      description="Creating a TALOS requires a Stellar wallet connection. Your public key will be registered as the Creator."
+      title={t("launch.walletGate.title")}
+      description={t("launch.walletGate.description")}
     >
       <LaunchForm />
     </WalletGate>
@@ -38,6 +45,7 @@ export default function LaunchPage() {
 }
 
 function LaunchForm() {
+  const { t } = useTranslation();
   const { address } = useWallet();
   const { signTransaction } = useStellarWallet();
   const router = useRouter();
@@ -139,7 +147,7 @@ function LaunchForm() {
 
     try {
       // 1. Verify Stellar wallet
-      setDeployStep("Verifying Stellar wallet...");
+      setDeployStep(t("launch.verifyingWallet"));
       setDeployProgress(1);
       await ensureStellarNetwork(address);
 
@@ -147,7 +155,7 @@ function LaunchForm() {
 
       // 2. Register TALOS on-chain via Soroban (if contract is deployed)
       if (TALOS_REGISTRY_CONTRACT_ID) {
-        setDeployStep("Registering TALOS on Soroban...");
+        setDeployStep(t("launch.registeringSoroban"));
         setDeployProgress(2);
 
         const {
@@ -272,7 +280,7 @@ function LaunchForm() {
 
       // 3. Register agent name on-chain (if name service is deployed)
       if (TALOS_NAME_SERVICE_CONTRACT_ID && onChainId !== null) {
-        setDeployStep("Registering agent identity on-chain...");
+        setDeployStep(t("launch.registeringIdentity"));
         setDeployProgress(3);
 
         const {
@@ -327,7 +335,7 @@ function LaunchForm() {
       }
 
       // 4. Save to database
-      setDeployStep("Saving to database...");
+      setDeployStep(t("launch.savingDatabase"));
       setDeployProgress(4);
 
       let dbData: { id: string; apiKeyOnce: string } | null = null;
@@ -369,16 +377,13 @@ function LaunchForm() {
       const raw = err instanceof Error ? err.message : "Deployment failed";
       let message = raw;
       if (raw.includes("User declined") || raw.includes("user rejected"))
-        message = "Transaction was rejected in your wallet.";
-      else if (raw.includes("Account not found")) message = raw;
-      else if (
-        raw.includes("insufficient") ||
-        raw.includes("balance")
-      )
-        message = "Insufficient XLM balance for this transaction.";
+        message = t("launch.txRejected");
+      else if (raw.includes("Account not found"))
+        message = raw;
+      else if (raw.includes("insufficient") || raw.includes("balance"))
+        message = t("launch.insufficientBalance");
       else if (raw.length > 200)
-        message =
-          "Deployment failed. Please try again or contact support.";
+        message = t("launch.deployFailed");
       setError(message);
     } finally {
       setSubmitting(false);
@@ -392,12 +397,8 @@ function LaunchForm() {
     return (
       <div className="max-w-3xl mx-auto px-6 py-12">
         <div className="mb-8">
-          <div className="text-xs text-accent font-bold mb-2">
-            [GENESIS COMPLETE]
-          </div>
-          <h1 className="text-2xl font-bold text-accent">
-            TALOS Launched Successfully
-          </h1>
+          <div className="text-xs text-accent font-bold mb-2">{t("launch.genesis.badge")}</div>
+          <h1 className="text-2xl font-bold text-accent">{t("launch.genesis.title")}</h1>
         </div>
 
         <div className="bg-surface border border-accent/30 p-8 mb-6 space-y-6">
@@ -414,46 +415,32 @@ function LaunchForm() {
                 <path d="M20 6L9 17l-5-5" />
               </svg>
               <span className="text-sm font-medium">
-                On-chain registration confirmed (ID: {genesisResult.onChainId})
+                {t("launch.genesis.onChainConfirmed", { id: genesisResult.onChainId })}
               </span>
             </div>
           )}
 
           <div>
-            <div className="text-xs text-muted mb-2">Agent Identity</div>
-            <div
-              data-testid="launched-agent-identity"
-              className="text-foreground font-mono text-sm"
-            >
-              {genesisResult.agentName}.talos
-            </div>
+            <div className="text-xs text-muted mb-2">{t("launch.genesis.agentIdentity")}</div>
+            <div data-testid="launched-agent-identity" className="text-foreground font-mono text-sm">{genesisResult.agentName}.talos</div>
           </div>
 
           <div>
-            <div className="text-xs text-accent font-bold mb-2">
-              API Key (shown only once — save it now)
-            </div>
-            <div
-              data-testid="launched-api-key"
-              className="bg-background border border-border p-3 font-mono text-xs text-accent break-all select-all"
-            >
+            <div className="text-xs text-accent font-bold mb-2">{t("launch.genesis.apiKeyTitle")}</div>
+            <div data-testid="launched-api-key" className="bg-background border border-border p-3 font-mono text-xs text-accent break-all select-all">
               {genesisResult.apiKey}
             </div>
           </div>
 
           <div>
-            <div className="text-xs text-muted mb-4">Run your Prime Agent</div>
+            <div className="text-xs text-muted mb-4">{t("launch.genesis.runAgent")}</div>
             <div className="bg-background border border-border p-4 text-xs text-foreground space-y-1 overflow-x-auto">
-              <div className="text-muted"># 1. Install the agent CLI</div>
+              <div className="text-muted">{t("launch.genesis.stepInstall")}</div>
               <div>pip install talos-agent</div>
-              <div className="text-muted mt-3"># 2. Set your API key</div>
-              <div>
-                export TALOS_API_KEY=&quot;{genesisResult.apiKey}&quot;
-              </div>
-              <div className="text-muted mt-3"># 3. Start your Prime Agent</div>
-              <div>
-                talos-agent start --talos-id {genesisResult.talosId}
-              </div>
+              <div className="text-muted mt-3">{t("launch.genesis.stepKey")}</div>
+              <div>export TALOS_API_KEY=&quot;{genesisResult.apiKey}&quot;</div>
+              <div className="text-muted mt-3">{t("launch.genesis.stepStart")}</div>
+              <div>talos-agent start --talos-id {genesisResult.talosId}</div>
             </div>
           </div>
         </div>
@@ -475,7 +462,7 @@ function LaunchForm() {
                 : "border-border text-foreground hover:bg-surface-hover"
             }`}
           >
-            {copied ? "Copied!" : "Copy API Key"}
+            {copied ? t("launch.genesis.copied") : t("launch.genesis.copyApiKey")}
           </button>
           <button
             onClick={() =>
@@ -484,7 +471,7 @@ function LaunchForm() {
             data-testid="view-launched-talos-button"
             className="px-8 py-2.5 text-sm bg-accent text-background font-medium hover:bg-foreground transition-colors"
           >
-            View TALOS &rarr;
+            {t("launch.genesis.viewTalos")}
           </button>
         </div>
       </div>
@@ -544,67 +531,110 @@ function LaunchForm() {
       {/* Header */}
       <div className="mb-8 flex items-end justify-between">
         <div>
-          <div className="text-xs text-muted mb-2">[TALOS GENESIS]</div>
-          <h1 className="text-2xl font-bold text-accent">Launch your TALOS</h1>
+          <div className="text-xs text-muted mb-2">{t("launch.badge")}</div>
+          <h1 className="text-2xl font-bold text-accent">{t("launch.title")}</h1>
         </div>
         <button
           onClick={loadDemo}
           data-testid="load-demo-launch-form-button"
           className="px-4 py-2 text-xs border border-accent/30 text-accent hover:bg-surface-hover transition-colors"
         >
-          Demo: Nexus
+          {t("launch.demoButton")}
         </button>
       </div>
 
       {/* Step indicator */}
-      <LaunchStepper currentStep={step} onStepClick={setStep} />
+      <div className="flex items-center gap-1 mb-10 overflow-x-auto">
+        {STEPS.map((s, i) => (
+          <button
+            key={s.id}
+            onClick={() => i <= step && setStep(i)}
+            data-testid={`launch-step-${s.id}`}
+            className={`px-3 py-1.5 text-xs border transition-colors whitespace-nowrap ${
+              i === step
+                ? "border-accent text-accent bg-surface"
+                : i < step
+                ? "border-border text-foreground bg-surface cursor-pointer hover:bg-surface-hover"
+                : "border-border text-muted bg-background cursor-default"
+            }`}
+          >
+            {String(i + 1).padStart(2, "0")} {t(s.key)}
+          </button>
+        ))}
+      </div>
 
       {/* Step content */}
       <div className="bg-surface border border-border p-8 mb-6">
         {step === 0 && (
           <div className="space-y-6">
-            <h2 className="text-lg font-bold text-accent mb-1">Product Input</h2>
+            <h2 className="text-lg font-bold text-accent mb-1">{t("launch.product.title")}</h2>
             <p className="text-sm text-muted mb-6">
-              Register your product. Your Prime Agent will handle GTM and service delivery.
+              {t("launch.product.description")}
             </p>
-            <Field label="Product Name" value={form.productName} onChange={(v) => update("productName", v)} placeholder="e.g. ImageGen Pro" />
-            <Field label="Description" value={form.productDesc} onChange={(v) => update("productDesc", v)} placeholder="What does your product do? Who is it for?" multiline />
+            <Field
+              label={t("launch.product.name")}
+              testId="launch-input-product-name"
+              value={form.productName}
+              onChange={(v) => update("productName", v)}
+              placeholder={t("launch.product.namePlaceholder")}
+            />
+            <Field
+              label={t("launch.product.desc")}
+              testId="launch-input-description"
+              value={form.productDesc}
+              onChange={(v) => update("productDesc", v)}
+              placeholder={t("launch.product.descPlaceholder")}
+              multiline
+            />
             <div>
-              <label className="block text-xs text-muted mb-2">Category</label>
+              <label className="block text-xs text-muted mb-2">{t("launch.product.category")}</label>
               <select
                 value={form.category}
                 onChange={(e) => update("category", e.target.value)}
                 data-testid="launch-input-category"
                 className="w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground focus:outline-none focus:border-accent"
               >
-                <option value="marketing">Marketing</option>
-                <option value="development">Development</option>
-                <option value="research">Research</option>
-                <option value="design">Design</option>
-                <option value="finance">Finance</option>
-                <option value="analytics">Analytics</option>
-                <option value="operations">Operations</option>
-                <option value="sales">Sales</option>
-                <option value="support">Support</option>
-                <option value="education">Education</option>
+                <option value="marketing">{t("launch.categories.marketing")}</option>
+                <option value="development">{t("launch.categories.development")}</option>
+                <option value="research">{t("launch.categories.research")}</option>
+                <option value="design">{t("launch.categories.design")}</option>
+                <option value="finance">{t("launch.categories.finance")}</option>
+                <option value="analytics">{t("launch.categories.analytics")}</option>
+                <option value="operations">{t("launch.categories.operations")}</option>
+                <option value="sales">{t("launch.categories.sales")}</option>
+                <option value="support">{t("launch.categories.support")}</option>
+                <option value="education">{t("launch.categories.education")}</option>
               </select>
             </div>
 
             <div className="pt-4 mt-2 border-t border-border">
-              <div className="text-xs text-accent mb-1">[COMMERCE SERVICE]</div>
+              <div className="text-xs text-accent mb-1">{t("launch.product.commerceBadge")}</div>
               <p className="text-xs text-muted mb-4">
-                Define the paid service your agent offers to other agents via the x402 protocol. Optional — you can add this later.
+                {t("launch.product.commerceDesc")}
               </p>
               <div className="space-y-4">
-                <Field label="Service Name" value={form.serviceName} onChange={(v) => update("serviceName", v)} placeholder="e.g. SEO Content Generation" />
-                <Field label="Service Description" value={form.serviceDescription} onChange={(v) => update("serviceDescription", v)} placeholder="What does this service do? What input/output should callers expect?" multiline />
+                <Field
+                  label={t("launch.product.serviceName")}
+                  testId="launch-input-service-name"
+                  value={form.serviceName}
+                  onChange={(v) => update("serviceName", v)}
+                  placeholder={t("launch.product.serviceNamePlaceholder")}
+                />
+                <Field
+                  label={t("launch.product.serviceDesc")}
+                  testId="launch-input-service-description"
+                  value={form.serviceDescription}
+                  onChange={(v) => update("serviceDescription", v)}
+                  placeholder={t("launch.product.serviceDescPlaceholder")}
+                  multiline
+                />
                 <div>
-                  <label className="block text-xs text-muted mb-2">Price per Request (USDC)</label>
+                  <label className="block text-xs text-muted mb-2">{t("launch.product.servicePrice")}</label>
                   <input
                     type="number"
                     value={form.servicePrice}
                     onChange={(e) => update("servicePrice", e.target.value)}
-                    placeholder="e.g. 5.00"
+                    placeholder={t("launch.product.servicePricePlaceholder")}
                     data-testid="launch-input-service-price"
                     className="w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent"
                   />
@@ -616,74 +646,112 @@ function LaunchForm() {
 
         {step === 1 && (
           <div className="space-y-6">
-            <h2 className="text-lg font-bold text-accent mb-1">Patron Configuration</h2>
+            <h2 className="text-lg font-bold text-accent mb-1">{t("launch.patron.title")}</h2>
             <p className="text-sm text-muted mb-6">
-              The Creator is your Stellar public key. It is permanently linked to this TALOS and cannot be changed.
+              {t("launch.patron.description")}
             </p>
             <div>
-              <label className="block text-xs text-muted mb-2">Creator Public Key (Stellar)</label>
+              <label className="block text-xs text-muted mb-2">{t("launch.patron.creatorLabel")}</label>
               <div
                 data-testid="creator-wallet-display"
                 className="w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground/70 font-mono select-all break-all"
               >
                 {form.creatorWallet || address || "—"}
               </div>
-              <p className="text-xs text-muted mt-1">This Stellar public key will be registered as the TALOS Creator on-chain.</p>
+              <p className="text-xs text-muted mt-1">{t("launch.patron.creatorHint")}</p>
             </div>
             <div className="p-4 border border-border bg-background">
-              <div className="text-xs text-accent mb-2">[REVENUE MODEL]</div>
+              <div className="text-xs text-accent mb-2">{t("launch.patron.revenueModelBadge")}</div>
               <div className="space-y-2 text-sm">
                 <div className="flex justify-between">
-                  <span className="text-muted">Agent Treasury</span>
+                  <span className="text-muted">{t("launch.patron.agentTreasury")}</span>
                   <span className="text-foreground font-medium">100%</span>
                 </div>
               </div>
-              <p className="text-xs text-muted mt-3">All revenue flows to the Agent Treasury controlled by the Creator.</p>
+              <p className="text-xs text-muted mt-3">{t("launch.patron.treasuryHint")}</p>
             </div>
           </div>
         )}
 
         {step === 2 && (
           <div className="space-y-6">
-            <h2 className="text-lg font-bold text-accent mb-1">Mitos Configuration</h2>
+            <h2 className="text-lg font-bold text-accent mb-1">{t("launch.mitos.title")}</h2>
             <p className="text-sm text-muted mb-6">
-              Configure your TALOS&apos;s Mitos token on Stellar.
+              {t("launch.mitos.description")}
             </p>
-            <Field label="Token Name" value={form.tokenName} onChange={(v) => update("tokenName", v)} placeholder="e.g. ImageGen Mitos" />
+            <Field
+              label={t("launch.mitos.tokenName")}
+              testId="launch-input-token-name"
+              value={form.tokenName}
+              onChange={(v) => update("tokenName", v)}
+              placeholder={t("launch.mitos.tokenNamePlaceholder")}
+            />
             <div>
-              <Field label="Token Symbol (Stellar Asset Code)" value={form.tokenSymbol} onChange={(v) => update("tokenSymbol", v.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8))} placeholder="e.g. IMGS" />
-              <p className="text-xs text-muted mt-1">2-8 characters, letters and numbers only. Used as Stellar asset code.</p>
+              <Field
+                label={t("launch.mitos.tokenSymbol")}
+                testId="launch-input-token-symbol"
+                value={form.tokenSymbol}
+                onChange={(v) => update("tokenSymbol", v.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8))}
+                placeholder={t("launch.mitos.tokenSymbolPlaceholder")}
+              />
+              <p className="text-xs text-muted mt-1">{t("launch.mitos.tokenSymbolHint")}</p>
             </div>
             <div>
-              <Field label="Total Supply" value={form.totalSupply} onChange={(v) => update("totalSupply", v)} type="number" />
-              <p className="text-xs text-muted mt-1">Max 100,000,000</p>
+              <Field
+                label={t("launch.mitos.totalSupply")}
+                testId="launch-input-total-supply"
+                value={form.totalSupply}
+                onChange={(v) => update("totalSupply", v)}
+                type="number"
+              />
+              <p className="text-xs text-muted mt-1">{t("launch.mitos.totalSupplyHint")}</p>
             </div>
             <div>
-              <Field label="Initial Price (USDC)" value={form.initialPrice} onChange={(v) => update("initialPrice", v)} type="number" />
-              <p className="text-xs text-muted mt-1">Price per Pulse token in USDC on Stellar</p>
+              <Field
+                label={t("launch.mitos.initialPrice")}
+                testId="launch-input-initial-price"
+                value={form.initialPrice}
+                onChange={(v) => update("initialPrice", v)}
+                type="number"
+              />
+              <p className="text-xs text-muted mt-1">{t("launch.mitos.initialPriceHint")}</p>
             </div>
           </div>
         )}
 
         {step === 3 && (
           <div className="space-y-6">
-            <h2 className="text-lg font-bold text-accent mb-1">Kernel Policy</h2>
+            <h2 className="text-lg font-bold text-accent mb-1">{t("launch.kernel.title")}</h2>
             <p className="text-sm text-muted mb-6">
-              Set the governance rules for your agent.
+              {t("launch.kernel.description")}
             </p>
-            <Field label="Approval Threshold (USDC)" value={form.approvalThreshold} onChange={(v) => update("approvalThreshold", v)} type="number" placeholder="Transactions above this require approval" />
-            <Field label="GTM Budget (USDC/month)" value={form.gtmBudget} onChange={(v) => update("gtmBudget", v)} type="number" placeholder="Monthly budget for GTM activities" />
+            <Field
+              label={t("launch.kernel.approvalThreshold")}
+              testId="launch-input-approval-threshold"
+              value={form.approvalThreshold}
+              onChange={(v) => update("approvalThreshold", v)}
+              type="number"
+              placeholder={t("launch.kernel.approvalThresholdPlaceholder")}
+            />
+            <Field
+              label={t("launch.kernel.gtmBudget")}
+              testId="launch-input-gtm-budget"
+              value={form.gtmBudget}
+              onChange={(v) => update("gtmBudget", v)}
+              type="number"
+              placeholder={t("launch.kernel.gtmBudgetPlaceholder")}
+            />
           </div>
         )}
 
         {step === 4 && (
           <div className="space-y-6">
-            <h2 className="text-lg font-bold text-accent mb-1">Prime Agent Setup</h2>
+            <h2 className="text-lg font-bold text-accent mb-1">{t("launch.agent.title")}</h2>
             <p className="text-sm text-muted mb-6">
-              Configure your AI agent&apos;s personality and targets.
+              {t("launch.agent.description")}
             </p>
             <div>
-              <label className="block text-xs text-muted mb-2">Agent Identity (immutable)</label>
+              <label className="block text-xs text-muted mb-2">{t("launch.agent.identityLabel")}</label>
               <div className="flex items-center gap-2">
                 <input
                   type="text"
@@ -693,47 +761,68 @@ function LaunchForm() {
                     update("agentName", v);
                     checkNameAvailability(v);
                   }}
-                  placeholder="e.g. marketbot"
+                  placeholder={t("launch.agent.identityPlaceholder")}
                   data-testid="launch-input-agent-identity"
                   className="flex-1 bg-background border border-border px-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent"
                 />
                 <span className="text-sm text-muted">.talos</span>
               </div>
               <div className="mt-1.5 text-xs">
-                {nameChecking && <span className="text-muted">Checking...</span>}
+                {nameChecking && <span className="text-muted">{t("launch.agent.checking")}</span>}
                 {!nameChecking && nameAvailable === true && form.agentName.length >= TALOS_NAME_MIN_LENGTH && (
-                  <span className="text-accent font-bold">{form.agentName}.talos is available</span>
+                  <span className="text-accent font-bold">
+                    {t("launch.agent.available", { name: form.agentName })}
+                  </span>
                 )}
                 {!nameChecking && nameAvailable === false && form.agentName.length <= TALOS_NAME_MAX_LENGTH && (
-                  <span className="text-red-600 font-bold">{form.agentName}.talos is taken</span>
+                  <span className="text-red-600 font-bold">
+                    {t("launch.agent.taken", { name: form.agentName })}
+                  </span>
                 )}
                 {!nameChecking && form.agentName.length > TALOS_NAME_MAX_LENGTH && (
-                  <span className="text-red-600 font-bold">Name must be at most {TALOS_NAME_MAX_LENGTH} characters</span>
+                  <span className="text-red-600 font-bold">
+                    {t("launch.agent.maxChars", { max: TALOS_NAME_MAX_LENGTH })}
+                  </span>
                 )}
                 {!nameChecking && nameAvailable === null && form.agentName.length > 0 && form.agentName.length < TALOS_NAME_MIN_LENGTH && (
-                  <span className="text-muted">Minimum {TALOS_NAME_MIN_LENGTH} characters</span>
+                  <span className="text-muted">
+                    {t("launch.agent.minChars", { min: TALOS_NAME_MIN_LENGTH })}
+                  </span>
                 )}
               </div>
-              <p className="text-xs text-muted mt-1">This is your agent&apos;s permanent on-chain identity. It cannot be changed after registration.</p>
+              <p className="text-xs text-muted mt-1">{t("launch.agent.identityHint")}</p>
             </div>
-            <Field label="Persona" value={form.persona} onChange={(v) => update("persona", v)} placeholder="e.g. A sharp, witty tech commentator" multiline />
-            <Field label="Target Audience" value={form.targetAudience} onChange={(v) => update("targetAudience", v)} placeholder="e.g. Indie developers building SaaS products" />
+            <Field
+              label={t("launch.agent.persona")}
+              testId="launch-input-persona"
+              value={form.persona}
+              onChange={(v) => update("persona", v)}
+              placeholder={t("launch.agent.personaPlaceholder")}
+              multiline
+            />
+            <Field
+              label={t("launch.agent.targetAudience")}
+              testId="launch-input-target-audience"
+              value={form.targetAudience}
+              onChange={(v) => update("targetAudience", v)}
+              placeholder={t("launch.agent.targetAudiencePlaceholder")}
+            />
             <div>
-              <label className="block text-xs text-muted mb-2">Tone</label>
+              <label className="block text-xs text-muted mb-2">{t("launch.agent.tone")}</label>
               <select
                 value={form.tone}
                 onChange={(e) => update("tone", e.target.value)}
                 data-testid="launch-input-tone"
                 className="w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground focus:outline-none focus:border-accent"
               >
-                <option value="professional">Professional</option>
-                <option value="casual">Casual</option>
-                <option value="witty">Witty</option>
-                <option value="technical">Technical</option>
+                <option value="professional">{t("launch.agent.toneProfessional")}</option>
+                <option value="casual">{t("launch.agent.toneCasual")}</option>
+                <option value="witty">{t("launch.agent.toneWitty")}</option>
+                <option value="technical">{t("launch.agent.toneTechnical")}</option>
               </select>
             </div>
             <div>
-              <label className="block text-xs text-muted mb-2">GTM Channels</label>
+              <label className="block text-xs text-muted mb-2">{t("launch.agent.channels")}</label>
               <div className="flex flex-wrap gap-2">
                 {CHANNELS.map((ch) => (
                   <button
@@ -761,28 +850,28 @@ function LaunchForm() {
 
         {step === 5 && (
           <div className="space-y-6">
-            <h2 className="text-lg font-bold text-accent mb-1">Review & Deploy</h2>
+            <h2 className="text-lg font-bold text-accent mb-1">{t("launch.review.title")}</h2>
             <p className="text-sm text-muted mb-6">
-              Confirm your TALOS configuration before deployment.
+              {t("launch.review.description")}
             </p>
             <div className="space-y-4 text-sm">
-              <ReviewRow label="Product" value={form.productName} />
-              <ReviewRow label="Category" value={form.category} />
-              <ReviewRow label="Token" value={`${form.tokenName} (${form.tokenSymbol})`} />
-              <ReviewRow label="Supply" value={Number(form.totalSupply).toLocaleString()} />
-              <ReviewRow label="Price" value={`$${form.initialPrice}`} />
-              <ReviewRow label="Agent Identity" value={`${form.agentName}.talos`} />
-              <ReviewRow label="Revenue Model" value="100% Agent Treasury (no external distribution)" />
-              <ReviewRow label="Creator (Stellar)" value={form.creatorWallet || address || ""} />
-              <ReviewRow label="Approval" value={`> $${form.approvalThreshold}`} />
-              <ReviewRow label="Budget" value={`$${form.gtmBudget}/mo`} />
-              <ReviewRow label="Persona" value={form.persona} />
-              <ReviewRow label="Audience" value={form.targetAudience} />
-              <ReviewRow label="Channels" value={form.channels.join(", ")} />
+              <ReviewRow label={t("launch.review.product")} value={form.productName} />
+              <ReviewRow label={t("launch.review.category")} value={form.category} />
+              <ReviewRow label={t("launch.review.token")} value={`${form.tokenName} (${form.tokenSymbol})`} />
+              <ReviewRow label={t("launch.review.supply")} value={Number(form.totalSupply).toLocaleString()} />
+              <ReviewRow label={t("launch.review.price")} value={`$${form.initialPrice}`} />
+              <ReviewRow label={t("launch.review.agentIdentity")} value={`${form.agentName}.talos`} />
+              <ReviewRow label={t("launch.review.revenueModel")} value={t("launch.review.revenueModelValue")} />
+              <ReviewRow label={t("launch.review.creator")} value={form.creatorWallet || address || ""} />
+              <ReviewRow label={t("launch.review.approval")} value={`> $${form.approvalThreshold}`} />
+              <ReviewRow label={t("launch.review.budget")} value={`$${form.gtmBudget}/mo`} />
+              <ReviewRow label={t("launch.review.persona")} value={form.persona} />
+              <ReviewRow label={t("launch.review.audience")} value={form.targetAudience} />
+              <ReviewRow label={t("launch.review.channels")} value={form.channels.join(", ")} />
               {form.serviceName && (
                 <>
-                  <ReviewRow label="Service" value={form.serviceName} />
-                  <ReviewRow label="Service Price" value={form.servicePrice ? `${form.servicePrice} USDC` : "—"} />
+                  <ReviewRow label={t("launch.review.service")} value={form.serviceName} />
+                  <ReviewRow label={t("launch.review.servicePrice")} value={form.servicePrice ? `${form.servicePrice} USDC` : "—"} />
                 </>
               )}
             </div>
@@ -813,9 +902,7 @@ function LaunchForm() {
                 d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
               />
             </svg>
-            <span className="text-sm text-accent">
-              {deployStep || "Preparing..."}
-            </span>
+            <span className="text-sm text-accent">{deployStep || t("launch.deploying.preparing")}</span>
           </div>
           <div className="flex gap-1">
             {[1, 2, 3, 4].map((s) => (
@@ -828,10 +915,10 @@ function LaunchForm() {
             ))}
           </div>
           <div className="flex justify-between mt-1 text-xs text-muted">
-            <span>Wallet</span>
-            <span>Registry</span>
-            <span>Name</span>
-            <span>Database</span>
+            <span>{t("launch.deploying.wallet")}</span>
+            <span>{t("launch.deploying.registry")}</span>
+            <span>{t("launch.deploying.name")}</span>
+            <span>{t("launch.deploying.database")}</span>
           </div>
         </div>
       )}
@@ -851,7 +938,7 @@ function LaunchForm() {
           data-testid="launch-back-button"
           className="px-6 py-2.5 text-sm border border-border text-foreground hover:bg-surface-hover transition-colors disabled:opacity-30 disabled:cursor-default"
         >
-          Back
+          {t("launch.buttons.back")}
         </button>
         {step < 5 ? (
           <button
@@ -860,7 +947,7 @@ function LaunchForm() {
             data-testid="launch-next-button"
             className="px-6 py-2.5 text-sm bg-accent text-background font-medium hover:bg-foreground transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-default"
           >
-            Next
+            {t("launch.buttons.next")}
           </button>
         ) : (
           <button
@@ -869,10 +956,65 @@ function LaunchForm() {
             data-testid="launch-submit-button"
             className="px-8 py-2.5 text-sm bg-accent text-background font-medium hover:bg-foreground transition-colors disabled:opacity-50"
           >
-            {submitting ? deployStep || "Deploying..." : "Launch TALOS"}
+            {submitting ? (deployStep || t("launch.deploying.deploying")) : t("launch.buttons.launch")}
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+function Field({
+  label,
+  value,
+  onChange,
+  placeholder = "",
+  type = "text",
+  multiline = false,
+  testId: customTestId,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  type?: string;
+  multiline?: boolean;
+  testId?: string;
+}) {
+  const testId = customTestId ?? `launch-input-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+  const cls =
+    "w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent";
+  return (
+    <div>
+      <label className="block text-xs text-muted mb-2">{label}</label>
+      {multiline ? (
+        <textarea
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          rows={3}
+          data-testid={testId}
+          className={`${cls} resize-none`}
+        />
+      ) : (
+        <input
+          type={type}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          data-testid={testId}
+          className={cls}
+        />
+      )}
+    </div>
+  );
+}
+
+function ReviewRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-start justify-between py-2 border-b border-border">
+      <span className="text-muted">{label}</span>
+      <span className="text-foreground text-right max-w-[60%] break-all">{value || "—"}</span>
     </div>
   );
 }

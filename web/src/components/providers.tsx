@@ -69,7 +69,15 @@ export function useStellarWallet(): WalletContextValue {
   return useContext(WalletContext);
 }
 
-export function Providers({ children }: { children: ReactNode }) {
+import { I18nProvider, type SupportedLocale } from "@/lib/i18n";
+
+export function Providers({
+  children,
+  initialLocale,
+}: {
+  children: ReactNode;
+  initialLocale?: SupportedLocale;
+}) {
   const [publicKey, setPublicKey] = useState<string | null>(null);
   const [showWalletModal, setShowWalletModal] = useState(false);
 
@@ -123,27 +131,29 @@ export function Providers({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <WalletContext.Provider
-      value={{
-        kit: StellarWalletsKit,
-        publicKey,
-        isConnected: !!publicKey,
-        connect,
-        disconnect,
-        signTransaction,
-        signMessage,
-        showWalletModal,
-        setShowWalletModal,
-        selectWallet,
-      }}
-    >
-      {children}
-      <WalletModal
-        open={showWalletModal}
-        onClose={() => setShowWalletModal(false)}
-        onSelect={selectWallet}
-      />
-    </WalletContext.Provider>
+    <I18nProvider initialLocale={initialLocale}>
+      <WalletContext.Provider
+        value={{
+          kit: StellarWalletsKit,
+          publicKey,
+          isConnected: !!publicKey,
+          connect,
+          disconnect,
+          signTransaction,
+          signMessage,
+          showWalletModal,
+          setShowWalletModal,
+          selectWallet,
+        }}
+      >
+        {children}
+        <WalletModal
+          open={showWalletModal}
+          onClose={() => setShowWalletModal(false)}
+          onSelect={selectWallet}
+        />
+      </WalletContext.Provider>
+    </I18nProvider>
   );
 }
 
