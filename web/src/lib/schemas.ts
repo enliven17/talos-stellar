@@ -894,3 +894,24 @@ export function canNextForStep(
       return true;
   }
 }
+
+// --- Revenue Buyback ---
+
+const buybackAmountSchema = z
+  .number()
+  .positive("amount must be greater than zero")
+  .refine(Number.isFinite, "amount must be finite")
+  .refine(
+    (n) => Number(n.toFixed(7)) === n,
+    "amount must have at most 7 decimal places",
+  );
+
+export const buybackSchema = z
+  .object({
+    usdcAmount: buybackAmountSchema.optional(),
+    mitosAmount: buybackAmountSchema.optional(),
+  })
+  .refine(
+    (d) => d.usdcAmount !== undefined || d.mitosAmount !== undefined,
+    { message: "usdcAmount or mitosAmount is required" },
+  );
