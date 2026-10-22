@@ -23,8 +23,8 @@
  */
 
 import { NextRequest } from "next/server";
-import { shouldSample } from "./sampler.js";
-import { validateAgainstSchema, stripUnknownFields, makeInvalidJsonViolation } from "./validator.js";
+import { shouldSample } from "./sampler";
+import { validateAgainstSchema, stripUnknownFields, makeInvalidJsonViolation } from "./validator";
 import {
   recordSkip,
   recordClean,
@@ -32,12 +32,12 @@ import {
   recordReject,
   recordValidatorError,
   recordNoSchema,
-} from "./metrics.js";
+} from "./metrics";
 import type {
   ResolvedDriftConfig,
   SchemaRegistry,
   DriftViolation,
-} from "./types.js";
+} from "./types";
 
 type RouteHandler<Params = any> = (
   req: NextRequest,
@@ -46,7 +46,7 @@ type RouteHandler<Params = any> = (
 
 // ── Global registry and config ────────────────────────────────────────────────
 
-import type { JsonSchemaObject } from "./types.js";
+import type { JsonSchemaObject } from "./types";
 
 /** Singleton schema registry populated at startup. */
 const registry: SchemaRegistry = new Map();
@@ -68,7 +68,7 @@ export function registeredRoutes(): string[] {
 
 // ── Config resolution ─────────────────────────────────────────────────────────
 
-import type { DriftConfig, ResolvedDriftConfig as RDC } from "./types.js";
+import type { DriftConfig, ResolvedDriftConfig as RDC } from "./types";
 
 function resolveConfig(partial?: Partial<DriftConfig>): RDC {
   const mode = (partial?.mode ?? process.env.DRIFT_MODE ?? "off") as RDC["mode"];
