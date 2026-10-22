@@ -198,11 +198,11 @@ class PolicyMiddleware:
             params = dict(kwargs)
             # Attempt to map positional args to parameter names
             import inspect
+
             try:
                 sig = inspect.signature(tool_fn)
                 param_names = [
-                    n for n, p in sig.parameters.items()
-                    if n not in ("self", "cls")
+                    n for n, p in sig.parameters.items() if n not in ("self", "cls")
                 ]
                 for i, val in enumerate(args):
                     if i < len(param_names):

@@ -146,6 +146,7 @@ def classified(
 
 # ── Guard ────────────────────────────────────────────────────────────────────
 
+
 class ClassificationError(Exception):
     """Raised when an unclassified field is about to be persisted or included
     in a checkpoint payload."""
@@ -196,6 +197,7 @@ def validate_checkpoint_payload(payload: dict[str, Any]) -> None:
 
 
 # ── Documentation helper ────────────────────────────────────────────────────
+
 
 def classification_report() -> str:
     """Return a human-readable report of all registered classifications."""

@@ -85,19 +85,23 @@ class PolicySimulator:
             context = scenario.get("context", {})
             try:
                 result = self.simulate(action, params, context)
-                results.append({
-                    "scenario_index": i,
-                    "action": action,
-                    "decision": result.decision.value,
-                    "evidence": list(result.evidence),
-                    "result_digest": result.result_digest,
-                })
+                results.append(
+                    {
+                        "scenario_index": i,
+                        "action": action,
+                        "decision": result.decision.value,
+                        "evidence": list(result.evidence),
+                        "result_digest": result.result_digest,
+                    }
+                )
             except Exception as exc:
-                results.append({
-                    "scenario_index": i,
-                    "action": action,
-                    "error": str(exc),
-                })
+                results.append(
+                    {
+                        "scenario_index": i,
+                        "action": action,
+                        "error": str(exc),
+                    }
+                )
         return results
 
     def export_scenarios(self, scenarios: list[dict[str, Any]], path: str) -> None:

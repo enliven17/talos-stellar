@@ -12,7 +12,11 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
+from talos_agent.adapters.base import (
+    BaseSocialAdapter,
+    ChannelCapabilities,
+    PublishResult,
+)
 from talos_agent.adapters.capability import (
     _BUDGET,
     AdapterHTTPClient,
@@ -303,7 +307,11 @@ class TelegramAdapter(BaseSocialAdapter):
             result = data.get("result", {})
             message_id = result.get("message_id")
             url = None
-            if isinstance(self._chat_id, str) and self._chat_id.startswith("@") and message_id is not None:
+            if (
+                isinstance(self._chat_id, str)
+                and self._chat_id.startswith("@")
+                and message_id is not None
+            ):
                 username = self._chat_id.lstrip("@")
                 url = f"https://t.me/{username}/{message_id}"
 
@@ -346,7 +354,9 @@ class TelegramAdapter(BaseSocialAdapter):
 
         valid, error = self._validate_formatted_content(content)
         if not valid:
-            return PublishResult(status="failed", channel=self.channel_name, content=content, error=error)
+            return PublishResult(
+                status="failed", channel=self.channel_name, content=content, error=error
+            )
 
         if self._queue is not None:
             return await self._submit("post", content, None, self._operation_id(kwargs))
@@ -365,11 +375,15 @@ class TelegramAdapter(BaseSocialAdapter):
 
         valid, error = self._validate_formatted_content(content)
         if not valid:
-            return PublishResult(status="failed", channel=self.channel_name, content=content, error=error)
+            return PublishResult(
+                status="failed", channel=self.channel_name, content=content, error=error
+            )
 
         message_id = self._parse_message_id(target_url)
         if self._queue is not None:
-            return await self._submit("reply", content, message_id, self._operation_id(kwargs))
+            return await self._submit(
+                "reply", content, message_id, self._operation_id(kwargs)
+            )
 
         payload = self._message_payload(content, reply_to_message_id=message_id)
         return await self._send(payload)
@@ -410,7 +424,9 @@ class TelegramAdapter(BaseSocialAdapter):
         budget = _BUDGET.get()
         return budget.operation_id if budget is not None else None
 
-    def _queued_result(self, status: str, item: QueuedMessage | int, text: str, **extra: Any) -> PublishResult:
+    def _queued_result(
+        self, status: str, item: QueuedMessage | int, text: str, **extra: Any
+    ) -> PublishResult:
         item_id = item.id if isinstance(item, QueuedMessage) else item
         metadata: dict[str, Any] = {"queue_id": item_id, **extra}
         post_id = None
@@ -437,10 +453,16 @@ class TelegramAdapter(BaseSocialAdapter):
     def _result_for_row(self, row: QueuedMessage) -> PublishResult:
         """Map a stored queue row to the result a caller would have seen."""
         if row.state == STATE_SENT:
-            return self._queued_result("posted", row, row.text, message_id=row.message_id)
+            return self._queued_result(
+                "posted", row, row.text, message_id=row.message_id
+            )
         if row.state in (STATE_FAILED, STATE_INDETERMINATE):
             return self._queued_result(
-                "failed", row, row.text, error_code=row.last_error_code or row.state, queue_state=row.state
+                "failed",
+                row,
+                row.text,
+                error_code=row.last_error_code or row.state,
+                queue_state=row.state,
             )
         return self._queued_result("pending", row, row.text, queue_state=row.state)
 
@@ -455,9 +477,14 @@ class TelegramAdapter(BaseSocialAdapter):
         text = re.sub(r"\r\n|\r", "\n", content.strip())
         if not text:
             return PublishResult(
-                status="failed", channel=self.channel_name, content=content, error="Content must not be empty."
+                status="failed",
+                channel=self.channel_name,
+                content=content,
+                error="Content must not be empty.",
             )
-        dedupe_key = operation_id if isinstance(operation_id, str) and operation_id else None
+        dedupe_key = (
+            operation_id if isinstance(operation_id, str) and operation_id else None
+        )
         try:
             enqueued = self._queue.enqueue(
                 chat_id=str(self._chat_id),
@@ -489,7 +516,9 @@ class TelegramAdapter(BaseSocialAdapter):
         try:
             claim = self._queue.claim_next(only_id=enqueued.item_id)
         except TelegramQueueError:
-            return self._queued_result("pending", enqueued.item_id, text, queue_state=STATE_PENDING)
+            return self._queued_result(
+                "pending", enqueued.item_id, text, queue_state=STATE_PENDING
+            )
         if claim.item is None:
             extra: dict[str, Any] = {"queue_state": STATE_PENDING}
             if claim.wait_seconds is not None:
@@ -502,12 +531,18 @@ class TelegramAdapter(BaseSocialAdapter):
         assert self._queue is not None
         if isinstance(queue_item_id, bool) or not isinstance(queue_item_id, int):
             return PublishResult(
-                status="failed", channel=self.channel_name, content="", error="Invalid queue item."
+                status="failed",
+                channel=self.channel_name,
+                content="",
+                error="Invalid queue item.",
             )
         row = self._queue.get(queue_item_id)
         if row is None:
             return PublishResult(
-                status="failed", channel=self.channel_name, content="", error="Queue item not found."
+                status="failed",
+                channel=self.channel_name,
+                content="",
+                error="Queue item not found.",
             )
         if row.state != STATE_SENDING:
             # Already resolved (e.g. a sandbox retry after a terminal result).
@@ -519,7 +554,9 @@ class TelegramAdapter(BaseSocialAdapter):
         assert self._queue is not None
         queue = self._queue
         if not self._is_configured():
-            state = queue.mark_retry(item.id, queue.backoff_delay(item.attempt_count), "not_configured")
+            state = queue.mark_retry(
+                item.id, queue.backoff_delay(item.attempt_count), "not_configured"
+            )
             return self._queued_result(
                 "failed" if state == STATE_FAILED else "pending",
                 item,
@@ -538,23 +575,36 @@ class TelegramAdapter(BaseSocialAdapter):
         )
         plain_text = str(payload.pop("_plain_text", item.text))
         try:
-            response = await self._http.post(self._build_url("sendMessage"), json=payload)
+            response = await self._http.post(
+                self._build_url("sendMessage"), json=payload
+            )
         except AdapterSandboxError:
             # Denied or over budget before any request left the process: safe to retry.
-            queue.mark_retry(item.id, queue.backoff_delay(item.attempt_count), "sandbox_denied")
+            queue.mark_retry(
+                item.id, queue.backoff_delay(item.attempt_count), "sandbox_denied"
+            )
             raise
         except (httpx.ConnectError, httpx.ConnectTimeout):
             # The request never reached Telegram: safe to retry with backoff.
-            state = queue.mark_retry(item.id, queue.backoff_delay(item.attempt_count), "connect_error")
+            state = queue.mark_retry(
+                item.id, queue.backoff_delay(item.attempt_count), "connect_error"
+            )
             return self._queued_result(
-                "failed" if state == STATE_FAILED else "pending", item, item.text,
-                error_code="connect_error", queue_state=state,
+                "failed" if state == STATE_FAILED else "pending",
+                item,
+                item.text,
+                error_code="connect_error",
+                queue_state=state,
             )
         except Exception:
             # Outcome unknown (the message may have been delivered); never auto-resend.
             queue.mark_indeterminate(item.id, "transport_error")
             return self._queued_result(
-                "failed", item, item.text, error_code="transport_error", queue_state=STATE_INDETERMINATE
+                "failed",
+                item,
+                item.text,
+                error_code="transport_error",
+                queue_state=STATE_INDETERMINATE,
             )
 
         status = response.status_code
@@ -582,32 +632,61 @@ class TelegramAdapter(BaseSocialAdapter):
             if body is None:
                 queue.mark_indeterminate(item.id, "malformed_response")
                 return self._queued_result(
-                    "failed", item, item.text, error_code="malformed_response", queue_state=STATE_INDETERMINATE
+                    "failed",
+                    item,
+                    item.text,
+                    error_code="malformed_response",
+                    queue_state=STATE_INDETERMINATE,
                 )
             if body.get("ok") is True:
                 result = body.get("result")
                 raw_id = result.get("message_id") if isinstance(result, dict) else None
-                message_id = raw_id if isinstance(raw_id, int) and not isinstance(raw_id, bool) else None
+                message_id = (
+                    raw_id
+                    if isinstance(raw_id, int) and not isinstance(raw_id, bool)
+                    else None
+                )
                 queue.mark_sent(item.id, message_id)
-                return self._queued_result("posted", item, item.text, message_id=message_id)
+                return self._queued_result(
+                    "posted", item, item.text, message_id=message_id
+                )
             queue.mark_failed(item.id, "rejected")
-            return self._queued_result("failed", item, item.text, error_code="rejected", queue_state=STATE_FAILED)
+            return self._queued_result(
+                "failed",
+                item,
+                item.text,
+                error_code="rejected",
+                queue_state=STATE_FAILED,
+            )
         if status == 429:
-            delay = self._retry_after(body, response) or queue.backoff_delay(item.attempt_count)
+            delay = self._retry_after(body, response) or queue.backoff_delay(
+                item.attempt_count
+            )
             queue.block_chat(item.chat_id, delay)
             queue.mark_retry(item.id, delay, "rate_limited", consume_attempt=False)
             return self._queued_result(
-                "pending", item, item.text, queue_state=STATE_PENDING, retry_in_seconds=round(delay, 3)
+                "pending",
+                item,
+                item.text,
+                queue_state=STATE_PENDING,
+                retry_in_seconds=round(delay, 3),
             )
         if status >= 500:
-            state = queue.mark_retry(item.id, queue.backoff_delay(item.attempt_count), "server_error")
+            state = queue.mark_retry(
+                item.id, queue.backoff_delay(item.attempt_count), "server_error"
+            )
             return self._queued_result(
-                "failed" if state == STATE_FAILED else "pending", item, item.text,
-                error_code="server_error", queue_state=state,
+                "failed" if state == STATE_FAILED else "pending",
+                item,
+                item.text,
+                error_code="server_error",
+                queue_state=state,
             )
         code = f"http_{status}"
         queue.mark_failed(item.id, code)
-        return self._queued_result("failed", item, item.text, error_code=code, queue_state=STATE_FAILED)
+        return self._queued_result(
+            "failed", item, item.text, error_code=code, queue_state=STATE_FAILED
+        )
 
     @staticmethod
     def _json_body(response: Any) -> dict | None:

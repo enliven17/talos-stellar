@@ -395,7 +395,11 @@ class ProviderRegistry:
         if name in self._providers:
             raise ValueError(f"Provider '{name}' is already registered")
         self._providers[name] = provider
-        logger.info("Registered provider '%s' (default model: %s)", name, provider.metadata.default_model)
+        logger.info(
+            "Registered provider '%s' (default model: %s)",
+            name,
+            provider.metadata.default_model,
+        )
 
     def register_or_replace(self, provider: LLMProvider) -> None:
         """Register or replace an existing provider with the same name."""
@@ -414,7 +418,9 @@ class ProviderRegistry:
             If the provider is not registered.
         """
         if name not in self._providers:
-            raise KeyError(f"Provider '{name}' is not registered. Available: {list(self._providers)}")
+            raise KeyError(
+                f"Provider '{name}' is not registered. Available: {list(self._providers)}"
+            )
         return self._providers[name]
 
     def available(self) -> list[str]:
@@ -464,8 +470,12 @@ class ProviderRegistry:
         """Estimate the cost in USD for a given token count on a provider."""
         provider = self.get(provider_name)
         meta = provider.metadata
-        input_cost = meta.cost_per_1k_input * Decimal(str(input_tokens)) / Decimal("1000")
-        output_cost = meta.cost_per_1k_output * Decimal(str(output_tokens)) / Decimal("1000")
+        input_cost = (
+            meta.cost_per_1k_input * Decimal(str(input_tokens)) / Decimal("1000")
+        )
+        output_cost = (
+            meta.cost_per_1k_output * Decimal(str(output_tokens)) / Decimal("1000")
+        )
         return input_cost + output_cost
 
 

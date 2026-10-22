@@ -574,8 +574,7 @@ async def _scenario_scheduler_no_duplicate_effects(
 
             # Insert synthetic schedules with far-future timestamps (simulating clock skew)
             far_future = (
-                datetime.now(timezone.utc).replace(tzinfo=None)
-                + timedelta(hours=5)
+                datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=5)
             ).isoformat()
             db._conn.execute(
                 "INSERT INTO schedules (task_name, last_run_at) VALUES (?, ?)",
@@ -588,8 +587,7 @@ async def _scenario_scheduler_no_duplicate_effects(
 
             # Insert synthetic retry state with far-future backoff
             far_future_backoff = (
-                datetime.now(timezone.utc).replace(tzinfo=None)
-                + timedelta(hours=5)
+                datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=5)
             ).isoformat()
             db._conn.execute(
                 "INSERT INTO retry_state (task_name, attempt_count, next_attempt_at, terminal) "
@@ -666,9 +664,7 @@ _SCENARIO_RUNNERS: dict[str, Any] = {
 }
 
 
-async def _run_scenario(
-    name: str, runner: Any, **kwargs: Any
-) -> ScenarioResult:
+async def _run_scenario(name: str, runner: Any, **kwargs: Any) -> ScenarioResult:
     """Run a scenario that may be async or sync."""
     import inspect
 
@@ -744,9 +740,7 @@ async def run_restore_drill(
             )
 
         if result.duration_ms == 0:
-            result.duration_ms = round(
-                (time.monotonic() - scenario_start) * 1000, 2
-            )
+            result.duration_ms = round((time.monotonic() - scenario_start) * 1000, 2)
 
         report.scenarios.append(result)
         if result.passed:
@@ -877,9 +871,7 @@ def write_drill_report(
     return report_path
 
 
-def _prune_old_reports(
-    report_dir: Path, retain_count: int, *, current: str
-) -> None:
+def _prune_old_reports(report_dir: Path, retain_count: int, *, current: str) -> None:
     """Keep only the ``retain_count`` most recent drill reports.
 
     Sorts by filename timestamp (embedded in the report name) so that rapid

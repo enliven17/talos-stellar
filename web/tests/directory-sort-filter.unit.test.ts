@@ -263,6 +263,10 @@ describe("parseMarketplaceSort with DIRECTORY_SORT_FIELDS", () => {
 
 import { GET as talosGET } from "@/app/api/talos/route";
 
+function encodeTestCursor() {
+  return Buffer.from(JSON.stringify({ createdAt: "2026-08-01T00:00:00.000Z", id: "talos-1" })).toString("base64url");
+}
+
 describe("GET /api/talos — sort validation", () => {
   beforeEach(() => vi.clearAllMocks());
 
@@ -298,7 +302,7 @@ describe("GET /api/talos — sort validation", () => {
 
   it("returns 400 when cursor is combined with non-default sort", async () => {
     const res = await talosGET(
-      req("/api/talos", { sort: "name", cursor: "2026-08-01T00:00:00.000Z|talos-1" }),
+      req("/api/talos", { sort: "name", cursor: encodeTestCursor() }),
     );
     expect(res.status).toBe(400);
     expect(mocks.mockDb.select).not.toHaveBeenCalled();
@@ -307,7 +311,7 @@ describe("GET /api/talos — sort validation", () => {
   it("allows cursor with default sort (createdAt desc)", async () => {
     mocks.mockDb.select.mockReturnValue(buildChain([]));
     const res = await talosGET(
-      req("/api/talos", { cursor: "2026-08-01T00:00:00.000Z|talos-1" }),
+      req("/api/talos", { cursor: encodeTestCursor() }),
     );
     expect(res.status).toBe(200);
   });

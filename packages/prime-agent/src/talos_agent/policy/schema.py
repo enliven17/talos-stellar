@@ -143,8 +143,7 @@ class PolicyRule:
             rule_id=d.get("rule_id", ""),
             description=d.get("description", ""),
             conditions=tuple(
-                MatchCondition.from_dict(c)
-                for c in d.get("conditions", [])
+                MatchCondition.from_dict(c) for c in d.get("conditions", [])
             ),
             decision=PolicyDecision(d.get("decision", "deny")),
             severity=Severity(d.get("severity", "high")),
@@ -286,10 +285,7 @@ class ConditionTrace:
         obs = self.observed if self.observed is not None else "<missing>"
         exp = self.expected if self.expected is not None else "<n/a>"
         status = "matched" if self.matched else "no-match"
-        return (
-            f"{self.field} {self.operator} {exp} "
-            f"(observed={obs}, {status})"
-        )
+        return f"{self.field} {self.operator} {exp} (observed={obs}, {status})"
 
 
 @dataclass(frozen=True)
@@ -410,7 +406,9 @@ class PolicyResult:
     violated_rules: tuple[PolicyRule, ...] = ()
     all_results: tuple[dict[str, Any], ...] = ()
     evidence: tuple[str, ...] = ()
-    evaluated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    evaluated_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     result_digest: str = ""
     simulation: bool = False
     trace: PolicyDecisionTrace | None = None
@@ -437,10 +435,7 @@ class PolicyResult:
         if self.trace is not None:
             return self.trace.explain()
         if self.evidence:
-            return (
-                f"decision={self.decision.value}; "
-                + "; ".join(self.evidence)
-            )
+            return f"decision={self.decision.value}; " + "; ".join(self.evidence)
         return f"decision={self.decision.value} (no evidence recorded)"
 
     def to_dict(self) -> dict[str, Any]:
@@ -497,7 +492,9 @@ class PolicyResult:
         return cls(
             decision=PolicyDecision.DENY,
             violated_rules=(rule,),
-            evidence=evidence if evidence is not None else (f"[{rule.rule_id}] {rule.reason}",),
+            evidence=evidence
+            if evidence is not None
+            else (f"[{rule.rule_id}] {rule.reason}",),
             simulation=simulation,
             trace=trace,
             all_results=all_results,

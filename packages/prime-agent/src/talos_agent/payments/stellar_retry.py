@@ -243,7 +243,9 @@ def classify_stellar_failure(
             # Exhausted the retry loop on a retryable status; use the status.
             if status_code is None:
                 status_code = exc.status_code
-        elif isinstance(exc, (httpx.TimeoutException, TimeoutError, asyncio.TimeoutError)):
+        elif isinstance(
+            exc, (httpx.TimeoutException, TimeoutError, asyncio.TimeoutError)
+        ):
             # Submitted but never confirmed — may have executed on chain.
             return _failure(StellarRetryClass.INDETERMINATE, "submission_timeout")
         elif isinstance(exc, httpx.TransportError):

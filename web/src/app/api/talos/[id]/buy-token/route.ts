@@ -7,6 +7,7 @@ import { getAccountInfo, getNetworkPassphrase, getUSDCIssuer } from "@/lib/stell
 import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
 import { logger } from "@/lib/logger";
 import { registerTx } from "@/lib/reconciler";
+import { withRequestId } from "@/lib/with-request-id";
 
 /**
  * Buy Mitos tokens from a Talos.

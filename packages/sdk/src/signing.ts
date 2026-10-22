@@ -118,10 +118,15 @@ function base64Url(bytes: Uint8Array): string {
 }
 
 async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
-  const digest = await globalThis.crypto.subtle.digest(
-    "SHA-256",
-    bytes.slice().buffer as ArrayBuffer,
-  );
+  let cryptoApi = globalThis.crypto;
+  if (!cryptoApi?.subtle && typeof process !== "undefined" && process.versions?.node) {
+    const loadNodeCrypto = new Function("return import('node:crypto')") as () => Promise<typeof import("node:crypto")>;
+    cryptoApi = (await loadNodeCrypto()).webcrypto as Crypto;
+  }
+  if (!cryptoApi?.subtle) {
+    throw new SigningError("UNAVAILABLE", "SHA-256 is unavailable in this runtime", false);
+  }
+  const digest = await cryptoApi.subtle.digest("SHA-256", bytes.slice().buffer as ArrayBuffer);
   return new Uint8Array(digest);
 }
 

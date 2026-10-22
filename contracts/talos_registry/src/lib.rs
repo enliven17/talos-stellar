@@ -394,6 +394,23 @@ fn validate_token_symbol(token_symbol: &String) {
     }
 }
 
+/// Enforce the same byte bounds for creator metadata updates as creation.
+fn validate_creator_metadata_fields(
+    env: &Env,
+    name: &String,
+    category: &String,
+    description: &String,
+) {
+    if name.len() == 0 {
+        panic!("Name cannot be empty");
+    }
+    if name.len() > MAX_NAME_BYTES
+        || category.len() > MAX_CATEGORY_BYTES
+        || description.len() > MAX_DESCRIPTION_BYTES
+    {
+        panic_with_error!(env, ContractError::MetadataFieldTooLong);
+    }
+}
 /// Enforce byte limits on caller-supplied Talos metadata before it is
 /// persisted.
 fn validate_talos_metadata(name: &String, category: &String, description: &String, pulse: &Pulse) {

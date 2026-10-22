@@ -1077,32 +1077,14 @@ mod tests {
         let ns_id = env.register_contract(None, TalosNameService);
 
         let ns_client = TalosNameServiceClient::new(&env, &ns_id);
-        ns_client.initialize(&registry_id);
-
-        let reg_client = TalosRegistryClient::new(&env, &registry_id);
         let owner = Address::generate(&env);
         let protocol_wallet = Address::generate(&env);
+        ns_client.initialize(&registry_id, &owner, &10_i128);
 
-        let talos_id = reg_client
-            .mock_auths(&[MockAuth {
-                address: &owner,
-                invoke: &MockAuthInvoke {
-                    contract: &registry_id,
-                    fn_name: "create_talos",
-                    args: (
-                        s(&env, "genesis"),
-                        s(&env, "Marketing"),
-                        s(&env, "desc"),
-                        patron(&env, &owner),
-                        kernel(),
-                        pulse(&env),
-                        protocol_wallet.clone(),
-                    )
-                        .into_val(&env),
-                    sub_invokes: &[],
-                },
-            }])
-            .create_talos(
+        let reg_client = TalosRegistryClient::new(&env, &registry_id);
+
+        env.mock_all_auths();
+        let talos_id = reg_client.create_talos(
                 &s(&env, "genesis"),
                 &s(&env, "Marketing"),
                 &s(&env, "desc"),
@@ -1367,14 +1349,14 @@ mod tests {
 
         let decoded_pid: u32 =
             TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
-        let (decoded_talos_id, decoded_proposer): (u32, Address) =
+        let decoded: talos_governance::EventProposalCreated =
             TryFromVal::try_from_val(&env, &data).unwrap();
 
         let fixture = proposal_created_fixture(proposal_id, 7, proposer.clone());
 
         assert_eq!(decoded_pid, fixture.proposal_id);
-        assert_eq!(decoded_talos_id, fixture.talos_id);
-        assert_eq!(decoded_proposer, fixture.proposer);
+        assert_eq!(decoded.talos_id, fixture.talos_id);
+        assert_eq!(decoded.proposer, fixture.proposer);
     }
 
     /// `vote` event: verify typed fixture matches the emitted event.
@@ -1429,15 +1411,15 @@ mod tests {
 
         let decoded_pid: u32 =
             TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
-        let (decoded_voter, decoded_choice, decoded_weight): (Address, VoteChoice, i128) =
+        let decoded: talos_governance::EventVoteCast =
             TryFromVal::try_from_val(&env, &data).unwrap();
 
         let fixture = vote_cast_fixture(proposal_id, voter.clone(), VoteChoice::Approve, 150);
 
         assert_eq!(decoded_pid, fixture.proposal_id);
-        assert_eq!(decoded_voter, fixture.voter);
-        assert_eq!(decoded_choice, fixture.choice);
-        assert_eq!(decoded_weight, fixture.weight);
+        assert_eq!(decoded.voter, fixture.voter);
+        assert_eq!(decoded.choice, fixture.choice);
+        assert_eq!(decoded.weight, fixture.weight);
     }
 
     /// `prop_stat` (Rejected) event: verify typed fixture matches the emitted event.
@@ -1473,13 +1455,13 @@ mod tests {
 
         let decoded_pid: u32 =
             TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
-        let decoded_status: ProposalStatus =
+        let decoded: talos_governance::EventProposalStatusChanged =
             TryFromVal::try_from_val(&env, &data).unwrap();
 
         let fixture = proposal_status_changed_fixture(proposal_id, ProposalStatus::Rejected);
 
         assert_eq!(decoded_pid, fixture.proposal_id);
-        assert_eq!(decoded_status, fixture.status);
+        assert_eq!(decoded.status, fixture.status);
     }
 
     /// `prop_stat` (Approved) event: verify typed fixture matches the emitted event.
@@ -1533,13 +1515,13 @@ mod tests {
 
         let decoded_pid: u32 =
             TryFromVal::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
-        let decoded_status: ProposalStatus =
+        let decoded: talos_governance::EventProposalStatusChanged =
             TryFromVal::try_from_val(&env, &data).unwrap();
 
         let fixture = proposal_status_changed_fixture(proposal_id, ProposalStatus::Approved);
 
         assert_eq!(decoded_pid, fixture.proposal_id);
-        assert_eq!(decoded_status, fixture.status);
+        assert_eq!(decoded.status, fixture.status);
     }
 
     // ─────────────────────────────────────────────────────────────────

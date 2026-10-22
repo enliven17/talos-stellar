@@ -70,7 +70,9 @@ class CircuitBreakerOpen(CircuitBreakerError):
     alternative strategy.
     """
 
-    def __init__(self, provider: str, retry_after: float, fallback_hint: str = "") -> None:
+    def __init__(
+        self, provider: str, retry_after: float, fallback_hint: str = ""
+    ) -> None:
         self.provider = provider
         self.retry_after = retry_after
         self.fallback_hint = fallback_hint
@@ -132,24 +134,40 @@ class CircuitBreakerConfig:
     PROVIDER_DEFAULTS: ClassVar[dict[str, CircuitBreakerConfig]] = {}
 
     def __post_init__(self) -> None:
-        if self.failure_threshold < 1 or self.half_open_max_probes < 1 or self.success_threshold < 1:
+        if (
+            self.failure_threshold < 1
+            or self.half_open_max_probes < 1
+            or self.success_threshold < 1
+        ):
             raise ValueError("circuit thresholds and probe limits must be at least 1")
         if self.recovery_timeout <= 0 or self.window_size <= 0:
             raise ValueError("circuit timeouts must be greater than zero")
         if self.retry_budget < 0:
             raise ValueError("retry_budget must not be negative")
-        if self.backoff_initial <= 0 or self.backoff_max <= 0 or self.backoff_initial > self.backoff_max:
-            raise ValueError("backoff_initial must be positive and no greater than backoff_max")
+        if (
+            self.backoff_initial <= 0
+            or self.backoff_max <= 0
+            or self.backoff_initial > self.backoff_max
+        ):
+            raise ValueError(
+                "backoff_initial must be positive and no greater than backoff_max"
+            )
 
     @classmethod
-    def from_mapping(cls, values: Mapping[str, Any] | None = None) -> CircuitBreakerConfig:
+    def from_mapping(
+        cls, values: Mapping[str, Any] | None = None
+    ) -> CircuitBreakerConfig:
         """Build a validated config from user-provided adapter settings."""
         if values is None:
             return cls()
-        allowed = {field for field in cls.__dataclass_fields__ if field != "PROVIDER_DEFAULTS"}
+        allowed = {
+            field for field in cls.__dataclass_fields__ if field != "PROVIDER_DEFAULTS"
+        }
         unknown = set(values) - allowed
         if unknown:
-            raise ValueError(f"unknown circuit breaker settings: {', '.join(sorted(unknown))}")
+            raise ValueError(
+                f"unknown circuit breaker settings: {', '.join(sorted(unknown))}"
+            )
         return cls(**dict(values))
 
     @classmethod
@@ -272,7 +290,9 @@ class ProviderCircuitBreaker:
     For multi-threaded use, callers should synchronise access externally.
     """
 
-    def __init__(self, provider: str, config: CircuitBreakerConfig | None = None) -> None:
+    def __init__(
+        self, provider: str, config: CircuitBreakerConfig | None = None
+    ) -> None:
         self.provider = provider
         self.config = config or CircuitBreakerConfig.for_provider(provider)
 
@@ -403,7 +423,9 @@ class ProviderCircuitBreaker:
     def metrics(self) -> CircuitBreakerMetrics:
         """Return a snapshot of current state for telemetry / logging."""
         now = time.monotonic()
-        last_failure_age = now - self._last_failure_time if self._last_failure_time else None
+        last_failure_age = (
+            now - self._last_failure_time if self._last_failure_time else None
+        )
         remaining = self.remaining_cooldown()
         return CircuitBreakerMetrics(
             provider=self.provider,
@@ -438,7 +460,9 @@ class ProviderCircuitBreaker:
             adapter=self.provider,
             previous_state=previous_state.value,
             state=new_state.value,
-            reason="failure_threshold" if new_state == CircuitState.OPEN else "recovery",
+            reason="failure_threshold"
+            if new_state == CircuitState.OPEN
+            else "recovery",
         )
 
         if new_state == CircuitState.OPEN:
@@ -482,10 +506,14 @@ class CircuitBreakerRegistry:
             logger.debug("Created circuit breaker for '%s'", provider)
         return self._breakers[provider]
 
-    def get_or_create(self, provider: str, config: CircuitBreakerConfig | None = None) -> ProviderCircuitBreaker:
+    def get_or_create(
+        self, provider: str, config: CircuitBreakerConfig | None = None
+    ) -> ProviderCircuitBreaker:
         """Return or create a breaker with an optional explicit *config*."""
         if provider not in self._breakers:
-            self._breakers[provider] = ProviderCircuitBreaker(provider, config or CircuitBreakerConfig.for_provider(provider))
+            self._breakers[provider] = ProviderCircuitBreaker(
+                provider, config or CircuitBreakerConfig.for_provider(provider)
+            )
         return self._breakers[provider]
 
     def all_metrics(self) -> dict[str, dict]:
@@ -525,9 +553,7 @@ async def execute_with_retry(
     prematurely.
     """
     if not await breaker.allow_request():
-        raise CircuitBreakerOpen(
-            breaker.provider, breaker.remaining_cooldown() or 0.0
-        )
+        raise CircuitBreakerOpen(breaker.provider, breaker.remaining_cooldown() or 0.0)
     failure_check = is_failure or (lambda result: False)
     for attempt in range(breaker.config.retry_budget + 1):
         try:

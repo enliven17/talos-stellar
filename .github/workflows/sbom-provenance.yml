@@ -173,7 +173,7 @@ jobs:
 
       - name: Run web analytics response-limit tests
         if: matrix.readiness-scenario == 'healthy'
-        run: pnpm --dir web exec vitest run src/app/api/analytics
+        run: pnpm --dir web exec vitest run tests/analytics-route-limits.unit.test.ts
 
   generate-sdk:
     needs: detect-components
@@ -244,7 +244,9 @@ jobs:
           mkdir -p "$OUT_DIR"
           TS="$(date -u +%Y%m%d-%H%M%S)"
           SHA="${GITHUB_SHA:0:7}"
-          BASE="${OUT_DIR}/talos-sdk-${GITHUB_REF_NAME:-$SHA}-$TS"
+          SAFE_REF="${GITHUB_REF_NAME:-$SHA}"
+          SAFE_REF="${SAFE_REF//\//-}"
+          BASE="${OUT_DIR}/talos-sdk-${SAFE_REF}-$TS"
 
           cd "${{ github.workspace }}/packages/sdk"
 
@@ -276,7 +278,7 @@ jobs:
             }
 
           echo "cdx-json=${BASE}.cdx.json" >> "$GITHUB_OUTPUT"
-          echo "cdx-name=talos-sdk-${GITHUB_REF_NAME:-$SHA}-$TS" >> "$GITHUB_OUTPUT"
+          echo "cdx-name=talos-sdk-${SAFE_REF}-$TS" >> "$GITHUB_OUTPUT"
 
       - name: Validate CycloneDX SBOM
         shell: bash
@@ -303,7 +305,9 @@ jobs:
           mkdir -p "$OUT_DIR"
           TS="$(date -u +%Y%m%d-%H%M%S)"
           SHA="${GITHUB_SHA:0:7}"
-          BASE="${OUT_DIR}/talos-sdk-${GITHUB_REF_NAME:-$SHA}-$TS"
+          SAFE_REF="${GITHUB_REF_NAME:-$SHA}"
+          SAFE_REF="${SAFE_REF//\//-}"
+          BASE="${OUT_DIR}/talos-sdk-${SAFE_REF}-$TS"
 
           cd "${{ github.workspace }}/packages/sdk"
           node -e "
@@ -409,7 +413,9 @@ jobs:
           mkdir -p "$OUT_DIR"
           TS="$(date -u +%Y%m%d-%H%M%S)"
           SHA="${GITHUB_SHA:0:7}"
-          BASE="${OUT_DIR}/talos-sdk-${GITHUB_REF_NAME:-$SHA}-$TS"
+          SAFE_REF="${GITHUB_REF_NAME:-$SHA}"
+          SAFE_REF="${SAFE_REF//\//-}"
+          BASE="${OUT_DIR}/talos-sdk-${SAFE_REF}-$TS"
 
           node -e "
             const fs=require('fs');
@@ -480,9 +486,11 @@ jobs:
         shell: bash
         run: |
           SHA="${GITHUB_SHA:0:7}"
-          echo "cyclonedx-artifact=sbom-sdk-cyclonedx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
-          echo "spdx-artifact=sbom-sdk-spdx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
-          echo "signature-artifact=sbom-sdk-signatures-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+          SAFE_REF="${GITHUB_REF_NAME:-$SHA}"
+          SAFE_REF="${SAFE_REF//\//-}"
+          echo "cyclonedx-artifact=sbom-sdk-cyclonedx-${SAFE_REF}" >> "$GITHUB_OUTPUT"
+          echo "spdx-artifact=sbom-sdk-spdx-${SAFE_REF}" >> "$GITHUB_OUTPUT"
+          echo "signature-artifact=sbom-sdk-signatures-${SAFE_REF}" >> "$GITHUB_OUTPUT"
 
       - name: Upload CycloneDX SBOM
         uses: actions/upload-artifact@v4
@@ -580,15 +588,16 @@ jobs:
           mkdir -p "$OUT_DIR"
           TS="$(date -u +%Y%m%d-%H%M%S)"
           SHA="${GITHUB_SHA:0:7}"
-          BASE="${OUT_DIR}/talos-agent-${GITHUB_REF_NAME:-$SHA}-$TS"
+          SAFE_REF="${GITHUB_REF_NAME:-$SHA}"
+          SAFE_REF="${SAFE_REF//\//-}"
+          BASE="${OUT_DIR}/talos-agent-${SAFE_REF}-$TS"
 
           cyclonedx-py environment \
-            --output-format json \
-            --output "${BASE}.cdx.json" \
+            --output-format JSON \
             --pyproject pyproject.toml \
-            2>&1 | tee "${BASE}.cdx.log" || {
+            > "${BASE}.cdx.json" 2> >(tee "${BASE}.cdx.log" >&2) || {
               echo "::warning::cyclonedx-py failed, generating fallback"
-              python3 << 'PYEOF'
+              python3 << PYEOF
           import json, tomllib, uuid, os
           base="${BASE}"
           with open("pyproject.toml","rb") as f: p=tomllib.load(f)
@@ -614,7 +623,7 @@ jobs:
             }
 
           echo "cdx-json=${BASE}.cdx.json" >> "$GITHUB_OUTPUT"
-          echo "cdx-name=talos-agent-${GITHUB_REF_NAME:-$SHA}-$TS" >> "$GITHUB_OUTPUT"
+          echo "cdx-name=talos-agent-${SAFE_REF}-$TS" >> "$GITHUB_OUTPUT"
 
       - name: Generate SPDX SBOM
         id: spdx
@@ -626,11 +635,13 @@ jobs:
           mkdir -p "$OUT_DIR"
           TS="$(date -u +%Y%m%d-%H%M%S)"
           SHA="${GITHUB_SHA:0:7}"
-          BASE="${OUT_DIR}/talos-agent-${GITHUB_REF_NAME:-$SHA}-$TS"
+          SAFE_REF="${GITHUB_REF_NAME:-$SHA}"
+          SAFE_REF="${SAFE_REF//\//-}"
+          BASE="${OUT_DIR}/talos-agent-${SAFE_REF}-$TS"
 
-          python3 << 'PYEOF'
+          BASE="$BASE" python3 << 'PYEOF'
           import json, tomllib, hashlib, uuid, os, datetime
-          base="${BASE}"
+          base=os.environ["BASE"]
           with open("pyproject.toml","rb") as f: p=tomllib.load(f)
           proj=p.get("project",{})
           deps = proj.get("dependencies",[])
@@ -712,7 +723,9 @@ jobs:
           mkdir -p "$OUT_DIR"
           TS="$(date -u +%Y%m%d-%H%M%S)"
           SHA="${GITHUB_SHA:0:7}"
-          BASE="${OUT_DIR}/talos-agent-${GITHUB_REF_NAME:-$SHA}-$TS"
+          SAFE_REF="${GITHUB_REF_NAME:-$SHA}"
+          SAFE_REF="${SAFE_REF//\//-}"
+          BASE="${OUT_DIR}/talos-agent-${SAFE_REF}-$TS"
           python3 << 'PYEOF'
           import json, hashlib, os
           def sha256(f):
@@ -740,9 +753,11 @@ jobs:
         shell: bash
         run: |
           SHA="${GITHUB_SHA:0:7}"
-          echo "cyclonedx-artifact=sbom-agent-cyclonedx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
-          echo "spdx-artifact=sbom-agent-spdx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
-          echo "signature-artifact=sbom-agent-signatures-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+          SAFE_REF="${GITHUB_REF_NAME:-$SHA}"
+          SAFE_REF="${SAFE_REF//\//-}"
+          echo "cyclonedx-artifact=sbom-agent-cyclonedx-${SAFE_REF}" >> "$GITHUB_OUTPUT"
+          echo "spdx-artifact=sbom-agent-spdx-${SAFE_REF}" >> "$GITHUB_OUTPUT"
+          echo "signature-artifact=sbom-agent-signatures-${SAFE_REF}" >> "$GITHUB_OUTPUT"
 
       - name: Upload CycloneDX
         uses: actions/upload-artifact@v4
@@ -870,7 +885,9 @@ jobs:
           mkdir -p "$OUT_DIR"
           TS="$(date -u +%Y%m%d-%H%M%S)"
           SHA="${GITHUB_SHA:0:7}"
-          BASE="${OUT_DIR}/talos-contracts-${GITHUB_REF_NAME:-$SHA}-$TS"
+          SAFE_REF="${GITHUB_REF_NAME:-$SHA}"
+          SAFE_REF="${SAFE_REF//\//-}"
+          BASE="${OUT_DIR}/talos-contracts-${SAFE_REF}-$TS"
 
           if command -v cargo-sbom >/dev/null 2>&1; then
             cargo-sbom --format cyclonedx --output "${BASE}.cdx.json" 2>&1 | tee "${BASE}.cdx.log" || {
@@ -906,7 +923,7 @@ jobs:
           fi
 
           echo "cdx-json=${BASE}.cdx.json" >> "$GITHUB_OUTPUT"
-          echo "cdx-name=talos-contracts-${GITHUB_REF_NAME:-$SHA}-$TS" >> "$GITHUB_OUTPUT"
+          echo "cdx-name=talos-contracts-${SAFE_REF}-$TS" >> "$GITHUB_OUTPUT"
 
       - name: Generate SPDX SBOM
         id: spdx
@@ -918,7 +935,9 @@ jobs:
           mkdir -p "$OUT_DIR"
           TS="$(date -u +%Y%m%d-%H%M%S)"
           SHA="${GITHUB_SHA:0:7}"
-          BASE="${OUT_DIR}/talos-contracts-${GITHUB_REF_NAME:-$SHA}-$TS"
+          SAFE_REF="${GITHUB_REF_NAME:-$SHA}"
+          SAFE_REF="${SAFE_REF//\//-}"
+          BASE="${OUT_DIR}/talos-contracts-${SAFE_REF}-$TS"
 
           node -e "
             const fs=require('fs');
@@ -1015,7 +1034,9 @@ jobs:
           mkdir -p "$OUT_DIR"
           TS="$(date -u +%Y%m%d-%H%M%S)"
           SHA="${GITHUB_SHA:0:7}"
-          BASE="${OUT_DIR}/talos-contracts-${GITHUB_REF_NAME:-$SHA}-$TS"
+          SAFE_REF="${GITHUB_REF_NAME:-$SHA}"
+          SAFE_REF="${SAFE_REF//\//-}"
+          BASE="${OUT_DIR}/talos-contracts-${SAFE_REF}-$TS"
           node -e "
             const fs=require('fs');const crypto=require('crypto');const path=require('path');
             function sha256(f){const h=crypto.createHash('sha256');h.update(fs.readFileSync(f));return h.digest('hex');}
@@ -1043,9 +1064,11 @@ jobs:
         shell: bash
         run: |
           SHA="${GITHUB_SHA:0:7}"
-          echo "cyclonedx-artifact=sbom-contracts-cyclonedx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
-          echo "spdx-artifact=sbom-contracts-spdx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
-          echo "signature-artifact=sbom-contracts-signatures-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+          SAFE_REF="${GITHUB_REF_NAME:-$SHA}"
+          SAFE_REF="${SAFE_REF//\//-}"
+          echo "cyclonedx-artifact=sbom-contracts-cyclonedx-${SAFE_REF}" >> "$GITHUB_OUTPUT"
+          echo "spdx-artifact=sbom-contracts-spdx-${SAFE_REF}" >> "$GITHUB_OUTPUT"
+          echo "signature-artifact=sbom-contracts-signatures-${SAFE_REF}" >> "$GITHUB_OUTPUT"
 
       - name: Upload CycloneDX
         uses: actions/upload-artifact@v4
@@ -1149,7 +1172,9 @@ jobs:
           mkdir -p "$OUT_DIR"
           TS="$(date -u +%Y%m%d-%H%M%S)"
           SHA="${GITHUB_SHA:0:7}"
-          BASE="${OUT_DIR}/talos-web-${GITHUB_REF_NAME:-$SHA}-$TS"
+          SAFE_REF="${GITHUB_REF_NAME:-$SHA}"
+          SAFE_REF="${SAFE_REF//\//-}"
+          BASE="${OUT_DIR}/talos-web-${SAFE_REF}-$TS"
 
           cd "${{ github.workspace }}/web"
           cyclonedx-npm --omit dev --output-format json --output-file "${BASE}.cdx.json" 2>&1 | tee "${BASE}.cdx.log" || {
@@ -1167,7 +1192,7 @@ jobs:
             "
           }
           echo "cdx-json=${BASE}.cdx.json" >> "$GITHUB_OUTPUT"
-          echo "cdx-name=talos-web-${GITHUB_REF_NAME:-$SHA}-$TS" >> "$GITHUB_OUTPUT"
+          echo "cdx-name=talos-web-${SAFE_REF}-$TS" >> "$GITHUB_OUTPUT"
 
       - name: Generate SPDX SBOM
         id: spdx
@@ -1178,7 +1203,9 @@ jobs:
           mkdir -p "$OUT_DIR"
           TS="$(date -u +%Y%m%d-%H%M%S)"
           SHA="${GITHUB_SHA:0:7}"
-          BASE="${OUT_DIR}/talos-web-${GITHUB_REF_NAME:-$SHA}-$TS"
+          SAFE_REF="${GITHUB_REF_NAME:-$SHA}"
+          SAFE_REF="${SAFE_REF//\//-}"
+          BASE="${OUT_DIR}/talos-web-${SAFE_REF}-$TS"
 
           cd "${{ github.workspace }}/web"
           node -e "
@@ -1245,7 +1272,9 @@ jobs:
           mkdir -p "$OUT_DIR"
           TS="$(date -u +%Y%m%d-%H%M%S)"
           SHA="${GITHUB_SHA:0:7}"
-          BASE="${OUT_DIR}/talos-web-${GITHUB_REF_NAME:-$SHA}-$TS"
+          SAFE_REF="${GITHUB_REF_NAME:-$SHA}"
+          SAFE_REF="${SAFE_REF//\//-}"
+          BASE="${OUT_DIR}/talos-web-${SAFE_REF}-$TS"
           node -e "
             const fs=require('fs');const crypto=require('crypto');const path=require('path');
             function sha256(f){const h=crypto.createHash('sha256');h.update(fs.readFileSync(f));return h.digest('hex');}
@@ -1271,9 +1300,11 @@ jobs:
         shell: bash
         run: |
           SHA="${GITHUB_SHA:0:7}"
-          echo "cyclonedx-artifact=sbom-web-cyclonedx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
-          echo "spdx-artifact=sbom-web-spdx-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
-          echo "signature-artifact=sbom-web-signatures-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
+          SAFE_REF="${GITHUB_REF_NAME:-$SHA}"
+          SAFE_REF="${SAFE_REF//\//-}"
+          echo "cyclonedx-artifact=sbom-web-cyclonedx-${SAFE_REF}" >> "$GITHUB_OUTPUT"
+          echo "spdx-artifact=sbom-web-spdx-${SAFE_REF}" >> "$GITHUB_OUTPUT"
+          echo "signature-artifact=sbom-web-signatures-${SAFE_REF}" >> "$GITHUB_OUTPUT"
 
       - name: Upload CycloneDX
         uses: actions/upload-artifact@v4

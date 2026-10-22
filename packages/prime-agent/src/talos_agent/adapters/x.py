@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING
 
 from rich.console import Console
 
-from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
+from talos_agent.adapters.base import (
+    BaseSocialAdapter,
+    ChannelCapabilities,
+    PublishResult,
+)
 from talos_agent.adapters.capability import SecretProvider
 from talos_agent.adapters.snapshots import XHealthSnapshot
 from talos_agent.config import resolve_setting_secret
@@ -42,7 +46,9 @@ def sanitize_outbound_x_content(text: str | None, *, max_len: int = _CHAR_LIMIT)
     cleaned = cleaned.strip()
     if not cleaned:
         raise ValueError("outbound X content is empty")
-    if _re.search(r"(?i)(api[_-]?key|secret|password|bearer\s+\S+|ghp_[A-Za-z0-9]+)", cleaned):
+    if _re.search(
+        r"(?i)(api[_-]?key|secret|password|bearer\s+\S+|ghp_[A-Za-z0-9]+)", cleaned
+    ):
         raise ValueError("outbound X content contains sensitive material")
     if len(cleaned) > max_len:
         cleaned = cleaned[: max_len - 1].rstrip() + "…"
@@ -134,7 +140,9 @@ class XAdapter(BaseSocialAdapter):
 
         password = self._password
         if not self._username or not password:
-            console.print("[yellow]X credentials not configured — skipping login.[/yellow]")
+            console.print(
+                "[yellow]X credentials not configured — skipping login.[/yellow]"
+            )
             return
 
         console.print("[dim]Checking X login status...[/dim]")
@@ -149,7 +157,11 @@ class XAdapter(BaseSocialAdapter):
             "Is the user logged in to X/Twitter? "
             "If you see a compose/post box or timeline feed → logged_in: true. "
             "If you see a login form, sign-in button, or 'Sign in' text → logged_in: false.",
-            schema={"type": "object", "properties": {"logged_in": {"type": "boolean"}}, "required": ["logged_in"]},
+            schema={
+                "type": "object",
+                "properties": {"logged_in": {"type": "boolean"}},
+                "required": ["logged_in"],
+            },
         )
         if isinstance(page_info, dict) and page_info.get("logged_in"):
             console.print("[green]Already logged in to X.[/green]")
@@ -173,13 +185,15 @@ class XAdapter(BaseSocialAdapter):
             "email or phone verification → type: 'verification'. "
             "password field → type: 'password'. "
             "something else → type: 'other'.",
-            schema={"type": "object", "properties": {"type": {"type": "string"}}, "required": ["type"]},
+            schema={
+                "type": "object",
+                "properties": {"type": {"type": "string"}},
+                "required": ["type"],
+            },
         )
         page_type = check.get("type", "other") if isinstance(check, dict) else "other"
         if page_type == "verification" and self._email:
-            await self._browser.act(
-                f"Click on the input field and type: {self._email}"
-            )
+            await self._browser.act(f"Click on the input field and type: {self._email}")
             await asyncio.sleep(1)
             await self._browser.act("Click the Next button")
             await asyncio.sleep(4)
@@ -195,7 +209,11 @@ class XAdapter(BaseSocialAdapter):
             "Is the user now logged in to X/Twitter? "
             "If you see a timeline, home feed, or compose button → logged_in: true. "
             "Otherwise → logged_in: false.",
-            schema={"type": "object", "properties": {"logged_in": {"type": "boolean"}}, "required": ["logged_in"]},
+            schema={
+                "type": "object",
+                "properties": {"logged_in": {"type": "boolean"}},
+                "required": ["logged_in"],
+            },
         )
         if isinstance(post_login, dict) and post_login.get("logged_in"):
             console.print("[bold green]Successfully logged in to X.[/bold green]")
@@ -217,7 +235,9 @@ class XAdapter(BaseSocialAdapter):
             )
         valid, error = self.validate_content(content)
         if not valid:
-            return PublishResult(status="failed", channel=self.channel_name, content=content, error=error)
+            return PublishResult(
+                status="failed", channel=self.channel_name, content=content, error=error
+            )
 
         await self._ensure_login()
         await self._dismiss_cookie_banner()
@@ -234,9 +254,15 @@ class XAdapter(BaseSocialAdapter):
             "Is there a compose tweet dialog/modal currently open on the page? "
             "If no dialog is open and you see the timeline → dialog_open: false. "
             "If the compose dialog is still visible with text → dialog_open: true.",
-            schema={"type": "object", "properties": {"dialog_open": {"type": "boolean"}}, "required": ["dialog_open"]},
+            schema={
+                "type": "object",
+                "properties": {"dialog_open": {"type": "boolean"}},
+                "required": ["dialog_open"],
+            },
         )
-        dialog_open = bool(verify.get("dialog_open")) if isinstance(verify, dict) else True
+        dialog_open = (
+            bool(verify.get("dialog_open")) if isinstance(verify, dict) else True
+        )
         if dialog_open:
             try:
                 await self._browser.act("Press the Escape key")
@@ -251,7 +277,9 @@ class XAdapter(BaseSocialAdapter):
                 error="Post failed — compose dialog still open. Tweet was NOT published.",
             )
 
-        return PublishResult(status="posted", channel=self.channel_name, content=content)
+        return PublishResult(
+            status="posted", channel=self.channel_name, content=content
+        )
 
     async def reply(self, target_url: str, content: str, **kwargs) -> PublishResult:
         content = sanitize_outbound_x_content(content)
@@ -337,4 +365,8 @@ class XAdapter(BaseSocialAdapter):
                 "required": ["followers"],
             },
         )
-        return stats if isinstance(stats, dict) else {"error": "Could not extract profile stats"}
+        return (
+            stats
+            if isinstance(stats, dict)
+            else {"error": "Could not extract profile stats"}
+        )

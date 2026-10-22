@@ -3082,6 +3082,159 @@ mod tests {
         assert!(result.is_err(), "finalize before end must be rejected");
     }
 
+    #[test]
+    fn finalize_at_end_ledger_is_rejected_and_after_end_emits_rejected() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+
+        env.ledger().with_mut(|li| li.sequence_number = proposal.end_ledger);
+        assert!(client.try_finalize_proposal(&proposal_id).is_err());
+        assert_eq!(client.get_proposal(&proposal_id).unwrap().status, ProposalStatus::Active);
+
+        env.ledger().with_mut(|li| li.sequence_number = proposal.end_ledger + 1);
+        client.finalize_proposal(&proposal_id);
+        assert_eq!(client.get_proposal(&proposal_id).unwrap().status, ProposalStatus::Rejected);
+
+        let events = env.events().all();
+        let status_events: std::vec::Vec<_> = events.iter().filter(|(cid, topics, _)| {
+            *cid == contract_id && topics.get(0).map(|topic| {
+                let symbol: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &topic);
+                symbol == symbol_short!("prop_stat")
+            }).unwrap_or(false)
+        }).collect();
+        assert_eq!(status_events.len(), 1);
+        let (_, _, data) = status_events.last().unwrap();
+        let payload: EventProposalStatusChanged = soroban_sdk::FromVal::from_val(&env, data);
+        assert_eq!(payload.proposal_id, proposal_id);
+        assert_eq!(payload.status, ProposalStatus::Rejected);
+    }
+
+    #[test]
+    fn execute_twice_is_rejected_and_emits_only_one_executed_transition() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        cache_balance_with_auth(&env, &contract_id, &client, &admin, proposal.snapshot_ledger, &voter, 200);
+        client.mock_auths(&[MockAuth {
+            address: &voter,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "vote",
+                args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]).vote(&voter, &proposal_id, &VoteChoice::Approve);
+
+        client.execute_proposal(&proposal_id);
+        assert_eq!(client.get_proposal(&proposal_id).unwrap().status, ProposalStatus::Executed);
+        assert!(client.try_execute_proposal(&proposal_id).is_err());
+
+        let events = env.events().all();
+        let executed_count = events.iter().filter(|(cid, topics, data)| {
+            if *cid != contract_id || !topics.get(0).map(|topic| {
+                let symbol: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &topic);
+                symbol == symbol_short!("prop_stat")
+            }).unwrap_or(false) { return false; }
+            let payload: EventProposalStatusChanged = soroban_sdk::FromVal::from_val(&env, data);
+            payload.proposal_id == proposal_id && payload.status == ProposalStatus::Executed
+        }).count();
+        assert_eq!(executed_count, 1);
+    }
+
+    #[test]
+    fn rejected_and_expired_proposals_cannot_be_executed() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+        let rejected_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let rejected = client.get_proposal(&rejected_id).unwrap();
+        cache_balance_with_auth(&env, &contract_id, &client, &admin, rejected.snapshot_ledger, &voter, 200);
+        client.mock_auths(&[MockAuth {
+            address: &voter,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "vote",
+                args: (voter.clone(), rejected_id, VoteChoice::Reject).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]).vote(&voter, &rejected_id, &VoteChoice::Reject);
+        assert_eq!(client.get_proposal(&rejected_id).unwrap().status, ProposalStatus::Rejected);
+        assert!(client.try_execute_proposal(&rejected_id).is_err());
+
+        let expired_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let expired = client.get_proposal(&expired_id).unwrap();
+        env.ledger().with_mut(|li| li.sequence_number = expired.end_ledger + 1);
+        client.finalize_proposal(&expired_id);
+        assert_eq!(client.get_proposal(&expired_id).unwrap().status, ProposalStatus::Rejected);
+        assert!(client.try_execute_proposal(&expired_id).is_err());
+
+        let events = env.events().all();
+        let status_events: std::vec::Vec<_> = events.iter().filter(|(cid, topics, _)| {
+            *cid == contract_id && topics.get(0).map(|topic| {
+                let symbol: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &topic);
+                symbol == symbol_short!("prop_stat")
+            }).unwrap_or(false)
+        }).collect();
+        assert_eq!(status_events.len(), 2);
+        let rejected_data = &status_events[0].2;
+        let rejected_event: EventProposalStatusChanged = soroban_sdk::FromVal::from_val(&env, rejected_data);
+        assert_eq!(rejected_event.proposal_id, rejected_id);
+        assert_eq!(rejected_event.status, ProposalStatus::Rejected);
+        let expired_data = &status_events[1].2;
+        let expired_event: EventProposalStatusChanged = soroban_sdk::FromVal::from_val(&env, expired_data);
+        assert_eq!(expired_event.proposal_id, expired_id);
+        assert_eq!(expired_event.status, ProposalStatus::Rejected);
+    }
+
+    #[test]
+    fn voting_after_quorum_status_change_is_rejected_without_extra_status_event() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+        let second_voter = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        cache_balance_with_auth(&env, &contract_id, &client, &admin, proposal.snapshot_ledger, &voter, 200);
+        cache_balance_with_auth(&env, &contract_id, &client, &admin, proposal.snapshot_ledger, &second_voter, 200);
+        client.mock_auths(&[MockAuth {
+            address: &voter,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "vote",
+                args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]).vote(&voter, &proposal_id, &VoteChoice::Approve);
+        assert_eq!(client.get_proposal(&proposal_id).unwrap().status, ProposalStatus::Approved);
+
+        let second_vote = client.mock_auths(&[MockAuth {
+            address: &second_voter,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "vote",
+                args: (second_voter.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]).try_vote(&second_voter, &proposal_id, &VoteChoice::Approve);
+        assert!(second_vote.is_err());
+
+        let events = env.events().all();
+        let status_events: std::vec::Vec<_> = events.iter().filter(|(cid, topics, _)| {
+            *cid == contract_id && topics.get(0).map(|topic| {
+                let symbol: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &topic);
+                symbol == symbol_short!("prop_stat")
+            }).unwrap_or(false)
+        }).collect();
+        assert_eq!(status_events.len(), 1);
+        let data = &status_events[0].2;
+        let payload: EventProposalStatusChanged = soroban_sdk::FromVal::from_val(&env, data);
+        assert_eq!(payload.proposal_id, proposal_id);
+        assert_eq!(payload.status, ProposalStatus::Approved);
+    }
     /// execute_proposal on a non-approved proposal must fail.
     #[test]
     fn execute_non_approved_proposal_is_rejected() {

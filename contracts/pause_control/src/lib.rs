@@ -147,6 +147,11 @@ mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Ledger};
 
+    fn in_contract<T>(env: &Env, body: impl FnOnce() -> T) -> T {
+        let contract_id = Address::generate(env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, body)
+    }
     fn setup_env() -> (Env, Address) {
         let env = Env::default();
         let admin = Address::generate(&env);
@@ -157,55 +162,70 @@ mod tests {
     #[test]
     fn test_is_not_paused_by_default() {
         let (env, _admin) = setup_env();
+        in_contract(&env, || {
         assert!(!is_paused(&env, 1));
+        });
     }
 
     #[test]
     fn test_get_pause_status_none_by_default() {
         let (env, _admin) = setup_env();
+        in_contract(&env, || {
         assert!(get_pause_status(&env, 1).is_none());
+        });
     }
 
     #[test]
     fn test_require_not_paused_does_not_panic_when_not_paused() {
         let (env, _admin) = setup_env();
+        in_contract(&env, || {
         require_not_paused(&env, 1);
+        });
     }
 
     #[test]
     fn test_pause_domain() {
         let (env, admin) = setup_env();
+        in_contract(&env, || {
         pause_domain(&env, 1, &admin, 0);
         assert!(is_paused(&env, 1));
+        });
     }
 
     #[test]
     #[should_panic(expected = "Domain is paused")]
     fn test_require_not_paused_panics_when_paused() {
         let (env, admin) = setup_env();
+        in_contract(&env, || {
         pause_domain(&env, 1, &admin, 0);
         require_not_paused(&env, 1);
+        });
     }
 
     #[test]
     fn test_unpause_domain() {
         let (env, admin) = setup_env();
+        in_contract(&env, || {
         pause_domain(&env, 1, &admin, 0);
         assert!(is_paused(&env, 1));
         unpause_domain(&env, 1, &admin);
         assert!(!is_paused(&env, 1));
+        });
     }
 
     #[test]
     #[should_panic(expected = "Domain is not paused")]
     fn test_unpause_not_paused_panics() {
         let (env, admin) = setup_env();
+        in_contract(&env, || {
         unpause_domain(&env, 1, &admin);
+        });
     }
 
     #[test]
     fn test_pause_with_expiry() {
         let (env, admin) = setup_env();
+        in_contract(&env, || {
         pause_domain(&env, 1, &admin, 100);
         assert!(is_paused(&env, 1));
         env.ledger().set_timestamp(1_000_050);
@@ -214,46 +234,56 @@ mod tests {
         env.ledger().set_timestamp(1_000_100);
         assert!(expire_if_elapsed(&env, 1));
         assert!(!is_paused(&env, 1));
+        });
     }
 
     #[test]
     fn test_expire_after_exact_timestamp() {
         let (env, admin) = setup_env();
+        in_contract(&env, || {
         pause_domain(&env, 1, &admin, 100);
         env.ledger().set_timestamp(1_000_100);
         assert!(expire_if_elapsed(&env, 1));
         assert!(!is_paused(&env, 1));
+        });
     }
 
     #[test]
     fn test_expire_before_timestamp_does_not_expire() {
         let (env, admin) = setup_env();
+        in_contract(&env, || {
         pause_domain(&env, 1, &admin, 100);
         env.ledger().set_timestamp(1_000_099);
         assert!(!expire_if_elapsed(&env, 1));
         assert!(is_paused(&env, 1));
+        });
     }
 
     #[test]
     fn test_indefinite_pause_does_not_expire() {
         let (env, admin) = setup_env();
+        in_contract(&env, || {
         pause_domain(&env, 1, &admin, 0);
         assert!(!expire_if_elapsed(&env, 1));
         assert!(is_paused(&env, 1));
+        });
     }
 
     #[test]
     fn test_check_not_paused_expires_automatically() {
         let (env, admin) = setup_env();
+        in_contract(&env, || {
         pause_domain(&env, 1, &admin, 50);
         env.ledger().set_timestamp(1_000_100);
         check_not_paused(&env, 1);
         assert!(!is_paused(&env, 1));
+        });
     }
 
     #[test]
     fn test_multiple_domains_independent() {
         let (env, admin) = setup_env();
+        in_contract(&env, || {
         pause_domain(&env, 1, &admin, 0);
         pause_domain(&env, 2, &admin, 0);
         assert!(is_paused(&env, 1));
@@ -261,31 +291,37 @@ mod tests {
         unpause_domain(&env, 1, &admin);
         assert!(!is_paused(&env, 1));
         assert!(is_paused(&env, 2));
+        });
     }
 
     #[test]
     fn test_pause_then_unpause_then_pause_again() {
         let (env, admin) = setup_env();
+        in_contract(&env, || {
         pause_domain(&env, 1, &admin, 0);
         unpause_domain(&env, 1, &admin);
         pause_domain(&env, 1, &admin, 100);
         assert!(is_paused(&env, 1));
+        });
     }
 
     #[test]
     fn test_get_pause_status_after_pause() {
         let (env, admin) = setup_env();
+        in_contract(&env, || {
         pause_domain(&env, 1, &admin, 100);
         let status = get_pause_status(&env, 1).unwrap();
         assert!(status.paused);
         assert_eq!(status.paused_by, admin);
         assert_eq!(status.paused_at, 1_000_000);
         assert_eq!(status.expires_at, 1_000_100);
+        });
     }
 
     #[test]
     fn test_domains_are_independent() {
         let (env, admin) = setup_env();
+        in_contract(&env, || {
         pause_domain(&env, 5, &admin, 0);
         pause_domain(&env, 10, &admin, 0);
         assert!(is_paused(&env, 5));
@@ -293,16 +329,19 @@ mod tests {
         unpause_domain(&env, 5, &admin);
         assert!(!is_paused(&env, 5));
         assert!(is_paused(&env, 10));
+        });
     }
 
     #[test]
     fn test_pause_status_returns_correct_values() {
         let (env, admin) = setup_env();
+        in_contract(&env, || {
         pause_domain(&env, 42, &admin, 500);
         let status = get_pause_status(&env, 42).unwrap();
         assert!(status.paused);
         assert_eq!(status.paused_by, admin);
         assert_eq!(status.paused_at, 1_000_000);
         assert_eq!(status.expires_at, 1_000_500);
+        });
     }
 }

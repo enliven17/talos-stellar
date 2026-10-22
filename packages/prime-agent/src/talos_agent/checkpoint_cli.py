@@ -111,7 +111,6 @@ def atomic_write(output_path: Path, data: bytes, max_size: int) -> None:
                 temporary_path.unlink(missing_ok=True)
 
 
-
 def open_readonly_database(path: Path) -> sqlite3.Connection:
     """Open an existing SQLite database without creating or modifying it."""
 
@@ -123,7 +122,6 @@ def open_readonly_database(path: Path) -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only = ON")
     return connection
-
 
 
 def summarize_database(connection: sqlite3.Connection) -> dict[str, int]:
@@ -171,7 +169,6 @@ def parse_checkpoint(data: bytes) -> dict[str, object]:
         raise ValueError("Checkpoint must contain a top-level JSON object.")
 
     return checkpoint
-
 
 
 @click.group()
@@ -423,8 +420,7 @@ def format_checkpoint_summary(
 
     if tables:
         lines.extend(
-            f"  {table_name}: {row_count}"
-            for table_name, row_count in tables.items()
+            f"  {table_name}: {row_count}" for table_name, row_count in tables.items()
         )
     else:
         lines.append("  none")
@@ -618,10 +614,16 @@ def restore_checkpoint(
                     f"after={res.state_diff.total_rows_after}"
                 )
                 click.echo("Changed tables:")
-                changed = res.state_diff.tables_changed or res.state_diff.tables_added or res.state_diff.tables_removed
+                changed = (
+                    res.state_diff.tables_changed
+                    or res.state_diff.tables_added
+                    or res.state_diff.tables_removed
+                )
                 if changed:
                     for tbl in changed:
-                        entry = next((t for t in res.state_diff.tables if t.table == tbl), None)
+                        entry = next(
+                            (t for t in res.state_diff.tables if t.table == tbl), None
+                        )
                         if entry is None:
                             click.echo(f"  {tbl}")
                         else:
@@ -632,7 +634,9 @@ def restore_checkpoint(
                 else:
                     click.echo("  none")
         else:
-            click.echo(f"Successfully restored checkpoint for agent '{validated_agent_id}' in {res.duration_ms}ms")
+            click.echo(
+                f"Successfully restored checkpoint for agent '{validated_agent_id}' in {res.duration_ms}ms"
+            )
             click.echo("Tables restored:")
             if res.tables_restored:
                 for tbl, cnt in res.tables_restored.items():
@@ -650,7 +654,14 @@ def restore_checkpoint(
             str(exc),
             CheckpointExitCode.VALIDATION_ERROR,
         ) from exc
-    except (StagingError, InvariantError, RollbackError, PermissionError, OSError, sqlite3.Error) as exc:
+    except (
+        StagingError,
+        InvariantError,
+        RollbackError,
+        PermissionError,
+        OSError,
+        sqlite3.Error,
+    ) as exc:
         raise CheckpointCLIError(
             f"Restore failed: {exc}",
             CheckpointExitCode.IO_ERROR,
@@ -760,26 +771,34 @@ def drill_checkpoint(
 
         if as_json:
             import json
-            click.echo(json.dumps({
-                "timestamp": report.timestamp,
-                "total": report.total,
-                "passed": report.passed,
-                "failed": report.failed,
-                "duration_ms": report.duration_ms,
-                "report_path": str(report_path),
-                "scenarios": [
+
+            click.echo(
+                json.dumps(
                     {
-                        "scenario": s.scenario,
-                        "passed": s.passed,
-                        "duration_ms": s.duration_ms,
-                        "detail": s.detail,
-                        "error": s.error,
-                    }
-                    for s in report.scenarios
-                ],
-            }, indent=2))
+                        "timestamp": report.timestamp,
+                        "total": report.total,
+                        "passed": report.passed,
+                        "failed": report.failed,
+                        "duration_ms": report.duration_ms,
+                        "report_path": str(report_path),
+                        "scenarios": [
+                            {
+                                "scenario": s.scenario,
+                                "passed": s.passed,
+                                "duration_ms": s.duration_ms,
+                                "detail": s.detail,
+                                "error": s.error,
+                            }
+                            for s in report.scenarios
+                        ],
+                    },
+                    indent=2,
+                )
+            )
         else:
-            click.echo(f"Restore drill complete: {report.passed}/{report.total} passed in {report.duration_ms}ms")
+            click.echo(
+                f"Restore drill complete: {report.passed}/{report.total} passed in {report.duration_ms}ms"
+            )
             click.echo(f"Report saved to {report_path}")
             if report.failed > 0:
                 click.echo()
@@ -803,4 +822,3 @@ def drill_checkpoint(
             f"Drill failed: {exc}",
             CheckpointExitCode.IO_ERROR,
         ) from exc
-

@@ -27,7 +27,7 @@ from talos_agent.redact import is_sensitive_key as _is_sensitive_key
 logger = logging.getLogger(__name__)
 
 # ── Sensitive-field matchers ──────────────────────────────────────────────────
-# Delegated to the canonical redact module — kept here as re-exports for
+# Delegated to the canonical redact module — kept here as a re-export for
 # backward compatibility with callers that import from telemetry.
 
 
@@ -133,9 +133,7 @@ class TelemetryReport:
 def _strip_empty(d: dict) -> dict:
     """Remove keys with ``None``, empty lists, or empty dicts for cleaner output."""
     return {
-        k: v
-        for k, v in d.items()
-        if v is not None and v != [] and v != {} and v != ""
+        k: v for k, v in d.items() if v is not None and v != [] and v != {} and v != ""
     }
 
 
@@ -270,7 +268,9 @@ class TelemetryCollector:
                 ).fetchone()
                 q.total_count = total["cnt"] if total else 0
             except Exception as exc:
-                logger.debug("Telemetry: failed to read queue depth for %s: %s", name, exc)
+                logger.debug(
+                    "Telemetry: failed to read queue depth for %s: %s", name, exc
+                )
 
             report.queues.append(q)
 
@@ -306,9 +306,7 @@ class TelemetryCollector:
 
     # ── Policy engine ────────────────────────────────────────────────
 
-    def _collect_policy_metrics(
-        self, report: TelemetryReport, engine: object
-    ) -> None:
+    def _collect_policy_metrics(self, report: TelemetryReport, engine: object) -> None:
         """Read policy-engine counters via its ``metrics`` property."""
         try:
             m = engine.metrics  # type: ignore[union-attr]
@@ -348,11 +346,15 @@ class TelemetryCollector:
         report.restore_checksum = str(safe.get("checksum") or "")
         report.restore_checksum_algorithm = str(safe.get("checksum_algorithm") or "")
         try:
-            report.restore_checksum_table_count = int(safe.get("checksum_table_count") or 0)
+            report.restore_checksum_table_count = int(
+                safe.get("checksum_table_count") or 0
+            )
         except (TypeError, ValueError):
             report.restore_checksum_table_count = 0
         try:
-            report.restore_checksum_total_rows = int(safe.get("checksum_total_rows") or 0)
+            report.restore_checksum_total_rows = int(
+                safe.get("checksum_total_rows") or 0
+            )
         except (TypeError, ValueError):
             report.restore_checksum_total_rows = 0
 
