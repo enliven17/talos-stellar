@@ -67,6 +67,8 @@ This page documents errors exposed by the contract sources in this workspace. Nu
 | 16 | `NegativeBalance` | Cached balance cannot be negative; review balance state. |
 | 17 | `DomainPaused` | Write operation is blocked by pause state; retry after unpause. |
 | 18 | `InvalidTtlBounds` | `extend_ttl_batch` bounds were rejected by the shared `ttl-manager` validator. |
+| 19 | `InvalidProposalThreshold` | Proposal threshold must be non-negative; submit a value >= 0. |
+| 20 | `InsufficientVotingPower` | Proposer's voting power at the snapshot ledger is below the configured `proposal_threshold`; acquire more voting power before proposing. |
 
 ### Storage migration helper (`MigrationError`)
 
