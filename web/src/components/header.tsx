@@ -5,8 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useStellarWallet } from "./providers";
 import { ThemeToggle } from "./theme-toggle";
-import { LocaleSwitch } from "./locale-switch";
-import { useTranslation, type MessageKey } from "@/lib/i18n";
+import { CopyButton } from "./copy-button";
 
 interface NavItemConfig {
   href: string;

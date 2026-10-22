@@ -438,10 +438,17 @@ async function _POST(request: NextRequest) {
   }
 }
 
+<<<<<<< HEAD
 // Re-export POST wrapped with drift detection.
 // The original async function above is kept intact so it can be tested directly.
 const getWithDriftDetection = withDriftDetection("GET /api/talos", _GET);
 export const GET = withRequestId((request: NextRequest) =>
   getWithDriftDetection(request, { params: Promise.resolve({}) }),
 );
+// Re-export GET and POST wrapped with drift detection.
+// The original async functions above are kept intact so they can be tested directly.
+export const GET = withRequestId(withDriftDetection("GET /api/talos", _GET));
 export const POST = withRequestId(withDriftDetection("POST /api/talos", _POST));
+
+export { _GET, _POST };
+

@@ -1,3 +1,5 @@
+import "./patch-ts.mjs";
+
 import { defineConfig, globalIgnores } from "eslint/config";
 import jsonParser from "./eslint-json-parser.mjs";
 import nextVitals from "eslint-config-next/core-web-vitals";

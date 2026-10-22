@@ -37,7 +37,7 @@ async function handleGet(
     }
 
     const { apiKey, ...safeTalos } = talos;
-    for (const tag of agentMutationTags(id)) revalidateTag(tag, "max");
+    for (const tag of agentMutationTags(id)) revalidateTag(tag, "max"); (feat(sdk): add a job tracker combining progress streaming with polling fallback (#1017) (#1244))
     return Response.json({ ...safeTalos, apiKeyMasked: maskApiKey(apiKey) });
   } catch {
     return internalError(request);

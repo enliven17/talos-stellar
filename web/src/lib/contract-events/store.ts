@@ -13,14 +13,14 @@ export interface ContractEventItem {
   id: string;
   contractId: string;
   ledger: number;
-  ledgerClosedAt: Date | null;
+  ledgerClosedAt: Date | string | null;
   txHash: string;
   topic: string;
   topics: unknown;
   data: unknown;
   decodedPayload: unknown;
   eventVersion: number | null;
-  createdAt: Date;
+  createdAt: Date | string;
 }
 
 export interface ListContractEventsResult {

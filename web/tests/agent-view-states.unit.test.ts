@@ -161,7 +161,7 @@ describe("AgentAvailabilityBadge accessibility", () => {
           "status",
       ) as { props: Record<string, unknown> } | undefined;
       expect(roled).toBeTruthy();
-      const label = String(roled.props["aria-label"] ?? "");
+      const label = String(roled?.props["aria-label"] ?? "");
       expect(label.toLowerCase()).toContain(state);
     },
   );

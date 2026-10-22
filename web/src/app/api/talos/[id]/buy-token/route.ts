@@ -2,8 +2,7 @@ import { db } from "@/db";
 import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsPatrons, tlsRevenues, tlsTokenPurchases } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
-import { NextResponse } from "next/server";
-import { withRequestId } from "@/lib/with-request-id";
+import { NextRequest, NextResponse } from "next/server";
 import { getAccountInfo, getNetworkPassphrase, getUSDCIssuer } from "@/lib/stellar";
 import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
 import { logger } from "@/lib/logger";
@@ -37,7 +36,7 @@ import { registerTx } from "@/lib/reconciler";
  *    insert + purchase status=completed + cached response)
  */
 async function _POST(
-  request: Request,
+  request: Request | NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;

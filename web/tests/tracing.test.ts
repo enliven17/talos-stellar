@@ -155,7 +155,7 @@ describe("withTraceContext with a real (in-memory) provider", () => {
   beforeEach(() => {
     exporter = new InMemorySpanExporter();
     provider = new NodeTracerProvider({
-      spanProcessors: [new SimpleSpanProcessor(exporter)],
+      spanProcessors: [new SimpleSpanProcessor(exporter) as any],
     });
     provider.register();
   });
@@ -230,6 +230,6 @@ describe("withTraceContext with a real (in-memory) provider", () => {
 
     const [span] = exporter.getFinishedSpans();
     expect(span.spanContext().traceId).toBe(traceId);
-    expect(span.parentSpanId).toBe(parentSpanId);
+    expect((span as any).parentSpanId).toBe(parentSpanId);
   });
 });
