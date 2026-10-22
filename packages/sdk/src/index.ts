@@ -1,16 +1,11 @@
 // ── Client ────────────────────────────────────────────────────────
 
-export {
-  TalosClient,
-  resolveRetryPolicy,
-  resolveRetryOptions,
-} from "./client.js";
+export { TalosClient } from "./client.js";
+export { resolveRetryPolicy, resolveRetryOptions } from "./client.js";
 export type {
   TalosClientOptions,
   RetryPolicyOptions,
   RetryOptions,
-  ResolvedRetryPolicy,
-  ResolvedRetryOptions,
   TalosErrorEvent,
   TalosResponseEvent,
   ReadOptions,
@@ -79,7 +74,6 @@ export {
   diagnoseBuyerProof,
   MAX_BODY_BYTES,
 } from "./errors.js";
-export type { RateLimitInfo, HeaderSource } from "./errors.js";
 
 // ── Domain types ──────────────────────────────────────────────────
 
@@ -92,6 +86,7 @@ export * from "./webhooks.js";
 export * from "./a2a-intent.js";
 export * from "./a2a-validation.js";
 export * from "./a2a-operations.js";
+export * from "./seller-quote.js";
 export {
   DEFAULT_SELLER_QUOTE_TTL_SECONDS,
   SellerQuoteError,

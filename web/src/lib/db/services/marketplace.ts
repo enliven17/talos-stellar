@@ -1,6 +1,6 @@
 import { eq, and, ilike, inArray, count } from 'drizzle-orm';
 import { db } from '@/db';
-import { capabilities, marketplaceItems, itemCapabilities } from '@/db/schema';
+import { capabilities, marketplaceItems, itemCapabilities } from '../schema/marketplace';
 import type { CapabilityFilter, MarketplaceSearchResult, MarketplaceSearchResponse } from '@/app/api/marketplace/search/types';
 
 export async function getCapabilityFilters(): Promise<CapabilityFilter[]> {

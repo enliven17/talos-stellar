@@ -27,6 +27,11 @@
       "types": "./dist/esm/errors.d.ts",
       "import": "./dist/esm/errors.js",
       "require": "./dist/cjs/errors.cjs"
+    },
+    "./testing": {
+      "types": "./dist/esm/testing/index.d.ts",
+      "import": "./dist/esm/testing/index.js",
+      "require": "./dist/cjs/testing/index.cjs"
     }
   },
   "bin": {

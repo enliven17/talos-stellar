@@ -30,11 +30,9 @@ console.log(`[compat:browser-bundle] bundle size: ${bytes} bytes`);
 const source = readFileSync(BUNDLE_PATH, "utf8");
 
 // Emulate a minimal browser global: only the things the bundle should use.
-const windowLike = {
-  crypto,
-  TextEncoder,
-  TextDecoder,
-};
+const windowLike = {};
+windowLike.crypto = crypto;
+windowLike.globalThis = windowLike;
 const globalThisLike = windowLike;
 windowLike.window = windowLike;
 windowLike.self = windowLike;
