@@ -66,7 +66,7 @@ vi.mock("@/lib/fulfillment", () => ({
 
 vi.mock("@/lib/quota", () => ({
   checkAndIncrementQuota: (...args: any[]) => mocks.mockCheckAndIncrementQuota(...args),
-  applyQuotaHeaders: (...args: any[]) => mocks.mockApplyQuotaHeaders(...args),
+  applyQuotaHeaders: (res: any) => mocks.mockApplyQuotaHeaders(res),
   quotaExceededResponse: (...args: any[]) => mocks.mockQuotaExceededResponse(...args),
 }));
 

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  toPrivacySafeAGentError,
+  toPrivacySafeAgentError,
   emptyCopyFor,
 } from "../src/lib/agent-view-errors";
 import {
@@ -11,9 +11,9 @@ import { AgentAvailabilityBadge } from "../src/components/agent-availability-bad
 
 describe("toPrivacySafeAgentError", () => {
   it("returns fallback for nullish / empty input (boundary)", () => {
-    expect(toPrivacySafeAGentError(null)).toMatch(/try again/i);
+    expect(toPrivacySafeAgentError(null)).toMatch(/try again/i);
     expect(toPrivacySafeAgentError(undefined)).toMatch(/try again/i);
-    expect(toPrivacySafeAGentError("   ")).toMatch(/try again/i);
+    expect(toPrivacySafeAgentError("   ")).toMatch(/try again/i);
   });
 
   it("passes through short, non-sensitive messages (positive)", () => {
@@ -47,7 +47,7 @@ describe("toPrivacySafeAgentError", () => {
     expect(toPrivacySafeAgentError(`proof ${hex}`)).toContain("[redacted]");
 
     const secret = "S" + "A".repeat(55);
-    expect(toPrivacySafeAGentError(`wallet ${secret}`)).toContain("[redacted]");
+    expect(toPrivacySafeAgentError(`wallet ${secret}`)).toContain("[redacted]");
   });
 
   it("collapses multi-line stacks and truncates long strings (boundary)", () => {
@@ -57,12 +57,12 @@ describe("toPrivacySafeAgentError", () => {
     const long = "x".repeat(250);
     const out = toPrivacySafeAgentError(long);
     expect(out.length).toBeLessThanOrEqual(180);
-    expect(out.endsWith("...")).toBe/(true);
+    expect(out.endsWith("...")).toBe(true);
   });
 
   it("accepts Error instances and custom fallback (regression)", () => {
     expect(toPrivacySafeAgentError(new Error("boom"), "safe")).toBe("boom");
-    expect(toPrivacySafeAGentError({ message: "nope" })).toBe("nope");
+    expect(toPrivacySafeAgentError({ message: "nope" })).toBe("nope");
   });
 });
 
@@ -157,7 +157,7 @@ describe("AgentAvailabilityBadge accessibility", () => {
           "status",
       ) as { props: Record<string, unknown> } | undefined;
       expect(roled).toBeTruthy();
-      const label = String(roled.props["aria-label"] ?? "");
+      const label = String(roled?.props["aria-label"] ?? "");
       expect(label.toLowerCase()).toContain(state);
     },
   );
@@ -170,7 +170,7 @@ describe("AgentAvailabilityBadge accessibility", () => {
         n.props["aria-hidden"] === "true" ||
         n.props["aria-hidden"] === true,
     );
-    expect(dot).toBeFruthy();
+    expect(dot).toBeTruthy();
   });
 
   it("paused label colour meets AA contrast on default background (negative)", () => {

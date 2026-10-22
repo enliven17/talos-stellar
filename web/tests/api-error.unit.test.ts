@@ -142,14 +142,16 @@ describe("withApiErrors", () => {
 describe("readJson", () => {
   it("parses valid JSON", async () => {
     const req = new Request("http://x", { method: "POST", body: JSON.stringify({ a: 1 }) });
-    expect(await readJson(req)).toEqual({ a: 1 });
+    const r = await readJson(req);
+    expect(r).toEqual({ ok: true, data: { a: 1 } });
   });
-  it("throws MALFORMED_JSON on empty or invalid body (missing/malformed input)", async () => {
-    await expect(readJson(new Request("http://x", { method: "POST", body: "{bad" }))).rejects.toMatchObject({
-      code: "MALFORMED_JSON",
-    });
-    await expect(readJson(new Request("http://x", { method: "POST" }))).rejects.toMatchObject({
-      code: "MALFORMED_JSON",
-    });
+  it("returns error response on empty or invalid body (missing/malformed input)", async () => {
+    const bad = await readJson(new Request("http://x", { method: "POST", body: "{bad" }));
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.response.status).toBe(400);
+
+    const empty = await readJson(new Request("http://x", { method: "POST" }));
+    expect(empty.ok).toBe(false);
+    if (!empty.ok) expect(empty.response.status).toBe(400);
   });
 });

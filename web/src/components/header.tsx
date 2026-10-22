@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useStellarWallet } from "./providers";
 import { ThemeToggle } from "./theme-toggle";
+import { CopyButton } from "./copy-button";
 
 const NAV_ITEMS = [
   { href: "/agents", label: "Agents", requiresWallet: false },

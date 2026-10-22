@@ -13,7 +13,22 @@ import {
 } from "@/lib/soroban";
 import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
 import { TALOS_NAME_MIN_LENGTH, TALOS_NAME_MAX_LENGTH } from "@/lib/limits";
-
+import {
+  type LaunchFormState,
+  LAUNCH_FORM_DEFAULTS,
+  buildCreateTalosPayload,
+} from "@/lib/schemas";
+import {
+  StepProduct,
+  StepPatron,
+  StepMitos,
+  StepKernel,
+  StepAgent,
+  StepReview,
+  LaunchStepper,
+  Field,
+  ReviewRow,
+} from "./steps";
 
 const STEPS = [
   "Product",
@@ -525,7 +540,7 @@ function LaunchForm() {
   // ── Step content map ─────────────────────────────────────────────────────
   const stepContent = [
     <StepProduct key="product" form={form} update={update} />,
-    <StepPatron key="patron" form={form} address={address} />,
+    <StepPatron key="patron" form={form} address={address ?? undefined} />,
     <StepMitos key="mitos" form={form} update={update} />,
     <StepKernel key="kernel" form={form} update={update} />,
     <StepAgent
@@ -536,7 +551,7 @@ function LaunchForm() {
       nameChecking={nameChecking}
       checkNameAvailability={checkNameAvailability}
     />,
-    <StepReview key="review" form={form} address={address} />,
+    <StepReview key="review" form={form} address={address ?? undefined} />,
   ];
 
   return (
