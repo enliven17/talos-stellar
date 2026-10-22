@@ -3,10 +3,10 @@
   "private": true,
   "license": "AGPL-3.0-only",
   "scripts": {
-    "dev": "node api.js && pnpm --dir web dev",
+    "dev": "pnpm --dir web dev",
     "doctor": "node scripts/doctor.mjs",
     "doctor:test": "node --test scripts/doctor.test.mjs",
-    "build": "node api.js && pnpm --dir web build",
+    "build": "pnpm --dir web build",
     "lint": "pnpm --dir web lint",
     "web:install": "pnpm --dir web install",
     "web:db:push": "pnpm --dir web db:push",
