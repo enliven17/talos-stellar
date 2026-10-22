@@ -61,14 +61,14 @@ export async function saveCursor(lastLedger: number, cursorId: string = "default
     .values({
       id: cursorId,
       lastLedger,
-      updatedAt: new Date(),
-    })
+      updatedAt: new Date().toISOString(),
+    } as any)
     .onConflictDoUpdate({
       target: tlsEventCursor.id,
       set: {
         lastLedger,
-        updatedAt: new Date(),
-      },
+        updatedAt: new Date().toISOString(),
+      } as any,
     });
 }
 
@@ -214,16 +214,17 @@ export async function ingestEvents(
           id: eventId,
           contractId: raw.contractId,
           ledger: raw.ledger,
-          ledgerClosedAt: raw.ledgerClosedAt ? new Date(raw.ledgerClosedAt) : null,
+          ledgerClosedAt: raw.ledgerClosedAt ? new Date(raw.ledgerClosedAt).toISOString() : null,
           txHash: raw.txHash ?? "",
           topic: topicSymbol,
           topics: (normalized?.topics ?? raw.topics ?? raw.topic ?? null) as unknown as Record<string, unknown>,
           data: (normalized?.data ?? raw.data ?? raw.value ?? null) as unknown as Record<string, unknown>,
           decodedPayload: decodedPayload as unknown as Record<string, unknown>,
           eventVersion,
-          createdAt: new Date(),
-        })
+          createdAt: new Date().toISOString(),
+        } as any)
         .onConflictDoNothing({ target: tlsContractEvents.id });
+
 
       stored++;
     } catch (dbErr) {
@@ -280,7 +281,7 @@ export async function pollContractEventsOnce(
       ];
     }
 
-    response = await server.getEvents(params);
+    response = (await (server as any).getEvents(params as any)) as any;
   } catch (rpcErr) {
     logger.error(
       { event: "contract_events_get_events_failed", startLedger, err: String(rpcErr) },

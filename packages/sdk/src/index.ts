@@ -128,6 +128,26 @@ export type {
   SchemaVersionNegotiationResult,
 } from "./events.js";
 
+// ── Job Tracker ───────────────────────────────────────────────────
+
+export {
+  JobTracker,
+  trackJob,
+  JobTerminalError,
+  JobFailedError,
+  JobCancelledError,
+  JobTrackAbortedError,
+  JobTrackTimeoutError,
+} from "./job-tracker.js";
+export type {
+  JobProgressDetails,
+  TrackJobEventType,
+  TrackJobEvent,
+  JobTerminalStatus,
+  JobTerminalOutcome,
+  TrackJobOptions,
+} from "./job-tracker.js";
+
 // ── Contract event decoding ───────────────────────────────────────────────────
 
 export {

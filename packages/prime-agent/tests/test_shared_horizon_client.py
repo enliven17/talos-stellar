@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from talos_agent.payments import USDC_TESTNET_ISSUER
 from talos_agent.payments.stellar_kit import StellarKit, _DEFAULT_HORIZON_TIMEOUT
 
 
@@ -43,16 +44,26 @@ def _make_balance_response(balance_xlm: str = "100.0") -> httpx.Response:
     )
 
 
-def _make_token_response(asset_code: str = "USDC", balance: str = "50.0") -> httpx.Response:
+def _make_token_response(
+    asset_code: str = "USDC",
+    balance: str = "50.0",
+    asset_issuer: str = USDC_TESTNET_ISSUER,
+) -> httpx.Response:
     return httpx.Response(
         200,
         json={
             "balances": [
-                {"asset_type": "credit_alphanum4", "asset_code": asset_code, "balance": balance},
+                {
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": asset_code,
+                    "asset_issuer": asset_issuer,
+                    "balance": balance,
+                },
             ]
         },
         request=httpx.Request("GET", "https://horizon-testnet.stellar.org/accounts/GABC123"),
     )
+
 
 
 # ── Client lifecycle ───────────────────────────────────────────────────────────

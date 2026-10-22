@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from decimal import Decimal
 from pathlib import Path
@@ -91,6 +92,16 @@ class Settings(BaseSettings):
     @property
     def llm_base_url(self) -> str | None:
         return "https://api.groq.com/openai/v1" if self.secret_value("groq_api_key") else None
+
+    @property
+    def stellar_usdc_issuer(self) -> str:
+        env_val = os.getenv("STELLAR_USDC_ISSUER") or os.getenv("NEXT_PUBLIC_STELLAR_USDC_ISSUER")
+        return env_val.strip() if env_val else ""
+
+    @property
+    def stellar_network(self) -> str:
+        env_val = os.getenv("STELLAR_NETWORK") or os.getenv("NEXT_PUBLIC_STELLAR_NETWORK")
+        return env_val.strip().lower() if env_val else "testnet"
 
     # Model routing (Issue #233) — disabled by default, backward compatible
     model_routing_enabled: bool = Field(
