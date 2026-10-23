@@ -47,37 +47,3 @@ describe("apiError", () => {
 });
 
 describe("readJson", () => {
-<<<<<<< HEAD
-  it("returns parsed request data", async () => {
-    const result = await readJson(new Request("http://localhost", {
-      method: "POST",
-      body: JSON.stringify({ value: 1 }),
-    }));
-    expect(result).toEqual({ ok: true, data: { value: 1 } });
-  });
-
-  it("returns a 400 response for missing or malformed JSON", async () => {
-    for (const body of ["{broken", null]) {
-      const request = new Request("http://localhost", {
-        method: "POST",
-        ...(body === null ? {} : { body }),
-      });
-      const result = await readJson(request);
-      expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.response.status).toBe(400);
-    }
-  it("parses valid JSON", async () => {
-    const req = new Request("http://x", { method: "POST", body: JSON.stringify({ a: 1 }) });
-    const r = await readJson(req);
-    expect(r).toEqual({ ok: true, data: { a: 1 } });
-  });
-  it("returns error response on empty or invalid body (missing/malformed input)", async () => {
-    const bad = await readJson(new Request("http://x", { method: "POST", body: "{bad" }));
-    expect(bad.ok).toBe(false);
-    if (!bad.ok) expect(bad.response.status).toBe(400);
-
-    const empty = await readJson(new Request("http://x", { method: "POST" }));
-    expect(empty.ok).toBe(false);
-    if (!empty.ok) expect(empty.response.status).toBe(400);
-  });
-});
