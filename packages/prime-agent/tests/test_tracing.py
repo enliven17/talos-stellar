@@ -275,6 +275,37 @@ class TestToolRegistrySpans:
         assert result == {"error": "Unknown tool: nonexistent"}
         assert in_memory_tracer.get_finished_spans() == ()
 
+    @pytest.mark.asyncio
+    async def test_execute_raises_http_tool_timeout_error_on_timeout(
+        self, in_memory_tracer
+    ):
+        """A tool that exceeds its per-call deadline raises the shared
+        ``talos_agent.http.ToolTimeoutError`` (not a private duplicate).
+        """
+        import asyncio
+
+        from talos_agent.http import ToolTimeoutError
+
+        registry = ToolRegistry()
+
+        async def slow_tool() -> dict:
+            await asyncio.sleep(10)
+            return {"ok": True}
+
+        registry.register(
+            "slow_tool",
+            "desc",
+            slow_tool,
+            {"type": "object", "properties": {}},
+            timeout=0.01,
+        )
+
+        with pytest.raises(ToolTimeoutError) as exc_info:
+            await registry.execute("slow_tool", {})
+
+        assert exc_info.value.tool_name == "slow_tool"
+        assert exc_info.value.timeout == pytest.approx(0.01)
+
 
 # ── Integration: TalosAPIClient ─────────────────────────────
 

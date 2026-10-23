@@ -1,0 +1,8 @@
+{
+  "paymentHeader": "x402 eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJmcm9tIjoiR0NLTEFLQ0...base64url-encoded-stellar-auth-entry",
+  "paymentToken": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJmcm9tIjoiR0NLTEFLQ0...base64url-encoded-stellar-auth-entry",
+  "from": "GCKLAKCGZK6DPZPKJQRZHTPJWHVKB2KIJFNTDTZTXNB6HKUFWJT7FIL",
+  "to": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+  "amount": "1.5",
+  "assetCode": "USDC"
+}

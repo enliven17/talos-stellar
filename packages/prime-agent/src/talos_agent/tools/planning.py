@@ -23,6 +23,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from talos_agent.tools import context as _context
 from talos_agent.tools.registry import tool
 
 if TYPE_CHECKING:
@@ -36,6 +37,12 @@ if TYPE_CHECKING:
 _api: TalosAPIClient = None  # type: ignore[assignment]
 _db: LocalDB = None  # type: ignore[assignment]
 _settings: Settings = None  # type: ignore[assignment]
+
+
+def _deps():
+    """This agent's dependencies: the bound ToolContext, else this module's globals."""
+    return _context.resolve(globals())
+
 
 # ---------------------------------------------------------------------------
 # Validation constants
@@ -607,17 +614,17 @@ def _read_budget_context() -> tuple[float, float, float]:
     approval_threshold = 10.0
 
     try:
-        if _db is not None:
-            config = _db.get_talos_config()
+        if _deps().db is not None:
+            config = _deps().db.get_talos_config()
             if config:
                 gtm_budget = float(config.get("gtmBudget", DEFAULT_GTM_BUDGET))
-            spent_this_period = float(_db.get_spending_period(30))
+            spent_this_period = float(_deps().db.get_spending_period(30))
     except Exception:  # noqa: BLE001, S110  # planning must never crash; defaults are safe
         pass
 
     try:
-        if _settings is not None:
-            approval_threshold = float(_settings.approval_threshold)
+        if _deps().settings is not None:
+            approval_threshold = float(_deps().settings.approval_threshold)
     except Exception:  # noqa: BLE001, S110
         pass
 
@@ -630,10 +637,10 @@ async def _fetch_services(category: str, target: str) -> list[dict[str, Any]]:
     _assert_read_only("discover_services")  # will NOT raise — discover_services is allowed
     # The check above is a no-op for allowed methods; the real guard is below
     # ensuring we never call any mutating method inside this module.
-    if _api is None:
+    if _deps().api is None:
         return []
     try:
-        services = await _api.discover_services(
+        services = await _deps().api.discover_services(
             category=category or None,
             target=target or None,
         )
@@ -650,8 +657,8 @@ def _record_planner_cancellation(tool_name: str, phase: str) -> None:
     seeds, payment proofs, or sensitive media are logged.
     """
     try:
-        if _db is not None:
-            _db.add_activity(
+        if _deps().db is not None:
+            _deps().db.add_activity(
                 "planner_cancelled",
                 f"Planner tool '{tool_name}' cancelled during {phase}",
                 "system",

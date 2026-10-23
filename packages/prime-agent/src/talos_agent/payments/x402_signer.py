@@ -13,6 +13,7 @@ from typing import Any
 from rich.console import Console
 
 from talos_agent.adapters.snapshots import X402HealthSnapshot
+from talos_agent.payments import USDC_DECIMALS, USDC_UNIT_SCALE
 from talos_agent.redact import redact_text as _redact_text
 
 console = Console()
@@ -74,13 +75,24 @@ class X402Signer:
     ) -> dict[str, Any]:
         """Request x402 payment signature from Web's Stellar proxy.
 
+        ``amount`` is in USDC smallest units: ``USDC_UNIT_SCALE`` (10 **
+        USDC_DECIMALS) units per USDC. Build it with
+        :func:`talos_agent.tools.commerce.price_to_usdc_units`.
+
         Returns a dict with the X-PAYMENT header value.
         """
         if not self.available:
             return {"error": "x402 signer not initialized"}
 
+        amount_usdc = (
+            f"{amount // USDC_UNIT_SCALE}"
+            f".{amount % USDC_UNIT_SCALE:0{USDC_DECIMALS}d}"
+        )
         try:
-            console.print(f"[dim]x402 sign: payee={payee}, amount={amount}, asset={asset_code}[/dim]")
+            console.print(
+                f"[dim]x402 sign: payee={payee}, amount={amount} units "
+                f"({amount_usdc} USDC), asset={asset_code}[/dim]"
+            )
             result = await self._api.sign_payment(
                 payee=payee,
                 amount=amount,

@@ -301,4 +301,17 @@ describe("Export map — regression and privacy", () => {
       expect(joined).not.toMatch(/file:\/\//);
     }
   });
+  it('lists export conditions in the correct order: types, browser, import, require', () => {
+  const conditions = Object.keys(pkg.exports['.']);
+  expect(conditions.indexOf('types')).toBe(0);
+  expect(conditions.indexOf('types')).toBeLessThan(conditions.indexOf('browser'));
+  expect(conditions.indexOf('browser')).toBeLessThan(conditions.indexOf('import'));
+  expect(conditions.indexOf('import')).toBeLessThan(conditions.indexOf('require'));
+});
+
+it('keeps top-level main and types fields for older tooling', () => {
+  expect(pkg.main).toBeTruthy();
+  expect(pkg.types).toBeTruthy();
+});
+
 });

@@ -76,6 +76,13 @@ is idempotent per cursor (see §4).
 | (`vote`, proposal_id: u32) | (voter: Address, choice: VoteChoice, weight: i128) |
 | (`prop_stat`, proposal_id: u32) | status: ProposalStatus |
 | (`qrm_rchd`, proposal_id: u32) | (proposal_id: u32, votes_cast: i128, quorum_threshold: i128, approval_bps: i128) |
+| (`cfg_upd`,) | (old_quorum_threshold: i128, new_quorum_threshold: i128, old_consensus_threshold: i128, new_consensus_threshold: i128, old_voting_period_ledgers: u32, new_voting_period_ledgers: u32, old_pulse_token_address: Address, new_pulse_token_address: Address) |
+
+`cfg_upd` is emitted once after a successful `update_config` call. Its data includes both the previous and new values for every governance parameter, including the Pulse token address.
+
+| (`adm_prp`,) | EventAdminProposed | admin transfer proposed |
+| (`adm_acc`,) | EventAdminAccepted | admin transfer accepted |
+| (`adm_cnl`,) | EventAdminTransferCancelled | admin transfer cancelled |
 
 `qrm_rchd` is emitted **at most once** per proposal, on the first vote that brings `votes_cast` to or above `quorum_threshold`. A `DataKey::QuorumReached(proposal_id)` sentinel prevents re-emission for subsequent votes.
 

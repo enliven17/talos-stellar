@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from rich.console import Console
 
+from talos_agent.tools import context as _context
 from talos_agent.tools.registry import tool
 
 if TYPE_CHECKING:
@@ -18,6 +19,12 @@ console = Console()
 # Injected by registry.build_all_tools
 _adapter_registry: AdapterRegistry = None  # type: ignore[assignment]
 
+
+def _deps():
+    """This agent's dependencies: the bound ToolContext, else this module's globals."""
+    return _context.resolve(globals())
+
+
 _TIMEOUT = 90  # seconds
 
 
@@ -26,12 +33,13 @@ def _publish_safe(fn: Callable) -> Callable:
 
     @functools.wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> dict:
-        if _adapter_registry is None:
+        if _deps().adapter_registry is None:
             return {"error": "Adapter registry not initialized"}
+        timeout = _publish_timeout
         try:
-            return await asyncio.wait_for(fn(*args, **kwargs), timeout=_TIMEOUT)
+            return await asyncio.wait_for(fn(*args, **kwargs), timeout=timeout)
         except asyncio.TimeoutError:
-            return {"error": f"Publishing action timed out after {_TIMEOUT}s"}
+            return {"error": f"Publishing action timed out after {timeout:g}s"}
         except Exception as e:
             return {"error": f"{type(e).__name__}: {e}"}
 
@@ -46,11 +54,11 @@ def _publish_safe(fn: Callable) -> Callable:
 async def publish_content(
     content: str, channel: str = "X", operation_id: str | None = None
 ) -> dict:
-    adapter = _adapter_registry.get(channel)
+    adapter = _deps().adapter_registry.get(channel)
     if not adapter:
         return {
             "error": f"Channel '{channel}' not available.",
-            "available_channels": _adapter_registry.available_channels(),
+            "available_channels": _deps().adapter_registry.available_channels(),
         }
     valid, error = adapter.validate_content(content)
     if not valid:
@@ -70,7 +78,7 @@ async def reply_on_channel(
     content: str,
     operation_id: str | None = None,
 ) -> dict:
-    adapter = _adapter_registry.get(channel)
+    adapter = _deps().adapter_registry.get(channel)
     if not adapter:
         return {"error": f"Channel '{channel}' not available"}
     caps = adapter.get_capabilities()
@@ -89,7 +97,7 @@ async def reply_on_channel(
 )
 @_publish_safe
 async def get_channel_mentions(channel: str = "X") -> dict:
-    adapter = _adapter_registry.get(channel)
+    adapter = _deps().adapter_registry.get(channel)
     if not adapter:
         return {"error": f"Channel '{channel}' not available"}
     mentions = await adapter.get_mentions()
@@ -102,7 +110,7 @@ async def get_channel_mentions(channel: str = "X") -> dict:
 )
 @_publish_safe
 async def search_channel(query: str, channel: str = "X") -> dict:
-    adapter = _adapter_registry.get(channel)
+    adapter = _deps().adapter_registry.get(channel)
     if not adapter:
         return {"error": f"Channel '{channel}' not available"}
     caps = adapter.get_capabilities()
@@ -117,9 +125,9 @@ async def search_channel(query: str, channel: str = "X") -> dict:
     "Get all available social publishing channels and their capabilities (character limits, supported features). Call this before composing content.",
 )
 async def get_publishing_channels() -> dict:
-    if _adapter_registry is None:
+    if _deps().adapter_registry is None:
         return {"error": "Adapter registry not initialized"}
     return {
-        "available": _adapter_registry.available_channels(),
-        "channels": _adapter_registry.capabilities(),
+        "available": _deps().adapter_registry.available_channels(),
+        "channels": _deps().adapter_registry.capabilities(),
     }

@@ -71,6 +71,93 @@ describe('TalosWebhook', () => {
     ).rejects.toThrow(TalosWebhookError);
   });
 
+  describe('strict timestamp validation (#923)', () => {
+    async function headerWithTimestamp(ts: string, sig: string) {
+      return `t=${ts},v1=${sig}`;
+    }
+
+    // Helper to get a valid v1 sig hex so the test isolates timestamp parsing.
+    async function validSigHex(ts: number): Promise<string> {
+      const encoder = new TextEncoder();
+      const key = await crypto.subtle.importKey(
+        'raw',
+        encoder.encode(secret),
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign'],
+      );
+      const data = encoder.encode(`${ts}.${payload}`);
+      const sig = await crypto.subtle.sign('HMAC', key, data);
+      return Array.from(new Uint8Array(sig))
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
+    }
+
+    it('rejects scientific notation (1e10) with MALFORMED_TIMESTAMP', async () => {
+      const header = await headerWithTimestamp('1e10', 'deadbeef');
+      await expect(
+        TalosWebhook.verify({ payload, signatureHeader: header, secret })
+      ).rejects.toMatchObject({ code: 'MALFORMED_TIMESTAMP' });
+    });
+
+    it('rejects decimal timestamps (12.5) with MALFORMED_TIMESTAMP', async () => {
+      const header = await headerWithTimestamp('12.5', 'deadbeef');
+      await expect(
+        TalosWebhook.verify({ payload, signatureHeader: header, secret })
+      ).rejects.toMatchObject({ code: 'MALFORMED_TIMESTAMP' });
+    });
+
+    it('rejects 14+ digit timestamps with MALFORMED_TIMESTAMP', async () => {
+      // 14 digits — exceeds the 13-digit cap (> year 2286 in Unix seconds).
+      const header = await headerWithTimestamp('99999999999999', 'deadbeef');
+      await expect(
+        TalosWebhook.verify({ payload, signatureHeader: header, secret })
+      ).rejects.toMatchObject({ code: 'MALFORMED_TIMESTAMP' });
+    });
+
+    it('rejects timestamps with leading sign (+123) with MALFORMED_TIMESTAMP', async () => {
+      const header = await headerWithTimestamp('+1620000000', 'deadbeef');
+      await expect(
+        TalosWebhook.verify({ payload, signatureHeader: header, secret })
+      ).rejects.toMatchObject({ code: 'MALFORMED_TIMESTAMP' });
+    });
+
+    it('rejects negative timestamps (-123) with MALFORMED_TIMESTAMP', async () => {
+      const header = await headerWithTimestamp('-1620000000', 'deadbeef');
+      await expect(
+        TalosWebhook.verify({ payload, signatureHeader: header, secret })
+      ).rejects.toMatchObject({ code: 'MALFORMED_TIMESTAMP' });
+    });
+
+    it('rejects empty timestamp value with MALFORMED_TIMESTAMP', async () => {
+      // Force the header format so the "t" key is present but value is blank.
+      // parseSignatureHeader skips parts where value is empty, which means
+      // timestamp stays -1, resulting in INVALID_HEADER — both codes indicate
+      // a malformed header, and INVALID_HEADER is the correct fallback here.
+      await expect(
+        TalosWebhook.verify({ payload, signatureHeader: 't=,v1=deadbeef', secret })
+      ).rejects.toBeInstanceOf(TalosWebhookError);
+    });
+
+    it('accepts a valid 10-digit Unix timestamp integer', async () => {
+      const ts = Math.floor(Date.now() / 1000);
+      const hex = await validSigHex(ts);
+      const header = `t=${ts},v1=${hex}`;
+      await expect(
+        TalosWebhook.verify({ payload, signatureHeader: header, secret })
+      ).resolves.toMatchObject({ timestamp: ts });
+    });
+
+    it('TalosWebhookError for malformed timestamp has name TalosWebhookError', async () => {
+      const header = await headerWithTimestamp('1e10', 'deadbeef');
+      const err = await TalosWebhook.verify({ payload, signatureHeader: header, secret })
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(TalosWebhookError);
+      expect((err as TalosWebhookError).name).toBe('TalosWebhookError');
+      expect((err as TalosWebhookError).code).toBe('MALFORMED_TIMESTAMP');
+    });
+  });
+
   it('throws when timestamp is outside tolerance (too old)', async () => {
     const oldTimestamp = Math.floor(Date.now() / 1000) - 400; // 400s old
     const oldHeader = await generateSignatureHeader(payload, oldTimestamp, secret);

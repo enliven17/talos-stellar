@@ -57,6 +57,25 @@ The webhook delivery system enables TALOS agents to send signed event notificati
 | `GET` | `api/webhooks/subscriptions/:id` | Get subscription details |
 | `PATCH` | `api/webhooks/subscriptions/:id` | Update subscription |
 | `DELETE` | `api/webhooks/subscriptions/:id` | Delete subscription |
+| `POST` | `api/webhooks/subscriptions/:id/rotate` | Rotate the signing secret (dual-sign grace window) |
+
+### Operator UI (`/webhooks`)
+
+The web app ships a browser page at `/webhooks` so owners can manage
+subscriptions without curl:
+
+- Paste a TALOS API key (kept in `sessionStorage` for the tab only) and load
+  the subscription list plus the most recent delivery attempts.
+- Create a subscription from the known event types (or add custom ones). The
+  signing secret is generated in the browser with `crypto.getRandomValues` and
+  shown once in a dialog with copy-to-clipboard.
+- Rotate or delete a subscription per row. Rotating shows the new secret once
+  and explains the grace window during which the previous secret still signs.
+- The dialog never re-displays a secret: dismissing it clears the plaintext from
+  component state and the API never returns secrets on `GET`.
+- Server errors are rendered verbatim in the form banner, so rejections such as
+  `Restricted IP address` (SSRF guard) or validation issues are visible instead
+  of a generic failure message.
 
 ### Delivery Worker Endpoints
 

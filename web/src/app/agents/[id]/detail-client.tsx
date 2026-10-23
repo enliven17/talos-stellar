@@ -4,10 +4,22 @@ import Link from "next/link";
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useWallet } from "@/components/wallet-gate";
 import { AgentAvatar } from "@/components/agent-avatar";
-import { AgentLifecyclePanel } from "@/components/agent-lifecycle-panel";
 import { AgentAvailabilityBadge } from "@/components/agent-availability-badge";
 import { AgentEmptyState } from "@/components/agent-view-states";
+import { ScopedApiKeysPanel } from "@/components/scoped-api-keys-panel";
+import { AgentPurchasesSection } from "@/components/agent-purchases-section";
+import { CopyButton } from "@/components/copy-button";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER as STELLAR_USDC_ISSUER } from "@/lib/stellar-config";
+import {
+  TabActivity,
+  TabPatrons,
+  TabRevenue,
+  TabGovernance,
+  TabAgent,
+  type Approval,
+  type DistPreview,
+  type BuybackPreview,
+} from "./components";
 
 
 interface ServiceInfo {
@@ -49,6 +61,7 @@ interface TalosDetail {
   pulsePrice: string;
   totalSupply: number;
   creatorPublicKey: string | null;
+  walletPublicKey: string | null;
   agentWalletAddress: string | null;
   persona: string;
   targetAudience: string;
@@ -71,7 +84,7 @@ interface TalosDetail {
   recentJobs: RecentJob[];
 }
 
-const TABS = ["Overview", "Services", "Activity", "Patrons", "Revenue", "Governance", "Agent"] as const;
+const TABS = ["Overview", "Services", "Activity", "Patrons", "Revenue", "Purchases", "Governance", "Agent"] as const;
 type Tab = (typeof TABS)[number];
 
 const TYPE_ICONS: Record<string, string> = {
@@ -91,20 +104,25 @@ const JOB_STATUS_STYLES: Record<string, string> = {
 export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
   const [tab, setTab] = useState<Tab>("Overview");
   const [patronStatus, setPatronStatus] = useState<"none" | "loading" | "patron">("none");
-  const { isConnected, connect, address, signTransaction } = useWallet();
-
-  const minRequired = talos.minPatronPulse ?? Math.floor(talos.totalSupply * 0.001);
-
-  const isPatron = talos.patrons.some(
-    (p) => p.stellarPublicKey === address && p.status === "active"
+  const { isConnected, connect, address, signTransaction, signMessage } = useWallet();
+  const isAgentOwner = Boolean(
+    address && (address === talos.creatorPublicKey || address === talos.walletPublicKey)
   );
 
-  const [myPulseBalance, setPulseBalance] = useState(0);
+  const minRequired =
+    talos.minPatronPulse ?? Math.floor(talos.totalSupply * 0.001);
 
+  const isPatron =
+    talos.patrons.some(
+      (p) => p.stellarPublicKey === address && p.status === "active",
+    ) || patronStatus === "patron";
+
+  const [myPulseBalance, setPulseBalance] = useState(0);
   useEffect(() => {
     if (!address) return;
-    // Look up patron pulse balance from DB data
-    const dbAmount = talos.patrons.find((p) => p.stellarPublicKey === address)?.pulseAmount ?? 0;
+    const dbAmount =
+      talos.patrons.find((p) => p.stellarPublicKey === address)?.pulseAmount ??
+      0;
     setPulseBalance(dbAmount);
   }, [address, talos.patrons]);
 
@@ -117,13 +135,19 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       const res = await fetch(`/api/talos/${talos.id}/patrons`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ stellarPublicKey: address, pulseAmount: myPulseBalance }),
+        body: JSON.stringify({
+          stellarPublicKey: address,
+          pulseAmount: myPulseBalance,
+        }),
       });
       if (res.ok) {
         setPatronStatus("patron");
       } else {
         let msg = "Failed to register as Patron";
-        try { const err = await res.json(); msg = err.error || msg; } catch { /* non-JSON response */ }
+        try {
+          const err = await res.json();
+          msg = err.error || msg;
+        } catch { /* non-JSON */ }
         alert(msg);
         setPatronStatus("none");
       }
@@ -133,14 +157,112 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
     }
   }, [address, talos.id, isPatron, myPulseBalance]);
 
-  // ─── Buy Token modal state ──────────────────────────
+  // ─── Buy Token modal ──────────────────────────────────────────────────────
   const [buyOpen, setBuyOpen] = useState(false);
   const [buyAmount, setBuyAmount] = useState("");
   const [buyStatus, setBuyStatus] = useState<"idle" | "buying" | "success" | "error">("idle");
   const [buyResult, setBuyResult] = useState<{ txHash: string; message: string } | null>(null);
   const buyInputRef = useRef<HTMLInputElement>(null);
 
-  // ─── Service Request modal state ─────────────────────
+  const priceNum = parseFloat(talos.pulsePrice.replace("$", "")) || 0;
+  const buyQty = Math.max(0, parseInt(buyAmount, 10) || 0);
+  const buyCost = Math.round(buyQty * priceNum * 100) / 100;
+
+  const handleBuyToken = useCallback(async () => {
+    if (!address || buyQty <= 0) return;
+    setBuyStatus("buying");
+    try {
+      const { Asset, TransactionBuilder, Operation, BASE_FEE, Horizon } =
+        await import("@stellar/stellar-sdk");
+
+      const HORIZON_URL = "https://horizon-testnet.stellar.org";
+      const NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
+      const USDC_ISSUER = STELLAR_USDC_ISSUER;
+      const recipient = talos.agentWalletAddress ?? OPERATOR_PUBLIC_KEY;
+
+      const server = new Horizon.Server(HORIZON_URL);
+      const account = await server.loadAccount(address);
+      const usdc = new Asset("USDC", USDC_ISSUER);
+
+      const txBuilder = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: NETWORK_PASSPHRASE,
+      });
+
+      const assetCode = talos.stellarAssetCode;
+      if (assetCode && assetCode.includes(":")) {
+        const [mitosCode, mitosIssuer] = assetCode.split(":");
+        const mitosAsset = new Asset(mitosCode, mitosIssuer);
+        const hasTrustline = (
+          account.balances as Array<{
+            asset_type: string;
+            asset_code?: string;
+            asset_issuer?: string;
+          }>
+        ).some(
+          (b) =>
+            b.asset_type !== "native" &&
+            b.asset_code === mitosCode &&
+            b.asset_issuer === mitosIssuer,
+        );
+        if (!hasTrustline) {
+          txBuilder.addOperation(Operation.changeTrust({ asset: mitosAsset }));
+        }
+      }
+
+      txBuilder.addOperation(
+        Operation.payment({
+          destination: recipient,
+          asset: usdc,
+          amount: buyCost.toFixed(7),
+        }),
+      );
+
+      const tx = txBuilder.setTimeout(60).build();
+      const signedXdr = await signTransaction(tx.toXDR());
+
+      const { TransactionBuilder: TB } = await import("@stellar/stellar-sdk");
+      const signedTx = TB.fromXDR(signedXdr, NETWORK_PASSPHRASE);
+      const result = await server.submitTransaction(signedTx);
+      const txHash = result.hash;
+
+      const res = await fetch(`/api/talos/${talos.id}/buy-token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          buyerPublicKey: address,
+          amount: buyQty,
+          txHash,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setBuyResult({ txHash, message: data.message });
+        setBuyStatus("success");
+      } else {
+        alert(data.error || "Purchase failed");
+        setBuyStatus("error");
+      }
+    } catch (err: unknown) {
+      console.error("[buy-token]", err);
+      alert(err instanceof Error ? err.message : "Transaction failed");
+      setBuyStatus("error");
+    }
+  }, [address, buyQty, buyCost, talos.id, talos.agentWalletAddress, talos.stellarAssetCode, signTransaction]);
+
+  const closeBuyModal = useCallback(() => {
+    setBuyOpen(false);
+    setBuyAmount("");
+    setBuyStatus("idle");
+    setBuyResult(null);
+  }, []);
+
+  const openBuyModal = useCallback(() => {
+    setBuyOpen(true);
+    setTimeout(() => buyInputRef.current?.focus(), 100);
+  }, []);
+
+  // ─── Service Request modal ────────────────────────────────────────────────
   const [serviceOpen, setServiceOpen] = useState(false);
   const [servicePayload, setServicePayload] = useState("");
   const [serviceStatus, setServiceStatus] = useState<"idle" | "paying" | "success" | "error">("idle");
@@ -164,38 +286,61 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
     setServiceStatus("paying");
     setServiceError(null);
     try {
-      const { Asset, TransactionBuilder, Operation, BASE_FEE, Horizon, Networks } = await import("@stellar/stellar-sdk");
+      const { Asset, TransactionBuilder, Operation, BASE_FEE, Horizon, Networks } =
+        await import("@stellar/stellar-sdk");
       const HORIZON_URL = "https://horizon-testnet.stellar.org";
       const NETWORK_PASSPHRASE = Networks.TESTNET;
       const USDC_ISSUER = STELLAR_USDC_ISSUER;
       const OPERATOR = OPERATOR_PUBLIC_KEY;
-      const recipient = talos.service.stellarPublicKey || talos.agentWalletAddress || OPERATOR;
+      const recipient =
+        talos.service.stellarPublicKey ||
+        talos.agentWalletAddress ||
+        OPERATOR;
 
-      // Build payment TX — don't submit in browser; server will submit + verify
       const server = new Horizon.Server(HORIZON_URL);
       const account = await server.loadAccount(address);
       const usdc = new Asset("USDC", USDC_ISSUER);
 
-      const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASE })
-        .addOperation(Operation.payment({ destination: recipient, asset: usdc, amount: String(talos.service.price) }))
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: NETWORK_PASSPHRASE,
+      })
+        .addOperation(
+          Operation.payment({
+            destination: recipient,
+            asset: usdc,
+            amount: String(talos.service.price),
+          }),
+        )
         .setTimeout(60)
         .build();
 
-      // Sign via wallet (Freighter / Albedo / etc.)
       const signedXdr = await signTransaction(tx.toXDR());
 
       let payload: Record<string, unknown> = {};
-      try { payload = servicePayload.trim() ? JSON.parse(servicePayload) : {}; } catch { payload = { request: servicePayload }; }
+      try {
+        payload = servicePayload.trim() ? JSON.parse(servicePayload) : {};
+      } catch {
+        payload = { request: servicePayload };
+      }
 
-      // Server submits TX, verifies payment, creates job
       const res = await fetch(`/api/talos/${talos.id}/jobs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ buyerPublicKey: address, signedXdr, payload }),
+        body: JSON.stringify({
+          buyerPublicKey: address,
+          signedXdr,
+          payload,
+        }),
       });
       const data = await res.json();
       if (res.ok) {
-        setServiceResult({ jobId: data.jobId, txHash: data.txHash, result: data.result, status: data.status });
+        setServiceResult({
+          jobId: data.jobId,
+          txHash: data.txHash,
+          result: data.result,
+          status: data.status,
+        });
         setServiceStatus("success");
       } else {
         const isRetryable = Boolean(data.retryable);
@@ -233,36 +378,52 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
     }
   }, [address, talos.id, talos.service, talos.agentWalletAddress, servicePayload, signTransaction]);
 
-  // ─── Governance (approvals) state ────────────────────
-  const [approvals, setApprovals] = useState<{
-    id: string; type: string; title: string; description: string | null;
-    amount: string | null; status: string; decidedBy: string | null;
-    createdAt: string;
-  }[]>([]);
+  // ─── Governance (approvals) ───────────────────────────────────────────────
+  const [approvals, setApprovals] = useState<Approval[]>([]);
   const [approvalsLoaded, setApprovalsLoaded] = useState(false);
   const [proposeOpen, setProposeOpen] = useState(false);
-  const [proposeForm, setProposeForm] = useState({ type: "strategy", title: "", description: "", amount: "" });
+  const [proposeForm, setProposeForm] = useState({
+    type: "strategy",
+    title: "",
+    description: "",
+    amount: "",
+  });
   const [proposeLoading, setProposeLoading] = useState(false);
 
   const loadApprovals = useCallback(async () => {
     const res = await fetch(`/api/talos/${talos.id}/approvals`);
-    if (res.ok) { setApprovals(await res.json()); setApprovalsLoaded(true); }
+    if (res.ok) {
+      setApprovals(await res.json());
+      setApprovalsLoaded(true);
+    }
   }, [talos.id]);
 
-  const handleVote = useCallback(async (approvalId: string, decision: "approved" | "rejected") => {
-    if (!address) return;
-    const res = await fetch(`/api/talos/${talos.id}/approvals/${approvalId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: decision, decidedBy: address }),
-    });
-    const data = await res.json();
-    if (res.ok) {
-      setApprovals(prev => prev.map(a => a.id === approvalId ? { ...a, status: decision, decidedBy: address } : a));
-    } else {
-      alert(data.error || "Vote failed");
-    }
-  }, [address, talos.id]);
+  const handleVote = useCallback(
+    async (approvalId: string, decision: "approved" | "rejected") => {
+      if (!address) return;
+      const res = await fetch(
+        `/api/talos/${talos.id}/approvals/${approvalId}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: decision, decidedBy: address }),
+        },
+      );
+      const data = await res.json();
+      if (res.ok) {
+        setApprovals((prev) =>
+          prev.map((a) =>
+            a.id === approvalId
+              ? { ...a, status: decision, decidedBy: address }
+              : a,
+          ),
+        );
+      } else {
+        alert(data.error || "Vote failed");
+      }
+    },
+    [address, talos.id],
+  );
 
   const handlePropose = useCallback(async () => {
     if (!address || !proposeForm.title) return;
@@ -279,7 +440,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       });
       const data = await res.json();
       if (res.ok) {
-        setApprovals(prev => [data, ...prev]);
+        setApprovals((prev) => [data, ...prev]);
         setProposeOpen(false);
         setProposeForm({ type: "strategy", title: "", description: "", amount: "" });
       } else {
@@ -290,48 +451,9 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
     }
   }, [address, talos.id, proposeForm]);
 
-  // ─── Revenue distribution state ──────────────────────
+  // ─── Revenue distribution ─────────────────────────────────────────────────
   const [distLoading, setDistLoading] = useState(false);
-  const [distPreview, setDistPreview] = useState<{
-    totalRevenue: number;
-    distributableAmount: number;
-    investorSharePercent: number;
-    breakdown: { stellarPublicKey: string; pulseAmount: number; sharePercent: string; estimatedUsdc: string }[];
-  } | null>(null);
-
-  // ─── Buyback state ───────────────────────────────────
-  const [buybackPreview, setBuybackPreview] = useState<{
-    totalRevenue: number; treasuryBalance: number; treasurySharePercent: number;
-    totalBuybackExecuted: number; operatorMitosBalance: number; circulatingSupply: number;
-  } | null>(null);
-  const [buybackLoading, setBuybackLoading] = useState(false);
-  const [buybackForm, setBuybackForm] = useState({ usdcAmount: "", mitosAmount: "" });
-
-  const loadBuybackPreview = useCallback(async () => {
-    const res = await fetch(`/api/talos/${talos.id}/revenue/buyback`);
-    if (res.ok) setBuybackPreview(await res.json());
-  }, [talos.id]);
-
-  const handleBuyback = useCallback(async () => {
-    if (!address) return;
-    setBuybackLoading(true);
-    try {
-      const res = await fetch(`/api/talos/${talos.id}/revenue/buyback`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          requesterPublicKey: address,
-          usdcAmount: Number(buybackForm.usdcAmount),
-          mitosAmount: Number(buybackForm.mitosAmount),
-        }),
-      });
-      const data = await res.json();
-      if (res.ok) { alert(data.message); loadBuybackPreview(); }
-      else alert(data.error || "Buyback failed");
-    } finally {
-      setBuybackLoading(false);
-    }
-  }, [address, talos.id, buybackForm, loadBuybackPreview]);
+  const [distPreview, setDistPreview] = useState<DistPreview | null>(null);
 
   const loadDistPreview = useCallback(async () => {
     const res = await fetch(`/api/talos/${talos.id}/revenue/distribute`);
@@ -359,104 +481,51 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
     }
   }, [address, talos.id, loadDistPreview]);
 
-  const priceNum = parseFloat(talos.pulsePrice.replace("$", "")) || 0;
-  const buyQty = Math.max(0, parseInt(buyAmount, 10) || 0);
-  const buyCost = Math.round(buyQty * priceNum * 100) / 100;
+  // ─── Buyback ──────────────────────────────────────────────────────────────
+  const [buybackPreview, setBuybackPreview] = useState<BuybackPreview | null>(null);
+  const [buybackLoading, setBuybackLoading] = useState(false);
+  const [buybackForm, setBuybackForm] = useState({
+    usdcAmount: "",
+    mitosAmount: "",
+  });
 
-  const handleBuyToken = useCallback(async () => {
-    if (!address || buyQty <= 0) return;
-    setBuyStatus("buying");
+  const loadBuybackPreview = useCallback(async () => {
+    const res = await fetch(`/api/talos/${talos.id}/revenue/buyback`);
+    if (res.ok) setBuybackPreview(await res.json());
+  }, [talos.id]);
+
+  const handleBuyback = useCallback(async () => {
+    if (!address) return;
+    setBuybackLoading(true);
     try {
-      // ── Step 1: Build TX (trustline + USDC payment) ────────────────
-      const {
-        Asset, TransactionBuilder, Operation, BASE_FEE, Horizon,
-      } = await import("@stellar/stellar-sdk");
-
-      const HORIZON_URL = "https://horizon-testnet.stellar.org";
-      const NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
-      const USDC_ISSUER = STELLAR_USDC_ISSUER;
-
-      // Payment goes to agent treasury (agentWalletAddress) or operator
-      const recipient =
-        talos.agentWalletAddress ??
-        OPERATOR_PUBLIC_KEY;
-
-      const server = new Horizon.Server(HORIZON_URL);
-      const account = await server.loadAccount(address);
-      const usdc = new Asset("USDC", USDC_ISSUER);
-
-      const txBuilder = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: NETWORK_PASSPHRASE,
-      });
-
-      // ── Add Mitos trustline if not already present ─────────────────
-      const assetCode = talos.stellarAssetCode; // format: "SYMBOL:ISSUER"
-      if (assetCode && assetCode.includes(":")) {
-        const [mitosCode, mitosIssuer] = assetCode.split(":");
-        const mitosAsset = new Asset(mitosCode, mitosIssuer);
-        const hasTrustline = (account.balances as Array<{ asset_type: string; asset_code?: string; asset_issuer?: string }>).some(
-          (b) => b.asset_type !== "native" && b.asset_code === mitosCode && b.asset_issuer === mitosIssuer,
-        );
-        if (!hasTrustline) {
-          txBuilder.addOperation(Operation.changeTrust({ asset: mitosAsset }));
-        }
-      }
-
-      // ── USDC payment ───────────────────────────────────────────────
-      txBuilder.addOperation(
-        Operation.payment({
-          destination: recipient,
-          asset: usdc,
-          amount: buyCost.toFixed(7),
-        }),
-      );
-
-      const tx = txBuilder.setTimeout(60).build();
-
-      // ── Step 2: Sign with wallet (Freighter/Albedo/xBull) ──────────
-      const signedXdr = await signTransaction(tx.toXDR());
-
-      // ── Step 3: Submit to Horizon ──────────────────────────────────
-      const { TransactionBuilder: TB } = await import("@stellar/stellar-sdk");
-      const signedTx = TB.fromXDR(signedXdr, NETWORK_PASSPHRASE);
-      const result = await server.submitTransaction(signedTx);
-      const txHash = result.hash;
-
-      // ── Step 4: Record in DB ───────────────────────────────────────
-      const res = await fetch(`/api/talos/${talos.id}/buy-token`, {
+      const res = await fetch(`/api/talos/${talos.id}/revenue/buyback`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ buyerPublicKey: address, amount: buyQty, txHash }),
+        body: JSON.stringify({
+          requesterPublicKey: address,
+          usdcAmount: Number(buybackForm.usdcAmount),
+          mitosAmount: Number(buybackForm.mitosAmount),
+        }),
       });
       const data = await res.json();
-      if (res.ok && data.success) {
-        setBuyResult({ txHash, message: data.message });
-        setBuyStatus("success");
+      if (res.ok) {
+        alert(data.message);
+        loadBuybackPreview();
       } else {
-        alert(data.error || "Purchase failed");
-        setBuyStatus("error");
+        alert(data.error || "Buyback failed");
       }
-    } catch (err: unknown) {
-      console.error("[buy-token]", err);
-      alert(err instanceof Error ? err.message : "Transaction failed");
-      setBuyStatus("error");
+    } finally {
+      setBuybackLoading(false);
     }
-  }, [address, buyQty, buyCost, talos.id, talos.agentWalletAddress, talos.stellarAssetCode, signTransaction]);
+  }, [address, talos.id, buybackForm, loadBuybackPreview]);
 
-  const closeBuyModal = useCallback(() => {
-    setBuyOpen(false);
-    setBuyAmount("");
-    setBuyStatus("idle");
-    setBuyResult(null);
-  }, []);
-
-  const REVENUE_HISTORY = talos.revenueHistory ?? [];
-  const maxRevenue = Math.max(...REVENUE_HISTORY.map((r) => r.amount), 1);
-
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-12">
-      <Link href="/agents" className="text-xs text-muted hover:text-foreground transition-colors">
+      <Link
+        href="/agents"
+        className="text-xs text-muted hover:text-foreground transition-colors"
+      >
         &larr; Agent Directory
       </Link>
 
@@ -467,37 +536,43 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
             <AgentAvatar name={talos.agentName || talos.name} size={56} />
           </div>
           <div>
-          <div className="flex items-center gap-3 mb-2">
-            <h1 className="text-2xl font-bold text-accent">{talos.name}</h1>
-            <AgentAvailabilityBadge
-              agentOnline={talos.agentOnline}
-              agentLastSeen={talos.agentLastSeen}
-              status={talos.status}
-              size="md"
-            />
-          </div>
-          {talos.agentName && (
-            <div className="flex items-center gap-2 text-sm text-foreground/70 mb-1">
-              <span className="font-mono">{talos.agentName}.talos</span>
-              {talos.description.includes("OpenClaw") && (
-                <span className="inline-flex items-center gap-1 text-xs text-red-400/90 border border-red-400/30 px-1.5 py-0.5 leading-none">
-                  <img src="/openclaw_icon.svg" alt="OpenClaw" width={14} height={14} />
-                  OpenClaw
-                </span>
-              )}
+            <div className="flex items-center gap-3 mb-2">
+              <h1 className="text-2xl font-bold text-accent">{talos.name}</h1>
+              <AgentAvailabilityBadge
+                agentOnline={talos.agentOnline}
+                agentLastSeen={talos.agentLastSeen}
+                status={talos.status}
+                size="md"
+              />
             </div>
-          )}
-          <p className="text-sm text-muted max-w-xl">{talos.description}</p>
-          <div className="flex items-center gap-4 mt-3 text-xs text-muted">
-            <span>[{talos.category.toUpperCase()}]</span>
-            <span>Created {talos.createdAt}</span>
-          </div>
+            {talos.agentName && (
+              <div className="flex items-center gap-2 text-sm text-foreground/70 mb-1">
+                <span className="font-mono">{talos.agentName}.talos</span>
+                {talos.description.includes("OpenClaw") && (
+                  <span className="inline-flex items-center gap-1 text-xs text-red-400/90 border border-red-400/30 px-1.5 py-0.5 leading-none">
+                    <img
+                      src="/openclaw_icon.svg"
+                      alt="OpenClaw"
+                      width={14}
+                      height={14}
+                    />
+                    OpenClaw
+                  </span>
+                )}
+              </div>
+            )}
+            <p className="text-sm text-muted max-w-xl">{talos.description}</p>
+            <div className="flex items-center gap-4 mt-3 text-xs text-muted">
+              <span>[{talos.category.toUpperCase()}]</span>
+              <span>Created {talos.createdAt}</span>
+            </div>
           </div>
         </div>
+
         <div className="flex flex-wrap gap-2">
           {isConnected ? (
             <>
-              {isPatron || patronStatus === "patron" ? (
+              {isPatron ? (
                 <span className="border border-accent/30 text-accent px-5 py-2 text-sm font-bold">
                   Patron
                 </span>
@@ -512,17 +587,20 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                         : "bg-surface text-muted border border-border cursor-not-allowed"
                     }`}
                   >
-                    {patronStatus === "loading" ? "Registering..." : "Become Patron"}
+                    {patronStatus === "loading"
+                      ? "Registering..."
+                      : "Become Patron"}
                   </button>
                   {!meetsThreshold && (
                     <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-1.5 bg-surface border border-border text-xs text-muted whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
-                      {minRequired.toLocaleString()} {talos.tokenSymbol} required
+                      {minRequired.toLocaleString()} {talos.tokenSymbol}{" "}
+                      required
                     </div>
                   )}
                 </div>
               )}
               <button
-                onClick={() => { setBuyOpen(true); setTimeout(() => buyInputRef.current?.focus(), 100); }}
+                onClick={openBuyModal}
                 className="border border-accent/40 text-accent px-5 py-2 text-sm font-medium hover:bg-accent hover:text-background transition-colors"
               >
                 Buy ${talos.tokenSymbol}
@@ -533,7 +611,14 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
               onClick={connect}
               className="bg-accent text-background px-5 py-2 text-sm font-medium hover:bg-foreground transition-colors flex items-center gap-2"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
                 <path d="M21 12V7H5a2 2 0 0 1 0-4h14v4" />
                 <path d="M3 5v14a2 2 0 0 0 2 2h16v-5" />
                 <path d="M18 12a2 2 0 0 0 0 4h4v-4h-4z" />
@@ -553,24 +638,32 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
           { label: "Jobs Done", value: talos.jobStats.completed.toString() },
           {
             label: "Success Rate",
-            value: talos.jobStats.successRate !== null ? `${talos.jobStats.successRate}%` : "—",
+            value:
+              talos.jobStats.successRate !== null
+                ? `${talos.jobStats.successRate}%`
+                : "—",
           },
         ].map((s) => (
-          <div key={s.label} className="bg-surface px-4 py-4 text-center">
+          <div
+            key={s.label}
+            className="bg-surface px-4 py-4 text-center"
+          >
             <div className="text-lg font-bold text-accent">{s.value}</div>
             <div className="text-xs text-muted">{s.label}</div>
           </div>
         ))}
       </div>
 
-      {/* Tabs */}
+      {/* Tab bar */}
       <div className="flex items-center gap-4 sm:gap-6 border-b border-border mb-8 overflow-x-auto scrollbar-hide -mx-4 px-4 sm:mx-0 sm:px-0">
         {TABS.map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
             className={`pb-3 pt-1 text-sm transition-colors whitespace-nowrap shrink-0 ${
-              tab === t ? "text-accent border-b border-accent" : "text-muted hover:text-foreground"
+              tab === t
+                ? "text-accent border-b border-accent"
+                : "text-muted hover:text-foreground"
             }`}
           >
             {t}
@@ -581,7 +674,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
         ))}
       </div>
 
-      {/* ─── Overview Tab ──────────────────────────────────── */}
+      {/* Tab panels */}
       {tab === "Overview" && (
         <div className="grid lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 space-y-6">
@@ -776,6 +869,18 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                   <span className="text-muted">Network</span>
                   <span className="text-foreground">Stellar Network</span>
                 </div>
+                <div className="flex justify-between items-center gap-2">
+                  <span className="text-muted shrink-0">Talos ID</span>
+                  <span className="text-foreground font-mono truncate max-w-[55%]">
+                    {talos.id.length > 20 ? `${talos.id.slice(0, 10)}...${talos.id.slice(-6)}` : talos.id}
+                  </span>
+                  <CopyButton
+                    value={talos.id}
+                    label="Copy Talos ID"
+                    confirmText="Copied!"
+                    size="sm"
+                  />
+                </div>
                 <div className="flex justify-between gap-2">
                   <span className="text-muted shrink-0">Asset Code</span>
                   <span className="text-foreground font-mono truncate text-right">
@@ -785,9 +890,15 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                   </span>
                 </div>
                 {talos.agentWalletAddress && (
-                  <div className="flex justify-between">
-                    <span className="text-muted">Agent Wallet</span>
-                    <span className="text-foreground font-mono truncate max-w-[60%]">{talos.agentWalletAddress.slice(0, 8)}...{talos.agentWalletAddress.slice(-4)}</span>
+                  <div className="flex justify-between items-center gap-2">
+                    <span className="text-muted shrink-0">Agent Wallet</span>
+                    <span className="text-foreground font-mono truncate max-w-[55%]">{talos.agentWalletAddress.slice(0, 8)}...{talos.agentWalletAddress.slice(-4)}</span>
+                    <CopyButton
+                      value={talos.agentWalletAddress}
+                      label="Copy agent wallet address"
+                      confirmText="Copied!"
+                      size="sm"
+                    />
                   </div>
                 )}
                 <div className="flex justify-between">
@@ -810,7 +921,6 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
         </div>
       )}
 
-      {/* ─── Services Tab ──────────────────────────────────── */}
       {tab === "Services" && (
         <div className="space-y-6">
           {talos.service ? (
@@ -848,7 +958,15 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                   </div>
                   <div>
                     <span className="text-muted text-xs">Wallet</span>
-                    <p className="text-foreground mt-1 font-mono text-xs truncate">{talos.service.stellarPublicKey}</p>
+                    <div className="text-foreground mt-1 font-mono text-xs truncate flex items-center gap-1">
+                      <span className="truncate">{talos.service.stellarPublicKey}</span>
+                      <CopyButton
+                        value={talos.service.stellarPublicKey}
+                        label="Copy service wallet address"
+                        confirmText="Copied!"
+                        size="sm"
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
@@ -937,472 +1055,89 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
         </div>
       )}
 
-      {/* ─── Activity Tab ──────────────────────────────────── */}
       {tab === "Activity" && (
-        <div className="bg-surface border border-border divide-y divide-border">
-          {talos.activities.length === 0 ? (
-            <AgentEmptyState kind="activity" className="py-12" />
-          ) : (
-            talos.activities.map((a) => (
-              <div key={a.id} className="flex items-start gap-4 p-4 hover:bg-surface-hover transition-colors">
-                <span className="text-sm text-muted w-6 shrink-0 font-bold text-center">{TYPE_ICONS[a.type]}</span>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm text-foreground">{a.content}</p>
-                  <div className="flex items-center gap-3 mt-1.5 text-xs text-muted">
-                    <span className="border border-border px-1.5 py-0.5">{a.channel}</span>
-                    <span>{a.timestamp}</span>
-                    <span className="border border-border px-1.5 py-0.5 uppercase">{a.type}</span>
-                  </div>
-                </div>
-                <span className={`text-xs shrink-0 ${a.status === "completed" ? "text-green-400" : a.status === "pending" ? "text-yellow-400" : "text-red-400"}`}>
-                  [{a.status.toUpperCase()}]
-                </span>
-              </div>
-            ))
-          )}
-        </div>
+        <TabActivity activities={talos.activities} />
       )}
 
-      {/* ─── Patrons Tab ──────────────────────────────────── */}
       {tab === "Patrons" && (
-        <div className="space-y-6">
-          {/* My Holdings (if connected) */}
-          {isConnected && address && (() => {
-            const me = talos.patrons.find(p => p.stellarPublicKey === address);
-            const totalPulse = talos.patrons.reduce((s, p) => s + p.pulseAmount, 0);
-            const myShare = totalPulse > 0 && me ? (me.pulseAmount / totalPulse * 100).toFixed(2) : "0";
-            return (
-              <div className="bg-surface border border-accent/20 p-6">
-                <div className="text-xs text-accent mb-4">[MY HOLDINGS]</div>
-                {me ? (
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                    <div>
-                      <div className="text-xs text-muted">{talos.tokenSymbol} Held</div>
-                      <div className="text-lg font-bold text-accent mt-1">{me.pulseAmount.toLocaleString()}</div>
-                    </div>
-                    <div>
-                      <div className="text-xs text-muted">Network Share</div>
-                      <div className="text-lg font-bold text-foreground mt-1">{myShare}%</div>
-                    </div>
-                    <div>
-                      <div className="text-xs text-muted">Role</div>
-                      <div className="text-lg font-bold text-foreground mt-1">{me.role}</div>
-                    </div>
-                    <div>
-                      <div className="text-xs text-muted">Status</div>
-                      <div className={`text-lg font-bold mt-1 ${me.status === "active" ? "text-green-400" : "text-muted"}`}>
-                        {me.status.toUpperCase()}
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm text-muted">
-                      You are not a patron yet. Buy at least {minRequired.toLocaleString()} {talos.tokenSymbol} to join.
-                    </p>
-                    <button
-                      onClick={() => { setBuyOpen(true); setTimeout(() => buyInputRef.current?.focus(), 100); }}
-                      className="border border-accent/40 text-accent px-4 py-1.5 text-xs font-medium hover:bg-accent hover:text-background transition-colors"
-                    >
-                      Buy {talos.tokenSymbol}
-                    </button>
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-
-          {/* All Patrons table */}
-          <div className="bg-surface border border-border">
-            <div className="grid grid-cols-4 gap-4 px-4 py-3 border-b border-border text-xs text-muted">
-              <span>Stellar Address</span>
-              <span>Role</span>
-              <span className="text-right">{talos.tokenSymbol} Amount</span>
-              <span className="text-right">Share</span>
-            </div>
-            {talos.patrons.length === 0 ? (
-              <AgentEmptyState kind="patrons" className="py-12" />
-            ) : (
-              talos.patrons.map((p, i) => (
-                <div key={i} className={`grid grid-cols-4 gap-4 px-4 py-3 border-b border-border last:border-0 transition-colors text-sm ${p.stellarPublicKey === address ? "bg-accent/5" : "hover:bg-surface-hover"}`}>
-                  <span className="text-foreground font-mono text-xs truncate">
-                    {p.stellarPublicKey === address ? "You" : `${p.stellarPublicKey.slice(0, 8)}...${p.stellarPublicKey.slice(-4)}`}
-                  </span>
-                  <span className={`text-xs ${p.role === "Creator" ? "text-accent" : p.role === "Treasury" ? "text-yellow-400" : "text-foreground"}`}>
-                    [{p.role.toUpperCase()}]
-                  </span>
-                  <span className="text-right text-foreground">{p.pulseAmount.toLocaleString()}</span>
-                  <span className="text-right text-muted">{p.share}%</span>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
+        <TabPatrons
+          talos={talos}
+          minRequired={minRequired}
+          address={address ?? undefined}
+          isConnected={isConnected}
+          onBuyToken={openBuyModal}
+        />
       )}
 
-      {/* ─── Revenue Tab ──────────────────────────────────── */}
       {tab === "Revenue" && (
-        <div className="space-y-6">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-            {[
-              { label: "Total Revenue", value: talos.revenue },
-              { label: "This Month", value: `$${(REVENUE_HISTORY[REVENUE_HISTORY.length - 1]?.amount ?? 0).toLocaleString()}` },
-              { label: "Avg Monthly", value: `$${Math.round(REVENUE_HISTORY.length > 0 ? REVENUE_HISTORY.reduce((s, r) => s + r.amount, 0) / REVENUE_HISTORY.length : 0).toLocaleString()}` },
-              { label: "From Jobs", value: `$${talos.jobStats.totalRevenue.toLocaleString()}` },
-            ].map((s) => (
-              <div key={s.label} className="bg-surface border border-border p-4 text-center">
-                <div className="text-xl font-bold text-accent">{s.value}</div>
-                <div className="text-xs text-muted">{s.label}</div>
-              </div>
-            ))}
-          </div>
-
-          {/* Distribution Panel */}
-          <div className="bg-surface border border-border p-6">
-            <div className="flex items-center justify-between mb-4">
-              <div className="text-xs text-accent">[REVENUE DISTRIBUTION]</div>
-              <button
-                onClick={loadDistPreview}
-                className="text-xs text-muted hover:text-accent transition-colors"
-              >
-                Load preview &rarr;
-              </button>
-            </div>
-            <p className="text-xs text-muted mb-4">
-              {talos.investorShare ?? 25}% of treasury revenue is distributable to {talos.tokenSymbol} holders
-              proportionally to their holdings.
-            </p>
-            {distPreview ? (
-              <div className="space-y-4">
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 text-xs">
-                  <div className="bg-background border border-border p-3 text-center">
-                    <div className="text-accent font-bold text-sm">${distPreview.totalRevenue.toFixed(2)}</div>
-                    <div className="text-muted">Total Treasury</div>
-                  </div>
-                  <div className="bg-background border border-border p-3 text-center">
-                    <div className="text-accent font-bold text-sm">${distPreview.distributableAmount.toFixed(2)}</div>
-                    <div className="text-muted">To Distribute ({distPreview.investorSharePercent}%)</div>
-                  </div>
-                  <div className="bg-background border border-border p-3 text-center">
-                    <div className="text-foreground font-bold text-sm">${(distPreview.totalRevenue - distPreview.distributableAmount).toFixed(2)}</div>
-                    <div className="text-muted">Treasury Retained</div>
-                  </div>
-                </div>
-                <div className="space-y-1">
-                  {distPreview.breakdown.map((b) => (
-                    <div key={b.stellarPublicKey} className={`flex items-center justify-between text-xs py-1.5 border-b border-border last:border-0 ${b.stellarPublicKey === address ? "text-accent" : "text-muted"}`}>
-                      <span className="font-mono">{b.stellarPublicKey === address ? "You" : `${b.stellarPublicKey.slice(0, 8)}...`}</span>
-                      <span>{b.pulseAmount.toLocaleString()} {talos.tokenSymbol} ({b.sharePercent}%)</span>
-                      <span className="font-bold">${b.estimatedUsdc} USDC</span>
-                    </div>
-                  ))}
-                </div>
-                {isConnected && (
-                  <button
-                    onClick={handleDistribute}
-                    disabled={distLoading || distPreview.distributableAmount <= 0}
-                    className={`w-full py-2.5 text-sm font-medium transition-colors ${
-                      distPreview.distributableAmount > 0
-                        ? "bg-accent text-background hover:bg-foreground"
-                        : "bg-surface text-muted border border-border cursor-not-allowed"
-                    }`}
-                  >
-                    {distLoading ? "Distributing..." : `Distribute ${distPreview.distributableAmount.toFixed(2)} USDC to Holders`}
-                  </button>
-                )}
-              </div>
-            ) : (
-              <button
-                onClick={loadDistPreview}
-                className="border border-border px-4 py-2 text-xs text-muted hover:text-accent hover:border-accent transition-colors"
-              >
-                Load distribution preview
-              </button>
-            )}
-          </div>
-
-          <div className="bg-surface border border-border p-6">
-            <div className="text-xs text-muted mb-6">[REVENUE HISTORY]</div>
-            {REVENUE_HISTORY.length === 0 ? (
-              <AgentEmptyState kind="revenue" className="py-12" />
-            ) : (
-              <div className="flex items-end gap-3 h-40">
-                {REVENUE_HISTORY.map((r) => (
-                  <div key={r.month} className="flex-1 flex flex-col items-center gap-2">
-                    <span className="text-xs text-accent">${(r.amount / 1000).toFixed(1)}K</span>
-                    <div className="w-full bg-border relative" style={{ height: `${(r.amount / maxRevenue) * 100}%` }}>
-                      <div className="absolute inset-0 bg-foreground/20 hover:bg-foreground/40 transition-colors" />
-                    </div>
-                    <span className="text-xs text-muted">{r.month}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
+        <TabRevenue
+          talos={talos}
+          address={address ?? undefined}
+          isConnected={isConnected}
+          distPreview={distPreview}
+          distLoading={distLoading}
+          onLoadDistPreview={loadDistPreview}
+          onDistribute={handleDistribute}
+          buybackPreview={buybackPreview}
+          buybackLoading={buybackLoading}
+          buybackForm={buybackForm}
+          onBuybackFormChange={(field: string, value: string) =>
+            setBuybackForm((f) => ({ ...f, [field]: value }))
+          }
+          onLoadBuybackPreview={loadBuybackPreview}
+          onBuyback={handleBuyback}
+        />
       )}
 
-      {/* ─── Governance Tab ─────────────────────────────── */}
+      {tab === "Purchases" && (
+        <AgentPurchasesSection
+          talosId={talos.id}
+          isOwner={isAgentOwner}
+          address={address ?? null}
+          signMessage={signMessage}
+          connect={connect}
+        />
+      )}
+
       {tab === "Governance" && (
-        <div className="space-y-6">
-          {/* Lifecycle state, durable job progress, and transition history */}
-          <AgentLifecyclePanel talosId={talos.id} />
+        <TabGovernance
+          talos={talos}
+          address={address ?? undefined}
 
-          {/* Propose + Approve section */}
-          <div className="flex items-center justify-between">
-            <div className="text-xs text-muted">{approvals.length} proposals total</div>
-            <div className="flex gap-2">
-              {!approvalsLoaded && (
-                <button onClick={loadApprovals} className="border border-border px-4 py-1.5 text-xs text-muted hover:text-accent hover:border-accent transition-colors">
-                  Load proposals
-                </button>
-              )}
-              {isConnected && (isPatron || patronStatus === "patron") && (
-                <button
-                  onClick={() => setProposeOpen(true)}
-                  className="bg-accent text-background px-4 py-1.5 text-xs font-medium hover:bg-foreground transition-colors"
-                >
-                  + Propose Action
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Propose form modal */}
-          {proposeOpen && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center">
-              <div className="absolute inset-0 bg-black/60" onClick={() => setProposeOpen(false)} />
-              <div className="relative bg-background border border-border w-full max-w-md mx-4 p-6 space-y-4">
-                <div className="text-xs text-accent mb-2">[NEW PROPOSAL]</div>
-                <div>
-                  <label className="text-xs text-muted block mb-1">Type</label>
-                  <select
-                    value={proposeForm.type}
-                    onChange={e => setProposeForm(f => ({ ...f, type: e.target.value }))}
-                    className="w-full bg-surface border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent"
-                  >
-                    {["transaction", "strategy", "policy", "channel"].map(t => (
-                      <option key={t} value={t}>{t}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-xs text-muted block mb-1">Title *</label>
-                  <input
-                    value={proposeForm.title}
-                    onChange={e => setProposeForm(f => ({ ...f, title: e.target.value }))}
-                    className="w-full bg-surface border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent"
-                    placeholder="Short description of the action"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-muted block mb-1">Details</label>
-                  <textarea
-                    rows={3}
-                    value={proposeForm.description}
-                    onChange={e => setProposeForm(f => ({ ...f, description: e.target.value }))}
-                    className="w-full bg-surface border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent resize-none"
-                    placeholder="Explain the rationale..."
-                  />
-                </div>
-                {proposeForm.type === "transaction" && (
-                  <div>
-                    <label className="text-xs text-muted block mb-1">Amount (USDC)</label>
-                    <input
-                      type="number"
-                      value={proposeForm.amount}
-                      onChange={e => setProposeForm(f => ({ ...f, amount: e.target.value }))}
-                      className="w-full bg-surface border border-border px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent"
-                      placeholder="0.00"
-                    />
-                  </div>
-                )}
-                <div className="flex gap-2 pt-2">
-                  <button onClick={() => setProposeOpen(false)} className="flex-1 border border-border py-2 text-sm text-muted hover:text-foreground transition-colors">
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handlePropose}
-                    disabled={!proposeForm.title || proposeLoading}
-                    className="flex-1 bg-accent text-background py-2 text-sm font-medium hover:bg-foreground transition-colors disabled:opacity-50"
-                  >
-                    {proposeLoading ? "Submitting..." : "Submit Proposal"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Approvals list */}
-          {approvalsLoaded && approvals.length === 0 && (
-            <AgentEmptyState kind="proposals" className="py-16" />
-          )}
-          {approvals.map(a => (
-            <div key={a.id} className="bg-surface border border-border p-5">
-              <div className="flex items-start justify-between gap-4 mb-3">
-                <div>
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-xs border border-border px-2 py-0.5 text-muted uppercase">{a.type}</span>
-                    <span className={`text-xs font-bold ${a.status === "pending" ? "text-yellow-400" : a.status === "approved" ? "text-green-400" : "text-red-400"}`}>
-                      [{a.status.toUpperCase()}]
-                    </span>
-                  </div>
-                  <h4 className="text-sm font-bold text-foreground">{a.title}</h4>
-                  {a.description && <p className="text-xs text-muted mt-1">{a.description}</p>}
-                  {a.amount && <p className="text-xs text-accent mt-1">${Number(a.amount).toFixed(2)} USDC</p>}
-                </div>
-                {a.status === "pending" && isConnected && (isPatron || patronStatus === "patron") && (
-                  <div className="flex gap-2 shrink-0">
-                    <button
-                      onClick={() => handleVote(a.id, "approved")}
-                      className="text-xs px-3 py-1.5 border border-green-400/30 text-green-400 hover:bg-green-400 hover:text-background transition-colors"
-                    >
-                      Approve
-                    </button>
-                    <button
-                      onClick={() => handleVote(a.id, "rejected")}
-                      className="text-xs px-3 py-1.5 border border-red-400/30 text-red-400 hover:bg-red-400 hover:text-background transition-colors"
-                    >
-                      Reject
-                    </button>
-                  </div>
-                )}
-              </div>
-              <div className="text-xs text-muted/60 flex gap-4">
-                <span>{new Date(a.createdAt).toLocaleDateString()}</span>
-                {a.decidedBy && <span>Decided by {a.decidedBy.slice(0, 8)}...</span>}
-              </div>
-            </div>
-          ))}
-
-          {/* Buyback section */}
-          <div className="bg-surface border border-border p-6">
-            <div className="flex items-center justify-between mb-4">
-              <div className="text-xs text-accent">[TREASURY BUYBACK]</div>
-              <button onClick={loadBuybackPreview} className="text-xs text-muted hover:text-accent transition-colors">
-                Load stats &rarr;
-              </button>
-            </div>
-            <p className="text-xs text-muted mb-4">
-              Burns {talos.tokenSymbol} tokens from treasury, reducing circulating supply.
-            </p>
-            {buybackPreview ? (
-              <div className="space-y-4">
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
-                  {[
-                    { label: "Treasury Balance", value: `$${buybackPreview.treasuryBalance.toFixed(2)}` },
-                    { label: "Total Burned", value: `$${buybackPreview.totalBuybackExecuted.toFixed(2)}` },
-                    { label: "Circulating Supply", value: buybackPreview.circulatingSupply.toLocaleString() },
-                  ].map(s => (
-                    <div key={s.label} className="bg-background border border-border p-3 text-center">
-                      <div className="font-bold text-accent">{s.value}</div>
-                      <div className="text-muted mt-0.5">{s.label}</div>
-                    </div>
-                  ))}
-                </div>
-                {isConnected && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="text-xs text-muted block mb-1">USDC to spend</label>
-                      <input
-                        type="number" value={buybackForm.usdcAmount}
-                        onChange={e => setBuybackForm(f => ({ ...f, usdcAmount: e.target.value }))}
-                        className="w-full bg-surface border border-border px-3 py-2 text-sm focus:outline-none focus:border-accent"
-                        placeholder="0.00"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-xs text-muted block mb-1">{talos.tokenSymbol} to burn</label>
-                      <input
-                        type="number" value={buybackForm.mitosAmount}
-                        onChange={e => setBuybackForm(f => ({ ...f, mitosAmount: e.target.value }))}
-                        className="w-full bg-surface border border-border px-3 py-2 text-sm focus:outline-none focus:border-accent"
-                        placeholder="0"
-                      />
-                    </div>
-                  </div>
-                )}
-                {isConnected && (
-                  <button
-                    onClick={handleBuyback}
-                    disabled={buybackLoading || !buybackForm.usdcAmount || !buybackForm.mitosAmount}
-                    className="w-full py-2.5 text-sm font-medium bg-accent text-background hover:bg-foreground transition-colors disabled:opacity-50"
-                  >
-                    {buybackLoading ? "Processing..." : `Burn ${buybackForm.mitosAmount || "0"} ${talos.tokenSymbol}`}
-                  </button>
-                )}
-              </div>
-            ) : (
-              <button onClick={loadBuybackPreview} className="border border-border px-4 py-2 text-xs text-muted hover:text-accent hover:border-accent transition-colors">
-                Load buyback stats
-              </button>
-            )}
-          </div>
-        </div>
+          isConnected={isConnected}
+          isPatron={isPatron}
+          approvals={approvals}
+          approvalsLoaded={approvalsLoaded}
+          proposeOpen={proposeOpen}
+          proposeForm={proposeForm}
+          proposeLoading={proposeLoading}
+          onLoadApprovals={loadApprovals}
+          onVote={handleVote}
+          onOpenPropose={() => setProposeOpen(true)}
+          onClosePropose={() => setProposeOpen(false)}
+          onProposeFormChange={(field: string, value: string) =>
+            setProposeForm((f) => ({ ...f, [field]: value }))
+          }
+          onPropose={handlePropose}
+        />
       )}
 
       {/* ─── Agent Tab ──────────────────────────────────── */}
       {tab === "Agent" && (
         <div className="space-y-6">
-          <div className="bg-surface border border-border p-6">
-            <div className="flex items-center justify-between mb-6">
-              <div className="text-xs text-muted">[PRIME AGENT STATUS]</div>
-              <AgentAvailabilityBadge
-                agentOnline={talos.agentOnline}
-                agentLastSeen={talos.agentLastSeen}
-                status={talos.status}
-                size="sm"
-              />
-            </div>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
-              <div>
-                <span className="text-muted text-xs">Posts Today</span>
-                <p className="text-foreground mt-1">{talos.agentStats.postsToday}</p>
-              </div>
-              <div>
-                <span className="text-muted text-xs">Replies Today</span>
-                <p className="text-foreground mt-1">{talos.agentStats.repliesToday}</p>
-              </div>
-              <div>
-                <span className="text-muted text-xs">Researches Today</span>
-                <p className="text-foreground mt-1">{talos.agentStats.researchesToday}</p>
-              </div>
-              <div>
-                <span className="text-muted text-xs">Jobs Today</span>
-                <p className="text-foreground mt-1">{talos.jobStats.jobsToday}</p>
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-surface border border-border p-6">
-            <div className="text-xs text-muted mb-4">[AGENT CONFIGURATION]</div>
-            <div className="space-y-4 text-sm">
-              <Row label="Persona" value={talos.persona} />
-              <Row label="Target Audience" value={talos.targetAudience} />
-              <Row label="Channels" value={talos.channels.join(", ")} />
-            </div>
-          </div>
-
-          <div className="bg-surface border border-border p-6">
-            <div className="text-xs text-muted mb-4">[LOCAL EXECUTION]</div>
-            <div className="bg-background border border-border p-4 text-xs text-foreground space-y-1 overflow-x-auto font-mono">
-              <div className="text-green-400">$ talos-agent status</div>
-              <div className="text-muted mt-2">TALOS:     {talos.name}</div>
-              <div className="text-muted break-all">Asset:     {talos.stellarAssetCode || talos.tokenSymbol}</div>
-              <div className="text-muted">Network:   Stellar</div>
-              <div className="text-muted">Status:    {talos.agentOnline ? "ONLINE" : "OFFLINE"}</div>
-              {talos.service && (
-                <>
-                  <div className="text-muted">Service:   {talos.service.name}</div>
-                  <div className="text-muted">Price:     {talos.service.price} {talos.service.currency}</div>
-                </>
-              )}
-            </div>
-          </div>
+          {isAgentOwner && address && (
+            <ScopedApiKeysPanel
+              talosId={talos.id}
+              address={address}
+              signMessage={signMessage}
+            />
+          )}
+          <TabAgent talos={talos} />
         </div>
       )}
 
-      {/* ─── Buy Token Modal ──────────────────────────────── */}
+
+      {/* Buy Token Modal */}
       {buyOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/60" onClick={closeBuyModal} />
@@ -1423,8 +1158,14 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                 </div>
                 <p className="text-sm text-foreground mb-2">Purchase Complete</p>
                 <p className="text-xs text-muted mb-4">{buyResult.message}</p>
-                <div className="bg-surface border border-border p-3 text-xs font-mono text-muted break-all mb-6">
-                  tx: {buyResult.txHash.slice(0, 18)}...{buyResult.txHash.slice(-8)}
+                <div className="bg-surface border border-border p-3 text-xs font-mono text-muted break-all mb-6 flex items-center gap-2">
+                  <span className="break-all">tx: {buyResult.txHash.slice(0, 18)}...{buyResult.txHash.slice(-8)}</span>
+                  <CopyButton
+                    value={buyResult.txHash}
+                    label="Copy transaction hash"
+                    confirmText="Copied!"
+                    size="sm"
+                  />
                 </div>
                 <button
                   onClick={closeBuyModal}
@@ -1513,7 +1254,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
         </div>
       )}
 
-      {/* ─── Service Request Modal ────────────────────────── */}
+      {/* Service Request Modal */}
       {serviceOpen && talos.service && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/60" onClick={() => { if (!serviceStatus.match(/paying/)) { if (retryIntervalRef.current !== null) { clearInterval(retryIntervalRef.current); retryIntervalRef.current = null; } setServiceOpen(false); setServiceError(null); setServiceStatus("idle"); setRetryCountdown(0); } }} />
@@ -1528,11 +1269,23 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                 <div className="w-12 h-12 mx-auto mb-4 border border-green-400/40 flex items-center justify-center text-green-400 text-lg">&#10003;</div>
                 <p className="text-sm text-foreground mb-2">Job Submitted</p>
                 <p className="text-xs text-muted mb-4">The agent will process your request. Poll for results using your job ID.</p>
-                <div className="bg-surface border border-border p-3 text-xs font-mono text-muted break-all mb-2">
-                  job: {serviceResult.jobId}
+                <div className="bg-surface border border-border p-3 text-xs font-mono text-muted break-all mb-2 flex items-center gap-2">
+                  <span className="break-all">job: {serviceResult.jobId}</span>
+                  <CopyButton
+                    value={serviceResult.jobId}
+                    label="Copy job id"
+                    confirmText="Copied!"
+                    size="sm"
+                  />
                 </div>
-                <div className="bg-surface border border-border p-3 text-xs font-mono text-muted break-all mb-6">
-                  tx: {serviceResult.txHash.slice(0, 18)}...{serviceResult.txHash.slice(-8)}
+                <div className="bg-surface border border-border p-3 text-xs font-mono text-muted break-all mb-6 flex items-center gap-2">
+                  <span className="break-all">tx: {serviceResult.txHash.slice(0, 18)}...{serviceResult.txHash.slice(-8)}</span>
+                  <CopyButton
+                    value={serviceResult.txHash}
+                    label="Copy transaction hash"
+                    confirmText="Copied!"
+                    size="sm"
+                  />
                 </div>
                 {serviceResult.status === "completed" && serviceResult.result ? (
                   <div className="bg-surface border border-accent/20 p-4 text-left mb-4">
@@ -1636,15 +1389,6 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-start justify-between py-2 border-b border-border last:border-0">
-      <span className="text-muted text-xs">{label}</span>
-      <span className="text-foreground text-right max-w-[60%]">{value}</span>
     </div>
   );
 }

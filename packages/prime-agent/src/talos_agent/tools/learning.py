@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import TYPE_CHECKING
 
 from rich.console import Console
 
 from talos_agent.agent.loop import get_openai_client
+from talos_agent.tools import context as _context
 from talos_agent.tools.registry import tool
 
 if TYPE_CHECKING:
@@ -16,9 +18,32 @@ if TYPE_CHECKING:
 
 console = Console()
 
+# Documented maximum plausible values for engagement metrics.
+# Values exceeding these ceilings are clamped to avoid skewing downstream analytics
+# and prevent overflow while still recording the interaction.
+MAX_LIKES: int = 100_000_000
+MAX_REPOSTS: int = 100_000_000
+MAX_REPLIES: int = 100_000_000
+MAX_IMPRESSIONS: int = 10_000_000_000
+MAX_FOLLOWERS: int = 2_000_000_000
+MAX_METRIC_DEFAULT: int = 1_000_000_000
+
+MAX_METRIC_VALUES: dict[str, int] = {
+    "likes": MAX_LIKES,
+    "reposts": MAX_REPOSTS,
+    "replies": MAX_REPLIES,
+    "impressions": MAX_IMPRESSIONS,
+    "followers_at": MAX_FOLLOWERS,
+}
+
 # Injected by registry.build_all_tools
 _db: LocalDB = None  # type: ignore[assignment]
 _settings: Settings = None  # type: ignore[assignment]
+
+
+def _deps():
+    """This agent's dependencies: the bound ToolContext, else this module's globals."""
+    return _context.resolve(globals())
 
 
 @tool(
@@ -27,7 +52,7 @@ _settings: Settings = None  # type: ignore[assignment]
     "Call check_post_performance for each, then store results. Returns list of unmeasured posts.",
 )
 async def measure_recent_posts() -> dict:
-    unmeasured = _db.get_unmeasured_content(10)
+    unmeasured = _deps().db.get_unmeasured_content(10)
     if not unmeasured:
         return {"status": "all_measured", "count": 0}
     return {
@@ -62,14 +87,67 @@ async def record_performance(
     impressions: int = 0,
     followers_at: int = 0,
 ) -> dict:
-    _db.record_performance(
+    """Record engagement metrics for a post.
+
+    Rejects non-existent content_id and negative metrics with a structured error.
+    Clamps absurd values exceeding documented ceilings (MAX_METRIC_VALUES).
+    """
+    if isinstance(content_id, bool):
+        return {"error": f"Invalid content_id: {content_id}"}
+    if isinstance(content_id, float) and content_id.is_integer():
+        content_id = int(content_id)
+    if not isinstance(content_id, int) or content_id <= 0:
+        return {"error": f"Invalid content_id: {content_id}"}
+
+    db = _deps().db
+    if db is None:
+        return {"error": "Database not initialized"}
+
+    exists = False
+    if hasattr(db, "content_exists"):
+        exists = db.content_exists(content_id)
+    elif hasattr(db, "get_content"):
+        exists = db.get_content(content_id) is not None
+    elif hasattr(db, "_conn") and db._conn is not None:
+        row = db._conn.execute(
+            "SELECT 1 FROM content_history WHERE id = ?", (content_id,)
+        ).fetchone()
+        exists = row is not None
+
+    if not exists:
+        return {"error": f"Content ID {content_id} not found"}
+
+    raw_metrics = {
+        "likes": likes,
+        "reposts": reposts,
+        "replies": replies,
+        "impressions": impressions,
+        "followers_at": followers_at,
+    }
+
+    clamped_metrics: dict[str, int] = {}
+    for name, val in raw_metrics.items():
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            return {"error": f"Metric '{name}' must be an integer, got {type(val).__name__}"}
+        if isinstance(val, float):
+            if not math.isfinite(val) or not val.is_integer():
+                return {"error": f"Metric '{name}' must be an integer, got {val}"}
+            val = int(val)
+        if val < 0:
+            return {"error": f"Metric '{name}' cannot be negative (got {val})"}
+        max_limit = MAX_METRIC_VALUES.get(name, MAX_METRIC_DEFAULT)
+        clamped_metrics[name] = min(val, max_limit)
+
+    channel_clean = channel.strip() if isinstance(channel, str) and channel.strip() else "X"
+
+    db.record_performance(
         content_id=content_id,
-        channel=channel,
-        likes=likes,
-        reposts=reposts,
-        replies=replies,
-        impressions=impressions,
-        followers_at=followers_at,
+        channel=channel_clean,
+        likes=clamped_metrics["likes"],
+        reposts=clamped_metrics["reposts"],
+        replies=clamped_metrics["replies"],
+        impressions=clamped_metrics["impressions"],
+        followers_at=clamped_metrics["followers_at"],
     )
     return {"status": "recorded", "content_id": content_id}
 
@@ -81,9 +159,9 @@ async def record_performance(
     "Call this after measuring posts to learn from the data.",
 )
 async def run_performance_review() -> dict:
-    top = _db.get_top_performing_content(5)
-    summary = _db.get_performance_summary(7)
-    recent = _db.get_content_with_performance(20)
+    top = _deps().db.get_top_performing_content(5)
+    summary = _deps().db.get_performance_summary(7)
+    recent = _deps().db.get_content_with_performance(20)
 
     if not recent or summary.get("total_posts", 0) == 0:
         return {"status": "insufficient_data", "message": "Not enough performance data yet. Measure more posts first."}
@@ -105,9 +183,9 @@ async def run_performance_review() -> dict:
         ],
     }
 
-    client = get_openai_client(_settings.llm_api_key, _settings.llm_base_url)
+    client = get_openai_client(_deps().settings.llm_api_key, _deps().settings.llm_base_url)
     response = await client.chat.completions.create(
-        model=_settings.llm_model,
+        model=_deps().settings.llm_model,
         messages=[
             {
                 "role": "system",
@@ -138,7 +216,7 @@ async def run_performance_review() -> dict:
     # Save learnings to DB
     saved_learnings = []
     for learning in analysis.get("learnings", []):
-        lid = _db.save_learning(
+        lid = _deps().db.save_learning(
             category=learning.get("category", "general"),
             insight=learning.get("insight", ""),
             evidence=learning.get("evidence", ""),
@@ -149,7 +227,7 @@ async def run_performance_review() -> dict:
 
     # Save audience insights
     for seg in analysis.get("audience_segments", []):
-        _db.upsert_audience_insight(
+        _deps().db.upsert_audience_insight(
             segment=seg.get("segment", "unknown"),
             description=seg.get("description", ""),
             engagement_score=seg.get("engagement_score", 0.0),
@@ -168,13 +246,13 @@ async def run_performance_review() -> dict:
 
 @tool("get_learnings", "Get active strategy learnings to inform content creation")
 async def get_learnings(limit: int = 10) -> dict:
-    learnings = _db.get_active_learnings(limit)
+    learnings = _deps().db.get_active_learnings(limit)
     return {"learnings": learnings, "count": len(learnings)}
 
 
 @tool("get_audience_insights", "Get audience segment insights to inform targeting")
 async def get_audience_insights() -> dict:
-    insights = _db.get_audience_insights(5)
+    insights = _deps().db.get_audience_insights(5)
     return {"segments": insights, "count": len(insights)}
 
 
@@ -183,10 +261,10 @@ async def get_audience_insights() -> dict:
     "Get a full performance dashboard: weekly summary, top posts, learnings, and audience segments.",
 )
 async def get_performance_dashboard() -> dict:
-    summary = _db.get_performance_summary(7)
-    top = _db.get_top_performing_content(3)
-    learnings = _db.get_active_learnings(5)
-    audience = _db.get_audience_insights(3)
+    summary = _deps().db.get_performance_summary(7)
+    top = _deps().db.get_top_performing_content(3)
+    learnings = _deps().db.get_active_learnings(5)
+    audience = _deps().db.get_audience_insights(3)
 
     return {
         "weekly_summary": summary,
@@ -202,17 +280,17 @@ async def get_performance_dashboard() -> dict:
     "Creates a new playbook from data-driven insights rather than buying one externally.",
 )
 async def evolve_strategy() -> dict:
-    learnings = _db.get_active_learnings(15)
-    top = _db.get_top_performing_content(10)
-    audience = _db.get_audience_insights(5)
-    summary = _db.get_performance_summary(14)
+    learnings = _deps().db.get_active_learnings(15)
+    top = _deps().db.get_top_performing_content(10)
+    audience = _deps().db.get_audience_insights(5)
+    summary = _deps().db.get_performance_summary(14)
 
     if not learnings:
         return {"status": "no_learnings", "message": "Run performance reviews first to accumulate learnings."}
 
-    client = get_openai_client(_settings.llm_api_key, _settings.llm_base_url)
+    client = get_openai_client(_deps().settings.llm_api_key, _deps().settings.llm_base_url)
     response = await client.chat.completions.create(
-        model=_settings.llm_model,
+        model=_deps().settings.llm_model,
         messages=[
             {
                 "role": "system",
@@ -258,19 +336,19 @@ async def evolve_strategy() -> dict:
         return {"status": "failed", "error": "Could not generate playbook"}
 
     name = playbook_data.get("name", "Auto-Evolved Strategy")
-    _db.save_playbook(name, playbook_data, source_talos="self")
+    _deps().db.save_playbook(name, playbook_data, source_talos="self")
 
     # Auto-apply the new playbook
-    row = _db._conn.execute(
+    row = _deps().db._conn.execute(
         "SELECT id FROM playbooks WHERE name = ? ORDER BY purchased_at DESC LIMIT 1",
         (name,),
     ).fetchone()
     if row:
-        _db.apply_playbook(row["id"])
+        _deps().db.apply_playbook(row["id"])
 
     # Mark learnings as applied
     for learning in learnings:
-        _db.mark_learning_applied(learning["id"])
+        _deps().db.mark_learning_applied(learning["id"])
 
     return {
         "status": "evolved",
@@ -287,7 +365,7 @@ async def evolve_strategy() -> dict:
     "Returns eviction counts only — never insight text.",
 )
 async def evict_expired_learnings() -> dict:
-    result = _db.evict_expired_learnings()
+    result = _deps().db.evict_expired_learnings()
     return {
         "status": "ok",
         "evicted": result["evicted"],

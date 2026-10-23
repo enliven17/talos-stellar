@@ -27,6 +27,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 
+from talos_agent.tools import context as _context
 from talos_agent.tools.registry import tool
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,12 @@ if TYPE_CHECKING:
 _api: TalosAPIClient = None  # type: ignore[assignment]
 _db: LocalDB = None  # type: ignore[assignment]
 _settings: Settings = None  # type: ignore[assignment]
+
+
+def _deps():
+    """This agent's dependencies: the bound ToolContext, else this module's globals."""
+    return _context.resolve(globals())
+
 
 # ---------------------------------------------------------------------------
 # Planning bounds and constants
@@ -618,11 +625,11 @@ class CompositionPlanner:
 
 async def _fetch_services_with_schemas() -> list[dict[str, Any]]:
     """Fetch services from the API with schema information."""
-    if _api is None:
+    if _deps().api is None:
         return []
     
     try:
-        services = await _api.discover_services()
+        services = await _deps().api.discover_services()
         
         # Enrich with schema information if available
         # For now, use default schemas based on service metadata
@@ -681,8 +688,8 @@ def _read_composition_settings() -> dict[str, Any]:
     }
     
     try:
-        if _db is not None:
-            config = _db.get_talos_config()
+        if _deps().db is not None:
+            config = _deps().db.get_talos_config()
             if config:
                 # Override with DB settings if present
                 if "compositionMaxDepth" in config:
@@ -818,8 +825,8 @@ def _record_planner_cancellation(tool_name: str, phase: str) -> None:
     seeds, payment proofs, or sensitive media are logged.
     """
     try:
-        if _db is not None:
-            _db.add_activity(
+        if _deps().db is not None:
+            _deps().db.add_activity(
                 "planner_cancelled",
                 f"Planner tool '{tool_name}' cancelled during {phase}",
                 "system",

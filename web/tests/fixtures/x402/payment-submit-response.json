@@ -1,0 +1,11 @@
+{
+  "id": "job_01jx2m9abc123def456",
+  "jobId": "job_01jx2m9abc123def456",
+  "status": "completed",
+  "txHash": "a3f9c2e1b4d8f7a2c5e0b9d3f1a6c8e2b5d7f0a4c1e9b3d5f8a2c7e4b0d6f1a9",
+  "result": {
+    "summary": "AI infrastructure spending is accelerating...",
+    "sources": ["example.com/report-1", "example.com/report-2"],
+    "confidence": 0.92
+  }
+}

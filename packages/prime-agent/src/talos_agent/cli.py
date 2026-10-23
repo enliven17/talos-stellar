@@ -33,6 +33,86 @@ main.add_command(checkpoint)
 
 
 @main.command()
+@click.option(
+    "--allow",
+    "allowlist_extra",
+    multiple=True,
+    help="Additional tool name(s) to expose beyond the default read-only allowlist (repeatable).",
+)
+@click.option(
+    "--allow-only",
+    "allowlist_only",
+    multiple=True,
+    help="Expose ONLY these tool names, overriding the default allowlist entirely (repeatable).",
+)
+def mcp(allowlist_extra: tuple[str, ...], allowlist_only: tuple[str, ...]):
+    """Start a stdio MCP server exposing selected agent tools.
+
+    External MCP-compatible clients (Claude Desktop, Cursor, etc.) can
+    list and call the allowlisted tools. Read-only by default; the
+    agent's permission enforcer and policy middleware apply to every
+    call, so even allowlisted tools that trigger gated actions are
+    subject to the same policy checks as the internal agent loop.
+
+    \b
+    Examples:
+      # Default read-only allowlist
+      talos-agent mcp
+
+      # Add specific tools to the default allowlist
+      talos-agent mcp --allow get_xlm_balance --allow get_pulse_balance
+
+      # Expose only a custom set
+      talos-agent mcp --allow-only discover_services --allow-only get_pending_jobs
+    """
+    import asyncio
+
+    from talos_agent.mcp_server import DEFAULT_ALLOWLIST, build_mcp_server
+    from talos_agent.tools.registry import build_all_tools
+
+    settings = Settings()
+    if not settings.talos_api_key and not settings.talos_api_keys:
+        console.print("[yellow]Warning:[/yellow] TALOS_API_KEY not set; some tools may fail at call time.")
+
+    # Build the tool registry with the same DI as the agent loop. Browser
+    # and API client are None-safe for read-only tools; the MCP server does
+    # not need a live browser session for discovery/balance tools.
+    from talos_agent.db import LocalDB
+
+    ensure_app_dir()
+    db = LocalDB()
+
+    try:
+        registry = build_all_tools(
+            api=None,
+            db=db,
+            browser=None,
+            settings=settings,
+        )
+
+        if allowlist_only:
+            allowlist = frozenset(allowlist_only)
+        else:
+            allowlist = frozenset(DEFAULT_ALLOWLIST | set(allowlist_extra))
+
+        server = build_mcp_server(registry, allowlist=allowlist)
+
+        console.print(f"[bold green]MCP server starting[/bold green] ({len(allowlist)} tools exposed)", file=sys.stderr)
+        for name in sorted(allowlist):
+            console.print(f"  - {name}", file=sys.stderr)
+
+        asyncio.run(_run_mcp_stdio(server))
+    finally:
+        db.close()
+
+
+async def _run_mcp_stdio(server) -> None:
+    """Thin async wrapper so the db.close() in the caller still runs."""
+    from talos_agent.mcp_server import run_stdio
+    await run_stdio(server)
+
+
+@main.command()
 @click.option("--talos-id", default=None, help="Talos ID (overrides TALOS_ID in .env)")
 @click.option("--env-file", default=".env", help="Path to .env file")
 def start(talos_id: str | None, env_file: str):
@@ -106,8 +186,18 @@ def start(talos_id: str | None, env_file: str):
 
 
 @main.command()
-@click.option("--api-key", prompt="Talos API Key", help="API key issued at Talos creation")
-@click.option("--openai-key", prompt="OpenAI API Key", help="OpenAI API key")
+@click.option(
+    "--api-key",
+    prompt="Talos API Key",
+    hide_input=True,
+    help="API key issued at Talos creation",
+)
+@click.option(
+    "--openai-key",
+    prompt="OpenAI API Key",
+    hide_input=True,
+    help="OpenAI API key",
+)
 def config(api_key: str, openai_key: str):
     """Configure agent credentials (saved to ~/.talos-agent/config.json)."""
     if Settings().secret_rotation_enabled:
@@ -120,7 +210,7 @@ def config(api_key: str, openai_key: str):
 
     existing = {}
     if cfg_path.exists():
-        existing = json.loads(cfg_path.read_text())
+        existing = json.loads(cfg_path.read_text(encoding="utf-8"))
 
     existing.update({
         k: v for k, v in {
@@ -129,7 +219,19 @@ def config(api_key: str, openai_key: str):
         }.items() if v
     })
 
-    cfg_path.write_text(json.dumps(existing, indent=2))
+    content = json.dumps(existing, indent=2)
+    # Write file with mode 0o600 (owner read/write only) on POSIX.
+    # Note on Windows: Windows NTFS uses Access Control Lists (ACLs) rather than
+    # POSIX permission bits. os.chmod only controls the read-only attribute on
+    # Windows and does not restrict file access permissions to the owner.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(cfg_path, flags, 0o600)
+    with open(fd, "w", encoding="utf-8") as f:
+        f.write(content)
+    try:
+        os.chmod(cfg_path, 0o600)
+    except OSError:
+        pass
     console.print(f"[green]Config saved to {cfg_path}[/green]")
 
 
@@ -139,6 +241,7 @@ def config(api_key: str, openai_key: str):
 def encrypt_keys(env_file: str):
     """Encrypt plaintext secret-like values in an .env file using a master password."""
     from pathlib import Path
+
     from talos_agent.crypto import encrypt_with_password
 
     path = Path(env_file)
@@ -337,34 +440,215 @@ def retry_job_effect(
 
 
 @main.command()
-def status():
-    """Show agent status."""
-    from talos_agent.db import LocalDB
+@click.option(
+    "--talos-id",
+    default=None,
+    envvar="TALOS_ID",
+    help="Talos agent ID to inspect (defaults to TALOS_ID env var or primary DB).",
+)
+@click.option(
+    "--db-path",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help="Explicit SQLite DB path (overrides --talos-id resolution).",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit status as stable JSON (suitable for scripting and monitoring).",
+)
+def status(talos_id: str | None, db_path: str | None, as_json: bool):
+    """Show a one-shot health snapshot for a local agent.
+
+    Reports adapter readiness, circuit-breaker states, WAL diagnostics,
+    pending durable job effects, and the last agent-cycle time — all from
+    local SQLite state. No network calls are made.
+
+    Identifiers are redacted via the shared sanitization helper so secret
+    keys, tokens, and signed payloads never appear in the output.
+
+    \b
+    Exit codes
+    ----------
+    0  All adapters healthy (or disabled) — no breakers open, WAL healthy.
+    1  One or more adapters degraded / timed out, or WAL degraded.
+    2  CLI usage error.
+    """
+    from pathlib import Path as _Path
+
+    from talos_agent.adapters.health import (
+        AdapterState,
+        _sanitize_health_detail,
+    )
+    from talos_agent.circuit_breaker import CircuitState, cb_registry
+    from talos_agent.db import LocalDB, get_db_path
+    from talos_agent.job_effects import (
+        JobEffectLimits,
+        JobEffectStore,
+    )
+    from talos_agent.wal_health import WalHealthState, collect_wal_health
 
     ensure_app_dir()
-    db = LocalDB()
 
-    talos_cfg = db.get_talos_config()
-    if talos_cfg:
-        console.print(f"[bold]Talos:[/bold] {talos_cfg.get('name', 'Unknown')}")
+    # ── Resolve DB path ────────────────────────────────────────────────────
+    resolved_db_path: _Path
+    if db_path:
+        resolved_db_path = _Path(db_path)
     else:
-        console.print("[yellow]No Talos config cached. Run `talos-agent start` first.[/yellow]")
+        resolved_db_path = get_db_path(talos_id)
 
-    last_cycle = db.get_last_run("agent_cycle")
-    if last_cycle:
-        console.print(f"[bold]Last agent cycle:[/bold] {last_cycle.isoformat()}")
+    db = LocalDB(path=resolved_db_path) if resolved_db_path.exists() else None
 
-    posts_today = db.count_today("post")
-    console.print(f"[bold]Posts today:[/bold] {posts_today}")
+    # ── Collect data ───────────────────────────────────────────────────────
 
-    playbook = db.get_active_playbook()
-    if playbook:
-        console.print(f"[bold]Active playbook:[/bold] {playbook['name']}")
+    # Basic agent info from DB
+    talos_cfg: dict = {}
+    last_cycle_str: str | None = None
+    posts_today: int = 0
+    pending_approvals: int = 0
+    pending_effects: int = 0
 
-    pending = db.get_pending_approvals()
-    console.print(f"[bold]Pending approvals:[/bold] {len(pending)}")
+    if db is not None:
+        try:
+            talos_cfg = db.get_talos_config() or {}
+            last_cycle = db.get_last_run("agent_cycle")
+            last_cycle_str = last_cycle.isoformat() if last_cycle else None
+            posts_today = db.count_today("post")
+            pending_approvals_list = db.get_pending_approvals()
+            pending_approvals = len(pending_approvals_list) if pending_approvals_list else 0
+        except Exception as exc:  # noqa: BLE001
+            if not as_json:
+                console.print(f"[yellow]Warning: DB read error:[/yellow] {_sanitize_health_detail(str(exc))}")
 
-    db.close()
+        # Durable job effects count
+        try:
+            settings = Settings()
+            limits = JobEffectLimits(
+                max_inbox_records=settings.talos_job_effect_max_inbox_records,
+                max_outbox_records=settings.talos_job_effect_max_outbox_records,
+                max_payload_bytes=settings.talos_job_effect_max_payload_bytes,
+                max_result_bytes=settings.talos_job_effect_max_result_bytes,
+                batch_size=settings.talos_job_effect_batch_size,
+                lease_seconds=settings.talos_job_effect_lease_seconds,
+                max_attempts=settings.talos_job_effect_max_attempts,
+                retry_base_seconds=settings.talos_job_effect_retry_base_seconds,
+                dispatch_timeout_seconds=settings.talos_job_effect_dispatch_timeout_seconds,
+                remote_lease_ttl_seconds=settings.job_lease_ttl,
+                busy_timeout_ms=settings.talos_job_effect_db_timeout_ms,
+            )
+            _scope_id = talos_id or talos_cfg.get("talos_id", "unknown")
+            effect_store = JobEffectStore(db, owner_talos_id=_scope_id, limits=limits)
+            pending_rows = effect_store.inspect(status="pending", limit=200)
+            dispatching_rows = effect_store.inspect(status="dispatching", limit=200)
+            retryable_rows = effect_store.inspect(status="retryable", limit=200)
+            pending_effects = len(pending_rows) + len(dispatching_rows) + len(retryable_rows)
+        except Exception:  # noqa: BLE001
+            pending_effects = -1  # -1 signals "unavailable"
+
+    # WAL health
+    wal_report = None
+    try:
+        wal_report = collect_wal_health(
+            resolved_db_path if resolved_db_path.exists() else None,
+            run_checkpoint=False,  # read-only — never trigger a checkpoint here
+            run_quick_check=True,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Circuit-breaker states
+    breaker_states: dict[str, str] = {}
+    try:
+        for name, state_dict in cb_registry.all_metrics().items():
+            breaker_states[str(name)] = state_dict.get("state", "unknown")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # ── Determine overall health ───────────────────────────────────────────
+    is_degraded = False
+    if wal_report and wal_report.state in (WalHealthState.DEGRADED, WalHealthState.ERROR):
+        is_degraded = True
+    if any(v == CircuitState.OPEN.value for v in breaker_states.values()):
+        is_degraded = True
+    if pending_effects > 0:
+        # Pending effects are informational — not a hard degraded signal
+        pass
+
+    # ── Output ─────────────────────────────────────────────────────────────
+    if as_json:
+        payload = {
+            "agent": {
+                "talos_id": _sanitize_health_detail(
+                    talos_id or talos_cfg.get("talos_id", "unknown")
+                ),
+                "name": _sanitize_health_detail(talos_cfg.get("name", "unknown")),
+                "db_path": str(resolved_db_path),
+                "db_exists": resolved_db_path.exists(),
+                "last_cycle_at": last_cycle_str,
+                "posts_today": posts_today,
+                "pending_approvals": pending_approvals,
+            },
+            "circuit_breakers": breaker_states,
+            "pending_job_effects": pending_effects,
+            "wal": wal_report.to_dict() if wal_report else None,
+            "overall": "degraded" if is_degraded else "healthy",
+        }
+        console.print_json(json.dumps(payload))
+    else:
+        _id = _sanitize_health_detail(talos_id or talos_cfg.get("talos_id", "unknown"))
+        _name = _sanitize_health_detail(talos_cfg.get("name", "unknown"))
+        console.print(f"\n[bold]Talos Agent Status[/bold]  id=[cyan]{_id}[/cyan]  name=[cyan]{_name}[/cyan]")
+        console.print(f"  db:              {resolved_db_path}  ({'exists' if resolved_db_path.exists() else '[red]missing[/red]'})")
+        console.print(f"  last cycle:      {last_cycle_str or '[dim]never[/dim]'}")
+        console.print(f"  posts today:     {posts_today}")
+        console.print(f"  pending approvals: {pending_approvals}")
+
+        # Circuit breakers
+        console.print("\n[bold]Circuit Breakers[/bold]")
+        if breaker_states:
+            for name, state in sorted(breaker_states.items()):
+                colour = "green" if state == CircuitState.CLOSED.value else "red" if state == CircuitState.OPEN.value else "yellow"
+                console.print(f"  {name:<24} [{colour}]{state}[/{colour}]")
+        else:
+            console.print("  [dim](no breakers registered — agent not yet started)[/dim]")
+
+        # Pending job effects
+        console.print("\n[bold]Pending Job Effects[/bold]")
+        if pending_effects < 0:
+            console.print("  [dim]unavailable (DB not accessible or agent ID unknown)[/dim]")
+        elif pending_effects == 0:
+            console.print("  [green]0 pending[/green]")
+        else:
+            console.print(f"  [yellow]{pending_effects} pending/retryable[/yellow]  (run `talos-agent jobs inspect --talos-id {_id}` for details)")
+
+        # WAL diagnostics
+        console.print("\n[bold]WAL Diagnostics[/bold]")
+        if wal_report is None:
+            console.print("  [dim]unavailable (DB not found)[/dim]")
+        else:
+            wal_colour = (
+                "green" if wal_report.state == WalHealthState.HEALTHY
+                else "yellow" if wal_report.state == WalHealthState.DEGRADED
+                else "red"
+            )
+            console.print(f"  state:           [{wal_colour}]{wal_report.state.value}[/{wal_colour}]")
+            console.print(f"  detail:          {_sanitize_health_detail(wal_report.detail)}")
+            if wal_report.wal_exists:
+                wal_kb = (wal_report.wal_size_bytes or 0) // 1024
+                console.print(f"  wal size:        {wal_kb} KB")
+            if wal_report.findings:
+                for finding in wal_report.findings:
+                    console.print(f"  [yellow]⚠[/yellow]  {_sanitize_health_detail(finding)}")
+
+        # Overall
+        overall_colour = "red" if is_degraded else "green"
+        console.print(f"\n[bold]Overall:[/bold] [{overall_colour}]{'degraded' if is_degraded else 'healthy'}[/{overall_colour}]\n")
+
+    if db is not None:
+        db.close()
+
+    sys.exit(1 if is_degraded else 0)
 
 
 # ─── Backup / Restore / Verify ──────────────────────────────────────

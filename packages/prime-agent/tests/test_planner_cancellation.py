@@ -15,7 +15,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -336,7 +336,7 @@ class TestPlanPurchaseCancellation:
         mock_db = MagicMock()
         original_db = mod._db
 
-        async def _cancel_fetch(**kwargs):
+        async def _cancel_fetch(*args, **kwargs):
             raise asyncio.CancelledError()
 
         try:
