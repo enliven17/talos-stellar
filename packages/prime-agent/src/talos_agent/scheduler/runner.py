@@ -427,6 +427,7 @@ def _build_task_list(
             learning_cycle_task(
                 **_shared, agent_lock=agent_lock, tools=tools,
                 ensure_browser_healthy=ensure_browser_healthy,
+                effective_clock=effective_clock,
             ),
             name="learning_cycle",
         ),

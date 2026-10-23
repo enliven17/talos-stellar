@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
+from talos_agent.clock import ClockProtocol, SystemClock
 from talos_agent.db import LocalDB
 
 logger = logging.getLogger(__name__)
+
+# Bounds for the content history rendered into the prompt context (Issue #974).
+# The default preserves the historical hard-coded value; the max mirrors
+# ``Settings.content_history_max_limit``.
+DEFAULT_CONTEXT_CONTENT_LIMIT = 5
+MAX_CONTEXT_CONTENT_LIMIT = 50
 
 
 @dataclass
@@ -38,7 +44,12 @@ class AgentContext:
         talos_config: dict,
         *,
         content_history_limit: int | None = None,
+        clock: ClockProtocol | None = None,
     ) -> AgentContext:
+        # Injectable clock so tests and replays can pin the current time shown
+        # in the prompt; production falls back to the system clock.
+        clock = clock if clock is not None else SystemClock()
+
         last_run = db.get_last_run("agent_cycle")
         playbook = db.get_active_playbook()
 
@@ -61,7 +72,7 @@ class AgentContext:
         gtm_budget = float(talos_config.get("gtmBudget", 200))
 
         return cls(
-            current_time=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            current_time=clock.now().strftime("%Y-%m-%d %H:%M UTC"),
             posts_today=db.count_today("post"),
             research_today=db.count_today("research"),
             replies_today=db.count_today("reply"),
