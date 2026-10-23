@@ -44,6 +44,9 @@ This page documents errors exposed by the contract sources in this workspace. Nu
 | 13 | `TalosNotFound` | Registry has no Talos for the supplied ID; verify ID and registry state. |
 | 14 | `AccountingOverflow` | Claim would make claimed amount exceed epoch total; resolve accounting state before retrying. |
 | 15 | `AlreadyRecovered` | Epoch has already been recovered. |
+| 16 | `InvalidPatronShares` | Supplied patron shares do not sum to 100%. |
+| 17 | `InconsistentShareData` | Rounding dust calculation conflicts with existing epoch claim data. |
+| 18 | `NoPendingAdmin` | No pending administrator nomination exists to accept or cancel. |
 
 ### TalosGovernance (`GovernanceError`)
 

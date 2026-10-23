@@ -121,6 +121,9 @@ is idempotent per cursor (see §4).
 | (`div_clm`, epoch_id: u64, patron: Address) | (talos_id: u32, amount: i128, role: PatronRole) |
 | (`div_dst`, epoch_id: u64) | (talos_id: u32, dust: i128) |
 | (`ep_rcv`, epoch_id: u64) | (talos_id: u32, recovered: i128, admin: Address) |
+| (`adm_prp`,) | (current: Address, proposed: Address) |
+| (`adm_acc`,) | (new_admin: Address,) |
+| (`adm_cnl`,) | (cancelled: Address,) |
 
 `VoteChoice` is `{ Approve | Reject }`; `ProposalStatus` is
 `{ Active | Approved | Rejected | Executed }`; `PatronRole` is
