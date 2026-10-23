@@ -60,6 +60,8 @@ function LaunchForm() {
   const { signTransaction } = useStellarWallet();
   const router = useRouter();
   const [step, setStep] = useState(0);
+  const [submittedSteps, setSubmittedSteps] = useState<Record<number, boolean>>({});
+  const isStepSubmitted = !!submittedSteps[step];
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<LaunchFormState>(LAUNCH_FORM_DEFAULTS);
@@ -143,6 +145,19 @@ function LaunchForm() {
           && nameAvailable === true;
       default:
         return true;
+    }
+  };
+
+  const handleNextOrSubmit = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setSubmittedSteps((prev) => ({ ...prev, [step]: true }));
+    if (!canNext()) {
+      return;
+    }
+    if (step < 5) {
+      setStep(step + 1);
+    } else {
+      handleLaunch();
     }
   };
 
@@ -599,10 +614,17 @@ function LaunchForm() {
             <div>
               <label className="block text-xs text-muted mb-2">{t("launch.product.category")}</label>
               <select
+                id="launch-input-category"
                 value={form.category}
                 onChange={(e) => update("category", e.target.value)}
+                required
+                aria-required="true"
+                aria-invalid={isStepSubmitted && !form.category ? "true" : "false"}
+                aria-describedby={isStepSubmitted && !form.category ? "launch-input-category-error" : undefined}
                 data-testid="launch-input-category"
-                className="w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground focus:outline-none focus:border-accent"
+                className={`w-full bg-background border px-4 py-2.5 text-sm text-foreground focus:outline-none focus:border-accent ${
+                  isStepSubmitted && !form.category ? "border-red-600" : "border-border"
+                }`}
               >
                 <option value="marketing">{t("launch.categories.marketing")}</option>
                 <option value="development">{t("launch.categories.development")}</option>
@@ -615,6 +637,11 @@ function LaunchForm() {
                 <option value="support">{t("launch.categories.support")}</option>
                 <option value="education">{t("launch.categories.education")}</option>
               </select>
+              {isStepSubmitted && !form.category && (
+                <p id="launch-input-category-error" role="alert" className="text-xs text-red-600 mt-1 font-medium">
+                  Category is required
+                </p>
+              )}
             </div>
 
             <div className="pt-4 mt-2 border-t border-border">
@@ -641,6 +668,7 @@ function LaunchForm() {
                 <div>
                   <label className="block text-xs text-muted mb-2">{t("launch.product.servicePrice")}</label>
                   <input
+                    id="launch-input-service-price"
                     type="number"
                     value={form.servicePrice}
                     onChange={(e) => update("servicePrice", e.target.value)}
@@ -648,6 +676,11 @@ function LaunchForm() {
                     data-testid="launch-input-service-price"
                     className="w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent"
                   />
+                  {form.servicePrice !== "" && (isNaN(Number(form.servicePrice)) || Number(form.servicePrice) < 0) && (
+                    <p id="launch-input-service-price-error" role="alert" className="text-xs text-red-600 mt-1 font-medium">
+                      Price must be a valid positive number
+                    </p>
+                  )}
                 </div>
               </div>
             </div>
@@ -664,7 +697,8 @@ function LaunchForm() {
               <label className="block text-xs text-muted mb-2">{t("launch.patron.creatorLabel")}</label>
               <div
                 data-testid="creator-wallet-display"
-                className="w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground/70 font-mono select-all break-all"
+                aria-describedby="launch-creator-wallet-help"
+                className="block w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground/70 font-mono select-all break-all"
               >
                 {form.creatorWallet || address || "—"}
               </div>
@@ -764,6 +798,7 @@ function LaunchForm() {
               <label className="block text-xs text-muted mb-2">{t("launch.agent.identityLabel")}</label>
               <div className="flex items-center gap-2">
                 <input
+                  id="launch-input-agent-identity"
                   type="text"
                   value={form.agentName}
                   onChange={(e) => {
@@ -773,7 +808,11 @@ function LaunchForm() {
                   }}
                   placeholder={t("launch.agent.identityPlaceholder")}
                   data-testid="launch-input-agent-identity"
-                  className="flex-1 bg-background border border-border px-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent"
+                  className={`flex-1 bg-background border px-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent ${
+                    nameAvailable === false || (isStepSubmitted && (form.agentName.length < 3 || nameAvailable !== true))
+                      ? "border-red-600"
+                      : "border-border"
+                  }`}
                 />
                 <span className="text-sm text-muted">.talos</span>
               </div>
@@ -799,6 +838,9 @@ function LaunchForm() {
                     {t("launch.agent.minChars", { min: TALOS_NAME_MIN_LENGTH })}
                   </span>
                 )}
+                {isStepSubmitted && !form.agentName && (
+                  <span role="alert" className="text-red-600 font-bold">Agent identity is required</span>
+                )}
               </div>
               <p className="text-xs text-muted mt-1">{t("launch.agent.identityHint")}</p>
             </div>
@@ -820,23 +862,37 @@ function LaunchForm() {
             <div>
               <label className="block text-xs text-muted mb-2">{t("launch.agent.tone")}</label>
               <select
+                id="launch-input-tone"
                 value={form.tone}
                 onChange={(e) => update("tone", e.target.value)}
+                required
+                aria-required="true"
+                aria-invalid={isStepSubmitted && !form.tone ? "true" : "false"}
+                aria-describedby={isStepSubmitted && !form.tone ? "launch-input-tone-error" : undefined}
                 data-testid="launch-input-tone"
-                className="w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground focus:outline-none focus:border-accent"
+                className={`w-full bg-background border px-4 py-2.5 text-sm text-foreground focus:outline-none focus:border-accent ${
+                  isStepSubmitted && !form.tone ? "border-red-600" : "border-border"
+                }`}
               >
                 <option value="professional">{t("launch.agent.toneProfessional")}</option>
                 <option value="casual">{t("launch.agent.toneCasual")}</option>
                 <option value="witty">{t("launch.agent.toneWitty")}</option>
                 <option value="technical">{t("launch.agent.toneTechnical")}</option>
               </select>
+              {isStepSubmitted && !form.tone && (
+                <p id="launch-input-tone-error" role="alert" className="text-xs text-red-600 mt-1 font-medium">
+                  Tone is required
+                </p>
+              )}
             </div>
             <div>
               <label className="block text-xs text-muted mb-2">{t("launch.agent.channels")}</label>
               <div className="flex flex-wrap gap-2">
                 {CHANNELS.map((ch) => (
                   <button
+                    type="button"
                     key={ch}
+                    aria-pressed={form.channels.includes(ch)}
                     onClick={() => {
                       const channels = form.channels.includes(ch)
                         ? form.channels.filter((c) => c !== ch)
@@ -854,6 +910,11 @@ function LaunchForm() {
                   </button>
                 ))}
               </div>
+              {isStepSubmitted && form.channels.length === 0 && (
+                <p id="launch-gtm-channels-error" role="alert" className="text-xs text-red-600 mt-1 font-medium">
+                  Select at least one channel
+                </p>
+              )}
             </div>
           </div>
         )}
@@ -943,6 +1004,7 @@ function LaunchForm() {
       {/* Navigation */}
       <div className="flex justify-between">
         <button
+          type="button"
           onClick={() => setStep(Math.max(0, step - 1))}
           disabled={step === 0}
           data-testid="launch-back-button"
@@ -952,16 +1014,17 @@ function LaunchForm() {
         </button>
         {step < 5 ? (
           <button
-            onClick={() => setStep(step + 1)}
-            disabled={!canNext()}
+            type="submit"
+            onClick={handleNextOrSubmit}
             data-testid="launch-next-button"
-            className="px-6 py-2.5 text-sm bg-accent text-background font-medium hover:bg-foreground transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-default"
+            className="px-6 py-2.5 text-sm bg-accent text-background font-medium hover:bg-foreground transition-colors cursor-pointer"
           >
             {t("launch.buttons.next")}
           </button>
         ) : (
           <button
-            onClick={handleLaunch}
+            type="submit"
+            onClick={handleNextOrSubmit}
             disabled={submitting}
             data-testid="launch-submit-button"
             className="px-8 py-2.5 text-sm bg-accent text-background font-medium hover:bg-foreground transition-colors disabled:opacity-50"
@@ -970,7 +1033,7 @@ function LaunchForm() {
           </button>
         )}
       </div>
-    </div>
+    </form>
   );
 }
 
@@ -996,25 +1059,48 @@ function Field({
     "w-full bg-background border border-border px-4 py-2.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent";
   return (
     <div>
-      <label className="block text-xs text-muted mb-2">{label}</label>
+      <label htmlFor={id} className="block text-xs text-muted mb-2">
+        {label}
+        {required && <span className="text-accent ml-1" aria-hidden="true">*</span>}
+      </label>
       {multiline ? (
         <textarea
+          id={id}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
           rows={3}
+          required={required}
+          aria-required={required ? "true" : undefined}
+          aria-invalid={isInvalid ? "true" : "false"}
+          aria-describedby={describedBy}
           data-testid={testId}
           className={`${cls} resize-none`}
         />
       ) : (
         <input
+          id={id}
           type={type}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
+          required={required}
+          aria-required={required ? "true" : undefined}
+          aria-invalid={isInvalid ? "true" : "false"}
+          aria-describedby={describedBy}
           data-testid={testId}
           className={cls}
         />
+      )}
+      {error && (
+        <p id={errorId} role="alert" className="text-xs text-red-600 mt-1 font-medium">
+          {error}
+        </p>
+      )}
+      {helpText && (
+        <p id={helpId} className="text-xs text-muted mt-1">
+          {helpText}
+        </p>
       )}
     </div>
   );
