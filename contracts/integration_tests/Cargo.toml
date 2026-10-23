@@ -1,0 +1,27 @@
+[package]
+name = "integration-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Cross-contract lifecycle integration tests for Talos Protocol"
+
+[lib]
+crate-type = ["rlib"]
+doctest = false
+
+# No runtime dependencies — this crate contains only tests.
+
+[dev-dependencies]
+talos-registry = { path = "../talos_registry" }
+talos-name-service = { path = "../talos_name_service" }
+talos-governance = { path = "../talos_governance" }
+talos-dividends = { path = "../talos_dividends" }
+pause-control = { path = "../pause_control" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+talos-registry = { path = "../talos_registry" }
+talos-name-service = { path = "../talos_name_service" }
+talos-governance = { path = "../talos_governance" }
+talos-dividends = { path = "../talos_dividends" }
+pause-control = { path = "../pause_control" }

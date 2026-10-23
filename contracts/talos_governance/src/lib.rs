@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! TalosGovernance - Soroban smart contract for token-weighted governance.
 //!
 //! ## What's new in this branch (#606)
@@ -13,10 +14,87 @@
 extern crate std;
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 use ttl_manager;
 use pause_control;
+
+// ── ProposalAction (#913) ────────────────────────────────────────────
+//
+// An optional typed action that can be attached to a governance proposal.
+// When `execute_proposal` is called on an Approved proposal that carries an
+// action, the contract performs the action via a cross-contract call and emits
+// an `EventProposalExecuted` event with the outcome.
+//
+// Title-only proposals (no action) remain valid: their `action` field is `None`
+// and execution simply transitions the status to `Executed`.
+//
+// Supported actions
+// -----------------
+// `PauseTalos`   – calls `deactivate_talos(talos_id, governance_address)` on
+//                  the registry.  The governance contract must be the
+//                  PauseController for the target Talos.
+// `ResumeTalos`  – calls `activate_talos(talos_id, governance_address)` on
+//                  the registry.  The governance contract must be the
+//                  ResumeController for the target Talos.
+// `UpdateConfig` – updates the local GovernanceConfig with the supplied
+//                  values; no external call is needed.
+//
+// Failure model
+// -------------
+// If the cross-contract call panics (e.g., because the governance address is
+// not the authorised controller), the host traps and the entire
+// `execute_proposal` invocation is rolled back.  The proposal therefore stays
+// in `Approved` status and can be retried once the on-chain permissions are
+// corrected.  This is intentional: it makes the failure observable and
+// retryable rather than silently swallowing errors.
+
+/// Typed executable payload for a governance proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProposalAction {
+    /// Deactivate (pause) a Talos via the registry.  The governance contract
+    /// must have been set as the PauseController for `talos_id` on the registry.
+    PauseTalos {
+        registry: Address,
+        talos_id: u32,
+    },
+    /// Reactivate (resume) a Talos via the registry.  The governance contract
+    /// must have been set as the ResumeController for `talos_id` on the registry.
+    ResumeTalos {
+        registry: Address,
+        talos_id: u32,
+    },
+    /// Replace the local GovernanceConfig numeric parameters with new values.
+    /// The `pulse_token_address` is preserved from the existing config.
+    UpdateConfig {
+        quorum_threshold: i128,
+        consensus_threshold: i128,
+        voting_period_ledgers: u32,
+    },
+}
+
+/// Emitted when a proposal with an action is executed.
+///
+/// `success` is always `true` — a failed cross-contract call traps the host
+/// and the event is never published, so subscribers can assume success.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventProposalExecuted {
+    pub proposal_id: u32,
+    pub action_tag: Symbol,
+    pub success: bool,
+}
+
+fn emit_proposal_executed(env: &Env, proposal_id: u32, action_tag: Symbol) {
+    let payload = EventProposalExecuted {
+        proposal_id,
+        action_tag: action_tag.clone(),
+        success: true,
+    };
+    env.events()
+        .publish((symbol_short!("prop_exec"), proposal_id), payload);
+}
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,6 +110,7 @@ pub enum ProposalStatus {
     Approved,
     Rejected,
     Executed,
+    Cancelled,
 }
 
 #[contracttype]
@@ -59,7 +138,26 @@ pub struct Proposal {
     pub no_votes: i128,
     pub total_voters: u32,
     pub created_at: u64,
+    /// Optional typed action to execute when this proposal is approved.
+    /// `None` means this is a signal/record-only proposal with no on-chain effect.
+    pub action: Option<ProposalAction>,
 }
+
+/// Default number of ledgers prior to proposal creation at which voting power is snapshotted.
+///
+/// An offset is used so that voting power is evaluated at a ledger sequence before
+/// the proposal was submitted. This prevents flash-loan or same-ledger front-running
+/// attacks where an account acquires tokens in the same ledger as proposal creation,
+/// exercises proposal creation / voting rights with temporarily borrowed funds, and
+/// exits in the same transaction or block. On Stellar's ~5-second ledger cadence,
+/// 10 ledgers represents an offset of approximately 50 seconds.
+pub const DEFAULT_SNAPSHOT_OFFSET_LEDGERS: u32 = 10;
+
+/// Maximum allowed snapshot offset in ledgers (~7 days on a 5-second ledger cadence).
+///
+/// Bounding the maximum offset prevents misconfigurations where proposals attempt to
+/// snapshot state beyond the ledger retention or historical checkpoint window.
+pub const MAX_SNAPSHOT_OFFSET_LEDGERS: u32 = 120_960;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -68,12 +166,15 @@ pub struct GovernanceConfig {
     pub consensus_threshold: i128,
     pub voting_period_ledgers: u32,
     pub pulse_token_address: Address,
+    pub snapshot_offset_ledgers: Option<u32>,
+    pub quorum_bps: Option<u32>,
 }
 
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
+    PendingAdmin,
     Config,
     NextProposalId,
     Proposal(u32),
@@ -81,6 +182,8 @@ pub enum DataKey {
     TokenBalanceSnapshot(u32, Address),
     Checkpoint(Address, u32),
     CheckpointCount(Address),
+    TotalSupplyCheckpoint(u32),
+    TotalSupplyCheckpointCount,
     Delegation(Address),
     LastTouched(u32),
     /// Monotonic counter for dividend epochs (1-based).
@@ -91,6 +194,10 @@ pub enum DataKey {
     /// threshold.  Presence (value `true`) prevents re-emitting
     /// `EventQuorumReached` for subsequent votes.
     QuorumReached(u32),
+    /// Configured TalosRegistry contract address.
+    RegistryContract,
+    /// Pending admin proposed for a two-step transfer (#948).
+    PendingAdmin,
 }
 
 #[contracttype]
@@ -99,6 +206,14 @@ pub struct Checkpoint {
     pub ledger: u32,
     pub votes: i128,
 }
+
+// ── Proposal Limits ──────────────────────────────────────────────────
+
+/// Maximum allowed byte length for proposal titles.
+pub const MAX_TITLE_LEN: u32 = 128;
+
+/// Maximum allowed byte length for proposal descriptions.
+pub const MAX_DESCRIPTION_LEN: u32 = 2048;
 
 // ── Dividend Snapshot (#598) ─────────────────────────────────────────
 
@@ -242,6 +357,19 @@ pub struct EventProposalStatusChanged {
     pub proposal_id: u32,
     pub status: ProposalStatus,
 }
+/// Emitted when the governance configuration changes.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventConfigUpdated {
+    pub old_quorum_threshold: i128,
+    pub new_quorum_threshold: i128,
+    pub old_consensus_threshold: i128,
+    pub new_consensus_threshold: i128,
+    pub old_voting_period_ledgers: u32,
+    pub new_voting_period_ledgers: u32,
+    pub old_pulse_token_address: Address,
+    pub new_pulse_token_address: Address,
+}
 
 fn emit_proposal_created(
     env: &Env,
@@ -288,6 +416,20 @@ fn emit_proposal_status_changed(env: &Env, proposal_id: u32, status: ProposalSta
         .publish((symbol_short!("prop_stat"), proposal_id), payload);
 }
 
+fn emit_config_updated(env: &Env, old: &GovernanceConfig, new: &GovernanceConfig) {
+    let payload = EventConfigUpdated {
+        old_quorum_threshold: old.quorum_threshold,
+        new_quorum_threshold: new.quorum_threshold,
+        old_consensus_threshold: old.consensus_threshold,
+        new_consensus_threshold: new.consensus_threshold,
+        old_voting_period_ledgers: old.voting_period_ledgers,
+        new_voting_period_ledgers: new.voting_period_ledgers,
+        old_pulse_token_address: old.pulse_token_address.clone(),
+        new_pulse_token_address: new.pulse_token_address.clone(),
+    };
+    env.events().publish((symbol_short!("cfg_upd"),), payload);
+}
+
 fn emit_dividend_snapshot_recorded(env: &Env, snap: &DividendSnapshot) {
     let payload = EventDividendSnapshotRecorded {
         epoch: snap.epoch,
@@ -317,6 +459,29 @@ fn emit_quorum_reached(
     };
     env.events()
         .publish((symbol_short!("qrm_rchd"), proposal_id), payload);
+}
+
+// ── Admin transfer event emit helpers ────────────────────────────────
+
+/// Emitted when the current admin nominates a new admin.
+/// `proposed` is the address that must call `accept_admin` to complete the transfer.
+fn emit_admin_proposed(env: &Env, current: Address, proposed: Address) {
+    let topics = (symbol_short!("adm_prp"),);
+    env.events().publish(topics, (current, proposed));
+}
+
+/// Emitted when the pending admin accepts the transfer.
+/// `new_admin` is now the active governance admin.
+fn emit_admin_accepted(env: &Env, new_admin: Address) {
+    let topics = (symbol_short!("adm_acc"),);
+    env.events().publish(topics, (new_admin,));
+}
+
+/// Emitted when the current admin cancels an in-progress admin transfer.
+/// `cancelled` is the address whose nomination was revoked.
+fn emit_admin_cancelled(env: &Env, cancelled: Address) {
+    let topics = (symbol_short!("adm_cnl"),);
+    env.events().publish(topics, (cancelled,));
 }
 
 // ── Stable interface (v1.1.0) ───────────────────────────────────────
@@ -372,6 +537,69 @@ pub fn version_supports(actual: (u32, u32, u32), required: (u32, u32, u32)) -> b
     actual.2 >= required.2
 }
 
+/// Expected `INTERFACE_ID` of the configured `RegistryContract`, mirroring
+/// the bytes published by `talos_registry::INTERFACE_ID` (namespace
+/// `"TalosRegistry"`, version `(1, 4, 0)`). Kept as an inline copy rather
+/// than a crate dependency so this contract's ABI check has no build-time
+/// coupling to the Registry crate.
+pub const EXPECTED_REGISTRY_INTERFACE_ID: [u8; 32] = [
+    0x54, 0x61, 0x6C, 0x6F, 0x73, 0x52, 0x65, 0x67, // "TalosReg"
+    0x69, 0x73, 0x74, 0x72, 0x79, 0x00, 0x00, 0x00, // "istry" + zero pads
+    // (major, minor, patch) big-endian u32s
+    0x00, 0x00, 0x00, 0x01, // major = 1
+    0x00, 0x00, 0x00, 0x04, // minor = 4
+    0x00, 0x00, 0x00, 0x00, // patch = 0
+    // reserved
+    0x00, 0x00, 0x00, 0x00,
+];
+
+/// Cross-contract compatibility helper.
+///
+/// Verifies that a contract registered as a `TalosRegistry` actually
+/// publishes the expected `INTERFACE_ID`. Emits a `compat_ok` event
+/// when the check passes and a `compat_err` event when it fails.
+pub fn check_registry_compatible(
+    e: &Env,
+    registry: &Address,
+    revert_on_mismatch: bool,
+) -> bool {
+    let registry_id: BytesN<32> = e.invoke_contract(
+        registry,
+        &Symbol::new(e, "interface_id"),
+        soroban_sdk::vec![e],
+    );
+
+    if registry_id != BytesN::from_array(e, &EXPECTED_REGISTRY_INTERFACE_ID) {
+        let topics = (Symbol::new(e, "compat_err"),);
+        e.events().publish(topics, ());
+        if revert_on_mismatch {
+            panic!("Registry interface ID mismatch: expected TalosRegistry-compatible v1");
+        }
+        return false;
+    }
+
+    let version: (u32, u32, u32) = e.invoke_contract(
+        registry,
+        &Symbol::new(e, "version"),
+        soroban_sdk::vec![e],
+    );
+
+    if !version_supports(version, (1, 1, 0)) {
+        let topics = (Symbol::new(e, "compat_err"),);
+        e.events()
+            .publish(topics, (version.0, version.1, version.2));
+        if revert_on_mismatch {
+            panic!("Registry version too old: requires TalosRegistry >= 1.1.0");
+        }
+        return false;
+    }
+
+    let topics = (symbol_short!("compat_ok"),);
+    e.events()
+        .publish(topics, (version.0, version.1, version.2));
+    true
+}
+
 #[contract]
 pub struct TalosGovernance;
 
@@ -405,6 +633,8 @@ impl TalosGovernance {
             consensus_threshold,
             voting_period_ledgers,
             pulse_token_address,
+            snapshot_offset_ledgers: None,
+            quorum_bps: None,
         };
 
         env.storage().persistent().set(&DataKey::Admin, &admin);
@@ -431,13 +661,59 @@ impl TalosGovernance {
         if title.len() == 0 {
             panic!("Title cannot be empty");
         }
+        if title.len() > MAX_TITLE_LEN {
+            panic!("Title exceeds maximum length");
+        }
         if description.len() == 0 {
             panic!("Description cannot be empty");
+        }
+        if description.len() > MAX_DESCRIPTION_LEN {
+            panic!("Description exceeds maximum length");
+        }
+
+        // Cross-contract verification: ensure talos_id exists and is active if
+        // a registry contract has been configured.
+        // For registry-unset deployments, the check is explicitly skipped to preserve
+        // backwards compatibility with unconfigured or legacy deployments.
+        if let Some(registry) = env
+            .storage()
+            .persistent()
+            .get::<_, Address>(&DataKey::RegistryContract)
+        {
+            let is_active: bool = env.invoke_contract(
+                &registry,
+                &Symbol::new(&env, "is_active"),
+                soroban_sdk::vec![&env, talos_id.into_val(&env)],
+            );
+            if !is_active {
+                panic!("Talos is not active or does not exist");
+            }
+        }
+
+        // Validate talos_id if a registry contract is configured.
+        // For registry-unset deployments, the check is explicitly skipped to preserve
+        // backwards compatibility with unconfigured or legacy deployments.
+        if let Some(registry) = env
+            .storage()
+            .persistent()
+            .get::<_, Address>(&DataKey::RegistryContract)
+        {
+            let is_active: bool = env.invoke_contract(
+                &registry,
+                &Symbol::new(&env, "is_active"),
+                soroban_sdk::vec![&env, talos_id.into_val(&env)],
+            );
+            if !is_active {
+                panic!("Talos is not active or does not exist");
+            }
         }
 
         let config = Self::require_config(&env);
         let current_ledger = env.ledger().sequence();
-        let snapshot_ledger = current_ledger.saturating_sub(10);
+        let snapshot_offset = config
+            .snapshot_offset_ledgers
+            .unwrap_or(DEFAULT_SNAPSHOT_OFFSET_LEDGERS);
+        let snapshot_ledger = current_ledger.saturating_sub(snapshot_offset);
         let proposal_id = Self::next_proposal_id(env.clone());
         let end_ledger = current_ledger + config.voting_period_ledgers;
 
@@ -455,6 +731,7 @@ impl TalosGovernance {
             no_votes: 0,
             total_voters: 0,
             created_at: env.ledger().timestamp(),
+            action: None,
         };
 
         env.storage()
@@ -466,6 +743,32 @@ impl TalosGovernance {
 
         emit_proposal_created(&env, proposal_id, talos_id, proposer, snapshot_ledger, end_ledger);
         proposal_id
+    }
+
+    pub fn cancel_proposal(env: Env, proposer: Address, proposal_id: u32) {
+        proposer.require_auth();
+
+        let mut proposal: Proposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Proposal(proposal_id))
+            .expect("Proposal not found");
+
+        if proposal.proposer != proposer {
+            panic!("Only the proposer can cancel this proposal");
+        }
+        if proposal.status != ProposalStatus::Active {
+            panic!("Only active proposals can be cancelled");
+        }
+        if proposal.total_voters > 0 {
+            panic!("Cannot cancel a proposal that has already received votes");
+        }
+
+        proposal.status = ProposalStatus::Cancelled;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
+        emit_proposal_status_changed(&env, proposal_id, ProposalStatus::Cancelled);
     }
 
     pub fn vote(env: Env, voter: Address, proposal_id: u32, choice: VoteChoice) {
@@ -552,11 +855,177 @@ impl TalosGovernance {
             panic!("Proposal is not approved");
         }
 
+        // Dispatch the typed action, if any.  A failed cross-contract call
+        // traps the host and rolls back this invocation, leaving the proposal
+        // in `Approved` status so it can be retried.
+        if let Some(action) = &proposal.action {
+            Self::dispatch_action(&env, proposal_id, action.clone());
+        }
+
         proposal.status = ProposalStatus::Executed;
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
         emit_proposal_status_changed(&env, proposal_id, ProposalStatus::Executed);
+    }
+
+    /// Dispatch a `ProposalAction` for the given proposal.
+    ///
+    /// Cross-contract calls are synchronous on Soroban: if the callee panics
+    /// the host traps and the entire invocation is rolled back, leaving the
+    /// proposal in `Approved` status (retryable once the root cause is fixed).
+    fn dispatch_action(env: &Env, proposal_id: u32, action: ProposalAction) {
+        let self_addr = env.current_contract_address();
+
+        match action {
+            ProposalAction::PauseTalos { registry, talos_id } => {
+                // Call deactivate_talos(talos_id, self_addr) on the registry.
+                // The governance contract must be set as the PauseController
+                // for this Talos on the registry contract.
+                let _: () = env.invoke_contract(
+                    &registry,
+                    &Symbol::new(env, "deactivate_talos"),
+                    soroban_sdk::vec![
+                        env,
+                        talos_id.into_val(env),
+                        self_addr.into_val(env),
+                    ],
+                );
+                emit_proposal_executed(env, proposal_id, Symbol::new(env, "PauseTalos"));
+            }
+            ProposalAction::ResumeTalos { registry, talos_id } => {
+                // Call activate_talos(talos_id, self_addr) on the registry.
+                // The governance contract must be set as the ResumeController
+                // for this Talos on the registry contract.
+                let _: () = env.invoke_contract(
+                    &registry,
+                    &Symbol::new(env, "activate_talos"),
+                    soroban_sdk::vec![
+                        env,
+                        talos_id.into_val(env),
+                        self_addr.into_val(env),
+                    ],
+                );
+                emit_proposal_executed(env, proposal_id, Symbol::new(env, "ResumeTalos"));
+            }
+            ProposalAction::UpdateConfig {
+                quorum_threshold,
+                consensus_threshold,
+                voting_period_ledgers,
+            } => {
+                // Validate the incoming config values.
+                if quorum_threshold <= 0 {
+                    panic!("Quorum must be positive");
+                }
+                if consensus_threshold <= 0 || consensus_threshold > 10_000 {
+                    panic!("Consensus threshold must be 1..10000 bps");
+                }
+                if voting_period_ledgers == 0 {
+                    panic!("Voting period must be positive");
+                }
+
+                // Read the current config to preserve pulse_token_address and
+                // snapshot_offset_ledgers (UpdateConfig only changes numeric thresholds).
+                let existing: GovernanceConfig = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::Config)
+                    .expect("Contract not initialized");
+
+                let new_config = GovernanceConfig {
+                    quorum_threshold,
+                    consensus_threshold,
+                    voting_period_ledgers,
+                    pulse_token_address: existing.pulse_token_address,
+                    snapshot_offset_ledgers: existing.snapshot_offset_ledgers,
+                };
+                env.storage().persistent().set(&DataKey::Config, &new_config);
+                emit_proposal_executed(env, proposal_id, Symbol::new(env, "UpdateConfig"));
+            }
+        }
+    }
+
+    /// Create a proposal carrying an optional typed action.
+    ///
+    /// This is an additive entry-point: `create_proposal` (action-less) remains
+    /// unchanged for backward compatibility.  Callers that want an executable
+    /// proposal use this variant instead.
+    pub fn create_proposal_with_action(
+        env: Env,
+        proposer: Address,
+        talos_id: u32,
+        title: String,
+        description: String,
+        action: Option<ProposalAction>,
+    ) -> u32 {
+        pause_control::check_not_paused(&env, PAUSE_PROPOSAL_CREATION);
+
+        proposer.require_auth();
+
+        if title.len() == 0 {
+            panic!("Title cannot be empty");
+        }
+        if title.len() > MAX_TITLE_LEN {
+            panic!("Title exceeds maximum length");
+        }
+        if description.len() == 0 {
+            panic!("Description cannot be empty");
+        }
+        if description.len() > MAX_DESCRIPTION_LEN {
+            panic!("Description exceeds maximum length");
+        }
+
+        // Cross-contract verification (same as create_proposal).
+        if let Some(registry) = env
+            .storage()
+            .persistent()
+            .get::<_, Address>(&DataKey::RegistryContract)
+        {
+            let is_active: bool = env.invoke_contract(
+                &registry,
+                &Symbol::new(&env, "is_active"),
+                soroban_sdk::vec![&env, talos_id.into_val(&env)],
+            );
+            if !is_active {
+                panic!("Talos is not active or does not exist");
+            }
+        }
+
+        let config = Self::require_config(&env);
+        let current_ledger = env.ledger().sequence();
+        let snapshot_offset = config
+            .snapshot_offset_ledgers
+            .unwrap_or(DEFAULT_SNAPSHOT_OFFSET_LEDGERS);
+        let snapshot_ledger = current_ledger.saturating_sub(snapshot_offset);
+        let proposal_id = Self::next_proposal_id(env.clone());
+        let end_ledger = current_ledger + config.voting_period_ledgers;
+
+        let proposal = Proposal {
+            id: proposal_id,
+            talos_id,
+            proposer: proposer.clone(),
+            title,
+            description,
+            snapshot_ledger,
+            start_ledger: current_ledger,
+            end_ledger,
+            status: ProposalStatus::Active,
+            yes_votes: 0,
+            no_votes: 0,
+            total_voters: 0,
+            created_at: env.ledger().timestamp(),
+            action,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
+        env.storage()
+            .persistent()
+            .set(&DataKey::NextProposalId, &(proposal_id + 1));
+
+        emit_proposal_created(&env, proposal_id, talos_id, proposer, snapshot_ledger, end_ledger);
+        proposal_id
     }
 
     pub fn cache_token_balance(
@@ -579,8 +1048,17 @@ impl TalosGovernance {
     pub fn update_config(env: Env, admin: Address, config: GovernanceConfig) {
         pause_control::check_not_paused(&env, PAUSE_GOVERNANCE_CONFIG);
         Self::require_admin(&env, &admin);
-        if config.quorum_threshold <= 0 {
-            panic!("Quorum must be positive");
+        if let Some(bps) = config.quorum_bps {
+            if bps == 0 || bps > 10_000 {
+                panic!("Quorum bps must be 1..10000");
+            }
+            if config.quorum_threshold < 0 {
+                panic!("Quorum threshold cannot be negative");
+            }
+        } else {
+            if config.quorum_threshold <= 0 {
+                panic!("Quorum must be positive");
+            }
         }
         if config.consensus_threshold <= 0 || config.consensus_threshold > 10_000 {
             panic!("Consensus threshold must be 1..10000 bps");
@@ -588,7 +1066,50 @@ impl TalosGovernance {
         if config.voting_period_ledgers == 0 {
             panic!("Voting period must be positive");
         }
+        if let Some(offset) = config.snapshot_offset_ledgers {
+            if offset > MAX_SNAPSHOT_OFFSET_LEDGERS {
+                panic!("Snapshot offset exceeds maximum allowed");
+            }
+        }
+        let old_config = Self::require_config(&env);
         env.storage().persistent().set(&DataKey::Config, &config);
+        emit_config_updated(&env, &old_config, &config);
+    }
+
+    /// Update the registered TalosRegistry contract address (admin only).
+    ///
+    /// Requires admin authorization. Setting this address enables Talos ID
+    /// validation during `create_proposal`.
+    pub fn set_registry_contract(env: Env, admin: Address, registry: Address) {
+        pause_control::check_not_paused(&env, PAUSE_GOVERNANCE_CONFIG);
+        Self::require_admin(&env, &admin);
+
+        let old_registry = env
+            .storage()
+            .persistent()
+            .get::<_, Address>(&DataKey::RegistryContract);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::RegistryContract, &registry);
+
+        emit_registry_updated(&env, old_registry, registry);
+    }
+
+    /// Alias for `set_registry_contract` (admin only).
+    pub fn set_registry(env: Env, admin: Address, registry: Address) {
+        Self::set_registry_contract(env, admin, registry);
+    }
+
+    /// Verify that the configured `RegistryContract` exposes the
+    /// `TalosRegistry` interface and supports version `(1, 1, 0)` or higher.
+    pub fn assert_registry_compatible(env: Env) -> bool {
+        let registry: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RegistryContract)
+            .expect("Registry contract not initialized");
+        check_registry_compatible(&env, &registry, true)
     }
 
     // ── Dividend Snapshots (#598) ─────────────────────────────────────
@@ -736,6 +1257,109 @@ impl TalosGovernance {
         env.storage().persistent().get(&DataKey::Admin)
     }
 
+    // ── Two-step admin transfer ──────────────────────────────────────
+
+    /// Nominate `new_admin` as the next governance admin.
+    ///
+    /// The transfer is not immediate. The nominated address must call
+    /// `accept_admin` to confirm and complete the handover. Until then the
+    /// current admin retains all privileges.
+    ///
+    /// Calling `propose_admin` while a transfer is already pending silently
+    /// replaces the old nomination with the new one.
+    ///
+    /// # Authorization
+    /// Requires the current admin to sign the transaction.
+    ///
+    /// # Panics
+    /// - `"Contract not initialized"` — if `initialize` has not been called.
+    pub fn propose_admin(env: Env, new_admin: Address) {
+        pause_control::check_not_paused(&env, PAUSE_GOVERNANCE_CONFIG);
+
+        let current: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
+
+        current.require_auth();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingAdmin, &new_admin);
+
+        emit_admin_proposed(&env, current, new_admin);
+    }
+
+    /// Complete the pending admin transfer.
+    ///
+    /// The nominated address (stored under `PendingAdmin`) must call this
+    /// method and authorize it. On success:
+    ///   1. `Admin` is updated to the caller's address.
+    ///   2. The `PendingAdmin` storage entry is removed.
+    ///   3. An `adm_acc` event is emitted.
+    ///
+    /// # Authorization
+    /// Requires the pending admin to sign the transaction.
+    ///
+    /// # Panics
+    /// - `"No pending admin transfer"` — if `propose_admin` has not been called.
+    pub fn accept_admin(env: Env) {
+        let pending: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdmin)
+            .expect("No pending admin transfer");
+
+        pending.require_auth();
+
+        // Promote pending → active admin.
+        env.storage()
+            .persistent()
+            .set(&DataKey::Admin, &pending);
+
+        // Clear the pending slot.
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
+
+        emit_admin_accepted(&env, pending);
+    }
+
+    /// Cancel an in-progress admin transfer.
+    ///
+    /// Removes the `PendingAdmin` entry and revokes the nomination without
+    /// changing the current admin.
+    ///
+    /// # Authorization
+    /// Requires the current admin to sign the transaction.
+    ///
+    /// # Panics
+    /// - `"Contract not initialized"` — if `initialize` has not been called.
+    /// - `"No pending admin transfer"` — if there is nothing to cancel.
+    pub fn cancel_admin_transfer(env: Env) {
+        let current: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Contract not initialized");
+
+        current.require_auth();
+
+        let pending: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdmin)
+            .expect("No pending admin transfer");
+
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
+
+        emit_admin_cancelled(&env, pending);
+    }
+
+    /// Return the pending admin address, if any.
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::PendingAdmin)
+    }
+
     // ── Quorum State (#599) ──────────────────────────────────────────
 
     /// Return the current quorum progress for a proposal.
@@ -770,7 +1394,7 @@ impl TalosGovernance {
             .expect("Contract not initialized");
 
         let votes_cast = proposal.yes_votes + proposal.no_votes;
-        let quorum_threshold = config.quorum_threshold;
+        let quorum_threshold = Self::compute_quorum_threshold(&env, &config, proposal.snapshot_ledger);
         let quorum_met = votes_cast >= quorum_threshold;
 
         let approval_bps = if votes_cast > 0 {
@@ -1118,6 +1742,77 @@ impl TalosGovernance {
         found.votes
     }
 
+    pub fn get_past_total_supply(env: &Env, ledger: u32) -> i128 {
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalSupplyCheckpointCount)
+            .unwrap_or(0);
+        if count == 0 {
+            return 0;
+        }
+
+        // Check latest
+        let latest_ck: Checkpoint = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalSupplyCheckpoint(count - 1))
+            .unwrap();
+        if latest_ck.ledger <= ledger {
+            return latest_ck.votes;
+        }
+
+        // Check earliest
+        let earliest_ck: Checkpoint = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalSupplyCheckpoint(0))
+            .unwrap();
+        if earliest_ck.ledger > ledger {
+            return 0;
+        }
+
+        // Binary search
+        let mut low = 0;
+        let mut high = count - 1;
+        while low < high {
+            let mid = high - (high - low) / 2;
+            let ck: Checkpoint = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TotalSupplyCheckpoint(mid))
+                .unwrap();
+            if ck.ledger == ledger {
+                return ck.votes;
+            } else if ck.ledger < ledger {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        let found: Checkpoint = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalSupplyCheckpoint(low))
+            .unwrap();
+        found.votes
+    }
+
+    fn compute_quorum_threshold(env: &Env, config: &GovernanceConfig, snapshot_ledger: u32) -> i128 {
+        if let Some(bps) = config.quorum_bps {
+            let supply = Self::get_past_total_supply(env, snapshot_ledger);
+            // Integer ceiling division so quorum is reached exactly at the configured share:
+            // ceil(supply * bps / 10_000) = (supply * bps + 9_999) / 10_000
+            if supply <= 0 {
+                0
+            } else {
+                (supply * (bps as i128) + 9_999) / 10_000
+            }
+        } else {
+            config.quorum_threshold
+        }
+    }
+
     pub fn delegate(env: Env, delegator: Address, delegatee: Address) {
         pause_control::check_not_paused(&env, PAUSE_GOVERNANCE_CONFIG);
         delegator.require_auth();
@@ -1129,28 +1824,97 @@ impl TalosGovernance {
         Self::require_admin(&env, &admin);
         let current_ledger = env.ledger().sequence();
         let count: u32 = env.storage().persistent().get(&DataKey::CheckpointCount(account.clone())).unwrap_or(0);
-        
+
+        let old_balance = if count > 0 {
+            let last_ck: Checkpoint = env.storage().persistent().get(&DataKey::Checkpoint(account.clone(), count - 1)).unwrap();
+            last_ck.votes
+        } else {
+            0
+        };
+        let delta = new_balance - old_balance;
+
         if count > 0 {
             let mut last_ck: Checkpoint = env.storage().persistent().get(&DataKey::Checkpoint(account.clone(), count - 1)).unwrap();
             if last_ck.ledger == current_ledger {
                 last_ck.votes = new_balance;
                 env.storage().persistent().set(&DataKey::Checkpoint(account.clone(), count - 1), &last_ck);
-                return;
+            } else {
+                let ck = Checkpoint {
+                    ledger: current_ledger,
+                    votes: new_balance,
+                };
+                env.storage().persistent().set(&DataKey::Checkpoint(account.clone(), count), &ck);
+                env.storage().persistent().set(&DataKey::CheckpointCount(account.clone()), &(count + 1));
             }
+        } else {
+            let ck = Checkpoint {
+                ledger: current_ledger,
+                votes: new_balance,
+            };
+            env.storage().persistent().set(&DataKey::Checkpoint(account.clone(), count), &ck);
+            env.storage().persistent().set(&DataKey::CheckpointCount(account.clone()), &(count + 1));
         }
-        
-        let ck = Checkpoint {
-            ledger: current_ledger,
-            votes: new_balance,
+
+        // Track total supply checkpoints alongside per-account ones
+        let total_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalSupplyCheckpointCount)
+            .unwrap_or(0);
+        let prev_total_supply = if total_count > 0 {
+            let last_total_ck: Checkpoint = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TotalSupplyCheckpoint(total_count - 1))
+                .unwrap();
+            last_total_ck.votes
+        } else {
+            0
         };
-        env.storage().persistent().set(&DataKey::Checkpoint(account.clone(), count), &ck);
-        env.storage().persistent().set(&DataKey::CheckpointCount(account.clone()), &(count + 1));
+        let new_total_supply = prev_total_supply + delta;
+
+        if total_count > 0 {
+            let mut last_total_ck: Checkpoint = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TotalSupplyCheckpoint(total_count - 1))
+                .unwrap();
+            if last_total_ck.ledger == current_ledger {
+                last_total_ck.votes = new_total_supply;
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::TotalSupplyCheckpoint(total_count - 1), &last_total_ck);
+            } else {
+                let total_ck = Checkpoint {
+                    ledger: current_ledger,
+                    votes: new_total_supply,
+                };
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::TotalSupplyCheckpoint(total_count), &total_ck);
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::TotalSupplyCheckpointCount, &(total_count + 1));
+            }
+        } else {
+            let total_ck = Checkpoint {
+                ledger: current_ledger,
+                votes: new_total_supply,
+            };
+            env.storage()
+                .persistent()
+                .set(&DataKey::TotalSupplyCheckpoint(total_count), &total_ck);
+            env.storage()
+                .persistent()
+                .set(&DataKey::TotalSupplyCheckpointCount, &(total_count + 1));
+        }
     }
 
     fn update_status_if_quorum(env: &Env, proposal: &mut Proposal) {
         let config = Self::require_config(env);
         let total_votes = proposal.yes_votes + proposal.no_votes;
-        if total_votes >= config.quorum_threshold {
+        let quorum_threshold = Self::compute_quorum_threshold(env, &config, proposal.snapshot_ledger);
+        if total_votes >= quorum_threshold {
             // Emit EventQuorumReached exactly once per proposal — write a
             // sentinel before emitting so a re-entrant call cannot double-fire.
             let sentinel_key = DataKey::QuorumReached(proposal.id);
@@ -1170,7 +1934,7 @@ impl TalosGovernance {
                     env,
                     proposal.id,
                     total_votes,
-                    config.quorum_threshold,
+                    quorum_threshold,
                     approval_bps,
                 );
             }
@@ -1182,7 +1946,8 @@ impl TalosGovernance {
     fn finalize_status(env: &Env, proposal: &mut Proposal) {
         let config = Self::require_config(env);
         let total_votes = proposal.yes_votes + proposal.no_votes;
-        if total_votes < config.quorum_threshold {
+        let quorum_threshold = Self::compute_quorum_threshold(env, &config, proposal.snapshot_ledger);
+        if total_votes < quorum_threshold {
             proposal.status = ProposalStatus::Rejected;
             return;
         }
@@ -1235,7 +2000,7 @@ mod tests {
     use super::*;
     use soroban_sdk::{
         testutils::{Address as _, Events as _, Ledger, MockAuth, MockAuthInvoke},
-        IntoVal,
+        IntoVal, TryFromVal,
     };
 
     fn setup() -> (
@@ -1321,6 +2086,46 @@ mod tests {
     }
 
     // ── Typed event fixture tests (#606) ─────────────────────────
+
+    #[test]
+    fn update_config_emits_old_and_new_values_once() {
+        let (env, contract_id, admin, old_pulse, client) = setup();
+        let new_pulse = Address::generate(&env);
+        let new_config = GovernanceConfig {
+            quorum_threshold: 250,
+            consensus_threshold: 7_500,
+            voting_period_ledgers: 30,
+            pulse_token_address: new_pulse.clone(),
+        };
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_config",
+                    args: (admin.clone(), new_config.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_config(&admin, &new_config);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1, "a config update emits exactly one event");
+        let (emitter, topics, data) = events.first().expect("config event missing");
+        assert_eq!(emitter, contract_id);
+        let topic: soroban_sdk::Symbol =
+            soroban_sdk::FromVal::from_val(&env, &topics.get(0).unwrap());
+        assert_eq!(topic, symbol_short!("cfg_upd"));
+        let payload: EventConfigUpdated = soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(payload.old_quorum_threshold, 100);
+        assert_eq!(payload.new_quorum_threshold, 250);
+        assert_eq!(payload.old_consensus_threshold, 5_100);
+        assert_eq!(payload.new_consensus_threshold, 7_500);
+        assert_eq!(payload.old_voting_period_ledgers, 20);
+        assert_eq!(payload.new_voting_period_ledgers, 30);
+        assert_eq!(payload.old_pulse_token_address, old_pulse);
+        assert_eq!(payload.new_pulse_token_address, new_pulse);
+    }
 
     #[test]
     fn create_proposal_emits_typed_event_proposal_created() {
@@ -1830,6 +2635,8 @@ mod tests {
             consensus_threshold: 6_000,
             voting_period_ledgers: 30,
             pulse_token_address: pulse,
+            snapshot_offset_ledgers: None,
+            quorum_bps: None,
         };
 
         client
@@ -1938,6 +2745,8 @@ mod tests {
             consensus_threshold: 6_000,
             voting_period_ledgers: 30,
             pulse_token_address: pulse,
+            snapshot_offset_ledgers: None,
+            quorum_bps: None,
         };
         let res = client
             .mock_auths(&[MockAuth {
@@ -2137,6 +2946,8 @@ mod tests {
             consensus_threshold: 5_000,
             voting_period_ledgers: 20,
             pulse_token_address: pulse,
+            snapshot_offset_ledgers: None,
+            quorum_bps: None,
         };
         let rando = Address::generate(&env);
         let result = client.try_update_config(&rando, &config);
@@ -2321,6 +3132,98 @@ mod tests {
             }])
             .try_create_proposal(&proposer, &1u32, &s(&env, "title"), &s(&env, ""));
         assert!(result.is_err(), "empty description must be rejected");
+    }
+
+    /// Proposal creation with title exactly at MAX_TITLE_LEN succeeds.
+    #[test]
+    fn create_proposal_title_at_limit_succeeds() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let title_bytes = [b'a'; MAX_TITLE_LEN as usize];
+        let title = s(&env, std::str::from_utf8(&title_bytes).unwrap());
+        let desc = s(&env, "Valid description");
+
+        let proposal_id = client
+            .mock_auths(&[MockAuth {
+                address: &proposer,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_proposal",
+                    args: (proposer.clone(), 1u32, title.clone(), desc.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .create_proposal(&proposer, &1u32, &title, &desc);
+        assert_eq!(proposal_id, 1);
+    }
+
+    /// Proposal creation with title one byte over MAX_TITLE_LEN fails.
+    #[test]
+    fn create_proposal_title_exceeding_limit_fails() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let title_bytes = [b'a'; (MAX_TITLE_LEN + 1) as usize];
+        let title = s(&env, std::str::from_utf8(&title_bytes).unwrap());
+        let desc = s(&env, "Valid description");
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &proposer,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_proposal",
+                    args: (proposer.clone(), 1u32, title.clone(), desc.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_proposal(&proposer, &1u32, &title, &desc);
+        assert!(result.is_err(), "title exceeding limit must fail");
+    }
+
+    /// Proposal creation with description exactly at MAX_DESCRIPTION_LEN succeeds.
+    #[test]
+    fn create_proposal_description_at_limit_succeeds() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let title = s(&env, "Valid title");
+        let desc_bytes = [b'd'; MAX_DESCRIPTION_LEN as usize];
+        let desc = s(&env, std::str::from_utf8(&desc_bytes).unwrap());
+
+        let proposal_id = client
+            .mock_auths(&[MockAuth {
+                address: &proposer,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_proposal",
+                    args: (proposer.clone(), 1u32, title.clone(), desc.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .create_proposal(&proposer, &1u32, &title, &desc);
+        assert_eq!(proposal_id, 1);
+    }
+
+    /// Proposal creation with description one byte over MAX_DESCRIPTION_LEN fails.
+    #[test]
+    fn create_proposal_description_exceeding_limit_fails() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let title = s(&env, "Valid title");
+        let desc_bytes = [b'd'; (MAX_DESCRIPTION_LEN + 1) as usize];
+        let desc = s(&env, std::str::from_utf8(&desc_bytes).unwrap());
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &proposer,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_proposal",
+                    args: (proposer.clone(), 1u32, title.clone(), desc.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_proposal(&proposer, &1u32, &title, &desc);
+        assert!(result.is_err(), "description exceeding limit must fail");
     }
 
     /// cache_token_balance with a negative balance must fail.
@@ -3046,5 +3949,1164 @@ mod tests {
             "rejected create_proposal memory {} exceeded ceiling {}",
             mem, BUDGET_MEM_CREATE_PROPOSAL,
         );
+    }
+
+    // ── Two-step admin transfer tests ────────────────────────────────
+
+    fn mock_propose(
+        env: &Env,
+        client: &TalosGovernanceClient,
+        contract_id: &Address,
+        admin: &Address,
+        new_admin: &Address,
+    ) {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "propose_admin",
+                    args: (new_admin.clone(),).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .propose_admin(new_admin);
+    }
+
+    fn mock_accept(
+        env: &Env,
+        client: &TalosGovernanceClient,
+        contract_id: &Address,
+        pending: &Address,
+    ) {
+        client
+            .mock_auths(&[MockAuth {
+                address: pending,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .accept_admin();
+    }
+
+    fn mock_cancel(
+        env: &Env,
+        client: &TalosGovernanceClient,
+        contract_id: &Address,
+        admin: &Address,
+    ) {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "cancel_admin_transfer",
+                    args: ().into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .cancel_admin_transfer();
+    }
+
+    /// Happy path: propose → accept transfers admin and clears pending slot.
+    #[test]
+    fn propose_then_accept_transfers_admin() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(client.get_admin(), Some(admin.clone()));
+        assert_eq!(client.pending_admin(), None);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        assert_eq!(client.pending_admin(), Some(new_admin.clone()));
+
+        mock_accept(&env, &client, &contract_id, &new_admin);
+
+        // Admin is now new_admin; pending slot is cleared.
+        assert_eq!(client.get_admin(), Some(new_admin.clone()));
+        assert_eq!(client.pending_admin(), None);
+    }
+
+    /// After acceptance, the old admin loses update_config rights and the new admin succeeds.
+    #[test]
+    fn old_admin_loses_update_config_rights_after_acceptance() {
+        let (env, contract_id, admin, pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        mock_accept(&env, &client, &contract_id, &new_admin);
+
+        let new_cfg = GovernanceConfig {
+            quorum_threshold: 300,
+            consensus_threshold: 6_000,
+            voting_period_ledgers: 50,
+            pulse_token_address: pulse.clone(),
+        };
+
+        // Old admin attempts update_config — must be rejected.
+        let old_admin_res = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_config",
+                    args: (admin.clone(), new_cfg.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_config(&admin, &new_cfg);
+        assert!(old_admin_res.is_err(), "old admin must lose update_config rights");
+
+        // New admin updates config successfully.
+        client
+            .mock_auths(&[MockAuth {
+                address: &new_admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_config",
+                    args: (new_admin.clone(), new_cfg.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_config(&new_admin, &new_cfg);
+
+        assert_eq!(client.get_config(), Some(new_cfg));
+    }
+
+    /// propose_admin without current admin auth must fail.
+    #[test]
+    fn propose_admin_requires_current_admin_auth() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let impostor = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        // No mock_auths → auth check fails.
+        assert!(client.try_propose_admin(&new_admin).is_err());
+
+        // Impostor auth → still fails.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &impostor,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "propose_admin",
+                    args: (new_admin.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_propose_admin(&new_admin);
+        assert!(result.is_err());
+    }
+
+    /// accept_admin without pending admin auth must fail.
+    #[test]
+    fn accept_admin_requires_pending_admin_auth() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+
+        // Impostor pretending to be pending admin.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &impostor,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_accept_admin();
+        assert!(result.is_err());
+
+        // Original admin trying to accept — must also fail (only pending may accept).
+        let result2 = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_accept_admin();
+        assert!(result2.is_err());
+    }
+
+    /// accept_admin with no pending nomination must panic.
+    #[test]
+    fn accept_admin_without_pending_panics() {
+        let (_env, _contract_id, _admin, _pulse, client) = setup();
+
+        // No propose was called; any accept attempt must fail.
+        assert!(client.try_accept_admin().is_err());
+    }
+
+    /// cancel_admin_transfer removes pending and leaves admin unchanged.
+    #[test]
+    fn cancel_admin_transfer_clears_pending() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        assert_eq!(client.pending_admin(), Some(new_admin.clone()));
+
+        mock_cancel(&env, &client, &contract_id, &admin);
+
+        assert_eq!(client.pending_admin(), None);
+        // Admin is unchanged.
+        assert_eq!(client.get_admin(), Some(admin.clone()));
+    }
+
+    /// After cancellation the pending admin can no longer accept.
+    #[test]
+    fn cancelled_pending_cannot_accept() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        mock_cancel(&env, &client, &contract_id, &admin);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &new_admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_accept_admin();
+        assert!(result.is_err());
+    }
+
+    /// cancel_admin_transfer without pending nomination must panic.
+    #[test]
+    fn cancel_without_pending_panics() {
+        let (_env, _contract_id, _admin, _pulse, client) = setup();
+
+        // No nomination exists.
+        assert!(client.try_cancel_admin_transfer().is_err());
+    }
+
+    /// cancel_admin_transfer requires current admin auth.
+    #[test]
+    fn cancel_admin_transfer_requires_admin_auth() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &impostor,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "cancel_admin_transfer",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_cancel_admin_transfer();
+        assert!(result.is_err());
+    }
+
+    /// propose_admin replaces an existing pending nomination (no cancel needed).
+    #[test]
+    fn propose_admin_replaces_existing_pending() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let first = Address::generate(&env);
+        let second = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &first);
+        assert_eq!(client.pending_admin(), Some(first.clone()));
+
+        // Replace with a different nominee.
+        mock_propose(&env, &client, &contract_id, &admin, &second);
+        assert_eq!(client.pending_admin(), Some(second.clone()));
+
+        // First nominee can no longer accept.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &first,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_accept_admin();
+        assert!(result.is_err());
+
+        // Second nominee can accept.
+        mock_accept(&env, &client, &contract_id, &second);
+        assert_eq!(client.get_admin(), Some(second));
+        assert_eq!(client.pending_admin(), None);
+    }
+
+    /// propose_admin emits adm_prp event with (current, proposed).
+    #[test]
+    fn propose_admin_emits_adm_prp_event() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+
+        let events = env.events().all();
+        let prp_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(a, t, _)| {
+                if *a != contract_id {
+                    return false;
+                }
+                if t.len() == 0 {
+                    return false;
+                }
+                let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &t.get(0).unwrap());
+                sym.map(|s| s == symbol_short!("adm_prp")).unwrap_or(false)
+            })
+            .collect();
+
+        assert_eq!(prp_events.len(), 1);
+        let (_, _, data) = prp_events[0].clone();
+        let (got_current, got_proposed): (Address, Address) =
+            TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(got_current, admin);
+        assert_eq!(got_proposed, new_admin);
+    }
+
+    /// accept_admin emits adm_acc event with (new_admin,).
+    #[test]
+    fn accept_admin_emits_adm_acc_event() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+
+        // Clear events accumulated by propose.
+        let _ = env.events().all();
+
+        mock_accept(&env, &client, &contract_id, &new_admin);
+
+        let events = env.events().all();
+        let accept_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(a, t, _)| {
+                if *a != contract_id {
+                    return false;
+                }
+                if t.len() == 0 {
+                    return false;
+                }
+                let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &t.get(0).unwrap());
+                sym.map(|s| s == symbol_short!("adm_acc")).unwrap_or(false)
+            })
+            .collect();
+
+        assert_eq!(accept_events.len(), 1);
+        let (_, _, data) = accept_events[0].clone();
+        let (got_new,): (Address,) = TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(got_new, new_admin);
+    }
+
+    /// cancel_admin_transfer emits adm_cnl event with (cancelled,).
+    #[test]
+    fn cancel_admin_transfer_emits_adm_cnl_event() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        mock_cancel(&env, &client, &contract_id, &admin);
+
+        let events = env.events().all();
+        let cancel_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(a, t, _)| {
+                if *a != contract_id {
+                    return false;
+                }
+                if t.len() == 0 {
+                    return false;
+                }
+                let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &t.get(0).unwrap());
+                sym.map(|s| s == symbol_short!("adm_cnl")).unwrap_or(false)
+            })
+            .collect();
+
+        assert_eq!(cancel_events.len(), 1);
+        let (_, _, data) = cancel_events[0].clone();
+        let (got_cancelled,): (Address,) = TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(got_cancelled, new_admin);
+    }
+
+    /// propose_admin is gated by PAUSE_GOVERNANCE_CONFIG.
+    #[test]
+    fn propose_admin_blocked_when_governance_config_paused() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        // Pause governance config domain
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause_domain",
+                    args: (PAUSE_GOVERNANCE_CONFIG, 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .pause_domain(&PAUSE_GOVERNANCE_CONFIG, &0);
+
+        // propose_admin must be rejected while paused
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "propose_admin",
+                    args: (new_admin.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_propose_admin(&new_admin);
+        assert!(res.is_err(), "propose_admin must be blocked while PAUSE_GOVERNANCE_CONFIG is active");
+
+        // Unpause governance config domain
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "unpause_domain",
+                    args: (PAUSE_GOVERNANCE_CONFIG,).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .unpause_domain(&PAUSE_GOVERNANCE_CONFIG);
+
+        // Now propose_admin succeeds
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        assert_eq!(client.pending_admin(), Some(new_admin));
+    }
+
+    /// propose_admin on uninitialized contract must fail.
+    #[test]
+    fn propose_admin_on_uninit_contract_is_rejected() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, TalosGovernance);
+        let client = TalosGovernanceClient::new(&env, &contract_id);
+        let any_addr = Address::generate(&env);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &any_addr,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "propose_admin",
+                    args: (any_addr.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_propose_admin(&any_addr);
+        assert!(result.is_err());
+    }
+
+    /// cancel_admin_transfer on uninitialized contract must fail.
+    #[test]
+    fn cancel_admin_transfer_on_uninit_contract_is_rejected() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, TalosGovernance);
+        let client = TalosGovernanceClient::new(&env, &contract_id);
+        let any_addr = Address::generate(&env);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &any_addr,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "cancel_admin_transfer",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_cancel_admin_transfer();
+        assert!(result.is_err());
+    }
+
+    /// After transfer the new admin can pause and old admin cannot.
+    #[test]
+    fn new_admin_can_pause_and_old_admin_cannot_pause_after_transfer() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        mock_accept(&env, &client, &contract_id, &new_admin);
+
+        // Old admin cannot pause
+        let old_res = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause_domain",
+                    args: (PAUSE_PROPOSAL_CREATION, 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_pause_domain(&PAUSE_PROPOSAL_CREATION, &0);
+        assert!(old_res.is_err(), "old admin must not be able to pause");
+
+        // New admin can pause
+        client
+            .mock_auths(&[MockAuth {
+                address: &new_admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "pause_domain",
+                    args: (PAUSE_PROPOSAL_CREATION, 0u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .pause_domain(&PAUSE_PROPOSAL_CREATION, &0);
+        let status = client.get_domain_pause_status(&PAUSE_PROPOSAL_CREATION).unwrap();
+        assert!(status.paused);
+    }
+
+    // ── Two-step admin transfer tests (#948) ──────────────────────────
+    // Mirrored from the registry's admin-transfer tests.
+
+    fn mock_propose(
+        env: &Env,
+        client: &TalosGovernanceClient<'static>,
+        contract_id: &Address,
+        admin: &Address,
+        new_admin: &Address,
+    ) {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "propose_admin",
+                    args: (admin.clone(), new_admin.clone()).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .propose_admin(admin, new_admin);
+    }
+
+    fn mock_accept(
+        env: &Env,
+        client: &TalosGovernanceClient<'static>,
+        contract_id: &Address,
+        pending: &Address,
+    ) {
+        client
+            .mock_auths(&[MockAuth {
+                address: pending,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .accept_admin();
+    }
+
+    fn mock_cancel(
+        env: &Env,
+        client: &TalosGovernanceClient<'static>,
+        contract_id: &Address,
+        admin: &Address,
+    ) {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "cancel_admin_transfer",
+                    args: (admin.clone(),).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .cancel_admin_transfer(admin);
+    }
+
+    #[test]
+    fn propose_then_accept_transfers_admin() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(client.get_admin(), Some(admin.clone()));
+        assert_eq!(client.get_pending_admin(), None);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+
+        mock_accept(&env, &client, &contract_id, &new_admin);
+
+        // Admin is now new_admin; pending slot is cleared.
+        assert_eq!(client.get_admin(), Some(new_admin.clone()));
+        assert_eq!(client.get_pending_admin(), None);
+    }
+
+    #[test]
+    fn propose_admin_replaces_existing_pending() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let first = Address::generate(&env);
+        let second = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &first);
+        assert_eq!(client.get_pending_admin(), Some(first.clone()));
+
+        mock_propose(&env, &client, &contract_id, &admin, &second);
+        assert_eq!(client.get_pending_admin(), Some(second.clone()));
+
+        // First nominee can no longer accept.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &first,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_accept_admin();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn old_admin_loses_rights_after_transfer() {
+        let (env, contract_id, admin, pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        mock_accept(&env, &client, &contract_id, &new_admin);
+
+        // Old admin can no longer update config...
+        let config = GovernanceConfig {
+            quorum_threshold: 100_i128,
+            consensus_threshold: 5_100_i128,
+            voting_period_ledgers: 20_u32,
+            pulse_token_address: pulse.clone(),
+            snapshot_offset_ledgers: Some(10),
+        };
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_config",
+                    args: (admin.clone(), config.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_update_config(&admin, &config);
+        assert!(result.is_err());
+
+        // ...but the new admin can.
+        client
+            .mock_auths(&[MockAuth {
+                address: &new_admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_config",
+                    args: (new_admin.clone(), config.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_config(&new_admin, &config);
+    }
+
+    #[test]
+    fn propose_admin_requires_current_admin_auth() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let impostor = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        // No mock_auths → auth check fails.
+        assert!(client.try_propose_admin(&admin, &new_admin).is_err());
+
+        // Impostor auth → still fails.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &impostor,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "propose_admin",
+                    args: (impostor.clone(), new_admin.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_propose_admin(&impostor, &new_admin);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn accept_admin_requires_pending_admin_auth() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+
+        // Impostor pretending to be pending admin.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &impostor,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_accept_admin();
+        assert!(result.is_err());
+
+        // Original admin trying to accept — must also fail (only pending may accept).
+        let result2 = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_accept_admin();
+        assert!(result2.is_err());
+    }
+
+    #[test]
+    fn accept_admin_without_pending_panics() {
+        let (_env, _contract_id, _admin, _pulse, client) = setup();
+
+        // No nomination exists.
+        assert!(client.try_accept_admin().is_err());
+    }
+
+    #[test]
+    fn cancel_admin_transfer_clears_pending() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+
+        mock_cancel(&env, &client, &contract_id, &admin);
+
+        assert_eq!(client.get_pending_admin(), None);
+        // Admin is unchanged.
+        assert_eq!(client.get_admin(), Some(admin.clone()));
+    }
+
+    #[test]
+    fn cancelled_pending_cannot_accept() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        mock_cancel(&env, &client, &contract_id, &admin);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &new_admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_accept_admin();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cancel_without_pending_panics() {
+        let (env, _contract_id, admin, _pulse, client) = setup();
+
+        // No nomination exists.
+        assert!(client.try_cancel_admin_transfer(&admin).is_err());
+    }
+
+    #[test]
+    fn cancel_admin_transfer_requires_admin_auth() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &impostor,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "cancel_admin_transfer",
+                    args: (impostor.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_cancel_admin_transfer(&impostor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn propose_admin_emits_adm_prp_event() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+
+        let events = env.events().all();
+        let propose_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(a, t, _)| {
+                if *a != contract_id {
+                    return false;
+                }
+                if t.len() == 0 {
+                    return false;
+                }
+                let sym: Result<Symbol, _> = soroban_sdk::TryFromVal::try_from_val(&env, &t.get(0).unwrap());
+                sym.map(|s| s == symbol_short!("adm_prp")).unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(propose_events.len(), 1);
+
+        let (_, _, data) = propose_events[0].clone();
+        let payload: EventAdminProposed = soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(payload.current_admin, admin);
+        assert_eq!(payload.pending_admin, new_admin);
+    }
+
+    #[test]
+    fn accept_admin_emits_adm_acc_event() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+
+        // Clear events accumulated by propose.
+        let _ = env.events().all();
+
+        mock_accept(&env, &client, &contract_id, &new_admin);
+
+        let events = env.events().all();
+        let accept_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(a, t, _)| {
+                if *a != contract_id {
+                    return false;
+                }
+                if t.len() == 0 {
+                    return false;
+                }
+                let sym: Result<Symbol, _> = soroban_sdk::TryFromVal::try_from_val(&env, &t.get(0).unwrap());
+                sym.map(|s| s == symbol_short!("adm_acc")).unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(accept_events.len(), 1);
+
+        let (_, _, data) = accept_events[0].clone();
+        let payload: EventAdminAccepted = soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(payload.new_admin, new_admin);
+    }
+
+    #[test]
+    fn cancel_admin_transfer_emits_adm_cnl_event() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        mock_cancel(&env, &client, &contract_id, &admin);
+
+        let events = env.events().all();
+        let cancel_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(a, t, _)| {
+                if *a != contract_id {
+                    return false;
+                }
+                t.len() != 0 && {
+                    let sym: Result<Symbol, _> =
+                        soroban_sdk::TryFromVal::try_from_val(&env, &t.get(0).unwrap());
+                    sym.map(|s| s == symbol_short!("adm_cnl")).unwrap_or(false)
+                }
+            })
+            .collect();
+        assert_eq!(cancel_events.len(), 1);
+
+        let (_, _, data) = cancel_events[0].clone();
+        let payload: EventAdminTransferCancelled = soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(payload.pending_admin, new_admin);
+    }
+
+    // ── ProposalAction tests (#913) ───────────────────────────────────────
+
+    /// Helper: create an action proposal, vote it to Approved, return the proposal id.
+    fn create_and_approve_action_proposal(
+        env: &Env,
+        contract_id: &Address,
+        client: &TalosGovernanceClient<'static>,
+        admin: &Address,
+        proposer: &Address,
+        action: Option<ProposalAction>,
+    ) -> u32 {
+        let voter = Address::generate(env);
+
+        let proposal_id = client
+            .mock_auths(&[MockAuth {
+                address: proposer,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "create_proposal_with_action",
+                    args: (
+                        proposer.clone(),
+                        7_u32,
+                        s(env, "Action proposal"),
+                        s(env, "Governs on-chain action."),
+                        action.clone(),
+                    )
+                        .into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .create_proposal_with_action(
+                proposer,
+                &7_u32,
+                &s(env, "Action proposal"),
+                &s(env, "Governs on-chain action."),
+                &action,
+            );
+
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        // Cache enough balance to reach quorum (100) and consensus (51 %)
+        cache_balance_with_auth(env, contract_id, client, admin, proposal.snapshot_ledger, &voter, 200);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &voter,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "vote",
+                    args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .vote(&voter, &proposal_id, &VoteChoice::Approve);
+
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Approved);
+        proposal_id
+    }
+
+    /// A title-only proposal (no action) still executes and transitions to Executed.
+    #[test]
+    fn execute_title_only_proposal_transitions_to_executed() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        cache_balance_with_auth(
+            &env, &contract_id, &client, &admin,
+            proposal.snapshot_ledger, &voter, 200,
+        );
+        client
+            .mock_auths(&[MockAuth {
+                address: &voter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "vote",
+                    args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .vote(&voter, &proposal_id, &VoteChoice::Approve);
+
+        client.execute_proposal(&proposal_id);
+
+        let executed = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(executed.status, ProposalStatus::Executed);
+        assert!(executed.action.is_none(), "title-only proposal must have no action");
+    }
+
+    /// create_proposal_with_action stores the action field on the proposal.
+    #[test]
+    fn create_proposal_with_action_stores_action() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let fake_registry = Address::generate(&env);
+
+        let action = Some(ProposalAction::PauseTalos {
+            registry: fake_registry.clone(),
+            talos_id: 42,
+        });
+
+        let proposal_id = client
+            .mock_auths(&[MockAuth {
+                address: &proposer,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_proposal_with_action",
+                    args: (
+                        proposer.clone(),
+                        7_u32,
+                        s(&env, "Pause Talos 42"),
+                        s(&env, "Emergency pause."),
+                        action.clone(),
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .create_proposal_with_action(
+                &proposer,
+                &7_u32,
+                &s(&env, "Pause Talos 42"),
+                &s(&env, "Emergency pause."),
+                &action,
+            );
+
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(
+            proposal.action,
+            Some(ProposalAction::PauseTalos {
+                registry: fake_registry,
+                talos_id: 42,
+            })
+        );
+    }
+
+    /// An UpdateConfig action updates the stored config on execution.
+    #[test]
+    fn execute_update_config_action_applies_new_config() {
+        let (env, contract_id, admin, pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        let action = Some(ProposalAction::UpdateConfig {
+            quorum_threshold: 200,
+            consensus_threshold: 6_000,
+            voting_period_ledgers: 40,
+        });
+
+        let proposal_id =
+            create_and_approve_action_proposal(&env, &contract_id, &client, &admin, &proposer, action);
+
+        client.execute_proposal(&proposal_id);
+
+        let executed = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(executed.status, ProposalStatus::Executed);
+
+        let config = client.get_config().unwrap();
+        assert_eq!(config.quorum_threshold, 200);
+        assert_eq!(config.consensus_threshold, 6_000);
+        assert_eq!(config.voting_period_ledgers, 40);
+        assert_eq!(config.pulse_token_address, pulse, "pulse address must be preserved");
+    }
+
+    /// Executing an UpdateConfig proposal emits prop_exec and prop_stat(Executed) events.
+    #[test]
+    fn execute_update_config_emits_exec_and_status_events() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        let action = Some(ProposalAction::UpdateConfig {
+            quorum_threshold: 150,
+            consensus_threshold: 5_500,
+            voting_period_ledgers: 30,
+        });
+
+        let proposal_id =
+            create_and_approve_action_proposal(&env, &contract_id, &client, &admin, &proposer, action);
+
+        client.execute_proposal(&proposal_id);
+
+        let events = env.events().all();
+
+        // prop_exec event must be present
+        let exec_event = events.iter().find(|(cid, topics, _)| {
+            if *cid != contract_id { return false; }
+            if let Some(t0) = topics.get(0) {
+                let sym: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &t0);
+                sym == symbol_short!("prop_exec")
+            } else { false }
+        });
+        assert!(exec_event.is_some(), "prop_exec event must be emitted");
+
+        let (_, _, exec_data) = exec_event.unwrap();
+        let exec_payload: EventProposalExecuted = soroban_sdk::FromVal::from_val(&env, &exec_data);
+        assert_eq!(exec_payload.proposal_id, proposal_id);
+        assert!(exec_payload.success);
+
+        // prop_stat(Executed) must also be emitted
+        let executed_stat = events.iter().find(|(cid, topics, data)| {
+            if *cid != contract_id { return false; }
+            if let Some(t0) = topics.get(0) {
+                let sym: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &t0);
+                if sym != symbol_short!("prop_stat") { return false; }
+                let p: EventProposalStatusChanged = soroban_sdk::FromVal::from_val(&env, data);
+                p.status == ProposalStatus::Executed
+            } else { false }
+        });
+        assert!(executed_stat.is_some(), "prop_stat(Executed) must be emitted");
+    }
+
+    /// An UpdateConfig with invalid quorum panics at execution time.
+    #[test]
+    #[should_panic(expected = "Quorum must be positive")]
+    fn execute_update_config_invalid_quorum_is_rejected() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        let action = Some(ProposalAction::UpdateConfig {
+            quorum_threshold: 0,
+            consensus_threshold: 5_000,
+            voting_period_ledgers: 20,
+        });
+
+        let proposal_id =
+            create_and_approve_action_proposal(&env, &contract_id, &client, &admin, &proposer, action);
+
+        client.execute_proposal(&proposal_id);
+    }
+
+    /// A proposal can only be executed once; the second call sees Executed status.
+    #[test]
+    fn execute_proposal_only_once() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        let action = Some(ProposalAction::UpdateConfig {
+            quorum_threshold: 200,
+            consensus_threshold: 5_500,
+            voting_period_ledgers: 25,
+        });
+
+        let proposal_id =
+            create_and_approve_action_proposal(&env, &contract_id, &client, &admin, &proposer, action);
+
+        client.execute_proposal(&proposal_id);
+
+        let result = client.try_execute_proposal(&proposal_id);
+        assert!(result.is_err(), "second execute must fail");
     }
 }

@@ -37,23 +37,21 @@ export function HeroClient() {
     let animId: number | null = null;
     let resizeRafId: number | null = null;
 
-    const motionMediaQuery =
-      typeof window.matchMedia === "function"
-        ? window.matchMedia("(prefers-reduced-motion: reduce)")
-        : null;
-    let prefersReducedMotion = motionMediaQuery ? motionMediaQuery.matches : false;
-    let isIntersecting = typeof IntersectionObserver === "undefined";
-    let isTabVisible =
-      typeof document !== "undefined"
-        ? document.visibilityState !== "hidden"
-        : true;
-
-    function shouldAnimate(): boolean {
-      return !prefersReducedMotion && isIntersecting && isTabVisible;
+    // Canvas cannot use CSS variables directly, so the page background is read
+    // from the active theme. It is refreshed twice a second rather than every
+    // frame, which is quick enough to follow the theme toggle.
+    let background = "#FCF8F8";
+    function readBackground() {
+      const value = getComputedStyle(document.documentElement)
+        .getPropertyValue("--background")
+        .trim();
+      if (value) background = value;
     }
+    readBackground();
 
-    function drawFrame() {
-      ctx!.fillStyle = "#FCF8F8";
+    function draw() {
+      if (frame % 30 === 0) readBackground();
+      ctx!.fillStyle = background;
       ctx!.fillRect(0, 0, W, H);
       ctx!.font = `${fontSize}px monospace`;
 

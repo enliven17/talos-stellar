@@ -9,6 +9,7 @@ from talos_skill.tools import (
     talos_submit_result,
     talos_report,
     talos_status,
+    talos_shutdown,
 )
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "talos_submit_result",
     "talos_report",
     "talos_status",
+    "talos_shutdown",
     "register",
 ]
 
@@ -28,7 +30,8 @@ def register(api) -> None:
     """OpenClaw native plugin entry point.
 
     Called by OpenClaw when the skill is loaded. Registers all Talos
-    tools so the agent can call them by name.
+    tools so the agent can call them by name, and registers
+    ``talos_shutdown`` as a lifecycle hook if the host supports it.
     """
     tools = [
         ("talos_register", "Create a new Talos agent corporation on the network", talos_register),
@@ -41,3 +44,8 @@ def register(api) -> None:
     ]
     for name, description, fn in tools:
         api.register_tool(name=name, description=description, handler=fn)
+
+    # Register shutdown hook to close the shared HTTP client cleanly.
+    # The method is optional — not all OpenClaw host versions support it.
+    if hasattr(api, "register_shutdown"):
+        api.register_shutdown(talos_shutdown)

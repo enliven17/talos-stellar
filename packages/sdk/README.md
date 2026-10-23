@@ -8,6 +8,34 @@ TypeScript SDK for the TALOS Protocol API on Stellar.
 npm install @talos-protocol/sdk
 ```
 
+## Command-Line Interface (CLI)
+
+The package provides an operator CLI executable (`talos`) for inspecting resources, services, jobs, and verifying webhooks:
+
+```bash
+# Inspect a Talos agent
+talos get <id>
+talos get me
+
+# Check agent name availability
+talos check-name <name>
+
+# List available services
+talos services list [--category <name>] [--limit <n>]
+
+# Inspect a commerce job result
+talos jobs get <id>
+
+# Verify a webhook payload and signature
+talos webhooks verify --secret-env WEBHOOK_SECRET --file payload.json
+```
+
+### Security & Environment Variables
+- Credentials (`TALOS_API_KEY`) are read strictly from environment variables; passing API keys via flags is forbidden to prevent leaking secrets into process tables or shell history.
+- All command outputs (JSON and text) automatically redact API keys, tokens, and Stellar secret keys.
+- Supports `--json` for structured output and sets non-zero exit codes on errors.
+- Target the local stack or staging via `--base-url <url>` or `TALOS_API_URL` (defaults to `http://localhost:3000`).
+
 ## Module formats and the export map
 
 The package ships three built entry points and selects one per consumer
@@ -24,6 +52,29 @@ The ESM and CJS builds expose the same public surface, and the build scripts
 under `scripts/` keep them in sync. Because `import` precedes `browser` in the
 map, condition-order-sensitive resolvers select the ESM build; the check below
 warns about that ordering so the intent stays visible.
+
+### Server-only subpaths
+
+The root barrel re-exports `client.ts`, which imports `@stellar/stellar-sdk`.
+A handler that only verifies webhooks or decodes the event stream does not need
+that, so three subpaths are published for it:
+
+| Subpath | ESM | CJS | Types |
+| --- | --- | --- | --- |
+| `@talos-protocol/sdk/webhooks` | `dist/esm/webhooks.js` | `dist/cjs/webhooks.cjs` | `dist/esm/webhooks.d.ts` |
+| `@talos-protocol/sdk/events` | `dist/esm/events.js` | `dist/cjs/events.cjs` | `dist/esm/events.d.ts` |
+| `@talos-protocol/sdk/errors` | `dist/esm/errors.js` | `dist/cjs/errors.cjs` | `dist/esm/errors.d.ts` |
+
+```ts
+import { verifyWebhook } from "@talos-protocol/sdk/webhooks";
+```
+
+None of these modules reaches `@stellar/stellar-sdk` — directly or
+transitively — so bundling one for an edge or serverless target keeps the
+Stellar SDK out of the artifact (about 18 KB for `webhooks` against roughly
+2 MB for the client). `tests/subpath-exports.test.ts` asserts that with an
+esbuild metafile, and `npm run compat:edge` loads each published subpath
+bundle into a sandbox with no Node globals.
 
 ### Verifying the export map
 
@@ -239,6 +290,120 @@ await TalosWebhook.verify({
 - **"Timestamp outside tolerance zone"**: Check your server's NTP clock synchronization. If events are genuinely delayed, increase `toleranceSeconds`.
 - **"Signature mismatch"**: Ensure you are passing the *raw* request body (unparsed bytes) to the `payload` option. Frameworks like Express often parse JSON automatically; you need to bypass it or capture the raw buffer. This also surfaces if a `v1=` signature value isn't a well-formed hex string (even length, `0-9a-fA-F` only) — the SDK rejects malformed or non-canonical hex rather than attempting a partial decode.
 
+#### Managing Subscriptions
+
+`TalosWebhook` / `verifyWebhook` above handle *inbound* delivery verification. To create, list, delete, or rotate the subscriptions that produce those deliveries, use the corresponding `TalosClient` methods:
+
+```typescript
+import { TalosClient } from '@talos-protocol/sdk';
+
+const client = new TalosClient({ apiKey: process.env.TALOS_API_KEY });
+
+// Create — the secret is written once and never echoed back.
+const subscription = await client.createWebhookSubscription({
+  url: "https://example.com/webhooks/talos",
+  secret: process.env.TALOS_WEBHOOK_SECRET!, // 16-256 chars
+  eventTypes: ["revenue.recorded", "approval.completed"],
+});
+
+// List (cursor-paginated) — or use `client.paginateWebhookSubscriptions()`.
+const page = await client.listWebhookSubscriptions({ active: true, limit: 50 });
+
+// Delete.
+await client.deleteWebhookSubscription(subscription.id);
+```
+
+**Secret rotation** is zero-downtime: the previous secret stays valid for a grace window so `TalosWebhook.verify` (passed an array of secrets) keeps accepting deliveries signed with either key until the window elapses or you finalize early.
+
+```typescript
+// Let the server generate a new secret. It is returned exactly once —
+// store it immediately and never log the response as-is.
+const rotated = await client.rotateWebhookSecret(subscription.id, { generate: true });
+console.log(rotated.secret); // whsec_... — capture and persist this now
+
+// ...or supply your own secret, with a custom grace window (seconds):
+await client.rotateWebhookSecret(subscription.id, {
+  secret: process.env.TALOS_WEBHOOK_SECRET_NEXT!,
+  graceSeconds: 3600,
+});
+
+// During the grace window, verify with both secrets:
+await TalosWebhook.verify({
+  payload: rawBody,
+  signatureHeader: header,
+  secret: [process.env.TALOS_WEBHOOK_SECRET_NEXT!, process.env.TALOS_WEBHOOK_SECRET!],
+});
+
+// Once all consumers have switched, finalize early to drop the old secret:
+await client.rotateWebhookSecret(subscription.id, { finalize: true });
+```
+
+If you log the result of `createWebhookSubscription` / `rotateWebhookSecret` yourself, run it through `redactSecrets` (exported from `@talos-protocol/sdk`) first — the SDK never logs these values internally, and its own `onError` hook already redacts `secret`-shaped fields in failure responses.
+
+### Reputation & Availability
+
+Before buying a service, check whether a provider is trustworthy and currently accepting jobs.
+
+```typescript
+// Fetch reputation score (0–100) and trust signals
+const rep = await client.getReputation("provider_talos_id");
+
+console.log(`${rep.talosName} reputation: ${rep.reputationScore} (${rep.reputationGrade})`);
+// "Vega reputation: 72.5 (A)"
+
+console.log(rep.reputationSummary);
+// "Good standing — reliable history with room to grow"
+
+console.log(`Job fulfilment rate: ${rep.signals.jobFulfilmentRate}%`);
+// "Job fulfilment rate: 90%"
+```
+
+```typescript
+// Check whether the agent is online and accepting jobs
+const avail = await client.getAvailability("provider_talos_id");
+
+if (avail.availability.acceptingJobs) {
+  console.log(`${avail.talosName} is ${avail.availability.status} — ready to take work`);
+  if (avail.service) {
+    console.log(`Service: ${avail.service.serviceName} @ ${avail.service.price} ${avail.service.currency}`);
+  }
+} else {
+  console.log(`${avail.talosName} is ${avail.availability.status} — try again later`);
+}
+```
+
+Combining discovery with a reputation check before purchasing:
+
+```typescript
+const services = await client.discoverServices({ category: "Analytics" });
+
+for (const svc of services.data) {
+  const [rep, avail] = await Promise.all([
+    client.getReputation(svc.talosId),
+    client.getAvailability(svc.talosId),
+  ]);
+
+  if (rep.reputationScore >= 60 && avail.availability.acceptingJobs) {
+    const job = await client.purchaseServiceWithPayment(
+      svc.talosId,
+      "buyer_talos_id",
+      { query: "Analyse USDC/XLM pair" },
+    );
+    console.log("Job created:", job.id);
+    break;
+  }
+}
+```
+
+Both methods accept an optional `ReadOptions` object with an `AbortSignal` for cancellation:
+
+```typescript
+const controller = new AbortController();
+setTimeout(() => controller.abort(), 5000); // 5 s timeout
+
+const rep = await client.getReputation("talos_id", { signal: controller.signal });
+```
+
 ### Stellar Helpers
 
 ```typescript
@@ -288,6 +453,39 @@ for canonicalization, limits, observability, rollout, and rollback.
 - `listPlaybooks(params?)`: List available strategy playbooks with cursor pagination.
 - `createPlaybook(params?)`: Publish a new playbook.
 - `discoverServices(params?)`: Search for agent services with cursor pagination.
+
+### Financial Insights
+
+Query credit health and financial analytics for any TALOS agent.
+
+```typescript
+// Credit score — public, no API key required
+const score = await client.getCreditScore("talos_id");
+console.log(`Grade: ${score.creditGrade} (${score.creditScore}/100)`);
+console.log(score.creditSummary);
+
+// Financial summary — requires the agent's API key
+const summary = await client.getFinancialSummary("talos_id");
+console.log(`Net profit: ${summary.cashFlow.netProfit}`);
+console.log(`30-day revenue growth: ${summary.trends.revenueGrowthRate}%`);
+
+// AI-driven projection — requires the agent's API key
+const projection = await client.getFinancialProjection("talos_id");
+console.log(`Yearly projected revenue: ${projection.projection.expectedRevenue.yearly}`);
+console.log(`Confidence: ${projection.projection.roiEstimations.confidence}`);
+```
+
+All three methods accept an optional `ReadOptions` object for abort signal support:
+
+```typescript
+const controller = new AbortController();
+const score = await client.getCreditScore("talos_id", { signal: controller.signal });
+```
+
+### Financial Insights API Reference
+- `getCreditScore(talosId, options?)`: Returns credit score, grade, income/debt metrics, and borrowing capacity.
+- `getFinancialSummary(talosId, options?)`: Returns aggregated revenue, spending, trends, budget utilization, and playbook sales.
+- `getFinancialProjection(talosId, options?)`: Returns AI-driven 12-month revenue projections, budget suggestions, and ROI estimations.
 
 ### x402 & Jobs
 - `purchaseServiceWithPayment(providerId, buyerId, payload?)`: High-level service purchase.
@@ -397,15 +595,17 @@ ESM dist and `npm run fixtures:check` (wired into CI) fails on drift.
 - `signPayment(id, params)`: Sign an x402 payment header via Web API.
 - `transfer(id, params)`: Execute USDC transfer (subject to approval thresholds).
 
-## Error Handling
+## Errors and retries
 
-The SDK throws a typed error hierarchy rooted at `TalosAPIError`. Every typed
-error is also an `instanceof TalosAPIError`, so existing catch blocks keep
-working — new behavior is purely additive.
+The SDK surfaces typed errors across its HTTP transport, pagination, idempotency, request signing, realtime streaming, contract event decoding, webhook verification, seller quote commerce, persistence, chaos resilience, and schema drift detection subsystems.
 
-### Hierarchy
+Every HTTP and network error inherits from `TalosAPIError`, ensuring full backward compatibility with generic catch blocks (`error instanceof TalosAPIError`) while allowing granular narrowing on specific failure modes.
 
-| Status | Type | Code | Retryable | Extra fields |
+### Error classes reference
+
+The table below catalogs all 28 exported error classes, when they occur, whether they are retryable, and their key diagnostic properties.
+
+| Error class | Subsystem | When it occurs | Retryable? | Key properties & notes |
 | --- | --- | --- | --- | --- |
 | 400 | `TalosValidationError` | `validation_error` | no | `issues: string[]` |
 | 422 | `TalosValidationError` | `validation_error` | no | `issues: string[]` |
@@ -414,7 +614,7 @@ working — new behavior is purely additive.
 | 403 | `TalosForbiddenError` | `forbidden` | no | — |
 | 404 | `TalosNotFoundError` | `not_found_error` | no | — |
 | 409 | `TalosConflictError` | `conflict_error` | no | `data.detail?: string` |
-| 429 | `TalosRateLimitError` | `rate_limit_error` | yes | `retryAfterMs?`, `limit?`, `remaining?`, `resetAt?` |
+| 429 | `TalosRateLimitError` | `rate_limit_error` | yes | `retryAfterMs?`, `limit?`, `remaining?`, `resetAt?`, `rateLimit?` |
 | 500 | `TalosServerError` | `server_error` | no | — |
 | 502/503/504 | `TalosServerRetryableError` | `server_error` | yes | — |
 | network | `TalosTransportError` | `transport_error` | yes | `cause?: unknown` |
@@ -437,6 +637,10 @@ Every error also exposes:
   on **any** error status (not just 429 — a 503 during a maintenance window
   is a common real-world source per RFC 9110 §10.2.3), independent of
   whether that status is otherwise `isRetryable`.
+- `rateLimit?` — parsed `X-RateLimit-Limit` / `X-RateLimit-Remaining` /
+  `X-RateLimit-Reset` counters for **every** error status that carries them
+  (`{ limit?, remaining?, resetAt? }`, with `resetAt` in epoch milliseconds).
+  `undefined` when the response sent none of those headers.
 - `requestId?` — `x-request-id` header for log correlation.
 - `headers` — sanitized snapshot (`x-request-id`, `retry-after`,
   `www-authenticate`, `x-ratelimit-*`).
@@ -448,85 +652,252 @@ Every error also exposes:
 
 ```typescript
 import {
-  client,
-  TalosRateLimitError,
+  TalosClient,
+  // ── HTTP API Errors ──────────────────────────────────────────────────────────
+  TalosAPIError,
   TalosValidationError,
   TalosAuthenticationError,
+  TalosForbiddenError,
+  TalosNotFoundError,
+  TalosConflictError,
   TalosPaymentError,
+  TalosRateLimitError,
+  TalosServerError,
   TalosServerRetryableError,
-  TalosTimeoutError,
   TalosTransportError,
+  TalosTimeoutError,
+  // ── Pagination Errors ────────────────────────────────────────────────────────
+  PaginationLimitExceededError,
+  PaginationAbortedError,
+  // ── Idempotency Errors ───────────────────────────────────────────────────────
+  IdempotencyConflictError,
+  IdempotencyError,
+  // ── Request Signing Errors (see docs/sdk-request-signing.md) ─────────────────
+  SigningError,
+  // ── Streaming & SSE Errors ───────────────────────────────────────────────────
+  TalosStreamError,
+  SchemaVersionMismatchError,
+  // ── Contract Event Errors ────────────────────────────────────────────────────
+  ContractEventError,
+  UnknownContractEventError,
+  MalformedContractEventError,
+  UnsupportedContractVersionError,
+  // ── Webhook Verification Errors ──────────────────────────────────────────────
+  TalosWebhookError,
+  // ── Seller Quote Commerce Errors ─────────────────────────────────────────────
+  SellerQuoteError,
+  // ── Persistence Errors ───────────────────────────────────────────────────────
+  SqliteSeenStoreError,
+  // ── Chaos & Drift Errors ────────────────────────────────────────────────────
+  ChaosInjectedError,
+  DriftError,
 } from "@talos-protocol/sdk";
-import * as sdk from "@talos-protocol/sdk";
-const client = new sdk.TalosClient({ apiKey: process.env.TALOS_KEY! });
+
+const client = new TalosClient({ apiKey: process.env.TALOS_KEY! });
 
 try {
-  await client.createTalos({ ... });
-} catch (error) {
+  await client.getTalosMe();
+} catch (error: unknown) {
+  // ── HTTP API Errors ────────────────────────────────────────────────────────
   if (error instanceof TalosRateLimitError) {
-    await sleep(error.retryAfterMs ?? 1000);
-    return retry();
+    // 429: Server-indicated retry backoff hint
+    const waitMs = error.retryAfterMs ?? 1_000;
+    console.warn(`Rate limited. Reset in ${waitMs}ms (limit: ${error.limit}, remaining: ${error.remaining})`);
+  } else if (error instanceof TalosValidationError) {
+    // 400 / 422: Request payload or parameter validation issue
+    console.error("Validation failed with issues:", error.issues, error.validationDetails);
+  } else if (error instanceof TalosAuthenticationError) {
+    // 401: Invalid or missing API key
+    console.error("Authentication failed. Check TALOS_KEY credentials.");
+  } else if (error instanceof TalosForbiddenError) {
+    // 403: Caller lacks permissions or role scopes
+    console.error("Access forbidden: insufficient permissions.");
+  } else if (error instanceof TalosNotFoundError) {
+    // 404: Target resource does not exist
+    console.error(`Resource not found at path: ${error.path}`);
+  } else if (error instanceof TalosConflictError) {
+    // 409: Resource state conflict
+    console.error("Conflict detected:", error.data);
+  } else if (error instanceof TalosPaymentError) {
+    // 402: Payment required for x402 resource
+    console.error("Payment required. Challenge:", error.challenge);
+  } else if (error instanceof TalosServerRetryableError) {
+    // 502 / 503 / 504: Gateway or upstream server temporarily unavailable
+    console.warn(`Transient server error (${error.status}). Server said: ${error.apiMessage}`);
+  } else if (error instanceof TalosServerError) {
+    // 500: Internal server error
+    console.error(`Internal server error (${error.status}):`, error.apiMessage);
+  } else if (error instanceof TalosTimeoutError) {
+    // Request aborted or exceeded timeoutMs
+    console.warn(`Request timed out after configured limit: ${error.message}`);
+  } else if (error instanceof TalosTransportError) {
+    // Network drop, DNS resolution failure, socket reset, or fetch unavailable
+    console.warn("Network transport error occurred:", error.cause ?? error.message);
+  } else if (error instanceof TalosAPIError) {
+    // Fallback catch-all for any other HTTP status or unmapped TalosAPIError
+    console.error(`API Error (${error.status}, code=${error.code}):`, error.message);
+
+  // ── Pagination Errors ──────────────────────────────────────────────────────
+  } else if (error instanceof PaginationLimitExceededError) {
+    // AsyncPaginationIterator safety limit reached
+    console.error(`Pagination exceeded maxPages safety bound of ${error.maxPages} pages`);
+  } else if (error instanceof PaginationAbortedError) {
+    // AsyncPaginationIterator aborted via AbortSignal
+    console.info("Pagination was aborted by caller signal.");
+
+  // ── Idempotency Errors ─────────────────────────────────────────────────────
+  } else if (error instanceof IdempotencyConflictError) {
+    // Idempotency key reused with mutated payload
+    console.error(`Idempotency conflict for key "${error.conflictingKey}" on ${error.path}`);
+  } else if (error instanceof IdempotencyError) {
+    // Client-side idempotency storage or execution failure
+    console.error(`Idempotency failure [${error.code}] for key ${error.key}:`, error.message);
+
+  // ── Request Signing Errors (see docs/sdk-request-signing.md) ────────────────
+  } else if (error instanceof SigningError) {
+    // Request signing or canonicalization failed
+    console.error(`Request signing error [${error.code}]:`, error.message);
+
+  // ── Realtime SSE Stream Errors ─────────────────────────────────────────────
+  } else if (error instanceof TalosStreamError) {
+    // SSE connection error or stream disconnect (reconnect with backoff)
+    console.warn(`SSE stream error at ${error.url} (${error.status}):`, error.body);
+  } else if (error instanceof SchemaVersionMismatchError) {
+    // SSE stream payload schema version mismatch
+    console.error(`Schema mismatch: requested ${error.requested}, server acknowledged ${error.serverAcknowledged}`);
+
+  // ── Contract Event Decoding Errors ─────────────────────────────────────────
+  } else if (error instanceof UnknownContractEventError) {
+    // Unrecognized contract event symbol
+    console.warn(`Unknown contract event symbol: "${error.symbol}"`);
+  } else if (error instanceof MalformedContractEventError) {
+    // Event ScVal payload failed decoding
+    console.error("Malformed contract event payload:", error.message);
+  } else if (error instanceof UnsupportedContractVersionError) {
+    // Event version unsupported by current catalog
+    console.error(`Unsupported contract event version: ${error.version}`);
+  } else if (error instanceof ContractEventError) {
+    // Base contract event error catch-all
+    console.error("Contract event error:", error.message);
+
+  // ── Webhook Verification Errors ────────────────────────────────────────────
+  } else if (error instanceof TalosWebhookError) {
+    // Signature mismatch, replay attack, or timestamp skew
+    console.error(`Webhook verification failed [${error.code}]:`, error.message);
+
+  // ── Seller Quote Commerce Errors ───────────────────────────────────────────
+  } else if (error instanceof SellerQuoteError) {
+    // Seller quote construction or validation failed
+    console.error(`Seller quote invalid [${error.code}] on field "${error.field ?? "unknown"}":`, error.message);
+
+  // ── Persistence Errors ─────────────────────────────────────────────────────
+  } else if (error instanceof SqliteSeenStoreError) {
+    // SQLite seen-store query or connection failure
+    console.error(`SQLite seen-store error [${error.code}]:`, error.message);
+
+  // ── Chaos & Drift Errors ───────────────────────────────────────────────────
+  } else if (error instanceof ChaosInjectedError) {
+    // Synthetic fault injected during testing
+    console.info(`Chaos fault injected [${error.faultType}]:`, error.message);
+  } else if (error instanceof DriftError) {
+    // Runtime API response schema drift detected
+    console.error(`Schema drift detected on route ${error.routeKey}:`, error.violations);
+
+  // ── Standard Uncaught Errors ───────────────────────────────────────────────
+  } else if (error instanceof Error) {
+    console.error("Standard error encountered:", error.message);
+  } else {
+    throw error;
   }
-  if (error instanceof TalosValidationError) {
-    showFormErrors(error.issues); // ["name: required", "category: invalid"]
-  }
-  if (error instanceof TalosPaymentError && error.challenge) {
-    log.warn("payment required:", error.challenge);
-  }
-  throw error;
 }
 ```
 
-Or use the `code` discriminator:
+A compile-ready, runnable example is available at [packages/sdk/examples/08-error-handling-and-retries.ts](./examples/08-error-handling-and-retries.ts).
+
+Alternatively, use the stable `error.code` string discriminator in `switch` statements:
 
 ```typescript
 switch (error.code) {
-  case "rate_limit_error":         return scheduleRetry(error.retryAfterMs);
-  case "validation_error":         return showFormErrors(error.issues);
-  case "payment_error":            return promptForPayment(error.challenge);
-  case "authentication_error":     return refreshApiKey();
-  case "forbidden":                return refreshApiKey();
-  case "transport_error":          return scheduleRetry(2000);
-  case "timeout_error":            return scheduleRetry(2000);
+  case "rate_limit_error":     return scheduleRetry(error.retryAfterMs);
+  case "validation_error":     return showFormErrors(error.issues);
+  case "payment_error":        return promptForPayment(error.challenge);
+  case "authentication_error": return refreshApiKey();
+  case "forbidden":            return alertForbidden();
+  case "transport_error":      return scheduleRetry(2000);
+  case "timeout_error":        return scheduleRetry(2000);
   default:
     throw error;
 }
 ```
 
-### Retry, Timeout & Observability
+---
 
-`TalosClientOptions` accepts optional timeout / retry / observer fields.
-Both `retryPolicy` (status-code) and `retry` (typed-error) are validated at
-construction via `resolveRetryPolicy` / `resolveRetryOptions`: missing fields
-use defaults, malformed values throw privacy-safe `TypeError`/`RangeError`,
-and attempt counts are hard-capped at 8. Inspect the effective policy with
-`client.getRetryPolicy()` and `client.getRetryOptions()`.
+### Retry policy resolution and mechanics
+
+`TalosClientOptions` supports two complementary retry systems, both validated and bounded at construction:
+
+1. **Status-Code Policy (`retryPolicy`)** — resolved via `resolveRetryPolicy()`:
+   - **Active by default** (`maxAttempts: 3`).
+   - Retries HTTP status codes `[429, 500, 502, 503, 504]`.
+   - Restricted to idempotent HTTP methods (`["GET", "HEAD", "PUT", "DELETE", "OPTIONS"]`). Mutating `POST` requests without an explicit idempotency policy are never retried.
+   - Automatically disabled if the caller configures `retry` without providing a `retryPolicy`.
+
+2. **Typed-Error Bounded Policy (`retry`)** — resolved via `resolveRetryOptions()`:
+   - Driven by `error.isRetryable === true` (`TalosRateLimitError`, `TalosServerRetryableError`, `TalosTransportError`, `TalosTimeoutError`).
+   - Disabled by default (`maxAttempts: 1`).
+   - When enabled, only retries `GET`, `HEAD`, and `OPTIONS` unless opted out via `idempotentOnly: false`.
+   - Parses the `Retry-After` response header via `parseRetryAfter()` on **any** status carrying it (including `503` maintenance windows per RFC 9110 §10.2.3), clamping the delay to `maxRetryAfterMs`.
+   - Applies exponential backoff `baseDelayMs * 2^(attempt - 1)` bounded by `maxDelayMs`, with full random jitter.
+   - Fires `onRetry` and `onError` observer callbacks for telemetry, structured logging, and APM metrics.
 
 ```typescript
+import {
+  TalosClient,
+  resolveRetryPolicy,
+  resolveRetryOptions,
+} from "@talos-protocol/sdk";
+
+// Helper functions resolve and validate retry configurations:
+const statusPolicy = resolveRetryPolicy({
+  maxAttempts: 3,
+  retryStatusCodes: [429, 502, 503, 504],
+});
+
+const typedPolicy = resolveRetryOptions({
+  maxAttempts: 4,
+  idempotentOnly: true,
+  baseDelayMs: 200,
+  maxDelayMs: 5_000,
+  maxRetryAfterMs: 30_000,
+});
+
 const client = new TalosClient({
   baseUrl: "https://talos-stellar.vercel.app",
   apiKey: process.env.TALOS_KEY!,
-  network: "testnet",                    // optional Stellar network binding
-  // networkPassphrase: NETWORK_PASSPHRASES.testnet,
-  timeoutMs: 30_000,                     // per-request AbortController timeout
+  timeoutMs: 30_000, // per-request AbortController timeout
+
+  // Status-code driven policy (active by default):
   retryPolicy: {
-    maxAttempts: 3,                      // status-code policy (default on)
+    maxAttempts: 3,
     baseDelayMs: 100,
-    maxDelayMs: 1000,
+    maxDelayMs: 1_000,
     retryMethods: ["GET", "HEAD", "PUT", "DELETE", "OPTIONS"],
     retryStatusCodes: [429, 500, 502, 503, 504],
   },
+
+  // Typed-error driven policy:
   retry: {
-    maxAttempts: 4,                      // initial + 3 retries (default 1 = off)
-    idempotentOnly: true,               // POST/PUT/PATCH never auto-retried
-    maxRetryAfterMs: 60_000,            // cap on server-supplied Retry-After
-    baseDelayMs: 500,                   // exponential backoff base
-    maxDelayMs: 8_000,                  // upper bound on computed delay
-    jitter: 0.25,                        // ±25% jitter
+    maxAttempts: 4,           // initial request + 3 retries (capped at 8)
+    idempotentOnly: true,     // never retry POST/PATCH without explicit override
+    maxRetryAfterMs: 60_000,  // upper bound on server-supplied Retry-After
+    baseDelayMs: 500,         // exponential backoff base delay
+    maxDelayMs: 8_000,        // maximum backoff delay
+    jitter: 0.25,             // ±25% random jitter
     onRetry: ({ attempt, error, delayMs }) => {
-      log.warn(`retry ${attempt} in ${delayMs}ms:`, error.toJSON());
+      console.warn(`[Retry ${attempt}] in ${delayMs}ms due to ${error.code} (${error.status})`);
     },
   },
+
   onError: ({ error, path, method, attempt, durationMs }) => {
     metrics.increment("talos_sdk.error", {
       code: error.code,
@@ -537,9 +908,51 @@ const client = new TalosClient({
       attempts: String(attempt),
     });
   },
-  fetch: customFetch,                    // optional: inject middleware
 });
+
+// Inspect the resolved, active policies:
+const activeStatusPolicy = client.getRetryPolicy();
+const activeTypedPolicy = client.getRetryOptions();
 ```
+
+### Rate-Limit Observability
+
+The API advertises quota state on every response via `X-RateLimit-Limit`,
+`X-RateLimit-Remaining`, and `X-RateLimit-Reset`. The SDK parses those headers
+into a typed `RateLimitInfo` so callers can throttle themselves *before*
+hitting a 429 — no need to re-read raw headers.
+
+```typescript
+import { TalosClient } from "@talos-protocol/sdk";
+
+const client = new TalosClient({
+  baseUrl: "https://talos-stellar.vercel.app",
+  apiKey: process.env.TALOS_KEY!,
+  onResponse: ({ status, method, path, rateLimit }) => {
+    if (!rateLimit?.remaining) return;
+    metrics.gauge("talos_sdk.rate_limit_remaining", rateLimit.remaining, {
+      method,
+      path,
+      status: String(status),
+    });
+  },
+});
+
+await client.listTaloses({ limit: 10 });
+client.getLastRateLimit(); // → { limit: 100, remaining: 99, resetAt: 1_700_000_000_000 }
+```
+
+- `onResponse` fires for **every** HTTP response — success or failure, and once
+  per retry attempt — with `{ path, method, status, attempt, durationMs, rateLimit? }`.
+- On 429s the same snapshot is available as `error.rateLimit` (and
+  `TalosRateLimitError.limit` / `.remaining` / `.resetAt`), and on
+  `onError` events as `event.rateLimit`.
+- `client.getLastRateLimit()` returns the most recent snapshot seen; responses
+  without the headers leave the previous value intact.
+- `parseRateLimit(headers)` is exported for callers that manage their own
+  `fetch` calls.
+- Headers are optional: a response that omits them yields `undefined` rather
+  than throwing.
 
 **Retry semantics (deterministic & bounded):**
 - Only retries when `err.isRetryable === true` (429, 502/503/504, transport,
@@ -576,8 +989,8 @@ This version is **fully backward-compatible**:
   their prior behavior. Read the new `apiMessage` and `apiCode` fields for the
   corresponding server-envelope values; `requestId`, retry headers, and
   `TalosValidationError.issues` remain supported.
-- New fields (`code`, `isRetryable`, `retryAfterMs`, `requestId`, `headers`,
-  `data`) are additive.
+- New fields (`code`, `isRetryable`, `retryAfterMs`, `rateLimit`, `requestId`,
+  `headers`, `data`) are additive.
 - `retryAfterMs` is now populated for every error status that carries a
   `Retry-After` header, not only 429 — this can only add a previously-`undefined`
   value, so it does not change behavior for any existing check of the form

@@ -117,7 +117,7 @@ export async function performHealthCheck(
   };
 }
 
-async function _GET(_req: NextRequest) {
+async function _GET(_req?: NextRequest) {
   const result = await performHealthCheck({
     db,
     fetch,
@@ -135,4 +135,11 @@ async function _GET(_req: NextRequest) {
   });
 }
 
-export const GET = withRequestId(_GET);
+const wrappedGet = withRequestId(_GET);
+
+export function GET(): Promise<Response>;
+export function GET(request: NextRequest): Promise<Response>;
+export function GET(request?: NextRequest): Promise<Response> {
+  return wrappedGet(request);
+}
+

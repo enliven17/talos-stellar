@@ -39,9 +39,9 @@ import type {
   DriftViolation,
 } from "./types.js";
 
-type RouteHandler = (
+type RouteHandler<Params = any> = (
   req: NextRequest,
-  ctx: { params: Promise<Record<string, string>> },
+  ctx?: { params?: Promise<Params> } | any,
 ) => Promise<Response>;
 
 // ── Global registry and config ────────────────────────────────────────────────
@@ -114,12 +114,13 @@ function getConfig(): RDC {
  * @param handler   The original Next.js route handler
  * @param override  Per-route config override (optional)
  */
-export function withDriftDetection(
+export function withDriftDetection<H extends (req: NextRequest, ctx?: any) => Promise<Response>>(
   routeKey: string,
-  handler: RouteHandler,
+  handler: H,
   override?: Partial<DriftConfig>,
-): RouteHandler {
-  return async (req, ctx) => {
+): H {
+  return (async (req: NextRequest, ctx?: any) => {
+
     const config = override ? resolveConfig(override) : getConfig();
     const requestId = req.headers.get("x-request-id") ?? "unknown";
 
@@ -219,8 +220,9 @@ export function withDriftDetection(
     // mode === "warn"
     recordWarn(requestId, routeKey, violations);
     return handler(rebuildRequest(req, rawBody), ctx);
-  };
+  }) as unknown as H;
 }
+
 
 // ── Body re-injection ─────────────────────────────────────────────────────────
 

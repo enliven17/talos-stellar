@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react";
+import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from "react";
 import { StellarWalletsKit, Networks } from "@creit.tech/stellar-wallets-kit";
 import { FreighterModule, FREIGHTER_ID } from "@creit.tech/stellar-wallets-kit/modules/freighter";
 import { AlbedoModule, ALBEDO_ID } from "@creit.tech/stellar-wallets-kit/modules/albedo";
@@ -69,7 +69,15 @@ export function useStellarWallet(): WalletContextValue {
   return useContext(WalletContext);
 }
 
-export function Providers({ children }: { children: ReactNode }) {
+import { I18nProvider, type SupportedLocale } from "@/lib/i18n";
+
+export function Providers({
+  children,
+  initialLocale,
+}: {
+  children: ReactNode;
+  initialLocale?: SupportedLocale;
+}) {
   const [publicKey, setPublicKey] = useState<string | null>(null);
   const [showWalletModal, setShowWalletModal] = useState(false);
 
@@ -123,27 +131,29 @@ export function Providers({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <WalletContext.Provider
-      value={{
-        kit: StellarWalletsKit,
-        publicKey,
-        isConnected: !!publicKey,
-        connect,
-        disconnect,
-        signTransaction,
-        signMessage,
-        showWalletModal,
-        setShowWalletModal,
-        selectWallet,
-      }}
-    >
-      {children}
-      <WalletModal
-        open={showWalletModal}
-        onClose={() => setShowWalletModal(false)}
-        onSelect={selectWallet}
-      />
-    </WalletContext.Provider>
+    <I18nProvider initialLocale={initialLocale}>
+      <WalletContext.Provider
+        value={{
+          kit: StellarWalletsKit,
+          publicKey,
+          isConnected: !!publicKey,
+          connect,
+          disconnect,
+          signTransaction,
+          signMessage,
+          showWalletModal,
+          setShowWalletModal,
+          selectWallet,
+        }}
+      >
+        {children}
+        <WalletModal
+          open={showWalletModal}
+          onClose={() => setShowWalletModal(false)}
+          onSelect={selectWallet}
+        />
+      </WalletContext.Provider>
+    </I18nProvider>
   );
 }
 
@@ -158,6 +168,71 @@ function WalletModal({
 }) {
   const [connecting, setConnecting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const modalRef = useRef<HTMLDivElement>(null);
+  const firstWalletButtonRef = useRef<HTMLButtonElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const previousActiveElementRef = useRef<HTMLElement | null>(null);
+
+  // Focus management: move focus to first wallet option on open
+  useEffect(() => {
+    if (open) {
+      previousActiveElementRef.current = document.activeElement as HTMLElement;
+      // Small delay to ensure the modal is rendered
+      const timer = setTimeout(() => {
+        firstWalletButtonRef.current?.focus();
+      }, 50);
+      return () => clearTimeout(timer);
+    } else {
+      // Restore focus to the trigger on close
+      const timer = setTimeout(() => {
+        previousActiveElementRef.current?.focus();
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [open]);
+
+  // Focus trap: keep focus within the modal
+  useEffect(() => {
+    if (!open || !modalRef.current) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+
+      if (e.key !== "Tab") return;
+
+      const focusableElements = modalRef.current?.querySelectorAll<
+        HTMLElement
+      >(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      );
+
+      if (!focusableElements || focusableElements.length === 0) return;
+
+      const firstElement = focusableElements[0];
+      const lastElement = focusableElements[focusableElements.length - 1];
+
+      if (e.shiftKey) {
+        // Shift+Tab: if focus is on first element, move to last
+        if (document.activeElement === firstElement) {
+          e.preventDefault();
+          lastElement.focus();
+        }
+      } else {
+        // Tab: if focus is on last element, move to first
+        if (document.activeElement === lastElement) {
+          e.preventDefault();
+          firstElement.focus();
+        }
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [open, onClose]);
 
   if (!open) return null;
 
@@ -174,6 +249,10 @@ function WalletModal({
 
   return (
     <div
+      ref={modalRef}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="wallet-modal-title"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
       onClick={onClose}
       data-testid="wallet-modal"
@@ -186,11 +265,18 @@ function WalletModal({
         <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <div>
             <div className="text-xs text-muted tracking-widest mb-0.5">[WALLET SELECT]</div>
-            <div className="text-sm font-semibold text-foreground">Connect Wallet</div>
+            <div
+              id="wallet-modal-title"
+              className="text-sm font-semibold text-foreground"
+            >
+              Connect Wallet
+            </div>
           </div>
           <button
+            ref={closeButtonRef}
             onClick={onClose}
             data-testid="wallet-modal-close-button"
+            aria-label="Close wallet selection"
             className="text-muted hover:text-foreground transition-colors text-lg leading-none"
           >
             ×
@@ -199,9 +285,10 @@ function WalletModal({
 
         {/* Wallet list */}
         <div className="p-3 space-y-1">
-          {WALLET_OPTIONS.map((w) => (
+          {WALLET_OPTIONS.map((w, index) => (
             <button
               key={w.id}
+              ref={index === 0 ? firstWalletButtonRef : undefined}
               onClick={() => handleSelect(w.id)}
               disabled={!!connecting}
               data-testid={`wallet-option-${w.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
@@ -225,7 +312,10 @@ function WalletModal({
 
         {/* Error */}
         {error && (
-          <div className="mx-3 mb-3 px-4 py-2 bg-red-950/30 border border-red-900/40 text-red-400 text-xs">
+          <div
+            role="alert"
+            className="mx-3 mb-3 px-4 py-2 bg-red-950/30 border border-red-900/40 text-red-400 text-xs"
+          >
             {error}
           </div>
         )}

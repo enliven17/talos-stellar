@@ -570,7 +570,11 @@ export class TalosEventStream {
           attempt: this.reconnectAttempt,
           delayMs: delay,
         });
-        await this._sleep(delay);
+        try {
+          await this._sleep(delay);
+        } catch {
+          if (this.state === StreamState.Closed) break;
+        }
       }
     }
 
