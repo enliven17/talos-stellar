@@ -82,7 +82,7 @@ describe("AgentEmptyState / AgentErrorState element contracts", () => {
   function findTestId(node: unknown, id: string): unknown {
     if (!node || typeof node !== "object") return null;
     const n = node as { props?: Record<string, unknown> };
-    if (n.props?.["data-testid"] === id) return n;
+    if (n.props?.["testid"] === id) return n;
     const kids = n.props?.children;
     if (Array.isArray(kids)) {
       for (const k of kids) {

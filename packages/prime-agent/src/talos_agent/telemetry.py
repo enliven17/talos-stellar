@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from talos_agent.circuit_breaker import CircuitBreakerRegistry
+from talos_agent.redact import is_sensitive_key as _is_sensitive_key
 
 logger = logging.getLogger(__name__)
 

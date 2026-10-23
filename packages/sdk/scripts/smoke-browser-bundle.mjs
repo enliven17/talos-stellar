@@ -15,6 +15,9 @@ const windowLike = {
   TextDecoder,
 };
 const globalThisLike = windowLike;
+windowLike.window = windowLike;
+windowLike.self = windowLike;
+windowLike.globalThis = globalThisLike;
 const context = {
   // Mimic a browser's globals. We deliberately do NOT expose Buffer, require,
   // __dirname, etc. — this catches accidental Node-only usage in the SDK's

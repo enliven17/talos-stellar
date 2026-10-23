@@ -27,6 +27,8 @@ import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { Keypair, StrKey, Networks } from "@stellar/stellar-sdk";
 
+import { Keypair, StrKey, Networks } from "@stellar/stellar-sdk";
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SDK_ROOT = resolve(__dirname, "..");
 const ESM_DIR = resolve(SDK_ROOT, "dist", "esm");
