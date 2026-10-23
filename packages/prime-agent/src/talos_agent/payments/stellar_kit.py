@@ -162,7 +162,7 @@ class StellarKit:
             try:
                 r = await request_with_retry(
                     lambda: client.get(f"{_HORIZON_URL}/accounts/{acct}"),
-                    provider="talos_web_api",
+                    provider="stellar_horizon",
                 )
             finally:
                 if close_after:
@@ -268,7 +268,7 @@ class StellarKit:
             try:
                 r = await request_with_retry(
                     lambda: client.get(f"{_HORIZON_URL}/accounts/{account_id}"),
-                    provider="talos_web_api",
+                    provider="stellar_horizon",
                 )
             finally:
                 if close_after:
