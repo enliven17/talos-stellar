@@ -20,7 +20,7 @@ export function HeroClient() {
     let cols = 0;
     let rows = 0;
 
-    function resize() {
+    function applyResize() {
       const rect = canvas!.getBoundingClientRect();
       W = rect.width;
       H = rect.height;
@@ -31,11 +31,11 @@ export function HeroClient() {
       rows = Math.floor(H / fontSize);
     }
 
-    resize();
-    window.addEventListener("resize", resize);
+    applyResize();
 
     let frame = 0;
-    let animId: number;
+    let animId: number | null = null;
+    let resizeRafId: number | null = null;
 
     // Canvas cannot use CSS variables directly, so the page background is read
     // from the active theme. It is refreshed twice a second rather than every
@@ -79,20 +79,112 @@ export function HeroClient() {
           ctx!.fillText(chars[idx], x * fontSize * 0.6, y * fontSize + fontSize);
         }
       }
-      frame++;
-      animId = requestAnimationFrame(draw);
     }
 
-    draw();
+    function tick() {
+      if (!shouldAnimate()) {
+        animId = null;
+        return;
+      }
+      drawFrame();
+      frame++;
+      animId = requestAnimationFrame(tick);
+    }
+
+    function startLoop() {
+      if (animId !== null) return;
+      animId = requestAnimationFrame(tick);
+    }
+
+    function stopLoop() {
+      if (animId !== null) {
+        cancelAnimationFrame(animId);
+        animId = null;
+      }
+    }
+
+    function syncPlayback() {
+      if (shouldAnimate()) {
+        startLoop();
+      } else {
+        stopLoop();
+        if (prefersReducedMotion) {
+          drawFrame();
+        }
+      }
+    }
+
+    function handleResize() {
+      if (resizeRafId !== null) return;
+      resizeRafId = requestAnimationFrame(() => {
+        resizeRafId = null;
+        applyResize();
+        if (!shouldAnimate()) {
+          drawFrame();
+        }
+      });
+    }
+
+    window.addEventListener("resize", handleResize);
+
+    const handleVisibilityChange = () => {
+      isTabVisible = document.visibilityState !== "hidden";
+      syncPlayback();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    const handleMotionChange = (e: MediaQueryListEvent | MediaQueryList) => {
+      prefersReducedMotion = e.matches;
+      syncPlayback();
+    };
+    if (motionMediaQuery) {
+      if (typeof motionMediaQuery.addEventListener === "function") {
+        motionMediaQuery.addEventListener("change", handleMotionChange);
+      } else if (typeof (motionMediaQuery as any).addListener === "function") {
+        (motionMediaQuery as any).addListener(handleMotionChange);
+      }
+    }
+
+    let observer: IntersectionObserver | null = null;
+    if (typeof IntersectionObserver !== "undefined") {
+      observer = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (!entry.target || entry.target === canvas) {
+            isIntersecting = entry.isIntersecting;
+            syncPlayback();
+          }
+        }
+      });
+      observer.observe(canvas);
+    }
+
+    syncPlayback();
+
     return () => {
-      cancelAnimationFrame(animId);
-      window.removeEventListener("resize", resize);
+      stopLoop();
+      if (resizeRafId !== null) {
+        cancelAnimationFrame(resizeRafId);
+        resizeRafId = null;
+      }
+      window.removeEventListener("resize", handleResize);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      if (motionMediaQuery) {
+        if (typeof motionMediaQuery.removeEventListener === "function") {
+          motionMediaQuery.removeEventListener("change", handleMotionChange);
+        } else if (typeof (motionMediaQuery as any).removeListener === "function") {
+          (motionMediaQuery as any).removeListener(handleMotionChange);
+        }
+      }
+      if (observer) {
+        observer.disconnect();
+      }
     };
   }, []);
 
   return (
     <canvas
       ref={canvasRef}
+      aria-hidden="true"
       className="absolute inset-0 w-full h-full opacity-60"
     />
   );
