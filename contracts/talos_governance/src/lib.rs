@@ -1,5 +1,6 @@
 #![allow(unused)]
 //! TalosGovernance - Soroban smart contract for token-weighted governance.
+//! TalosGovernance - Soroban smart contract for token-weighted governance.
 //!
 //! ## What's new in this branch (#606)
 //! - `EventProposalCreated` typed struct — replaces raw tuple publish for prop_crt
