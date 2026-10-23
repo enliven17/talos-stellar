@@ -245,6 +245,25 @@ export const OPERATOR_PUBLIC_KEY = isClient
      process.env.NEXT_PUBLIC_STELLAR_OPERATOR_PUBLIC_KEY ||
      "GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL");
 
+// ── Explorer URL ───────────────────────────────────────────────────────────
+
+/**
+ * Configured Stellar explorer URL for transaction links.
+ * Defaults to stellar.expert testnet.
+ */
+export const STELLAR_EXPLORER_URL = process.env.NEXT_PUBLIC_STELLAR_EXPLORER_URL || "https://stellar.expert/explorer/testnet";
+
+/**
+ * Returns the explorer URL for a given transaction hash.
+ * Returns null if the hash is invalid (not 64 hex characters).
+ */
+export function explorerTxUrl(hash: string | null | undefined): string | null {
+  if (!hash) return null;
+  // Stellar transaction hashes are 64 hex characters
+  if (!/^[a-fA-F0-9]{64}$/.test(hash)) return null;
+  return `${STELLAR_EXPLORER_URL}/tx/${hash}`;
+}
+
 // Throw at module load if a required env var is missing in production
 if (isProd && !isNextBuild) {
   if (isClient) {

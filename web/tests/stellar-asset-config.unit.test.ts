@@ -5,6 +5,7 @@ import {
   StellarConfigError,
   resolveStellarAssetConfig,
   validateStellarAssetConfig,
+  explorerTxUrl,
   type StellarAssetConfigIssueCode,
   type StellarAssetEnv,
 } from "../src/lib/stellar-config";
@@ -225,6 +226,43 @@ describe("resolveStellarAssetConfig", () => {
     expect(configError.issues.map((issue) => issue.code)).toEqual(["issuer_network_mismatch"]);
     expect(configError.message).toContain("[issuer_network_mismatch]");
     expect(configError.message).toContain("STELLAR_USDC_ISSUER");
+  });
+});
+
+describe("explorerTxUrl", () => {
+  it("returns the full explorer URL for a valid 64-char hex hash", () => {
+    const hash = "a".repeat(64);
+    expect(explorerTxUrl(hash)).toBe("https://stellar.expert/explorer/testnet/tx/" + hash);
+  });
+
+  it("returns null for null or undefined hash", () => {
+    expect(explorerTxUrl(null)).toBe(null);
+    expect(explorerTxUrl(undefined)).toBe(null);
+  });
+
+  it("returns null for empty string hash", () => {
+    expect(explorerTxUrl("")).toBe(null);
+  });
+
+  it("returns null for hash with invalid length", () => {
+    expect(explorerTxUrl("abc")).toBe(null);
+    expect(explorerTxUrl("a".repeat(63))).toBe(null);
+    expect(explorerTxUrl("a".repeat(65))).toBe(null);
+  });
+
+  it("returns null for hash with non-hex characters", () => {
+    expect(explorerTxUrl("g".repeat(64))).toBe(null);
+    expect(explorerTxUrl("a".repeat(32) + "z" + "a".repeat(31))).toBe(null);
+  });
+
+  it("accepts uppercase hex characters", () => {
+    const hash = "A".repeat(32) + "B".repeat(32);
+    expect(explorerTxUrl(hash)).toBe("https://stellar.expert/explorer/testnet/tx/" + hash);
+  });
+
+  it("accepts mixed case hex characters", () => {
+    const hash = "aBcDeF".repeat(10) + "0123456789abcdef";
+    expect(explorerTxUrl(hash)).toBe("https://stellar.expert/explorer/testnet/tx/" + hash);
   });
 });
 

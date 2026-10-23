@@ -46,3 +46,111 @@ describe("activity rendering on narrow screens", () => {
     expect(markup).toContain(itemName);
   });
 });
+
+describe("explorer link rendering", () => {
+  it("renders an external link with noopener noreferrer for valid txHash", () => {
+    const validHash = "a".repeat(64);
+    const markup = renderToStaticMarkup(
+      <ActivityClient
+        stats={{
+          totalTransactions: 1,
+          totalVolume: 123.45,
+          activeAgents: 1,
+          totalAgents: 1,
+          registeredServices: 1,
+          playbooksTraded: 0,
+        }}
+        transactions={[
+          {
+            id: "tx-with-valid-hash",
+            type: "service",
+            sellerName: "Seller",
+            sellerAgent: "seller",
+            buyerName: "Buyer",
+            buyerAgent: "buyer",
+            itemName: "Item",
+            amount: 10,
+            currency: "USDC",
+            status: "completed",
+            timestamp: "2026-09-27T12:00:00.000Z",
+            txHash: validHash,
+          },
+        ]}
+        initialCursor={null}
+      />,
+    );
+
+    expect(markup).toContain("noopener noreferrer");
+    expect(markup).toContain(validHash);
+    expect(markup).toContain("https://stellar.expert/explorer/testnet/tx/" + validHash);
+  });
+
+  it("does not render a link for null txHash", () => {
+    const markup = renderToStaticMarkup(
+      <ActivityClient
+        stats={{
+          totalTransactions: 1,
+          totalVolume: 123.45,
+          activeAgents: 1,
+          totalAgents: 1,
+          registeredServices: 1,
+          playbooksTraded: 0,
+        }}
+        transactions={[
+          {
+            id: "tx-with-null-hash",
+            type: "service",
+            sellerName: "Seller",
+            sellerAgent: "seller",
+            buyerName: "Buyer",
+            buyerAgent: "buyer",
+            itemName: "Item",
+            amount: 10,
+            currency: "USDC",
+            status: "completed",
+            timestamp: "2026-09-27T12:00:00.000Z",
+            txHash: null,
+          },
+        ]}
+        initialCursor={null}
+      />,
+    );
+
+    expect(markup).not.toContain("noopener noreferrer");
+  });
+
+  it("does not render a link for invalid txHash (wrong length)", () => {
+    const invalidHash = "abc123";
+    const markup = renderToStaticMarkup(
+      <ActivityClient
+        stats={{
+          totalTransactions: 1,
+          totalVolume: 123.45,
+          activeAgents: 1,
+          totalAgents: 1,
+          registeredServices: 1,
+          playbooksTraded: 0,
+        }}
+        transactions={[
+          {
+            id: "tx-with-invalid-hash",
+            type: "service",
+            sellerName: "Seller",
+            sellerAgent: "seller",
+            buyerName: "Buyer",
+            buyerAgent: "buyer",
+            itemName: "Item",
+            amount: 10,
+            currency: "USDC",
+            status: "completed",
+            timestamp: "2026-09-27T12:00:00.000Z",
+            txHash: invalidHash,
+          },
+        ]}
+        initialCursor={null}
+      />,
+    );
+
+    expect(markup).not.toContain("noopener noreferrer");
+  });
+});

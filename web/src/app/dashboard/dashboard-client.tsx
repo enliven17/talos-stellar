@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { WalletGate, useWallet } from "@/components/wallet-gate";
 import { AgentAvatar } from "@/components/agent-avatar";
 import { LazyFinancialProjectionChart } from "@/components/lazy-financial-projection-chart";
-
+import { explorerTxUrl } from "@/lib/stellar-config";
 interface DashboardData {
   stats: {
     totalValue: string;
@@ -408,19 +408,22 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
                                 <span className="font-mono">{item.decidedBy.slice(0, 6)}...{item.decidedBy.slice(-4)}</span>
                               </>
                             )}
-                            {item.txHash && (
-                              <>
-                                <span>&middot;</span>
-                                <a
-                                  href={`https://stellar.expert/explorer/testnet/tx/${item.txHash}`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-accent hover:underline font-mono"
-                                >
-                                  TX {item.txHash.slice(0, 8)}...{item.txHash.slice(-6)}
-                                </a>
-                              </>
-                            )}
+                            {(() => {
+                              const url = explorerTxUrl(item.txHash);
+                              return url ? (
+                                <>
+                                  <span>&middot;</span>
+                                  <a
+                                    href={url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-accent hover:underline font-mono"
+                                  >
+                                    TX {item.txHash.slice(0, 8)}...{item.txHash.slice(-6)}
+                                  </a>
+                                </>
+                              ) : null;
+                            })()}
                           </div>
                         </div>
                       </div>
