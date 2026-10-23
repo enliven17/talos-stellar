@@ -59,14 +59,10 @@ describe('@talos-protocol/sdk/testing', () => {
       globalThis.fetch = mock as unknown as typeof fetch;
       const client = new TalosClient({ baseUrl: 'https://api.talos.protocol' });
 
-      const res = await client.request('/v1/jobs', {
+      await expect(client.request('/v1/jobs', {
         method: 'POST',
         body: JSON.stringify({ task: 'echo hello' }),
-      });
-      expect(res.status).toBe(402);
-      const body = await res.json();
-      expect(body.x402Version).toBe('1');
-      expect(body.accepts.length).toBeGreaterThan(0);
+      })).rejects.toMatchObject({ status: 402, code: 'payment_error' });
       expect(mock.requests).toHaveLength(1);
     });
   });
@@ -77,19 +73,17 @@ describe('@talos-protocol/sdk/testing', () => {
       globalThis.fetch = mock as unknown as typeof fetch;
       const client = new TalosClient({ baseUrl: 'https://api.talos.protocol' });
 
-      const created = await client.request('/v1/jobs', {
+      const created = await client.request<{ status: string }>('/v1/jobs', {
         method: 'POST',
         body: JSON.stringify({ task: 'echo hello' }),
       });
-      expect(created.status).toBe(202);
-      const createdBody = await created.json();
-      expect(createdBody.status).toBe('queued');
+      expect(created.status).toBe('queued');
 
-      const running = await client.request('/v1/jobs/job_mock_123');
-      expect((await running.json()).status).toBe('running');
+      const running = await client.request<{ status: string }>('/v1/jobs/job_mock_123');
+      expect(running.status).toBe('running');
 
-      const done = await client.request('/v1/jobs/job_mock_123');
-      expect((await done.json()).status).toBe('succeeded');
+      const done = await client.request<{ status: string }>('/v1/jobs/job_mock_123');
+      expect(done.status).toBe('succeeded');
     });
   });
 
@@ -112,8 +106,7 @@ describe('@talos-protocol/sdk/testing', () => {
         const path = cursor
           ? `/v1/jobs?cursor=${encodeURIComponent(cursor)}&limit=2`
           : '/v1/jobs?limit=2';
-        const res = await client.request(path);
-        const body = await res.json();
+        const body = await client.request<{ items: { id: string }[]; nextCursor: string | null }>(path);
         for (const item of body.items) {
           seen.push(item.id);
         }
@@ -136,11 +129,8 @@ describe('@talos-protocol/sdk/testing', () => {
       globalThis.fetch = mock as unknown as typeof fetch;
       const client = new TalosClient({ baseUrl: 'https://api.talos.protocol' });
 
-      const res = await client.request('/v1/jobs', { method: 'POST', body: '{}' });
-      expect(res.status).toBe(422);
-      const body = await res.json();
-      expect(body.error.code).toBe('unprocessable_entity');
-      expect(body.error.message).toBe('invalid payload');
+      await expect(client.request('/v1/jobs', { method: 'POST', body: '{}' }))
+        .rejects.toMatchObject({ status: 422, apiCode: 'unprocessable_entity' });
     });
   });
 

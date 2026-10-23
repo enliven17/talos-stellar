@@ -14,10 +14,11 @@ function maskApiKey(key: string | null): string | null {
 
 // GET /api/talos/:id — TALOS detail + configuration
 async function handleGet(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
+  request: Request,
+  context?: { params: Promise<{ id: string }> },
 ) {
-  const { id } = await params;
+  const pathname = new URL(request.url).pathname.split("/").filter(Boolean);
+  const { id } = await (context?.params ?? Promise.resolve({ id: pathname[3] ?? "" }));
 
   try {
     const talos = await db.query.tlsTalos.findFirst({
@@ -36,7 +37,7 @@ async function handleGet(
     }
 
     const { apiKey, ...safeTalos } = talos;
-    for (const tag of agentMutationTags(id)) (revalidateTag as any)(tag);
+    for (const tag of agentMutationTags(id)) revalidateTag(tag, "max"); (feat(sdk): add a job tracker combining progress streaming with polling fallback (#1017) (#1244))
     return Response.json({ ...safeTalos, apiKeyMasked: maskApiKey(apiKey) });
   } catch {
     return internalError(request);

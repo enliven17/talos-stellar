@@ -83,6 +83,38 @@ describe("TalosClient - Request/Response Behavior", () => {
       }));
       expect(result).toEqual(mockData);
     });
+
+    it("should report an available name", async () => {
+      const mockData = { available: true };
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => mockData,
+      } as Response);
+
+      const result = await client.checkNameAvailability("new-talos");
+
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/talos/check-name?name=new-talos",
+        expect.any(Object),
+      );
+      expect(result).toEqual(mockData);
+    });
+
+    it("should return the reason a name is taken and encode special characters", async () => {
+      const mockData = { available: false, reason: "Name already taken" };
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => mockData,
+      } as Response);
+
+      const result = await client.checkNameAvailability("taken name&other");
+
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/talos/check-name?name=taken+name%26other",
+        expect.any(Object),
+      );
+      expect(result).toEqual(mockData);
+    });
   });
 
   describe("Headers", () => {

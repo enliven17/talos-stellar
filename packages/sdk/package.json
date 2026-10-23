@@ -5,14 +5,13 @@
   "type": "module",
   "main": "dist/esm/index.js",
   "types": "dist/esm/index.d.ts",
- "exports": {
-  ".": {
-    "types": "./dist/esm/index.d.ts",
-    "browser": "./dist/browser/sdk.bundle.js",
-    "import": "./dist/esm/index.js",
-    "require": "./dist/cjs/index.cjs"
-  }
-},
+  "exports": {
+    ".": {
+      "types": "./dist/esm/index.d.ts",
+      "browser": "./dist/browser/sdk.bundle.js",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.cjs"
+    },
     "./webhooks": {
       "types": "./dist/esm/webhooks.d.ts",
       "import": "./dist/esm/webhooks.js",
@@ -27,6 +26,11 @@
       "types": "./dist/esm/errors.d.ts",
       "import": "./dist/esm/errors.js",
       "require": "./dist/cjs/errors.cjs"
+    },
+    "./testing": {
+      "types": "./dist/esm/testing/index.d.ts",
+      "import": "./dist/esm/testing/index.js",
+      "require": "./dist/cjs/testing/index.cjs"
     }
   },
   "bin": {

@@ -6,14 +6,14 @@ import { GET as getLive } from "@/app/api/health/live/route";
 
 describe("GET /api/health/live", () => {
   it("returns 200 with status=ok", async () => {
-    const res = getLive();
+    const res = await getLive(new Request("http://localhost/api/health/live"));
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.status).toBe("ok");
   });
 
   it("includes uptime (non-negative integer) and ts (ISO string)", async () => {
-    const res = getLive();
+    const res = await getLive(new Request("http://localhost/api/health/live"));
     const body = await res.json();
     expect(typeof body.uptime).toBe("number");
     expect(body.uptime).toBeGreaterThanOrEqual(0);
@@ -22,14 +22,14 @@ describe("GET /api/health/live", () => {
     expect(() => new Date(body.ts)).not.toThrow();
   });
 
-  it("sets Cache-Control: no-store", () => {
-    const res = getLive();
+  it("sets Cache-Control: no-store", async () => {
+    const res = await getLive(new Request("http://localhost/api/health/live"));
     expect(res.headers.get("cache-control")).toBe("no-store");
   });
 
   it("never calls fetch or any external service", async () => {
     const spy = vi.spyOn(globalThis, "fetch");
-    getLive();
+    await getLive(new Request("http://localhost/api/health/live"));
     expect(spy).not.toHaveBeenCalled();
     spy.mockRestore();
   });
@@ -66,7 +66,7 @@ describe("GET /api/health/ready", () => {
       new Response(null, { status: 200 }),
     );
 
-    const res = await getReady();
+    const res = await getReady(new Request("http://localhost/api/health/ready"));
 
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -86,7 +86,7 @@ describe("GET /api/health/ready", () => {
       new Response(null, { status: 200 }),
     );
 
-    const res = await getReady();
+    const res = await getReady(new Request("http://localhost/api/health/ready"));
 
     expect(res.status).toBe(503);
     const body = await res.json();
@@ -103,7 +103,7 @@ describe("GET /api/health/ready", () => {
       new Error("fetch failed"),
     );
 
-    const res = await getReady();
+    const res = await getReady(new Request("http://localhost/api/health/ready"));
 
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -120,7 +120,7 @@ describe("GET /api/health/ready", () => {
       new Response(null, { status: 503 }),
     );
 
-    const res = await getReady();
+    const res = await getReady(new Request("http://localhost/api/health/ready"));
 
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -138,7 +138,7 @@ describe("GET /api/health/ready", () => {
       new Error("network error"),
     );
 
-    const res = await getReady();
+    const res = await getReady(new Request("http://localhost/api/health/ready"));
 
     expect(res.status).toBe(503);
     const body = await res.json();
@@ -157,7 +157,7 @@ describe("GET /api/health/ready", () => {
       new Response(null, { status: 200 }),
     );
 
-    const promise = getReady();
+    const promise = getReady(new Request("http://localhost/api/health/ready"));
     vi.advanceTimersByTime(2500);
     const res = await promise;
 
@@ -171,7 +171,7 @@ describe("GET /api/health/ready", () => {
     mockExecute.mockResolvedValue([]);
     (fetch as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
 
-    const promise = getReady();
+    const promise = getReady(new Request("http://localhost/api/health/ready"));
     // Async variant lets the already-resolved DB check settle before the
     // 2 s DB timer fires; the sync variant would time it out spuriously.
     await vi.advanceTimersByTimeAsync(4000);
@@ -195,7 +195,7 @@ describe("GET /api/health/ready", () => {
       return new Promise(() => {});
     });
 
-    const promise = getReady();
+    const promise = getReady(new Request("http://localhost/api/health/ready"));
     vi.advanceTimersByTime(4000);
     await promise;
 
@@ -212,7 +212,7 @@ describe("GET /api/health/ready", () => {
       new Response(null, { status: 200 }),
     );
 
-    await getReady();
+    await getReady(new Request("http://localhost/api/health/ready"));
 
     expect(clearTimeoutSpy).toHaveBeenCalled();
     clearTimeoutSpy.mockRestore();
@@ -226,7 +226,7 @@ describe("GET /api/health/ready", () => {
       new Response(null, { status: 200 }),
     );
 
-    const res = await getReady();
+    const res = await getReady(new Request("http://localhost/api/health/ready"));
     expect(res.headers.get("cache-control")).toBe("no-store");
   });
 
@@ -234,7 +234,7 @@ describe("GET /api/health/ready", () => {
     mockExecute.mockRejectedValue(new Error("down"));
     (fetch as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("down"));
 
-    const res = await getReady();
+    const res = await getReady(new Request("http://localhost/api/health/ready"));
     expect(res.headers.get("cache-control")).toBe("no-store");
   });
 });
