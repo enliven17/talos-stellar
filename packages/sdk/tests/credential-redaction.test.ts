@@ -1,14 +1,18 @@
 /**
  * Tests for issue #590 — credential redaction in SDK logger hooks (onError).
+ * Tests for issue #985 — credential redaction in client serialization (toJSON/inspect).
  *
  * Covers:
  *   - redactEventPath() utility (unit tests)
  *   - TalosClient.notifyError() path sanitisation integration
  *   - Boundary and negative cases for the query-string scrubber
+ *   - TalosClient.toJSON() credential redaction
+ *   - TalosClient[Symbol.for('nodejs.util.inspect.custom')] credential redaction
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { TalosClient } from "../src/client.js";
 import { redactEventPath } from "../src/errors.js";
+import { inspect } from "node:util";
 
 // ── redactEventPath unit tests ─────────────────────────────────────────────
 
@@ -345,5 +349,367 @@ describe("TalosClient onError hook – credential redaction", () => {
     expect(event.path).not.toContain("tok123");
     expect(event.path).not.toContain("key456");
     expect(event.path).toContain("limit=5");
+  });
+});
+
+// ── TalosClient.toJSON() credential redaction ───────────────────────────────
+
+describe("TalosClient.toJSON() – credential redaction", () => {
+  it("redacts Authorization header", () => {
+    const client = new TalosClient({
+      apiKey: "tak_supersecret123",
+    });
+    const json = client.toJSON();
+    expect(json.headers.Authorization).toBe("[REDACTED]");
+    expect(json.headers.Authorization).not.toContain("tak_supersecret123");
+  });
+
+  it("redacts x-api-key header", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["x-api-key"] = "key_abc123";
+    const json = client.toJSON();
+    expect(json.headers["x-api-key"]).toBe("[REDACTED]");
+    expect(json.headers["x-api-key"]).not.toContain("key_abc123");
+  });
+
+  it("redacts cookie header", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["cookie"] = "session=secret123";
+    const json = client.toJSON();
+    expect(json.headers.cookie).toBe("[REDACTED]");
+    expect(json.headers.cookie).not.toContain("secret123");
+  });
+
+  it("redacts x-payment header", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["x-payment"] = "payment_secret_abc";
+    const json = client.toJSON();
+    expect(json.headers["x-payment"]).toBe("[REDACTED]");
+    expect(json.headers["x-payment"]).not.toContain("payment_secret_abc");
+  });
+
+  it("redacts signature header", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["signature"] = "sig_xyz789";
+    const json = client.toJSON();
+    expect(json.headers.signature).toBe("[REDACTED]");
+    expect(json.headers.signature).not.toContain("sig_xyz789");
+  });
+
+  it("redacts token header", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["token"] = "token_value_456";
+    const json = client.toJSON();
+    expect(json.headers.token).toBe("[REDACTED]");
+    expect(json.headers.token).not.toContain("token_value_456");
+  });
+
+  it("redacts secret header", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["secret"] = "my_secret_value";
+    const json = client.toJSON();
+    expect(json.headers.secret).toBe("[REDACTED]");
+    expect(json.headers.secret).not.toContain("my_secret_value");
+  });
+
+  it("redacts password header", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["password"] = "hunter2";
+    const json = client.toJSON();
+    expect(json.headers.password).toBe("[REDACTED]");
+    expect(json.headers.password).not.toContain("hunter2");
+  });
+
+  it("redacts api-key header (kebab-case)", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["api-key"] = "key_abc123";
+    const json = client.toJSON();
+    expect(json.headers["api-key"]).toBe("[REDACTED]");
+    expect(json.headers["api-key"]).not.toContain("key_abc123");
+  });
+
+  it("redacts api_key header (snake_case)", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["api_key"] = "key_def456";
+    const json = client.toJSON();
+    expect(json.headers.api_key).toBe("[REDACTED]");
+    expect(json.headers.api_key).not.toContain("key_def456");
+  });
+
+  it("redacts nonce header", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["nonce"] = "random_nonce_value";
+    const json = client.toJSON();
+    expect(json.headers.nonce).toBe("[REDACTED]");
+    expect(json.headers.nonce).not.toContain("random_nonce_value");
+  });
+
+  it("redacts hash header", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["hash"] = "hash_value_123";
+    const json = client.toJSON();
+    expect(json.headers.hash).toBe("[REDACTED]");
+    expect(json.headers.hash).not.toContain("hash_value_123");
+  });
+
+  it("redacts message header", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["message"] = "secret_message";
+    const json = client.toJSON();
+    expect(json.headers.message).toBe("[REDACTED]");
+    expect(json.headers.message).not.toContain("secret_message");
+  });
+
+  it("preserves non-sensitive headers", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["content-type"] = "application/json";
+    client.headers["accept"] = "application/json";
+    client.headers["x-request-id"] = "req-123";
+    const json = client.toJSON();
+    expect(json.headers["content-type"]).toBe("application/json");
+    expect(json.headers.accept).toBe("application/json");
+    expect(json.headers["x-request-id"]).toBe("req-123");
+  });
+
+  it("redacts case-insensitively (AUTHORIZATION)", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["AUTHORIZATION"] = "Bearer secret_token";
+    const json = client.toJSON();
+    expect(json.headers.AUTHORIZATION).toBe("[REDACTED]");
+    expect(json.headers.AUTHORIZATION).not.toContain("secret_token");
+  });
+
+  it("redacts multiple sensitive headers in a single client", () => {
+    const client = new TalosClient({
+      apiKey: "tak_main_key",
+    });
+    // @ts-expect-error — testing custom header injection
+    client.headers["x-api-key"] = "key_secondary";
+    client.headers["cookie"] = "session=abc";
+    const json = client.toJSON();
+    expect(json.headers.Authorization).toBe("[REDACTED]");
+    expect(json.headers["x-api-key"]).toBe("[REDACTED]");
+    expect(json.headers.cookie).toBe("[REDACTED]");
+    expect(json.headers.Authorization).not.toContain("tak_main_key");
+    expect(json.headers["x-api-key"]).not.toContain("key_secondary");
+    expect(json.headers.cookie).not.toContain("session=abc");
+  });
+
+  it("includes baseUrl in JSON output", () => {
+    const client = new TalosClient({
+      baseUrl: "https://custom.example.com",
+    });
+    const json = client.toJSON();
+    expect(json.baseUrl).toBe("https://custom.example.com");
+  });
+
+  it("includes retryPolicy configuration in JSON output", () => {
+    const client = new TalosClient({
+      retryPolicy: { maxAttempts: 5 },
+    });
+    const json = client.toJSON();
+    expect(json.retryPolicy).toBeDefined();
+    expect(json.retryPolicy.maxAttempts).toBe(5);
+  });
+
+  it("includes retry configuration in JSON output", () => {
+    const client = new TalosClient({
+      retry: { maxAttempts: 3 },
+    });
+    const json = client.toJSON();
+    expect(json.retry).toBeDefined();
+    expect(json.retry.maxAttempts).toBe(3);
+  });
+});
+
+// ── TalosClient[Symbol.for('nodejs.util.inspect.custom')] credential redaction ─
+
+describe("TalosClient util.inspect – credential redaction", () => {
+  it("redacts Authorization header in util.inspect output", () => {
+    const client = new TalosClient({
+      apiKey: "tak_supersecret123",
+    });
+    const inspected = inspect(client);
+    expect(inspected).toContain("[REDACTED]");
+    expect(inspected).not.toContain("tak_supersecret123");
+  });
+
+  it("redacts x-api-key header in util.inspect output", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["x-api-key"] = "key_abc123";
+    const inspected = inspect(client);
+    expect(inspected).toContain("[REDACTED]");
+    expect(inspected).not.toContain("key_abc123");
+  });
+
+  it("redacts cookie header in util.inspect output", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["cookie"] = "session=secret123";
+    const inspected = inspect(client);
+    expect(inspected).toContain("[REDACTED]");
+    expect(inspected).not.toContain("secret123");
+  });
+
+  it("redacts x-payment header in util.inspect output", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["x-payment"] = "payment_secret_abc";
+    const inspected = inspect(client);
+    expect(inspected).toContain("[REDACTED]");
+    expect(inspected).not.toContain("payment_secret_abc");
+  });
+
+  it("redacts signature header in util.inspect output", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["signature"] = "sig_xyz789";
+    const inspected = inspect(client);
+    expect(inspected).toContain("[REDACTED]");
+    expect(inspected).not.toContain("sig_xyz789");
+  });
+
+  it("redacts token header in util.inspect output", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["token"] = "token_value_456";
+    const inspected = inspect(client);
+    expect(inspected).toContain("[REDACTED]");
+    expect(inspected).not.toContain("token_value_456");
+  });
+
+  it("redacts secret header in util.inspect output", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["secret"] = "my_secret_value";
+    const inspected = inspect(client);
+    expect(inspected).toContain("[REDACTED]");
+    expect(inspected).not.toContain("my_secret_value");
+  });
+
+  it("redacts password header in util.inspect output", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["password"] = "hunter2";
+    const inspected = inspect(client);
+    expect(inspected).toContain("[REDACTED]");
+    expect(inspected).not.toContain("hunter2");
+  });
+
+  it("redacts api-key header in util.inspect output", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["api-key"] = "key_abc123";
+    const inspected = inspect(client);
+    expect(inspected).toContain("[REDACTED]");
+    expect(inspected).not.toContain("key_abc123");
+  });
+
+  it("redacts api_key header in util.inspect output", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["api_key"] = "key_def456";
+    const inspected = inspect(client);
+    expect(inspected).toContain("[REDACTED]");
+    expect(inspected).not.toContain("key_def456");
+  });
+
+  it("redacts nonce header in util.inspect output", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["nonce"] = "random_nonce_value";
+    const inspected = inspect(client);
+    expect(inspected).toContain("[REDACTED]");
+    expect(inspected).not.toContain("random_nonce_value");
+  });
+
+  it("redacts hash header in util.inspect output", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["hash"] = "hash_value_123";
+    const inspected = inspect(client);
+    expect(inspected).toContain("[REDACTED]");
+    expect(inspected).not.toContain("hash_value_123");
+  });
+
+  it("redacts message header in util.inspect output", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["message"] = "secret_message";
+    const inspected = inspect(client);
+    expect(inspected).toContain("[REDACTED]");
+    expect(inspected).not.toContain("secret_message");
+  });
+
+  it("preserves non-sensitive headers in util.inspect output", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["content-type"] = "application/json";
+    client.headers["accept"] = "application/json";
+    client.headers["x-request-id"] = "req-123";
+    const inspected = inspect(client);
+    expect(inspected).toContain("application/json");
+    expect(inspected).toContain("req-123");
+  });
+
+  it("redacts case-insensitively in util.inspect output", () => {
+    const client = new TalosClient({});
+    // @ts-expect-error — testing custom header injection
+    client.headers["AUTHORIZATION"] = "Bearer secret_token";
+    const inspected = inspect(client);
+    expect(inspected).toContain("[REDACTED]");
+    expect(inspected).not.toContain("secret_token");
+  });
+
+  it("redacts multiple sensitive headers in util.inspect output", () => {
+    const client = new TalosClient({
+      apiKey: "tak_main_key",
+    });
+    // @ts-expect-error — testing custom header injection
+    client.headers["x-api-key"] = "key_secondary";
+    client.headers["cookie"] = "session=abc";
+    const inspected = inspect(client);
+    expect(inspected).not.toContain("tak_main_key");
+    expect(inspected).not.toContain("key_secondary");
+    expect(inspected).not.toContain("session=abc");
+  });
+
+  it("includes baseUrl in util.inspect output", () => {
+    const client = new TalosClient({
+      baseUrl: "https://custom.example.com",
+    });
+    const inspected = inspect(client);
+    expect(inspected).toContain("https://custom.example.com");
+  });
+
+  it("includes retryPolicy configuration in util.inspect output", () => {
+    const client = new TalosClient({
+      retryPolicy: { maxAttempts: 5 },
+    });
+    const inspected = inspect(client);
+    expect(inspected).toContain("maxAttempts");
+  });
+
+  it("includes retry configuration in util.inspect output", () => {
+    const client = new TalosClient({
+      retry: { maxAttempts: 3 },
+    });
+    const inspected = inspect(client);
+    expect(inspected).toContain("maxAttempts");
   });
 });
