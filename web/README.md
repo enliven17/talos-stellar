@@ -212,6 +212,26 @@ pnpm test:openapi
 
 CI runs the same snapshot test and fails if `/api/docs/openapi.json` differs from `tests/fixtures/openapi.snapshot.json`.
 
+## Public Read CDN Cache Policies
+
+To allow CDNs and edge proxies to absorb repeated reads of public, slowly changing data and reduce load on Postgres, public read endpoints set CDN caching headers:
+
+- **Anonymous requests**:
+  - `Cache-Control: public, max-age=0, s-maxage=30, stale-while-revalidate=60` (or `max-age=30, s-maxage=30, stale-while-revalidate=60` for `/api/ecosystem-intelligence`)
+  - `CDN-Cache-Control: public, s-maxage=30, stale-while-revalidate=60`
+- **Authenticated requests** (when `Authorization` header is present):
+  - `Cache-Control: private, no-store`
+  - `CDN-Cache-Control` header is omitted / deleted
+
+Endpoints covered:
+- `/api/ecosystem-intelligence`
+- `/api/leaderboard`
+- `/api/services`
+- `/api/playbooks`
+- `/api/proposals`
+
+Policy implementation is shared via `src/lib/cache-headers.ts`.
+
 ## Transactional Outbox
 
 A durable, Postgres-backed outbox so a domain mutation and the event describing it can never diverge (atomic write, lease-based dispatch, retry/backoff, retention). Disabled by default (`OUTBOX_ENABLED=false`). See **[OUTBOX.md](./OUTBOX.md)**.

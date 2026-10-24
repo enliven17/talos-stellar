@@ -11,8 +11,7 @@
     "browser": "./dist/browser/sdk.bundle.js",
     "import": "./dist/esm/index.js",
     "require": "./dist/cjs/index.cjs"
-  }
-},
+  },
     "./webhooks": {
       "types": "./dist/esm/webhooks.d.ts",
       "import": "./dist/esm/webhooks.js",
