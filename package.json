@@ -38,7 +38,8 @@
     "test:sbom-verify": "node --test scripts/verify-sbom.test.mjs",
     "test:contracts-readme": "node --test scripts/verify-contracts-readme.test.mjs",
     "env:template:check": "node scripts/check-env-template.mjs",
-    "test:env-template": "node --test scripts/check-env-template.test.mjs"
+    "test:env-template": "node --test scripts/check-env-template.test.mjs",
+    "devcontainer:check": "node --test scripts/verify-devcontainer.test.mjs"
   },
   "dependencies": {
     "next": "16.4.2"
