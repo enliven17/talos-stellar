@@ -3,6 +3,7 @@ import { Ruthie } from "next/font/google";
 import { connection } from "next/server";
 import "./globals.css";
 import { Header } from "@/components/header";
+import { OfflineBanner } from "@/components/offline-banner";
 import { Providers } from "@/components/providers";
 import { SplashScreen } from "@/components/splash-screen";
 import { THEME_INIT_SCRIPT } from "@/lib/theme";
@@ -46,6 +47,7 @@ export default async function RootLayout({
       </head>
       <body className="min-h-full flex flex-col bg-background text-foreground font-mono">
         <SplashScreen />
+        <OfflineBanner />
         <Providers initialLocale={locale}>
           <Header />
           <main className="flex-1">{children}</main>
