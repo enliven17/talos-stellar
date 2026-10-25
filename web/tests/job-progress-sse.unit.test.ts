@@ -218,8 +218,13 @@ describe("GET /api/jobs/:id/progress", () => {
     expect(getSseMetrics().activeConnections).toBe(1);
 
     const reader = res.body!.getReader();
-    const { value } = await reader.read();
-    const text = new TextDecoder().decode(value);
+    let text = "";
+    const decoder = new TextDecoder();
+    while (!text.includes("event: snapshot")) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      text += typeof value === "string" ? value : decoder.decode(value, { stream: true });
+    }
     expect(text).toContain("event: snapshot");
     expect(text).toContain("job-1");
     expect(text).not.toContain("paymentSig");

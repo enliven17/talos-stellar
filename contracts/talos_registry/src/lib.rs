@@ -412,6 +412,22 @@ fn validate_talos_metadata(name: &String, category: &String, description: &Strin
     validate_token_symbol(&pulse.token_symbol);
 }
 
+/// Validate creator-updatable metadata using the same byte limits as creation.
+fn validate_creator_metadata_fields(_e: &Env, name: &String, category: &String, description: &String) {
+    if name.len() == 0 {
+        panic!("Name cannot be empty");
+    }
+    if name.len() > MAX_NAME_BYTES {
+        panic!("Name exceeds maximum byte length");
+    }
+    if category.len() > MAX_CATEGORY_BYTES {
+        panic!("Category exceeds maximum byte length");
+    }
+    if description.len() > MAX_DESCRIPTION_BYTES {
+        panic!("Description exceeds maximum byte length");
+    }
+}
+
 // ── Registry Input Fuzzing Helpers ──────────────────────────────────
 
 /// Maximum allowed length for string fields in registry inputs.

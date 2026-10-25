@@ -14,6 +14,10 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { webcrypto } from "node:crypto";
+
+// Node 18 does not expose Web Crypto globally in every supported mode.
+if (!globalThis.crypto) Object.defineProperty(globalThis, "crypto", { value: webcrypto });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SDK_ROOT = resolve(__dirname, "..");

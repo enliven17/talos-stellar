@@ -25,7 +25,6 @@ import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
 import { resolve, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
-
 import { Keypair, StrKey, Networks } from "@stellar/stellar-sdk";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -46,6 +45,8 @@ const edgeGlobal = {
   TextEncoder,
   TextDecoder,
   crypto,
+  // The flattened ESM smoke loader strips package imports; provide the
+  // immutable constants used during SDK module initialization.
   fetch: () => {
     throw new Error("fetch should not be called during edge import smoke test");
   },
@@ -173,13 +174,18 @@ const files = [];
     const full = join(dir, entry);
     const s = statSync(full);
     if (s.isDirectory()) walk(full);
-    else if (full.endsWith(".js")) files.push(full);
+    // The CLI entry is built as a self-contained bundle and is not part of
+    // the SDK export surface. Including it here duplicates every bundled
+    // declaration when the remaining ESM modules are flattened below.
+    else if (full.endsWith(".js") && !full.endsWith("/cli.js")) files.push(full);
   }
 })(ESM_DIR);
-files.sort((a, b) => {
-  if (a.endsWith("chaos.js") && b.endsWith("chaos-fixtures.js")) return -1;
-  if (b.endsWith("chaos.js") && a.endsWith("chaos-fixtures.js")) return 1;
-  return a.localeCompare(b);
+files.sort((left, right) => {
+  // Fixture module initialization references the enum declared by chaos.js.
+  // Preserve that dependency when flattening ESM modules into one script.
+  const priority = (path) =>
+    path.endsWith("/chaos.js") ? 0 : path.endsWith("/chaos-fixtures.js") ? 1 : 2;
+  return priority(left) - priority(right) || left.localeCompare(right);
 });
 
 console.log(`[compat:edge] concatenating ${files.length} ESM files`);
@@ -192,11 +198,11 @@ const IMPORT_LINE =
   /^import\s+(?:(?:\{[^}]*\}|\*\s+as\s+[A-Za-z0-9_$]+|[A-Za-z0-9_$]+(?:\s*,\s*\{[^}]*\})?)\s+from\s+)?["']([^"']+)["'];?\s*$/;
 
 function stripImportsExports(src) {
-  // Strip multiline re-exports and imports before line processing
-  const preprocessed = src
-    .replace(/export\s*\{[^}]*\}\s*from\s*["'][^"']+["'];?/gs, "")
-    .replace(/import\s+(?:\{[^}]*\}|\*\s+as\s+[A-Za-z0-9_$]+|[A-Za-z0-9_$]+(?:\s*,\s*\{[^}]*\})?)\s+from\s+["'][^"']+["'];?/gs, "");
-  const lines = preprocessed.split(/\r?\n/);
+  // TypeScript may pretty-print named re-exports across multiple lines (and
+  // preserve comments inside the list). Remove those module-only blocks
+  // before the line-based declaration shim below.
+  src = src.replace(/^export\s+\{[\s\S]*?\}\s+from\s+["'][^"']+["'];?/gm, "");
+  const lines = src.split(/\r?\n/);
   const out = [];
   const deferred = [];
   for (const raw of lines) {

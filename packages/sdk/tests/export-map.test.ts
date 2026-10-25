@@ -28,8 +28,13 @@ const shippedPackage = JSON.parse(
   readFileSync(resolve(__dirname, "../package.json"), "utf8"),
 );
 
+const TESTING_SUBPATH = "./testing";
+const TESTING_IMPORT = "./dist/esm/testing/index.js";
+const TESTING_REQUIRE = "./dist/cjs/testing/index.cjs";
+const TESTING_TYPES = "./dist/esm/testing/index.d.ts";
+
 /** A minimal manifest that satisfies every rule, used as a mutation base. */
-function basePackage(overrides: Record<string, unknown> = {}) {
+function basePackage(overrides?: Record<string, unknown>): Record<string, unknown> {
   return {
     name: "@talos-protocol/sdk",
     version: "0.1.0",
@@ -109,7 +114,40 @@ describe("Export map — shipped manifest (positive)", () => {
 
   it("reports each declared target exactly once", () => {
     const conditions = result.targets.map((target) => target.condition).sort();
-    expect(conditions).toEqual(["browser", "import", "require", "types"]);
+    expect(conditions).toEqual(["browser","import","require","types"]);
+  });
+});
+
+describe("Export map — testing subpath", () => {
+  const exports = shippedPackage.exports as Record<string, unknown>;
+  const testing = exports[TESTING_SUBPATH] as Record<string, unknown> | undefined;
+
+  it("declares the ./testing subpath", () => {
+    expect(testing).toBeTypeOf("object");
+  });
+
+  it("wires import, require and types for the testing subpath", () => {
+    expect(testing!.import).toBe(TESTING_IMPORT);
+    expect(testing!.require).toBe(TESTING_REQUIRE);
+    expect(testing!.types).toBe(TESTING_TYPES);
+  });
+
+  it("does not expose a browser bundle for the testing subpath", () => {
+    expect(testing!.browser).toBeUndefined();
+  });
+
+  it("includes the testing targets in the published files", () => {
+    for (const target of [TESTING_IMPORT, TESTING_REQUIRE, TESTING_TYPES]) {
+      expect(isTargetCoveredByFiles(target, shippedPackage.files)).toBe(true);
+    }
+  });
+
+  it("validates the testing subpath with the shared rules", () => {
+    const result = validateExportMap(shippedPackage);
+    const testingTargets = result.subpaths
+      .filter((entry) => entry.subpath === TESTING_SUBPATH)
+      .flatMap((entry) => entry.targets);
+    expect(testingTargets.map((t) => t.condition).sort()).toEqual(["import","require","types"]);
   });
 });
 
