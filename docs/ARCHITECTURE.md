@@ -202,6 +202,10 @@ stateDiagram-v2
     retired --> [*]
 ```
 
+### OpenAPI Route-Coverage Drift Check
+
+The public API surface exposed under `web/src/app/api` must stay in sync with the committed OpenAPI snapshot. A deterministic CI guard compares implemented public routes against the snapshot and fails with a concise list of missing or stale entries, pointing contributors to the exact files to update. Routes that are intentionally internal or experimental must be listed explicitly as excluded (with review) so the check remains reviewable and tested. The check does not depend on a running database.
+
 ### Governance Components & Documentation References:
 - **Lifecycle State Machine**: Defined in [`web/src/lib/governance/lifecycle.ts`](../web) and documented in [`docs/AGENT_LIFECYCLE.md`](./AGENT_LIFECYCLE.md).
 - **On-chain Registry & Pause Controllers**: Implemented in [`contracts/talos_registry`](../contracts/talos_registry) and documented in [`contracts/README.md`](../contracts/README.md).

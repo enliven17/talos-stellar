@@ -57,6 +57,12 @@ lint-all:
     cd web && pnpm lint
     cd packages/prime-agent && uv run ruff check src tests scripts
 
+# Check OpenAPI route coverage: fails when implemented public routes and the
+# committed OpenAPI snapshot drift apart. Deterministic; no database required.
+openapi-drift:
+    @echo "Checking OpenAPI route-coverage drift..."
+    cd web && pnpm exec tsx scripts/check-openapi-drift.ts
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Stack recipes (use pnpm scripts from root package.json on Windows)
 # ─────────────────────────────────────────────────────────────────────────────

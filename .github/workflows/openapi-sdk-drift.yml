@@ -30,6 +30,8 @@ on:
       - "web/scripts/write-openapi-snapshot.ts"
       - "packages/sdk/src/generated-types.ts"
       - "packages/sdk/package.json"
+      - "web/src/app/api/**/route.ts"
+      - "web/openapi.exclusions.json"
       - "scripts/check-openapi-sdk-drift.mjs"
       - "scripts/check-openapi-sdk-drift.test.mjs"
       - ".github/workflows/openapi-sdk-drift.yml"
@@ -43,6 +45,8 @@ on:
       - "web/scripts/write-openapi-snapshot.ts"
       - "packages/sdk/src/generated-types.ts"
       - "packages/sdk/package.json"
+      - "web/src/app/api/**/route.ts"
+      - "web/openapi.exclusions.json"
       - "scripts/check-openapi-sdk-drift.mjs"
       - "scripts/check-openapi-sdk-drift.test.mjs"
       - ".github/workflows/openapi-sdk-drift.yml"
@@ -74,6 +78,16 @@ jobs:
 
       - name: Run drift check unit tests
         run: node --test scripts/check-openapi-sdk-drift.test.mjs
+
+      - name: Run OpenAPI route-coverage drift check
+        # Fails when implemented public API routes and the committed snapshot diverge.
+        # Deterministic, offline: scans web/src/app/api route files, no DB required.
+        run: node scripts/check-openapi-sdk-drift.mjs --route-coverage
+
+      - name: Output route-coverage report on failure
+        if: failure()
+        run: |
+          node scripts/check-openapi-sdk-drift.mjs --route-coverage --json | tee route-coverage-report.json || true
 
   # ── OpenAPI snapshot structural check ─────────────────────────────────────
   openapi-snapshot:

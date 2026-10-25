@@ -52,3 +52,6 @@ jobs:
 
       - name: Check OpenAPI snapshot
         run: pnpm test:openapi
+
+      - name: Check OpenAPI route coverage drift
+        run: pnpm exec tsx scripts/check-openapi-route-coverage.ts

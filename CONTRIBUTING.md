@@ -358,6 +358,25 @@ Choose the focused command by area:
 | Local test-data reset (`web/src/lib/local-test-data-reset.ts`, `web/src/db/reset-test-data.ts`, `scripts/local-stack.sh`) | `pnpm --dir web exec vitest run tests/local-test-data-reset.unit.test.ts; bash scripts/local-stack.test.sh` | `Deploy Web -> Vercel` |
 | Backup or restore paths | `pnpm --dir web exec vitest run tests/backup-restore-fixture.test.ts tests/backup-crypto.test.ts tests/backup-types.test.ts` | `Web Backups CI` |
 
+### OpenAPI route-coverage drift check
+
+The `Web OpenAPI CI` workflow fails when a public API route is implemented under
+`web/src/app/api/**` but is not represented in the committed snapshot
+`web/tests/fixtures/openapi.snapshot.json`, or when the snapshot lists a route
+that no longer exists. The check is deterministic and does not require a running
+database.
+
+- **Adding a public route:** regenerate and commit the snapshot alongside the
+  route change. CI output lists the missing entries and the snapshot path to update.
+- **Removing a route:** regenerate the snapshot so the stale entry is dropped.
+- **Internal or experimental routes:** these may be excluded only through the
+  explicit, reviewed exclusion list in the check's configuration. Add a test for
+  any new exclusion. Do not exclude a route to silence a failure without review.
+
+Run it locally with:
+
+
+
 Use `pnpm --dir web run test:e2e` only when API route behavior depends on the running app or cross-route state. Use the local stack with `pnpm stack:up` when you need Postgres plus the mock Stellar provider, and clean it up with `pnpm stack:down`. Do not use `pnpm stack:reset` unless you intentionally want to destroy and recreate local stack data; `pnpm stack:reset-data` clears test rows without touching the stack volumes.
 
 ### SDK changes
