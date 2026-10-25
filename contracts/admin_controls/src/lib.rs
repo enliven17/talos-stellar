@@ -195,13 +195,13 @@ pub fn validate_executable(env: &Env, eta: u64, grace_period: u64) {
 /// Emit `guard_add` — a guardian was registered.
 pub fn emit_guardian_added(env: &Env, guardian: &Address) {
     let topics = (symbol_short!("guard_add"),);
-    env.events().publish(topics, (guardian.clone(),));
+    env.events().publish(topics, guardian.clone());
 }
 
 /// Emit `guard_rem` — a guardian was deregistered.
 pub fn emit_guardian_removed(env: &Env, guardian: &Address) {
     let topics = (symbol_short!("guard_rem"),);
-    env.events().publish(topics, (guardian.clone(),));
+    env.events().publish(topics, guardian.clone());
 }
 
 // ── Guardian storage helpers ──────────────────────────────────────────
@@ -284,7 +284,7 @@ pub fn emit_pause_cleared<D: soroban_sdk::IntoVal<Env, soroban_sdk::Val> + Clone
     actor: &Address,
 ) {
     let topics = (symbol_short!("pause_off"), domain.clone());
-    env.events().publish(topics, (actor.clone(),));
+    env.events().publish(topics, actor.clone());
 }
 
 // ── Pause validation helpers ──────────────────────────────────────────

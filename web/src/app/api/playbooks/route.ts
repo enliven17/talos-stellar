@@ -14,6 +14,7 @@ import {
 import { withTraceContext } from "@/lib/tracing";
 import { resolveTalosFromRequest } from "@/lib/auth";
 import { withRequestId } from "@/lib/with-request-id";
+import { applyPublicCacheHeaders } from "@/lib/cache-headers";
 
 
 // GET /api/playbooks — List playbooks (with optional filters and cursor pagination)
@@ -142,7 +143,8 @@ async function _GET(request: NextRequest) {
       ? `${lastItem.createdAt.toISOString()}|${lastItem.id}`
       : null;
 
-    return Response.json({ data, nextCursor });
+    const response = Response.json({ data, nextCursor });
+    return applyPublicCacheHeaders(response, request);
   } catch {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }

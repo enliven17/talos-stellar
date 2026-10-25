@@ -14,6 +14,7 @@ import { parsePriceRange } from "@/lib/parse-price";
 import { fetchReputations } from "@/lib/reputation-ledger";
 import { withTraceContext } from "@/lib/tracing";
 import { internalError } from "@/lib/api-response";
+import { applyPublicCacheHeaders } from "@/lib/cache-headers";
 
 export type ServiceCursor = {
   createdAt: string;
@@ -228,10 +229,11 @@ async function handleGet(request: NextRequest) {
     const nextCursor =
       accumulated.length === limit && hasMore ? pageCursor : null;
 
-    return Response.json({
+    const response = Response.json({
       data: accumulated,
       nextCursor: nextCursor ? encodeServiceCursor(nextCursor) : null,
     });
+    return applyPublicCacheHeaders(response, request);
   } catch {
     return internalError(request);
   }

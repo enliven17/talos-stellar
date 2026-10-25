@@ -20,11 +20,9 @@ import {
 } from "@/lib/analytics-privacy";
 import { parseAnalyticsLimit } from "@/lib/analytics-limits";
 import { withRequestId } from "@/lib/with-request-id";
+import { applyPublicCacheHeaders } from "@/lib/cache-headers";
 
 export const dynamic = 'force-dynamic';
-
-const CACHE_MAX_AGE = 30; // 30 seconds cache for public endpoint
-const STALE_WHILE_REVALIDATE = 60; // Serve stale for up to 60s while revalidating
 
 interface EcosystemMetrics {
   metadata: {
@@ -484,9 +482,8 @@ async function _GET(req: Request | NextRequest) {
 
     const response = NextResponse.json(metrics);
     
-    // Add cache headers for public endpoint
-    response.headers.set('Cache-Control', `public, max-age=${CACHE_MAX_AGE}, stale-while-revalidate=${STALE_WHILE_REVALIDATE}`);
-    response.headers.set('CDN-Cache-Control', `public, max-age=${CACHE_MAX_AGE}, stale-while-revalidate=${STALE_WHILE_REVALIDATE}`);
+    // Add cache headers for public endpoint (anonymous only)
+    applyPublicCacheHeaders(response, req, { maxAge: 30, sMaxAge: 30, staleWhileRevalidate: 60 });
     
     return response;
   } catch (error) {
