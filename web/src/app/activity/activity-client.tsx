@@ -6,6 +6,7 @@ import {
   mergeBackgroundRefresh,
   shouldReplaceRowsOnRefresh,
 } from "@/lib/preserveDashboardState";
+import { explorerTxUrl } from "@/lib/stellar-config";
 
 // ─── Types ───────────────────────────────────────────────────────
 
@@ -334,21 +335,24 @@ export function ActivityClient({ stats: initialStats, transactions: initialTrans
                     </span>
                     {/* 10. Explorer link */}
                     <span>
-                      {tx.txHash ? (
-                        <a
-                          href={`https://testnet.arcscan.app/tx/${tx.txHash}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-accent hover:text-accent/70 transition-colors"
-                          title="View on ArcScan"
-                        >
-                          <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                            <path d="M6 3H3v10h10v-3" />
-                            <path d="M9 2h5v5" />
-                            <path d="M14 2L7 9" />
-                          </svg>
-                        </a>
-                      ) : <span className="w-3.5" />}
+                      {(() => {
+                        const url = explorerTxUrl(tx.txHash);
+                        return url ? (
+                          <a
+                            href={url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-accent hover:text-accent/70 transition-colors"
+                            title="View transaction on explorer"
+                          >
+                            <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                              <path d="M6 3H3v10h10v-3" />
+                              <path d="M9 2h5v5" />
+                              <path d="M14 2L7 9" />
+                            </svg>
+                          </a>
+                        ) : <span className="w-3.5" />;
+                      })()}
                     </span>
                   </div>
                 </div>

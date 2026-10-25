@@ -6,10 +6,10 @@ import { useWallet } from "@/components/wallet-gate";
 import { AgentAvatar } from "@/components/agent-avatar";
 import { AgentAvailabilityBadge } from "@/components/agent-availability-badge";
 import { AgentEmptyState } from "@/components/agent-view-states";
+import { OPERATOR_PUBLIC_KEY, USDC_ISSUER as STELLAR_USDC_ISSUER, explorerTxUrl } from "@/lib/stellar-config";
 import { ScopedApiKeysPanel } from "@/components/scoped-api-keys-panel";
 import { AgentPurchasesSection } from "@/components/agent-purchases-section";
 import { CopyButton } from "@/components/copy-button";
-import { OPERATOR_PUBLIC_KEY, USDC_ISSUER as STELLAR_USDC_ISSUER } from "@/lib/stellar-config";
 import {
   TabActivity,
   TabPatrons,
@@ -1158,15 +1158,31 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                 </div>
                 <p className="text-sm text-foreground mb-2">Purchase Complete</p>
                 <p className="text-xs text-muted mb-4">{buyResult.message}</p>
-                <div className="bg-surface border border-border p-3 text-xs font-mono text-muted break-all mb-6 flex items-center gap-2">
-                  <span className="break-all">tx: {buyResult.txHash.slice(0, 18)}...{buyResult.txHash.slice(-8)}</span>
-                  <CopyButton
-                    value={buyResult.txHash}
-                    label="Copy transaction hash"
-                    confirmText="Copied!"
-                    size="sm"
-                  />
-                </div>
+              <div className="bg-surface border border-border p-3 text-xs font-mono text-muted mb-4 flex items-center justify-between gap-2">
+  {(() => {
+    const url = explorerTxUrl(buyResult.txHash);
+    return url ? (
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="break-all text-accent hover:underline"
+      >
+        tx: {buyResult.txHash.slice(0, 18)}...{buyResult.txHash.slice(-8)}
+      </a>
+    ) : (
+      <span className="break-all">
+        tx: {buyResult.txHash.slice(0, 18)}...{buyResult.txHash.slice(-8)}
+      </span>
+    );
+  })()}
+  <CopyButton
+    value={buyResult.txHash}
+    label="Copy transaction hash"
+    confirmText="Copied!"
+    size="sm"
+  />
+</div>
                 <button
                   onClick={closeBuyModal}
                   className="bg-accent text-background px-8 py-2.5 text-sm font-medium hover:bg-foreground transition-colors"
@@ -1278,15 +1294,31 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
                     size="sm"
                   />
                 </div>
-                <div className="bg-surface border border-border p-3 text-xs font-mono text-muted break-all mb-6 flex items-center gap-2">
-                  <span className="break-all">tx: {serviceResult.txHash.slice(0, 18)}...{serviceResult.txHash.slice(-8)}</span>
-                  <CopyButton
-                    value={serviceResult.txHash}
-                    label="Copy transaction hash"
-                    confirmText="Copied!"
-                    size="sm"
-                  />
-                </div>
+                <div className="bg-surface border border-border p-3 text-xs font-mono text-muted mb-4 flex items-center justify-between gap-2">
+  {(() => {
+    const url = explorerTxUrl(serviceResult.txHash);
+    return url ? (
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="break-all text-accent hover:underline"
+      >
+        tx: {serviceResult.txHash.slice(0, 18)}...{serviceResult.txHash.slice(-8)}
+      </a>
+    ) : (
+      <span className="break-all">
+        tx: {serviceResult.txHash.slice(0, 18)}...{serviceResult.txHash.slice(-8)}
+      </span>
+    );
+  })()}
+  <CopyButton
+    value={serviceResult.txHash}
+    label="Copy transaction hash"
+    confirmText="Copied!"
+    size="sm"
+  />
+</div>
                 {serviceResult.status === "completed" && serviceResult.result ? (
                   <div className="bg-surface border border-accent/20 p-4 text-left mb-4">
                     <div className="text-xs text-accent mb-2">[RESULT]</div>
