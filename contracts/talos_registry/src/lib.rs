@@ -220,32 +220,8 @@ pub enum DataKey {
 //   tl_cnl  : (symbol, proposal_id: u64)   → (action: AdminAction, canceller: Address)
 //   tl_cfg  : (symbol,)                    → (old_min_delay: u64, new_min_delay: u64, grace_period: u64)
 //   dep_path: (symbol,)                    → (deprecated: String, replacement: String)
+//   meta_upd : (symbol, talos_id: u32)     → (name: String, category: String, description: String)
 //                                                  Privacy-safe: no caller/tx/value data.
-//                                                  Reasons callers hit a deprecated path.
-//   tls_paus : (symbol, talos_id: u32)     → (controller: Address)
-//   tls_resu : (symbol, talos_id: u32)     → (controller: Address)
-
-fn emit_talos_created(env: &Env, talos_id: u32, creator: Address, name: String, category: String) {
-    let topics = (symbol_short!("tls_crt"), creator.clone());
-    env.events()
-        .publish(topics, (talos_id, name.clone(), category.clone()));
-
-    let topics2 = (symbol_short!("tls_crt2"), creator);
-    env.events()
-        .publish(topics2, (1u32, talos_id, name, category));
-}
-
-fn emit_patron_updated(env: &Env, talos_id: u32, patron: &Patron) {
-    let topics = (symbol_short!("pat_upd"), talos_id);
-    env.events().publish(
-        topics,
-        (
-            patron.creator_addr.clone(),
-            patron.creator_share,
-            patron.investor_share,
-        ),
-    );
-}
 
 /// Emitted when a creator updates the bounded metadata fields on their Talos.
 ///
@@ -262,32 +238,6 @@ fn emit_creator_metadata_updated(
     let topics = (symbol_short!("meta_upd"), talos_id);
     env.events()
         .publish(topics, (name.clone(), category.clone(), description.clone()));
-}
-
-fn emit_protocol_fee_changed(env: &Env, old_bps: u32, new_bps: u32) {
-    let topics = (symbol_short!("fee_chg"),);
-    env.events().publish(topics, (old_bps, new_bps));
-}
-
-/// Emitted when the current admin nominates a new admin.
-/// `proposed` is the address that must call `accept_admin` to complete the transfer.
-fn emit_admin_proposed(env: &Env, current: Address, proposed: Address) {
-    let topics = (symbol_short!("adm_prp"),);
-    env.events().publish(topics, (current, proposed));
-}
-
-/// Emitted when the pending admin accepts the transfer.
-/// `new_admin` is now the active protocol wallet / admin.
-fn emit_admin_accepted(env: &Env, new_admin: Address) {
-    let topics = (symbol_short!("adm_acc"),);
-    env.events().publish(topics, (new_admin,));
-}
-
-/// Emitted when the current admin cancels an in-progress admin transfer.
-/// `cancelled` is the address whose nomination was revoked.
-fn emit_admin_cancelled(env: &Env, cancelled: Address) {
-    let topics = (symbol_short!("adm_cnl"),);
-    env.events().publish(topics, (cancelled,));
 }
 
 fn emit_timelock_scheduled(
@@ -340,35 +290,6 @@ fn emit_guardian_added(env: &Env, guardian: Address) {
     env.events().publish(topics, (guardian,));
 }
 
-fn emit_guardian_removed(env: &Env, guardian: Address) {
-    let topics = (symbol_short!("guard_rem"),);
-    env.events().publish(topics, (guardian,));
-}
-
-fn emit_allowlist_added(env: &Env, asset: Address, admin: Address) {
-    let topics = (symbol_short!("allow_add"),);
-    env.events().publish(topics, (asset, admin));
-}
-
-fn emit_allowlist_removed(env: &Env, asset: Address, admin: Address) {
-    let topics = (symbol_short!("allow_rem"),);
-    env.events().publish(topics, (asset, admin));
-}
-
-fn emit_deprecated_call(env: &Env, deprecated: &str, replacement: &str) {
-    let topics = (symbol_short!("dep_path"),);
-    env.events().publish(topics, (deprecated, replacement));
-}
-
-fn emit_talos_paused(env: &Env, talos_id: u32, controller: Address) {
-    let topics = (symbol_short!("tls_paus"), talos_id);
-    env.events().publish(topics, controller);
-}
-
-fn emit_talos_resumed(env: &Env, talos_id: u32, controller: Address) {
-    let topics = (symbol_short!("tls_resu"), talos_id);
-    env.events().publish(topics, controller);
-}
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -412,6 +333,22 @@ fn validate_talos_metadata(name: &String, category: &String, description: &Strin
     validate_token_symbol(&pulse.token_symbol);
 }
 
+/// Validate creator-updatable metadata using the same byte limits as creation.
+fn validate_creator_metadata_fields(_e: &Env, name: &String, category: &String, description: &String) {
+    if name.len() == 0 {
+        panic!("Name cannot be empty");
+    }
+    if name.len() > MAX_NAME_BYTES {
+        panic!("Name exceeds maximum byte length");
+    }
+    if category.len() > MAX_CATEGORY_BYTES {
+        panic!("Category exceeds maximum byte length");
+    }
+    if description.len() > MAX_DESCRIPTION_BYTES {
+        panic!("Description exceeds maximum byte length");
+    }
+}
+
 // ── Registry Input Fuzzing Helpers ──────────────────────────────────
 
 /// Maximum allowed length for string fields in registry inputs.
@@ -427,18 +364,6 @@ fn validate_string_input(env: &Env, input: &String, field_name: &str) {
     }
 }
 
-/// Validates that a Soroban `BytesN` fits within registry constraints.
-/// Panics with a privacy-safe error if the bytes are too long.
-fn validate_creator_metadata_fields(
-    env: &Env,
-    name: &String,
-    category: &String,
-    description: &String,
-) {
-    validate_string_input(env, name, "name");
-    validate_string_input(env, category, "category");
-    validate_string_input(env, description, "description");
-}
 fn validate_bytes_input(env: &Env, input: &BytesN<32>, field_name: &str) {
     // BytesN<32> is fixed size, but we validate presence/non-empty if needed.
     // For this implementation, we assume fixed-size inputs are structurally valid.
@@ -485,10 +410,10 @@ const PROTOCOL_FEE_BPS: u32 = 300; // 3%
 const MAX_PROTOCOL_FEE_BPS: u32 = 10_000; // 100%
 
 // Timelock and pause constants now come from admin_controls for deduplication.
-pub(crate) use admin_controls::{
-    DEFAULT_GRACE_PERIOD, MAX_ADMIN_PAUSE_SECS, MAX_GUARDIAN_PAUSE_SECS, MAX_GUARDIANS,
-    MAX_MIN_DELAY,
-};
+pub use admin_controls::{DEFAULT_GRACE_PERIOD, MAX_ADMIN_PAUSE_SECS, MAX_GUARDIAN_PAUSE_SECS, MAX_GUARDIANS, MAX_MIN_DELAY};
+/// Canonical timelock status/config types shared with `TalosNameService` via
+/// the [`admin_controls`] crate (issue #1177).
+pub use admin_controls::{ProposalStatus, TimelockConfig, validate_delay, validate_executable};
 
 // ── Metadata byte limits ────────────────────────────────────────────
 
@@ -1252,10 +1177,10 @@ impl TalosRegistry {
             .get(&DataKey::Guardians)
             .unwrap_or(Vec::new(&e));
 
+        admin_controls::remove_guardian(&e, &mut guardians, guardian);
         e.storage()
             .persistent()
-            .set(&DataKey::Guardians, &remaining);
-        emit_guardian_removed(&e, guardian);
+            .set(&DataKey::Guardians, &guardians);
     }
 
     /// Check whether `addr` currently holds guardian pause authority.

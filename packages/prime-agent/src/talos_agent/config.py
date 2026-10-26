@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from decimal import Decimal
@@ -12,7 +13,6 @@ from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from talos_agent.circuit_breaker import CircuitBreakerConfig
-from talos_agent.http import validate_tool_timeout
 
 APP_DIR = Path.home() / ".talos-agent"
 
@@ -25,6 +25,13 @@ _CONFIG_SECRET_VALUE = re.compile(r"(?i)(input_value\s*=\s*)(['\"])(.*?)(\2)")
 def safe_config_error(error: BaseException) -> str:
     """Return a useful configuration error without exposing secret values."""
     text = str(error)
+    # Redact pydantic validation error input_value fields that may contain
+    # operator-supplied values (issue #873).
+    text = re.sub(
+        r"(input_value=)(['\"])(.*?)\2",
+        r"\1\2[REDACTED]\2",
+        text
+    )
     if _CONFIG_SECRET_FIELDS.search(text):
         text = _CONFIG_SECRET_VALUE.sub(r"\1'[REDACTED]'", text)
     return text or "configuration could not be loaded"
@@ -388,6 +395,34 @@ class Settings(BaseSettings):
         validation_alias="TALOS_TOOL_TIMEOUT_SECONDS",
         description="Maximum seconds for a single external tool call before it is cancelled.",
     )
+    publish_timeout_seconds: float = Field(
+        default=90,
+        ge=0.1,
+        le=300,
+        validation_alias="TALOS_PUBLISH_TIMEOUT",
+        description="Seconds a publishing tool call may run before cancellation (TALOS_PUBLISH_TIMEOUT).",
+    )
+
+    @field_validator("publish_timeout_seconds", mode="before")
+    @classmethod
+    def validate_publish_timeout(cls, value: object) -> float:
+        # The error message is intentionally generic: raising with the raw
+        # operator-supplied value would leak it into UX/CLI surfaces (issue #873).
+        try:
+            seconds = float(str(value))
+        except (ValueError, TypeError):
+            raise ValueError(
+                "publish timeout must be a finite number of seconds"
+            ) from None
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError(
+                "publish timeout must be a positive finite number of seconds"
+            )
+        if seconds > 300:
+            raise ValueError(
+                "publish timeout must not exceed 300 seconds"
+            )
+        return seconds
 
     # Content history and research note bounds (Issue #974)
     content_history_max_limit: int = Field(

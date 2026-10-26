@@ -15,7 +15,6 @@ from talos_agent.security.ssrf import (
     BlockedURLError,
     assert_public_url,
     is_public_url,
-    is_public_url_sync,
 )
 
 

@@ -335,7 +335,8 @@ class TestReportRevenue:
                 amount=25.0, source="service_fee", tx_hash="tx-456"
             )
 
-            assert result == {"status": "reported"}
+            assert result["status"] == "reported"
+            assert result["amount"] == "25.0000000"
             mock_web_api_env["api"].report_revenue.assert_called_once()
 
     @pytest.mark.asyncio

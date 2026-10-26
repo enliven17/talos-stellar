@@ -26,7 +26,7 @@ class TestTalosAPIClientRetry:
         mock_response = {
             "id": "test-talos",
             "name": "Test Agent",
-            "stellarAccountId": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+            "stellarAccountId": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
         }
         respx.get("http://test.local/api/talos/test-talos").mock(
             return_value=Response(200, json=mock_response)
@@ -312,7 +312,7 @@ class TestWalletOperations:
         """GET wallet returns wallet ID and address."""
         mock_response = {
             "walletId": "circle-wallet-789",
-            "publicKey": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+            "publicKey": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f42bE",
         }
         respx.get("http://test.local/api/talos/test-talos-id/wallet").mock(
@@ -330,7 +330,7 @@ class TestWalletOperations:
         """POST wallet creates new wallet if none exists."""
         mock_response = {
             "walletId": "circle-wallet-new",
-            "publicKey": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+            "publicKey": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
         }
         respx.post("http://test.local/api/talos/test-talos-id/wallet").mock(
             return_value=Response(201, json=mock_response)
@@ -350,20 +350,20 @@ class TestPaymentSigning:
         """POST sign returns payment header for x402 transfer."""
         mock_response = {
             "paymentHeader": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-            "from": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+            "from": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
         }
         respx.post("http://test.local/api/talos/test-talos-id/sign").mock(
             return_value=Response(200, json=mock_response)
         )
 
         result = await api_client.sign_payment(
-            payee="GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMQ",
+            payee="GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             amount=1_000_000,
             asset_code="USDC",
         )
         assert result is not None
         assert "paymentHeader" in result
-        assert result["from"] == "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+        assert result["from"] == "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
 
     @pytest.mark.asyncio
     @respx.mock
@@ -377,10 +377,10 @@ class TestPaymentSigning:
         )
 
         result = await api_client.sign_payment(
-            payee="GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMQ",
+            payee="GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             amount=500_000,
             asset_code="PULSE",
-            asset_issuer="GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMX",
+            asset_issuer="GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
         )
         assert result is not None
 
@@ -394,7 +394,7 @@ class TestCommerceFlow:
         """GET service returns 402 Payment Required with payment details."""
         mock_response = {
             "price": 10.50,
-            "payee": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+            "payee": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             "token": "GBBD47UZQ5PBC4MUE4BBQWBW6IM5I46UYOWMUSFA67YPPY権",
             "chainId": 280,
         }
@@ -580,7 +580,7 @@ class TestTransfers:
         )
 
         result = await api_client.request_transfer(
-            to_account="GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMQ",
+            to_account="GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             amount=100.0,
             currency="XLM",
         )
@@ -597,7 +597,7 @@ class TestTransfers:
         )
 
         result = await api_client.request_transfer(
-            to_account="GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMQ",
+            to_account="GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             amount=500.0,
             currency="native",
             token_id="pulse-token-1",
@@ -664,7 +664,7 @@ class TestServiceRegistration:
             service_name="Playbook Generation",
             description="Generate custom GTM playbooks",
             price=20.0,
-            wallet_address="GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+            wallet_address="GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
         )
         assert result is not None
         assert result["serviceName"] == "Playbook Generation"

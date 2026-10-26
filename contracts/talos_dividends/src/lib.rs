@@ -389,29 +389,6 @@ fn compute_rounding_dust(
         .ok_or(ContractError::Overflow)
 }
 
-/// Compatibility helper: returns true if `actual` semver satisfies `required`.
-///
-/// Mirrors `TalosRegistry::version_supports` so callers in both modules
-/// get identical answers even though no shared crate is imported:
-///
-/// - `major` must match exactly.
-/// - `actual.minor > required.minor`        → supported.
-/// - `actual.minor == required.minor` and `actual.patch >= required.patch`
-///                                          → supported.
-/// - `actual.minor < required.minor`        → not supported.
-fn version_supports(actual: (u32, u32, u32), required: (u32, u32, u32)) -> bool {
-    if actual.0 != required.0 {
-        return false;
-    }
-    if actual.1 > required.1 {
-        return true;
-    }
-    if actual.1 < required.1 {
-        return false;
-    }
-    actual.2 >= required.2
-}
-
 /// Cross-contract compatibility helper.
 ///
 /// Verifies that a contract registered as a `TalosRegistry` actually

@@ -816,6 +816,10 @@ function parseErrorEnvelope(rawBody: string): {
       return { issues: [] };
     }
     const envelope = parsed as Record<string, unknown>;
+    const nestedError =
+      envelope.error != null && typeof envelope.error === "object" && !Array.isArray(envelope.error)
+        ? (envelope.error as Record<string, unknown>)
+        : undefined;
     const safeText = (value: unknown): string | undefined => {
       if (typeof value !== "string") return undefined;
       const normalized = redactInlineSecrets(
@@ -825,8 +829,8 @@ function parseErrorEnvelope(rawBody: string): {
     };
     const requestId = safeText(envelope.requestId);
     return {
-      code: safeText(envelope.code),
-      message: safeText(envelope.message) ?? safeText(envelope.error),
+      code: safeText(envelope.code) ?? safeText(nestedError?.code),
+      message: safeText(envelope.message) ?? safeText(nestedError?.message) ?? safeText(envelope.error),
       requestId: requestId && /^[A-Za-z0-9._~:-]{1,128}$/.test(requestId) ? requestId : undefined,
       issues: Array.isArray(envelope.issues)
         ? envelope.issues

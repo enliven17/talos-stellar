@@ -3,7 +3,15 @@
 from __future__ import annotations
 
 import sqlite3
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
+
+
+def _to_decimal(value: float | str | Decimal) -> Decimal:
+    """Convert a numeric value to Decimal without float drift."""
+    if isinstance(value, Decimal):
+        return value
+    return Decimal(str(value))
 
 
 class LoanRepo:
@@ -56,19 +64,24 @@ class LoanRepo:
             "INSERT INTO loan_repayments (loan_id, amount, tx_hash) VALUES (?, ?, ?)",
             (loan_id, amount, tx_hash),
         )
-        self._conn.execute(
-            """UPDATE loans
-               SET outstanding_amount = outstanding_amount - ?,
-                   updated_at = datetime('now')
-               WHERE id = ?""",
-            (amount, loan_id),
-        )
+        # Use Decimal arithmetic to avoid float drift in outstanding_amount.
         loan = self.get_loan_by_id(loan_id)
-        if loan and loan["outstanding_amount"] <= 0:
+        if loan is not None:
+            outstanding = _to_decimal(loan["outstanding_amount"])
+            paid = _to_decimal(amount)
+            remaining = outstanding - paid
             self._conn.execute(
-                "UPDATE loans SET status = 'repaid', updated_at = datetime('now') WHERE id = ?",
-                (loan_id,),
+                """UPDATE loans
+                   SET outstanding_amount = ?,
+                       updated_at = datetime('now')
+                   WHERE id = ?""",
+                (float(remaining), loan_id),
             )
+            if remaining <= 0:
+                self._conn.execute(
+                    "UPDATE loans SET status = 'repaid', updated_at = datetime('now') WHERE id = ?",
+                    (loan_id,),
+                )
         self._conn.commit()
 
     def get_loans_due_soon(self, days: int = 7) -> list[dict]:

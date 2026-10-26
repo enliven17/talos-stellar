@@ -493,7 +493,7 @@ class TestPublishTimeout:
         adapter = FakeAdapter(channel_name="X", post_delay=0.2)
         registry = _make_registry(X=adapter)
         with patch.object(publishing, "_adapter_registry", registry), \
-                patch.object(publishing, "_TIMEOUT", 0.01):
+                patch.object(publishing, "_publish_timeout", 0.01):
             result = await publishing.publish_content("Hello", channel="X")
         assert "error" in result
         assert "timed out" in result["error"]
@@ -503,10 +503,10 @@ class TestPublishTimeout:
         adapter = FakeAdapter(channel_name="X", post_delay=0.2)
         registry = _make_registry(X=adapter)
         with patch.object(publishing, "_adapter_registry", registry), \
-                patch.object(publishing, "_TIMEOUT", 5):
+                patch.object(publishing, "_publish_timeout", 0.05):
             result = await publishing.publish_content("Hello", channel="X")
         assert "error" in result
-        assert "5s" in result["error"]
+        assert "0.05s" in result["error"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════

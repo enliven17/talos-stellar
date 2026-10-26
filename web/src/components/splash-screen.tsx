@@ -39,7 +39,6 @@ export function SplashScreen() {
 
   useEffect(() => {
     if (shouldSkipSplash()) {
-      setIsVisible(false);
       return;
     }
 

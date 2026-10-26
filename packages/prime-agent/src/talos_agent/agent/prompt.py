@@ -2,12 +2,46 @@
 
 from __future__ import annotations
 
+import unicodedata
 from typing import TYPE_CHECKING
 
 from talos_agent.agent.context import AgentContext
 
 if TYPE_CHECKING:
     from talos_agent.config import Settings
+
+# ── Operator-supplied field delimiting (issue #878) ─────────────────
+#
+# Operator-supplied talos_config values are embedded in agent system
+# prompts. To prevent prompt injection they are sanitised (strip C0/C1
+# control characters, cap length) and wrapped in clearly-labelled data
+# fences so downstream models treat them as data, not instructions.
+
+_FIELD_MAX_LEN = 2000
+
+
+def _sanitise_field(value: str) -> str:
+    """Strip C0/C1 control characters and cap the field at ``_FIELD_MAX_LEN``."""
+    cleaned = "".join(ch for ch in value if unicodedata.category(ch) != "Cc")
+    if len(cleaned) > _FIELD_MAX_LEN:
+        cleaned = cleaned[:_FIELD_MAX_LEN]
+    return cleaned
+
+
+def _delimit_field(field_name: str, value: str) -> str:
+    """Wrap a sanitised value in ``<<<DATA:field>>>…<<<END:field>>>`` fences."""
+    end_marker = f"<<<END:{field_name}>>>"
+    # Values cannot break out of their block: strip any embedded end marker.
+    escaped = value.replace(end_marker, "")
+    return f"<<<DATA:{field_name}>>>\n{escaped}\n{end_marker}"
+
+
+def _safe_field(talos_config: dict, field_name: str, default: str) -> str:
+    """Fetch, sanitise and delimit an operator-supplied config field."""
+    raw = talos_config.get(field_name, default)
+    if not isinstance(raw, str):
+        raw = str(raw)
+    return _delimit_field(field_name, _sanitise_field(raw))
 
 
 def build_learning_prompt(talos_config: dict, context: AgentContext) -> str:
@@ -63,13 +97,17 @@ def build_system_prompt(
             reproduce the original demo guidance.
     """
     name = talos_config.get("name", "Unknown Talos")
-    persona = talos_config.get("persona", "a professional marketing agent")
-    target = talos_config.get("targetAudience", "general audience")
-    tone = talos_config.get("toneVoice", "professional and engaging")
     channels = talos_config.get("channels", ["X"])
     threshold = talos_config.get("approvalThreshold", 10)
     gtm_budget = talos_config.get("gtmBudget", 200)
     channels_str = ", ".join(channels) if isinstance(channels, list) else str(channels)
+
+    # Operator-supplied fields are sanitised and delimited (issue #878).
+    persona_block = _safe_field(talos_config, "persona", "a professional marketing agent")
+    target_block = _safe_field(talos_config, "targetAudience", "general audience")
+    tone_block = _safe_field(talos_config, "toneVoice", "professional and engaging")
+    description_block = _safe_field(talos_config, "description", "")
+    name_block = _safe_field(talos_config, "name", "Unknown Talos")
 
     # Issue #879 — gate demo/aggressive purchasing language behind a flag
     demo_mode: bool = bool(

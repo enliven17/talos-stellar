@@ -14,6 +14,9 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const assert = require("node:assert/strict");
+if (!globalThis.crypto) {
+  Object.defineProperty(globalThis, "crypto", { value: require("node:crypto").webcrypto });
+}
 
 const SDK_ROOT = path.resolve(__dirname, "..");
 const CJS_DIR = path.join(SDK_ROOT, "dist", "cjs");

@@ -307,9 +307,10 @@ export function managedTables(): string[] {
   // first is what lets `is(value, PgTable)` act as a predicate (a predicate type
   // must be assignable to the narrow union it filters).
   const exported: unknown[] = Object.values(schema);
-  return exported
+  return [...new Set(exported
     .filter((value): value is PgTable => is(value, PgTable))
     .map((table) => getTableName(table))
+    .filter((name) => name.startsWith("tls_")))]
     .sort();
 }
 

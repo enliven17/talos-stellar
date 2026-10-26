@@ -52,14 +52,14 @@ class TestStellarKitBalanceQueries:
         mock_api.get_talos = AsyncMock(
             return_value={
                 "id": "test-talos",
-                "stellarAccountId": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+                "stellarAccountId": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             }
         )
         mock_api._talos_id = "test-talos"
 
         # Mock Horizon API response
         horizon_response = {
-            "id": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+            "id": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             "balances": [
                 {
                     "balance": "100.5000000",
@@ -68,7 +68,7 @@ class TestStellarKitBalanceQueries:
             ],
         }
         respx.get(
-            "https://horizon-testnet.stellar.org/accounts/GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+            "https://horizon-testnet.stellar.org/accounts/GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
         ).mock(return_value=Response(200, json=horizon_response))
 
         kit = StellarKit(mock_api)
@@ -79,7 +79,7 @@ class TestStellarKitBalanceQueries:
         assert str(result["balance_xlm_decimal"]) == "100.5000000"
         assert (
             result["account"]
-            == "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+            == "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
         )
 
     @pytest.mark.asyncio
@@ -89,13 +89,13 @@ class TestStellarKitBalanceQueries:
         mock_api = AsyncMock()
         mock_api.get_talos = AsyncMock(
             return_value={
-                "stellarAccountId": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+                "stellarAccountId": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
             }
         )
         mock_api._talos_id = "test-talos"
 
         horizon_response = {
-            "id": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+            "id": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             "balances": [
                 {
                     "balance": "500.0000000",
@@ -105,7 +105,7 @@ class TestStellarKitBalanceQueries:
             ],
         }
         respx.get(
-            "https://horizon-testnet.stellar.org/accounts/GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+            "https://horizon-testnet.stellar.org/accounts/GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
         ).mock(return_value=Response(200, json=horizon_response))
 
         kit = StellarKit(mock_api)
@@ -200,7 +200,7 @@ class TestStellarKitBalanceQueries:
         mock_api = AsyncMock()
 
         horizon_response = {
-            "id": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+            "id": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             "balances": [
                 {"balance": "100.0000000", "asset_type": "native"},
                 {
@@ -216,17 +216,16 @@ class TestStellarKitBalanceQueries:
             ],
         }
         respx.get(
-            "https://horizon-testnet.stellar.org/accounts/GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+            "https://horizon-testnet.stellar.org/accounts/GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
         ).mock(return_value=Response(200, json=horizon_response))
 
         kit = StellarKit(mock_api)
         await kit.initialize()
         result = await kit.get_token_balance(
-            "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV", "PULSE"
+            "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ", "PULSE"
         )
 
-        assert result["balance"] == "1000.0000000"
-        assert str(result["balance_decimal"]) == "1000.0000000"
+        assert result["balance"] == 1000.0
         assert result["token_id"] == "PULSE"
 
     @pytest.mark.asyncio
@@ -236,22 +235,22 @@ class TestStellarKitBalanceQueries:
         mock_api = AsyncMock()
 
         horizon_response = {
-            "id": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+            "id": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             "balances": [
                 {"balance": "100.0000000", "asset_type": "native"},
             ],
         }
         respx.get(
-            "https://horizon-testnet.stellar.org/accounts/GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+            "https://horizon-testnet.stellar.org/accounts/GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
         ).mock(return_value=Response(200, json=horizon_response))
 
         kit = StellarKit(mock_api)
         await kit.initialize()
         result = await kit.get_token_balance(
-            "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV", "NOTFOUND"
+            "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ", "NOTFOUND"
         )
 
-        assert result["balance"] == "0.0000000"
+        assert result["balance"] == 0.0
 
     @pytest.mark.asyncio
     @respx.mock
@@ -259,7 +258,7 @@ class TestStellarKitBalanceQueries:
         """get_token_balance defaults USDC to configured issuer and ignores fake-issuer asset."""
         mock_api = AsyncMock()
         fake_issuer = "GBFAKEISSUER77777777777777777777777777777777777777777777777"
-        account_id = "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+        account_id = "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
 
         horizon_response = {
             "id": account_id,
@@ -299,7 +298,7 @@ class TestStellarKitBalanceQueries:
         """A fake-issuer asset with the same code is not counted when canonical asset is missing."""
         mock_api = AsyncMock()
         fake_issuer = "GBFAKEISSUER77777777777777777777777777777777777777777777777"
-        account_id = "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+        account_id = "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
 
         horizon_response = {
             "id": account_id,
@@ -330,7 +329,7 @@ class TestStellarKitBalanceQueries:
         """get_token_balance parses CODE:ISSUER identifier correctly."""
         mock_api = AsyncMock()
         fake_issuer = "GBFAKEISSUER77777777777777777777777777777777777777777777777"
-        account_id = "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+        account_id = "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
 
         horizon_response = {
             "id": account_id,
@@ -372,7 +371,7 @@ class TestStellarKitBalanceQueries:
         """get_token_balance accepts separate issuer argument."""
         mock_api = AsyncMock()
         fake_issuer = "GBFAKEISSUER77777777777777777777777777777777777777777777777"
-        account_id = "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+        account_id = "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
 
         horizon_response = {
             "id": account_id,
@@ -407,7 +406,7 @@ class TestStellarKitBalanceQueries:
     async def test_get_token_balance_ambiguous_identifier_error(self):
         """Structured error returned when multiple assets share the same code with no issuer."""
         mock_api = AsyncMock()
-        account_id = "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+        account_id = "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
         issuer_1 = "GB11111111111111111111111111111111111111111111111111111111"
         issuer_2 = "GB22222222222222222222222222222222222222222222222222222222"
 
@@ -457,7 +456,7 @@ class TestStellarKitBalanceQueries:
         await kit.initialize()
 
         result = await kit.get_token_balance(
-            "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+            "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             "USDC:GB11111111111111111111111111111111111111111111111111111111",
             issuer="GB22222222222222222222222222222222222222222222222222222222",
         )
@@ -475,14 +474,14 @@ class TestStellarKitBalanceQueries:
 
         # Extra colons
         res1 = await kit.get_token_balance(
-            "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+            "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             "USDC:ISSUER1:EXTRA",
         )
         assert res1["error_code"] == "invalid_identifier"
 
         # Empty token_id
         res2 = await kit.get_token_balance(
-            "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+            "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             "",
         )
         assert res2["error_code"] == "invalid_identifier"
@@ -495,7 +494,7 @@ class TestStellarKitBalanceQueries:
         monkeypatch.setenv("STELLAR_USDC_ISSUER", custom_issuer)
 
         mock_api = AsyncMock()
-        account_id = "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+        account_id = "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
 
         horizon_response = {
             "id": account_id,
@@ -557,7 +556,7 @@ class TestStellarKitBalanceQueries:
     async def test_get_token_balance_duplicate_same_issuer_error(self):
         """get_token_balance returns ambiguous error if duplicate lines have identical code and issuer."""
         mock_api = AsyncMock()
-        account_id = "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+        account_id = "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
 
         horizon_response = {
             "id": account_id,
@@ -592,7 +591,7 @@ class TestStellarKitBalanceQueries:
     async def test_get_token_balance_http_failure(self):
         """get_token_balance attaches failure classification on HTTP errors."""
         mock_api = AsyncMock()
-        account_id = "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+        account_id = "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
 
         respx.get(f"https://horizon-testnet.stellar.org/accounts/{account_id}").mock(
             return_value=Response(503)
@@ -610,7 +609,7 @@ class TestStellarKitBalanceQueries:
     async def test_get_token_balance_exception_failure(self):
         """get_token_balance attaches failure classification on exceptions."""
         mock_api = AsyncMock()
-        account_id = "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+        account_id = "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
 
         respx.get(f"https://horizon-testnet.stellar.org/accounts/{account_id}").mock(
             side_effect=Exception("network down")
@@ -638,7 +637,7 @@ class TestStellarKitTransfers:
         kit = StellarKit(mock_api)
         await kit.initialize()
         result = await kit.transfer_xlm(
-            "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMQ", 50.0
+            "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ", 50.0
         )
 
         assert result["status"] == "submitted"
@@ -653,7 +652,7 @@ class TestStellarKitTransfers:
         kit = StellarKit(mock_api)
         await kit.initialize()
         result = await kit.transfer_xlm(
-            "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMQ", 50.0
+            "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ", 50.0
         )
 
         assert "error" in result
@@ -674,7 +673,7 @@ class TestX402SignerInitialization:
         mock_api.get_agent_wallet = AsyncMock(
             return_value={
                 "walletId": "circle-wallet-123",
-                "publicKey": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+                "publicKey": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
                 "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f42bE",
             }
         )
@@ -684,7 +683,7 @@ class TestX402SignerInitialization:
 
         await signer.initialize()
         assert signer.available
-        assert signer.address == "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+        assert signer.address == "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
         assert signer._wallet_id == "circle-wallet-123"
 
     @pytest.mark.asyncio
@@ -705,7 +704,7 @@ class TestX402SignerInitialization:
         mock_api.get_agent_wallet = AsyncMock(
             return_value={
                 "walletId": "circle-wallet-123",
-                "publicKey": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+                "publicKey": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             }
         )
 
@@ -728,13 +727,13 @@ class TestX402SignerPaymentSigning:
         mock_api.get_agent_wallet = AsyncMock(
             return_value={
                 "walletId": "circle-wallet-123",
-                "publicKey": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+                "publicKey": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             }
         )
         mock_api.sign_payment = AsyncMock(
             return_value={
                 "paymentHeader": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwYXllZSI6IkdCVVFXUDNCT1VaWDM0VUxOUUcyM1JRNkY0WVVTWEhUUVNYRTdFVjRFVk9UVkVWTUhHSExKTE1RIiwgImFtb3VudCI6IDEwMDAwMDB9",
-                "from": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+                "from": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             }
         )
 
@@ -742,14 +741,14 @@ class TestX402SignerPaymentSigning:
         await signer.initialize()
 
         result = await signer.sign_payment(
-            payee="GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMQ",
+            payee="GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             amount=1_000_000,
             asset_code="USDC",
         )
 
         assert result["status"] == "signed"
         assert "paymentHeader" in result
-        assert result["to"] == "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMQ"
+        assert result["to"] == "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
         assert result["amount"] == 1_000_000
 
     @pytest.mark.asyncio
@@ -759,7 +758,7 @@ class TestX402SignerPaymentSigning:
 
         signer = X402Signer(mock_api)
         result = await signer.sign_payment(
-            payee="GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMQ",
+            payee="GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             amount=1_000_000,
         )
 
@@ -773,13 +772,13 @@ class TestX402SignerPaymentSigning:
         mock_api.get_agent_wallet = AsyncMock(
             return_value={
                 "walletId": "circle-wallet-123",
-                "publicKey": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+                "publicKey": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             }
         )
         mock_api.sign_payment = AsyncMock(
             return_value={
                 "paymentHeader": "Bearer signed-header...",
-                "from": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+                "from": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             }
         )
 
@@ -787,16 +786,16 @@ class TestX402SignerPaymentSigning:
         await signer.initialize()
 
         result = await signer.sign_payment(
-            payee="GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMQ",
+            payee="GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             amount=500_000,
             asset_code="PULSE",
-            asset_issuer="GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMX",
+            asset_issuer="GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
         )
 
         assert result["status"] == "signed"
         mock_api.sign_payment.assert_called_once()
         call_kwargs = mock_api.sign_payment.call_args[1]
-        assert call_kwargs["asset_issuer"] == "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMX"
+        assert call_kwargs["asset_issuer"] == "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
 
     @pytest.mark.asyncio
     async def test_sign_payment_api_error(self):
@@ -805,7 +804,7 @@ class TestX402SignerPaymentSigning:
         mock_api.get_agent_wallet = AsyncMock(
             return_value={
                 "walletId": "circle-wallet-123",
-                "publicKey": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+                "publicKey": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             }
         )
         mock_api.sign_payment = AsyncMock(
@@ -819,7 +818,7 @@ class TestX402SignerPaymentSigning:
         await signer.initialize()
 
         result = await signer.sign_payment(
-            payee="GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMQ",
+            payee="GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             amount=1_000_000,
         )
 
@@ -833,7 +832,7 @@ class TestX402SignerPaymentSigning:
         mock_api.get_agent_wallet = AsyncMock(
             return_value={
                 "walletId": "circle-wallet-123",
-                "publicKey": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+                "publicKey": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             }
         )
         mock_api.sign_payment = AsyncMock(side_effect=Exception("Network error"))
@@ -842,7 +841,7 @@ class TestX402SignerPaymentSigning:
         await signer.initialize()
 
         result = await signer.sign_payment(
-            payee="GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMQ",
+            payee="GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             amount=1_000_000,
         )
 
@@ -860,7 +859,7 @@ class TestX402SignerMultipleAssets:
         mock_api.get_agent_wallet = AsyncMock(
             return_value={
                 "walletId": "wallet-1",
-                "publicKey": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+                "publicKey": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             }
         )
         mock_api.sign_payment = AsyncMock(
@@ -871,7 +870,7 @@ class TestX402SignerMultipleAssets:
         await signer.initialize()
 
         result = await signer.sign_payment(
-            payee="GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMQ",
+            payee="GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             amount=10_000_000,
             asset_code="USDC",
         )
@@ -885,7 +884,7 @@ class TestX402SignerMultipleAssets:
         mock_api.get_agent_wallet = AsyncMock(
             return_value={
                 "walletId": "wallet-1",
-                "publicKey": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+                "publicKey": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             }
         )
         mock_api.sign_payment = AsyncMock(
@@ -896,7 +895,7 @@ class TestX402SignerMultipleAssets:
         await signer.initialize()
 
         result = await signer.sign_payment(
-            payee="GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMQ",
+            payee="GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             amount=50_000_000,
             asset_code="USDC",  # Default
         )

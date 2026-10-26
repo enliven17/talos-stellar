@@ -13,7 +13,7 @@ text, seeds, payment proofs, or response bodies are ever surfaced.
 from __future__ import annotations
 
 import os
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -146,22 +146,30 @@ class StellarKit:
             initialized=bool(self._initialized),
         )
 
-    async def get_balance(self, account_id: str = "") -> dict[str, Any]:
-        """Query XLM balance via Horizon (public API)."""
+    async def get_balance(
+        self, account_id: str | None = None
+    ) -> dict[str, Any]:
+        """Query XLM balance via Horizon (public API).
+
+        Args:
+            account_id: Optional explicit account ID. When None, falls back to
+                the Talos's configured ``stellarAccountId``.
+        """
         try:
             talos = await self._api.get_talos(self._api._talos_id)
-            acct = account_id or (talos.get("stellarAccountId", "") if talos else "")
-            if not acct:
-                return {"error": "No Stellar account configured"}
-            if not _validate_account_id(acct):
-                return {"error": "invalid_account", "account": acct}
+            if account_id is None:
+                account_id = talos.get("stellarAccountId", "") if talos else ""
+                if not account_id:
+                    return {"error": "No Stellar account configured"}
+            if not _validate_account_id(account_id):
+                return {"error": "invalid_account", "account": account_id}
             # Reuse the shared client; fall back to a temporary one if not
             # initialized (e.g. called in tests without initialize()).
             client = self._client or httpx.AsyncClient(timeout=self._horizon_timeout)
             close_after = self._client is None
             try:
                 r = await request_with_retry(
-                    lambda: client.get(f"{_HORIZON_URL}/accounts/{acct}"),
+                    lambda: client.get(f"{_HORIZON_URL}/accounts/{account_id}"),
                     provider="stellar_horizon",
                 )
             finally:
@@ -172,8 +180,17 @@ class StellarKit:
                 balance = data.get("balances", [])
                 xlm_balance = next((b for b in balance if b.get("asset_type") == "native"), None)
                 if xlm_balance:
-                    return {"balance_xlm": float(xlm_balance["balance"]), "account": acct}
-                return {"balance_xlm": 0, "account": acct}
+                    balance_dec = to_stellar_amount(xlm_balance["balance"])
+                    return {
+                        "balance_xlm": format_stellar_amount(balance_dec),
+                        "balance_xlm_decimal": balance_dec,
+                        "account": acct,
+                    }
+                return {
+                    "balance_xlm": format_stellar_amount(0),
+                    "balance_xlm_decimal": Decimal(0),
+                    "account": acct,
+                }
             return attach_stellar_failure(
                 None,
                 classify_stellar_failure(status_code=r.status_code),
@@ -214,6 +231,8 @@ class StellarKit:
 
             if not account_id:
                 return {"error": "No Stellar account configured"}
+            if not _validate_account_id(account_id):
+                return {"error": "invalid_account", "account": account_id}
 
             # Parse CODE[:ISSUER]
             parsed_code: str

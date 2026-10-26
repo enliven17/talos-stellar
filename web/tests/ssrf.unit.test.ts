@@ -1,5 +1,11 @@
-import { validateUrl, safeFetch } from "@/lib/security/ssrf";
+import { validateUrl } from "@/lib/security/ssrf";
 import { describe, it, expect, vi } from "vitest";
+
+vi.mock("dns/promises", () => ({
+  default: {
+    lookup: vi.fn().mockResolvedValue([{ address: "93.184.216.34", family: 4 }]),
+  },
+}));
 
 describe("SSRF Prevention - validateUrl", () => {
   it("allows standard safe URLs", async () => {
