@@ -54,7 +54,7 @@ jobs:
             (cd packages/sdk && npm run build)
           fi
       - name: Upload SDK dist artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sdk-dist-node-${{ matrix.node-version }}
           path: packages/sdk/dist/
