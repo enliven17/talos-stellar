@@ -43,7 +43,7 @@
     "devcontainer:check": "node --test scripts/verify-devcontainer.test.mjs"
   },
   "dependencies": {
-    "next": "16.4.2"
+    "next": "16.4.3"
   },
   "engines": {
     "node": ">=20"
