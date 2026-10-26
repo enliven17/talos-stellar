@@ -485,14 +485,14 @@ jobs:
           echo "signature-artifact=sbom-sdk-signatures-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Upload CycloneDX SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.meta.outputs.cyclonedx-artifact }}
           path: ${{ steps.cyclonedx.outputs.cdx-json }}
           retention-days: ${{ env.RETENTION_DAYS }}
 
       - name: Upload SPDX SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.meta.outputs.spdx-artifact }}
           path: ${{ steps.spdx.outputs.spdx-file }}
@@ -500,14 +500,14 @@ jobs:
 
       - name: Upload signatures
         if: inputs.sign_artifacts != false && steps.sign.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.meta.outputs.signature-artifact }}
           path: ${{ steps.sign.outputs.sig-dir }}
           retention-days: ${{ env.RETENTION_DAYS }}
 
       - name: Upload provenance
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: provenance-sdk-${{ steps.cyclonedx.outputs.cdx-name }}
           path: ${{ steps.provenance.outputs.provenance-file }}
@@ -745,14 +745,14 @@ jobs:
           echo "signature-artifact=sbom-agent-signatures-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Upload CycloneDX
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.meta.outputs.cyclonedx-artifact }}
           path: ${{ steps.cyclonedx.outputs.cdx-json }}
           retention-days: ${{ env.RETENTION_DAYS }}
 
       - name: Upload SPDX
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.meta.outputs.spdx-artifact }}
           path: ${{ steps.spdx.outputs.spdx-file }}
@@ -760,14 +760,14 @@ jobs:
 
       - name: Upload signatures
         if: inputs.sign_artifacts != false && steps.sign.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.meta.outputs.signature-artifact }}
           path: ${{ steps.sign.outputs.sig-dir }}
           retention-days: ${{ env.RETENTION_DAYS }}
 
       - name: Upload provenance
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: provenance-agent-${{ steps.cyclonedx.outputs.cdx-name }}
           path: ${{ steps.provenance.outputs.provenance-file }}
@@ -1048,14 +1048,14 @@ jobs:
           echo "signature-artifact=sbom-contracts-signatures-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Upload CycloneDX
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.meta.outputs.cyclonedx-artifact }}
           path: ${{ steps.cyclonedx.outputs.cdx-json }}
           retention-days: ${{ env.RETENTION_DAYS }}
 
       - name: Upload SPDX
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.meta.outputs.spdx-artifact }}
           path: ${{ steps.spdx.outputs.spdx-file }}
@@ -1063,14 +1063,14 @@ jobs:
 
       - name: Upload signatures
         if: inputs.sign_artifacts != false && steps.sign.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.meta.outputs.signature-artifact }}
           path: ${{ steps.sign.outputs.sig-dir }}
           retention-days: ${{ env.RETENTION_DAYS }}
 
       - name: Upload provenance
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: provenance-contracts-${{ steps.cyclonedx.outputs.cdx-name }}
           path: ${{ steps.provenance.outputs.provenance-file }}
@@ -1276,14 +1276,14 @@ jobs:
           echo "signature-artifact=sbom-web-signatures-${GITHUB_REF_NAME:-$SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Upload CycloneDX
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.meta.outputs.cyclonedx-artifact }}
           path: ${{ steps.cyclonedx.outputs.cdx-json }}
           retention-days: ${{ env.RETENTION_DAYS }}
 
       - name: Upload SPDX
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.meta.outputs.spdx-artifact }}
           path: ${{ steps.spdx.outputs.spdx-file }}
@@ -1291,14 +1291,14 @@ jobs:
 
       - name: Upload signatures
         if: inputs.sign_artifacts != false && steps.sign.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.meta.outputs.signature-artifact }}
           path: ${{ steps.sign.outputs.sig-dir }}
           retention-days: ${{ env.RETENTION_DAYS }}
 
       - name: Upload provenance
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: provenance-web-${{ steps.cyclonedx.outputs.cdx-name }}
           path: ${{ steps.provenance.outputs.provenance-file }}
