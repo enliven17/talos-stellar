@@ -62,7 +62,7 @@
     "@types/node": "^26.6.5",
     "esbuild": "^0.28.2",
     "openapi-typescript": "^7.4.3",
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.2"
   },
   "license": "MIT",
