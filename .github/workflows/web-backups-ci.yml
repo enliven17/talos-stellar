@@ -71,7 +71,7 @@ jobs:
       BACKUP_PASSPHRASE: ci-passphrase-must-be-long-enough
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node
         uses: actions/setup-node@v7
