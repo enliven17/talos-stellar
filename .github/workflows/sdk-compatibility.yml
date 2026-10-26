@@ -74,7 +74,7 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - name: Download SDK dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: sdk-dist-node-${{ matrix.node-version }}
           path: packages/sdk/dist
@@ -163,7 +163,7 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - name: Download SDK dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: sdk-dist-node-${{ matrix.node-version }}
           path: packages/sdk/dist
@@ -205,7 +205,7 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - name: Download SDK dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: sdk-dist-node-${{ matrix.node-version }}
           path: packages/sdk/dist
@@ -247,7 +247,7 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - name: Download SDK dist (includes browser bundle)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: sdk-dist-node-20.x
           path: packages/sdk/dist
@@ -310,7 +310,7 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - name: Download SDK ESM dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: sdk-dist-node-20.x
           path: packages/sdk/dist
