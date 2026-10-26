@@ -120,7 +120,16 @@ export function Providers({
   // depending on the adapter; normalise to base64 so the server has one shape
   // to verify against.
   const signMessage = useCallback(async (message: string): Promise<string> => {
-    const { signedMessage } = await StellarWalletsKit.signMessage(message);
+    // Map user rejection to a typed error code so SDK consumers can branch on it.
+    let signedMessage: string | Uint8Array;
+    try {
+      ({ signedMessage } = await StellarWalletsKit.signMessage(message));
+    } catch (err) {
+      const e = new Error("User rejected the signing request") as Error & { code?: string };
+      e.code = "USER_REJECTED";
+      if (err instanceof Error && /reject|den(y|ied)|cancel/i.test(err.message)) throw e;
+      throw err;
+    }
     if (typeof signedMessage === "string") return signedMessage;
 
     // Browser-safe base64 — `Buffer` is not available in the client bundle.

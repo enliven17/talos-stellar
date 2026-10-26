@@ -1,4 +1,6 @@
 #![allow(unused)]
+#![allow(unused)]
+//! TalosGovernance - Soroban smart contract for token-weighted governance.
 //! TalosGovernance - Soroban smart contract for token-weighted governance.
 //!
 //! ## What's new in this branch (#606)
@@ -174,7 +176,6 @@ pub struct GovernanceConfig {
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
-    PendingAdmin,
     Config,
     NextProposalId,
     Proposal(u32),
@@ -938,6 +939,7 @@ impl TalosGovernance {
                     voting_period_ledgers,
                     pulse_token_address: existing.pulse_token_address,
                     snapshot_offset_ledgers: existing.snapshot_offset_ledgers,
+                    quorum_bps: existing.quorum_bps,
                 };
                 env.storage().persistent().set(&DataKey::Config, &new_config);
                 emit_proposal_executed(env, proposal_id, Symbol::new(env, "UpdateConfig"));

@@ -104,7 +104,8 @@ pub fn emit_timelock_scheduled_raw(
     proposer: Address,
 ) {
     let topics = (symbol_short!("tl_sch"), proposal_id);
-    env.events().publish(topics, (action, eta, proposer));
+    let action_val: soroban_sdk::Val = action.into_val(env);
+    env.events().publish(topics, (action_val, eta, proposer));
 }
 
 /// Emit `tl_exec` — a proposal was executed.
@@ -115,7 +116,8 @@ pub fn emit_timelock_executed_raw(
     executor: Address,
 ) {
     let topics = (symbol_short!("tl_exec"), proposal_id);
-    env.events().publish(topics, (action, executor));
+    let action_val: soroban_sdk::Val = action.into_val(env);
+    env.events().publish(topics, (action_val, executor));
 }
 
 /// Emit `tl_cnl` — a proposal was cancelled.
@@ -126,7 +128,8 @@ pub fn emit_timelock_cancelled_raw(
     canceller: Address,
 ) {
     let topics = (symbol_short!("tl_cnl"), proposal_id);
-    env.events().publish(topics, (action, canceller));
+    let action_val: soroban_sdk::Val = action.into_val(env);
+    env.events().publish(topics, (action_val, canceller));
 }
 
 /// Emit `tl_cfg` — the timelock configuration was updated.

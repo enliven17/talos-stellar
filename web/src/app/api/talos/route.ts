@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsPatrons, tlsCommerceServices } from "@/db/schema";
-import { and, desc, eq, ilike, lt, or, sql, type SQLWrapper } from "drizzle-orm";
+import { and, desc, eq, ilike, isNull, lt, or, sql, type SQLWrapper } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { createAgentKeypair, fundTestnetAccount, verifyStellarSignature } from "@/lib/stellar";
 import { createTalosSchema, parseBody } from "@/lib/schemas";
@@ -153,7 +153,7 @@ async function _GET(request: NextRequest) {
 
     // Loop until we fulfill the limit or exhaust the DB
     while (accumulated.length < limit && !exhausted) {
-      const conditions = [];
+      const conditions = [isNull(tlsTalos.deletedAt)];
 
       // Apply status filter (defaults to excluding "Deleted" if no filter provided)
       if (statusFilter !== null) {

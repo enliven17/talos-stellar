@@ -107,7 +107,9 @@ async def agent_cycle_task(
                         talos=talos_config.get("name"),
                         cycle_id=cycle_id,
                     )
-                    context = AgentContext.from_db(db, talos_config)
+                    context = AgentContext.from_db(
+                        db, talos_config, clock=effective_clock
+                    )
 
                     # ── Replay recording (optional) ──────────────────────
                     replay_recorder = None
@@ -399,6 +401,7 @@ async def learning_cycle_task(
     talos_config: dict,
     db,
     ensure_browser_healthy,
+    effective_clock: "ClockProtocol",
 ) -> None:
     """Run a dedicated learning cycle every 6 hours: measure → review → evolve."""
     from talos_agent.agent.context import AgentContext
@@ -423,7 +426,9 @@ async def learning_cycle_task(
             else:
                 try:
                     with _traced_task_run("learning_cycle", talos_config):
-                        context = AgentContext.from_db(db, talos_config)
+                        context = AgentContext.from_db(
+                            db, talos_config, clock=effective_clock
+                        )
 
                         if context.unmeasured_count > 0 or context.performance_summary.get("total_posts", 0) >= 5:
                             console.print("[bold magenta]Starting learning cycle...[/bold magenta]")

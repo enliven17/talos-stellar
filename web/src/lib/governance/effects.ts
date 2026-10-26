@@ -123,6 +123,7 @@ export const databaseEffects: ProvisioningEffects = {
       .update(tlsCommerceServices)
       .set({ stellarPublicKey: wallet })
       .where(eq(tlsCommerceServices.talosId, ctx.talosId));
+    // Note: effects are idempotent; re-running registerServices with the same wallet is a no-op in effect.
 
     return {
       serviceCount: existing.length,

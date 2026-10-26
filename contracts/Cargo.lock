@@ -1872,6 +1872,8 @@ dependencies = [
  "admin-controls",
  "pause-control",
  "proptest",
+ "serde",
+ "serde_json",
  "soroban-sdk",
  "talos-registry",
  "ttl-manager",

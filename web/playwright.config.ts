@@ -1,42 +1,36 @@
-import { defineConfig, devices } from '@playwright/test';
+import { defineConfig, devices } from "@playwright/test";
 
 /**
- * Playwright configuration for browser tests.
- *
- * These tests run against the local stack (postgres + mock-stellar) and use
- * a stubbed wallet provider to avoid real key material.
- *
- * To run:
- *   pnpm test:browser
- *
- * Prerequisites:
- *   - Local stack running: docker compose up -d postgres mock-stellar web
- *   - Database seeded: pnpm db:seed
+ * Playwright E2E configuration for Talos web app against the local stack.
+ * See https://playwright.dev/docs/test-configuration
  */
 export default defineConfig({
-  testDir: './tests/browser',
+  testDir: "./e2e",
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
   workers: process.env.CI ? 1 : undefined,
-  reporter: 'html',
+  reporter: [
+    ["html", { outputFolder: "playwright-report", open: "never" }],
+    ["list"],
+  ],
   use: {
-    baseURL: 'http://localhost:3000',
-    trace: 'on-first-retry',
-    screenshot: 'only-on-failure',
+    baseURL: process.env.PLAYWRIGHT_TEST_BASE_URL || "http://127.0.0.1:3000",
+    trace: "retain-on-failure",
+    screenshot: "only-on-failure",
+    video: "retain-on-failure",
+    headless: true,
   },
-
   projects: [
     {
-      name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"] },
     },
   ],
-
-  // Note: webServer is not configured here because the local stack (docker compose)
-  // must be started manually. Tests assume the server is already running at baseURL.
-  // To run tests:
-  //   1. Start local stack: docker compose up -d postgres mock-stellar web
-  //   2. Seed database: pnpm db:seed
-  //   3. Run tests: pnpm test:browser
+  webServer: {
+    command: "pnpm start",
+    url: "http://127.0.0.1:3000/api/health/live",
+    reuseExistingServer: !process.env.CI,
+    timeout: 120_000,
+  },
 });

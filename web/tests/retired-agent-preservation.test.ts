@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { Keypair } from "@stellar/stellar-sdk";
 import { db } from "@/db";
-import { tlsTalos, tlsPatrons, tlsActivities } from "@/db/schema";
+import { tlsTalos, tlsPatrons, tlsActivities, tlsCommerceServices } from "@/db/schema";
 import { eq } from "drizzle-orm";
 
 const BASE = process.env.TEST_BASE_URL || "http://localhost:3000";
@@ -321,6 +321,97 @@ describe("Retired Agent Preservation - Issue #315", () => {
       const queryBody = await queryRes.json();
       expect(queryBody.retiredAt).toBeDefined();
       expect(queryBody.status).toBe("Retired");
+    });
+  });
+
+  describe("Deleted Agent Listing Exclusions", () => {
+    let deletedAgentId: string;
+    let deletedAgentName: string;
+    const deletedKeypair = Keypair.random();
+
+    beforeAll(async () => {
+      // Create an agent with a commerce service
+      const name = "Listing Exclusion Agent";
+      deletedAgentName = "listing-exclusion-agent";
+      const totalSupply = 500_000;
+      const onChainId = null;
+      const message = `talos-genesis:${name}:${onChainId ?? "null"}:${totalSupply}`;
+      const signature = deletedKeypair.sign(Buffer.from(message, "utf-8")).toString("base64");
+
+      const res = await api("/api/talos", {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          category: "Development",
+          description: "Test agent for listing exclusion",
+          totalSupply,
+          creatorPublicKey: deletedKeypair.publicKey(),
+          signature,
+          message,
+          agentName: deletedAgentName,
+          serviceName: "Exclusion Test Service",
+          serviceDescription: "Service from agent to be deleted",
+          servicePrice: 10,
+        }),
+      });
+
+      expect(res.status).toBe(201);
+      const body = await res.json();
+      deletedAgentId = body.id;
+
+      // Soft delete the agent
+      const deleteMsg = `Delete TALOS ${deletedAgentId}`;
+      const deleteSig = deletedKeypair.sign(Buffer.from(deleteMsg, "utf-8")).toString("base64");
+
+      const delRes = await api(`/api/talos/${deletedAgentId}/delete`, {
+        method: "POST",
+        body: JSON.stringify({
+          reason: "Listing exclusion test",
+          stellarPublicKey: deletedKeypair.publicKey(),
+          signature: deleteSig,
+          message: deleteMsg,
+        }),
+      });
+      expect(delRes.status).toBe(200);
+    });
+
+    it("should exclude deleted agent's services from /api/services", async () => {
+      const res = await api("/api/services");
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      const match = body.data.find(
+        (s: { talosId: string }) => s.talosId === deletedAgentId,
+      );
+      expect(match).toBeUndefined();
+    });
+
+    it("should exclude deleted agents from /api/leaderboard", async () => {
+      const res = await api("/api/leaderboard");
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      const match = body.data.find(
+        (a: { id: string }) => a.id === deletedAgentId,
+      );
+      expect(match).toBeUndefined();
+    });
+
+    it("should exclude deleted agents from /api/talos directory", async () => {
+      const res = await api("/api/talos");
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      const match = body.data.find(
+        (a: { id: string }) => a.id === deletedAgentId,
+      );
+      expect(match).toBeUndefined();
+    });
+
+    it("should continue to return deleted agent on direct detail lookup (/api/talos/:id)", async () => {
+      const res = await api(`/api/talos/${deletedAgentId}`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.id).toBe(deletedAgentId);
+      expect(body.deletedAt).toBeDefined();
+      expect(body.agentName).toBe(deletedAgentName);
     });
   });
 });

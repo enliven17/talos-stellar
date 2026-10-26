@@ -5,7 +5,7 @@
   "license": "AGPL-3.0-only",
   "scripts": {
     "dev": "next dev --webpack --hostname 0.0.0.0",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
@@ -78,7 +78,7 @@
     "pino-pretty": "^13.2.0",
     "tailwindcss": "^4",
     "tsx": "^4.23.15",
-    "typescript": "^7",
+    "typescript": "^5.9.3",
     "undici": "^8.12.2",
     "vitest": "^4.1.2"
   }
