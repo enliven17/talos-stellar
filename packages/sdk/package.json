@@ -56,7 +56,7 @@
     "verify:browser": "npm run build:browser && npm run check:bundle-size && npm run compat:browser-bundle"
   },
   "dependencies": {
-    "@stellar/stellar-sdk": "^17.2.1"
+    "@stellar/stellar-sdk": "^17.3.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
