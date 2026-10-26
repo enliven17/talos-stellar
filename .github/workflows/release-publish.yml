@@ -121,7 +121,7 @@ jobs:
       # --- sdk ---
       - name: Setup pnpm
         if: matrix.release.name == 'sdk'
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10.0.0
 

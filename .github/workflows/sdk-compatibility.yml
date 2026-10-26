@@ -20,7 +20,7 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
           run_install: false
@@ -79,7 +79,7 @@ jobs:
           name: sdk-dist-node-${{ matrix.node-version }}
           path: packages/sdk/dist
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
           run_install: false
@@ -116,7 +116,7 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
           run_install: false
@@ -168,7 +168,7 @@ jobs:
           name: sdk-dist-node-${{ matrix.node-version }}
           path: packages/sdk/dist
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
           run_install: false
@@ -210,7 +210,7 @@ jobs:
           name: sdk-dist-node-${{ matrix.node-version }}
           path: packages/sdk/dist
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
           run_install: false
@@ -252,7 +252,7 @@ jobs:
           name: sdk-dist-node-20.x
           path: packages/sdk/dist
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
           run_install: false
@@ -315,7 +315,7 @@ jobs:
           name: sdk-dist-node-20.x
           path: packages/sdk/dist
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
           run_install: false
