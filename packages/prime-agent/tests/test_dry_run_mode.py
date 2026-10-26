@@ -367,7 +367,7 @@ class TestDryRunCycleSimulation:
         assert post_result.status == "dry_run"
 
         transfer_result = await proxy_api.request_transfer(
-            to_account="GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+            to_account="GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             amount=5,
         )
         assert transfer_result["status"] == "dry_run"

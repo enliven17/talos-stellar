@@ -21,9 +21,15 @@ def get_db_path(agent_id: str | None = None) -> Path:
     Resolved lazily so tests (and ops tooling) can monkeypatch ``APP_DIR``
     to redirect ``get_db_path()`` without rewriting module-level constants.
     """
+    # APP_DIR is resolved through the public ``talos_agent.db`` namespace so
+    # monkeypatching ``db.APP_DIR`` redirects path resolution (the façade
+    # package is the compatibility boundary the old ``db`` module had).
+    from talos_agent import db as _db_pkg
+
+    app_dir = _db_pkg.APP_DIR
     if agent_id:
-        return APP_DIR / f"agent-{agent_id}.db"
-    return APP_DIR / "talos-agent.db"
+        return app_dir / f"agent-{agent_id}.db"
+    return app_dir / "talos-agent.db"
 
 
 def normalize_playbook_name(name: str) -> str:

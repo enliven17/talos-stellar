@@ -109,7 +109,7 @@ class TestCommercePurchaseFlow:
                 402,
                 json={
                     "price": 10.0,
-                    "payee": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+                    "payee": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
                     "token": "GBBD47UZQ5PBC4MUE4BBQWBW6IM5I46UYOWMUSFA67YPPY권",
                     "chainId": 280,
                 },
@@ -160,7 +160,7 @@ class TestCommercePurchaseFlow:
                 402,
                 json={
                     "price": 50.0,  # Above typical threshold
-                    "payee": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+                    "payee": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
                 },
             )
         )

@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING
 import structlog
 from rich.console import Console
 
-from talos_agent import metrics
 from talos_agent.circuit_breaker import cb_registry
 from talos_agent.observability import log
 from talos_agent.scheduler.backoff import DurableBackoff
@@ -82,7 +81,6 @@ async def agent_cycle_task(
     """Run agent loop every ``settings.agent_cycle_interval`` seconds."""
     from talos_agent.agent.context import AgentContext
     from talos_agent.agent.loop import agent_loop
-    from talos_agent.agent.prompt import build_learning_prompt
 
     while not shutdown_event.is_set():
         async with agent_lock:

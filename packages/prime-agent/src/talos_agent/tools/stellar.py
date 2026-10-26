@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from talos_agent.payments.stellar_kit import StellarKit
+from talos_agent.payments.stellar_kit import StellarKit, format_stellar_amount, to_stellar_amount
 from talos_agent.payments.stellar_retry import (
     attach_stellar_failure,
     classify_stellar_failure,
@@ -45,9 +45,13 @@ async def transfer_xlm(to_account: str, amount: float | str, reason: str = "") -
     kit = _get_kit()
     await kit.initialize()
 
+    # Stellar amounts require exact 7-decimal precision (issue #1139).
+    amount_dec = to_stellar_amount(amount)
+    formatted_amount = format_stellar_amount(amount_dec)
+
     # Check threshold
     threshold = float(_deps().settings.approval_threshold)
-    if amount > threshold:
+    if float(amount_dec) > threshold:
         result = await _deps().api.create_approval(
             _deps().settings.talos_id,
             type_="transaction",

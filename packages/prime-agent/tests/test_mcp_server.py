@@ -420,7 +420,7 @@ class TestStdioRunLoop:
 
         await run_stdio(server, stdin=stdin, stdout=stdout)
 
-        lines = [json.loads(l) for l in stdout.getvalue().strip().splitlines()]
+        lines = [json.loads(ln) for ln in stdout.getvalue().strip().splitlines()]
         assert len(lines) == 3
         assert lines[0]["id"] == 1
         assert lines[0]["result"] == {}
@@ -438,7 +438,7 @@ class TestStdioRunLoop:
 
         await run_stdio(server, stdin=stdin, stdout=stdout)
 
-        lines = [json.loads(l) for l in stdout.getvalue().strip().splitlines()]
+        lines = [json.loads(ln) for ln in stdout.getvalue().strip().splitlines()]
         assert lines[0]["error"]["code"] == PARSE_ERROR
 
     @pytest.mark.asyncio
@@ -455,7 +455,7 @@ class TestStdioRunLoop:
 
         await run_stdio(server, stdin=stdin, stdout=stdout)
 
-        lines = [json.loads(l) for l in stdout.getvalue().strip().splitlines()]
+        lines = [json.loads(ln) for ln in stdout.getvalue().strip().splitlines()]
         # Only the ping response, not the notification.
         assert len(lines) == 1
         assert lines[0]["id"] == 1
@@ -487,5 +487,5 @@ class TestStdioRunLoop:
 
         await run_stdio(server, stdin=stdin, stdout=stdout)
 
-        lines = [json.loads(l) for l in stdout.getvalue().strip().splitlines()]
+        lines = [json.loads(ln) for ln in stdout.getvalue().strip().splitlines()]
         assert len(lines) == 1

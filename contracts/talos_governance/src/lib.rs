@@ -1,6 +1,4 @@
 #![allow(unused)]
-#![allow(unused)]
-//! TalosGovernance - Soroban smart contract for token-weighted governance.
 //! TalosGovernance - Soroban smart contract for token-weighted governance.
 //!
 //! ## What's new in this branch (#606)
@@ -52,28 +50,25 @@ use pause_control;
 // retryable rather than silently swallowing errors.
 
 /// Typed executable payload for a governance proposal.
+///
+/// Variants are tuples because Soroban `#[contracttype]` enums do not
+/// support struct-style (named-field) variants. Field order is documented
+/// on each variant so call sites remain readable.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProposalAction {
-    /// Deactivate (pause) a Talos via the registry.  The governance contract
-    /// must have been set as the PauseController for `talos_id` on the registry.
-    PauseTalos {
-        registry: Address,
-        talos_id: u32,
-    },
-    /// Reactivate (resume) a Talos via the registry.  The governance contract
-    /// must have been set as the ResumeController for `talos_id` on the registry.
-    ResumeTalos {
-        registry: Address,
-        talos_id: u32,
-    },
-    /// Replace the local GovernanceConfig numeric parameters with new values.
-    /// The `pulse_token_address` is preserved from the existing config.
-    UpdateConfig {
-        quorum_threshold: i128,
-        consensus_threshold: i128,
-        voting_period_ledgers: u32,
-    },
+    /// Deactivate (pause) a Talos via the registry (0: registry, 1: talos_id).
+    /// The governance contract must have been set as the PauseController for
+    /// `talos_id` on the registry.
+    PauseTalos(Address, u32),
+    /// Reactivate (resume) a Talos via the registry (0: registry, 1: talos_id).
+    /// The governance contract must have been set as the ResumeController for
+    /// `talos_id` on the registry.
+    ResumeTalos(Address, u32),
+    /// Replace the local GovernanceConfig numeric parameters (0: quorum_threshold,
+    /// 1: consensus_threshold, 2: voting_period_ledgers). The
+    /// `pulse_token_address` is preserved from the existing config.
+    UpdateConfig(i128, i128, u32),
 }
 
 /// Emitted when a proposal with an action is executed.
@@ -879,7 +874,7 @@ impl TalosGovernance {
         let self_addr = env.current_contract_address();
 
         match action {
-            ProposalAction::PauseTalos { registry, talos_id } => {
+            ProposalAction::PauseTalos(registry, talos_id) => {
                 // Call deactivate_talos(talos_id, self_addr) on the registry.
                 // The governance contract must be set as the PauseController
                 // for this Talos on the registry contract.
@@ -894,7 +889,7 @@ impl TalosGovernance {
                 );
                 emit_proposal_executed(env, proposal_id, Symbol::new(env, "PauseTalos"));
             }
-            ProposalAction::ResumeTalos { registry, talos_id } => {
+            ProposalAction::ResumeTalos(registry, talos_id) => {
                 // Call activate_talos(talos_id, self_addr) on the registry.
                 // The governance contract must be set as the ResumeController
                 // for this Talos on the registry contract.
@@ -909,11 +904,7 @@ impl TalosGovernance {
                 );
                 emit_proposal_executed(env, proposal_id, Symbol::new(env, "ResumeTalos"));
             }
-            ProposalAction::UpdateConfig {
-                quorum_threshold,
-                consensus_threshold,
-                voting_period_ledgers,
-            } => {
+            ProposalAction::UpdateConfig(quorum_threshold, consensus_threshold, voting_period_ledgers) => {
                 // Validate the incoming config values.
                 if quorum_threshold <= 0 {
                     panic!("Quorum must be positive");
@@ -4958,10 +4949,7 @@ mod tests {
         let proposer = Address::generate(&env);
         let fake_registry = Address::generate(&env);
 
-        let action = Some(ProposalAction::PauseTalos {
-            registry: fake_registry.clone(),
-            talos_id: 42,
-        });
+        let action = Some(ProposalAction::PauseTalos(fake_registry.clone(), 42));
 
         let proposal_id = client
             .mock_auths(&[MockAuth {
@@ -4991,10 +4979,7 @@ mod tests {
         let proposal = client.get_proposal(&proposal_id).unwrap();
         assert_eq!(
             proposal.action,
-            Some(ProposalAction::PauseTalos {
-                registry: fake_registry,
-                talos_id: 42,
-            })
+            Some(ProposalAction::PauseTalos(fake_registry, 42))
         );
     }
 
@@ -5004,11 +4989,7 @@ mod tests {
         let (env, contract_id, admin, pulse, client) = setup();
         let proposer = Address::generate(&env);
 
-        let action = Some(ProposalAction::UpdateConfig {
-            quorum_threshold: 200,
-            consensus_threshold: 6_000,
-            voting_period_ledgers: 40,
-        });
+        let action = Some(ProposalAction::UpdateConfig(200, 6_000, 40));
 
         let proposal_id =
             create_and_approve_action_proposal(&env, &contract_id, &client, &admin, &proposer, action);
@@ -5031,11 +5012,7 @@ mod tests {
         let (env, contract_id, admin, _pulse, client) = setup();
         let proposer = Address::generate(&env);
 
-        let action = Some(ProposalAction::UpdateConfig {
-            quorum_threshold: 150,
-            consensus_threshold: 5_500,
-            voting_period_ledgers: 30,
-        });
+        let action = Some(ProposalAction::UpdateConfig(150, 5_500, 30));
 
         let proposal_id =
             create_and_approve_action_proposal(&env, &contract_id, &client, &admin, &proposer, action);
@@ -5079,11 +5056,7 @@ mod tests {
         let (env, contract_id, admin, _pulse, client) = setup();
         let proposer = Address::generate(&env);
 
-        let action = Some(ProposalAction::UpdateConfig {
-            quorum_threshold: 0,
-            consensus_threshold: 5_000,
-            voting_period_ledgers: 20,
-        });
+        let action = Some(ProposalAction::UpdateConfig(0, 5_000, 20));
 
         let proposal_id =
             create_and_approve_action_proposal(&env, &contract_id, &client, &admin, &proposer, action);
@@ -5097,11 +5070,7 @@ mod tests {
         let (env, contract_id, admin, _pulse, client) = setup();
         let proposer = Address::generate(&env);
 
-        let action = Some(ProposalAction::UpdateConfig {
-            quorum_threshold: 200,
-            consensus_threshold: 5_500,
-            voting_period_ledgers: 25,
-        });
+        let action = Some(ProposalAction::UpdateConfig(200, 5_500, 25));
 
         let proposal_id =
             create_and_approve_action_proposal(&env, &contract_id, &client, &admin, &proposer, action);

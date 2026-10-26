@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from talos_agent.payments.stellar_kit import format_stellar_amount, to_stellar_amount
 from talos_agent.tools import context as _context
 from talos_agent.tools.registry import tool
 
@@ -70,9 +71,11 @@ async def check_approval(approval_id: str) -> dict:
 
 @tool("report_revenue", "Report revenue earned from a service or transaction")
 async def report_revenue(amount: float, source: str, tx_hash: str = "") -> dict:
+    amount_dec = to_stellar_amount(amount)
+    formatted_amount = format_stellar_amount(amount_dec)
     result = await _deps().api.report_revenue(
         _deps().settings.talos_id,
-        amount=amount,
+        amount=float(amount_dec),
         source=source,
         tx_hash=tx_hash or None,
     )

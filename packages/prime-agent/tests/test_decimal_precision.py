@@ -75,13 +75,13 @@ class TestStellarKitDecimalPrecision:
         mock_api.get_talos = AsyncMock(
             return_value={
                 "id": "talos-1",
-                "stellarAccountId": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+                "stellarAccountId": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             }
         )
         mock_api._talos_id = "talos-1"
 
         horizon_response = {
-            "id": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+            "id": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             "balances": [
                 {
                     "balance": "300.1234567",
@@ -90,7 +90,7 @@ class TestStellarKitDecimalPrecision:
             ],
         }
         respx.get(
-            "https://horizon-testnet.stellar.org/accounts/GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+            "https://horizon-testnet.stellar.org/accounts/GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
         ).mock(return_value=Response(200, json=horizon_response))
 
         kit = StellarKit(mock_api)
@@ -106,7 +106,7 @@ class TestStellarKitDecimalPrecision:
         """get_token_balance returns 7-decimal string and exact Decimal value."""
         mock_api = AsyncMock()
         horizon_response = {
-            "id": "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV",
+            "id": "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             "balances": [
                 {
                     "balance": "12345678.9012345",
@@ -116,13 +116,13 @@ class TestStellarKitDecimalPrecision:
             ],
         }
         respx.get(
-            "https://horizon-testnet.stellar.org/accounts/GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV"
+            "https://horizon-testnet.stellar.org/accounts/GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ"
         ).mock(return_value=Response(200, json=horizon_response))
 
         kit = StellarKit(mock_api)
         await kit.initialize()
         result = await kit.get_token_balance(
-            "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMV", "USDC"
+            "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ", "USDC"
         )
 
         assert result["balance"] == "12345678.9012345"
@@ -140,13 +140,13 @@ class TestStellarKitDecimalPrecision:
         # 0.1 + 0.2 in standard float math is 0.30000000000000004
         # We pass it as string or Decimal or float and verify the serialized amount is exactly "0.3000000"
         result = await kit.transfer_xlm(
-            "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMQ", "0.3"
+            "GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ", "0.3"
         )
 
         assert result["status"] == "submitted"
         assert result["amount"] == "0.3000000"
         mock_api.request_transfer.assert_called_once_with(
-            to_account="GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7EV4EVOTVEVMHGHLJLMQ",
+            to_account="GDQ5KUD3776UNI2PPHTFHXNDYGXX2IO2GGRQ4KZU6TX4K7XTIF5TVFCZ",
             amount="0.3000000",
             currency="XLM",
         )

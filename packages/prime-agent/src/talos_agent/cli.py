@@ -478,7 +478,6 @@ def status(talos_id: str | None, db_path: str | None, as_json: bool):
     from pathlib import Path as _Path
 
     from talos_agent.adapters.health import (
-        AdapterState,
         _sanitize_health_detail,
     )
     from talos_agent.circuit_breaker import CircuitState, cb_registry

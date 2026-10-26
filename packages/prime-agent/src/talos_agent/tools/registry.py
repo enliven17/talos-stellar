@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping, get_type_hints
 
 from talos_agent import metrics
 from talos_agent.config import Settings, resolve_setting_secret
+from talos_agent.http import ToolTimeoutError, validate_tool_timeout
 from talos_agent.redact import redact_text
 from talos_agent.tracing import traced_span
 from talos_agent.tools import context as _context
@@ -660,7 +661,6 @@ def _resolve_json_type(hint: Any) -> dict[str, Any]:
     - ``dict[K, V]`` → ``{"type": "object"}``
     - Anything unrecognised → ``{"type": "string"}``
     """
-    import types as _types
     import typing as _typing
 
     origin = _typing.get_origin(hint)

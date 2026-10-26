@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from rich.console import Console
 
+from talos_agent.redact import LOG_TEXT_MAX_CHARS, redact_text
 from talos_agent.tools import context as _context
 from talos_agent.tools.registry import tool
 
@@ -26,7 +27,15 @@ def _deps():
 
 
 _TIMEOUT = 90  # seconds
+_DEFAULT_TIMEOUT = _TIMEOUT
+_publish_timeout: float = _DEFAULT_TIMEOUT
 _MAX_ERROR_CHARS = LOG_TEXT_MAX_CHARS
+
+
+def set_publish_timeout(seconds: float) -> None:
+    """Set the module-level publishing timeout (seconds) used by ``_publish_safe``."""
+    global _publish_timeout
+    _publish_timeout = float(seconds)
 
 
 def _publish_safe(fn: Callable) -> Callable:
