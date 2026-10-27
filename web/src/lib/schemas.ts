@@ -174,6 +174,137 @@ export type StellarAsset = z.infer<typeof stellarAssetSchema>;
  */
 export const optionalStellarAssetField = stellarAssetSchema.optional();
 
+// ── Money amount helpers ─────────────────────────────────────────────────────
+//
+// All monetary columns in this project use numeric(18, 6) in PostgreSQL, which
+// means at most 12 integer digits and 6 fractional digits.  The helpers below
+// enforce those same bounds at the request-validation layer so invalid amounts
+// are rejected before they reach the database or the Stellar network.
+//
+// We use 6 decimal places (not Stellar's native 7) because the DB column is
+// the stricter constraint: storing a 7-decimal value would silently round it.
+
+/**
+ * Maximum monetary value accepted by any write endpoint.
+ *
+ * Derived from the numeric(18, 6) column definition: 18 total digits with
+ * 6 reserved for the fractional part leaves 12 integer digits, giving a
+ * maximum of 10^12 - 1 (999 999 999 999.999999).  We use a strict less-than
+ * bound of 10^12 to keep the check simple and conservative.
+ *
+ * References: tlsRevenues.amount, tlsDividends.amount, tlsCommerceJobs.amount,
+ *             tlsTokenPurchases.totalCost — all numeric(18, 6).
+ */
+export const MAX_MONEY_AMOUNT = 1_000_000_000_000; // 10^12, exclusive upper bound
+
+/**
+ * Count the number of fractional digits in a decimal string.
+ *
+ * Uses the string representation rather than float arithmetic so that values
+ * like 0.1+0.2 and exponent notation (1e-7) are handled correctly.
+ * Returns Infinity for strings containing 'e'/'E' (scientific notation) to
+ * immediately trigger the ≤ 6 check as a rejection signal.
+ */
+function fractionalDigits(value: string): number {
+  // Reject scientific notation immediately — it cannot represent a canonical
+  // decimal amount and is a common source of precision surprises.
+  if (/[eE]/.test(value)) return Infinity;
+  const dot = value.indexOf(".");
+  return dot === -1 ? 0 : value.length - dot - 1;
+}
+
+/**
+ * Textual "less than MAX_MONEY_AMOUNT" check for string amounts.
+ *
+ * Avoids floating-point rounding errors near 10^12: a value like
+ * "999999999999.999999" has more significant digits than an IEEE-754 double
+ * can represent exactly, so Number("999999999999.999999") rounds to 1e12.
+ * We compare the integer-part length instead.
+ *
+ * A string amount s is < 10^12 iff its integer part has ≤ 12 digits.
+ * (The fractional part is validated separately to ≤ 6 d.p., so the maximum
+ * representable value is 999999999999.999999 < 10^12.)
+ */
+function stringAmountBelowMax(s: string): boolean {
+  // Already verified: no 'e'/'E', parseable as a number.
+  const dot = s.indexOf(".");
+  const intPart = dot === -1 ? s : s.slice(0, dot);
+  // Strip a leading '-' if somehow present (positivity check runs separately)
+  const digits = intPart.replace(/^-/, "");
+  return digits.length <= 12;
+}
+
+/**
+ * Zod refinement for a **number** money amount.
+ *
+ * Validates:
+ *   - finite (rejects NaN / Infinity)
+ *   - strictly positive
+ *   - less than MAX_MONEY_AMOUNT (10^12)
+ *   - at most 6 fractional digits in the string representation
+ *
+ * The input type stays `number` so callers that already send numbers do not
+ * need to change their payload shape.
+ *
+ * Note: We use MAX_MONEY_AMOUNT - 1 (= 999_999_999_999) as the .max() argument
+ * rather than MAX_MONEY_AMOUNT - 0.000001 because 1e12 - 0.000001 rounds to 1e12
+ * in IEEE-754 double precision, making the subtraction a no-op.  Using an
+ * integer gap of 1 gives a safe exclusive upper bound for integer token amounts
+ * (buy-token only deals in whole tokens) and is a deliberate conservative choice
+ * for float amounts: any value ≥ 1e12 - 1 + epsilon that rounds to an integer
+ * ≥ 1e12 would be rejected by the 6-decimal check anyway.
+ */
+export const moneyAmountNumber = z
+  .number()
+  .finite("amount must be a finite number")
+  .positive("amount must be greater than zero")
+  .max(
+    MAX_MONEY_AMOUNT - 1,
+    `amount must be less than ${MAX_MONEY_AMOUNT} (numeric(18,6) column limit)`,
+  )
+  .refine(
+    (n) => fractionalDigits(String(n)) <= 6,
+    "amount must have at most 6 decimal places (numeric(18,6) column limit)",
+  );
+
+/**
+ * Zod refinement for a **string** money amount.
+ *
+ * Validates:
+ *   - non-empty string
+ *   - no scientific / exponent notation
+ *   - parseable as a finite number greater than zero
+ *   - integer part has at most 12 digits (equivalent to < 10^12, checked
+ *     textually to avoid double-precision rounding near the boundary)
+ *   - at most 6 fractional digits (also checked on the raw string)
+ *
+ * The input type stays `string` to preserve the existing schema shapes.
+ */
+export const moneyAmountString = z
+  .string()
+  .min(1, "amount is required")
+  .refine(
+    (s) => fractionalDigits(s) !== Infinity,
+    "amount must not use scientific notation",
+  )
+  .refine(
+    (s) => {
+      const n = Number(s);
+      return !isNaN(n) && isFinite(n);
+    },
+    "amount must be a valid finite number",
+  )
+  .refine((s) => Number(s) > 0, "amount must be greater than zero")
+  .refine(
+    stringAmountBelowMax,
+    `amount must be less than ${MAX_MONEY_AMOUNT} (numeric(18,6) column limit)`,
+  )
+  .refine(
+    (s) => fractionalDigits(s) <= 6,
+    "amount must have at most 6 decimal places (numeric(18,6) column limit)",
+  );
+
+
 // ── Categories ───────────────────────────────────────────────────────────────
 
 export const VALID_CATEGORIES = [
@@ -388,7 +519,10 @@ export const submitBidSchema = z.object({
 // --- Revenue ---
 
 export const reportRevenueSchema = z.object({
-  amount: z.string().min(1),
+  // Accept string (canonical numeric column value) or number. Both paths
+  // are validated by the shared money-amount helpers (positive, finite, < 10^12,
+  // ≤ 6 fractional digits).
+  amount: z.union([moneyAmountString, moneyAmountNumber]),
   currency: z.string().optional().default("USDC"),
   source: z.string().min(1).max(200),
   txHash: z.string().nullable().optional(),
@@ -405,7 +539,7 @@ const dividendBreakdownEntrySchema = z.object({
 
 export const recordDividendSchema = z.object({
   // Total distributed amount. Accept string (numeric column) or number.
-  amount: z.union([z.string().min(1), z.number().positive()]),
+  amount: z.union([moneyAmountString, moneyAmountNumber]),
   currency: z.string().max(20).optional().default("USDC"),
   patronCount: z.number().int().nonnegative().optional().default(0),
   totalPulse: z.number().int().nonnegative().optional().default(0),
@@ -455,7 +589,7 @@ export const deleteAgentSchema = z.object({
 
 export const signPaymentSchema = z.object({
   payee: z.string().min(1), // Stellar public key of payee
-  amount: z.union([z.string(), z.number()]),
+  amount: z.union([moneyAmountString, moneyAmountNumber]),
   assetCode: stellarAssetCodeSchema.optional().default("USDC"),
   // Typed asset; when present its code takes precedence over assetCode.
   asset: optionalStellarAssetField,
@@ -465,7 +599,7 @@ export const signPaymentSchema = z.object({
 
 export const buyTokenSchema = z.object({
   buyerPublicKey: z.string().min(1), // Stellar public key
-  amount: z.number().positive(),
+  amount: moneyAmountNumber,
 });
 
 // --- Revenue Buyback ---
@@ -924,24 +1058,3 @@ export function canNextForStep(
       return true;
   }
 }
-
-// --- Revenue Buyback ---
-
-const buybackAmountSchema = z
-  .number()
-  .positive("amount must be greater than zero")
-  .refine(Number.isFinite, "amount must be finite")
-  .refine(
-    (n) => Number(n.toFixed(7)) === n,
-    "amount must have at most 7 decimal places",
-  );
-
-export const buybackSchema = z
-  .object({
-    usdcAmount: buybackAmountSchema.optional(),
-    mitosAmount: buybackAmountSchema.optional(),
-  })
-  .refine(
-    (d) => d.usdcAmount !== undefined || d.mitosAmount !== undefined,
-    { message: "usdcAmount or mitosAmount is required" },
-  );

@@ -248,6 +248,24 @@ describe("canonical transfer signatures", () => {
     expect(mocks.sendUSDC).not.toHaveBeenCalled();
   });
 
+  it("returns 400 for an amount exceeding maximum", async () => {
+    const body = signedBody(
+      payload({ amount: "999999999999.00" }),
+    );
+    const response = await post(body);
+    expect(response.status).toBe(400);
+    expect(mocks.sendUSDC).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 for an over-precise amount (more than 2 decimal places)", async () => {
+    const body = signedBody(
+      payload({ amount: "10.000" }),
+    );
+    const response = await post(body);
+    expect(response.status).toBe(400);
+    expect(mocks.sendUSDC).not.toHaveBeenCalled();
+  });
+
   it("rejects an authorization outside the five-minute expiry window", async () => {
     const body = signedBody(
       payload({ expiry: String(Math.floor(Date.now() / 1000) + 3_600) }),
