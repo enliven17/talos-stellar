@@ -114,7 +114,7 @@ _SENSITIVE_SUBSTRINGS: frozenset[str] = frozenset(
         "private key",
         "signature",
         "stellar_secret",
-        "stellar_key",   # covers stellar_key, stellar_signing_key, etc.
+        "stellar_key",  # covers stellar_key, stellar_signing_key, etc.
         "wallet_secret",
         "wallet_key",
         "signing_key",
@@ -143,9 +143,7 @@ _SENSITIVE_SUBSTRINGS: frozenset[str] = frozenset(
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 #: Bearer / Token scheme in Authorization-style headers or JSON values.
-_BEARER_RE = re.compile(
-    r"(?i)(Bearer|Token)\s+[A-Za-z0-9\-\._~\+/]+=*"
-)
+_BEARER_RE = re.compile(r"(?i)(Bearer|Token)\s+[A-Za-z0-9\-\._~\+/]+=*")
 
 #: Stellar *secret* key — S followed by exactly 55 uppercase Base32 chars.
 #: Stellar *public* keys start with G and are safe to log.

@@ -440,7 +440,7 @@ describe("jobs route — reconciler wiring", () => {
     setupSelectResults({ dupeRow: [{ id: "existing_job" }] });
 
     const res = await jobsPOST(
-      jobsReq({ buyerPublicKey: BUYER_PK, txHash: TX_HASH }),
+      jobsReq({ buyerPublicKey: BUYER_PK, txHash: TX_HASH }, { "Idempotency-Key": "replay-key" }),
       { params: Promise.resolve({ id: TALOS_ID }) },
     );
 

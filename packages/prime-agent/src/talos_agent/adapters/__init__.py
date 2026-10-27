@@ -1,6 +1,10 @@
 """Social channel adapters — modular publishing interface."""
 
-from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
+from talos_agent.adapters.base import (
+    BaseSocialAdapter,
+    ChannelCapabilities,
+    PublishResult,
+)
 from talos_agent.adapters.capability import (
     AdapterCapabilityManifest,
     AdapterResourceLimits,
@@ -94,4 +98,3 @@ __all__ = [
     "StorageVerificationError",
     "StorageProviderError",
 ]
-

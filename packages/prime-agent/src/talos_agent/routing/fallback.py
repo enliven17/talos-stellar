@@ -25,7 +25,6 @@ DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
 MAX_TOOL_TIMEOUT_SECONDS = 300.0
 
 
-
 @dataclass(frozen=True)
 class FallbackMetricsSnapshot:
     """A typed snapshot of fallback operational metrics for diagnostics."""
@@ -54,7 +53,7 @@ class FallbackMetrics:
             provider = "OTHER_OVERFLOW"
         elif _is_sensitive_key(provider):
             provider = "[REDACTED]"
-        
+
         counter[provider] = counter.get(provider, 0) + 1
 
     def record_attempt(self, provider: str) -> None:
@@ -272,7 +271,9 @@ class FallbackChain:
                 timeout_msg = f"Timeout after {effective_timeout:g}s"
                 attempts.append((provider_name, timeout_msg))
                 timeout_events.append((provider_name, effective_timeout))
-                safe_provider = "[REDACTED]" if _is_sensitive_key(provider_name) else provider_name
+                safe_provider = (
+                    "[REDACTED]" if _is_sensitive_key(provider_name) else provider_name
+                )
                 logger.warning(
                     "Fallback: '%s' timed out after %.1fs",
                     safe_provider,

@@ -36,7 +36,7 @@ async function handleGet(
     }
 
     const { apiKey, ...safeTalos } = talos;
-    for (const tag of agentMutationTags(id)) (revalidateTag as any)(tag);
+    for (const tag of agentMutationTags(id)) revalidateTag(tag, "max");
     return Response.json({ ...safeTalos, apiKeyMasked: maskApiKey(apiKey) });
   } catch {
     return internalError(request);

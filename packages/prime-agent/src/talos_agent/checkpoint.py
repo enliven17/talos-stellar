@@ -66,13 +66,14 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 _ENVELOPE_VERSION = 1
-_HMAC_KEY_BYTES = 32          # 256-bit HMAC-SHA256 key
-_AES_KEY_BYTES = 32           # 256-bit AES-GCM content encryption key
+_HMAC_KEY_BYTES = 32  # 256-bit HMAC-SHA256 key
+_AES_KEY_BYTES = 32  # 256-bit AES-GCM content encryption key
 _PBKDF2_ITERATIONS = 200_000
-_MAX_SEQ_DRIFT = 10_000       # sanity upper bound for accepted future sequences
+_MAX_SEQ_DRIFT = 10_000  # sanity upper bound for accepted future sequences
 
 
 # ── Exceptions ─────────────────────────────────────────────────────────────────
+
 
 class CheckpointError(Exception):
     """Base class for all checkpoint errors."""
@@ -108,6 +109,7 @@ class SchemaError(CheckpointError):
 
 # ── Low-level key-wrapping helpers ────────────────────────────────────────────
 
+
 def _derive_wrapping_key(password: str, salt: bytes) -> bytes:
     """Derive a 256-bit AES key from *password* and *salt* (PBKDF2-SHA256)."""
     kdf = PBKDF2HMAC(
@@ -142,7 +144,7 @@ def _unwrap_key(blob: str, master_password: str) -> bytes:
     if not blob.startswith("ENC::"):
         raise MasterKeyError("Key material is not in wrapped ENC:: format")
     try:
-        raw = base64.b64decode(blob[len("ENC::"):])
+        raw = base64.b64decode(blob[len("ENC::") :])
         if len(raw) < 16 + 12 + 16:
             raise ValueError("Blob too short")
         salt, nonce, ct = raw[:16], raw[16:28], raw[28:]
@@ -153,6 +155,7 @@ def _unwrap_key(blob: str, master_password: str) -> bytes:
 
 
 # ── AAD / HMAC helpers ────────────────────────────────────────────────────────
+
 
 def _build_aad(
     *,
@@ -242,6 +245,7 @@ CREATE INDEX IF NOT EXISTS idx_checkpoint_envelopes_agent_ns_seq
 
 
 # ── CheckpointStore ───────────────────────────────────────────────────────────
+
 
 class CheckpointStore:
     """Manages checkpoint key lifecycle and envelope persistence.
@@ -501,8 +505,7 @@ class CheckpointStore:
         Returns ``None`` if no envelopes exist for the given agent/namespace.
         """
         query = (
-            "SELECT payload FROM checkpoint_envelopes "
-            "WHERE agent_id=? AND namespace=? "
+            "SELECT payload FROM checkpoint_envelopes WHERE agent_id=? AND namespace=? "
         )
         params: list[Any] = [agent_id, namespace]
         if schema_version is not None:
@@ -573,9 +576,7 @@ class CheckpointStore:
 
         return json.loads(plaintext)
 
-    def _get_active_key_row(
-        self, agent_id: str, namespace: str
-    ) -> sqlite3.Row | None:
+    def _get_active_key_row(self, agent_id: str, namespace: str) -> sqlite3.Row | None:
         return self._conn.execute(
             "SELECT key_id, key_hmac, key_enc FROM checkpoint_keys "
             "WHERE agent_id=? AND namespace=? AND status='active'",
@@ -599,6 +600,7 @@ class CheckpointStore:
 
 
 # ── Convenience factory ───────────────────────────────────────────────────────
+
 
 def open_checkpoint_store(
     db_path: Path | str,

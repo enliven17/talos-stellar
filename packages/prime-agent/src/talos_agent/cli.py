@@ -133,7 +133,9 @@ def start(talos_id: str | None, env_file: str):
         )
         master_key = os.environ.get("TALOS_MASTER_KEY")
         if has_encrypted and not master_key:
-            master_key = click.prompt("Master password (to decrypt secrets)", hide_input=True)
+            master_key = click.prompt(
+                "Master password (to decrypt secrets)", hide_input=True
+            )
 
         for line in raw:
             line = line.strip()
@@ -145,12 +147,16 @@ def start(talos_id: str | None, env_file: str):
             if value.startswith("ENC::"):
                 try:
                     if not master_key:
-                        console.print(f"[red]Error:[/red] Encrypted value for {key} but no master password available.")
+                        console.print(
+                            f"[red]Error:[/red] Encrypted value for {key} but no master password available."
+                        )
                         sys.exit(1)
                     dec = decrypt_with_password(value, master_key)
                     os.environ.setdefault(key, dec)
                 except Exception as e:
-                    console.print(f"[red]Error decrypting {key}:[/red] {safe_config_error(e)}")
+                    console.print(
+                        f"[red]Error decrypting {key}:[/red] {safe_config_error(e)}"
+                    )
                     sys.exit(1)
             else:
                 os.environ.setdefault(key, value)
@@ -166,7 +172,9 @@ def start(talos_id: str | None, env_file: str):
 
     all_keys = settings.get_all_api_keys()
     if not all_keys:
-        console.print("[red]Error:[/red] TALOS_API_KEY (or TALOS_API_KEYS) is required.")
+        console.print(
+            "[red]Error:[/red] TALOS_API_KEY (or TALOS_API_KEYS) is required."
+        )
         sys.exit(1)
     if not settings.llm_api_key:
         console.print("[red]Error:[/red] GROQ_API_KEY (or OPENAI_API_KEY) is required.")
@@ -179,9 +187,11 @@ def start(talos_id: str | None, env_file: str):
 
     if len(all_keys) == 1:
         from talos_agent.scheduler import run
+
         asyncio.run(run(settings))
     else:
         from talos_agent.scheduler import run_multi
+
         asyncio.run(run_multi(settings, all_keys))
 
 
@@ -212,12 +222,16 @@ def config(api_key: str, openai_key: str):
     if cfg_path.exists():
         existing = json.loads(cfg_path.read_text(encoding="utf-8"))
 
-    existing.update({
-        k: v for k, v in {
-            "talos_api_key": api_key,
-            "openai_api_key": openai_key,
-        }.items() if v
-    })
+    existing.update(
+        {
+            k: v
+            for k, v in {
+                "talos_api_key": api_key,
+                "openai_api_key": openai_key,
+            }.items()
+            if v
+        }
+    )
 
     content = json.dumps(existing, indent=2)
     # Write file with mode 0o600 (owner read/write only) on POSIX.
@@ -235,9 +249,10 @@ def config(api_key: str, openai_key: str):
     console.print(f"[green]Config saved to {cfg_path}[/green]")
 
 
-
 @main.command(name="encrypt-keys")
-@click.option("--env-file", default=".env", help="Path to .env file to encrypt secrets in")
+@click.option(
+    "--env-file", default=".env", help="Path to .env file to encrypt secrets in"
+)
 def encrypt_keys(env_file: str):
     """Encrypt plaintext secret-like values in an .env file using a master password."""
     from pathlib import Path
@@ -251,7 +266,11 @@ def encrypt_keys(env_file: str):
 
     master_key = os.environ.get("TALOS_MASTER_KEY")
     if not master_key:
-        master_key = click.prompt("Master password (to encrypt .env)", hide_input=True, confirmation_prompt=True)
+        master_key = click.prompt(
+            "Master password (to encrypt .env)",
+            hide_input=True,
+            confirmation_prompt=True,
+        )
 
     text = path.read_text()
     lines = text.splitlines()
@@ -281,10 +300,16 @@ def encrypt_keys(env_file: str):
         console.print("[yellow]No secret-like values found to encrypt.[/yellow]")
         return
 
-    backup = path.with_suffix(path.suffix + ".bak") if path.suffix else Path(str(path) + ".bak")
+    backup = (
+        path.with_suffix(path.suffix + ".bak")
+        if path.suffix
+        else Path(str(path) + ".bak")
+    )
     path.rename(backup)
     path.write_text("\n".join(out_lines) + "\n")
-    console.print(f"[green]Encrypted {changed} values. Original saved to {backup}[/green]")
+    console.print(
+        f"[green]Encrypted {changed} values. Original saved to {backup}[/green]"
+    )
 
 
 @main.group()
@@ -317,7 +342,9 @@ def _job_store(db_path: str | None, talos_id: str):
 
 
 @jobs.command(name="inspect")
-@click.option("--talos-id", required=True, help="Talos scope whose effects may be inspected")
+@click.option(
+    "--talos-id", required=True, help="Talos scope whose effects may be inspected"
+)
 @click.option("--db-path", default=None, type=click.Path(dir_okay=False))
 @click.option(
     "--status",
@@ -370,9 +397,10 @@ def inspect_jobs(
             db.close()
 
 
-
 @jobs.command(name="audit")
-@click.option("--talos-id", required=True, help="Talos scope whose audit trail may be inspected")
+@click.option(
+    "--talos-id", required=True, help="Talos scope whose audit trail may be inspected"
+)
 @click.option("--db-path", default=None, type=click.Path(dir_okay=False))
 @click.option("--effect-id", default=None, help="Filter audit trail to one effect")
 @click.option("--job-id", default=None, help="Filter audit trail to one job")
@@ -497,7 +525,6 @@ def status(talos_id: str | None, db_path: str | None, as_json: bool):
         resolved_db_path = _Path(db_path)
     else:
         resolved_db_path = get_db_path(talos_id)
-
     db = LocalDB(path=resolved_db_path) if resolved_db_path.exists() else None
 
     # ── Collect data ───────────────────────────────────────────────────────
@@ -655,10 +682,22 @@ def status(talos_id: str | None, db_path: str | None, as_json: bool):
 
 
 @main.command()
-@click.option("--output", default=None, help="Output artifact path (default: ~/.talos-agent/backups/talos-agent-YYYYMMDD-HHMMSS.enc)")
+@click.option(
+    "--output",
+    default=None,
+    help="Output artifact path (default: ~/.talos-agent/backups/talos-agent-YYYYMMDD-HHMMSS.enc)",
+)
 @click.option("--agent-id", default=None, help="Talos ID for multi-agent mode")
-@click.option("--passphrase", default=None, help="Backup passphrase (≥ 8 chars). Prompted if not provided.")
-@click.option("--web-endpoint", is_flag=True, help="Also trigger POST /api/ops/backup on the Talos web API for Postgres coverage.")
+@click.option(
+    "--passphrase",
+    default=None,
+    help="Backup passphrase (≥ 8 chars). Prompted if not provided.",
+)
+@click.option(
+    "--web-endpoint",
+    is_flag=True,
+    help="Also trigger POST /api/ops/backup on the Talos web API for Postgres coverage.",
+)
 @click.option(
     "--web-api-url",
     default=None,
@@ -691,12 +730,16 @@ def backup(output, agent_id, passphrase, web_endpoint, web_api_url, ops_token):
 
     ensure_app_dir()
     if not passphrase:
-        passphrase = click.prompt("Backup passphrase (≥8 chars)", hide_input=True, confirmation_prompt=True)
+        passphrase = click.prompt(
+            "Backup passphrase (≥8 chars)", hide_input=True, confirmation_prompt=True
+        )
     if len(passphrase) < 8:
         console.print("[red]Error:[/red] passphrase must be ≥ 8 chars.")
         sys.exit(2)
 
-    default_name = f"talos-agent-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.enc"
+    default_name = (
+        f"talos-agent-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.enc"
+    )
     out = _Path(output) if output else (APP_DIR / "backups" / default_name)
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -721,7 +764,7 @@ def backup(output, agent_id, passphrase, web_endpoint, web_api_url, ops_token):
     console.print(f"  scope:         {run.scope}")
     console.print(f"  files:         {len(run.files)}")
     console.print(f"  row_count:     {run.manifest.get('rowCountTotal', 0)}")
-    console.print(f"  duration_s:    {elapsed:.2f}")    
+    console.print(f"  duration_s:    {elapsed:.2f}")
     settings = Settings()
     if settings.backup_retention_enabled:
         from talos_agent.backup_service import prune_backups
@@ -753,7 +796,9 @@ def backup(output, agent_id, passphrase, web_endpoint, web_api_url, ops_token):
         )
         token = ops_token or os.environ.get("TALOS_OPS_TOKEN")
         if not token:
-            console.print("[red]--web-endpoint requires --ops-token or TALOS_OPS_TOKEN[/red]")
+            console.print(
+                "[red]--web-endpoint requires --ops-token or TALOS_OPS_TOKEN[/red]"
+            )
             sys.exit(2)
         try:
             result = asyncio.run(
@@ -775,10 +820,20 @@ def backup(output, agent_id, passphrase, web_endpoint, web_api_url, ops_token):
 
 @main.command()
 @click.argument("artifact", type=click.Path(exists=True, dir_okay=False))
-@click.option("--passphrase", default=None, help="Backup passphrase (Prompted if not provided.)")
-@click.option("--confirm", is_flag=True, help="Overwrite existing agent DB. Required if state already exists.")
+@click.option(
+    "--passphrase", default=None, help="Backup passphrase (Prompted if not provided.)"
+)
+@click.option(
+    "--confirm",
+    is_flag=True,
+    help="Overwrite existing agent DB. Required if state already exists.",
+)
 @click.option("--agent-id", default=None, help="Talos ID for multi-agent mode")
-@click.option("--restore-root", default=None, help="Override restore root (default: ~/.talos-agent)")
+@click.option(
+    "--restore-root",
+    default=None,
+    help="Override restore root (default: ~/.talos-agent)",
+)
 def restore(artifact, passphrase, confirm, agent_id, restore_root):
     """Restore agent state from an encrypted backup artifact.
 
@@ -819,7 +874,9 @@ def restore(artifact, passphrase, confirm, agent_id, restore_root):
     console.print(f"  plaintext_size: {verified.manifest.get('size_bytes', 0)} B")
 
     if not confirm:
-        console.print("[yellow]Dry run only.[/yellow] Re-run with --confirm to apply the restore.")
+        console.print(
+            "[yellow]Dry run only.[/yellow] Re-run with --confirm to apply the restore."
+        )
         return
 
     try:
@@ -833,12 +890,16 @@ def restore(artifact, passphrase, confirm, agent_id, restore_root):
     except BackupError as exc:
         console.print(f"[red]Restore failed:[/red] {exc}")
         sys.exit(1)
-    console.print(f"[green]Restore applied to {_Path(restore_root) if restore_root else APP_DIR}[/green]")
+    console.print(
+        f"[green]Restore applied to {_Path(restore_root) if restore_root else APP_DIR}[/green]"
+    )
 
 
 @main.command(name="backup-doctor")
 @click.argument("artifact", type=click.Path(exists=True, dir_okay=False))
-@click.option("--passphrase", default=None, help="Backup passphrase (Prompted if not provided.)")
+@click.option(
+    "--passphrase", default=None, help="Backup passphrase (Prompted if not provided.)"
+)
 def backup_doctor(artifact, passphrase):
     """Print integrity-check results for a backup artifact without applying it.
 
@@ -879,8 +940,15 @@ def backup_doctor(artifact, passphrase):
         console.print(f"    - {name}")
         console.print(f"        sha256:    {meta.get('sha256')}")
         console.print(f"        size_bytes:{meta.get('size_bytes')}")
+
+
 @main.command()
-@click.option("--json", "json_output", is_flag=True, help="Output raw JSON instead of a formatted summary.")
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    help="Output raw JSON instead of a formatted summary.",
+)
 def telemetry(json_output: bool):
     """Show privacy-safe runtime telemetry for the agent.
 
@@ -917,10 +985,14 @@ def telemetry(json_output: bool):
             if task.retry_attempts > 0:
                 retry_info = f" [yellow]retries={task.retry_attempts}[/yellow]"
                 if task.retry_remaining_seconds > 0:
-                    retry_info += f" [dim](next in {task.retry_remaining_seconds:.0f}s)[/dim]"
+                    retry_info += (
+                        f" [dim](next in {task.retry_remaining_seconds:.0f}s)[/dim]"
+                    )
                 if task.is_terminal:
                     retry_info += " [red]TERMINAL[/red]"
-            console.print(f"  {task.name}: last_run={task.last_run_at or 'never'}{retry_info}")
+            console.print(
+                f"  {task.name}: last_run={task.last_run_at or 'never'}{retry_info}"
+            )
     console.print()
 
     console.print("[bold]Queue Depth[/bold]")
@@ -932,7 +1004,9 @@ def telemetry(json_output: bool):
         console.print("[bold]Circuit Breakers[/bold]")
         for cb in report.circuit_breakers:
             state = cb.get("state", "unknown")
-            color = {"closed": "green", "half_open": "yellow", "open": "red"}.get(state, "dim")
+            color = {"closed": "green", "half_open": "yellow", "open": "red"}.get(
+                state, "dim"
+            )
             console.print(
                 f"  {cb.get('provider', '?')}: [{color}]{state}[/{color}] "
                 f"(failures={cb.get('failures_in_window', 0)}, "
@@ -943,9 +1017,20 @@ def telemetry(json_output: bool):
     if report.adapters:
         console.print("[bold]Adapter Health[/bold]")
         for a in report.adapters:
-            color = {"healthy": "green", "disabled": "dim", "degraded": "yellow", "timeout": "red"}.get(a.state, "dim")
-            cat_str = f" [{a.error_category}]" if a.error_category and a.error_category != "none" else ""
-            console.print(f"  {a.name}: [{color}]{a.state}[/{color}]{cat_str} — {a.detail}")
+            color = {
+                "healthy": "green",
+                "disabled": "dim",
+                "degraded": "yellow",
+                "timeout": "red",
+            }.get(a.state, "dim")
+            cat_str = (
+                f" [{a.error_category}]"
+                if a.error_category and a.error_category != "none"
+                else ""
+            )
+            console.print(
+                f"  {a.name}: [{color}]{a.state}[/{color}]{cat_str} — {a.detail}"
+            )
         console.print()
 
     console.print("[bold]Content Performance (7d)[/bold]")
@@ -963,7 +1048,12 @@ def telemetry(json_output: bool):
 
 
 @main.command(name="diagnostics")
-@click.option("--json", "json_output", is_flag=True, help="Output raw JSON instead of a formatted summary.")
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    help="Output raw JSON instead of a formatted summary.",
+)
 def diagnostics(json_output: bool):
     """Run health probes across social, browser, and payment adapters.
 
@@ -1030,14 +1120,25 @@ def diagnostics(json_output: bool):
         "timeout": "red",
     }.get(report.overall.value, "dim")
 
-    console.print(f"[bold]Adapter Health & Diagnostics:[/bold] [{overall_color}]{report.overall.value.upper()}[/{overall_color}]")
+    console.print(
+        f"[bold]Adapter Health & Diagnostics:[/bold] [{overall_color}]{report.overall.value.upper()}[/{overall_color}]"
+    )
     console.print(f"  Checked at: {report.checked_at.isoformat()}")
     console.print()
 
     for a in report.adapters:
-        color = {"healthy": "green", "disabled": "dim", "degraded": "yellow", "timeout": "red"}.get(a.state.value, "dim")
-        cat_str = f" [{a.error_category.value}]" if a.error_category.value != "none" else ""
-        console.print(f"  [bold]{a.adapter}[/bold]: [{color}]{a.state.value}[/{color}]{cat_str}")
+        color = {
+            "healthy": "green",
+            "disabled": "dim",
+            "degraded": "yellow",
+            "timeout": "red",
+        }.get(a.state.value, "dim")
+        cat_str = (
+            f" [{a.error_category.value}]" if a.error_category.value != "none" else ""
+        )
+        console.print(
+            f"  [bold]{a.adapter}[/bold]: [{color}]{a.state.value}[/{color}]{cat_str}"
+        )
         if a.detail:
             console.print(f"    Detail: {a.detail}")
     console.print()
@@ -1079,11 +1180,15 @@ def secrets(ctx: click.Context, db_path: Path | None):
 
 @secrets.command("stage")
 @click.argument("name")
-@click.option("--request-id", default=None, help="Idempotency key (generated if omitted)")
+@click.option(
+    "--request-id", default=None, help="Idempotency key (generated if omitted)"
+)
 @click.option("--actor", default="operator", show_default=True)
 @click.option("--reason", default=None, help="Lowercase audit reason code")
 @click.pass_obj
-def stage_secret(obj: dict, name: str, request_id: str | None, actor: str, reason: str | None):
+def stage_secret(
+    obj: dict, name: str, request_id: str | None, actor: str, reason: str | None
+):
     """Prompt for and stage an encrypted value without activating it."""
     value = click.prompt("Secret value", hide_input=True, confirmation_prompt=True)
     try:
@@ -1123,7 +1228,11 @@ def activate_secret(
 ):
     """Atomically activate a staged version using compare-and-swap."""
     store = obj["store"]
-    expected = expected_version if expected_version is not None else store.current_version(name)
+    expected = (
+        expected_version
+        if expected_version is not None
+        else store.current_version(name)
+    )
     try:
         result = store.activate(
             name,
@@ -1140,7 +1249,9 @@ def activate_secret(
 
 @secrets.command("rotate")
 @click.argument("name")
-@click.option("--request-id", default=None, help="Idempotency key (generated if omitted)")
+@click.option(
+    "--request-id", default=None, help="Idempotency key (generated if omitted)"
+)
 @click.option("--expected-version", type=click.IntRange(min=1), default=None)
 @click.option("--actor", default="operator", show_default=True)
 @click.option("--reason", default="routine_rotation", show_default=True)
@@ -1162,7 +1273,11 @@ def rotate_secret(
 ):
     """Prompt for, stage, and atomically activate a new encrypted version."""
     store = obj["store"]
-    expected = expected_version if expected_version is not None else store.current_version(name)
+    expected = (
+        expected_version
+        if expected_version is not None
+        else store.current_version(name)
+    )
     value = click.prompt("New secret value", hide_input=True, confirmation_prompt=True)
     rid = request_id or str(uuid.uuid4())
     try:
@@ -1179,7 +1294,9 @@ def rotate_secret(
             expected_active_version=expected,
             actor=actor,
             reason=reason,
-            checkpoint_request_id=(f"ckpt-{rid}" if with_checkpoint and expected is not None else None),
+            checkpoint_request_id=(
+                f"ckpt-{rid}" if with_checkpoint and expected is not None else None
+            ),
         )
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
@@ -1262,7 +1379,9 @@ def secrets_checkpoint():
 
 @secrets_checkpoint.command("create")
 @click.argument("name")
-@click.option("--request-id", default=None, help="Idempotency key (generated if omitted)")
+@click.option(
+    "--request-id", default=None, help="Idempotency key (generated if omitted)"
+)
 @click.option("--actor", default="operator", show_default=True)
 @click.option("--reason", default="pre_rotation", show_default=True)
 @click.pass_obj
@@ -1343,10 +1462,21 @@ def checkpoint_discard(
 
 
 @main.command(name="wal-health")
-@click.option("--db", "db_path", default=None, help="Path to SQLite DB (default: agent local DB).")
-@click.option("--agent-id", default=None, help="Resolve per-agent DB path when --db is omitted.")
-@click.option("--json", "json_output", is_flag=True, help="Output raw JSON instead of a formatted summary.")
-@click.option("--no-checkpoint", is_flag=True, help="Skip PRAGMA wal_checkpoint(PASSIVE).")
+@click.option(
+    "--db", "db_path", default=None, help="Path to SQLite DB (default: agent local DB)."
+)
+@click.option(
+    "--agent-id", default=None, help="Resolve per-agent DB path when --db is omitted."
+)
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    help="Output raw JSON instead of a formatted summary.",
+)
+@click.option(
+    "--no-checkpoint", is_flag=True, help="Skip PRAGMA wal_checkpoint(PASSIVE)."
+)
 @click.option("--no-quick-check", is_flag=True, help="Skip PRAGMA quick_check.")
 def wal_health_cmd(db_path, agent_id, json_output, no_checkpoint, no_quick_check):
     """Show SQLite WAL health diagnostics for the agent database.
@@ -1410,8 +1540,12 @@ def wal_health_cmd(db_path, agent_id, json_output, no_checkpoint, no_quick_check
     console.print()
     console.print("[bold]Files[/bold]")
     console.print(f"  db_size_bytes:  {report.db_size_bytes}")
-    console.print(f"  wal_exists:     {report.wal_exists}  size={report.wal_size_bytes}")
-    console.print(f"  shm_exists:     {report.shm_exists}  size={report.shm_size_bytes}")
+    console.print(
+        f"  wal_exists:     {report.wal_exists}  size={report.wal_size_bytes}"
+    )
+    console.print(
+        f"  shm_exists:     {report.shm_exists}  size={report.shm_size_bytes}"
+    )
     console.print()
     console.print("[bold]Checkpoint / Integrity[/bold]")
     console.print(

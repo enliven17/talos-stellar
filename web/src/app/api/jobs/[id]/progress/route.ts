@@ -139,7 +139,7 @@ async function handleGet(
         if (isClosed || eventsSent >= eventLimit) return false;
         try {
           controller.enqueue(
-            `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`,
+            new TextEncoder().encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
           );
           eventsSent++;
           if (eventsSent >= eventLimit) cleanup();

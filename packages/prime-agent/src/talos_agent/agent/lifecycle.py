@@ -10,6 +10,7 @@ from talos_agent.payments.stellar_kit import StellarKit
 
 logger = logging.getLogger(__name__)
 
+
 class LifecycleState(str, Enum):
     ACTIVE = "active"
     PAUSED = "paused"
@@ -20,7 +21,9 @@ class LifecycleState(str, Enum):
 class LifecycleManager:
     """Manages credentials, balances, and obligations during agent lifecycle transitions."""
 
-    def __init__(self, settings: Settings, db: LocalDB, api: TalosAPIClient, stellar: StellarKit):
+    def __init__(
+        self, settings: Settings, db: LocalDB, api: TalosAPIClient, stellar: StellarKit
+    ):
         self.settings = settings
         self.db = db
         self.api = api
@@ -31,16 +34,16 @@ class LifecycleManager:
         """Pause the agent. Rotates credentials, suspends operations."""
         logger.info("Transitioning agent to PAUSED state.")
         self.state = LifecycleState.PAUSED
-        
+
         # Revoke API credentials first
         revoke_result = await self._revoke_credentials()
-        
+
         # Reconcile pending operations
         reconcile_result = await self._reconcile_all()
-        
+
         # Notify API of state change
         await self._notify_state_change("paused")
-        
+
         return {
             "status": "success",
             "state": "paused",
@@ -52,36 +55,36 @@ class LifecycleManager:
         """Retire the agent permanently."""
         logger.info("Transitioning agent to RETIRED state.")
         self.state = LifecycleState.RETIRED
-        
+
         # Revoke all credentials permanently
         revoke_result = await self._revoke_credentials()
-        
+
         # Reconcile and refund pending operations
         reconcile_result = await self._reconcile_all(refund=True)
-        
+
         # Notify API
         await self._notify_state_change("retired")
-        
+
         return {
             "status": "success",
             "state": "retired",
             "credentials_revoked": revoke_result,
             "reconciled": reconcile_result,
         }
-        
+
     async def transition_to_recovering(self) -> dict:
         """Recover agent state from a paused or failed condition."""
         logger.info("Transitioning agent to RECOVERING state.")
         self.state = LifecycleState.RECOVERING
-        
+
         # Attempt recovery logic (mocked)
         recovery_status = await self._recover_state()
-        
+
         if recovery_status:
             self.state = LifecycleState.ACTIVE
             await self._notify_state_change("active")
             return {"status": "success", "state": "active"}
-        
+
         return {"status": "failure", "state": "recovering"}
 
     async def _revoke_credentials(self) -> bool:
@@ -102,25 +105,25 @@ class LifecycleManager:
             "balances_checked": False,
             "transactions_settled": 0,
             "approvals_cancelled": 0,
-            "refunds_issued": 0
+            "refunds_issued": 0,
         }
         try:
             # Check balance to ensure wallet access
             balance = await self.stellar.get_balance()
             if balance and "error" not in balance:
                 result["balances_checked"] = True
-            
+
             # Cancel pending approvals in DB
             pending_approvals = self.db.get_pending_approvals()
             for approval in pending_approvals:
                 # Cancel locally
                 result["approvals_cancelled"] += 1
-                
+
             # Process refunds if retiring
             if refund and result["balances_checked"]:
                 # Mock refund logic
                 result["refunds_issued"] = len(pending_approvals)
-                
+
             return result
         except Exception:
             logger.error("Reconciliation failed.", exc_info=True)
@@ -130,7 +133,9 @@ class LifecycleManager:
         """Notifies the backend API of the lifecycle state change."""
         try:
             # Using update_status as a proxy for state change notification
-            await self.api.update_status(self.settings.talos_id, online=(state == "active"))
+            await self.api.update_status(
+                self.settings.talos_id, online=(state == "active")
+            )
         except Exception:
             # Ignore failure if provider unavailable, to support unavailable providers test case
             pass

@@ -126,12 +126,18 @@ class TalosAPIClient:
         self._settings = settings
         max_bytes = getattr(settings, "api_client_response_max_bytes", None)
         self._response_max_bytes: int = (
-            max_bytes if isinstance(max_bytes, int) and not isinstance(max_bytes, bool) else 1_048_576
+            max_bytes
+            if isinstance(max_bytes, int) and not isinstance(max_bytes, bool)
+            else 1_048_576
         )
 
-    def _request_headers(self, supplied: dict[str, str] | None = None) -> dict[str, str]:
+    def _request_headers(
+        self, supplied: dict[str, str] | None = None
+    ) -> dict[str, str]:
         """Capture one credential for the complete retry lifecycle of a request."""
-        headers = {"Authorization": f"Bearer {self._settings.secret_value('talos_api_key')}"}
+        headers = {
+            "Authorization": f"Bearer {self._settings.secret_value('talos_api_key')}"
+        }
         headers.update(supplied or {})
         return headers
 
@@ -225,7 +231,9 @@ class TalosAPIClient:
 
         response = await self._get(url, params=query)
         if response.status_code != 200:
-            raise PaginationError(f"pagination request failed with status {response.status_code}")
+            raise PaginationError(
+                f"pagination request failed with status {response.status_code}"
+            )
 
         try:
             payload = response.json()
@@ -245,9 +253,13 @@ class TalosAPIClient:
         else:
             raise PaginationError("pagination response has an unexpected shape")
 
-        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+        if not isinstance(items, list) or not all(
+            isinstance(item, dict) for item in items
+        ):
             raise PaginationError("pagination response contains invalid items")
-        if next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor):
+        if next_cursor is not None and (
+            not isinstance(next_cursor, str) or not next_cursor
+        ):
             raise PaginationError("pagination response contains an invalid next cursor")
         return PaginatedPage(items=items, next_cursor=next_cursor)
 
@@ -261,7 +273,11 @@ class TalosAPIClient:
         max_pages: int = _MAX_PAGINATION_PAGES,
     ) -> list[dict[str, Any]]:
         """Traverse cursor pages with bounds, loop detection, and de-duplication."""
-        if not isinstance(max_pages, int) or isinstance(max_pages, bool) or max_pages < 1:
+        if (
+            not isinstance(max_pages, int)
+            or isinstance(max_pages, bool)
+            or max_pages < 1
+        ):
             raise ValueError("max_pages must be a positive integer")
 
         items: list[dict[str, Any]] = []
@@ -283,9 +299,13 @@ class TalosAPIClient:
                 # returning it twice when a continuation regresses.
                 identifier = item.get("id", item.get("talosId"))
                 if not isinstance(identifier, str) or not identifier:
-                    raise PaginationError("pagination item is missing a stable identifier")
+                    raise PaginationError(
+                        "pagination item is missing a stable identifier"
+                    )
                 if identifier in seen_items:
-                    raise PaginationError("pagination response contains a duplicate item")
+                    raise PaginationError(
+                        "pagination response contains a duplicate item"
+                    )
                 seen_items.add(identifier)
                 items.append(item)
 
@@ -357,7 +377,12 @@ class TalosAPIClient:
     ) -> dict | None:
         r = await self._post(
             f"/api/talos/{talos_id}/revenue",
-            json={"amount": amount, "currency": "USDC", "source": source, "txHash": tx_hash},
+            json={
+                "amount": amount,
+                "currency": "USDC",
+                "source": source,
+                "txHash": tx_hash,
+            },
             idempotency_key=idempotency_key,
         )
         if r.status_code in (200, 201):
@@ -378,7 +403,12 @@ class TalosAPIClient:
     ) -> dict | None:
         r = await self._post(
             f"/api/talos/{talos_id}/approvals",
-            json={"type": type_, "title": title, "description": description, "amount": amount},
+            json={
+                "type": type_,
+                "title": title,
+                "description": description,
+                "amount": amount,
+            },
             idempotency_key=idempotency_key,
         )
         if r.status_code in (200, 201):
@@ -425,7 +455,9 @@ class TalosAPIClient:
             max_pages=max_pages,
         )
 
-    async def get_approvals(self, talos_id: str, status: str | None = None) -> list[dict]:
+    async def get_approvals(
+        self, talos_id: str, status: str | None = None
+    ) -> list[dict]:
         """Compatibility wrapper returning all approval pages as one list."""
         return await self.get_all_approvals(talos_id, status)
 
@@ -446,7 +478,9 @@ class TalosAPIClient:
 
     async def create_agent_wallet(self) -> dict | None:
         """Create a Circle MPC wallet for this Talos if one doesn't exist."""
-        r = await self._post(f"/api/talos/{self._talos_id}/wallet", idempotency_key=None)
+        r = await self._post(
+            f"/api/talos/{self._talos_id}/wallet", idempotency_key=None
+        )
         if r.status_code in (200, 201):
             return r.json()
         return None
@@ -462,11 +496,17 @@ class TalosAPIClient:
         """Request x402 payment signature from Web's Stellar proxy."""
         if not self._talos_id:
             return {"error": "talos_id not set"}
-        payload: dict[str, Any] = {"payee": payee, "amount": amount, "assetCode": asset_code}
+        payload: dict[str, Any] = {
+            "payee": payee,
+            "amount": amount,
+            "assetCode": asset_code,
+        }
         if asset_issuer:
             payload["assetIssuer"] = asset_issuer
         # sign_payment is not a state-mutating write; opt out of idempotency.
-        r = await self._post(f"/api/talos/{self._talos_id}/sign", json=payload, idempotency_key=None)
+        r = await self._post(
+            f"/api/talos/{self._talos_id}/sign", json=payload, idempotency_key=None
+        )
         if r.status_code == 200:
             return r.json()
         # Return error details
@@ -477,12 +517,16 @@ class TalosAPIClient:
 
     # ── Commerce / x402 ────────────────────────────────────
 
-    async def get_service(self, talos_id: str, service_type: str | None = None) -> httpx.Response:
+    async def get_service(
+        self, talos_id: str, service_type: str | None = None
+    ) -> httpx.Response:
         """GET service endpoint — expects 402 response with payment details."""
         params = {}
         if service_type:
             params["type"] = service_type
-        return await self._get(f"/api/talos/{talos_id}/service", params=params, timeout=self._a2a_timeout)
+        return await self._get(
+            f"/api/talos/{talos_id}/service", params=params, timeout=self._a2a_timeout
+        )
 
     async def submit_commerce(
         self,

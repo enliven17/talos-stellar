@@ -225,7 +225,9 @@ class ReplayRecorder:
                 redacted=was_redacted,
             )
         except Exception as exc:
-            log.warning("replay_record_error", session_id=self.session_id, error=str(exc))
+            log.warning(
+                "replay_record_error", session_id=self.session_id, error=str(exc)
+            )
 
         log.debug(
             "replay_event_recorded",
@@ -302,9 +304,9 @@ class ReplayRunner:
             # Determine the stubbed result for this event.
             if tool_fn_override and original.event_type in tool_fn_override:
                 try:
-                    result_payload: dict[str, Any] = tool_fn_override[original.event_type](
-                        original.payload
-                    )
+                    result_payload: dict[str, Any] = tool_fn_override[
+                        original.event_type
+                    ](original.payload)
                 except Exception as exc:
                     divergence_report.append(
                         f"[{idx}] {original.event_type}: stub raised {type(exc).__name__}: {exc}"

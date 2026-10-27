@@ -106,7 +106,9 @@ class AgentContext:
         if self.recent_content:
             lines.append("Recent posts (avoid duplicates):")
             for c in self.recent_content:
-                lines.append(f"  - [{c.get('channel', '?')}] {c.get('content', '')[:80]}")
+                lines.append(
+                    f"  - [{c.get('channel', '?')}] {c.get('content', '')[:80]}"
+                )
         if self.active_playbook:
             lines.append(f"Active playbook: {self.active_playbook['name']}")
             data = self.active_playbook.get("data", {})
@@ -131,7 +133,9 @@ class AgentContext:
             )
 
         if self.unmeasured_count > 0:
-            lines.append(f"Unmeasured posts: {self.unmeasured_count} (run measure_recent_posts)")
+            lines.append(
+                f"Unmeasured posts: {self.unmeasured_count} (run measure_recent_posts)"
+            )
 
         # Active learnings
         if self.active_learnings:
@@ -146,6 +150,8 @@ class AgentContext:
         if self.audience_insights:
             lines.append("Audience segments:")
             for a in self.audience_insights:
-                lines.append(f"  - {a['segment']}: {a['description'][:80]} (score: {a['engagement_score']:.1f})")
+                lines.append(
+                    f"  - {a['segment']}: {a['description'][:80]} (score: {a['engagement_score']:.1f})"
+                )
 
         return "\n".join(lines)

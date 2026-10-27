@@ -10,8 +10,8 @@ type AnyRouteHandler = (...args: any[]) => any;
  */
 export function withRequestId<H extends AnyRouteHandler>(handler: H): H {
   return ((req?: Request | NextRequest, ...rest: unknown[]) => {
-    const requestId = getRequestId(req);
     const request = req ?? new NextRequest("http://localhost");
+    const requestId = getRequestId(request);
     const result = handler(request, ...rest);
     if (result && typeof (result as Promise<Response>).then === "function") {
       return (result as Promise<Response>).then((res: Response) => {

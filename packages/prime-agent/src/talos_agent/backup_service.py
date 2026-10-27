@@ -96,17 +96,24 @@ def single_flight(name: str):
     try:
         try:
             import fcntl  # type: ignore[import-not-found]
+
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (ImportError, OSError) as exc:
             # Windows doesn't support fcntl.flock the same way; fall back to
             # a sentinel file. We never want to silently drop the lock.
-            if isinstance(exc, OSError) and exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
-                raise BackupBusyError(f"Another backup/restore is already running: {name}")
+            if isinstance(exc, OSError) and exc.errno in (
+                errno.EWOULDBLOCK,
+                errno.EAGAIN,
+            ):
+                raise BackupBusyError(
+                    f"Another backup/restore is already running: {name}"
+                )
             # If fcntl unavailable, do best-effort cross-platform lock.
         yield
     finally:
         try:
             import fcntl  # type: ignore[import-not-found]
+
             fcntl.flock(fd, fcntl.LOCK_UN)
         except (ImportError, OSError):
             pass
@@ -137,11 +144,13 @@ def _sha256_bytes(data: bytes) -> str:
 def _b64(data: bytes) -> str:
     """Base64 encode without chunking (keeps the JSON compact and deterministic)."""
     import base64 as _b64mod
+
     return _b64mod.b64encode(data).decode("ascii")
 
 
 def _b64_decode(s: str) -> bytes:
     import base64 as _b64mod
+
     return _b64mod.b64decode(s.encode("ascii"))
 
 
@@ -154,11 +163,15 @@ def _safe_filename(name: str) -> str:
     preventing an attacker who edits an artifact from writing outside the
     restore root.
     """
-    bad = set("\\:*?\"<>|\0")
+    bad = set('\\:*?"<>|\0')
     if any(c in bad for c in name):
-        raise BackupError(f"Unsafe filename in backup manifest: {name!r}", code="BAD_INPUT")
+        raise BackupError(
+            f"Unsafe filename in backup manifest: {name!r}", code="BAD_INPUT"
+        )
     if ".." in name.split("/") or ".." in name.split("\\"):
-        raise BackupError(f"Path traversal rejected in backup manifest: {name!r}", code="BAD_INPUT")
+        raise BackupError(
+            f"Path traversal rejected in backup manifest: {name!r}", code="BAD_INPUT"
+        )
     return name
 
 
@@ -455,11 +468,10 @@ def prune_backups(
 
     return deleted
 
+
 # ────────────────────────────────────────────────────────────────────
 # Verify
 # ────────────────────────────────────────────────────────────────────
-
-
 
 
 def stream_encrypted_artifact(
@@ -505,7 +517,6 @@ def stream_encrypted_artifact(
             except OSError:
                 pass
     return written
-
 
 
 def verify_backup(*, artifact_path: Path, password: str) -> BackupRun:
@@ -658,7 +669,7 @@ def restore_backup(
                         code="BAD_INPUT",
                     )
                 # Place the file under `target_root/<relative-name>`.
-                rel = safe[len("db/"):]
+                rel = safe[len("db/") :]
                 target = (target_root / rel).resolve()
                 if not str(target).startswith(str(target_root.resolve())):
                     raise BackupError(

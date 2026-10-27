@@ -39,6 +39,7 @@ def normalize_playbook_name(name: str) -> str:
 
     return normalized_name
 
+
 _MIGRATIONS = [
     (
         1,
@@ -710,7 +711,9 @@ class LocalDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_recent_content_by_channel(self, channel: str, limit: int = 20) -> list[dict]:
+    def get_recent_content_by_channel(
+        self, channel: str, limit: int = 20
+    ) -> list[dict]:
         rows = self._conn.execute(
             "SELECT content, channel, posted_at FROM content_history "
             "WHERE channel = ? ORDER BY posted_at DESC LIMIT ?",
@@ -720,7 +723,9 @@ class LocalDB:
 
     # ── Commerce Queue ─────────────────────────────────────
 
-    def add_commerce_job(self, job_id: str, talos_id: str, service_type: str, payload: dict | None = None) -> None:
+    def add_commerce_job(
+        self, job_id: str, talos_id: str, service_type: str, payload: dict | None = None
+    ) -> None:
         self._conn.execute(
             "INSERT OR IGNORE INTO commerce_queue (job_id, talos_id, service_type, payload) VALUES (?, ?, ?, ?)",
             (job_id, talos_id, service_type, json.dumps(payload) if payload else None),
@@ -742,7 +747,14 @@ class LocalDB:
 
     # ── Approval Cache ─────────────────────────────────────
 
-    def cache_approval(self, approval_id: str, type_: str, title: str, description: str | None, amount: float | None) -> None:
+    def cache_approval(
+        self,
+        approval_id: str,
+        type_: str,
+        title: str,
+        description: str | None,
+        amount: float | None,
+    ) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO approval_cache (approval_id, type, title, description, amount) VALUES (?, ?, ?, ?, ?)",
             (approval_id, type_, title, description, amount),
@@ -773,7 +785,9 @@ class LocalDB:
         self._conn.commit()
 
     def get_config(self, key: str) -> str | None:
-        row = self._conn.execute("SELECT value FROM talos_config WHERE key = ?", (key,)).fetchone()
+        row = self._conn.execute(
+            "SELECT value FROM talos_config WHERE key = ?", (key,)
+        ).fetchone()
         return row["value"] if row else None
 
     def set_talos_config(self, data: dict) -> None:
@@ -785,7 +799,9 @@ class LocalDB:
 
     # ── Playbooks ──────────────────────────────────────────
 
-    def save_playbook(self, name: str, data: dict, source_talos: str | None = None) -> None:
+    def save_playbook(
+        self, name: str, data: dict, source_talos: str | None = None
+    ) -> None:
         self._conn.execute(
             "INSERT INTO playbooks (name, data, source_talos) VALUES (?, ?, ?)",
             (name, json.dumps(data), source_talos),
@@ -817,12 +833,20 @@ class LocalDB:
 
     def apply_playbook(self, playbook_id: int) -> None:
         self._conn.execute("UPDATE playbooks SET applied = 0")
-        self._conn.execute("UPDATE playbooks SET applied = 1 WHERE id = ?", (playbook_id,))
+        self._conn.execute(
+            "UPDATE playbooks SET applied = 1 WHERE id = ?", (playbook_id,)
+        )
         self._conn.commit()
 
     # ── Spending Tracker ────────────────────────────────────
 
-    def record_spending(self, amount: float, category: str, description: str = "", currency: str = "USDC") -> None:
+    def record_spending(
+        self,
+        amount: float,
+        category: str,
+        description: str = "",
+        currency: str = "USDC",
+    ) -> None:
         self._conn.execute(
             "INSERT INTO spending_log (amount, currency, category, description) VALUES (?, ?, ?, ?)",
             (amount, currency, category, description),
@@ -1019,7 +1043,10 @@ class LocalDB:
             "WHERE expires_at IS NOT NULL AND expires_at <= ?",
             (cutoff,),
         ).fetchall()
-        ids = [int(r["id"] if isinstance(r, dict) or hasattr(r, "keys") else r[0]) for r in rows]
+        ids = [
+            int(r["id"] if isinstance(r, dict) or hasattr(r, "keys") else r[0])
+            for r in rows
+        ]
         if ids:
             self._conn.execute(
                 f"DELETE FROM strategy_learnings WHERE id IN ({','.join('?' for _ in ids)})",
@@ -1045,7 +1072,12 @@ class LocalDB:
             "engagement_score = excluded.engagement_score, "
             "keywords = excluded.keywords, "
             "updated_at = datetime('now')",
-            (segment, description, engagement_score, json.dumps(keywords) if keywords else None),
+            (
+                segment,
+                description,
+                engagement_score,
+                json.dumps(keywords) if keywords else None,
+            ),
         )
         self._conn.commit()
 
@@ -1080,12 +1112,22 @@ class LocalDB:
             """INSERT INTO dividends_log
                (spending_log_id, recipient_address, token_symbol, amount, currency, tx_hash, note)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (spending_log_id, recipient_address, token_symbol, amount, currency, tx_hash, note),
+            (
+                spending_log_id,
+                recipient_address,
+                token_symbol,
+                amount,
+                currency,
+                tx_hash,
+                note,
+            ),
         )
         self._conn.commit()
         return cursor.lastrowid
 
-    def get_dividend_history(self, limit: int = 50, recipient_address: str | None = None) -> list[dict]:
+    def get_dividend_history(
+        self, limit: int = 50, recipient_address: str | None = None
+    ) -> list[dict]:
         """Get dividend distribution history, optionally filtered by recipient."""
         if recipient_address:
             rows = self._conn.execute(
@@ -1126,8 +1168,18 @@ class LocalDB:
                (platform, amount, collateral_asset, loan_asset, duration_days, purpose, 
                 repayment_address, outstanding_amount, created_at, due_date)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (platform, amount, collateral_asset, loan_asset, duration_days, purpose,
-             repayment_address, amount, created_at.isoformat(), due_date.isoformat()),
+            (
+                platform,
+                amount,
+                collateral_asset,
+                loan_asset,
+                duration_days,
+                purpose,
+                repayment_address,
+                amount,
+                created_at.isoformat(),
+                due_date.isoformat(),
+            ),
         )
         self._conn.commit()
         return cursor.lastrowid
@@ -1152,7 +1204,9 @@ class LocalDB:
         ).fetchone()
         return dict(row) if row else None
 
-    def record_repayment(self, loan_id: int, amount: float, tx_hash: str | None = None) -> None:
+    def record_repayment(
+        self, loan_id: int, amount: float, tx_hash: str | None = None
+    ) -> None:
         """Record a repayment for a loan and update outstanding amount."""
         self._conn.execute(
             "INSERT INTO loan_repayments (loan_id, amount, tx_hash) VALUES (?, ?, ?)",
@@ -1282,7 +1336,9 @@ class LocalDB:
         expires_iso = (
             lease_expires_at.isoformat()
             if lease_expires_at is not None
-            else (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
+            else (
+                datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+            ).isoformat()
         )
         self._conn.execute(
             """INSERT INTO claimed_jobs (job_id, fencing_token, lease_expires_at, ttl_seconds)

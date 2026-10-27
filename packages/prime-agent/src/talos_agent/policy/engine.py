@@ -448,7 +448,9 @@ class PolicyEngine:
 
         # Determine aggregate decision
         escalated_rules = tuple(
-            r for r in violated if r.decision in (PolicyDecision.ESCALATE, PolicyDecision.DENY)
+            r
+            for r in violated
+            if r.decision in (PolicyDecision.ESCALATE, PolicyDecision.DENY)
             and r.severity == Severity.HIGH
         )
 
@@ -478,8 +480,9 @@ class PolicyEngine:
 
         # Check if any non-BLOCKER DENY rules matched (MEDIUM severity)
         deny_rules = tuple(
-            r for r in violated if r.decision == PolicyDecision.DENY
-            and r.severity != Severity.BLOCKER
+            r
+            for r in violated
+            if r.decision == PolicyDecision.DENY and r.severity != Severity.BLOCKER
         )
         if deny_rules:
             # MEDIUM deny rules are treated as escalations

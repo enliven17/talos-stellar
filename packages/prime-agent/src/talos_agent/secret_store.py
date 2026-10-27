@@ -109,16 +109,22 @@ def decode_keyring(raw: str | Mapping[str, str]) -> dict[str, bytes]:
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise SecretConfigurationError("TALOS_SECRET_KEYRING must be valid JSON") from exc
+            raise SecretConfigurationError(
+                "TALOS_SECRET_KEYRING must be valid JSON"
+            ) from exc
     else:
         parsed = dict(raw)
     if not isinstance(parsed, dict) or len(parsed) > 32:
-        raise SecretConfigurationError("secret keyring must be an object with at most 32 keys")
+        raise SecretConfigurationError(
+            "secret keyring must be an object with at most 32 keys"
+        )
 
     result: dict[str, bytes] = {}
     for key_id, encoded in parsed.items():
         if not isinstance(key_id, str) or not _NAME_RE.fullmatch(key_id):
-            raise SecretConfigurationError("secret key IDs must use lowercase safe identifiers")
+            raise SecretConfigurationError(
+                "secret key IDs must use lowercase safe identifiers"
+            )
         if not isinstance(encoded, str) or len(encoded) > 128:
             raise SecretConfigurationError("keyring contains an invalid encoded key")
         try:
@@ -127,7 +133,9 @@ def decode_keyring(raw: str | Mapping[str, str]) -> dict[str, bytes]:
         except (ValueError, UnicodeEncodeError, binascii.Error) as exc:
             raise SecretConfigurationError("keyring contains invalid base64") from exc
         if len(key) != 32:
-            raise SecretConfigurationError("every keyring key must contain exactly 32 bytes")
+            raise SecretConfigurationError(
+                "every keyring key must contain exactly 32 bytes"
+            )
         result[key_id] = key
     return result
 
@@ -159,7 +167,9 @@ class SecretStore:
         self._dual_read = dual_read
         self._legacy_fallback = legacy_fallback
         if active_key_id not in self._keyring:
-            raise SecretConfigurationError("active secret key ID is missing from the keyring")
+            raise SecretConfigurationError(
+                "active secret key ID is missing from the keyring"
+            )
 
     @property
     def backend_kind(self) -> str:
@@ -206,7 +216,9 @@ class SecretStore:
         ciphertext = AESGCM(key).encrypt(
             nonce, plaintext, self._aad(name, version, self._active_key_id)
         )
-        return _ENVELOPE_PREFIX + base64.urlsafe_b64encode(nonce + ciphertext).decode("ascii")
+        return _ENVELOPE_PREFIX + base64.urlsafe_b64encode(nonce + ciphertext).decode(
+            "ascii"
+        )
 
     def _decrypt(self, row: SecretVersionRecord) -> str:
         key_id = row.key_id
@@ -231,7 +243,9 @@ class SecretStore:
             )
             return plaintext.decode("utf-8")
         except Exception as exc:
-            raise SecretDecryptionError("secret envelope authentication failed") from exc
+            raise SecretDecryptionError(
+                "secret envelope authentication failed"
+            ) from exc
 
     def _audit(
         self,
@@ -245,9 +259,13 @@ class SecretStore:
         metadata: Mapping[str, object] | None = None,
     ) -> None:
         if not _REQUEST_ID_RE.fullmatch(actor):
-            raise SecretValidationError("actor must be a safe identifier of at most 128 characters")
+            raise SecretValidationError(
+                "actor must be a safe identifier of at most 128 characters"
+            )
         if reason is not None and not _REASON_RE.fullmatch(reason):
-            raise SecretValidationError("reason must be a lowercase reason code of at most 64 characters")
+            raise SecretValidationError(
+                "reason must be a lowercase reason code of at most 64 characters"
+            )
         safe_metadata = json.dumps(dict(metadata or {}), sort_keys=True)
         if len(safe_metadata.encode("utf-8")) > 2048:
             raise SecretValidationError("audit metadata exceeds 2048-byte limit")
@@ -263,7 +281,12 @@ class SecretStore:
         )
 
     def _transition_log(
-        self, name: str, version: int | None, transition: str, outcome: str, error: Exception | None = None
+        self,
+        name: str,
+        version: int | None,
+        transition: str,
+        outcome: str,
+        error: Exception | None = None,
     ) -> None:
         fields = {
             "scope": self._scope,
@@ -286,9 +309,13 @@ class SecretStore:
     @staticmethod
     def _map_busy(exc: Exception) -> Exception | None:
         if isinstance(exc, BackendBusyError):
-            return SecretBusyError("secret store is busy; retry the idempotent operation")
+            return SecretBusyError(
+                "secret store is busy; retry the idempotent operation"
+            )
         if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower():
-            return SecretBusyError("secret store is busy; retry the idempotent operation")
+            return SecretBusyError(
+                "secret store is busy; retry the idempotent operation"
+            )
         return None
 
     def stage(
@@ -304,10 +331,14 @@ class SecretStore:
         name = self._validate_identifier(name, "secret name")
         plaintext = self._validate_value(value)
         if not isinstance(request_id, str) or not _REQUEST_ID_RE.fullmatch(request_id):
-            raise SecretValidationError("request ID must be a safe identifier of at most 128 characters")
+            raise SecretValidationError(
+                "request ID must be a safe identifier of at most 128 characters"
+            )
         try:
             self._backend.begin_immediate()
-            existing = self._backend.get_version_by_request_id(self._scope, name, request_id)
+            existing = self._backend.get_version_by_request_id(
+                self._scope, name, request_id
+            )
             if existing:
                 self._backend.commit()
                 return self._public_version(existing)
@@ -516,7 +547,6 @@ class SecretStore:
                 raise busy from exc
             raise
 
-
     def _public_checkpoint(
         self, row: SecretRollbackCheckpointRecord
     ) -> SecretRollbackCheckpoint:
@@ -617,7 +647,9 @@ class SecretStore:
                 checkpoint_id=checkpoint_id,
             )
             self._backend.commit()
-            self._transition_log(name, result.active_version, "checkpoint_created", "success")
+            self._transition_log(
+                name, result.active_version, "checkpoint_created", "success"
+            )
             return result
         except Exception as exc:
             self._backend.rollback()
@@ -642,7 +674,9 @@ class SecretStore:
     ) -> SecretRollbackCheckpoint:
         """Mark an open checkpoint as discarded so it cannot be restored."""
         name = self._validate_identifier(name, "secret name")
-        if not isinstance(checkpoint_id, str) or not _REQUEST_ID_RE.fullmatch(checkpoint_id):
+        if not isinstance(checkpoint_id, str) or not _REQUEST_ID_RE.fullmatch(
+            checkpoint_id
+        ):
             raise SecretValidationError(
                 "checkpoint ID must be a safe identifier of at most 128 characters"
             )
@@ -652,7 +686,9 @@ class SecretStore:
                 self._scope, name, checkpoint_id
             )
             if not row:
-                raise SecretNotFoundError(f"checkpoint {checkpoint_id!r} does not exist")
+                raise SecretNotFoundError(
+                    f"checkpoint {checkpoint_id!r} does not exist"
+                )
             if row.status == "discarded":
                 self._backend.commit()
                 return self._public_checkpoint(row)
@@ -705,7 +741,9 @@ class SecretStore:
     ) -> SecretVersion:
         """Restore the secret head captured by an open rollback checkpoint (CAS)."""
         name = self._validate_identifier(name, "secret name")
-        if not isinstance(checkpoint_id, str) or not _REQUEST_ID_RE.fullmatch(checkpoint_id):
+        if not isinstance(checkpoint_id, str) or not _REQUEST_ID_RE.fullmatch(
+            checkpoint_id
+        ):
             raise SecretValidationError(
                 "checkpoint ID must be a safe identifier of at most 128 characters"
             )
@@ -717,7 +755,9 @@ class SecretStore:
                 self._scope, name, checkpoint_id
             )
             if not checkpoint:
-                raise SecretNotFoundError(f"checkpoint {checkpoint_id!r} does not exist")
+                raise SecretNotFoundError(
+                    f"checkpoint {checkpoint_id!r} does not exist"
+                )
             if checkpoint.status == "discarded":
                 raise SecretConflictError(
                     f"checkpoint {checkpoint_id!r} has been discarded"

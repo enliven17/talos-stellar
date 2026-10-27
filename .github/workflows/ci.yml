@@ -228,6 +228,12 @@ jobs:
         working-directory: web
         run: pnpm lint
 
+      - name: "[web] Use Node 22 for accessibility runtime"
+        if: matrix.package == 'web'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: "[web] Accessibility checks"
         if: matrix.package == 'web'
         working-directory: web

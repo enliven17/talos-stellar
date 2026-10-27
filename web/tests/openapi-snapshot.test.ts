@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { NextRequest } from "next/server";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -34,7 +35,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 describe("OpenAPI snapshot", () => {
   it("matches the JSON served by /api/docs/openapi.json", async () => {
-    const response = GET();
+    const response = await GET(new NextRequest("http://localhost/api/docs/openapi.json"));
     const spec = await response.json();
     const actual = `${JSON.stringify(spec, null, 2)}\n`;
     const expected = await readFile(

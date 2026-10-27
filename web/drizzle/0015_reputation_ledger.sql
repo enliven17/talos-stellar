@@ -131,27 +131,27 @@ ALTER TABLE "tls_commerce_services" ALTER COLUMN "chains" SET DEFAULT '{"stellar
 ALTER TABLE "tls_commerce_services" ALTER COLUMN "chains" SET NOT NULL;--> statement-breakpoint
 ALTER TABLE "tls_playbooks" ALTER COLUMN "tags" SET DEFAULT '{}';--> statement-breakpoint
 ALTER TABLE "tls_playbooks" ALTER COLUMN "tags" SET NOT NULL;--> statement-breakpoint
-ALTER TABLE "tls_talos" ADD COLUMN "onChainId" integer;--> statement-breakpoint
-ALTER TABLE "tls_talos" ADD COLUMN "agentName" text;--> statement-breakpoint
-ALTER TABLE "tls_talos" ADD COLUMN "tokenSymbol" text;--> statement-breakpoint
-ALTER TABLE "tls_talos" ADD COLUMN "walletPublicKey" text;--> statement-breakpoint
-ALTER TABLE "tls_talos" ADD COLUMN "creatorPublicKey" text;--> statement-breakpoint
-ALTER TABLE "tls_talos" ADD COLUMN "investorPublicKey" text;--> statement-breakpoint
-ALTER TABLE "tls_talos" ADD COLUMN "treasuryPublicKey" text;--> statement-breakpoint
-ALTER TABLE "tls_talos" ADD COLUMN "agentWalletId" text;--> statement-breakpoint
-ALTER TABLE "tls_talos" ADD COLUMN "agentWalletAddress" text;--> statement-breakpoint
-ALTER TABLE "tls_commerce_jobs" ADD COLUMN "requesterTalosId" text NOT NULL;--> statement-breakpoint
-ALTER TABLE "tls_commerce_jobs" ADD COLUMN "txHash" text;--> statement-breakpoint
-ALTER TABLE "tls_commerce_jobs" ADD COLUMN "bidPrice" numeric(18, 6);--> statement-breakpoint
-ALTER TABLE "tls_commerce_jobs" ADD COLUMN "idempotencyKey" text;--> statement-breakpoint
-ALTER TABLE "tls_commerce_jobs" ADD COLUMN "idempotencyResponse" jsonb;--> statement-breakpoint
-ALTER TABLE "tls_commerce_jobs" ADD COLUMN "leasedBy" text;--> statement-breakpoint
-ALTER TABLE "tls_commerce_jobs" ADD COLUMN "leasedAt" timestamp (3);--> statement-breakpoint
-ALTER TABLE "tls_commerce_jobs" ADD COLUMN "leaseExpiresAt" timestamp (3);--> statement-breakpoint
-ALTER TABLE "tls_commerce_jobs" ADD COLUMN "fencingToken" integer DEFAULT 0 NOT NULL;--> statement-breakpoint
-ALTER TABLE "tls_commerce_services" ADD COLUMN "fulfillmentMode" text DEFAULT 'async' NOT NULL;--> statement-breakpoint
-ALTER TABLE "tls_approvals" ADD COLUMN "txHash" text;--> statement-breakpoint
-ALTER TABLE "tls_playbooks" ADD COLUMN "content" jsonb;--> statement-breakpoint
+ALTER TABLE "tls_talos" ADD COLUMN IF NOT EXISTS "onChainId" integer;--> statement-breakpoint
+ALTER TABLE "tls_talos" ADD COLUMN IF NOT EXISTS "agentName" text;--> statement-breakpoint
+ALTER TABLE "tls_talos" ADD COLUMN IF NOT EXISTS "tokenSymbol" text;--> statement-breakpoint
+ALTER TABLE "tls_talos" ADD COLUMN IF NOT EXISTS "walletPublicKey" text;--> statement-breakpoint
+ALTER TABLE "tls_talos" ADD COLUMN IF NOT EXISTS "creatorPublicKey" text;--> statement-breakpoint
+ALTER TABLE "tls_talos" ADD COLUMN IF NOT EXISTS "investorPublicKey" text;--> statement-breakpoint
+ALTER TABLE "tls_talos" ADD COLUMN IF NOT EXISTS "treasuryPublicKey" text;--> statement-breakpoint
+ALTER TABLE "tls_talos" ADD COLUMN IF NOT EXISTS "agentWalletId" text;--> statement-breakpoint
+ALTER TABLE "tls_talos" ADD COLUMN IF NOT EXISTS "agentWalletAddress" text;--> statement-breakpoint
+ALTER TABLE "tls_commerce_jobs" ADD COLUMN IF NOT EXISTS "requesterTalosId" text NOT NULL;--> statement-breakpoint
+ALTER TABLE "tls_commerce_jobs" ADD COLUMN IF NOT EXISTS "txHash" text;--> statement-breakpoint
+ALTER TABLE "tls_commerce_jobs" ADD COLUMN IF NOT EXISTS "bidPrice" numeric(18, 6);--> statement-breakpoint
+ALTER TABLE "tls_commerce_jobs" ADD COLUMN IF NOT EXISTS "idempotencyKey" text;--> statement-breakpoint
+ALTER TABLE "tls_commerce_jobs" ADD COLUMN IF NOT EXISTS "idempotencyResponse" jsonb;--> statement-breakpoint
+ALTER TABLE "tls_commerce_jobs" ADD COLUMN IF NOT EXISTS "leasedBy" text;--> statement-breakpoint
+ALTER TABLE "tls_commerce_jobs" ADD COLUMN IF NOT EXISTS "leasedAt" timestamp (3);--> statement-breakpoint
+ALTER TABLE "tls_commerce_jobs" ADD COLUMN IF NOT EXISTS "leaseExpiresAt" timestamp (3);--> statement-breakpoint
+ALTER TABLE "tls_commerce_jobs" ADD COLUMN IF NOT EXISTS "fencingToken" integer DEFAULT 0 NOT NULL;--> statement-breakpoint
+ALTER TABLE "tls_commerce_services" ADD COLUMN IF NOT EXISTS "fulfillmentMode" text DEFAULT 'async' NOT NULL;--> statement-breakpoint
+ALTER TABLE "tls_approvals" ADD COLUMN IF NOT EXISTS "txHash" text;--> statement-breakpoint
+ALTER TABLE "tls_playbooks" ADD COLUMN IF NOT EXISTS "content" jsonb;--> statement-breakpoint
 ALTER TABLE "tls_api_audit_logs" ADD CONSTRAINT "tls_api_audit_logs_talosId_tls_talos_id_fk" FOREIGN KEY ("talosId") REFERENCES "public"."tls_talos"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tls_dividends" ADD CONSTRAINT "tls_dividends_talosId_tls_talos_id_fk" FOREIGN KEY ("talosId") REFERENCES "public"."tls_talos"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tls_lifecycle_events" ADD CONSTRAINT "tls_lifecycle_events_talosId_tls_talos_id_fk" FOREIGN KEY ("talosId") REFERENCES "public"."tls_talos"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint

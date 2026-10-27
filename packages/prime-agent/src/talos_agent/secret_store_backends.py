@@ -85,12 +85,10 @@ class SecretStoreBackend(ABC):
     @abstractmethod
     def get_version_by_request_id(
         self, scope: str, name: str, request_id: str
-    ) -> SecretVersionRecord | None:
-        ...
+    ) -> SecretVersionRecord | None: ...
 
     @abstractmethod
-    def next_version_number(self, scope: str, name: str) -> int:
-        ...
+    def next_version_number(self, scope: str, name: str) -> int: ...
 
     @abstractmethod
     def insert_version(
@@ -103,20 +101,18 @@ class SecretStoreBackend(ABC):
         key_id: str,
         status: str,
         request_id: str,
-    ) -> None:
-        ...
+    ) -> None: ...
 
     @abstractmethod
-    def get_version(self, scope: str, name: str, version: int) -> SecretVersionRecord | None:
-        ...
+    def get_version(
+        self, scope: str, name: str, version: int
+    ) -> SecretVersionRecord | None: ...
 
     @abstractmethod
-    def get_head(self, scope: str, name: str) -> SecretHeadRecord | None:
-        ...
+    def get_head(self, scope: str, name: str) -> SecretHeadRecord | None: ...
 
     @abstractmethod
-    def insert_head(self, scope: str, name: str, active_version: int) -> None:
-        ...
+    def insert_head(self, scope: str, name: str, active_version: int) -> None: ...
 
     @abstractmethod
     def update_head(
@@ -126,8 +122,7 @@ class SecretStoreBackend(ABC):
         *,
         active_version: int,
         previous_version: int | None,
-    ) -> None:
-        ...
+    ) -> None: ...
 
     @abstractmethod
     def set_version_status(
@@ -140,24 +135,22 @@ class SecretStoreBackend(ABC):
         set_activated: bool = False,
         set_revoked: bool = False,
         clear_revoked: bool = False,
-    ) -> None:
-        ...
+    ) -> None: ...
 
     @abstractmethod
-    def clear_previous_if(self, scope: str, name: str, previous_version: int) -> None:
-        ...
+    def clear_previous_if(
+        self, scope: str, name: str, previous_version: int
+    ) -> None: ...
 
     @abstractmethod
     def get_rollback_checkpoint_by_request_id(
         self, scope: str, name: str, request_id: str
-    ) -> SecretRollbackCheckpointRecord | None:
-        ...
+    ) -> SecretRollbackCheckpointRecord | None: ...
 
     @abstractmethod
     def get_rollback_checkpoint(
         self, scope: str, name: str, checkpoint_id: str
-    ) -> SecretRollbackCheckpointRecord | None:
-        ...
+    ) -> SecretRollbackCheckpointRecord | None: ...
 
     @abstractmethod
     def insert_rollback_checkpoint(
@@ -172,14 +165,12 @@ class SecretStoreBackend(ABC):
         request_id: str,
         actor: str,
         reason: str | None,
-    ) -> None:
-        ...
+    ) -> None: ...
 
     @abstractmethod
     def list_rollback_checkpoints(
         self, scope: str, name: str
-    ) -> list[SecretRollbackCheckpointRecord]:
-        ...
+    ) -> list[SecretRollbackCheckpointRecord]: ...
 
     @abstractmethod
     def update_rollback_checkpoint_status(
@@ -191,20 +182,18 @@ class SecretStoreBackend(ABC):
         *,
         set_restored: bool = False,
         set_discarded: bool = False,
-    ) -> None:
-        ...
+    ) -> None: ...
 
     @abstractmethod
-    def supersede_unless_revoked(self, scope: str, name: str, version: int) -> None:
-        ...
+    def supersede_unless_revoked(self, scope: str, name: str, version: int) -> None: ...
 
     @abstractmethod
-    def restore_version_activation(self, scope: str, name: str, version: int) -> None:
-        ...
+    def restore_version_activation(
+        self, scope: str, name: str, version: int
+    ) -> None: ...
 
     @abstractmethod
-    def list_versions(self, scope: str, name: str) -> list[SecretVersionRecord]:
-        ...
+    def list_versions(self, scope: str, name: str) -> list[SecretVersionRecord]: ...
 
     @abstractmethod
     def insert_audit(
@@ -218,12 +207,10 @@ class SecretStoreBackend(ABC):
         actor: str,
         reason: str | None,
         metadata: str,
-    ) -> None:
-        ...
+    ) -> None: ...
 
     @abstractmethod
-    def list_audit(self, scope: str, name: str, limit: int) -> list[dict[str, Any]]:
-        ...
+    def list_audit(self, scope: str, name: str, limit: int) -> list[dict[str, Any]]: ...
 
 
 class SqliteSecretStoreBackend(SecretStoreBackend):
@@ -287,7 +274,9 @@ class SqliteSecretStoreBackend(SecretStoreBackend):
             (scope, name, version, ciphertext, key_id, status, request_id),
         )
 
-    def get_version(self, scope: str, name: str, version: int) -> SecretVersionRecord | None:
+    def get_version(
+        self, scope: str, name: str, version: int
+    ) -> SecretVersionRecord | None:
         row = self._conn.execute(
             """
             SELECT name, version, status, created_at, activated_at, revoked_at,
@@ -309,7 +298,9 @@ class SqliteSecretStoreBackend(SecretStoreBackend):
         return SecretHeadRecord(
             active_version=int(row["active_version"]),
             previous_version=(
-                int(row["previous_version"]) if row["previous_version"] is not None else None
+                int(row["previous_version"])
+                if row["previous_version"] is not None
+                else None
             ),
             generation=int(row["generation"]),
         )
@@ -606,7 +597,9 @@ class SqliteSecretStoreBackend(SecretStoreBackend):
             checkpoint_id=row["checkpoint_id"],
             active_version=int(row["active_version"]),
             previous_version=(
-                int(row["previous_version"]) if row["previous_version"] is not None else None
+                int(row["previous_version"])
+                if row["previous_version"] is not None
+                else None
             ),
             generation=int(row["generation"]),
             request_id=row["request_id"],
@@ -643,10 +636,14 @@ class MemorySecretStoreBackend(SecretStoreBackend):
     def begin_immediate(self) -> None:
         acquired = self._lock.acquire(timeout=self._lock_timeout)
         if not acquired:
-            raise BackendBusyError("secret store is busy; retry the idempotent operation")
+            raise BackendBusyError(
+                "secret store is busy; retry the idempotent operation"
+            )
         if self._in_tx:
             self._lock.release()
-            raise BackendBusyError("secret store is busy; retry the idempotent operation")
+            raise BackendBusyError(
+                "secret store is busy; retry the idempotent operation"
+            )
         self._snapshot = {
             "versions": copy.deepcopy(self._versions),
             "by_request": copy.deepcopy(self._by_request),
@@ -718,7 +715,9 @@ class MemorySecretStoreBackend(SecretStoreBackend):
         }
         self._by_request[(scope, name, request_id)] = version
 
-    def get_version(self, scope: str, name: str, version: int) -> SecretVersionRecord | None:
+    def get_version(
+        self, scope: str, name: str, version: int
+    ) -> SecretVersionRecord | None:
         raw = self._versions.get((scope, name, version))
         if raw is None:
             return None
@@ -836,9 +835,7 @@ class MemorySecretStoreBackend(SecretStoreBackend):
             for (s, n, _cid), raw in self._checkpoints.items()
             if s == scope and n == name
         ]
-        rows.sort(
-            key=lambda r: (r.created_at, r.checkpoint_id), reverse=True
-        )
+        rows.sort(key=lambda r: (r.created_at, r.checkpoint_id), reverse=True)
         return rows
 
     def update_rollback_checkpoint_status(
@@ -908,7 +905,9 @@ class MemorySecretStoreBackend(SecretStoreBackend):
         )
 
     def list_audit(self, scope: str, name: str, limit: int) -> list[dict[str, Any]]:
-        rows = [row for row in self._audit if row["scope"] == scope and row["name"] == name]
+        rows = [
+            row for row in self._audit if row["scope"] == scope and row["name"] == name
+        ]
         rows = list(reversed(rows))[:limit]
         return [
             {
@@ -931,7 +930,9 @@ def normalize_backend_kind(raw: str | None) -> str:
     kind = (raw or "sqlite").strip().lower()
     if kind not in _SUPPORTED:
         supported = ", ".join(sorted(_SUPPORTED))
-        raise ValueError(f"unsupported secret-store backend {kind!r}; expected one of: {supported}")
+        raise ValueError(
+            f"unsupported secret-store backend {kind!r}; expected one of: {supported}"
+        )
     return kind
 
 

@@ -108,7 +108,8 @@ export async function generateLicenseReport({ cwd = process.cwd(), outputDir = "
   await writeFile(join(destination, "dependency-licenses.json"), `${JSON.stringify({ generatedBy: "pnpm licenses", dependencies: records }, null, 2)}\n`);
   await writeFile(join(destination, "dependency-licenses.md"), markdown(records));
   if (records.some(({ license }) => UNKNOWN_LICENSES.has(license.toUpperCase()))) {
-    throw new Error("dependency license metadata is missing or ambiguous");
+    const unknown = records.filter(({ license }) => UNKNOWN_LICENSES.has(license.toUpperCase())).map(({ name, versions }) => `${name}@${versions.join(",")}`);
+    throw new Error(`dependency license metadata is missing or ambiguous: ${unknown.join(", ")}`);
   }
   return { count: records.length, destination };
 }

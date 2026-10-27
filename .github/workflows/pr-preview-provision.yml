@@ -45,6 +45,7 @@ jobs:
         run: pnpm env:cleanup ${{ github.event.pull_request.number }}
 
       - name: Comment on PR
+        if: github.event.pull_request.head.repo.fork == false
         uses: actions/github-script@v9
         with:
           script: |
