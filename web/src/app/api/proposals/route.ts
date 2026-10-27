@@ -5,7 +5,7 @@ import { tlsApprovals, tlsTalos } from "@/db/schema";
 import { and, asc, desc, eq, lt, or } from "drizzle-orm";
 import { badRequest, internalError } from "@/lib/api-response";
 import { parseAnalyticsLimit } from "@/lib/analytics-limits";
-import { PROPOSALS_DEFAULT_LIMIT, PROPOSALS_MAX_LIMIT } from "@/lib/limits";
+import { PROPOSALS_DEFAULT_LIMIT, PROPOSALS_MAX_LIMIT } from "@/lib/parse-limit";
 import { PROPOSAL_TYPES } from "@/lib/proposals-filters";
 import { decodeProposalCursor, encodeProposalCursor } from "./cursor";
 
