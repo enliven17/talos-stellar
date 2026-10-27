@@ -178,6 +178,7 @@ async function _GET(req: NextRequest) {
 
   const talosManagement = talosRows.map((c) => ({
     id: c.id,
+    onChainId: c.onChainId,
     name: c.name,
     status: c.status,
     approvalThreshold: Number(c.approvalThreshold),
