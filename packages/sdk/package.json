@@ -7,10 +7,10 @@
   "types": "dist/esm/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/esm/index.js",
-      "require": "./dist/cjs/index.cjs",
       "types": "./dist/esm/index.d.ts",
-      "browser": "./dist/browser/sdk.bundle.js"
+      "browser": "./dist/browser/sdk.bundle.js",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.cjs"
     },
     "./webhooks": {
       "types": "./dist/esm/webhooks.d.ts",
@@ -62,7 +62,7 @@
     "@types/node": "^26.6.5",
     "esbuild": "^0.28.2",
     "openapi-typescript": "^7.4.3",
-    "typescript": "^7.0.2",
+    "typescript": "^5.9.3",
     "vitest": "^4.1.2"
   },
   "license": "MIT",

@@ -31,7 +31,7 @@ async function _GET(request: NextRequest) {
         if (
           Array.isArray(decoded) &&
           decoded.length === 2 &&
-          typeof decoded[0] === "number" &&
+          (typeof decoded[0] === "string" || typeof decoded[0] === "number") &&
           typeof decoded[1] === "string"
         ) {
           parsedCursor = decoded as LeaderboardCursor;

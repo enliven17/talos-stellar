@@ -92,6 +92,8 @@ async function _GET(request: NextRequest) {
   }
   const eventLimit = limitResult.limit;
 
+  const walletAddr = wallet;
+
   // Reject before allocating any resources when the pool is full.
   // The wallet is passed as the per-key so the pool can also enforce a
   // per-client cap (SSE_MAX_CONNECTIONS_PER_KEY) on top of the global cap.
@@ -102,7 +104,6 @@ async function _GET(request: NextRequest) {
     });
   }
 
-  const walletAddr = wallet;
 
   // Resolve TALOS IDs once per connection, not on every poll tick.
   //

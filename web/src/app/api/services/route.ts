@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsCommerceServices } from "@/db/schema";
-import { and, arrayContains, eq, gte, ilike, lt, lte, ne, or, type SQL, type SQLWrapper } from "drizzle-orm";
+import { and, arrayContains, eq, gte, ilike, isNull, lt, lte, ne, or, type SQL, type SQLWrapper } from "drizzle-orm";
 import { parseLimit } from "@/lib/parse-limit";
 import {
   buildMarketplaceOrderBy,
@@ -245,7 +245,7 @@ function buildConditions(
   maxPrice: number | undefined,
   network: string | null,
 ) {
-  const conditions = [eq(tlsTalos.status, "Active")];
+  const conditions = [eq(tlsTalos.status, "Active"), isNull(tlsTalos.deletedAt)];
 
   if (selfId) {
     conditions.push(ne(tlsCommerceServices.talosId, selfId));

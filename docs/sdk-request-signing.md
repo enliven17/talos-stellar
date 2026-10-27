@@ -78,7 +78,7 @@ are enforced across replicas.
 
 ## Verification and troubleshooting
 
-Run `npm test` and `npm run build` in `packages/sdk`. `UNSUPPORTED` means the
+Run `npm test` and `npm run build` in `packages/sdk`. The browser wallet signer (`WalletMessageSigner`) is covered by unit tests using a fake wallet function, including user rejection (`SigningError` code `USER_REJECTED`) and malformed signature cases; the bundle size check must pass before merging. `UNSUPPORTED` means the
 provider did not advertise `http-request-v1`; `SATURATED` means limits are too
 low or the signer is unhealthy; `TIMEOUT` calls for checking wallet/custody
 latency; `INVALID_RESULT` indicates a provider contract bug. Clock or replay
@@ -88,7 +88,10 @@ rejected because they cannot be replayed and canonicalized safely.
 ## Limitations
 
 This release signs SDK HTTP requests and exposes raw
-`stellar-transaction-v1` capability for custom workflows. It does not change
+`stellar-transaction-v1` capability for custom workflows. Browser apps can sign
+requests through `WalletMessageSigner`, which wraps an injected wallet
+`signMessage`-style function (for example Freighter or Albedo) without bundling
+any wallet SDK; user rejection surfaces as a `USER_REJECTED` `SigningError`. It does not change
 the existing x402 payment-header format or silently replace the server-side
 `signPayment` endpoint. Enforcing signatures and durable replay storage are
 server rollout steps, deliberately outside this backward-compatible SDK gate.

@@ -36,6 +36,7 @@
 //! | `Claimed(epoch_id, patron)` | `bool`           | persistent  |
 //! | `RoundingDust(talos_id, epoch_id)` | `i128`     | persistent  |
 //! | `NextEpochId(talos_id)`     | `u64`            | persistent  |
+//! | `PendingAdmin`              | `Address`        | persistent  |
 //!
 //! ## Events (topics → data)
 //!
@@ -1237,8 +1238,6 @@ mod tests {
     }
 
     /// Helper: perform a claim with provided patron addresses and shares.
-    /// Returns the allocation on success; panics if the contract returns an error.
-    /// For negative-path tests, call `try_claim_dividend` directly.
     #[allow(clippy::too_many_arguments)]
     fn do_claim_with_shares(
         env: &Env,
@@ -1276,17 +1275,20 @@ mod tests {
                 },
             }])
             .claim_dividend(
-                claimant, &talos_id, &epoch_id, creator, investor, treasury, &creator_share,
-                &investor_share, &treasury_share,
+                claimant,
+                &talos_id,
+                &epoch_id,
+                creator,
+                investor,
+                treasury,
+                &creator_share,
+                &investor_share,
+                &treasury_share,
             )
     }
 
-    /// Like `do_claim` but uses `try_claim_dividend` to surface errors.
-    /// Returns the raw soroban-sdk 21 result: `Ok(Ok(allocation))` on success,
-    /// `Ok(Err(_))` when the contract returns an error, `Err(_)` on host error.
-    /// Assertions should use the `Err(Ok(ContractError::...))` pattern.
     #[allow(clippy::too_many_arguments)]
-    fn try_do_claim(
+    fn try_do_claim_with_shares(
         env: &Env,
         contract_id: &Address,
         client: &TalosDividendsClient<'static>,

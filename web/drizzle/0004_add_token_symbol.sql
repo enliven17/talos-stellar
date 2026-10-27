@@ -1,1 +1,1 @@
-ALTER TABLE "tls_talos" ADD COLUMN "tokenSymbol" text;
+ALTER TABLE "tls_talos" ADD COLUMN IF NOT EXISTS "tokenSymbol" text;

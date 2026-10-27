@@ -85,6 +85,14 @@ export type { RateLimitInfo, HeaderSource } from "./errors.js";
 
 export * from "./types.js";
 
+// ── Name validation ────────────────────────────────────────────────
+
+export {
+  validateName,
+  canonicalizeName,
+  validateAndCanonicalizeName,
+} from "./name-validation.js";
+
 // ── Stellar helpers ───────────────────────────────────────────────
 
 export * from "./stellar.js";
@@ -127,6 +135,26 @@ export type {
   SeenStore,
   SchemaVersionNegotiationResult,
 } from "./events.js";
+
+// ── Job Tracker ───────────────────────────────────────────────────
+
+export {
+  JobTracker,
+  trackJob,
+  JobTerminalError,
+  JobFailedError,
+  JobCancelledError,
+  JobTrackAbortedError,
+  JobTrackTimeoutError,
+} from "./job-tracker.js";
+export type {
+  JobProgressDetails,
+  TrackJobEventType,
+  TrackJobEvent,
+  JobTerminalStatus,
+  JobTerminalOutcome,
+  TrackJobOptions,
+} from "./job-tracker.js";
 
 // ── Contract event decoding ───────────────────────────────────────────────────
 

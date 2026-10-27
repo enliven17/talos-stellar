@@ -68,10 +68,10 @@ describe("ProposalsClient accessibility", () => {
     render(<ProposalsClient />);
 
     const approvedBtn = screen.getByRole("button", { name: /approved/i });
-    expect(approvedBtn).toHaveAttribute("aria-pressed", "true");
+    expect(approvedBtn.getAttribute("aria-pressed")).toBe("true");
 
     const allBtn = screen.getByRole("button", { name: /all/i });
-    expect(allBtn).toHaveAttribute("aria-pressed", "false");
+    expect(allBtn.getAttribute("aria-pressed")).toBe("false");
   });
 
   it("toggles aria-pressed when a different filter is activated", async () => {
@@ -82,10 +82,10 @@ describe("ProposalsClient accessibility", () => {
     render(<ProposalsClient />);
 
     const pendingBtn = screen.getByRole("button", { name: /pending/i });
-    expect(pendingBtn).toHaveAttribute("aria-pressed", "true");
+    expect(pendingBtn.getAttribute("aria-pressed")).toBe("true");
 
     const allBtn = screen.getByRole("button", { name: /^all$/i });
-    expect(allBtn).toHaveAttribute("aria-pressed", "false");
+    expect(allBtn.getAttribute("aria-pressed")).toBe("false");
   });
 
   it("gives each vote button a unique accessible name including the proposal title", async () => {
@@ -102,7 +102,7 @@ describe("ProposalsClient accessibility", () => {
     render(<ProposalsClient />);
 
     await waitFor(() => {
-      expect(screen.getByText("Upgrade Protocol")).toBeInTheDocument();
+      expect(screen.getByText("Upgrade Protocol")).toBeTruthy();
     });
 
     // Each approve/reject button must have a unique accessible name.
@@ -111,10 +111,10 @@ describe("ProposalsClient accessibility", () => {
     const approveB = screen.getByRole("button", { name: "Approve proposal: Adjust Treasury" });
     const rejectB = screen.getByRole("button", { name: "Reject proposal: Adjust Treasury" });
 
-    expect(approveA).toBeInTheDocument();
-    expect(rejectA).toBeInTheDocument();
-    expect(approveB).toBeInTheDocument();
-    expect(rejectB).toBeInTheDocument();
+    expect(approveA).toBeTruthy();
+    expect(rejectA).toBeTruthy();
+    expect(approveB).toBeTruthy();
+    expect(rejectB).toBeTruthy();
   });
 
   it("disables vote buttons while a vote is in flight", async () => {
@@ -135,22 +135,22 @@ describe("ProposalsClient accessibility", () => {
     render(<ProposalsClient />);
 
     await waitFor(() => {
-      expect(screen.getByText("Upgrade Protocol")).toBeInTheDocument();
+      expect(screen.getByText("Upgrade Protocol")).toBeTruthy();
     });
 
     const approveBtn = screen.getByRole("button", { name: "Approve proposal: Upgrade Protocol" });
     const rejectBtn = screen.getByRole("button", { name: "Reject proposal: Upgrade Protocol" });
 
     // Both buttons start enabled.
-    expect(approveBtn).not.toBeDisabled();
-    expect(rejectBtn).not.toBeDisabled();
+    expect((approveBtn as HTMLButtonElement).disabled).toBe(false);
+    expect((rejectBtn as HTMLButtonElement).disabled).toBe(false);
 
     // Fire a click — the pending vote PATCH keeps fetch mocked-unresolved.
     approveBtn.click();
 
     await waitFor(() => {
-      expect(approveBtn).toBeDisabled();
-      expect(rejectBtn).toBeDisabled();
+      expect((approveBtn as HTMLButtonElement).disabled).toBe(true);
+      expect((rejectBtn as HTMLButtonElement).disabled).toBe(true);
     });
 
     // Resolve the vote to clean up.
@@ -167,18 +167,18 @@ describe("ProposalsClient accessibility", () => {
     render(<ProposalsClient />);
 
     await waitFor(() => {
-      expect(screen.getByText("Upgrade Protocol")).toBeInTheDocument();
+      expect(screen.getByText("Upgrade Protocol")).toBeTruthy();
     });
 
     // Live region exists.
     const liveRegion = screen.getByText("", { selector: "[aria-live='polite']" });
-    expect(liveRegion).toBeInTheDocument();
+    expect(liveRegion).toBeTruthy();
 
     const approveBtn = screen.getByRole("button", { name: "Approve proposal: Upgrade Protocol" });
     approveBtn.click();
 
     await waitFor(() => {
-      expect(liveRegion).toHaveTextContent(/Upgrade Protocol.*approved/i);
+      expect(liveRegion.textContent).toMatch(/Upgrade Protocol.*approved/i);
     });
   });
 });

@@ -7,6 +7,7 @@ import { z } from "zod/v4";
 import {
   becomePatronSchema,
   buyTokenSchema,
+  buybackSchema,
   claimJobSchema,
   createApprovalSchema,
   createPlaybookSchema,
@@ -74,11 +75,13 @@ describe("generated request JSON Schemas", () => {
     regenerateKey: ["stellarPublicKey", "signature", "message"],
     signPayment: ["payee", "amount"],
     buyToken: ["buyerPublicKey", "amount"],
+    buyback: ["usdcAmount", "mitosAmount"],
     createPlaybook: ["title", "category", "price"],
   } as const;
   const schemas = {
     becomePatron: becomePatronSchema,
     buyToken: buyTokenSchema,
+    buyback: buybackSchema,
     claimJob: claimJobSchema,
     createApproval: createApprovalSchema,
     createPlaybook: createPlaybookSchema,

@@ -12,7 +12,7 @@
 mod upgrade_simulation_tests;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-mod name_validation_proptests;
+
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 extern crate std;

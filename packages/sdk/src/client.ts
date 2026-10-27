@@ -33,7 +33,17 @@ import type {
   MarketplaceSearchResult,
   MarketplaceSearchParams,
   CapabilityFilter,
+  JobPaymentStatus,
+  WebhookSubscription,
+  WebhookSubscriptionPage,
+  CreateWebhookSubscriptionParams,
+  ListWebhookSubscriptionsParams,
+  DeleteWebhookSubscriptionResult,
+  RotateWebhookSecretParams,
+  RotateWebhookSecretResult,
+  FinalizeWebhookSecretRotationResult,
 } from "./types.js";
+
 import {
   PROPOSAL_STATUSES,
   isValidProposalStatus,
@@ -49,7 +59,7 @@ import {
   TalosAPIError,
   TalosTransportError,
   TalosPaymentError,
-  TalosTransportError,
+  TalosTimeoutError,
   classifyTransportError,
   errorFromResponse,
   parseRateLimit,
@@ -57,6 +67,7 @@ import {
   parseRetryAfter as parseRetryAfterHeader,
   redactEventPath,
   diagnoseBuyerProof,
+  SENSITIVE_FIELD_PATTERN,
   type RateLimitInfo,
 } from "./errors.js";
 import {
@@ -79,10 +90,40 @@ import {
   resolveNetworkConfig,
   type ResolvedNetworkConfig,
 } from "./stellar.js";
+import {
+  JobTracker,
+  trackJob,
+  type TrackJobOptions,
+  type TrackJobEvent,
+  type TrackJobEventType,
+  type JobTerminalStatus,
+  type JobTerminalOutcome,
+  JobTerminalError,
+  JobFailedError,
+  JobCancelledError,
+  JobTrackAbortedError,
+  JobTrackTimeoutError,
+} from "./job-tracker.js";
 
 // Legacy import path: `import { TalosAPIError } from "./client.js"`.
 export { TalosAPIError };
 export { generateIdempotencyKey, validateIdempotencyKey, IdempotencyConflictError };
+export {
+  JobTracker,
+  trackJob,
+  JobTerminalError,
+  JobFailedError,
+  JobCancelledError,
+  JobTrackAbortedError,
+  JobTrackTimeoutError,
+};
+export type {
+  TrackJobOptions,
+  TrackJobEvent,
+  TrackJobEventType,
+  JobTerminalStatus,
+  JobTerminalOutcome,
+};
 export type {
   Proposal,
   ProposalStatus,
@@ -337,7 +378,12 @@ export interface TalosClientOptions {
   /** Opt-in request signer. Omitting it preserves the legacy wire format. */
   signer?: RequestSigner;
   signing?: SigningControllerOptions;
+  /** Opt-in in-flight GET deduplication. */
+  dedupeInFlightGets?: boolean | DedupeInFlightGetsOptions;
+  /** Opt-in ETag conditional-GET caching. */
+  etagCache?: boolean | ETagCacheOptions;
 }
+
 
 /**
  * Per-call options for write methods (POST / PATCH).
@@ -698,6 +744,8 @@ export class TalosClient {
   private readonly fetchOverride?: typeof fetch;
   private readonly chaosInjector?: ChaosInjector;
   private signer?: SigningController;
+  private readonly etagStore: ETagStore | null = null;
+  private readonly onCacheHit?: (event: { url: string; etag: string }) => void;
 
   // ── In-flight GET deduplication ────────────────────────────
   /**
@@ -759,7 +807,36 @@ export class TalosClient {
       this.dedupeOptions = null;
     }
     this.inFlightGets = new Map();
+
+    // Resolve ETag cache options.
+    if (options.etagCache) {
+      const raw = typeof options.etagCache === "object" ? options.etagCache : {};
+      const maxEntries = raw.maxEntries ?? 512;
+      if (!Number.isInteger(maxEntries) || maxEntries < 1) {
+        throw new RangeError("etagCache.maxEntries must be a positive integer");
+      }
+      if (raw.store !== undefined && typeof raw.store !== "object") {
+        throw new TypeError("etagCache.store must be an object");
+      }
+      this.etagStore = raw.store ?? new BoundedETagStore(maxEntries);
+      this.onCacheHit = raw.onCacheHit;
+    } else {
+      this.etagStore = null;
+    }
   }
+
+  /**
+   * Return the configured ETagStore instance, or null if caching is disabled.
+   */
+  getETagStore(): ETagStore | null {
+    return this.etagStore;
+  }
+
+  private etagCacheKey(method: string, url: string): string | null {
+    if (method.toUpperCase() !== "GET" || !this.etagStore) return null;
+    return `${url}\n${this.headers["Authorization"] ?? ""}`;
+  }
+
 
   /**
    * Effective status-code retry policy after validation/normalization.
@@ -798,16 +875,36 @@ export class TalosClient {
     return this.lastRateLimit;
   }
 
+  /** Base URL configured on this client. */
+  getBaseUrl(): string {
+    return this.baseUrl;
+  }
+
+  /** The Authorization header value (e.g. "Bearer ..."), or undefined if unauthenticated. */
+  getAuthHeader(): string | undefined {
+    return this.headers["Authorization"];
+  }
+
+  /** Configured chaos injector on this client, if any. */
+  getChaosInjector(): ChaosInjector | undefined {
+    return this.chaosInjector;
+  }
+
+  /** Fetch override configured on this client, if any. */
+  getFetch(): typeof fetch | undefined {
+    return this.fetchOverride;
+  }
+
   /**
    * Privacy-safe JSON representation. Omits credentials (`Authorization`
    * header, API key) and other internal state so that `JSON.stringify(client)`
    * or structured log sinks never accidentally surface secrets.
    */
   toJSON(): Record<string, unknown> {
-    // Mask Authorization header so the API key is not exposed.
+    // Mask sensitive headers so credential values are not exposed.
     const safeHeaders: Record<string, string> = {};
     for (const [k, v] of Object.entries(this.headers)) {
-      if (k.toLowerCase() === "authorization") {
+      if (SENSITIVE_FIELD_PATTERN.test(k)) {
         safeHeaders[k] = "[REDACTED]";
       } else {
         safeHeaders[k] = v;
@@ -835,6 +932,15 @@ export class TalosClient {
         // `onRetry` is intentionally omitted — it's a function reference.
       },
     };
+  }
+
+  /**
+   * Custom inspect implementation for Node.js `util.inspect`. Returns the
+   * same redacted view as `toJSON()` so that `console.log(client)` never
+   * surfaces credential values.
+   */
+  [Symbol.for("nodejs.util.inspect.custom")](): Record<string, unknown> {
+    return this.toJSON();
   }
 
   /** Resolve the fetch implementation per request. Prefer override; fall back to global. */
@@ -1252,7 +1358,13 @@ export class TalosClient {
         // attempts that are about to fail and be retried.
         this.observeResponse(path, method, res.status, attempt, Date.now() - attemptStartedAt, res.headers);
 
+        if (res.status === 304 && cachedEntry) {
+          this.onCacheHit?.({ url, etag: cachedEntry.etag });
+          return cachedEntry.body as T;
+        }
+
         if (res.ok) {
+
           // Malformed JSON on a 2xx intentionally propagates the raw parse error.
           const body = (await res.json()) as T;
 
@@ -1879,7 +1991,17 @@ export class TalosClient {
         }
 
         // Job is still pending. Wait before the next poll.
-        await this.wait(currentIntervalMs, loopSignal);
+        try {
+          await this.wait(currentIntervalMs, loopSignal);
+        } catch (waitErr) {
+          if (loopSignal.aborted) {
+            const reason = abortReason === "timeout"
+              ? `waitForJobResult timed out after ${timeoutMs}ms`
+              : "waitForJobResult aborted";
+            throw new TalosTimeoutError(0, reason, path, { message: reason });
+          }
+          throw waitErr;
+        }
 
         // Exponential back-off capped at maxIntervalMs, with jitter.
         currentIntervalMs = Math.min(
@@ -1892,6 +2014,21 @@ export class TalosClient {
       if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
       callerSignal?.removeEventListener("abort", onCallerAbort);
     }
+  }
+
+  /**
+   * Follow a purchased job to completion with progress streaming and polling fallback.
+   *
+   * Yields ordered, deduplicated progress events and ends with the final result.
+   * Automatically falls back to backoff polling if the SSE stream disconnects or
+   * encounters errors.
+   *
+   * @param jobId - The job ID to follow.
+   * @param options - Tracking configuration (cancellation signal, timeout, intervals, etc.).
+   * @returns An async iterator and Promise resolving to the final {@link CommerceJob}.
+   */
+  trackJob(jobId: string, options?: TrackJobOptions): JobTracker {
+    return new JobTracker(this, jobId, options);
   }
 
   // ── Leaderboard ────────────────────────────────────────────
@@ -2035,5 +2172,100 @@ export class TalosClient {
       timeoutMs,
     });
   }
+
+  // ── Webhook subscriptions ───────────────────────────────────
+
+  /**
+   * Create a webhook subscription. The `secret` in `params` is sent once to
+   * configure signing and is never echoed back in the response.
+   */
+  async createWebhookSubscription(
+    params: CreateWebhookSubscriptionParams,
+    options?: WriteOptions,
+  ): Promise<WebhookSubscription> {
+    return this.request("/api/webhooks/subscriptions", {
+      method: "POST",
+      body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  async listWebhookSubscriptions(
+    params?: ListWebhookSubscriptionsParams,
+  ): Promise<WebhookSubscriptionPage> {
+    const { signal, timeoutMs, ...query } = params ?? {};
+    return this.request("/api/webhooks/subscriptions", {
+      params: query,
+      signal,
+      timeoutMs,
+    });
+  }
+
+  /**
+   * Async iterator for paginated webhook subscriptions.
+   *
+   * @example
+   * ```ts
+   * for await (const sub of client.paginateWebhookSubscriptions({ active: true })) {
+   *   console.log(sub.id, sub.url);
+   * }
+   * ```
+   */
+  paginateWebhookSubscriptions(
+    options?: AsyncPaginationIteratorOptions & ListWebhookSubscriptionsParams,
+  ): AsyncPaginationIterator<WebhookSubscription> {
+    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
+    return createPaginationIterator<WebhookSubscription>(
+      (opts) => this.listWebhookSubscriptions({ ...cursorOptions, ...opts }),
+      { maxPages, signal, timeoutMs },
+    );
+  }
+
+  async deleteWebhookSubscription(
+    id: string,
+    options?: WriteOptions,
+  ): Promise<DeleteWebhookSubscriptionResult> {
+    return this.request(`/api/webhooks/subscriptions/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * Rotate (or finalize the rotation of) a webhook subscription's signing
+   * secret. Pass `{ generate: true }` to have the server generate a secret
+   * (returned once in `result.secret`), `{ secret }` to supply your own, or
+   * `{ finalize: true }` to clear the previous secret early. The resolved
+   * secret is never logged by the SDK; callers that log the result should
+   * route it through {@link redactSecrets} first.
+   */
+  async rotateWebhookSecret(
+    id: string,
+    params: RotateWebhookSecretParams & { finalize: true },
+    options?: WriteOptions,
+  ): Promise<FinalizeWebhookSecretRotationResult>;
+  async rotateWebhookSecret(
+    id: string,
+    params?: RotateWebhookSecretParams,
+    options?: WriteOptions,
+  ): Promise<RotateWebhookSecretResult>;
+  async rotateWebhookSecret(
+    id: string,
+    params: RotateWebhookSecretParams = {},
+    options?: WriteOptions,
+  ): Promise<RotateWebhookSecretResult | FinalizeWebhookSecretRotationResult> {
+    return this.request(`/api/webhooks/subscriptions/${encodeURIComponent(id)}/rotate`, {
+      method: "POST",
+      body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
 }
+
 

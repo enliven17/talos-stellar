@@ -51,7 +51,7 @@ export const MAX_DATA_BYTES = 4096;
  * Names of fields whose values potentially contain credentials or other
  * sensitive material. We redact them in the surfaced error body and `data`.
  */
-const SENSITIVE_FIELD_PATTERN = /^(token|authorization|secret|api[_-]?key|password|cookie|signature|message|nonce|hash)$/i;
+export const SENSITIVE_FIELD_PATTERN = /^(token|authorization|secret|api[_-]?key|password|cookie|signature|message|nonce|hash)$/i;
 
 /**
  * Options accepted by every TalosAPIError subclass via the 4th constructor

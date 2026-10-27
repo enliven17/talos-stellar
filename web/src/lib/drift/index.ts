@@ -12,17 +12,17 @@ export type {
   DriftValidationResult,
   JsonSchemaObject,
   SchemaRegistry,
-} from "./types.js";
+} from "./types";
 
-export { routeKey } from "./types.js";
+export { routeKey } from "./types";
 
 export {
   validateAgainstSchema,
   stripUnknownFields,
   makeInvalidJsonViolation,
-} from "./validator.js";
+} from "./validator";
 
-export { shouldSample } from "./sampler.js";
+export { shouldSample } from "./sampler";
 
 export {
   withDriftDetection,
@@ -31,9 +31,9 @@ export {
   registeredRoutes,
   setDriftConfig,
   resetDriftConfig,
-} from "./middleware.js";
+} from "./middleware";
 
 export {
   getDriftCounters,
   resetDriftCounters,
-} from "./metrics.js";
+} from "./metrics";

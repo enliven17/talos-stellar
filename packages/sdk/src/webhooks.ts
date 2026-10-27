@@ -93,8 +93,10 @@ export interface VerifyWebhookOptions {
    * Passing a value shorter than `toleranceSeconds` throws
    * {@link TalosWebhookError} with code `REPLAY_MISCONFIGURED`.
    */
+  replayWindowSeconds?: number;
   /** Optional store to prevent replay attacks by recording processed event IDs. */
   replayStore?: ReplayStore;
+
   /** The event ID from the payload, required if replayStore is used. */
   eventId?: string;
   /** Optional logger for observability (privacy-safe: does not log payloads or secrets). */
@@ -340,8 +342,8 @@ export class TalosWebhook {
       eventId,
       logger,
       chaosInjector,
-      replayWindowSeconds,
     } = options;
+
 
     // Replay-window guard: replayWindowSeconds must cover the full tolerance
     // window, otherwise a dedup entry can expire while the timestamp is still

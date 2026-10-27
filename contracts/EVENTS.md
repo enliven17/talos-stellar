@@ -77,6 +77,9 @@ is idempotent per cursor (see §4).
 | (`prop_stat`, proposal_id: u32) | status: ProposalStatus |
 | (`qrm_rchd`, proposal_id: u32) | (proposal_id: u32, votes_cast: i128, quorum_threshold: i128, approval_bps: i128) |
 | (`cfg_upd`,) | (old_quorum_threshold: i128, new_quorum_threshold: i128, old_consensus_threshold: i128, new_consensus_threshold: i128, old_voting_period_ledgers: u32, new_voting_period_ledgers: u32, old_pulse_token_address: Address, new_pulse_token_address: Address) |
+| (`dlg_chg`, delegator: Address) | (delegatee: Option<Address>) |
+
+`dlg_chg` is emitted by `delegate` (with `Some(delegatee)`) and by `undelegate` (with `None`), so indexers can track the current delegation for each delegator. `delegate` rejects self-delegation (`delegator == delegatee`). Its data is `delegatee: Option<Address>` appended as the sole data field.
 
 `cfg_upd` is emitted once after a successful `update_config` call. Its data includes both the previous and new values for every governance parameter, including the Pulse token address.
 
@@ -121,6 +124,9 @@ is idempotent per cursor (see §4).
 | (`div_clm`, epoch_id: u64, patron: Address) | (talos_id: u32, amount: i128, role: PatronRole) |
 | (`div_dst`, epoch_id: u64) | (talos_id: u32, dust: i128) |
 | (`ep_rcv`, epoch_id: u64) | (talos_id: u32, recovered: i128, admin: Address) |
+| (`adm_prp`,) | (current: Address, proposed: Address) |
+| (`adm_acc`,) | (new_admin: Address,) |
+| (`adm_cnl`,) | (cancelled: Address,) |
 
 `VoteChoice` is `{ Approve | Reject }`; `ProposalStatus` is
 `{ Active | Approved | Rejected | Executed }`; `PatronRole` is

@@ -149,6 +149,13 @@
       ]
     },
     {
+      "name": "buyback",
+      "file": "buyback.json",
+      "routes": [
+        "POST /api/talos/:id/revenue/buyback"
+      ]
+    },
+    {
       "name": "createPlaybook",
       "file": "createPlaybook.json",
       "routes": [
