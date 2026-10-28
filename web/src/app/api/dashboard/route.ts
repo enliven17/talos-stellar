@@ -5,32 +5,39 @@ import { eq, or, inArray } from "drizzle-orm";
 import { withTimeout, TimeoutError } from "@/lib/timeout";
 import { withRequestId } from "@/lib/with-request-id";
 
-async function _GET(req: NextRequest) {
-  const wallet = req.nextUrl.searchParams.get("wallet");
-  if (!wallet) {
-    return NextResponse.json({ error: "wallet parameter required" }, { status: 400 });
-  }
+import { badRequest, errorResponse, internalError } from "@/lib/api-response";
+import { parseStellarPublicKeyParam } from "@/lib/stellar-keys";
 
-  // Stellar public keys are case-sensitive; compare exactly.
-  const addr = wallet;
+/** Timeout in ms for dashboard database queries (under platform function limit). */
+export const DASHBOARD_QUERY_TIMEOUT_MS = 15_000;
+
+async function _GET(req: NextRequest) {
+  const walletResult = parseStellarPublicKeyParam(req.nextUrl.searchParams.get("wallet"));
+  if (!walletResult.ok) {
+    return walletResult.response;
+  }
+  const addr = walletResult.publicKey;
+
 
   // Add timeout for patron query
   let patronTalosIds = [];
   try {
     patronTalosIds = await withTimeout(
       db.select({ talosId: tlsPatrons.talosId }).from(tlsPatrons).where(eq(tlsPatrons.stellarPublicKey, addr)).limit(100),
-      25000,
+      DASHBOARD_QUERY_TIMEOUT_MS,
       "Dashboard patron query timeout",
     );
   } catch (error) {
     if (error instanceof TimeoutError) {
-      return NextResponse.json(
-        { error: "Query timeout. Please try again with a simpler query." },
-        { status: 408 },
+      return errorResponse(
+        req,
+        504,
+        "GATEWAY_TIMEOUT",
+        "Query timeout. Please try again with a simpler query.",
       );
     }
     console.error("Dashboard query error:", error);
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+    return internalError(req);
   }
 
   const patronIds = patronTalosIds.map((p) => p.talosId);
@@ -60,18 +67,20 @@ async function _GET(req: NextRequest) {
           patrons: { limit: 50 },
         },
       }),
-      30000,
+      DASHBOARD_QUERY_TIMEOUT_MS,
       "Dashboard main query timeout",
     );
   } catch (error) {
     if (error instanceof TimeoutError) {
-      return NextResponse.json(
-        { error: "Query timeout. Please try again with a simpler query." },
-        { status: 408 },
+      return errorResponse(
+        req,
+        504,
+        "GATEWAY_TIMEOUT",
+        "Query timeout. Please try again with a simpler query.",
       );
     }
     console.error("Dashboard query error:", error);
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+    return internalError(req);
   }
 
   // Aggregate data

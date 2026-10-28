@@ -295,6 +295,18 @@ def default_manifests(limits: AdapterResourceLimits) -> dict[str, AdapterCapabil
             network=(NetworkRule("api.telegram.org", "/", frozenset({"POST"})),),
             limits=limits,
         ),
+        "mastodon": AdapterCapabilityManifest(
+            adapter_id="mastodon",
+            operations=frozenset({"post", "reply"}),
+            secrets=frozenset({"mastodon_access_token"}),
+            # The instance URL is operator-configured; network rules are
+            # validated at runtime in MastodonAdapter._build_url so the
+            # manifest purposefully leaves the host unset here.  A deployment
+            # that enables the sandbox should override this manifest via
+            # TALOS_ADAPTER_CAPABILITY_MANIFESTS with the concrete host.
+            network=(),
+            limits=limits,
+        ),
         "x": AdapterCapabilityManifest(
             adapter_id="x",
             operations=_ADAPTER_OPERATIONS,
@@ -790,10 +802,6 @@ class AdapterInvocationStore:
                 WHERE operation_id = ? AND state = 'failed'
                 """,
                 (owner_id, lease.isoformat(), operation_id),
-            )
-            self._conn.execute(
-                "UPDATE adapter_invocations SET attempt_count = attempt_count + 1 WHERE operation_id = ?",
-                (operation_id,),
             )
             self._conn.commit()
         except sqlite3.OperationalError as exc:

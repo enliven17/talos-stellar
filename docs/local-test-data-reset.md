@@ -29,9 +29,15 @@ pnpm --dir web run db:reset-test-data --dry-run
 pnpm --dir web run db:reset-test-data --yes --seed
 ```
 
-Windows PowerShell (the compose wrapper is POSIX-only; run the package script):
+Windows (via the compose wrapper or directly):
 
 ```powershell
+# Via the compose wrapper (recommended)
+.\scripts\local-stack.bat reset-data --dry-run
+.\scripts\local-stack.bat reset-data --yes
+.\scripts\local-stack.bat reset-data --yes --seed
+
+# Or directly with the package script
 $env:DATABASE_URL = "postgresql://postgres:postgres@127.0.0.1:5432/talos"
 pnpm --dir web run db:reset-test-data --dry-run
 pnpm --dir web run db:reset-test-data --yes --seed

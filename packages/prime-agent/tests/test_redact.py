@@ -25,7 +25,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from talos_agent.redact import (
-    REDACT_FIELD_NAMES,
     is_sensitive_key,
     redact_event_dict,
     redact_json_value,
@@ -394,7 +393,6 @@ class TestStructlogPipelineIntegration:
         # Access the bound configuration
         config = structlog.get_config()
         processors = config["processors"]
-        names = [getattr(p, "__name__", repr(p)) for p in processors]
         # Find positions
         try:
             redact_idx = next(

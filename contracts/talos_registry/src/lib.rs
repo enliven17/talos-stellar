@@ -11,6 +11,12 @@
 #![no_std]
 
 pub mod allowlist;
+pub(crate) mod events;
+pub(crate) mod migrations;
+pub(crate) mod pause;
+pub(crate) mod timelock;
+pub(crate) mod ttl;
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub mod registry_schema_fixtures;
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -28,6 +34,12 @@ use soroban_sdk::{
 };
 use storage_migration;
 use ttl_manager;
+
+use events::{
+    emit_admin_accepted, emit_admin_cancelled, emit_admin_proposed, emit_allowlist_added,
+    emit_allowlist_removed, emit_deprecated_call, emit_patron_updated, emit_protocol_fee_changed,
+    emit_talos_created, emit_talos_paused, emit_talos_resumed,
+};
 
 // ── Event Schema Version ────────────────────────────────────────────
 
@@ -115,14 +127,8 @@ pub enum AdminAction {
     ProposeAdmin(Address),
 }
 
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ProposalStatus {
-    Scheduled,
-    Executed,
-    Cancelled,
-}
-
+/// Registry-specific timelock proposal. Uses the canonical [`ProposalStatus`]
+/// from `admin_controls` and the registry-local [`AdminAction`].
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TimelockProposal {
@@ -132,13 +138,6 @@ pub struct TimelockProposal {
     pub status: ProposalStatus,
     pub scheduled_at: u64,
     pub scheduled_by: Address,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TimelockConfig {
-    pub min_delay: u64,
-    pub grace_period: u64,
 }
 
 /// A narrowly-scoped write path that can be independently paused.
@@ -396,10 +395,7 @@ fn validate_token_symbol(token_symbol: &String) {
 }
 
 /// Enforce byte limits on caller-supplied Talos metadata before it is
-/// persisted. `name` and `Pulse.token_symbol` are required identifiers and
-/// must be non-empty; `category` and `description` are descriptive and may
-/// be empty, but are still byte-bounded. Panics are explicit and
-/// privacy-safe — no caller or value data is included.
+/// persisted.
 fn validate_talos_metadata(name: &String, category: &String, description: &String, pulse: &Pulse) {
     if name.len() == 0 {
         panic!("Name cannot be empty");
@@ -433,6 +429,16 @@ fn validate_string_input(env: &Env, input: &String, field_name: &str) {
 
 /// Validates that a Soroban `BytesN` fits within registry constraints.
 /// Panics with a privacy-safe error if the bytes are too long.
+fn validate_creator_metadata_fields(
+    env: &Env,
+    name: &String,
+    category: &String,
+    description: &String,
+) {
+    validate_string_input(env, name, "name");
+    validate_string_input(env, category, "category");
+    validate_string_input(env, description, "description");
+}
 fn validate_bytes_input(env: &Env, input: &BytesN<32>, field_name: &str) {
     // BytesN<32> is fixed size, but we validate presence/non-empty if needed.
     // For this implementation, we assume fixed-size inputs are structurally valid.
@@ -477,18 +483,14 @@ fn require_not_paused(e: &Env, domain: PauseDomain) {
 
 const PROTOCOL_FEE_BPS: u32 = 300; // 3%
 const MAX_PROTOCOL_FEE_BPS: u32 = 10_000; // 100%
-const DEFAULT_GRACE_PERIOD: u64 = 604_800; // 7 days in seconds
-const MAX_MIN_DELAY: u64 = 2_592_000; // 30 days in seconds
-const MAX_GUARDIAN_PAUSE_SECS: u64 = 604_800; // 7 days — bounds guardian blast radius
-const MAX_ADMIN_PAUSE_SECS: u64 = 2_592_000; // 30 days; 0 (indefinite) is also allowed for admin
-const MAX_GUARDIANS: u32 = 10; // bounds unbounded storage growth
+
+// Timelock and pause constants now come from admin_controls for deduplication.
+pub(crate) use admin_controls::{
+    DEFAULT_GRACE_PERIOD, MAX_ADMIN_PAUSE_SECS, MAX_GUARDIAN_PAUSE_SECS, MAX_GUARDIANS,
+    MAX_MIN_DELAY,
+};
 
 // ── Metadata byte limits ────────────────────────────────────────────
-//
-// Talos metadata is caller-supplied and persisted verbatim, so it is
-// bounded in bytes (not characters) to cap per-entry storage rent and to
-// keep off-chain indexers from having to accept unbounded payloads. The
-// limits are enforced on every write path that carries the field.
 
 /// Maximum byte length of `Talos.name`.
 const MAX_NAME_BYTES: u32 = 64;
@@ -507,7 +509,7 @@ pub const MAX_METADATA_BYTES: u32 = 200;
 
 /// Pre-migration-system baseline. Every TalosRegistry instance, including
 /// ones deployed before this framework existed, is treated as starting here.
-const SCHEMA_GENESIS: u32 = 1;
+pub(crate) const SCHEMA_GENESIS: u32 = 1;
 /// v1 -> v2: persist an explicit `TimelockConfig` default so future reads
 /// no longer depend on `get_timelock_config`'s implicit `unwrap_or` fallback.
 const SCHEMA_TIMELOCK_DEFAULTS: u32 = 2;
@@ -531,11 +533,6 @@ const MAX_ROLLBACK_DEPTH: u32 = 1;
 pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 5, 0);
 
 /// Stable 32-byte interface identifier for TalosRegistry v1.
-///
-/// Derived deterministically from the contract namespace
-/// (`"TalosRegistry"`) and `CONTRACT_VERSION` so that any client or
-/// dependent contract that re-runs the algorithm reproduces the same
-/// bytes (see the golden-vector tests in `mod tests`).
 pub const INTERFACE_ID: [u8; 32] = [
     0x54, 0x61, 0x6C, 0x6F, 0x73, 0x52, 0x65, 0x67, // "TalosReg"
     0x69, 0x73, 0x74, 0x72, 0x79, 0x00, 0x00, 0x00, // "istry" + zero pads
@@ -605,18 +602,6 @@ pub struct TalosRegistry;
 #[contractimpl]
 impl TalosRegistry {
     /// Create a new Talos on-chain.
-    ///
-    /// # Arguments
-    /// * `e` - Soroban environment
-    /// * `name` - Talos name
-    /// * `category` - Category (Marketing, Sales, etc.)
-    /// * `description` - Description
-    /// * `patron` - Patron configuration (shares + addresses)
-    /// * `kernel` - Kernel policy (thresholds, budget)
-    /// * `pulse` - Pulse token config (supply, price, symbol)
-    /// * `protocol_wallet` - Protocol wallet to receive 3% fee
-    ///
-    /// Returns the new Talos ID.
     pub fn create_talos(
         e: Env,
         name: String,
@@ -629,15 +614,11 @@ impl TalosRegistry {
     ) -> u32 {
         pause_control::check_not_paused(&e, PAUSE_TALOS_CREATION);
 
-        // Require creator authorization
         patron.creator_addr.require_auth();
 
         validate_patron_shares(&e, &patron);
         validate_talos_metadata(&name, &category, &description, &pulse);
 
-        // If the registry has been initialized, ensure callers use the configured
-        // protocol wallet. This keeps the create_talos ABI backwards compatible
-        // while preventing a mismatched fee recipient from being supplied.
         if let Some(configured_wallet) = e
             .storage()
             .persistent()
@@ -648,14 +629,12 @@ impl TalosRegistry {
             }
         }
 
-        // Get next Talos ID
         let next_id: u32 = e
             .storage()
             .persistent()
             .get(&DataKey::NextTalosId)
             .unwrap_or(1);
 
-        // Create Talos struct
         let talos = Talos {
             id: next_id,
             name: name.clone(),
@@ -670,29 +649,17 @@ impl TalosRegistry {
             metadata: None,
         };
 
-        // Store Talos
         e.storage()
             .persistent()
             .set(&DataKey::Talos(next_id), &talos);
-
-        // Track creator
         e.storage()
             .persistent()
             .set(&DataKey::CreatorOf(next_id), &talos.creator);
-
-        // Increment next ID
         e.storage()
             .persistent()
             .set(&DataKey::NextTalosId, &(next_id + 1));
 
-        // Emit event
-        emit_talos_created(
-            &e,
-            next_id,
-            talos.creator.clone(),
-            name,
-            talos.category.clone(),
-        );
+        emit_talos_created(&e, next_id, talos.creator.clone(), name, talos.category.clone());
 
         next_id
     }
@@ -734,13 +701,10 @@ impl TalosRegistry {
             .get(&DataKey::Talos(talos_id))
             .expect("Talos not found");
 
-        // Require creator authorization
         talos.creator.require_auth();
-
         validate_patron_shares(&e, &patron);
 
         talos.patron = patron.clone();
-
         e.storage()
             .persistent()
             .set(&DataKey::Talos(talos_id), &talos);
@@ -759,9 +723,7 @@ impl TalosRegistry {
             .expect("Talos not found");
 
         talos.creator.require_auth();
-
         talos.kernel = kernel;
-
         e.storage()
             .persistent()
             .set(&DataKey::Talos(talos_id), &talos);
@@ -778,11 +740,8 @@ impl TalosRegistry {
             .expect("Talos not found");
 
         talos.creator.require_auth();
-
         validate_token_symbol(&pulse.token_symbol);
-
         talos.pulse = pulse;
-
         e.storage()
             .persistent()
             .set(&DataKey::Talos(talos_id), &talos);
@@ -848,7 +807,6 @@ impl TalosRegistry {
     }
 
     /// Deactivate a Talos.
-    /// Can be called by creator or authorized pause controller.
     pub fn deactivate_talos(e: Env, talos_id: u32, controller: Address) {
         pause_control::check_not_paused(&e, PAUSE_TALOS_DEACTIVATION);
 
@@ -860,7 +818,6 @@ impl TalosRegistry {
 
         controller.require_auth();
 
-        // Check if caller is creator or authorized pause controller
         let is_creator = talos.creator == controller;
         let pause_controller: Option<Address> = e
             .storage()
@@ -873,7 +830,6 @@ impl TalosRegistry {
         }
 
         talos.active = false;
-
         e.storage()
             .persistent()
             .set(&DataKey::Talos(talos_id), &talos);
@@ -882,7 +838,6 @@ impl TalosRegistry {
     }
 
     /// Activate a Talos.
-    /// Can be called by creator or authorized resume controller.
     pub fn activate_talos(e: Env, talos_id: u32, controller: Address) {
         pause_control::check_not_paused(&e, PAUSE_TALOS_ACTIVATION);
 
@@ -894,7 +849,6 @@ impl TalosRegistry {
 
         controller.require_auth();
 
-        // Check if caller is creator or authorized resume controller
         let is_creator = talos.creator == controller;
         let resume_controller: Option<Address> = e
             .storage()
@@ -907,7 +861,6 @@ impl TalosRegistry {
         }
 
         talos.active = true;
-
         e.storage()
             .persistent()
             .set(&DataKey::Talos(talos_id), &talos);
@@ -915,8 +868,7 @@ impl TalosRegistry {
         emit_talos_resumed(&e, talos_id, controller);
     }
 
-    /// Set the pause controller for a Talos.
-    /// Only the creator can set this.
+    /// Set the pause controller for a Talos. Only the creator can set this.
     pub fn set_pause_controller(e: Env, talos_id: u32, pause_controller: Address) {
         let talos: Talos = e
             .storage()
@@ -925,14 +877,12 @@ impl TalosRegistry {
             .expect("Talos not found");
 
         talos.creator.require_auth();
-
         e.storage()
             .persistent()
             .set(&DataKey::PauseController(talos_id), &pause_controller);
     }
 
-    /// Set the resume controller for a Talos.
-    /// Only the creator can set this.
+    /// Set the resume controller for a Talos. Only the creator can set this.
     pub fn set_resume_controller(e: Env, talos_id: u32, resume_controller: Address) {
         let talos: Talos = e
             .storage()
@@ -941,7 +891,6 @@ impl TalosRegistry {
             .expect("Talos not found");
 
         talos.creator.require_auth();
-
         e.storage()
             .persistent()
             .set(&DataKey::ResumeController(talos_id), &resume_controller);
@@ -1019,15 +968,8 @@ impl TalosRegistry {
 
     /// Update the protocol fee in basis points.
     ///
-    /// Only the configured protocol wallet may update the fee.
-    ///
-    /// **Deprecation:** When the timelock is enabled (`min_delay > 0`),
-    /// this direct entry-point is rejected. Callers should use
-    /// `schedule_action(SetProtocolFee(..), delay)` followed by
-    /// `execute_action` after the timelock ETA. The rejection emits a
-    /// `dep_path` event with the recommended replacement before
-    /// panicking so off-chain telemetry can still see the attempted
-    /// legacy call.
+    /// **Deprecation:** When the timelock is enabled, this direct entry-point
+    /// is rejected. Use `schedule_action(SetProtocolFee(..))` + `execute_action`.
     pub fn set_protocol_fee(e: Env, fee_bps: u32) {
         pause_control::check_not_paused(&e, PAUSE_PROTOCOL_CONFIG);
 
@@ -1060,27 +1002,8 @@ impl TalosRegistry {
 
     /// Nominate `new_admin` as the next protocol wallet (admin).
     ///
-    /// The transfer is **not** immediate. The nominated address must call
-    /// `accept_admin` to confirm and complete the handover. Until then the
-    /// current admin retains all privileges.
-    ///
-    /// Calling `propose_admin` while a transfer is already pending silently
-    /// replaces the old nomination with the new one (no separate cancellation
-    /// step is required for the proposer). The replacement emits a fresh
-    /// `adm_prp` event without emitting `adm_cnl`.
-    ///
-    /// **Deprecation:** When the timelock is enabled (`min_delay > 0`),
-    /// this direct entry-point is rejected. Callers should schedule
-    /// `ProposeAdmin(new_admin)` via `schedule_action` and execute it
-    /// after the timelock ETA. The rejection emits a `dep_path` event
-    /// with the recommended replacement before panicking so off-chain
-    /// telemetry can still observe the attempted legacy call.
-    ///
-    /// # Authorization
-    /// Requires the current admin (`ProtocolWallet`) to sign the transaction.
-    ///
-    /// # Panics
-    /// - `"Contract not initialized"` — if `initialize` has not been called.
+    /// **Deprecation:** When the timelock is enabled, this direct entry-point
+    /// is rejected. Use `schedule_action(ProposeAdmin(..))` + `execute_action`.
     pub fn propose_admin(e: Env, new_admin: Address) {
         pause_control::check_not_paused(&e, PAUSE_PROTOCOL_CONFIG);
 
@@ -1108,9 +1031,6 @@ impl TalosRegistry {
     // ── Timelock Administration ─────────────────────────────────────
 
     /// Configure timelock parameter settings (`min_delay` and `grace_period`).
-    ///
-    /// # Authorization
-    /// Requires current protocol wallet (admin) authorization.
     pub fn set_timelock_config(e: Env, min_delay: u64, grace_period: u64) {
         pause_control::check_not_paused(&e, PAUSE_PROTOCOL_CONFIG);
 
@@ -1121,42 +1041,15 @@ impl TalosRegistry {
             .expect("Contract not initialized");
         admin.require_auth();
 
-        if grace_period == 0 {
-            panic!("Grace period must be positive");
-        }
-        if min_delay > MAX_MIN_DELAY {
-            panic!("Min delay exceeds maximum limit");
-        }
-
-        let old_config = Self::get_timelock_config(e.clone());
-
-        let new_config = TimelockConfig {
-            min_delay,
-            grace_period,
-        };
-
-        e.storage()
-            .persistent()
-            .set(&DataKey::TimelockConfig, &new_config);
-
-        emit_timelock_config_changed(&e, old_config.min_delay, min_delay, grace_period);
+        timelock::set_timelock_config_internal(&e, min_delay, grace_period);
     }
 
     /// Retrieve active timelock configuration.
     pub fn get_timelock_config(e: Env) -> TimelockConfig {
-        e.storage()
-            .persistent()
-            .get(&DataKey::TimelockConfig)
-            .unwrap_or(TimelockConfig {
-                min_delay: 0,
-                grace_period: DEFAULT_GRACE_PERIOD,
-            })
+        timelock::get_timelock_config(&e)
     }
 
     /// Schedule a high-impact administrative action for future execution.
-    ///
-    /// # Authorization
-    /// Requires current protocol wallet (admin) authorization.
     pub fn schedule_action(e: Env, action: AdminAction, delay: u64) -> u64 {
         pause_control::check_not_paused(&e, PAUSE_PROTOCOL_CONFIG);
 
@@ -1167,61 +1060,12 @@ impl TalosRegistry {
             .expect("Contract not initialized");
         admin.require_auth();
 
-        let config = Self::get_timelock_config(e.clone());
-        if delay < config.min_delay {
-            panic!("Delay less than minimum required delay");
-        }
-
-        let id: u64 = e
-            .storage()
-            .persistent()
-            .get(&DataKey::NextTimelockId)
-            .unwrap_or(1);
-
-        let now = e.ledger().timestamp();
-        let eta = now.saturating_add(delay);
-
-        let proposal = TimelockProposal {
-            id,
-            action: action.clone(),
-            eta,
-            status: ProposalStatus::Scheduled,
-            scheduled_at: now,
-            scheduled_by: admin.clone(),
-        };
-
-        e.storage()
-            .persistent()
-            .set(&DataKey::TimelockProposal(id), &proposal);
-        e.storage()
-            .persistent()
-            .set(&DataKey::NextTimelockId, &(id + 1));
-
-        emit_timelock_scheduled(&e, id, &action, eta, admin);
-        id
+        timelock::schedule_action_internal(&e, admin, action, delay)
     }
 
     /// Execute a scheduled administrative action after its timelock ETA has matured.
     pub fn execute_action(e: Env, proposal_id: u64) {
-        let mut proposal: TimelockProposal = e
-            .storage()
-            .persistent()
-            .get(&DataKey::TimelockProposal(proposal_id))
-            .expect("Timelock proposal not found");
-
-        if proposal.status != ProposalStatus::Scheduled {
-            panic!("Proposal not active");
-        }
-
-        let now = e.ledger().timestamp();
-        if now < proposal.eta {
-            panic!("Timelock delay not met");
-        }
-
-        let config = Self::get_timelock_config(e.clone());
-        if now > proposal.eta.saturating_add(config.grace_period) {
-            panic!("Proposal expired");
-        }
+        let proposal = timelock::validate_executable_proposal(&e, proposal_id);
 
         match &proposal.action {
             AdminAction::SetProtocolFee(fee_bps) => {
@@ -1237,19 +1081,10 @@ impl TalosRegistry {
             }
         }
 
-        proposal.status = ProposalStatus::Executed;
-        e.storage()
-            .persistent()
-            .set(&DataKey::TimelockProposal(proposal_id), &proposal);
-
-        let executor = proposal.scheduled_by.clone();
-        emit_timelock_executed(&e, proposal_id, &proposal.action, executor);
+        timelock::mark_executed(&e, proposal);
     }
 
     /// Cancel a scheduled administrative proposal before it is executed.
-    ///
-    /// # Authorization
-    /// Requires current protocol wallet (admin) authorization.
     pub fn cancel_action(e: Env, proposal_id: u64) {
         pause_control::check_not_paused(&e, PAUSE_PROTOCOL_CONFIG);
 
@@ -1260,22 +1095,7 @@ impl TalosRegistry {
             .expect("Contract not initialized");
         admin.require_auth();
 
-        let mut proposal: TimelockProposal = e
-            .storage()
-            .persistent()
-            .get(&DataKey::TimelockProposal(proposal_id))
-            .expect("Timelock proposal not found");
-
-        if proposal.status != ProposalStatus::Scheduled {
-            panic!("Proposal not active");
-        }
-
-        proposal.status = ProposalStatus::Cancelled;
-        e.storage()
-            .persistent()
-            .set(&DataKey::TimelockProposal(proposal_id), &proposal);
-
-        emit_timelock_cancelled(&e, proposal_id, &proposal.action, admin);
+        timelock::cancel_action_internal(&e, admin, proposal_id);
     }
 
     /// Retrieve a timelock proposal by ID.
@@ -1286,18 +1106,6 @@ impl TalosRegistry {
     }
 
     /// Complete the pending admin transfer.
-    ///
-    /// The nominated address (stored under `PendingAdmin`) must call this
-    /// method and authorize it. On success:
-    ///   1. `ProtocolWallet` is updated to the caller's address.
-    ///   2. The `PendingAdmin` storage entry is removed.
-    ///   3. An `adm_acc` event is emitted.
-    ///
-    /// # Authorization
-    /// Requires the pending admin to sign the transaction.
-    ///
-    /// # Panics
-    /// - `"No pending admin transfer"` — if `propose_admin` has not been called.
     pub fn accept_admin(e: Env) {
         pause_control::check_not_paused(&e, PAUSE_PROTOCOL_CONFIG);
 
@@ -1309,28 +1117,15 @@ impl TalosRegistry {
 
         pending.require_auth();
 
-        // Promote pending → active admin.
         e.storage()
             .persistent()
             .set(&DataKey::ProtocolWallet, &pending);
-
-        // Clear the pending slot.
         e.storage().persistent().remove(&DataKey::PendingAdmin);
 
         emit_admin_accepted(&e, pending);
     }
 
     /// Cancel an in-progress admin transfer.
-    ///
-    /// Removes the `PendingAdmin` entry and revokes the nomination without
-    /// changing the current admin.
-    ///
-    /// # Authorization
-    /// Requires the current admin (`ProtocolWallet`) to sign the transaction.
-    ///
-    /// # Panics
-    /// - `"Contract not initialized"` — if `initialize` has not been called.
-    /// - `"No pending admin transfer"` — if there is nothing to cancel.
     pub fn cancel_admin_transfer(e: Env) {
         pause_control::check_not_paused(&e, PAUSE_PROTOCOL_CONFIG);
 
@@ -1360,34 +1155,11 @@ impl TalosRegistry {
 
     // ── Emergency Pause Controls ──────────────────────────────────────
 
-    /// Pause a single write-path domain, blocking it while leaving all
-    /// reads and every other domain fully functional.
+    /// Pause a single write-path domain.
     ///
-    /// # Authorization
-    /// `caller` must be either the current admin (`ProtocolWallet`) or a
-    /// registered guardian, and must sign the transaction.
-    ///
-    /// # Duration semantics
-    /// - Admin: `duration = 0` pauses indefinitely (only the admin can lift
-    ///   it later via `unpause`). A non-zero `duration` must not exceed
-    ///   [`MAX_ADMIN_PAUSE_SECS`].
-    /// - Guardian: `duration` must be non-zero and at most
-    ///   [`MAX_GUARDIAN_PAUSE_SECS`] — guardians can never impose an
-    ///   indefinite pause, bounding the damage a compromised guardian key
-    ///   can do.
-    ///
-    /// Calling `pause` again on an already-paused domain refreshes
-    /// (overwrites) the existing record — this is intentionally idempotent
-    /// so a retried or duplicated transaction is safe. The one exception:
-    /// a guardian may never overwrite a pause that the admin established
-    /// (see `Panics`), preventing a guardian from weakening an admin lock.
-    ///
-    /// # Panics
-    /// - `"Contract not initialized"` — if `initialize` has not been called.
-    /// - `"Caller is not admin or guardian"` — unauthorized caller.
-    /// - `"Domain locked by admin; guardians cannot modify"` — a guardian
-    ///   attempted to overwrite an admin-established pause.
-    /// - `"Duration exceeds admin maximum"` / `"Guardian pause duration out of bounds"`.
+    /// `caller` must be the admin or a registered guardian and must sign.
+    /// Duration rules: admin may use 0 (indefinite) or up to `MAX_ADMIN_PAUSE_SECS`;
+    /// guardians must use 1..=`MAX_GUARDIAN_PAUSE_SECS`.
     pub fn pause(e: Env, caller: Address, domain: PauseDomain, duration: u64) {
         caller.require_auth();
 
@@ -1398,61 +1170,20 @@ impl TalosRegistry {
             .expect("Contract not initialized");
 
         let is_admin_caller = caller == admin;
-        if !is_admin_caller && !is_guardian_internal(&e, &caller) {
+        let guardians: Vec<Address> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Guardians)
+            .unwrap_or(Vec::new(&e));
+
+        if !is_admin_caller && !admin_controls::is_guardian(&guardians, &caller) {
             panic!("Caller is not admin or guardian");
         }
 
-        let key = DataKey::PauseState(domain.clone());
-
-        if !is_admin_caller {
-            if let Some(existing) = e.storage().persistent().get::<_, PauseState>(&key) {
-                if existing.paused_by == admin {
-                    panic!("Domain locked by admin; guardians cannot modify");
-                }
-            }
-        }
-
-        let now = e.ledger().timestamp();
-        let expires_at = if is_admin_caller {
-            if duration == 0 {
-                0
-            } else {
-                if duration > MAX_ADMIN_PAUSE_SECS {
-                    panic!("Duration exceeds admin maximum");
-                }
-                now.saturating_add(duration)
-            }
-        } else {
-            if duration == 0 || duration > MAX_GUARDIAN_PAUSE_SECS {
-                panic!("Guardian pause duration out of bounds");
-            }
-            now.saturating_add(duration)
-        };
-
-        e.storage().persistent().set(
-            &key,
-            &PauseState {
-                paused_by: caller.clone(),
-                paused_at: now,
-                expires_at,
-            },
-        );
-
-        emit_pause_set(&e, &domain, &caller, expires_at);
+        pause::apply_pause(&e, &caller, &admin, is_admin_caller, domain, duration);
     }
 
-    /// Lift an active pause on `domain`.
-    ///
-    /// Idempotent: if the domain has no active pause record (never paused,
-    /// already lifted, or already expired), this is a deterministic no-op —
-    /// it does not panic, so duplicate or retried `unpause` calls are safe.
-    ///
-    /// # Authorization
-    /// Only the current admin (`ProtocolWallet`) may unpause, regardless of
-    /// whether the pause was originally set by the admin or a guardian.
-    ///
-    /// # Panics
-    /// - `"Contract not initialized"` — if `initialize` has not been called.
+    /// Lift an active pause on `domain`. Idempotent.
     pub fn unpause(e: Env, domain: PauseDomain) {
         let admin: Address = e
             .storage()
@@ -1474,49 +1205,17 @@ impl TalosRegistry {
         emit_pause_cleared(&e, &domain, &admin);
     }
 
-    /// Returns `true` if `domain` is currently paused (and its pause has not
-    /// yet expired). Never requires authorization — this is a read.
+    /// Returns `true` if `domain` is currently paused.
     pub fn is_paused(e: Env, domain: PauseDomain) -> bool {
-        is_domain_paused(&e, &domain)
+        pause::is_domain_paused(&e, &domain)
     }
 
-    /// Full observability view of a domain's pause status: who paused it,
-    /// when, and when it expires (or `None` for indefinite/unpaused).
+    /// Full observability view of a domain's pause status.
     pub fn pause_info(e: Env, domain: PauseDomain) -> PauseInfo {
-        match e
-            .storage()
-            .persistent()
-            .get::<_, PauseState>(&DataKey::PauseState(domain.clone()))
-        {
-            None => PauseInfo {
-                active: false,
-                paused_by: None,
-                paused_at: None,
-                expires_at: None,
-            },
-            Some(state) => {
-                let active = state.expires_at == 0 || e.ledger().timestamp() < state.expires_at;
-                PauseInfo {
-                    active,
-                    paused_by: Some(state.paused_by),
-                    paused_at: Some(state.paused_at),
-                    expires_at: if state.expires_at == 0 {
-                        None
-                    } else {
-                        Some(state.expires_at)
-                    },
-                }
-            }
-        }
+        pause::pause_info(&e, domain)
     }
 
-    /// Register a guardian address authorized to trigger (but never lift)
-    /// bounded-duration pauses. Bounded to [`MAX_GUARDIANS`] entries.
-    ///
-    /// Idempotent: adding an already-registered guardian is a no-op.
-    ///
-    /// # Authorization
-    /// Requires current admin (`ProtocolWallet`) authorization.
+    /// Register a guardian address. Idempotent.
     pub fn add_guardian(e: Env, guardian: Address) {
         let admin: Address = e
             .storage()
@@ -1525,13 +1224,11 @@ impl TalosRegistry {
             .expect("Contract not initialized");
         admin.require_auth();
 
-        let mut guardians = get_guardians(&e);
-        if guardians.iter().any(|g| g == guardian) {
-            return;
-        }
-        if guardians.len() >= MAX_GUARDIANS {
-            panic!("Guardian limit reached");
-        }
+        let mut guardians: Vec<Address> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Guardians)
+            .unwrap_or(Vec::new(&e));
 
         guardians.push_back(guardian.clone());
         e.storage()
@@ -1540,14 +1237,7 @@ impl TalosRegistry {
         emit_guardian_added(&e, guardian);
     }
 
-    /// Revoke a guardian's pause authority.
-    ///
-    /// Idempotent: removing an address that is not a guardian is a no-op.
-    /// Does not affect any pause the guardian already set — use `unpause`
-    /// (admin-only) to lift it explicitly.
-    ///
-    /// # Authorization
-    /// Requires current admin (`ProtocolWallet`) authorization.
+    /// Revoke a guardian's pause authority. Idempotent.
     pub fn remove_guardian(e: Env, guardian: Address) {
         let admin: Address = e
             .storage()
@@ -1556,20 +1246,11 @@ impl TalosRegistry {
             .expect("Contract not initialized");
         admin.require_auth();
 
-        let guardians = get_guardians(&e);
-        let mut remaining = Vec::new(&e);
-        let mut found = false;
-        for g in guardians.iter() {
-            if g == guardian {
-                found = true;
-                continue;
-            }
-            remaining.push_back(g);
-        }
-
-        if !found {
-            return;
-        }
+        let mut guardians: Vec<Address> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Guardians)
+            .unwrap_or(Vec::new(&e));
 
         e.storage()
             .persistent()
@@ -1579,44 +1260,28 @@ impl TalosRegistry {
 
     /// Check whether `addr` currently holds guardian pause authority.
     pub fn is_guardian(e: Env, addr: Address) -> bool {
-        is_guardian_internal(&e, &addr)
+        let guardians: Vec<Address> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Guardians)
+            .unwrap_or(Vec::new(&e));
+        admin_controls::is_guardian(&guardians, &addr)
     }
 
-    /// List all currently registered guardians (bounded to `MAX_GUARDIANS`).
+    /// List all currently registered guardians.
     pub fn list_guardians(e: Env) -> Vec<Address> {
-        get_guardians(&e)
+        e.storage()
+            .persistent()
+            .get(&DataKey::Guardians)
+            .unwrap_or(Vec::new(&e))
     }
 
     /// Return the contract's interface version as `(major, minor, patch)`.
-    ///
-    /// The value is a compile-time constant baked into the WASM binary.
-    /// It is **not** stored in ledger state and cannot be altered by any
-    /// administrator, upgrade, or cross-contract call after deployment.
-    ///
-    /// Clients should call this method to verify ABI compatibility before
-    /// invoking other entry-points. A change in `major` signals a breaking
-    /// change; a change in `minor` adds new entry-points while remaining
-    /// backwards compatible; `patch` carries bug-fixes only.
-    ///
-    /// # Returns
-    /// `(major: u32, minor: u32, patch: u32)` — currently `(1, 1, 0)`.
     pub fn version(_e: Env) -> (u32, u32, u32) {
         CONTRACT_VERSION
     }
 
     /// Return the contract's 32-byte stable interface identifier.
-    ///
-    /// The identifier is content-derived from
-    /// `(INTERFACE_NAMESPACE, CONTRACT_VERSION)` and is identical to the
-    /// `INTERFACE_ID` constant embedded in the WASM binary at compile
-    /// time. Cross-contract callers and SDKs use it to detect which
-    /// `interface_id()` consumer is registered at a given address — they
-    /// should treat a mismatch as a hard `abort()` rather than fall back,
-    /// since the contract family has changed.
-    ///
-    /// Stable identifiers are also documented as "golden vectors" in the
-    /// test suite — regenerate from the namespace + version tuple at any
-    /// time to verify.
     pub fn interface_id(e: Env) -> BytesN<32> {
         BytesN::from_array(&e, &INTERFACE_ID)
     }
@@ -1648,26 +1313,12 @@ impl TalosRegistry {
 
     /// Return `true` when the deployed contract semver is at least the
     /// `major.minor.patch` requested by the caller.
-    ///
-    /// Compatibility rule (see `version_supports`):
-    /// - `major` must match exactly;
-    /// - `minor` must be `>=` required, with `patch` checked on exact minor.
-    ///
-    /// Returns `false` for any incompatible combination (including
-    /// illegal inputs such as `major > u32::MAX`, which silently
-    /// round-trips to `0` — tests cover this).
     pub fn supports_version(e: Env, major: u32, minor: u32, patch: u32) -> bool {
         let _ = e;
         version_supports(CONTRACT_VERSION, (major, minor, patch))
     }
 
     /// Return the list of capability symbols supported by this contract.
-    ///
-    /// Capability IDs are **stable feature markers**: if a consumer is
-    /// gated on a particular capability (e.g. `"timelock_admin"`), they
-    /// can read this list at integration time rather than guessing from
-    /// version bumps. Adding a capability requires a `minor` bump;
-    /// removing or renaming requires a `major` bump.
     pub fn interface_features(e: Env) -> Vec<Symbol> {
         let caps = features_list();
         let mut out = Vec::new(&e);
@@ -1677,9 +1328,7 @@ impl TalosRegistry {
         out
     }
 
-    /// Reported count of deprecated direct-admin paths exposed for
-    /// telemetry. Each entry in the static table corresponds to exactly
-    /// one entry-point that becomes a no-op after timelocks are enabled.
+    /// Reported count of deprecated direct-admin paths.
     pub fn deprecated_entry_count(_e: Env) -> u32 {
         DEPRECATED_DIRECT_ADMIN.len() as u32
     }
@@ -1700,9 +1349,6 @@ impl TalosRegistry {
     }
 
     /// Return the event-schema version expected by off-chain indexers.
-    ///
-    /// This is a pure read. Indexers should reject a deployment when its
-    /// major version differs from the version they support.
     pub fn event_schema_version(_e: Env) -> EventSchemaVersion {
         if EVENT_SCHEMA_VERSION.major != SUPPORTED_MAJOR {
             panic!("Unsupported event schema major version");
@@ -1713,20 +1359,11 @@ impl TalosRegistry {
     // ── Allowlist Management ──────────────────────────────────────
 
     /// Check whether an asset is allowlisted for value-transfer operations.
-    ///
-    /// This is a read-only entry-point and does not require authorization.
-    /// Returns `true` if the asset is currently allowlisted, `false` otherwise.
     pub fn is_asset_allowed(e: Env, asset: Address) -> bool {
         crate::allowlist::AssetAllowlist::is_allowed(&e, &asset)
     }
 
     /// Add an asset to the allowlist.
-    ///
-    /// # Authorization
-    /// Requires the current protocol wallet (admin) to sign the transaction.
-    ///
-    /// # Panics
-    /// - `"Contract not initialized"` — if `initialize` has not been called.
     pub fn add_asset_to_allowlist(e: Env, asset: Address) {
         let admin: Address = e
             .storage()
@@ -1739,12 +1376,6 @@ impl TalosRegistry {
     }
 
     /// Remove an asset from the allowlist.
-    ///
-    /// # Authorization
-    /// Requires the current protocol wallet (admin) to sign the transaction.
-    ///
-    /// # Panics
-    /// - `"Contract not initialized"` — if `initialize` has not been called.
     pub fn remove_asset_from_allowlist(e: Env, asset: Address) {
         let admin: Address = e
             .storage()
@@ -1759,43 +1390,11 @@ impl TalosRegistry {
     // ── Storage TTL Management ───────────────────────────────────
 
     /// Touch a Talos record to reset its Soroban storage TTL.
-    ///
-    /// Since every `set()` call on persistent storage auto-bumps the TTL,
-    /// this function re-reads the Talos struct and writes it back unchanged.
-    /// It only writes when the entry has not been touched recently (within
-    /// the renewal threshold) to save gas.
-    ///
-    /// Returns `true` if a touch was performed, `false` if skipped.
     pub fn touch_talos(e: Env, talos_id: u32) -> bool {
-        let key = DataKey::Talos(talos_id);
-        let talos: Talos = e.storage().persistent().get(&key).expect("Talos not found");
-
-        let current_ledger = e.ledger().sequence();
-        let last_touched: u32 = e
-            .storage()
-            .persistent()
-            .get(&DataKey::LastTouched(talos_id))
-            .unwrap_or(0);
-
-        if ttl_manager::needs_touch(last_touched, current_ledger) {
-            e.storage().persistent().set(&key, &talos);
-            e.storage()
-                .persistent()
-                .set(&DataKey::LastTouched(talos_id), &current_ledger);
-            ttl_manager::emit_ttl_touched(&e, "talos", 1);
-            true
-        } else {
-            false
-        }
+        ttl::touch_talos_inner(&e, talos_id)
     }
 
     /// Batch-touch all Talos records up to a limit (paginated).
-    ///
-    /// The sweep is bounded by `limit` and by the renewal age window; use
-    /// [`TalosRegistry::extend_ttl_batch`] to pass explicit bounds.
-    ///
-    /// # Authorization
-    /// Requires the protocol wallet (admin) to sign.
     pub fn touch_batch(e: Env, start_id: u32, limit: u32) -> (u32, u32) {
         pause_control::check_not_paused(&e, PAUSE_PROTOCOL_CONFIG);
 
@@ -1812,29 +1411,10 @@ impl TalosRegistry {
             .get(&DataKey::NextTalosId)
             .unwrap_or(1);
         let range = start_id..next_id.min(start_id.saturating_add(limit));
-        Self::sweep_talos_ttl(&e, &ttl_manager::TtlBounds::renewal(), range)
+        ttl::sweep_talos_ttl(&e, &ttl_manager::TtlBounds::renewal(), range)
     }
 
     /// Batched TTL extension with explicit age and work bounds.
-    ///
-    /// Visits ids `[start_id, min(next_id, start_id + limit))`, clipped to
-    /// [`ttl_manager::DEFAULT_MAX_BATCH_KEYS`] ids per call, and re-writes only
-    /// the records whose age in ledgers falls inside `[min_age, max_age]`.
-    /// Records outside the window are reported as `skipped` in the return value
-    /// and in the `ttl_batch` event; ids with no record are ignored.
-    ///
-    /// Returns `(touched, skipped)`.
-    ///
-    /// # Panics
-    /// - `"Domain is paused"` — when the protocol-config domain is paused.
-    /// - `"Contract not initialized"` — if `initialize` has not been called.
-    /// - `"ttl bounds: ..."` — static diagnostic for malformed bounds
-    ///   (`min_age > max_age`, `max_keys` of 0, or `max_keys` above
-    ///   [`ttl_manager::MAX_BATCH_KEYS`]). Diagnostics are compile-time
-    ///   constants and never embed caller or storage data.
-    ///
-    /// # Authorization
-    /// Requires the protocol wallet (admin) to sign.
     pub fn extend_ttl_batch(
         e: Env,
         start_id: u32,
@@ -1860,99 +1440,22 @@ impl TalosRegistry {
             ttl_manager::TtlBounds::new(min_age, max_age, ttl_manager::DEFAULT_MAX_BATCH_KEYS);
         let range = ttl_manager::bounded_range(start_id, limit, &bounds, next_id)
             .unwrap_or_else(|err| panic!("{}", err.message()));
-        Self::sweep_talos_ttl(&e, &bounds, range)
-    }
-
-    /// Shared bounded sweep behind `touch_batch` / `extend_ttl_batch`.
-    ///
-    /// Re-writes each Talos in `range` (bumping its Soroban TTL) when its age
-    /// falls inside `bounds`, refreshes the matching `LastTouched` marker,
-    /// emits `ttl_batch`, and returns `(touched, skipped)`. Ids without a
-    /// record are neither touched nor skipped, matching the historical
-    /// behaviour of `touch_batch`.
-    fn sweep_talos_ttl(
-        e: &Env,
-        bounds: &ttl_manager::TtlBounds,
-        range: core::ops::Range<u32>,
-    ) -> (u32, u32) {
-        let current_ledger = e.ledger().sequence();
-        let mut sweep = ttl_manager::BatchSweep::empty();
-
-        for id in range {
-            let key = DataKey::Talos(id);
-            let talos: Talos = match e.storage().persistent().get(&key) {
-                Some(talos) => talos,
-                None => {
-                    sweep.record(ttl_manager::EntryOutcome::Absent);
-                    continue;
-                }
-            };
-            let last_touched: u32 = e
-                .storage()
-                .persistent()
-                .get(&DataKey::LastTouched(id))
-                .unwrap_or(0);
-
-            if ttl_manager::should_extend(last_touched, current_ledger, bounds) {
-                e.storage().persistent().set(&key, &talos);
-                e.storage()
-                    .persistent()
-                    .set(&DataKey::LastTouched(id), &current_ledger);
-                sweep.record(ttl_manager::EntryOutcome::Touched);
-            } else {
-                sweep.record(ttl_manager::EntryOutcome::Skipped);
-            }
-        }
-
-        sweep.emit(e);
-        (sweep.touched, sweep.skipped)
+        ttl::sweep_talos_ttl(&e, &bounds, range)
     }
 
     /// Query storage health by comparing entry ages against thresholds.
-    ///
-    /// Returns `(min_age, max_age, keys_below_warn, keys_below_crit, total)`.
-    /// Emits `ttl_warn` if any entry is at risk.
     pub fn get_storage_health(e: Env) -> (u32, u32, u32, u32, u32) {
-        let mut health = ttl_manager::KeyHealth::empty();
-        let current_ledger = e.ledger().sequence();
         let next_id: u32 = e
             .storage()
             .persistent()
             .get(&DataKey::NextTalosId)
             .unwrap_or(1);
-
-        for id in 1..next_id {
-            if e.storage().persistent().has(&DataKey::Talos(id)) {
-                let last_touched: u32 = e
-                    .storage()
-                    .persistent()
-                    .get(&DataKey::LastTouched(id))
-                    .unwrap_or(0);
-                health.observe(ttl_manager::age_ledgers(last_touched, current_ledger));
-            }
-        }
-
-        if health.needs_immediate_attention() {
-            ttl_manager::emit_ttl_warning(&e, "talos", health.keys_below_crit, health.max_age);
-        }
-        if health.is_empty() {
-            (0, 0, 0, 0, 0)
-        } else {
-            (
-                health.min_age,
-                health.max_age,
-                health.keys_below_warn,
-                health.keys_below_crit,
-                health.total_keys,
-            )
-        }
+        ttl::storage_health(&e, next_id)
     }
 
     // ── Storage Schema Migrations ─────────────────────────────────
 
-    /// Current on-chain storage schema version. Defaults to
-    /// [`SCHEMA_GENESIS`] for any instance that has never run
-    /// `initialize` or `run_migrations` under this framework.
+    /// Current on-chain storage schema version.
     pub fn schema_version(e: Env) -> u32 {
         storage_migration::schema_version(&e).unwrap_or(SCHEMA_GENESIS)
     }
@@ -2033,13 +1536,7 @@ impl TalosRegistry {
         current
     }
 
-    /// Roll the schema version pointer back to `target_version`, bounded by
-    /// [`MAX_ROLLBACK_DEPTH`] steps. Does **not** undo data written by
-    /// forward migrations — see `storage_migration`'s README before relying
-    /// on old entry-points again after a rollback.
-    ///
-    /// # Authorization
-    /// Requires the protocol wallet (admin) to sign.
+    /// Roll the schema version pointer back to `target_version`.
     pub fn rollback_schema(e: Env, target_version: u32) {
         let admin: Address = e
             .storage()

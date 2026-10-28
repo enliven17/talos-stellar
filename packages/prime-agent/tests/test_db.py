@@ -78,6 +78,18 @@ class TestCommerceLifecycle:
         assert len(rows) == 1
         assert rows[0]["talos_id"] == "c1"
 
+    def test_count_pending_commerce_jobs_empty(self, mock_db: LocalDB):
+        assert mock_db.count_pending_commerce_jobs() == 0
+
+    def test_count_pending_commerce_jobs_mixed_statuses(self, mock_db: LocalDB):
+        mock_db.add_commerce_job("job-1", "client-1", "research")
+        mock_db.add_commerce_job("job-2", "client-2", "analysis")
+        mock_db.add_commerce_job("job-3", "client-3", "summary")
+        mock_db.update_commerce_status("job-2", "completed")
+        mock_db.update_commerce_status("job-3", "failed")
+
+        assert mock_db.count_pending_commerce_jobs() == 1
+
 
 class TestPlaybookLookup:
     def test_find_playbook_by_name_returns_exact_match(self, mock_db: LocalDB):
@@ -249,3 +261,27 @@ class TestDividendLifecycle:
         mock_db.record_dividend("GABC123", "VEGA", 10.0, tx_hash="txabc123")
         history = mock_db.get_dividend_history()
         assert history[0]["tx_hash"] == "txabc123"
+
+
+class TestContentHistoryLifecycle:
+    def test_add_content_returns_id(self, mock_db: LocalDB):
+        cid = mock_db.add_content("New post content", "X")
+        assert isinstance(cid, int)
+        assert cid > 0
+
+    def test_get_content_found(self, mock_db: LocalDB):
+        cid = mock_db.add_content("Found post", "telegram")
+        post = mock_db.get_content(cid)
+        assert post is not None
+        assert post["id"] == cid
+        assert post["content"] == "Found post"
+        assert post["channel"] == "telegram"
+
+    def test_get_content_not_found(self, mock_db: LocalDB):
+        assert mock_db.get_content(9999) is None
+
+    def test_content_exists(self, mock_db: LocalDB):
+        cid = mock_db.add_content("Check exists", "discord")
+        assert mock_db.content_exists(cid) is True
+        assert mock_db.content_exists(9999) is False
+

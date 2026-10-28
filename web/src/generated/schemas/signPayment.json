@@ -1,3 +1,108 @@
 {
-  "type": "string"
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "payee": {
+      "type": "string",
+      "minLength": 1
+    },
+    "amount": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        }
+      ]
+    },
+    "assetCode": {
+      "default": "USDC",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 12,
+      "pattern": "^[A-Z0-9]+$"
+    },
+    "asset": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "native"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "issued"
+            },
+            "code": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 12,
+              "pattern": "^[A-Z0-9]+$"
+            },
+            "issuer": {
+              "type": "string",
+              "minLength": 56,
+              "maxLength": 56,
+              "pattern": "^G.*"
+            }
+          },
+          "required": [
+            "type",
+            "code",
+            "issuer"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "native": {
+              "type": "boolean",
+              "const": true
+            },
+            "code": {},
+            "issuer": {}
+          },
+          "required": [
+            "native"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "native": {},
+            "code": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 12,
+              "pattern": "^[A-Z0-9]{1,12}$"
+            },
+            "issuer": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "issuer"
+          ]
+        }
+      ]
+    }
+  },
+  "required": [
+    "payee",
+    "amount"
+  ]
 }
