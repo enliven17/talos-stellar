@@ -19,6 +19,7 @@ class TalosClient:
         base_url: str | None = None,
         api_key: str | None = None,
         talos_id: str | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.base_url = (base_url or os.getenv("TALOS_API_URL", "https://talos-stellar.vercel.app")).rstrip("/")
         self.api_key = api_key or os.getenv("TALOS_API_KEY", "")
@@ -30,7 +31,16 @@ class TalosClient:
             base_url=self.base_url,
             headers=headers,
             timeout=30.0,
+            transport=transport,
         )
+
+    def set_api_key(self, key: str) -> None:
+        """Update the API key attribute and default Authorization header."""
+        self.api_key = key
+        if key:
+            self._http.headers["Authorization"] = f"Bearer {key}"
+        else:
+            self._http.headers.pop("Authorization", None)
 
     # ── Talos ────────────────────────────────────────────────
 

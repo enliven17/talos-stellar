@@ -104,8 +104,7 @@ async def talos_register(
     if "id" in result:
         client.talos_id = result["id"]
     if "apiKeyOnce" in result:
-        client.api_key = result["apiKeyOnce"]
-        client._http.headers["Authorization"] = f"Bearer {result['apiKeyOnce']}"
+        client.set_api_key(result["apiKeyOnce"])
 
     return {
         "talos_id": result.get("id"),
