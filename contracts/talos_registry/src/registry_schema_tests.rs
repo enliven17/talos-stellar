@@ -51,6 +51,7 @@ mod tests {
             },
             created_at: f.created_at,
             active: f.active,
+            metadata: f.metadata.as_deref().map(|m| s(env, m)),
         }
     }
 
@@ -88,6 +89,9 @@ mod tests {
     const V2_NAME_FORWARD: &str = include_str!("../../fixtures/registry_schema/v2/name_forward_001.json");
     const V2_NAME_REVERSE: &str = include_str!("../../fixtures/registry_schema/v2/name_reverse_001.json");
     const V2_GOVERNANCE: &str = include_str!("../../fixtures/registry_schema/v2/governance_002.json");
+
+    const V3_TALOS_WITH_CREATOR_METADATA: &str = include_str!("../../fixtures/registry_schema/v3/talos_001_with_creator_metadata.json");
+    const V3_TALOS_NO_METADATA: &str = include_str!("../../fixtures/registry_schema/v3/talos_002_no_metadata.json");
 
     const MALFORMED_MISSING: &str = include_str!("../../fixtures/registry_schema/malformed/missing_required_field.json");
     const MALFORMED_WRONG_TYPE: &str = include_str!("../../fixtures/registry_schema/malformed/wrong_type_pulse_price.json");
@@ -323,6 +327,94 @@ mod tests {
             assert!(res.is_err(), "malformed {} should fail but got {:?}", file, res.unwrap());
             let msg = res.unwrap_err().to_string();
             assert!(msg.contains(file) && msg.contains("regen:"), "error not actionable for {}: {}", file, msg);
+        }
+    }
+
+    // ── v3 fixture tests (talos-registry v1.5.0: update_creator_metadata) ─
+
+    /// v3 fixture with updated name/category/description + Some(metadata) parses correctly.
+    #[test]
+    fn v3_talos_with_creator_metadata_parses_correctly() {
+        let talos = parse_talos_fixture(
+            V3_TALOS_WITH_CREATOR_METADATA,
+            "v3/talos_001_with_creator_metadata.json",
+        )
+        .expect("v3 with creator metadata should parse");
+        assert_eq!(talos.id, 1);
+        assert_eq!(talos.name, "Updated Genesis");
+        assert_eq!(talos.category, "Growth");
+        assert_eq!(talos.description, "Autonomous growth agent with updated strategy");
+        assert!(talos.active);
+        // metadata field present in v3 with Some value
+        assert_eq!(
+            talos.metadata.as_deref(),
+            Some("ipfs://QmVegaStrategyV3Example"),
+            "v3 fixture must carry non-None metadata"
+        );
+    }
+
+    /// v3 fixture without metadata key maps to None (backward compat).
+    #[test]
+    fn v3_talos_no_metadata_maps_to_none() {
+        let talos = parse_talos_fixture(
+            V3_TALOS_NO_METADATA,
+            "v3/talos_002_no_metadata.json",
+        )
+        .expect("v3 without metadata should parse as None");
+        assert_eq!(talos.id, 2);
+        assert_eq!(talos.name, "Atlas");
+        assert_eq!(talos.metadata, None, "absent metadata key must be None");
+    }
+
+    /// v3 fixture constructs a valid Soroban Talos without panic.
+    #[test]
+    fn v3_fixture_constructs_soroban_talos() {
+        let env = Env::default();
+        let talos = fixture_to_talos(
+            &env,
+            V3_TALOS_WITH_CREATOR_METADATA,
+            "v3/talos_001_with_creator_metadata.json",
+        );
+        assert_eq!(talos.id, 1);
+        assert_eq!(talos.name, SorobanString::from_str(&env, "Updated Genesis"));
+        assert_eq!(talos.category, SorobanString::from_str(&env, "Growth"));
+        assert_eq!(
+            talos.metadata,
+            Some(SorobanString::from_str(&env, "ipfs://QmVegaStrategyV3Example"))
+        );
+    }
+
+    /// v3 fixture without metadata constructs with metadata == None.
+    #[test]
+    fn v3_fixture_no_metadata_constructs_with_none() {
+        let env = Env::default();
+        let talos = fixture_to_talos(
+            &env,
+            V3_TALOS_NO_METADATA,
+            "v3/talos_002_no_metadata.json",
+        );
+        assert_eq!(talos.metadata, None);
+    }
+
+    /// Schema version 3 fixtures still respect all existing field constraints
+    /// (patron shares sum to 100, active flag is bool, etc.).
+    #[test]
+    fn v3_fixtures_pass_existing_field_invariants() {
+        let t = parse_talos_fixture(
+            V3_TALOS_WITH_CREATOR_METADATA,
+            "v3/talos_001_with_creator_metadata.json",
+        )
+        .unwrap();
+        assert_eq!(
+            t.patron.creator_share + t.patron.investor_share + t.patron.treasury_share,
+            100,
+            "patron shares must sum to 100"
+        );
+        assert!(t.name.len() <= 64, "name byte limit respected");
+        assert!(t.category.len() <= 32, "category byte limit respected");
+        assert!(t.description.len() <= 512, "description byte limit respected");
+        if let Some(ref m) = t.metadata {
+            assert!(m.len() <= 200, "metadata byte limit respected");
         }
     }
 }

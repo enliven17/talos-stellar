@@ -173,6 +173,8 @@ the governance audit trail.
 
 ## 8. Known limitations
 
+- Governance effect application (`web/src/lib/governance/effects.ts`) is covered by `web/tests/governance-effects.unit.test.ts`, which exercises each effect type, idempotent re-application, and failure rollback against a mocked transaction.
+
 - No worker process is scheduled here. `findResumableJobs()` + `acquireLease()` +
   `runProvisioningJob()` are the building blocks; wiring them to a cron or queue
   is deployment-specific.

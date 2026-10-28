@@ -1,21 +1,22 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsApiKeys } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
-import { verifyAgentApiKey } from "@/lib/auth";
+import { authorizeApiKeyManagement } from "@/lib/api-key-owner-auth";
 import { parseBody } from "@/lib/schemas";
 import { updateApiKeySchema } from "@/lib/schemas";
 
 // PATCH /api/talos/:id/api-keys/:keyId — Update scopes, name, expiry
-export async function PATCH(
+async function _PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string; keyId: string }> }
 ) {
   const { id, keyId } = await params;
 
   try {
-    const auth = await verifyAgentApiKey(request, id, ["admin"]);
-    if (!auth.ok) return auth.response;
+    const authorizationError = await authorizeApiKeyManagement(request, id);
+    if (authorizationError) return authorizationError;
 
     const key = await db
       .select()
@@ -63,15 +64,15 @@ export async function PATCH(
 }
 
 // DELETE /api/talos/:id/api-keys/:keyId — Revoke a key (soft-delete)
-export async function DELETE(
+async function _DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string; keyId: string }> }
 ) {
   const { id, keyId } = await params;
 
   try {
-    const auth = await verifyAgentApiKey(request, id, ["admin"]);
-    if (!auth.ok) return auth.response;
+    const authorizationError = await authorizeApiKeyManagement(request, id);
+    if (authorizationError) return authorizationError;
 
     const key = await db
       .select()
@@ -94,3 +95,6 @@ export async function DELETE(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const PATCH = withRequestId(_PATCH);
+export const DELETE = withRequestId(_DELETE);

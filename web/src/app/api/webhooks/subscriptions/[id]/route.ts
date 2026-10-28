@@ -6,6 +6,7 @@
  * DELETE /api/webhooks/subscriptions/:id  — Delete subscription
  */
 
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsWebhookSubscriptions } from "@/db/schema";
@@ -14,6 +15,7 @@ import { logger } from "@/lib/logger";
 import { z } from "zod/v4";
 import { parseBody } from "@/lib/schemas";
 import { rotateWebhookSecret } from "@/lib/webhooks/rotation";
+import { validateUrl } from "@/lib/security/ssrf";
 
 // ─── Auth helper ─────────────────────────────────────────────────
 
@@ -46,7 +48,7 @@ const updateSubscriptionSchema = z
 
 // ─── GET /api/webhooks/subscriptions/:id ─────────────────────────
 
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -100,7 +102,7 @@ export async function GET(
 
 // ─── PATCH /api/webhooks/subscriptions/:id ───────────────────────
 
-export async function PATCH(
+async function _PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -114,6 +116,17 @@ export async function PATCH(
 
     const { data, error } = await parseBody(request, updateSubscriptionSchema);
     if (error) return error;
+
+    if (data.url !== undefined) {
+      try {
+        await validateUrl(data.url);
+      } catch (err) {
+        return Response.json(
+          { error: "Validation failed", issues: [`url: ${err instanceof Error ? err.message : "Invalid URL"}`] },
+          { status: 400 }
+        );
+      }
+    }
 
     // Build update payload
     const updateData: Partial<typeof tlsWebhookSubscriptions.$inferInsert> = {};
@@ -219,7 +232,7 @@ export async function PATCH(
 
 // ─── DELETE /api/webhooks/subscriptions/:id ──────────────────────
 
-export async function DELETE(
+async function _DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -256,3 +269,7 @@ export async function DELETE(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withRequestId(_GET);
+export const PATCH = withRequestId(_PATCH);
+export const DELETE = withRequestId(_DELETE);

@@ -23,8 +23,8 @@
  */
 
 import { NextRequest } from "next/server";
-import { shouldSample } from "./sampler.js";
-import { validateAgainstSchema, stripUnknownFields, makeInvalidJsonViolation } from "./validator.js";
+import { shouldSample } from "./sampler";
+import { validateAgainstSchema, stripUnknownFields, makeInvalidJsonViolation } from "./validator";
 import {
   recordSkip,
   recordClean,
@@ -32,21 +32,21 @@ import {
   recordReject,
   recordValidatorError,
   recordNoSchema,
-} from "./metrics.js";
+} from "./metrics";
 import type {
   ResolvedDriftConfig,
   SchemaRegistry,
   DriftViolation,
-} from "./types.js";
+} from "./types";
 
-type RouteHandler = (
+type RouteHandler<Params = any> = (
   req: NextRequest,
-  ctx: { params: Promise<Record<string, string>> },
+  ctx?: { params?: Promise<Params> } | any,
 ) => Promise<Response>;
 
 // ── Global registry and config ────────────────────────────────────────────────
 
-import type { JsonSchemaObject } from "./types.js";
+import type { JsonSchemaObject } from "./types";
 
 /** Singleton schema registry populated at startup. */
 const registry: SchemaRegistry = new Map();
@@ -68,7 +68,7 @@ export function registeredRoutes(): string[] {
 
 // ── Config resolution ─────────────────────────────────────────────────────────
 
-import type { DriftConfig, ResolvedDriftConfig as RDC } from "./types.js";
+import type { DriftConfig, ResolvedDriftConfig as RDC } from "./types";
 
 function resolveConfig(partial?: Partial<DriftConfig>): RDC {
   const mode = (partial?.mode ?? process.env.DRIFT_MODE ?? "off") as RDC["mode"];
@@ -114,12 +114,13 @@ function getConfig(): RDC {
  * @param handler   The original Next.js route handler
  * @param override  Per-route config override (optional)
  */
-export function withDriftDetection(
+export function withDriftDetection<H extends (req: NextRequest, ctx?: any) => Promise<Response>>(
   routeKey: string,
-  handler: RouteHandler,
+  handler: H,
   override?: Partial<DriftConfig>,
-): RouteHandler {
-  return async (req, ctx) => {
+): H {
+  return (async (req: NextRequest, ctx?: any) => {
+
     const config = override ? resolveConfig(override) : getConfig();
     const requestId = req.headers.get("x-request-id") ?? "unknown";
 
@@ -219,8 +220,9 @@ export function withDriftDetection(
     // mode === "warn"
     recordWarn(requestId, routeKey, violations);
     return handler(rebuildRequest(req, rawBody), ctx);
-  };
+  }) as unknown as H;
 }
+
 
 // ── Body re-injection ─────────────────────────────────────────────────────────
 

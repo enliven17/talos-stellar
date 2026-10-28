@@ -5,6 +5,7 @@
  * GET  /api/webhooks/subscriptions   — List subscriptions for the authenticated TALOS
  */
 
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import {
@@ -16,6 +17,7 @@ import { logger } from "@/lib/logger";
 import { z } from "zod/v4";
 import { parseBody } from "@/lib/schemas";
 import { encryptSecret } from "@/lib/webhooks/signing";
+import { validateUrl } from "@/lib/security/ssrf";
 
 // ─── Auth helper (same pattern as jobs routes) ───────────────────
 
@@ -49,7 +51,7 @@ const listQuerySchema = z.object({
 
 // ─── POST /api/webhooks/subscriptions ────────────────────────────
 
-export async function POST(request: NextRequest) {
+async function _POST(request: NextRequest) {
   try {
     const callerTalosId = await resolveCallerTalos(request);
     if (!callerTalosId) {
@@ -58,6 +60,15 @@ export async function POST(request: NextRequest) {
 
     const { data, error } = await parseBody(request, createSubscriptionSchema);
     if (error) return error;
+
+    try {
+      await validateUrl(data.url);
+    } catch (err) {
+      return Response.json(
+        { error: "Validation failed", issues: [`url: ${err instanceof Error ? err.message : "Invalid URL"}`] },
+        { status: 400 }
+      );
+    }
 
     // Encrypt the secret at rest
     let secretCiphertext: string;
@@ -110,7 +121,7 @@ export async function POST(request: NextRequest) {
 
 // ─── GET /api/webhooks/subscriptions ─────────────────────────────
 
-export async function GET(request: NextRequest) {
+async function _GET(request: NextRequest) {
   try {
     const callerTalosId = await resolveCallerTalos(request);
     if (!callerTalosId) {
@@ -178,3 +189,6 @@ export async function GET(request: NextRequest) {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);
+export const GET = withRequestId(_GET);

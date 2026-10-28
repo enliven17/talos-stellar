@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsPlaybooks, tlsPlaybookPurchases, tlsActivities } from "@/db/schema";
@@ -6,7 +7,7 @@ import { resolveTalosFromRequest } from "@/lib/auth";
 
 // PATCH /api/playbooks/:id/apply — Mark a purchased playbook as applied
 // Requires activity:write scope (scoped key or legacy).
-export async function PATCH(
+async function _PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -118,3 +119,5 @@ export async function PATCH(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const PATCH = withRequestId(_PATCH);

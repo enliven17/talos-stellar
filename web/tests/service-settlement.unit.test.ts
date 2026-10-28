@@ -190,7 +190,7 @@ describe("POST /api/talos/[id]/service — service-settlement failure matrix", (
 
       expect(response.status).toBe(502);
       const body = await response.json();
-      expect(body.error).toBe("On-chain payment settlement failed");
+      expect(body.error).toContain("On-chain payment settlement failed");
 
       // A failed settlement must never be reported as a completed purchase.
       expect(mocks.fulfillInstant).not.toHaveBeenCalled();

@@ -1,0 +1,6 @@
+{
+  "error": "Amount exceeds approval threshold",
+  "amountUsd": 50.0,
+  "threshold": 10.0,
+  "message": "Create an approval request first"
+}

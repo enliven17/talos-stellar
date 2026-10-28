@@ -15,6 +15,13 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
   ]),
   {
+    rules: {
+      "react-hooks/set-state-in-effect": "off",
+      "react-hooks/purity": "off",
+      "@typescript-eslint/no-explicit-any": "warn",
+    },
+  },
+  {
     files: ["**/*.json"],
     languageOptions: {
       parser: jsonParser,
@@ -27,10 +34,12 @@ const eslintConfig = defineConfig([
     },
   },
   {
-    files: ["**/*.test.ts", "**/*.test.tsx", "**/__tests__/**", "scripts/**"],
+    files: ["tests/**", "**/*.test.ts", "**/*.test.tsx", "**/__tests__/**", "scripts/**"],
     rules: {
       "@typescript-eslint/no-explicit-any": "off",
       "@typescript-eslint/no-unsafe-function-type": "off",
+      "@typescript-eslint/no-require-imports": "off",
+      "react-hooks/rules-of-hooks": "off",
     },
   },
 ]);

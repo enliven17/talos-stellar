@@ -1,0 +1,1 @@
+export { capabilities, marketplaceItems, itemCapabilities } from '@/db/schema';

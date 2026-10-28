@@ -113,10 +113,15 @@ class CircuitBreakerConfig:
     window_size: float = 60.0
     """Rolling window size in seconds for failure counting."""
 
-    retry_budget: int = 3
-    """Number of retries permitted for one adapter invocation."""
+    retry_budget: int = 0
+    """Number of retries permitted for one adapter invocation.
 
-    backoff_initial: float = 1.0
+    Defaults to 0 (fail fast) so adapters without an explicit retry
+    configuration keep their pre-budget invocation semantics; operators opt
+    in per adapter via ``TALOS_ADAPTER_RETRY_CONFIGS``.
+    """
+
+    backoff_initial: float = 0.5
     """Initial exponential backoff delay in seconds."""
 
     backoff_max: float = 30.0
@@ -176,6 +181,7 @@ CircuitBreakerConfig.PROVIDER_DEFAULTS["talos_web_api"] = CircuitBreakerConfig(
     success_threshold=2,
     window_size=60.0,
 )
+CircuitBreakerConfig.PROVIDER_DEFAULTS["stellar_horizon"] = CircuitBreakerConfig()
 CircuitBreakerConfig.PROVIDER_DEFAULTS["discord"] = CircuitBreakerConfig(
     failure_threshold=3,
     recovery_timeout=60.0,
@@ -218,6 +224,8 @@ def _resolve_provider_from_url(url: str) -> str:
         return "telegram"
     if "x.com" in lower or "twitter.com" in lower:
         return "x"
+    if "horizon" in lower and "stellar.org" in lower:
+        return "stellar_horizon"
     # Fallback — anything not recognised goes through the talos_web_api breaker.
     return "talos_web_api"
 

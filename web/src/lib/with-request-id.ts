@@ -2,25 +2,27 @@ import { NextRequest } from "next/server";
 import { getRequestId } from "./api-response";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-type RouteHandler = (req: NextRequest, ...rest: any[]) => Promise<Response>;
+type AnyRouteHandler = (...args: any[]) => any;
 
 /**
- * Generic over rest args so it composes with both dynamic routes
- * (`ctx: { params }`) and static routes (no second argument).
- *
- * Passes the original request through unchanged rather than rebuilding a
- * NextRequest with an added header — no handler reads x-request-id off the
- * incoming request today, and reconstructing NextRequest from itself broke
- * under Turbopack's production bundling (private class fields, e.g.
- * `#state`, don't survive across chunk boundaries when a request built by
- * one bundled copy of the class is fed back into another).
+ * Wraps a route handler to ensure every response includes an x-request-id header.
+ * Supports both Request and NextRequest, async and synchronous handlers.
  */
-export function withRequestId<H extends RouteHandler>(handler: H): H {
-  return (async (req: NextRequest, ...rest: unknown[]) => {
+export function withRequestId<H extends AnyRouteHandler>(handler: H): H {
+  return ((req?: Request | NextRequest, ...rest: unknown[]) => {
     const requestId = getRequestId(req);
-    const res = await handler(req, ...rest);
-    const newRes = new Response(res.body, res);
+    const request = req ?? new NextRequest("http://localhost");
+    const result = handler(request, ...rest);
+    if (result && typeof (result as Promise<Response>).then === "function") {
+      return (result as Promise<Response>).then((res: Response) => {
+        const newRes = new Response(res.body, res);
+        newRes.headers.set("x-request-id", requestId);
+        return newRes;
+      });
+    }
+    const res = result as Response;
+    const newRes = new Response(res?.body, res);
     newRes.headers.set("x-request-id", requestId);
     return newRes;
-  }) as H;
+  }) as unknown as H;
 }

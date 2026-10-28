@@ -1,0 +1,182 @@
+{
+  "description": "Shared name-validation test vectors for Talos name service. Used across contract, SDK, and web.",
+  "validation_rules": {
+    "length": {
+      "min": 3,
+      "max": 32
+    },
+    "allowed_chars": "lowercase alphanumeric (a-z, 0-9) and hyphens (-)",
+    "constraints": [
+      "No leading hyphens",
+      "No trailing hyphens",
+      "No consecutive hyphens"
+    ],
+    "canonicalization": "Trim leading/trailing ASCII whitespace, lowercase ASCII letters"
+  },
+  "valid_names": [
+    {
+      "name": "alpha-1",
+      "description": "Basic valid name with hyphen and digit"
+    },
+    {
+      "name": "vega",
+      "description": "Simple lowercase name"
+    },
+    {
+      "name": "atlas",
+      "description": "Simple lowercase name"
+    },
+    {
+      "name": "abc",
+      "description": "Minimum length (3 chars)"
+    },
+    {
+      "name": "a".repeat(32),
+      "description": "Maximum length (32 chars)"
+    },
+    {
+      "name": "marketbot",
+      "description": "Longer valid name"
+    },
+    {
+      "name": "test-123-name",
+      "description": "Multiple hyphens and digits"
+    },
+    {
+      "name": "a-b-c-d-e",
+      "description": "Multiple single hyphens"
+    },
+    {
+      "name": "123",
+      "description": "All digits"
+    },
+    {
+      "name": "x0",
+      "description": "Single letter and digit"
+    }
+  ],
+  "invalid_names": [
+    {
+      "name": "ab",
+      "reason": "too_short",
+      "description": "Below minimum length (2 chars)"
+    },
+    {
+      "name": "a",
+      "reason": "too_short",
+      "description": "Below minimum length (1 char)"
+    },
+    {
+      "name": "",
+      "reason": "too_short",
+      "description": "Empty string"
+    },
+    {
+      "name": "a".repeat(33),
+      "reason": "too_long",
+      "description": "Exceeds maximum length (33 chars)"
+    },
+    {
+      "name": "Alpha",
+      "reason": "uppercase_letters",
+      "description": "Contains uppercase letter"
+    },
+    {
+      "name": "ALPHA",
+      "reason": "uppercase_letters",
+      "description": "All uppercase"
+    },
+    {
+      "name": "Alpha-1",
+      "reason": "uppercase_letters",
+      "description": "Mixed case with uppercase"
+    },
+    {
+      "name": "bad--name",
+      "reason": "consecutive_hyphens",
+      "description": "Consecutive hyphens"
+    },
+    {
+      "name": "test---name",
+      "reason": "consecutive_hyphens",
+      "description": "Multiple consecutive hyphens"
+    },
+    {
+      "name": "-bad",
+      "reason": "leading_hyphen",
+      "description": "Leading hyphen"
+    },
+    {
+      "name": "bad-",
+      "reason": "trailing_hyphen",
+      "description": "Trailing hyphen"
+    },
+    {
+      "name": "-",
+      "reason": "leading_hyphen",
+      "description": "Single hyphen (also too short)"
+    },
+    {
+      "name": "a b",
+      "reason": "invalid_char",
+      "description": "Contains space"
+    },
+    {
+      "name": "test_name",
+      "reason": "invalid_char",
+      "description": "Contains underscore"
+    },
+    {
+      "name": "test.name",
+      "reason": "invalid_char",
+      "description": "Contains period"
+    },
+    {
+      "name": "test@name",
+      "reason": "invalid_char",
+      "description": "Contains special character"
+    },
+    {
+      "name": "test_name-123",
+      "reason": "invalid_char",
+      "description": "Contains underscore with valid chars"
+    }
+  ],
+  "canonicalization_vectors": [
+    {
+      "input": "Vega",
+      "canonicalized": "vega",
+      "description": "Uppercase to lowercase"
+    },
+    {
+      "input": "VEGA",
+      "canonicalized": "vega",
+      "description": "All uppercase to lowercase"
+    },
+    {
+      "input": " vega ",
+      "canonicalized": "vega",
+      "description": "Trim whitespace"
+    },
+    {
+      "input": "\tvega\n",
+      "canonicalized": "vega",
+      "description": "Trim tabs and newlines"
+    },
+    {
+      "input": "  VEGA  ",
+      "canonicalized": "vega",
+      "description": "Trim and lowercase"
+    },
+    {
+      "input": "Alpha-1",
+      "canonicalized": "alpha-1",
+      "description": "Mixed case with hyphen"
+    },
+    {
+      "input": " ALPHA-1 ",
+      "canonicalized": "alpha-1",
+      "description": "Trim, lowercase with hyphen"
+    }
+  ]
+}

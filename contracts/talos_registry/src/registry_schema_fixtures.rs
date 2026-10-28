@@ -301,7 +301,7 @@ pub fn parse_talos_fixture(json: &str, file: &str) -> Result<FixtureTalos, Fixtu
         }
         // Extract meta version check
         if let Some(meta) = val.get("meta").and_then(|m| m.get("schema_version")).and_then(|v| v.as_u64()) {
-            if meta != 1 && meta != 2 {
+            if meta != 1 && meta != 2 && meta != 3 {
                 return Err(FixtureError::UnknownVersion {
                     version: meta as u32,
                     file: file.to_string(),

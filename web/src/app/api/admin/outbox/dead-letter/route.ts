@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { verifyAdminKey } from "@/lib/admin-auth";
 import { logger } from "@/lib/logger";
@@ -11,7 +12,7 @@ import { truncateError } from "@/lib/outbox/metrics";
 // privacy-safe triage shape (no payload / dedupeKey / lease fields, sanitized
 // lastError), with strict query validation and a per-eventType backlog
 // summary. Requeue an event with POST /api/admin/outbox/:id/retry.
-export async function GET(request: NextRequest) {
+async function _GET(request: NextRequest) {
   const auth = verifyAdminKey(request);
   if (!auth.ok) return auth.response;
 
@@ -36,3 +37,5 @@ export async function GET(request: NextRequest) {
     return Response.json({ error: "Failed to load dead-letter events" }, { status: 503 });
   }
 }
+
+export const GET = withRequestId(_GET);

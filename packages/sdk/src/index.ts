@@ -7,14 +7,25 @@ export {
 } from "./client.js";
 export type {
   TalosClientOptions,
-  RetryOptions,
   RetryPolicyOptions,
+  RetryOptions,
   ResolvedRetryPolicy,
   ResolvedRetryOptions,
   TalosErrorEvent,
-  WriteOptions,
+  TalosResponseEvent,
   ReadOptions,
+  WriteOptions,
 } from "./client.js";
+
+// ── Pagination ─────────────────────────────────────────────────────
+
+export {
+  AsyncPaginationIterator,
+  createPaginationIterator,
+  PaginationAbortedError,
+  PaginationLimitExceededError,
+} from "./pagination.js";
+export type { AsyncPaginationIteratorOptions } from "./pagination.js";
 
 // ── Idempotency ───────────────────────────────────────────────────
 export {
@@ -22,7 +33,19 @@ export {
   validateIdempotencyKey,
   IdempotencyConflictError,
   isUuidV4,
+  isPayloadConflict,
   IDEMPOTENCY_KEY_MAX_BYTES,
+  // Client-side idempotency helpers
+  InMemoryIdempotencyStore,
+  createIdempotencyStore,
+  withIdempotency,
+  IdempotencyError,
+} from "./idempotency.js";
+export type {
+  IdempotencyRecord,
+  IdempotencyStore,
+  WithIdempotencyOptions,
+  IdempotencyErrorCode,
 } from "./idempotency.js";
 
 // ── Errors (typed hierarchy) ──────────────────────────────────────
@@ -49,16 +72,26 @@ export {
   sanitizeBody,
   redactSecrets,
   snapshotHeaders,
+  parseRateLimit,
   parseRetryAfter,
   parseX402Challenge,
   redactEventPath,
   diagnoseBuyerProof,
   MAX_BODY_BYTES,
 } from "./errors.js";
+export type { RateLimitInfo, HeaderSource } from "./errors.js";
 
 // ── Domain types ──────────────────────────────────────────────────
 
 export * from "./types.js";
+
+// ── Name validation ────────────────────────────────────────────────
+
+export {
+  validateName,
+  canonicalizeName,
+  validateAndCanonicalizeName,
+} from "./name-validation.js";
 
 // ── Stellar helpers ───────────────────────────────────────────────
 
@@ -84,6 +117,13 @@ export {
   TalosEventStream,
   TalosStreamError,
   InMemorySeenStore,
+  TALOS_EVENT_SCHEMA_VERSION,
+  SCHEMA_VERSION_REQUEST_HEADER,
+  SCHEMA_VERSION_RESPONSE_HEADER,
+  SchemaVersionMismatchError,
+  negotiateSchemaVersion,
+  SSE_MAX_FIELD_BYTES,
+  SSE_MAX_DATA_LINES,
 } from "./events.js";
 export type {
   TalosEventType,
@@ -93,13 +133,128 @@ export type {
   TalosStreamCloseHandler,
   TalosEventStreamOptions,
   SeenStore,
+  SchemaVersionNegotiationResult,
 } from "./events.js";
+
+// ── Job Tracker ───────────────────────────────────────────────────
+
+export {
+  JobTracker,
+  trackJob,
+  JobTerminalError,
+  JobFailedError,
+  JobCancelledError,
+  JobTrackAbortedError,
+  JobTrackTimeoutError,
+} from "./job-tracker.js";
+export type {
+  JobProgressDetails,
+  TrackJobEventType,
+  TrackJobEvent,
+  JobTerminalStatus,
+  JobTerminalOutcome,
+  TrackJobOptions,
+} from "./job-tracker.js";
+
+// ── Contract event decoding ───────────────────────────────────────────────────
+
+export {
+  decodeContractEvent,
+  decodeContractEvents,
+  isContractEvent,
+  isContractEventFamily,
+  compareEventCursors,
+  ContractEventError,
+  UnknownContractEventError,
+  MalformedContractEventError,
+  UnsupportedContractVersionError,
+  BUILTIN_EVENT_CATALOG,
+  CATALOG_SPEC_VERSION,
+} from "./contract-events.js";
+export type {
+  ScVal,
+  CatalogFieldDescriptor,
+  CatalogEventDescriptor,
+  ContractEventFamily,
+  EventCatalog,
+  RawContractEvent,
+  EventCursor,
+  DecodedContractEventBase,
+  TalosCrtEvent,
+  TalosCrt2Event,
+  PatUpdEvent,
+  RegUpdEvent,
+  PropCrtEvent,
+  VoteEvent,
+  PropStatEvent,
+  EpCmtEvent,
+  DivClmEvent,
+  DecodedContractEvent,
+  DecodeContractEventOptions,
+  BatchDecodeResult,
+} from "./contract-events.js";
 export {
   FaultType,
   ChaosInjector,
   ChaosInjectedError,
   globalChaosInjector,
+  assertValidFaultConfig,
+  faultEffect,
 } from "./chaos.js";
+export type { FaultConfig, FaultEffect } from "./chaos.js";
+
+// ── Deterministic chaos transport fixtures ────────────────────────────────────
+
+export {
+  CHAOS_SCENARIOS,
+  createSeededRandom,
+  planChaosScenario,
+  replayChaosScenario,
+  buildChaosFixtureBundle,
+  getChaosScenario,
+  assertValidChaosScenario,
+} from "./chaos-fixtures.js";
+export type {
+  ChaosScenarioSpec,
+  ChaosCallOutcome,
+  ChaosCallPlan,
+  ChaosPlan,
+  PlannedFault,
+  ReplayChaosScenarioOptions,
+  ChaosReplayCall,
+  ChaosReplayResult,
+  SerializedChaosScenario,
+  ChaosFixtureBundle,
+} from "./chaos-fixtures.js";
+
+// ── Contract readers ──────────────────────────────────────────────────────
+
+export {
+  RegistryReader,
+  NameServiceReader,
+  TESTNET_RPC_URL,
+  TESTNET_REGISTRY_CONTRACT_ID,
+  TESTNET_NAME_SERVICE_CONTRACT_ID,
+  TESTNET_NETWORK_PASSPHRASE,
+} from "./contracts.js";
+export type {
+  OnChainTalos,
+  ContractPatron,
+  ContractKernel,
+  ContractPulse,
+  ContractVersion,
+  ContractReaderOptions,
+  RegistryReaderOptions,
+  NameServiceReaderOptions,
+} from "./contracts.js";
+
+// ── Contract reader errors ────────────────────────────────────────────────
+
+export {
+  TalosContractError,
+  TalosContractNotFoundError,
+  TalosContractSimulateError,
+} from "./errors.js";
 
 // ── Runtime compatibility matrix ──────────────────────────────────────────────
 
@@ -117,6 +272,22 @@ export type {
   RuntimeMatrixEntry,
   CompatibilityReport,
 } from "./compat.js";
+
+// ── Persistent SeenStore (SQLite-backed) ────────────────────────────────────
+//
+// Node-only (requires node:sqlite ≥22 or better-sqlite3).  Browser consumers
+// should continue using InMemorySeenStore.
+export {
+  SqliteSeenStore,
+  SqliteSeenStoreError,
+  resolveSqliteAdapter,
+} from "./seen-store-sqlite.js";
+export type {
+  SqliteAdapter,
+  SqliteStatement,
+  SqliteSeenStoreOptions,
+  SqliteSeenStoreErrorCode,
+} from "./seen-store-sqlite.js";
 
 // Request signing
 export {
@@ -141,3 +312,22 @@ export type {
   SignerCapabilities,
   StellarKeypairSignerOptions,
 } from "./signing.js";
+
+// ── Generated types provenance ────────────────────────────────────────────────
+export {
+  GENERATED_TYPES_PROVENANCE,
+  GENERATED_TYPES_TOOL,
+  GENERATED_TYPES_TOOL_VERSION,
+  GENERATED_TYPES_SOURCE,
+  GENERATED_TYPES_PACKAGE,
+} from "./provenance.js";
+export type { GeneratedTypesProvenance } from "./provenance.js";
+
+// ── Drift detection ──────────────────────────────────────────────────────────
+export { DriftDetector, DriftError } from "./drift.js";
+export type {
+  DriftMode,
+  UnknownFieldPolicy,
+  DriftViolation,
+  DriftDetectorOptions,
+} from "./drift.js";

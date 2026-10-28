@@ -26,16 +26,49 @@ import type {
   CursorRequestOptions,
   ActivityPage,
   ActivityPageOptions,
+  Proposal,
+  ProposalStatus,
+  ListProposalsParams,
+  MarketplaceSearchResponse,
+  MarketplaceSearchResult,
+  MarketplaceSearchParams,
+  CapabilityFilter,
+  JobPaymentStatus,
+  WebhookSubscription,
+  WebhookSubscriptionPage,
+  CreateWebhookSubscriptionParams,
+  ListWebhookSubscriptionsParams,
+  DeleteWebhookSubscriptionResult,
+  RotateWebhookSecretParams,
+  RotateWebhookSecretResult,
+  FinalizeWebhookSecretRotationResult,
+} from "./types.js";
+
+import {
+  PROPOSAL_STATUSES,
+  isValidProposalStatus,
 } from "./types.js";
 import {
+  AsyncPaginationIterator,
+  createPaginationIterator,
+  PaginationAbortedError,
+  PaginationLimitExceededError,
+  type AsyncPaginationIteratorOptions,
+} from "./pagination.js";
+import {
   TalosAPIError,
+  TalosTransportError,
   TalosPaymentError,
+  TalosTimeoutError,
   classifyTransportError,
   errorFromResponse,
+  parseRateLimit,
   parseX402Challenge,
   parseRetryAfter as parseRetryAfterHeader,
   redactEventPath,
   diagnoseBuyerProof,
+  SENSITIVE_FIELD_PATTERN,
+  type RateLimitInfo,
 } from "./errors.js";
 import {
   generateIdempotencyKey,
@@ -52,10 +85,55 @@ import {
   type RequestSigner,
   type SigningControllerOptions,
 } from "./signing.js";
+import {
+  normalizeNetworkId,
+  resolveNetworkConfig,
+  type ResolvedNetworkConfig,
+} from "./stellar.js";
+import {
+  JobTracker,
+  trackJob,
+  type TrackJobOptions,
+  type TrackJobEvent,
+  type TrackJobEventType,
+  type JobTerminalStatus,
+  type JobTerminalOutcome,
+  JobTerminalError,
+  JobFailedError,
+  JobCancelledError,
+  JobTrackAbortedError,
+  JobTrackTimeoutError,
+} from "./job-tracker.js";
 
 // Legacy import path: `import { TalosAPIError } from "./client.js"`.
 export { TalosAPIError };
 export { generateIdempotencyKey, validateIdempotencyKey, IdempotencyConflictError };
+export {
+  JobTracker,
+  trackJob,
+  JobTerminalError,
+  JobFailedError,
+  JobCancelledError,
+  JobTrackAbortedError,
+  JobTrackTimeoutError,
+};
+export type {
+  TrackJobOptions,
+  TrackJobEvent,
+  TrackJobEventType,
+  JobTerminalStatus,
+  JobTerminalOutcome,
+};
+export type {
+  Proposal,
+  ProposalStatus,
+  ListProposalsParams,
+  MarketplaceSearchResponse,
+  MarketplaceSearchResult,
+  MarketplaceSearchParams,
+  CapabilityFilter,
+};
+export { PROPOSAL_STATUSES, isValidProposalStatus };
 
 /**
  * Status-code driven retry policy (Retry-After aware). Enabled by default
@@ -109,6 +187,135 @@ export type ResolvedRetryPolicy = Readonly<Required<RetryPolicyOptions>>;
 /** Frozen snapshot of the effective typed retry policy. */
 export type ResolvedRetryOptions = Readonly<Required<RetryOptions>>;
 
+// ─── ETag cache ────────────────────────────────────────────────────────────
+
+/**
+ * A single entry in the ETag cache.
+ *
+ * @internal
+ */
+export interface ETagCacheEntry<T = unknown> {
+  /** The ETag value returned by the server (e.g. `"abc123"`). */
+  etag: string;
+  /** The cached response body. */
+  body: T;
+}
+
+/**
+ * Pluggable ETag store interface.
+ *
+ * The default implementation is an LRU-bounded in-memory map. Provide your
+ * own to persist across sessions, share across workers, etc.
+ */
+export interface ETagStore {
+  /** Retrieve a cache entry for the given key, or `undefined` on a miss. */
+  get(key: string): ETagCacheEntry | undefined;
+  /** Store a cache entry. */
+  set(key: string, entry: ETagCacheEntry): void;
+  /** Remove a cache entry (called when the server returns a non-304 / non-2xx on a conditional request). */
+  delete(key: string): void;
+}
+
+/**
+ * Options for the opt-in ETag conditional-GET feature.
+ *
+ * When {@link TalosClientOptions.etagCache} is `true` (or this object),
+ * GET requests will:
+ * 1. Send `If-None-Match: <etag>` when a cached ETag exists for the URL.
+ * 2. Return the cached body transparently on `304 Not Modified`.
+ * 3. Update the cache (ETag + body) on `2xx` responses that carry an `ETag`
+ *    header.
+ *
+ * **Scope**: only GET requests are ever cached. The cache key is
+ * `<url>\n<auth-identity>` so different API keys have isolated caches.
+ *
+ * **Disabled by default** — pass `true` or this object to opt in.
+ */
+export interface ETagCacheOptions {
+  /**
+   * Maximum number of entries in the built-in in-memory LRU store. Entries
+   * are evicted in insertion order once the limit is reached. Default 512.
+   * Ignored when `store` is provided.
+   */
+  maxEntries?: number;
+  /**
+   * Bring-your-own ETag store. When provided the `maxEntries` option is
+   * ignored.
+   */
+  store?: ETagStore;
+  /**
+   * Optional observer invoked each time a 304 response returns the cached
+   * body. Must not throw; invoked fire-and-forget.
+   */
+  onCacheHit?: (event: { url: string; etag: string }) => void;
+}
+
+/**
+ * A simple insertion-order LRU map bounded to `maxEntries`.
+ *
+ * @internal
+ */
+class BoundedETagStore implements ETagStore {
+  private readonly map = new Map<string, ETagCacheEntry>();
+  constructor(private readonly maxEntries: number) {}
+
+  get(key: string): ETagCacheEntry | undefined {
+    return this.map.get(key);
+  }
+
+  set(key: string, entry: ETagCacheEntry): void {
+    // Move to tail on update.
+    if (this.map.has(key)) this.map.delete(key);
+    // Evict the oldest (head) entry when at capacity.
+    if (this.map.size >= this.maxEntries) {
+      const oldest = this.map.keys().next().value;
+      if (oldest !== undefined) this.map.delete(oldest);
+    }
+    this.map.set(key, entry);
+  }
+
+  delete(key: string): void {
+    this.map.delete(key);
+  }
+
+  /** Number of entries currently in the store (for tests/observability). */
+  get size(): number {
+    return this.map.size;
+  }
+}
+
+/**
+ * Options for the opt-in in-flight GET deduplication feature.
+ *
+ * When {@link TalosClientOptions.dedupeInFlightGets} is `true` (or this
+ * object), concurrent calls to the **same** GET URL with the **same**
+ * authorization identity are coalesced into a single fetch. The shared
+ * promise is dropped from the map the moment it settles, so the next call
+ * after settlement always issues a fresh request.
+ *
+ * **AbortSignal semantics**: deduplication does NOT share `AbortSignal`
+ * instances. If the deduped call is aborted, only that caller's
+ * `AbortSignal` fires — the shared network request continues for any other
+ * concurrent callers that did not abort. This is intentional: aborting one
+ * consumer must not cancel a request that other live callers are waiting on.
+ *
+ * **Non-GET requests** are never deduped regardless of this setting.
+ */
+export interface DedupeInFlightGetsOptions {
+  /**
+   * Upper bound on the number of concurrent in-flight GET keys tracked.
+   * Once the map reaches this size, new requests bypass deduplication
+   * rather than evicting existing entries. Default 256.
+   */
+  maxInFlight?: number;
+  /**
+   * Optional observer invoked each time a deduplicated request is served
+   * from a shared in-flight promise (i.e. *not* the first caller). Must not
+   * throw; invoked fire-and-forget.
+   */
+  onDedupe?: (event: { url: string; method: string }) => void;
+}
+
 /**
  * Client configuration. All fields are optional; defaults match the prior
  * behavior for backward compatibility.
@@ -118,6 +325,19 @@ export interface TalosClientOptions {
   baseUrl?: string;
   /** Bearer token (TALOS API key). Adds `Authorization: Bearer <key>` header. */
   apiKey?: string;
+  /**
+   * Optional Stellar network id (`public` / `mainnet`, `testnet`, `futurenet`,
+   * `standalone`, or x402-style `stellar:<id>`). When set (alone or with
+   * {@link networkPassphrase}), validated at construction via
+   * {@link resolveNetworkConfig}. Omitting both preserves prior unbound behavior.
+   */
+  network?: string;
+  /**
+   * Optional Stellar network passphrase. When set with {@link network}, the
+   * pair must agree; when set alone, must be a well-known Stellar passphrase.
+   * Errors are privacy-safe and never echo secrets or raw payloads.
+   */
+  networkPassphrase?: string;
   /**
    * Status-code retry policy (Retry-After aware). Active by default. When only
    * {@link TalosClientOptions.retry} is supplied, this policy is disabled so
@@ -140,8 +360,17 @@ export interface TalosClientOptions {
   /**
    * Optional observer invoked once per failed SDK call (after retries are
    * exhausted). Must not throw; invoked fire-and-forget.
+   *
+   * The event carries the parsed `X-RateLimit-*` counters (when present) so
+   * failure handling can react to quota state without re-reading headers.
    */
   onError?: (event: TalosErrorEvent) => void;
+  /**
+   * Optional observer invoked once for **every** HTTP response (successful or
+   * not, including each retry attempt) with the parsed `X-RateLimit-*`
+   * counters. Must not throw; invoked fire-and-forget.
+   */
+  onResponse?: (event: TalosResponseEvent) => void;
   /** Optional fetch implementation. Defaults to the global `fetch` (resolved lazily). */
   fetch?: typeof fetch;
   /** Optional fault injector for chaos testing. Faults fire before each fetch. */
@@ -149,7 +378,12 @@ export interface TalosClientOptions {
   /** Opt-in request signer. Omitting it preserves the legacy wire format. */
   signer?: RequestSigner;
   signing?: SigningControllerOptions;
+  /** Opt-in in-flight GET deduplication. */
+  dedupeInFlightGets?: boolean | DedupeInFlightGetsOptions;
+  /** Opt-in ETag conditional-GET caching. */
+  etagCache?: boolean | ETagCacheOptions;
 }
+
 
 /**
  * Per-call options for write methods (POST / PATCH).
@@ -197,6 +431,37 @@ export interface ReadOptions {
   timeoutMs?: number;
 }
 
+/**
+ * Options for {@link TalosClient.waitForJobResult}.
+ *
+ * Polls `getJobResult` with exponential backoff + jitter until the job
+ * reaches a terminal state (`completed`, `failed`, or `cancelled`), a
+ * caller-supplied `signal` is aborted, or `timeoutMs` elapses.
+ */
+export interface WaitForJobResultOptions {
+  /**
+   * Initial polling interval in milliseconds. Default 500.
+   * Doubles on each poll up to `maxIntervalMs`.
+   */
+  intervalMs?: number;
+  /**
+   * Upper bound on the polling interval in milliseconds. Default 10_000.
+   * `Retry-After` headers from 429 responses are capped here too.
+   */
+  maxIntervalMs?: number;
+  /**
+   * Overall wall-clock timeout in milliseconds for the entire wait loop.
+   * Surfaces as {@link TalosTimeoutError} when exceeded. No default (waits
+   * indefinitely unless a signal is also provided).
+   */
+  timeoutMs?: number;
+  /**
+   * Caller-supplied AbortSignal. Aborting cancels the next scheduled poll
+   * and rejects the promise with {@link TalosTimeoutError}.
+   */
+  signal?: AbortSignal;
+}
+
 /** Structured event emitted to {@link TalosClientOptions.onError}. */
 export interface TalosErrorEvent {
   error: TalosAPIError;
@@ -204,6 +469,25 @@ export interface TalosErrorEvent {
   method: string;
   attempt: number;
   durationMs: number;
+  /** Parsed `X-RateLimit-*` counters from the failing response, when present. */
+  rateLimit?: RateLimitInfo;
+}
+
+/** Structured event emitted to {@link TalosClientOptions.onResponse}. */
+export interface TalosResponseEvent {
+  path: string;
+  method: string;
+  /** HTTP status code of the response. */
+  status: number;
+  /** 1-based attempt number that produced this response. */
+  attempt: number;
+  /** Wall-clock duration of the attempt in milliseconds. */
+  durationMs: number;
+  /**
+   * Parsed `X-RateLimit-*` counters. `undefined` when the response carried no
+   * (parseable) rate-limit headers.
+   */
+  rateLimit?: RateLimitInfo;
 }
 
 type RequestParams = Record<string, string | number | boolean>;
@@ -435,13 +719,24 @@ function applyJitter(delay: number, jitter: number): number {
  * timeout, idempotency keys, request signing, chaos injection and bounded
  * auto-retry.
  */
+/** Default cap on the number of tracked in-flight GET keys. */
+const DEFAULT_MAX_IN_FLIGHT = 256;
+
 export class TalosClient {
   private baseUrl: string;
   private headers: Record<string, string>;
   private readonly retryPolicy: Required<RetryPolicyOptions>;
   private readonly retry: Required<RetryOptions>;
+  private readonly networkConfig?: ResolvedNetworkConfig;
   private readonly timeoutMs?: number;
   private readonly onError?: (event: TalosErrorEvent) => void;
+  private readonly onResponse?: (event: TalosResponseEvent) => void;
+  /**
+   * Most recent parsed `X-RateLimit-*` snapshot. Updated by every response
+   * that carried counters; responses without them leave the previous value
+   * intact so callers can still read the last quota they observed.
+   */
+  private lastRateLimit?: RateLimitInfo;
   /**
    * Optional fetch override. `undefined` means `globalThis.fetch` is read
    * lazily on every call so `vi.stubGlobal("fetch", …)` keeps working.
@@ -449,6 +744,25 @@ export class TalosClient {
   private readonly fetchOverride?: typeof fetch;
   private readonly chaosInjector?: ChaosInjector;
   private signer?: SigningController;
+  private readonly etagStore: ETagStore | null = null;
+  private readonly onCacheHit?: (event: { url: string; etag: string }) => void;
+
+  // ── In-flight GET deduplication ────────────────────────────
+  /**
+   * Resolved options for the in-flight deduplication feature, or `null`
+   * when the feature is disabled (the default).
+   */
+  private readonly dedupeOptions: Required<DedupeInFlightGetsOptions> | null;
+  /**
+   * Map from dedup key → shared in-flight promise. Entries are removed the
+   * moment the shared promise settles so the next caller always issues a
+   * fresh request.
+   *
+   * Key format: `<METHOD> <URL>\n<auth-identity>`
+   * where auth-identity is either the Authorization header value or `""`.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private readonly inFlightGets: Map<string, Promise<any>>;
 
   constructor(options: TalosClientOptions = {}) {
     // An explicit `retry` config without `retryPolicy` opts out of the
@@ -456,8 +770,13 @@ export class TalosClient {
     const policyEnabled = options.retryPolicy !== undefined || options.retry === undefined;
     this.retryPolicy = resolveRetryPolicy(options.retryPolicy, policyEnabled);
     this.retry = resolveRetryOptions(options.retry);
+    this.networkConfig = resolveNetworkConfig({
+      network: options.network,
+      networkPassphrase: options.networkPassphrase,
+    });
     this.timeoutMs = options.timeoutMs;
     this.onError = options.onError;
+    this.onResponse = options.onResponse;
     this.fetchOverride = options.fetch;
     this.chaosInjector = options.chaosInjector;
     this.baseUrl = (
@@ -468,7 +787,56 @@ export class TalosClient {
       this.headers["Authorization"] = `Bearer ${options.apiKey}`;
     }
     if (options.signer) this.signer = new SigningController(options.signer, options.signing);
+
+    // Resolve in-flight deduplication options.
+    if (options.dedupeInFlightGets) {
+      const raw: DedupeInFlightGetsOptions =
+        typeof options.dedupeInFlightGets === "object" ? options.dedupeInFlightGets : {};
+      const maxInFlight = raw.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT;
+      if (!Number.isInteger(maxInFlight) || maxInFlight < 1) {
+        throw new RangeError("dedupeInFlightGets.maxInFlight must be a positive integer");
+      }
+      if (raw.onDedupe !== undefined && typeof raw.onDedupe !== "function") {
+        throw new TypeError("dedupeInFlightGets.onDedupe must be a function");
+      }
+      this.dedupeOptions = {
+        maxInFlight,
+        onDedupe: raw.onDedupe ?? (() => { /* no-op */ }),
+      };
+    } else {
+      this.dedupeOptions = null;
+    }
+    this.inFlightGets = new Map();
+
+    // Resolve ETag cache options.
+    if (options.etagCache) {
+      const raw = typeof options.etagCache === "object" ? options.etagCache : {};
+      const maxEntries = raw.maxEntries ?? 512;
+      if (!Number.isInteger(maxEntries) || maxEntries < 1) {
+        throw new RangeError("etagCache.maxEntries must be a positive integer");
+      }
+      if (raw.store !== undefined && typeof raw.store !== "object") {
+        throw new TypeError("etagCache.store must be an object");
+      }
+      this.etagStore = raw.store ?? new BoundedETagStore(maxEntries);
+      this.onCacheHit = raw.onCacheHit;
+    } else {
+      this.etagStore = null;
+    }
   }
+
+  /**
+   * Return the configured ETagStore instance, or null if caching is disabled.
+   */
+  getETagStore(): ETagStore | null {
+    return this.etagStore;
+  }
+
+  private etagCacheKey(method: string, url: string): string | null {
+    if (method.toUpperCase() !== "GET" || !this.etagStore) return null;
+    return `${url}\n${this.headers["Authorization"] ?? ""}`;
+  }
+
 
   /**
    * Effective status-code retry policy after validation/normalization.
@@ -487,15 +855,56 @@ export class TalosClient {
   }
 
   /**
+   * Effective Stellar network / passphrase after validation, or `undefined`
+   * when the client was constructed without a network binding.
+   */
+  getNetworkConfig(): ResolvedNetworkConfig | undefined {
+    return this.networkConfig;
+  }
+
+  /**
+   * Counters from the most recent response that carried `X-RateLimit-*`
+   * headers, or `undefined` when none has been observed yet.
+   *
+   * Responses that omit the headers (or send values that cannot be parsed)
+   * leave the previous snapshot in place, so this reflects the last known
+   * quota state. Pair it with `onResponse` when you need per-response
+   * granularity.
+   */
+  getLastRateLimit(): RateLimitInfo | undefined {
+    return this.lastRateLimit;
+  }
+
+  /** Base URL configured on this client. */
+  getBaseUrl(): string {
+    return this.baseUrl;
+  }
+
+  /** The Authorization header value (e.g. "Bearer ..."), or undefined if unauthenticated. */
+  getAuthHeader(): string | undefined {
+    return this.headers["Authorization"];
+  }
+
+  /** Configured chaos injector on this client, if any. */
+  getChaosInjector(): ChaosInjector | undefined {
+    return this.chaosInjector;
+  }
+
+  /** Fetch override configured on this client, if any. */
+  getFetch(): typeof fetch | undefined {
+    return this.fetchOverride;
+  }
+
+  /**
    * Privacy-safe JSON representation. Omits credentials (`Authorization`
    * header, API key) and other internal state so that `JSON.stringify(client)`
    * or structured log sinks never accidentally surface secrets.
    */
   toJSON(): Record<string, unknown> {
-    // Mask Authorization header so the API key is not exposed.
+    // Mask sensitive headers so credential values are not exposed.
     const safeHeaders: Record<string, string> = {};
     for (const [k, v] of Object.entries(this.headers)) {
-      if (k.toLowerCase() === "authorization") {
+      if (SENSITIVE_FIELD_PATTERN.test(k)) {
         safeHeaders[k] = "[REDACTED]";
       } else {
         safeHeaders[k] = v;
@@ -525,9 +934,38 @@ export class TalosClient {
     };
   }
 
+  /**
+   * Custom inspect implementation for Node.js `util.inspect`. Returns the
+   * same redacted view as `toJSON()` so that `console.log(client)` never
+   * surfaces credential values.
+   */
+  [Symbol.for("nodejs.util.inspect.custom")](): Record<string, unknown> {
+    return this.toJSON();
+  }
+
   /** Resolve the fetch implementation per request. Prefer override; fall back to global. */
   private resolveFetch(): typeof fetch {
-    return this.fetchOverride ?? globalThis.fetch;
+    const fetchFn = this.fetchOverride ?? globalThis.fetch;
+    if (typeof fetchFn !== "function") {
+      throw new TalosTransportError(0, "Fetch implementation is unavailable", "", {
+        message: "Fetch implementation is unavailable",
+      });
+    }
+    return fetchFn;
+  }
+
+  /**
+   * Build the deduplication key for a GET request. Returns `null` when the
+   * feature is disabled, the method is not GET, or the in-flight map is
+   * already at capacity.
+   */
+  private dedupeKey(method: string, url: string): string | null {
+    if (!this.dedupeOptions || method !== "GET") return null;
+    if (this.inFlightGets.size >= this.dedupeOptions.maxInFlight) return null;
+    // Include the Authorization identity so different API keys do not share
+    // each other's responses.
+    const auth = this.headers["Authorization"] ?? "";
+    return `GET ${url}\n${auth}`;
   }
 
   // ── Internal helpers ───────────────────────────────────────
@@ -678,6 +1116,30 @@ export class TalosClient {
     return Math.floor(this.retryPolicy.random() * delay);
   }
 
+  private parseRetryAfter(header: string | null): number | null {
+    if (!header) return null;
+    const trimmed = header.trim();
+    if (trimmed.length === 0) {
+      return null;
+    }
+    if (trimmed.length > 1024) {
+      return null;
+    }
+
+    const seconds = Number(trimmed);
+    if (!Number.isNaN(seconds)) {
+      return Math.max(0, seconds * 1000);
+    }
+
+    const parsedDate = Date.parse(trimmed);
+    if (!Number.isNaN(parsedDate)) {
+      const delta = parsedDate - Date.now();
+      return delta > 0 ? delta : 0;
+    }
+
+    return null;
+  }
+
   private wait(delayMs: number, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) {
       return Promise.reject(new Error("Request aborted"));
@@ -707,6 +1169,15 @@ export class TalosClient {
     if (!configured || configured <= 1) return 1;
     if (this.retry.idempotentOnly && !idempotent) return 1;
     return Math.max(1, Math.min(configured, MAX_TYPED_RETRY_ATTEMPTS));
+  }
+
+  /**
+   * Detect whether the client is operating in a legacy environment lacking
+   * modern web features (e.g., `AbortController`, `crypto.randomUUID`).
+   * Returns `true` if the environment is modern, `false` otherwise.
+   */
+  private isModernEnvironment(): boolean {
+    return typeof AbortController !== "undefined" && typeof globalThis.crypto?.randomUUID === "function";
   }
 
   /**
@@ -758,6 +1229,36 @@ export class TalosClient {
     return null;
   }
 
+  /**
+   * Record the parsed `X-RateLimit-*` counters from a response and notify the
+   * `onResponse` observer. Never throws: a misbehaving observer must not be
+   * able to break a request.
+   */
+  private observeResponse(
+    path: string,
+    method: string,
+    status: number,
+    attempt: number,
+    durationMs: number,
+    headers: Headers | Record<string, string> | undefined | null,
+  ): void {
+    const rateLimit = parseRateLimit(headers);
+    if (rateLimit !== undefined) this.lastRateLimit = rateLimit;
+    if (!this.onResponse) return;
+    try {
+      this.onResponse({
+        path: redactEventPath(path),
+        method,
+        status,
+        attempt,
+        durationMs,
+        ...(rateLimit !== undefined ? { rateLimit } : {}),
+      });
+    } catch {
+      // Fire-and-forget.
+    }
+  }
+
   private notifyError(event: TalosErrorEvent): void {
     if (!this.onError) return;
     try {
@@ -792,10 +1293,28 @@ export class TalosClient {
     const callerSignal = signal ?? undefined;
     const method = (requestInit.method ?? "GET").toUpperCase();
     const url = this.buildUrl(path, params);
+    if (!this.isModernEnvironment()) {
+      throw new TalosAPIError(
+        501,
+        "Client requires a modern environment with AbortController and crypto.randomUUID",
+        path,
+      );
+    }
+
 
     const extraHeaders: Record<string, string> = {};
     if (idempotencyKey !== undefined) {
       extraHeaders["Idempotency-Key"] = validateIdempotencyKey(idempotencyKey);
+    }
+
+    // ── ETag conditional-GET ──────────────────────────────────
+    const cacheKey = this.etagCacheKey(method, url);
+    let cachedEntry: ETagCacheEntry | undefined;
+    if (cacheKey !== null && this.etagStore) {
+      cachedEntry = this.etagStore.get(cacheKey);
+      if (cachedEntry) {
+        extraHeaders["If-None-Match"] = cachedEntry.etag;
+      }
     }
 
     // A keyed write is de-duplicated server-side, so it becomes retry-eligible.
@@ -811,6 +1330,7 @@ export class TalosClient {
     let lastError: TalosAPIError | undefined;
     let attempt = 1;
     for (; attempt <= maxAttempts; attempt += 1) {
+      const attemptStartedAt = Date.now();
       if (this.chaosInjector) await this.injectChaos();
 
       const baseHeaders = this.mergeHeaders(requestInit.headers, extraHeaders);
@@ -834,9 +1354,34 @@ export class TalosClient {
           throw classifyTransportError(cause, path);
         }
 
+        // Surface rate-limit counters for every response, including the
+        // attempts that are about to fail and be retried.
+        this.observeResponse(path, method, res.status, attempt, Date.now() - attemptStartedAt, res.headers);
+
+        if (res.status === 304 && cachedEntry) {
+          this.onCacheHit?.({ url, etag: cachedEntry.etag });
+          return cachedEntry.body as T;
+        }
+
         if (res.ok) {
+
           // Malformed JSON on a 2xx intentionally propagates the raw parse error.
-          return (await res.json()) as T;
+          const body = (await res.json()) as T;
+
+          // Update ETag cache if the server returned an ETag header.
+          if (cacheKey !== null && this.etagStore) {
+            const etag = res.headers.get("ETag") ?? res.headers.get("etag");
+            if (etag) {
+              this.etagStore.set(cacheKey, { etag, body });
+            }
+          }
+
+          return body;
+        }
+
+        // Non-2xx, non-304: evict stale cache entry if present.
+        if (cacheKey !== null && this.etagStore) {
+          this.etagStore.delete(cacheKey);
         }
 
         const rawBody = await res.text().catch(() => "");
@@ -874,6 +1419,7 @@ export class TalosClient {
       method,
       attempt: Math.min(attempt, maxAttempts),
       durationMs: Date.now() - startedAt,
+      ...(finalError.rateLimit !== undefined ? { rateLimit: finalError.rateLimit } : {}),
     });
     throw finalError;
   }
@@ -892,12 +1438,44 @@ export class TalosClient {
     return this.requestPage("/api/talos", params);
   }
 
+  /**
+   * Async iterator for paginated Talos list.
+   *
+   * @example
+   * ```ts
+   * for await (const talos of client.paginateTaloses({ limit: 50 })) {
+   *   console.log(talos.name);
+   * }
+   * ```
+   */
+  paginateTaloses(options?: AsyncPaginationIteratorOptions & CursorRequestOptions): AsyncPaginationIterator<Talos> {
+    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
+    return createPaginationIterator<Talos>(
+      (opts) => this.listTaloses({ ...cursorOptions, ...opts }),
+      { maxPages, signal, timeoutMs },
+    );
+  }
+
   async getTalos(id: string, options?: ReadOptions): Promise<TalosDetail> {
     return this.request(`/api/talos/${id}`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
   }
 
   async getTalosMe(options?: ReadOptions): Promise<TalosDetail> {
     return this.request("/api/talos/me", { signal: options?.signal, timeoutMs: options?.timeoutMs });
+  }
+
+  /**
+   * Check whether an agent name is available for registration.
+   */
+  async checkNameAvailability(
+    name: string,
+    options?: ReadOptions,
+  ): Promise<{ available: boolean; reason?: string }> {
+    return this.request("/api/talos/check-name", {
+      params: { name },
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
   }
 
   async createTalos(params: CreateTalosParams): Promise<TalosCreated> {
@@ -928,6 +1506,7 @@ export class TalosClient {
       body: JSON.stringify(params),
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
@@ -947,6 +1526,7 @@ export class TalosClient {
       body: JSON.stringify(params),
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
@@ -966,6 +1546,7 @@ export class TalosClient {
       body: JSON.stringify(params),
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
@@ -1007,6 +1588,24 @@ export class TalosClient {
     return this.requestPage("/api/services", { ...query, signal, timeoutMs });
   }
 
+  /**
+   * Async iterator for paginated service discovery.
+   *
+   * @example
+   * ```ts
+   * for await (const service of client.paginateServices({ category: "Marketing" })) {
+   *   console.log(service.serviceName, service.price);
+   * }
+   * ```
+   */
+  paginateServices(options?: AsyncPaginationIteratorOptions & DiscoverServicesParams): AsyncPaginationIterator<CommerceService> {
+    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
+    return createPaginationIterator<CommerceService>(
+      (opts) => this.discoverServices({ ...cursorOptions, ...opts }),
+      { maxPages, signal, timeoutMs },
+    );
+  }
+
   async purchaseService(
     talosId: string,
     params: PurchaseServiceParams,
@@ -1018,6 +1617,7 @@ export class TalosClient {
       headers: { "X-PAYMENT": params.paymentHeader },
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
@@ -1080,6 +1680,7 @@ export class TalosClient {
       : baseHeaders;
     const timeout = this.acquireTimeoutController(signal, callTimeoutMs);
     const effectiveSignal = timeout?.signal ?? signal;
+    const challengeAttemptStartedAt = Date.now();
     let res: Response;
     try {
       res = await this.resolveFetch()(url, {
@@ -1088,6 +1689,16 @@ export class TalosClient {
         body,
         ...(effectiveSignal ? { signal: effectiveSignal } : {}),
       });
+      // The challenge probe is a response too — surface its counters so a
+      // caller throttling on quota sees every hop of the x402 flow.
+      this.observeResponse(
+        path,
+        "POST",
+        res.status,
+        1,
+        Date.now() - challengeAttemptStartedAt,
+        res.headers,
+      );
     } catch (cause) {
       throw classifyTransportError(cause, path);
     } finally {
@@ -1113,6 +1724,26 @@ export class TalosClient {
           message: "Invalid x402 challenge",
           headers: { "www-authenticate": authHeader },
         });
+      }
+
+      // When the client is bound to a Stellar network, reject challenges that
+      // target a different (or unrecognized) network. Unbound clients skip.
+      if (this.networkConfig && challenge.network) {
+        let challengeNetwork;
+        try {
+          challengeNetwork = normalizeNetworkId(challenge.network);
+        } catch {
+          throw new TalosPaymentError(402, "Invalid x402 challenge", path, {
+            message: "x402 challenge network is not recognized",
+            headers: { "www-authenticate": authHeader },
+          });
+        }
+        if (challengeNetwork !== this.networkConfig.network) {
+          throw new TalosPaymentError(402, "Invalid x402 challenge", path, {
+            message: "x402 challenge network does not match client network",
+            headers: { "www-authenticate": authHeader },
+          });
+        }
       }
 
       emitDiag(challenge, "challenge_parsed");
@@ -1209,6 +1840,7 @@ export class TalosClient {
       body: JSON.stringify(params),
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
@@ -1235,11 +1867,168 @@ export class TalosClient {
       body: JSON.stringify({ result }),
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
   async getJobResult(jobId: string, options?: ReadOptions): Promise<CommerceJob> {
     return this.request(`/api/jobs/${jobId}/result`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
+  }
+
+  /**
+   * Get the on-chain payment finality status for a commerce job.
+   *
+    * @throws `TalosNotFoundError` when the job does not belong to `talosId` or does not exist.
+   */
+  async getJobPaymentStatus(
+    talosId: string,
+    jobId: string,
+    options?: ReadOptions,
+  ): Promise<JobPaymentStatus> {
+    return this.request(
+      `/api/talos/${encodeURIComponent(talosId)}/jobs/${encodeURIComponent(jobId)}/payment-status`,
+      { signal: options?.signal, timeoutMs: options?.timeoutMs },
+    );
+  }
+
+  /**
+   * Poll `getJobResult` with exponential back-off and jitter until the job
+   * reaches a terminal state or the timeout / abort fires.
+   *
+   * Resolution rules:
+   *   - `completed`  → resolves with the {@link CommerceJob}
+   *   - `failed`     → rejects with the {@link CommerceJob} as the `cause`
+   *                    inside a {@link TalosAPIError}
+   *   - `cancelled`  → same as `failed`
+   *   - Timeout      → rejects with {@link TalosTimeoutError}
+   *   - Abort signal → rejects with {@link TalosTimeoutError}
+   *
+   * Network errors from `getJobResult` are surfaced immediately without
+   * retry (the outer retry policy on the client handles those individually).
+   *
+   * After the promise settles (any outcome) **no timers remain running**.
+   *
+   * @param jobId   - Job ID to poll.
+   * @param options - Polling configuration (intervals, timeout, signal).
+   */
+  async waitForJobResult(
+    jobId: string,
+    options: WaitForJobResultOptions = {},
+  ): Promise<CommerceJob> {
+    const {
+      intervalMs = 500,
+      maxIntervalMs = 10_000,
+      timeoutMs,
+      signal: callerSignal,
+    } = options;
+
+    const path = `/api/jobs/${jobId}/result`;
+
+    // Reject immediately if the signal is already aborted.
+    if (callerSignal?.aborted) {
+      throw new TalosTimeoutError(0, "Request aborted", path, {
+        message: "waitForJobResult aborted before starting",
+      });
+    }
+
+    // Optional wall-clock deadline.
+    const deadline = timeoutMs != null ? Date.now() + timeoutMs : null;
+
+    // Abort controller for the overall wait. Linked to both the caller's
+    // signal (if any) and the optional wall-clock deadline timer.
+    const loopController = new AbortController();
+    const loopSignal = loopController.signal;
+
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    let abortReason: "timeout" | "signal" | undefined;
+
+    const onCallerAbort = () => {
+      abortReason = "signal";
+      loopController.abort();
+    };
+
+    if (deadline !== null) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new TalosTimeoutError(0, `Job ${jobId} wait timed out`, path, {
+          message: `waitForJobResult timed out after ${timeoutMs}ms`,
+        });
+      }
+      deadlineTimer = setTimeout(() => {
+        abortReason = "timeout";
+        loopController.abort();
+      }, remaining);
+    }
+
+    callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+
+    try {
+      let currentIntervalMs = Math.max(0, intervalMs);
+
+      while (true) {
+        // Check abort before every poll.
+        if (loopSignal.aborted) {
+          const reason = abortReason === "timeout"
+            ? `waitForJobResult timed out after ${timeoutMs}ms`
+            : "waitForJobResult aborted";
+          throw new TalosTimeoutError(0, reason, path, { message: reason });
+        }
+
+        // Perform a single poll. Respect the loopSignal so an abort during
+        // the network call surfaces promptly.
+        const job = await this.getJobResult(jobId, { signal: loopSignal });
+
+        if (job.status === "completed") {
+          return job;
+        }
+
+        if (job.status === "failed" || job.status === "cancelled") {
+          throw new TalosAPIError(0, `Job ${jobId} ended with status: ${job.status}`, path, {
+            message: `Job ${jobId} ended with status: ${job.status}`,
+            code: "api_error",
+            cause: job,
+          });
+        }
+
+        // Job is still pending. Wait before the next poll.
+        try {
+          await this.wait(currentIntervalMs, loopSignal);
+        } catch (waitErr) {
+          if (loopSignal.aborted) {
+            const reason = abortReason === "timeout"
+              ? `waitForJobResult timed out after ${timeoutMs}ms`
+              : "waitForJobResult aborted";
+            throw new TalosTimeoutError(0, reason, path, { message: reason });
+          }
+          throw waitErr;
+        }
+
+        // Exponential back-off capped at maxIntervalMs, with jitter.
+        currentIntervalMs = Math.min(
+          Math.round(currentIntervalMs * 2 * (0.75 + 0.25 * Math.random())),
+          maxIntervalMs,
+        );
+      }
+    } finally {
+      // Always clear timers and listeners so nothing leaks.
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      callerSignal?.removeEventListener("abort", onCallerAbort);
+    }
+  }
+
+  /**
+   * Follow a purchased job to completion with progress streaming and polling fallback.
+   *
+   * Yields ordered, deduplicated progress events and ends with the final result.
+   * Automatically falls back to backoff polling if the SSE stream disconnects or
+   * encounters errors.
+   *
+   * @param jobId - The job ID to follow.
+   * @param options - Tracking configuration (cancellation signal, timeout, intervals, etc.).
+   * @returns An async iterator and Promise resolving to the final {@link CommerceJob}.
+   */
+  trackJob(jobId: string, options?: TrackJobOptions): JobTracker {
+    return new JobTracker(this, jobId, options);
   }
 
   // ── Leaderboard ────────────────────────────────────────────
@@ -1248,6 +2037,24 @@ export class TalosClient {
     params?: CursorRequestOptions,
   ): Promise<CursorPage<LeaderboardEntry>> {
     return this.requestPage("/api/leaderboard", params);
+  }
+
+  /**
+   * Async iterator for paginated leaderboard.
+   *
+   * @example
+   * ```ts
+   * for await (const entry of client.paginateLeaderboard({ limit: 50 })) {
+   *   console.log(entry.name, entry.totalRevenue);
+   * }
+   * ```
+   */
+  paginateLeaderboard(options?: AsyncPaginationIteratorOptions & CursorRequestOptions): AsyncPaginationIterator<LeaderboardEntry> {
+    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
+    return createPaginationIterator<LeaderboardEntry>(
+      (opts) => this.getLeaderboard({ ...cursorOptions, ...opts }),
+      { maxPages, signal, timeoutMs },
+    );
   }
 
   // ── Playbooks ──────────────────────────────────────────────
@@ -1264,6 +2071,30 @@ export class TalosClient {
     return this.requestPage("/api/playbooks", params);
   }
 
+  /**
+   * Async iterator for paginated playbooks.
+   *
+   * @example
+   * ```ts
+   * for await (const playbook of client.paginatePlaybooks({ category: "Marketing" })) {
+   *   console.log(playbook.title, playbook.price);
+   * }
+   * ```
+   */
+  paginatePlaybooks(options?: AsyncPaginationIteratorOptions & {
+    category?: string;
+    channel?: string;
+    search?: string;
+    sort?: "createdAt" | "price" | "title";
+    direction?: "asc" | "desc";
+  } & CursorRequestOptions): AsyncPaginationIterator<Playbook> {
+    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
+    return createPaginationIterator<Playbook>(
+      (opts) => this.listPlaybooks({ ...cursorOptions, ...opts }),
+      { maxPages, signal, timeoutMs },
+    );
+  }
+
   async createPlaybook(
     params: CreatePlaybookParams,
     options?: WriteOptions,
@@ -1273,6 +2104,168 @@ export class TalosClient {
       body: JSON.stringify(params),
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  // ── Governance Proposals ───────────────────────────────────
+
+  /**
+   * List governance proposals across all Talos agents, newest first.
+   *
+   * Validates `status` client-side against documented values (`pending`, `approved`, `rejected`)
+   * and throws a `RangeError` before sending the request if invalid.
+   */
+  async listProposals(
+    params?: ListProposalsParams,
+    options?: ReadOptions,
+  ): Promise<Proposal[]> {
+    if (params?.status !== undefined && !isValidProposalStatus(params.status)) {
+      throw new RangeError(
+        `Invalid proposal status "${params.status}". Documented values are: ${PROPOSAL_STATUSES.join(", ")}`,
+      );
+    }
+
+    const { signal: paramSignal, timeoutMs: paramTimeout, ...queryRest } = params ?? {};
+    const signal = options?.signal ?? paramSignal;
+    const timeoutMs = options?.timeoutMs ?? paramTimeout;
+
+    const query: RequestParams = {};
+    if (queryRest.status !== undefined) query.status = queryRest.status;
+    if (queryRest.limit !== undefined) query.limit = queryRest.limit;
+
+    return this.request<Proposal[]>("/api/proposals", {
+      params: Object.keys(query).length > 0 ? query : undefined,
+      signal,
+      timeoutMs,
+    });
+  }
+
+  // ── Marketplace ────────────────────────────────────────────
+
+  /**
+   * Search marketplace items and filter by capabilities.
+   *
+   * Formats `capabilities` as JSON-encoded array matching `/api/marketplace/search` query contract.
+   */
+  async searchMarketplace(
+    params?: MarketplaceSearchParams,
+    options?: ReadOptions,
+  ): Promise<MarketplaceSearchResponse> {
+    const { signal: paramSignal, timeoutMs: paramTimeout, ...queryRest } = params ?? {};
+    const signal = options?.signal ?? paramSignal;
+    const timeoutMs = options?.timeoutMs ?? paramTimeout;
+
+    const query: RequestParams = {};
+    if (queryRest.q !== undefined) query.q = queryRest.q;
+    if (queryRest.capabilities !== undefined) {
+      query.capabilities = Array.isArray(queryRest.capabilities)
+        ? JSON.stringify(queryRest.capabilities)
+        : String(queryRest.capabilities);
+    }
+    if (queryRest.limit !== undefined) query.limit = queryRest.limit;
+    if (queryRest.page !== undefined) query.page = queryRest.page;
+
+    return this.request<MarketplaceSearchResponse>("/api/marketplace/search", {
+      params: Object.keys(query).length > 0 ? query : undefined,
+      signal,
+      timeoutMs,
+    });
+  }
+
+  // ── Webhook subscriptions ───────────────────────────────────
+
+  /**
+   * Create a webhook subscription. The `secret` in `params` is sent once to
+   * configure signing and is never echoed back in the response.
+   */
+  async createWebhookSubscription(
+    params: CreateWebhookSubscriptionParams,
+    options?: WriteOptions,
+  ): Promise<WebhookSubscription> {
+    return this.request("/api/webhooks/subscriptions", {
+      method: "POST",
+      body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  async listWebhookSubscriptions(
+    params?: ListWebhookSubscriptionsParams,
+  ): Promise<WebhookSubscriptionPage> {
+    const { signal, timeoutMs, ...query } = params ?? {};
+    return this.request("/api/webhooks/subscriptions", {
+      params: query,
+      signal,
+      timeoutMs,
+    });
+  }
+
+  /**
+   * Async iterator for paginated webhook subscriptions.
+   *
+   * @example
+   * ```ts
+   * for await (const sub of client.paginateWebhookSubscriptions({ active: true })) {
+   *   console.log(sub.id, sub.url);
+   * }
+   * ```
+   */
+  paginateWebhookSubscriptions(
+    options?: AsyncPaginationIteratorOptions & ListWebhookSubscriptionsParams,
+  ): AsyncPaginationIterator<WebhookSubscription> {
+    const { maxPages, signal, timeoutMs, ...cursorOptions } = options ?? {};
+    return createPaginationIterator<WebhookSubscription>(
+      (opts) => this.listWebhookSubscriptions({ ...cursorOptions, ...opts }),
+      { maxPages, signal, timeoutMs },
+    );
+  }
+
+  async deleteWebhookSubscription(
+    id: string,
+    options?: WriteOptions,
+  ): Promise<DeleteWebhookSubscriptionResult> {
+    return this.request(`/api/webhooks/subscriptions/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * Rotate (or finalize the rotation of) a webhook subscription's signing
+   * secret. Pass `{ generate: true }` to have the server generate a secret
+   * (returned once in `result.secret`), `{ secret }` to supply your own, or
+   * `{ finalize: true }` to clear the previous secret early. The resolved
+   * secret is never logged by the SDK; callers that log the result should
+   * route it through {@link redactSecrets} first.
+   */
+  async rotateWebhookSecret(
+    id: string,
+    params: RotateWebhookSecretParams & { finalize: true },
+    options?: WriteOptions,
+  ): Promise<FinalizeWebhookSecretRotationResult>;
+  async rotateWebhookSecret(
+    id: string,
+    params?: RotateWebhookSecretParams,
+    options?: WriteOptions,
+  ): Promise<RotateWebhookSecretResult>;
+  async rotateWebhookSecret(
+    id: string,
+    params: RotateWebhookSecretParams = {},
+    options?: WriteOptions,
+  ): Promise<RotateWebhookSecretResult | FinalizeWebhookSecretRotationResult> {
+    return this.request(`/api/webhooks/subscriptions/${encodeURIComponent(id)}/rotate`, {
+      method: "POST",
+      body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 }
+
+

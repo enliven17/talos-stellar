@@ -7,6 +7,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { NextRequest } from "next/server";
 
 // Mock the database module before importing routes that use it.
 vi.mock("@/db", () => ({
@@ -28,9 +29,8 @@ import { GET as readyGet } from "./ready/route";
 import { GET as liveGet } from "./live/route";
 import { DB_TIMEOUT_MS, STELLAR_TIMEOUT_MS } from "./utils";
 
-// A fake request object for the /api/health route.
-function healthRequest() {
-  return { nextUrl: new URL("http://localhost/api/health") } as any;
+function healthRequest(path = "/api/health") {
+  return new NextRequest(new URL(path, "http://localhost"));
 }
 
 function isIsoString(value: unknown): boolean {
@@ -48,7 +48,7 @@ describe("health probes", () => {
       vi.mocked(db.execute).mockRejectedValue(new Error("db unavailable"));
       mockFetch.mockRejectedValue(new Error("horizon unavailable"));
 
-      const response = await liveGet();
+      const response = await liveGet(healthRequest("/api/health/live"));
       expect(response.status).toBe(200);
 
       const body = await response.json();
@@ -65,8 +65,9 @@ describe("health probes", () => {
     });
 
     it("returns no-store cache header", async () => {
-      const response = await liveGet();
+      const response = await liveGet(healthRequest("/api/health/live"));
       expect(response.headers.get("Cache-Control")).toBe("no-store");
+      expect(response.headers.get("x-request-id")).toBeTruthy();
     });
   });
 
@@ -190,7 +191,7 @@ describe("health probes", () => {
 
       const [healthResponse, readyResponse] = await Promise.all([
         healthGet(healthRequest()),
-        readyGet(),
+        readyGet(healthRequest("/api/health/ready")),
       ]);
 
       expect(readyResponse.status).toBe(healthResponse.status);
@@ -208,7 +209,7 @@ describe("health probes", () => {
       );
       mockFetch.mockResolvedValue(new Response(null, { status: 200 }));
 
-      const pending = readyGet();
+      const pending = readyGet(healthRequest("/api/health/ready"));
       await vi.advanceTimersByTimeAsync(DB_TIMEOUT_MS + 10);
       const response = await pending;
 

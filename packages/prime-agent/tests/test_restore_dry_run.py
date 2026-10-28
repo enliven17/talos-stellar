@@ -18,7 +18,7 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from talos_agent.checkpoint_cli import checkpoint, CheckpointExitCode
+from talos_agent.checkpoint_cli import checkpoint
 from talos_agent.db import LocalDB
 from talos_agent.restore import (
     PreflightError,
@@ -176,6 +176,18 @@ class TestRestoreDryRunBoundary:
         # theme may show as changed (value dark->light) without exposing values
         assert "theme" in cfg.changed_keys or "theme" in cfg.added_keys or cfg.delta != 0
 
+    def test_completion_marker_keys_are_tracked(self, tmp_path: Path):
+        staged = tmp_path / "staged.db"
+        db = LocalDB(path=staged)
+        db.add_completion_marker("job-1", "marker-1", retain_days=7)
+        db.close()
+
+        diff = compute_restore_state_diff(None, staged)
+        markers = next(t for t in diff.tables if t.table == "completion_markers")
+
+        assert markers.key_column == "idempotency_key"
+        assert "marker-1" in markers.added_keys
+
 
 class TestRestoreDryRunRegression:
     @pytest.mark.asyncio
@@ -204,7 +216,8 @@ class TestCheckpointCLIDryRun:
         runner = CliRunner()
         with patch("talos_agent.db.APP_DIR", tmp_path):
             # Seed an active DB under APP_DIR so diff is non-empty
-            from talos_agent.db import get_db_path, LocalDB as LDB
+            from talos_agent.db import LocalDB as LDB
+            from talos_agent.db import get_db_path
 
             db_path = get_db_path("test_agent")
             db = LDB(path=db_path)

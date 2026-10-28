@@ -54,6 +54,20 @@ function quickFetch(body: unknown = { ok: true }): typeof fetch {
   } as Response) as unknown as typeof fetch;
 }
 
+/**
+ * Assert a promise rejects with a TalosTimeoutError while advancing fake
+ * timers concurrently, so the rejection handler is always attached before the
+ * abort fires and the rejection is never left unhandled.
+ */
+async function expectTimeoutRejection(
+  promise: Promise<unknown>,
+  advanceMs: number,
+): Promise<void> {
+  const assertion = expect(promise).rejects.toBeInstanceOf(TalosTimeoutError);
+  await vi.advanceTimersByTimeAsync(advanceMs);
+  await assertion;
+}
+
 // ── suite ──────────────────────────────────────────────────────────────────
 
 describe("Abortable request timeouts (#569)", () => {
@@ -76,10 +90,8 @@ describe("Abortable request timeouts (#569)", () => {
     });
 
     const promise = client.getTalos("abc");
-    // Advance clock past the timeout.
-    await vi.advanceTimersByTimeAsync(200);
-
-    await expect(promise).rejects.toBeInstanceOf(TalosTimeoutError);
+    // Advance clock past the timeout (handler attached first — no unhandled rejection).
+    await expectTimeoutRejection(promise, 200);
   });
 
   it("client-level timeoutMs fires TalosTimeoutError for a hanging POST", async () => {
@@ -94,9 +106,7 @@ describe("Abortable request timeouts (#569)", () => {
       content: "hello",
       channel: "twitter",
     });
-    await vi.advanceTimersByTimeAsync(200);
-
-    await expect(promise).rejects.toBeInstanceOf(TalosTimeoutError);
+    await expectTimeoutRejection(promise, 200);
   });
 
   // ── Positive: per-call WriteOptions.timeoutMs override ────────────────
@@ -115,9 +125,7 @@ describe("Abortable request timeouts (#569)", () => {
       { type: "post", content: "test", channel: "twitter" },
       options,
     );
-    await vi.advanceTimersByTimeAsync(100);
-
-    await expect(promise).rejects.toBeInstanceOf(TalosTimeoutError);
+    await expectTimeoutRejection(promise, 100);
   });
 
   it("WriteOptions.timeoutMs overrides client default for submitJobResult", async () => {
@@ -128,9 +136,7 @@ describe("Abortable request timeouts (#569)", () => {
     });
 
     const promise = client.submitJobResult("job-1", { done: true }, { timeoutMs: 50 });
-    await vi.advanceTimersByTimeAsync(100);
-
-    await expect(promise).rejects.toBeInstanceOf(TalosTimeoutError);
+    await expectTimeoutRejection(promise, 100);
   });
 
   // ── Positive: per-call ReadOptions.timeoutMs override ─────────────────
@@ -144,9 +150,7 @@ describe("Abortable request timeouts (#569)", () => {
 
     const options: ReadOptions = { timeoutMs: 50 };
     const promise = client.getTalos("talos-1", options);
-    await vi.advanceTimersByTimeAsync(100);
-
-    await expect(promise).rejects.toBeInstanceOf(TalosTimeoutError);
+    await expectTimeoutRejection(promise, 100);
   });
 
   it("ReadOptions.timeoutMs on getTalosMe fires TalosTimeoutError", async () => {
@@ -156,9 +160,7 @@ describe("Abortable request timeouts (#569)", () => {
     });
 
     const promise = client.getTalosMe({ timeoutMs: 50 });
-    await vi.advanceTimersByTimeAsync(100);
-
-    await expect(promise).rejects.toBeInstanceOf(TalosTimeoutError);
+    await expectTimeoutRejection(promise, 100);
   });
 
   it("ReadOptions.timeoutMs on getPendingJobs fires TalosTimeoutError", async () => {
@@ -168,9 +170,7 @@ describe("Abortable request timeouts (#569)", () => {
     });
 
     const promise = client.getPendingJobs({ timeoutMs: 50 });
-    await vi.advanceTimersByTimeAsync(100);
-
-    await expect(promise).rejects.toBeInstanceOf(TalosTimeoutError);
+    await expectTimeoutRejection(promise, 100);
   });
 
   // ── Per-call on CursorRequestOptions (list methods) ───────────────────
@@ -182,9 +182,7 @@ describe("Abortable request timeouts (#569)", () => {
     });
 
     const promise = client.listTaloses({ limit: 10, timeoutMs: 50 });
-    await vi.advanceTimersByTimeAsync(100);
-
-    await expect(promise).rejects.toBeInstanceOf(TalosTimeoutError);
+    await expectTimeoutRejection(promise, 100);
   });
 
   it("CursorRequestOptions.timeoutMs on getLeaderboard fires TalosTimeoutError", async () => {
@@ -194,9 +192,7 @@ describe("Abortable request timeouts (#569)", () => {
     });
 
     const promise = client.getLeaderboard({ timeoutMs: 50 });
-    await vi.advanceTimersByTimeAsync(100);
-
-    await expect(promise).rejects.toBeInstanceOf(TalosTimeoutError);
+    await expectTimeoutRejection(promise, 100);
   });
 
   // ── Boundary: timeoutMs: 0 disables the timeout ────────────────────────
@@ -234,9 +230,11 @@ describe("Abortable request timeouts (#569)", () => {
     });
 
     const promise = client.getTalos("talos-1");
+    // Attach the catch handler BEFORE advancing so the rejection is handled.
+    const errPromise = promise.catch((e: unknown) => e);
     await vi.advanceTimersByTimeAsync(100);
 
-    const err = await promise.catch((e: unknown) => e);
+    const err = await errPromise;
     expect(err).toBeInstanceOf(TalosAPIError);
     expect(err).toBeInstanceOf(TalosTimeoutError);
   });
@@ -249,9 +247,10 @@ describe("Abortable request timeouts (#569)", () => {
     });
 
     const promise = client.getTalos("talos-1");
+    const errPromise = promise.catch((e: unknown) => e);
     await vi.advanceTimersByTimeAsync(100);
 
-    const err = await promise.catch((e: unknown) => e);
+    const err = await errPromise;
     expect((err as TalosTimeoutError).code).toBe("timeout_error");
   });
 
@@ -263,9 +262,10 @@ describe("Abortable request timeouts (#569)", () => {
     });
 
     const promise = client.getTalos("talos-1");
+    const errPromise = promise.catch((e: unknown) => e);
     await vi.advanceTimersByTimeAsync(100);
 
-    const err = await promise.catch((e: unknown) => e);
+    const err = await errPromise;
     expect((err as TalosTimeoutError).isRetryable).toBe(true);
   });
 
@@ -280,9 +280,10 @@ describe("Abortable request timeouts (#569)", () => {
     });
 
     const promise = client.getTalos("talos-1");
+    const errPromise = promise.catch((e: unknown) => e);
     await vi.advanceTimersByTimeAsync(100);
 
-    const err = await promise.catch((e: unknown) => e);
+    const err = await errPromise;
     const json = JSON.stringify((err as TalosTimeoutError).toJSON());
     expect(json).not.toContain("super-secret-key");
   });
@@ -348,8 +349,6 @@ describe("Abortable request timeouts (#569)", () => {
     });
 
     const promise = client.getTalos("talos-1", { timeoutMs: 50 });
-    await vi.advanceTimersByTimeAsync(100);
-
-    await expect(promise).rejects.toBeInstanceOf(TalosTimeoutError);
+    await expectTimeoutRejection(promise, 100);
   });
 });

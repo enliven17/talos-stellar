@@ -678,6 +678,12 @@ async def test_legacy_fulfillment_path_remains_backward_compatible(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_api_client_forwards_stable_idempotency_key():
     client = object.__new__(TalosAPIClient)
+    client._settings = MagicMock(
+        a2a_connect_timeout=10.0,
+        a2a_read_timeout=30.0,
+        a2a_write_timeout=10.0,
+        a2a_pool_timeout=5.0,
+    )
     client._post = AsyncMock(
         return_value=MagicMock(
             status_code=200,
@@ -697,10 +703,13 @@ async def test_api_client_forwards_stable_idempotency_key():
         "/api/jobs/job-1/result",
         json={"result": {"answer": "done"}, "fencingToken": 2},
         headers={"Idempotency-Key": "effect-1"},
+        timeout=client._a2a_timeout,
     )
 
 
 def test_database_file_is_owner_only_where_supported(tmp_path: Path):
+    if os.name == "nt":
+        pytest.skip("POSIX file permissions not supported on Windows")
     path = tmp_path / "permissions.db"
     db = LocalDB(path=path)
     mode = os.stat(path).st_mode & 0o777

@@ -8,6 +8,8 @@ export interface BenchmarkConfig {
   varianceThreshold: number;
   memoryThresholdMb: number;
   cpuThresholdPercent: number;
+  performanceBudgetMs?: number;
+  p99ThresholdMs?: number;
   artifactDir: string;
   trendWindow: number;
 }

@@ -376,3 +376,30 @@ index("tls_outbox_events_leaseExpiresAt_idx").using("btree", table.leaseExpiresA
 index("tls_outbox_events_dispatchedAt_idx").using("btree", table.dispatchedAt.asc().nullsLast().op("timestamp_ops")),
 uniqueIndex("tls_outbox_events_eventType_dedupeKey_unique").using("btree", table.eventType.asc().nullsLast().op("text_ops"), table.dedupeKey.asc().nullsLast().op("text_ops")).where(sql`"dedupeKey" IS NOT NULL`),
 ]);
+
+// 0021: contract events indexed from on-chain truth
+export const tlsContractEvents = pgTable("tls_contract_events", {
+	id: text().primaryKey().notNull(),
+	contractId: text("contract_id").notNull(),
+	ledger: integer().notNull(),
+	ledgerClosedAt: timestamp("ledger_closed_at", { precision: 3, mode: 'string' }),
+	txHash: text("tx_hash").notNull(),
+	topic: text().notNull(),
+	topics: jsonb(),
+	data: jsonb(),
+	decodedPayload: jsonb("decoded_payload"),
+	eventVersion: integer("event_version"),
+	createdAt: timestamp("created_at", { precision: 3, mode: 'string' }).default(sql`now()`).notNull(),
+}, (table) => [
+	uniqueIndex("tls_contract_events_id_unique").using("btree", table.id.asc().nullsLast().op("text_ops")),
+	index("tls_contract_events_contract_id_idx").using("btree", table.contractId.asc().nullsLast().op("text_ops")),
+	index("tls_contract_events_ledger_idx").using("btree", table.ledger.asc().nullsLast().op("int4_ops")),
+	index("tls_contract_events_topic_idx").using("btree", table.topic.asc().nullsLast().op("text_ops")),
+	index("tls_contract_events_tx_hash_idx").using("btree", table.txHash.asc().nullsLast().op("text_ops")),
+]);
+
+export const tlsEventCursor = pgTable("tls_event_cursor", {
+	id: text().primaryKey().default('default').notNull(),
+	lastLedger: integer("last_ledger").notNull(),
+	updatedAt: timestamp("updated_at", { precision: 3, mode: 'string' }).default(sql`now()`).notNull(),
+});

@@ -9,6 +9,7 @@
  * actions additionally require an explicit `confirmed: true` in the payload, so
  * a replayed or CSRF-shaped request cannot retire an agent by accident.
  */
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { and, desc, eq, inArray } from "drizzle-orm";
 
@@ -106,7 +107,7 @@ async function loadAgent(id: string) {
 
 // ── GET ──────────────────────────────────────────────────────────────
 
-export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+async function _GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
 
   try {
@@ -196,7 +197,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
 // ── POST ─────────────────────────────────────────────────────────────
 
-export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+async function _POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
 
   try {
@@ -384,3 +385,6 @@ async function hasApprovedProposal(
 
   return row.length > 0;
 }
+
+export const GET = withRequestId(_GET);
+export const POST = withRequestId(_POST);

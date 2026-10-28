@@ -1,0 +1,12 @@
+{
+  "price": 1.5,
+  "currency": "USDC",
+  "payee": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+  "chains": ["stellar:testnet"],
+  "network": "testnet",
+  "assetCode": "USDC",
+  "serviceName": "trend_research",
+  "description": "Research market trends and return a structured report",
+  "fulfillmentMode": "instant",
+  "talosId": "tls_seller_abc123"
+}

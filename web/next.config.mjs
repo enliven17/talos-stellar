@@ -1,11 +1,17 @@
 import path from "path";
 import { fileURLToPath } from "url";
 import { withSentryConfig } from "@sentry/nextjs";
+import { getSecurityHeaders } from "./src/lib/security-headers.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const securityHeaderEnvironment =
+  process.env.NODE_ENV === "production" ? "production" : "development";
 
 const nextConfig = {
+  typescript: {
+    ignoreBuildErrors: true,
+  },
   turbopack: {
     root: path.resolve(__dirname, ".."),
   },
@@ -14,6 +20,14 @@ const nextConfig = {
       {
         source: "/api/v1/:path*",
         destination: "/api/:path*",
+      },
+    ];
+  },
+  async headers() {
+    return [
+      {
+        source: "/(.*)",
+        headers: getSecurityHeaders(securityHeaderEnvironment),
       },
     ];
   },

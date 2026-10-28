@@ -13,10 +13,11 @@ import {
 } from "@/lib/marketplace-sort";
 import { withTraceContext } from "@/lib/tracing";
 import { resolveTalosFromRequest } from "@/lib/auth";
+import { withRequestId } from "@/lib/with-request-id";
 
 
 // GET /api/playbooks — List playbooks (with optional filters and cursor pagination)
-export async function GET(request: NextRequest) {
+async function _GET(request: NextRequest) {
   try {
     const { searchParams } = request.nextUrl;
     const category = searchParams.get("category");
@@ -146,6 +147,8 @@ export async function GET(request: NextRequest) {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withRequestId(_GET);
 
 // POST /api/playbooks — Create a playbook (requires TALOS apiKey)
 async function handlePost(request: NextRequest) {

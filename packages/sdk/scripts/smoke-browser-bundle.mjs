@@ -30,8 +30,15 @@ console.log(`[compat:browser-bundle] bundle size: ${bytes} bytes`);
 const source = readFileSync(BUNDLE_PATH, "utf8");
 
 // Emulate a minimal browser global: only the things the bundle should use.
-const windowLike = {};
+const windowLike = {
+  crypto,
+  TextEncoder,
+  TextDecoder,
+};
 const globalThisLike = windowLike;
+windowLike.window = windowLike;
+windowLike.self = windowLike;
+windowLike.globalThis = globalThisLike;
 const context = {
   // Mimic a browser's globals. We deliberately do NOT expose Buffer, require,
   // __dirname, etc. — this catches accidental Node-only usage in the SDK's
@@ -39,8 +46,8 @@ const context = {
   // is allowed to use; `process` is shimmed inside the bundle itself (see
   // scripts/bundle-browser.mjs) and must NOT be provided here.
   window: windowLike,
-  globalThis: globalThisLike,
   self: windowLike,
+  globalThis: globalThisLike,
   TextEncoder,
   TextDecoder,
   btoa,
@@ -91,6 +98,8 @@ const context = {
   Request,
   Response,
   ReadableStream,
+  TextEncoder,
+  TextDecoder,
 };
 vm.createContext(context);
 
@@ -141,6 +150,22 @@ for (const k of essentials) {
     `TalosSDK is missing required export "${k}" (got ${keys.length} exports)`,
   );
   console.log("  + " + k + " present on TalosSDK");
+}
+
+// Deterministic chaos fixtures: pure JS, no Node globals needed.
+if (typeof sdk.planChaosScenario === "function") {
+  const scenario = sdk.getChaosScenario("always-injects-unit-probability");
+  assert.ok(scenario, "chaos scenario lookup failed in browser bundle");
+  const plan = sdk.planChaosScenario(scenario);
+  assert.equal(plan.calls[0].outcome, "injected-throw", "chaos plan outcome drifted in browser bundle");
+  const drawA = sdk.createSeededRandom(7);
+  const drawB = sdk.createSeededRandom(7);
+  assert.deepEqual(
+    Array.from({ length: 4 }, () => drawA()),
+    Array.from({ length: 4 }, () => drawB()),
+    "seeded PRNG not deterministic in browser bundle",
+  );
+  console.log("  + deterministic chaos fixtures OK (browser bundle)");
 }
 
 console.log("[compat:browser-bundle] ALL CHECKS PASSED");

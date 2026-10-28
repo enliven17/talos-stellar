@@ -12,15 +12,32 @@
  * `process`. Callers pass an already-parsed `package.json` object, so the same
  * rules apply to the real manifest and to synthetic negative fixtures.
  *
+ * The root (`"."`) barrel is checked alongside every declared subpath
+ * (`"./webhooks"`, `"./events"`, `"./errors"`), so a server-only entry point
+ * cannot drift into a single-string shorthand or a CJS/ESM collision.
+ *
  * Error/warning strings only ever contain condition names and package-relative
  * paths — never secrets, tokens, or absolute host paths.
  */
 
-/** Conditions every published dual CJS/ESM build must declare. */
+/** The barrel entry point every consumer gets by default. */
+export const ROOT_SUBPATH = ".";
+
+/** Conditions every published dual CJS/ESM entry point must declare. */
 export const REQUIRED_CONDITIONS = Object.freeze(["import", "require", "types"]);
 
 /** Conditions we understand but do not require. */
 export const OPTIONAL_CONDITIONS = Object.freeze(["browser", "default"]);
+
+/**
+ * Server-only subpaths that must stay importable without the root barrel.
+ *
+ * The barrel pulls in `client.ts` and, through it, `@stellar/stellar-sdk`;
+ * these entries exist so edge and serverless webhook consumers can bundle only
+ * what they need. `tests/subpath-exports.test.ts` proves the modules behind
+ * them stay free of the Stellar SDK.
+ */
+export const REQUIRED_SUBPATHS = Object.freeze(["./webhooks", "./events", "./errors"]);
 
 /**
  * Extensions allowed per leaf condition. `.d.ts` is listed on its own so a
@@ -39,27 +56,29 @@ export function isPlainObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * Flatten a (possibly nested) conditional-exports object into leaf targets.
+/** Quote a subpath the way `package.json` writes it, for message labels. */
+const quoted = (subpath) => JSON.stringify(subpath);
+
+/** Flatten a (possibly nested) conditional-exports object into leaf targets.
  *
  * Node allows nesting such as `{ require: { types, default } }`; we record the
  * full condition path so error messages stay unambiguous.
  */
-function flattenConditions(value, prefix, leaves, errors) {
+function flattenConditions(subpath, value, prefix, leaves, errors) {
   for (const [condition, target] of Object.entries(value)) {
     const conditions = [...prefix, condition];
     if (typeof target === "string") {
       leaves.push({ conditions, target });
     } else if (isPlainObject(target)) {
-      flattenConditions(target, conditions, leaves, errors);
+      flattenConditions(subpath, target, conditions, leaves, errors);
     } else if (Array.isArray(target)) {
       errors.push(
-        `exports["."] target for "${conditions.join(".")}" is an array; ` +
+        `exports[${quoted(subpath)}] target for "${conditions.join(".")}" is an array; ` +
           "this package declares explicit string conditions only",
       );
     } else {
       errors.push(
-        `exports["."] target for "${conditions.join(".")}" must be a string, got ` +
+        `exports[${quoted(subpath)}] target for "${conditions.join(".")}" must be a string, got ` +
           `${target === null ? "null" : typeof target}`,
       );
     }
@@ -67,8 +86,8 @@ function flattenConditions(value, prefix, leaves, errors) {
 }
 
 /** Validate a single target path against the rules for its leaf condition. */
-function validateTargetPath(conditions, target) {
-  const label = `exports["."].${conditions.join(".")}`;
+function validateTargetPath(subpath, conditions, target) {
+  const label = `exports[${quoted(subpath)}].${conditions.join(".")}`;
 
   if (target.includes("\0")) {
     return `${label} must not contain NUL bytes`;
@@ -116,53 +135,44 @@ function runtimeTargetForCondition(leaves, condition) {
 }
 
 /**
- * Validate the root (`"."`) subpath of a `package.json` export map.
+ * Validate one entry of the export map (the root barrel or a subpath).
  *
- * @param {unknown} pkg parsed package.json object
- * @returns {{ ok: boolean, errors: string[], warnings: string[],
- *            targets: Array<{ condition: string, target: string }> }}
+ * @param {string} subpath package-relative subpath key, e.g. "." or "./webhooks"
+ * @param {unknown} spec the value declared for that subpath
+ * @param {string[]} files the package `files` allow-list
  */
-export function validateExportMap(pkg) {
+function validateEntry(subpath, spec, files) {
   const errors = [];
   const warnings = [];
-  const empty = { ok: false, errors, warnings, targets: [] };
 
-  if (!isPlainObject(pkg)) {
-    errors.push("package.json must be a JSON object");
-    return empty;
-  }
-  if (!isPlainObject(pkg.exports)) {
-    errors.push('package.json must declare an "exports" object');
-    return empty;
-  }
-
-  const root = pkg.exports["."];
-  if (root === undefined) {
-    errors.push('exports must declare the "." subpath used by "@talos-protocol/sdk"');
-    return empty;
-  }
-  if (!isPlainObject(root)) {
-    errors.push(
-      `exports["."] must be a conditional object, got ${typeof root} ` +
-        "(a single string cannot describe both the CJS and ESM entry points)",
-    );
-    return empty;
+  if (!isPlainObject(spec)) {
+    return {
+      subpath,
+      ok: false,
+      errors: [
+        `exports[${quoted(subpath)}] must be a conditional object, got ` +
+          `${spec === null ? "null" : typeof spec} ` +
+          "(a single string cannot describe both the CJS and ESM entry points)",
+      ],
+      warnings,
+      targets: [],
+    };
   }
 
   const leaves = [];
-  flattenConditions(root, [], leaves, errors);
+  flattenConditions(subpath, spec, [], leaves, errors);
 
-  const topLevel = Object.keys(root);
+  const topLevel = Object.keys(spec);
   const hasCondition = (name) =>
     topLevel.includes(name) || leaves.some((leaf) => leaf.conditions[0] === name);
   for (const condition of REQUIRED_CONDITIONS) {
     if (!hasCondition(condition)) {
-      errors.push(`exports["."] is missing the required "${condition}" condition`);
+      errors.push(`exports[${quoted(subpath)}] is missing the required "${condition}" condition`);
     }
   }
 
   for (const leaf of leaves) {
-    const error = validateTargetPath(leaf.conditions, leaf.target);
+    const error = validateTargetPath(subpath, leaf.conditions, leaf.target);
     if (error) errors.push(error);
   }
 
@@ -170,27 +180,25 @@ export function validateExportMap(pkg) {
   const requireTarget = runtimeTargetForCondition(leaves, "require");
   if (importTarget && requireTarget && importTarget === requireTarget) {
     errors.push(
-      'exports["."] must resolve "import" (ESM) and "require" (CJS) to different ' +
-        "files so each consumer gets the right module format",
+      `exports[${quoted(subpath)}] must resolve "import" (ESM) and "require" (CJS) to ` +
+        "different files so each consumer gets the right module format",
     );
   }
 
-  const files = Array.isArray(pkg.files) ? pkg.files : [];
-  if (files.length > 0) {
-    for (const leaf of leaves) {
-      if (leaf.conditions[0] === "types") continue;
-      if (!isTargetCoveredByFiles(leaf.target, files)) {
-        errors.push(
-          `export target "${leaf.target}" is not covered by the published "files" list`,
-        );
-      }
+  for (const leaf of leaves) {
+    if (leaf.conditions[0] === "types") continue;
+    if (!isTargetCoveredByFiles(leaf.target, files)) {
+      errors.push(
+        `export target "${leaf.target}" is not covered by the published "files" list`,
+      );
     }
   }
 
   for (const condition of topLevel) {
     if (!REQUIRED_CONDITIONS.includes(condition) && !OPTIONAL_CONDITIONS.includes(condition)) {
       warnings.push(
-        `unrecognised export condition "${condition}" — confirm it is intentional`,
+        `unrecognised export condition "${condition}" on exports[${quoted(subpath)}] ` +
+          "— confirm it is intentional",
       );
     }
   }
@@ -200,21 +208,19 @@ export function validateExportMap(pkg) {
     topLevel.indexOf("browser") > topLevel.indexOf("import")
   ) {
     warnings.push(
-      '"browser" is declared after "import"/"require", so Node and ' +
-        "condition-order-sensitive bundlers will never select it",
+      `"browser" is declared after "import"/"require" on exports[${quoted(subpath)}], so ` +
+        "Node and condition-order-sensitive bundlers will never select it",
     );
   }
   if (topLevel.includes("types") && topLevel[0] !== "types") {
-    warnings.push('"types" is not the first condition; TypeScript tooling recommends listing it first');
-  }
-  if (typeof pkg.main === "string") {
-    const main = pkg.main.replace(/^\.\//, "");
-    if (!leaves.some((leaf) => leaf.target.replace(/^\.\//, "") === main)) {
-      warnings.push(`"main" (${pkg.main}) does not match any declared export target`);
-    }
+    warnings.push(
+      `"types" is not the first condition on exports[${quoted(subpath)}]; ` +
+        "TypeScript tooling recommends listing it first",
+    );
   }
 
   return {
+    subpath,
     ok: errors.length === 0,
     errors,
     warnings,
@@ -222,5 +228,63 @@ export function validateExportMap(pkg) {
       condition: leaf.conditions.join("."),
       target: leaf.target,
     })),
+  };
+}
+
+/**
+ * Validate every entry of a `package.json` export map.
+ *
+ * The result keeps its original shape for the root subpath (`targets` lists the
+ * root's leaves) and adds `subpaths` with the per-entry breakdown so callers can
+ * resolve each entry on disk separately.
+ *
+ * @param {unknown} pkg parsed package.json object
+ * @returns {{ ok: boolean, errors: string[], warnings: string[],
+ *            targets: Array<{ condition: string, target: string }>,
+ *            subpaths: Array<{ subpath: string, ok: boolean, errors: string[],
+ *                              warnings: string[],
+ *                              targets: Array<{ condition: string, target: string }> }> }}
+ */
+export function validateExportMap(pkg) {
+  const empty = { ok: false, errors: [], warnings: [], targets: [], subpaths: [] };
+
+  if (!isPlainObject(pkg)) {
+    return { ...empty, errors: ["package.json must be a JSON object"] };
+  }
+  if (!isPlainObject(pkg.exports)) {
+    return { ...empty, errors: ['package.json must declare an "exports" object'] };
+  }
+
+  const root = pkg.exports[ROOT_SUBPATH];
+  if (root === undefined) {
+    return {
+      ...empty,
+      errors: ['exports must declare the "." subpath used by "@talos-protocol/sdk"'],
+    };
+  }
+
+  const files = Array.isArray(pkg.files) ? pkg.files : [];
+  const subpaths = [validateEntry(ROOT_SUBPATH, root, files)];
+  for (const subpath of Object.keys(pkg.exports)) {
+    if (subpath === ROOT_SUBPATH) continue;
+    subpaths.push(validateEntry(subpath, pkg.exports[subpath], files));
+  }
+
+  if (typeof pkg.main === "string") {
+    const main = pkg.main.replace(/^\.\//, "");
+    const rootTargets = subpaths[0].targets;
+    if (!rootTargets.some((leaf) => leaf.target.replace(/^\.\//, "") === main)) {
+      subpaths[0].warnings.push(
+        `"main" (${pkg.main}) does not match any declared export target`,
+      );
+    }
+  }
+
+  return {
+    ok: subpaths.every((entry) => entry.ok),
+    errors: subpaths.flatMap((entry) => entry.errors),
+    warnings: subpaths.flatMap((entry) => entry.warnings),
+    targets: subpaths[0].targets,
+    subpaths,
   };
 }
