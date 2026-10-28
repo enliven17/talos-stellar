@@ -6,6 +6,74 @@ import { notFound } from "next/navigation";
 import { agentTag } from "@/lib/cache-tags";
 import { TalosDetailClient } from "./detail-client";
 
+const APP_URL = (
+  process.env.NEXT_PUBLIC_APP_URL ?? process.env.APP_URL ?? "https://talos-stellar.vercel.app"
+).replace(/\/$/, "");
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const { id } = await params;
+
+  const talos = await db.query.tlsTalos.findFirst({
+    where: eq(tlsTalos.id, id),
+    columns: {
+      id: true,
+      name: true,
+      category: true,
+      description: true,
+      status: true,
+      deletedAt: true,
+      retiredAt: true,
+    },
+  });
+
+  if (!talos) {
+    return {
+      title: "Agent Not Found — Talos",
+      robots: { index: false, follow: false },
+    };
+  }
+
+  const isInactive =
+    talos.status === "Deleted" ||
+    talos.status === "Retired" ||
+    talos.deletedAt != null ||
+    talos.retiredAt != null;
+
+  const title = `${talos.name} (${talos.category}) — Talos`;
+  const description = talos.description
+    ? talos.description.length > 160
+      ? `${talos.description.slice(0, 157)}...`
+      : talos.description
+    : `${talos.name} is a ${talos.category} agent on the Talos Protocol.`;
+
+  const canonicalUrl = `${APP_URL}/agents/${talos.id}`;
+
+  return {
+    title,
+    description,
+    ...(isInactive && { robots: { index: false, follow: false } }),
+    alternates: {
+      canonical: canonicalUrl,
+    },
+    openGraph: {
+      title,
+      description,
+      url: canonicalUrl,
+      siteName: "Talos",
+      type: "profile",
+    },
+    twitter: {
+      card: "summary",
+      title,
+      description,
+    },
+  };
+}
+
 export default async function TalosDetailPage({
   params,
 }: {
