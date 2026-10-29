@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 set ROOT=%~dp0..\
 cd /d "%ROOT%"
 
@@ -34,5 +34,22 @@ if /I "%COMMAND%"=="reset" (
   exit /b 0
 )
 
-echo Usage: %~nx0 {up^|down^|logs^|reset}
+if /I "%COMMAND%"=="reset-data" (
+  for /f "usebackq delims=" %%i in (`docker compose ps -q postgres 2^>nul`) do set POSTGRES_RUNNING=%%i
+  if "!POSTGRES_RUNNING!"=="" (
+    echo local-stack: the postgres service is not running.
+    echo Start it first with: pnpm stack:up
+    echo Use 'pnpm stack:reset' only if you want to destroy and recreate the stack volumes.
+    exit /b 1
+  )
+  if defined TALOS_RESET_DATABASE_URL (
+    set "DATABASE_URL=!TALOS_RESET_DATABASE_URL!"
+  ) else if not defined DATABASE_URL (
+    set "DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/talos"
+  )
+  pnpm --dir web run db:reset-test-data %2 %3 %4 %5 %6 %7 %8 %9
+  exit /b !ERRORLEVEL!
+)
+
+echo Usage: %~nx0 {up^|down^|logs^|reset^|reset-data}
 exit /b 1

@@ -60,8 +60,8 @@ export function sanitizeRequestId(value: string | null | undefined): string | nu
  * Read the request ID from the incoming request header, or generate a fresh
  * safe ID if absent or malformed. Always returns a non-empty string.
  */
-export function getRequestId(request: Request): string {
-  const incoming = sanitizeRequestId(request.headers.get(REQUEST_ID_HEADER));
+export function getRequestId(request?: Request | null): string {
+  const incoming = request?.headers ? sanitizeRequestId(request.headers.get(REQUEST_ID_HEADER)) : null;
   return incoming ?? randomUUID();
 }
 

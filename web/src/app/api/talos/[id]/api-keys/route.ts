@@ -3,7 +3,8 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsApiKeys } from "@/db/schema";
 import { eq } from "drizzle-orm";
-import { verifyAgentApiKey, generateApiKey } from "@/lib/auth";
+import { generateApiKey } from "@/lib/auth";
+import { authorizeApiKeyManagement } from "@/lib/api-key-owner-auth";
 import { parseBody } from "@/lib/schemas";
 import { createApiKeySchema } from "@/lib/schemas";
 
@@ -15,8 +16,8 @@ async function _GET(
   const { id } = await params;
 
   try {
-    const auth = await verifyAgentApiKey(request, id, ["admin"]);
-    if (!auth.ok) return auth.response;
+    const authorizationError = await authorizeApiKeyManagement(request, id);
+    if (authorizationError) return authorizationError;
 
     const keys = await db
       .select({
@@ -47,8 +48,8 @@ async function _POST(
   const { id } = await params;
 
   try {
-    const auth = await verifyAgentApiKey(request, id, ["admin"]);
-    if (!auth.ok) return auth.response;
+    const authorizationError = await authorizeApiKeyManagement(request, id);
+    if (authorizationError) return authorizationError;
 
     const parsed = await parseBody(request, createApiKeySchema);
     if (parsed.error) return parsed.error;

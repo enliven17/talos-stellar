@@ -4,7 +4,12 @@ import { renderToString } from 'react-dom/server';
 import { AgentAvatar } from '../src/components/agent-avatar';
 import { Header } from '../src/components/header';
 import { SplashScreen } from '../src/components/splash-screen';
+import { ThemeToggle } from '../src/components/theme-toggle';
 import { FinancialProjectionChart } from '../src/components/financial-projection-chart';
+import { ProposalDetail } from '../src/components/proposals/proposal-detail';
+import { buildTimeline, viewFromChain, viewFromDatabase } from '../src/lib/proposal-detail';
+import { databaseRows, proposals, quorums, votes } from '../tests/fixtures/governance/proposals';
+import { JobsClient } from '../src/app/admin/jobs/jobs-client';
 
 // Initialize JSDOM and globals BEFORE importing axe-core
 const dom = new JSDOM('<!DOCTYPE html><html lang="en"><head><title>Test</title></head><body></body></html>');
@@ -82,15 +87,41 @@ async function main() {
     { name: "AgentAvatar", el: React.createElement(AgentAvatar, { name: "TestAgent" }) },
     { name: "Header", el: React.createElement(Header) },
     { name: "SplashScreen", el: React.createElement(SplashScreen) },
-    { name: "FinancialProjectionChart", el: React.createElement(FinancialProjectionChart, { talosId: "123" }) }
+    { name: "ThemeToggle", el: React.createElement(ThemeToggle) },
+    { name: "FinancialProjectionChart", el: React.createElement(FinancialProjectionChart, { talosId: "123" }) },
+    ...(["Active", "Approved", "Rejected", "Executed"] as const).map((status) => {
+      const view = viewFromChain(proposals[status], quorums[status], { name: "Growth Agent", id: "talos-1" });
+      return {
+        name: `ProposalDetail (on-chain, ${status})`,
+        el: React.createElement(ProposalDetail, {
+          view,
+          timeline: buildTimeline(view, 5_000),
+          votes: { kind: "ok", votes, nextHref: "/proposals/7?cursor=abc", firstHref: "/proposals/7", incomplete: false },
+        }),
+      };
+    }),
+    (() => {
+      const view = viewFromDatabase(databaseRows.pending);
+      return {
+        name: "ProposalDetail (database, pending)",
+        el: React.createElement(ProposalDetail, { view, timeline: buildTimeline(view), votes: { kind: "not-applicable" } }),
+      };
+    })(),
+    { name: "JobsClient", el: React.createElement(JobsClient) }
   ];
 
-  for (const comp of components) {
-    console.log(`      Testing ${comp.name}...`);
-    if (!await runCheck(comp.el, false)) {
-      success = false;
+  // Every component is checked under both colour schemes. The scheme is the
+  // same `data-theme` attribute the stylesheet and the theme toggle use.
+  for (const scheme of ["light", "dark"] as const) {
+    document.documentElement.setAttribute("data-theme", scheme);
+    for (const comp of components) {
+      console.log(`      Testing ${comp.name} (${scheme} scheme)...`);
+      if (!await runCheck(comp.el, false)) {
+        success = false;
+      }
     }
   }
+  document.documentElement.removeAttribute("data-theme");
   
   console.log("[2/2] Running negative/boundary testing (inaccessible component)...");
   const badComponent = React.createElement("div", null, 

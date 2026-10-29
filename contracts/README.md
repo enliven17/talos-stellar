@@ -53,14 +53,151 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
   - Snapshot-based vote weight calculation (balances at proposal creation)
   - Quorum and consensus-based proposal approval/rejection
   - Configurable voting periods and thresholds
+  - **Two-step admin transfer** (`propose_admin` / `accept_admin` / `cancel_admin_transfer` / `pending_admin`)
   - **Interface version query** (`version()` — immutable, compile-time constant `(1, 0, 0)`)
   - **Stable interface identifier** (`interface_id()` returns `BytesN<32>` derived from `"TalosGovernance"` + version)
   - **Version negotiation** (`supports_version(maj, min, patch)`)
   - **Capability catalogue** (`interface_features()` returns `Vec<Symbol>`)
-  - Events: `proposal_created`, `vote_cast`, `proposal_status_changed`
+  - Events: `proposal_created`, `vote_cast`, `proposal_status_changed`, `adm_prp`, `adm_acc`, `adm_cnl`
   - **Scoped emergency pause controls** (`pause_domain` / `unpause_domain` / `is_domain_paused`) with domain-scoped pausing, auto-expiration, and event emission
 
-All three contracts include scoped emergency pause controls with domain-based pause/unpause, auto-expiration, and event emission.
+- **Purpose**: Token-weighted governance for the Talos Protocol, enabling proposals, voting with snapshot weight calculation, delegation, quorum progress tracking, dividend distribution snapshots, and emergency pause controls.
+- **Features**:
+  - **Proposal lifecycle management**: `create_proposal` creates active governance proposals bounded by ledger sequences (`start_ledger` to `end_ledger`); `finalize_proposal` transitions expired proposals to `Approved` or `Rejected`; `execute_proposal` transitions approved proposals to `Executed`.
+  - **Token-weighted voting**: Token holders cast votes (`VoteChoice::Approve` or `VoteChoice::Reject`) weighted by Pulse token snapshot balances or checkpoint history at `snapshot_ledger`.
+  - **Vote delegation & checkpoint history**: Token holders can delegate voting power via `delegate`; historical voting power tracked via checkpoints (`get_past_votes`).
+  - **Quorum & consensus thresholds**: Configurable quorum floor (`quorum_threshold`) and approval consensus threshold (`consensus_threshold` in basis points).
+  - **Quorum state monitoring**: Pure read-only query `get_proposal_quorum_state` calculates realtime votes cast, quorum percentage, approval basis points, and consensus progress.
+  - **One-time quorum event**: Emits `qrm_rchd` exactly once when `total_votes >= quorum_threshold`, guarded by an on-chain idempotency sentinel (`DataKey::QuorumReached`).
+  - **Two-step admin transfer** (`propose_admin` / `accept_admin` / `cancel_admin_transfer` / `get_pending_admin`), mirroring the registry's admin rotation with `adm_prp` / `adm_acc` / `adm_cnl` events.
+  - **Dividend distribution snapshots**: Administrator records periodic dividend distribution snapshots (`record_dividend_snapshot`) with sequential epoch numbering, `total_usdc`, `per_token_usdc`, and ledger timestamps; paginated retrieval via `get_dividend_snapshots_page`.
+  - **Scoped emergency pause controls**: Domain-scoped pausing via `pause_domain`, `unpause_domain`, `is_domain_paused`, and `get_domain_pause_status`:
+    - `PAUSE_PROPOSAL_CREATION` (Domain `7`): Guards `create_proposal`.
+    - `PAUSE_GOVERNANCE_VOTING` (Domain `8`): Guards `vote`.
+    - `PAUSE_GOVERNANCE_CONFIG` (Domain `9`): Guards `update_config`, `cache_token_balance`, `touch_all_ttl`, `extend_ttl_batch`, `delegate`, and `update_voting_power`.
+  - **Storage TTL maintenance**: Proactive Soroban storage lifetime extension via `touch_proposal`, `touch_all_ttl`, `extend_ttl_batch`, and health monitoring via `get_storage_health`.
+  - **Interface versioning**: Constant SemVer `version()` returning `(1, 1, 0)`, `interface_id()`, `deployment_manifest_digest()`, `supports_version()`, and `interface_features()`.
+- **Governance Configuration Parameters (`GovernanceConfig`)**:
+  - `quorum_threshold` (`i128`): Minimum total vote weight (`yes_votes + no_votes`) required for a proposal to be valid and capable of approval. Must be `> 0`.
+  - `consensus_threshold` (`i128`): Approval ratio required to pass, in basis points (`1..=10_000`, where `10_000` = 100%). Must be `1..=10000`.
+  - `voting_period_ledgers` (`u32`): Active voting window in Stellar ledgers from proposal creation (`end_ledger = current_ledger + voting_period_ledgers`). Must be `> 0`.
+  - `pulse_token_address` (`Address`): Contract address of the Pulse token used for balance snapshots and vote weight calculation.
+- **Entry Points**:
+  - `initialize(admin, pulse_token_address, quorum_threshold, consensus_threshold, voting_period_ledgers)`: One-time contract initialization (admin auth).
+  - `propose_admin(admin, new_admin)`: Propose a new admin (current admin auth); replaced nominations override earlier ones.
+  - `accept_admin()`: Accept the admin role as the pending nominee (pending admin auth); the previous admin loses all rights immediately.
+  - `cancel_admin_transfer(admin)`: Cancel an in-progress admin transfer (current admin auth).
+  - `get_pending_admin() -> Option<Address>`: Read the pending admin address, if any.
+  - `create_proposal(proposer, talos_id, title, description) -> u32`: Create a new proposal with title and description (proposer auth; rejects empty title/description).
+  - `vote(voter, proposal_id, choice)`: Cast an `Approve` or `Reject` vote weighted by snapshot balance (voter auth; rejects double voting, zero balance, or ended voting period).
+  - `finalize_proposal(proposal_id)`: Finalize status to `Approved` or `Rejected` after voting period ends (permissionless).
+  - `execute_proposal(proposal_id)`: Mark an approved proposal as `Executed` (permissionless).
+  - `get_proposal(proposal_id) -> Option<Proposal>`: Read proposal struct and current tallies.
+  - `get_vote(proposal_id, voter) -> Option<Vote>`: Read a voter's cast vote.
+  - `get_proposal_quorum_state(proposal_id) -> Option<ProposalQuorumState>`: Real-time query of quorum attainment and approval bps.
+  - `delegate(delegator, delegatee)`: Delegate voting weight to another account (delegator auth).
+  - `get_past_votes(account, ledger) -> i128`: Query historical voting weight at a specific ledger.
+  - `update_voting_power(admin, account, new_balance)`: Record voting power checkpoint for an account (admin auth).
+  - `cache_token_balance(admin, ledger, address, balance)`: Pre-cache token balance snapshot (admin auth).
+  - `update_config(admin, config)`: Update governance parameters and thresholds (admin auth).
+  - `get_config() -> Option<GovernanceConfig>`: Read active governance configuration.
+  - `get_admin() -> Option<Address>`: Read administrator address.
+  - `record_dividend_snapshot(admin, talos_id, total_usdc, per_token_usdc) -> u32`: Record a dividend snapshot epoch (admin auth).
+  - `get_dividend_snapshot(epoch) -> Option<DividendSnapshot>`: Read dividend snapshot for an epoch.
+  - `get_dividend_snapshots_page(offset, limit) -> Vec<DividendSnapshot>`: Paginated dividend snapshot query (limit clamped to `50`).
+  - `dividend_epoch_count() -> u32`: Total recorded dividend snapshot epochs.
+  - `next_proposal_id() -> u32`: Current sequential proposal counter.
+  - `touch_proposal(proposal_id) -> bool`: Touch proposal storage key to extend Soroban TTL.
+  - `touch_all_ttl() -> (u32, u32)`: Sweep and renew proposal and admin storage keys (admin auth).
+  - `extend_ttl_batch(limit, min_age, max_age) -> (u32, u32)`: Bounded TTL extension for proposal storage (admin auth).
+  - `get_storage_health() -> (u32, u32, u32, u32, u32)`: Query proposal storage health tuple `(min_age, max_age, keys_below_warn, keys_below_crit, total_keys)`.
+  - `pause_domain(domain_id, duration)` / `unpause_domain(domain_id)`: Emergency pause controls (admin auth).
+  - `is_domain_paused(domain_id) -> bool` / `get_domain_pause_status(domain_id) -> Option<PauseStatus>`: Pause status queries.
+  - `version() -> (u32, u32, u32)`: Returns compile-time `(1, 1, 0)`.
+  - `interface_id() -> BytesN<32>`: Stable 32-byte interface identifier.
+  - `deployment_manifest_digest() -> BytesN<32>`: Manifest digest.
+  - `supports_version(major, minor, patch) -> bool`: SemVer compatibility check.
+  - `interface_features() -> Vec<Symbol>`: Returns `["proposal_lifecycle", "vote_weighting", "config_admin", "interface_query", "quorum_state"]`.
+- **Events**:
+  - `prop_crt`: `(symbol_short!("prop_crt"), proposal_id: u32)` → `EventProposalCreated { proposal_id, talos_id, proposer, snapshot_ledger, end_ledger }`.
+  - `vote`: `(symbol_short!("vote"), proposal_id: u32)` → `EventVoteCast { proposal_id, voter, choice, weight }`.
+  - `prop_stat`: `(symbol_short!("prop_stat"), proposal_id: u32)` → `EventProposalStatusChanged { proposal_id, status }`.
+  - `qrm_rchd`: `(symbol_short!("qrm_rchd"), proposal_id: u32)` → `EventQuorumReached { proposal_id, votes_cast, quorum_threshold, approval_bps }`.
+  - `div_snap`: `(symbol_short!("div_snap"), epoch: u32)` → `EventDividendSnapshotRecorded { epoch, talos_id, total_usdc, per_token_usdc, snapshot_ledger }`.
+  - Pause events: `dom_paus`, `dom_resm`, `dom_expd`.
+  - TTL events: `ttl_touch`, `ttl_batch`, `ttl_warn`.
+- **Errors & Panics**:
+  - `"Already initialized"`: Attempted to initialize more than once.
+  - `"Quorum must be positive"`: Initialization or config update with `quorum_threshold <= 0`.
+  - `"Consensus threshold must be 1..10000 bps"`: Threshold outside `1..=10000` bps.
+  - `"Voting period must be positive"`: Voting period duration set to `0`.
+  - `"Title cannot be empty"` / `"Description cannot be empty"`: Missing proposal metadata.
+  - `"Proposal not found"`: Queried or voted on a non-existent proposal ID.
+  - `"Proposal is not active"`: Voting or finalizing a proposal not in `Active` status.
+  - `"Voting period has ended"`: Vote attempted after `proposal.end_ledger`.
+  - `"Voting period has not ended"`: Finalize attempted before `proposal.end_ledger`.
+  - `"Already voted on this proposal"`: Voter address has already cast a ballot.
+  - `"No voting power"`: Snapshot balance / checkpoint weight at `snapshot_ledger` is `0`.
+  - `"Proposal is not approved"`: Attempted to execute a proposal that was rejected or active.
+  - `"Unauthorized admin"`: Privileged call signed by non-admin address.
+  - `"Balance cannot be negative"` / `"total_usdc cannot be negative"` / `"per_token_usdc cannot be negative"`: Negative amounts rejected.
+  - `"Domain is paused"`: Mutation attempted while the corresponding pause domain is active.
+
+### 4. TalosDividends
+
+- **Purpose**: Pull-based dividend distribution and claim management for the Talos protocol. Allows distributors to commit payout epochs on ledger, enabling patrons to independently claim their allocations without unbounded on-chain loops, with rounding dust accounting and expiry recovery.
+- **Features**:
+  - **Pull-based claim architecture**: Bounded O(1) gas per transaction regardless of patron count. The distributor commits an epoch, and patrons pull their own shares.
+  - **Single claim guarantee**: `Claimed(epoch_id, claimant)` storage key prevents double-claims.
+  - **Proportional role allocation**: Calculates payouts from on-chain patron shares (`creator_share`, `investor_share`, `treasury_share`), enforcing `creator_share + investor_share + treasury_share == 100`.
+  - **Rounding dust tracking**: Computes and stores rounding remainder (`RoundingDust`) on first claim, ensuring exact conservation of funds. Emits `div_dst`.
+  - **Accounting invariant enforcement**: Tracks `claimed_amount <= total_amount` on every claim; prevents over-distribution (`AccountingOverflow`).
+  - **Idempotent epoch commits**: `commit_epoch` prevents duplicate epoch creation with identical `(talos_id, epoch_id)` (`EpochAlreadyExists`).
+  - **Expiry & unclaimed fund recovery**: Unclaimed allocations after epoch expiry can be swept back by the admin via `recover_expired`.
+  - **Interface versioning**: Constant SemVer `version()` returning `(1, 1, 0)`.
+- **Dividend Claim Windows & Expiry Rules**:
+  - `MIN_EXPIRY_SECS`: `3_600` seconds (1 hour). Epoch claim windows cannot be shorter than 1 hour.
+  - `MAX_EXPIRY_SECS`: `31_536_000` seconds (365 days / 1 year). Epoch claim windows cannot exceed 1 year.
+  - `MIN_EPOCH_AMOUNT`: `1` stroop-equivalent unit.
+  - **Active Claim Window (`now <= created_at + expiry_secs`)**: Eligible patrons can call `claim_dividend`. Calls to `recover_expired` are rejected with `ContractError::EpochNotExpired`.
+  - **Expired Claim Window (`now > created_at + expiry_secs`)**: Claims are rejected with `ContractError::EpochExpired`. Admin can call `recover_expired` to sweep remaining unclaimed funds (`total_amount - claimed_amount`).
+  - **Recovered State**: Once recovered, epoch transitions to `EpochStatus::Recovered`. Second recovery attempts return `ContractError::AlreadyRecovered`.
+- **Entry Points**:
+  - `initialize(admin, registry_contract) -> Result<(), ContractError>`: Initialize contract admin and registry contract address.
+  - `commit_epoch(admin, talos_id, total_amount, expiry_secs) -> Result<u64, ContractError>`: Commit a new dividend epoch with total funds and expiry window (admin auth).
+  - `claim_dividend(claimant, talos_id, epoch_id, patron_creator, patron_investor, patron_treasury, creator_share, investor_share, treasury_share) -> Result<i128, ContractError>`: Claim dividend allocation for a patron role (claimant auth).
+  - `recover_expired(admin, talos_id, epoch_id) -> Result<i128, ContractError>`: Sweep unclaimed funds after epoch expiration (admin auth).
+  - `get_epoch(talos_id, epoch_id) -> Option<EpochRecord>`: Query epoch metadata, amounts, and lifecycle status (`Active`, `Expired`, `Recovered`).
+  - `has_claimed(epoch_id, claimant) -> bool`: Query whether a claimant has claimed an epoch.
+  - `get_rounding_dust(talos_id, epoch_id) -> Option<i128>`: Query recorded rounding dust for an epoch.
+  - `next_epoch_id(talos_id) -> u64`: Query next sequential epoch ID for a Talos.
+  - `get_admin() -> Option<Address>`: Query contract admin address.
+  - `get_registry() -> Option<Address>`: Query configured registry contract address.
+  - `version() -> (u32, u32, u32)`: Returns compile-time `(1, 1, 0)`.
+- **Events**:
+  - `ep_cmt`: Topics: `(symbol_short!("ep_cmt"), talos_id: u32)`. Data: `(epoch_id: u64, total: i128, expiry_secs: u64)`. Emitted when an epoch is committed.
+  - `div_clm`: Topics: `(symbol_short!("div_clm"), epoch_id: u64, patron: Address)`. Data: `(talos_id: u32, amount: i128, role: PatronRole)`. Emitted on successful claim.
+  - `div_dst`: Topics: `(symbol_short!("div_dst"), epoch_id: u64)`. Data: `(talos_id: u32, dust: i128)`. Emitted when rounding remainder is recorded on first claim.
+  - `ep_rcv`: Topics: `(symbol_short!("ep_rcv"), epoch_id: u64)`. Data: `(talos_id: u32, recovered: i128, admin: Address)`. Emitted when expired funds are swept.
+- **Errors (`ContractError`)**:
+  - `AlreadyInitialized` (`1`): Contract already initialized.
+  - `NotInitialized` (`2`): Required contract storage missing.
+  - `Unauthorized` (`3`): Caller is not the configured admin.
+  - `EpochNotFound` (`4`): Referenced epoch does not exist.
+  - `AlreadyClaimed` (`5`): Patron has already claimed this epoch.
+  - `EpochExpired` (`6`): Claim window has elapsed.
+  - `EpochNotExpired` (`7`): Recovery attempted before claim window ended.
+  - `ZeroAllocation` (`8`): Computed allocation rounds to zero.
+  - `InvalidEpochParams` (`9`): `total_amount < 1` or `expiry_secs` outside `3_600..=31_536_000`.
+  - `NotAPatron` (`10`): Claimant address does not match creator, investor, or treasury.
+  - `Overflow` (`11`): Checked arithmetic overflow detected.
+  - `EpochAlreadyExists` (`12`): Duplicate epoch commit attempted.
+  - `TalosNotFound` (`13`): Registry returned no Talos for `talos_id`.
+  - `AccountingOverflow` (`14`): Claim would cause `claimed_amount > total_amount`.
+  - `AlreadyRecovered` (`15`): Epoch funds have already been recovered.
+  - `InvalidPatronShares` (`16`): Supplied patron shares do not sum to 100%.
+
+All deployed contracts implement scoped emergency pause controls or pull-based security invariants with explicit authorization, auto-expiration, and event emission.
 
 ## Event Schema Compatibility
 
@@ -74,6 +211,72 @@ indicates a breaking event payload change; minor versions are reserved for
 backwards-compatible additions.
 
 The helper does not alter event names, topics, data fields, or field order.
+
+### 4. TalosDividends
+- **Purpose**: Pro-rata dividend distribution to Mitos token holders
+- **Features**:
+  - Epoch-based revenue commits (`commit_epoch`)
+  - Pro-rata patron claims (`claim_dividend`)
+  - Stale-epoch recovery (`recover_expired`)
+  - **Scoped pause controls** — see [Pause Domains](#pause-domains) below
+  - Events: `ep_commit`, `div_claim`, `ep_recov`, `pc_pause`, `pc_unpause`
+
+### 5. PauseControl (library crate)
+- **Purpose**: Reusable, domain-scoped pause/unpause primitive for any Soroban contract
+- **Features**:
+  - Named pause domains — freeze only the affected functionality
+  - Temporary storage: pause entries expire automatically with Soroban TTL
+  - `check_not_paused(env, domain)` — guard function, returns `Err(DomainPaused)` when paused
+  - `pause_domain(env, domain)` / `unpause_domain(env, domain)` — state setters
+  - `is_paused(env, domain)` — query helper
+  - Events: `pc_pause`, `pc_unpause`
+
+## Pause Domains
+
+`TalosDividends` uses **scoped pause controls** so operators can freeze only the
+affected operation during an incident without halting unrelated functionality.
+
+### Domain table
+
+| Domain symbol | Entry point(s) gated      | When to use                                           |
+|---------------|---------------------------|-------------------------------------------------------|
+| `"commit"`    | `commit_epoch`            | Halt new epoch commits while investigating a faulty epoch |
+| `"claim"`     | `claim_dividend`          | Halt patron claims while an epoch is under review     |
+
+### Pause / unpause flow
+
+```
+# Halt commits only (claims still work)
+stellar contract invoke --id <CONTRACT_ID> -- pause --admin GADMIN... --domain commit
+
+# Halt claims only (commits still work)
+stellar contract invoke --id <CONTRACT_ID> -- pause --admin GADMIN... --domain claim
+
+# Restore after the incident is resolved
+stellar contract invoke --id <CONTRACT_ID> -- unpause --admin GADMIN... --domain claim
+stellar contract invoke --id <CONTRACT_ID> -- unpause --admin GADMIN... --domain commit
+```
+
+Only the contract **admin** may call `pause` or `unpause`.
+
+### Recovery (`recover_expired`) while paused
+
+`recover_expired` is intentionally **not gated** by any pause domain.
+Recovery is a maintenance operation that marks stale epochs as expired and
+keeps persistent storage healthy; blocking it during an incident would worsen
+the situation rather than contain it.
+
+If a complete operational freeze is needed (including recovery), revoke the
+admin key or deploy an upgraded contract rather than relying on pause domains.
+
+### Raising a pause (adding a new domain)
+
+To add a new domain to an existing contract:
+
+1. Define a `const DOMAIN_XYZ: &str = "xyz"` constant.
+2. Add `check_not_paused(&env, Symbol::new(&env, DOMAIN_XYZ))` at the top of the guarded entry point.
+3. Document the domain in this table.
+4. Add unit tests in the contract's test module.
 
 ## Prerequisites
 
@@ -98,6 +301,8 @@ pnpm build
 # Build individual contracts
 pnpm build:registry
 pnpm build:name-service
+cargo build --target wasm32-unknown-unknown --release -p talos-governance
+cargo build --target wasm32-unknown-unknown --release -p talos-dividends
 ```
 
 ## Deployment Guide
@@ -140,6 +345,8 @@ cargo build --target wasm32-unknown-unknown --release
 # Output location:
 # - target/wasm32-unknown-unknown/release/talos_registry.wasm
 # - target/wasm32-unknown-unknown/release/talos_name_service.wasm
+# - target/wasm32-unknown-unknown/release/talos_governance.wasm
+# - target/wasm32-unknown-unknown/release/talos_dividends.wasm
 ```
 
 **Testnet vs Mainnet**: The `--network` flag in deployment commands switches targets:
@@ -182,10 +389,25 @@ Option B: Automated Deployment (recommended)
 ./deploy.sh testnet --source deployer
 
 # The script will:
-# 1. Build contracts in release mode
-# 2. Deploy both contracts
-# 3. Initialize TalosNameService
-# 4. Output environment variable assignments
+# 1. Build all four contracts in release mode
+# 2. Deploy TalosRegistry, TalosNameService, TalosGovernance, TalosDividends
+# 3. Initialize each contract (skips already-initialized contracts — idempotent)
+# 4. Output all four environment variable assignments
+
+# Mainnet deployment requires explicit confirmation (--yes or interactive prompt):
+./deploy.sh mainnet --source deployer --yes
+
+# Optional env vars to auto-initialize governance and dividends:
+#   GOVERNANCE_ADMIN=G...         Admin address for TalosGovernance
+#   GOVERNANCE_PULSE_TOKEN=C...   Pulse token contract address
+#   GOVERNANCE_QUORUM_THRESHOLD=100          (default)
+#   GOVERNANCE_CONSENSUS_THRESHOLD=5100      (default, basis points)
+#   GOVERNANCE_VOTING_PERIOD_LEDGERS=17280   (default, ~1 day)
+#   DIVIDENDS_ADMIN=G...          Admin address for TalosDividends
+#
+# Contract IDs are cached under .deploy-ids/<network>/. Re-running the script
+# skips already-deployed contracts. Delete a cache file to force re-deployment:
+#   rm .deploy-ids/testnet/governance_id
 ```
 
 ### Step 4: Post-Deployment Configuration
@@ -196,10 +418,14 @@ After deployment, save the contract IDs to your configuration:
 # Add to web/.env.local:
 NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT=C...
 NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT=C...
+NEXT_PUBLIC_TALOS_GOVERNANCE_CONTRACT=C...
+NEXT_PUBLIC_TALOS_DIVIDENDS_CONTRACT=C...
 
 # Also add to contracts/.env if deploying from contracts/:
 TALOS_REGISTRY_CONTRACT=C...
 TALOS_NAME_SERVICE_CONTRACT=C...
+TALOS_GOVERNANCE_CONTRACT=C...
+TALOS_DIVIDENDS_CONTRACT=C...
 TALOS_PROTOCOL_WALLET=G...  # Receives protocol fees
 ```
 
@@ -304,6 +530,14 @@ stellar contract invoke --id "$GOVERNANCE_CONTRACT" --network testnet -- version
 | `TALOS_PROTOCOL_WALLET` | G-address | Receives 3% protocol fee on Talos creation | `GA3HQZTKR4U...` |
 | `NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT` | C-address | TalosRegistry contract ID | `CBZLPFCWX4QIZ...` |
 | `NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT` | C-address | TalosNameService contract ID | `CBZLPFCWX4QIZ...` |
+| `NEXT_PUBLIC_TALOS_GOVERNANCE_CONTRACT` | C-address | TalosGovernance contract ID | `CBZLPFCWX4QIZ...` |
+| `NEXT_PUBLIC_TALOS_DIVIDENDS_CONTRACT` | C-address | TalosDividends contract ID | `CBZLPFCWX4QIZ...` |
+| `GOVERNANCE_ADMIN` | G-address | Admin address for TalosGovernance `initialize` | `GBZLPFCWX4QIZ...` |
+| `GOVERNANCE_PULSE_TOKEN` | C-address | Pulse token contract for governance voting weight | `CBZLPFCWX4QIZ...` |
+| `GOVERNANCE_QUORUM_THRESHOLD` | integer | Minimum vote weight for quorum (default: `100`) | `100` |
+| `GOVERNANCE_CONSENSUS_THRESHOLD` | integer | Approval basis points to pass (default: `5100`) | `5100` |
+| `GOVERNANCE_VOTING_PERIOD_LEDGERS` | integer | Voting window in ledgers (default: `17280` ≈ 1 day) | `17280` |
+| `DIVIDENDS_ADMIN` | G-address | Admin address for TalosDividends `initialize` | `GBZLPFCWX4QIZ...` |
 
 ### Deployment Checklist
 
@@ -316,8 +550,10 @@ stellar contract invoke --id "$GOVERNANCE_CONTRACT" --network testnet -- version
 - [ ] WASM files exist: `ls target/wasm32-unknown-unknown/release/*.wasm`
 - [ ] TalosRegistry deployed and `version()` returns `[1, 1, 0]`
 - [ ] TalosNameService initialized: `stellar contract invoke --id <NAME_SERVICE_ID> -- is_name_available --name test`
-- [ ] Contract IDs added to `.env.local`
-- [ ] Timelock config set on both contracts (if desired)
+- [ ] TalosGovernance deployed (initialized if `GOVERNANCE_ADMIN` + `GOVERNANCE_PULSE_TOKEN` env vars set)
+- [ ] TalosDividends deployed (initialized if `DIVIDENDS_ADMIN` env var set)
+- [ ] All four contract IDs added to `.env.local`
+- [ ] Timelock config set on registry/name-service contracts (if desired)
 
 ### Troubleshooting
 
@@ -336,6 +572,8 @@ stellar contract invoke --id "$GOVERNANCE_CONTRACT" --network testnet -- version
 | "Domain locked by admin; guardians cannot modify" | A guardian tried to override an admin-set pause | Only the admin can change or lift it — call `unpause` with the admin key |
 
 ## Invoke Examples
+
+### TalosRegistry & TalosNameService
 
 ```bash
 # Create a Talos
@@ -374,6 +612,164 @@ soroban contract invoke \
   --name "myagent"
 ```
 
+### TalosGovernance
+
+```bash
+# Initialize TalosGovernance
+stellar contract invoke \
+  --id <GOVERNANCE_CONTRACT_ID> \
+  --source admin-key \
+  --network testnet \
+  -- \
+  initialize \
+  --admin <ADMIN_STELLAR_ADDRESS> \
+  --pulse_token_address <PULSE_TOKEN_CONTRACT_ID> \
+  --quorum_threshold 1000000000 \
+  --consensus_threshold 6000 \
+  --voting_period_ledgers 17280
+
+# Create a governance proposal
+stellar contract invoke \
+  --id <GOVERNANCE_CONTRACT_ID> \
+  --source proposer-key \
+  --network testnet \
+  -- \
+  create_proposal \
+  --proposer <PROPOSER_STELLAR_ADDRESS> \
+  --talos_id 1 \
+  --title "Upgrade GTM Strategy" \
+  --description "Allocate additional funds for GTM campaigns"
+
+# Cast a vote on a proposal (choice: Approve or Reject)
+stellar contract invoke \
+  --id <GOVERNANCE_CONTRACT_ID> \
+  --source voter-key \
+  --network testnet \
+  -- \
+  vote \
+  --voter <VOTER_STELLAR_ADDRESS> \
+  --proposal_id 1 \
+  --choice '{"Approve": {}}'
+
+# Query real-time proposal quorum progress and consensus state
+stellar contract invoke \
+  --id <GOVERNANCE_CONTRACT_ID> \
+  --network testnet \
+  -- \
+  get_proposal_quorum_state \
+  --proposal_id 1
+
+# Finalize proposal status after voting period ends
+stellar contract invoke \
+  --id <GOVERNANCE_CONTRACT_ID> \
+  --network testnet \
+  -- \
+  finalize_proposal \
+  --proposal_id 1
+
+# Execute an approved proposal
+stellar contract invoke \
+  --id <GOVERNANCE_CONTRACT_ID> \
+  --network testnet \
+  -- \
+  execute_proposal \
+  --proposal_id 1
+
+# Record a dividend snapshot epoch (admin only)
+stellar contract invoke \
+  --id <GOVERNANCE_CONTRACT_ID> \
+  --source admin-key \
+  --network testnet \
+  -- \
+  record_dividend_snapshot \
+  --admin <ADMIN_STELLAR_ADDRESS> \
+  --talos_id 1 \
+  --total_usdc 50000000000 \
+  --per_token_usdc 50000
+
+# Delegate voting power
+stellar contract invoke \
+  --id <GOVERNANCE_CONTRACT_ID> \
+  --source delegator-key \
+  --network testnet \
+  -- \
+  delegate \
+  --delegator <DELEGATOR_STELLAR_ADDRESS> \
+  --delegatee <DELEGATEE_STELLAR_ADDRESS>
+```
+
+### TalosDividends
+
+```bash
+# Initialize TalosDividends
+stellar contract invoke \
+  --id <DIVIDENDS_CONTRACT_ID> \
+  --source deployer-key \
+  --network testnet \
+  -- \
+  initialize \
+  --admin <ADMIN_STELLAR_ADDRESS> \
+  --registry_contract <REGISTRY_CONTRACT_ID>
+
+# Commit a distribution epoch (min 1 hour = 3600s, max 1 year = 31536000s)
+stellar contract invoke \
+  --id <DIVIDENDS_CONTRACT_ID> \
+  --source admin-key \
+  --network testnet \
+  -- \
+  commit_epoch \
+  --admin <ADMIN_STELLAR_ADDRESS> \
+  --talos_id 1 \
+  --total_amount 10000000000 \
+  --expiry_secs 2592000
+
+# Claim dividend allocation for a patron role
+stellar contract invoke \
+  --id <DIVIDENDS_CONTRACT_ID> \
+  --source claimant-key \
+  --network testnet \
+  -- \
+  claim_dividend \
+  --claimant <CLAIMANT_STELLAR_ADDRESS> \
+  --talos_id 1 \
+  --epoch_id 1 \
+  --patron_creator <CREATOR_STELLAR_ADDRESS> \
+  --patron_investor <INVESTOR_STELLAR_ADDRESS> \
+  --patron_treasury <TREASURY_STELLAR_ADDRESS> \
+  --creator_share 60 \
+  --investor_share 25 \
+  --treasury_share 15
+
+# Query epoch details and claimed progress
+stellar contract invoke \
+  --id <DIVIDENDS_CONTRACT_ID> \
+  --network testnet \
+  -- \
+  get_epoch \
+  --talos_id 1 \
+  --epoch_id 1
+
+# Check if an address has claimed for an epoch
+stellar contract invoke \
+  --id <DIVIDENDS_CONTRACT_ID> \
+  --network testnet \
+  -- \
+  has_claimed \
+  --epoch_id 1 \
+  --claimant <CLAIMANT_STELLAR_ADDRESS>
+
+# Recover unclaimed funds after epoch expiration (admin only)
+stellar contract invoke \
+  --id <DIVIDENDS_CONTRACT_ID> \
+  --source admin-key \
+  --network testnet \
+  -- \
+  recover_expired \
+  --admin <ADMIN_STELLAR_ADDRESS> \
+  --talos_id 1 \
+  --epoch_id 1
+```
+
 ## Project Structure
 
 ```
@@ -396,6 +792,10 @@ contracts/
 │   ├── Cargo.toml
 │   └── src/
 │       └── lib.rs                  # TalosGovernance contract
+├── talos_dividends/
+│   ├── Cargo.toml
+│   └── src/
+│       └── lib.rs                  # TalosDividends contract
 └── ttl_manager/
     ├── Cargo.toml
     └── src/
@@ -404,7 +804,7 @@ contracts/
 
 ## Event Schema
 
-Both contracts emit typed Soroban events on every meaningful state change. Off-chain consumers (dashboards, indexers, Stellar Expert) can subscribe using topic filters.
+All deployed contracts emit typed Soroban events on every meaningful state change. Off-chain consumers (dashboards, indexers, Stellar Expert) can subscribe using topic filters.
 
 ### TalosRegistry
 
@@ -475,6 +875,60 @@ Both contracts emit typed Soroban events on every meaningful state change. Off-c
 (symbol_short!("tl_sch"),)
 ```
 
+### TalosGovernance
+
+| Event | Topics | Data | Emitted on |
+|-------|--------|------|-----------|
+| `prop_crt` | `(symbol_short!("prop_crt"), proposal_id: u32)` | `EventProposalCreated { proposal_id, talos_id, proposer, snapshot_ledger, end_ledger }` | `create_proposal` success |
+| `vote` | `(symbol_short!("vote"), proposal_id: u32)` | `EventVoteCast { proposal_id, voter, choice, weight }` | `vote` success |
+| `prop_stat` | `(symbol_short!("prop_stat"), proposal_id: u32)` | `EventProposalStatusChanged { proposal_id, status }` | `finalize_proposal`, `execute_proposal`, or quorum state transition |
+| `qrm_rchd` | `(symbol_short!("qrm_rchd"), proposal_id: u32)` | `EventQuorumReached { proposal_id, votes_cast, quorum_threshold, approval_bps }` | Emitted once when proposal reaches quorum |
+| `div_snap` | `(symbol_short!("div_snap"), epoch: u32)` | `EventDividendSnapshotRecorded { epoch, talos_id, total_usdc, per_token_usdc, snapshot_ledger }` | `record_dividend_snapshot` success |
+| `dom_paus` | `(symbol_short!("dom_paus"), by: Address)` | `(domain_id: u32, duration: u64)` | `pause_domain` success |
+| `dom_resm` | `(symbol_short!("dom_resm"), by: Address)` | `(domain_id: u32,)` | `unpause_domain` success |
+| `dom_expd` | `(symbol_short!("dom_expd"),)` | `(domain_id: u32,)` | Auto-expiry after duration elapses |
+
+**Filtering examples**
+
+```rust
+// All proposals created for a specific Talos ID (scan prop_crt data)
+(symbol_short!("prop_crt"),)
+
+// All votes cast on proposal 1 — filter on topics[1] == proposal_id
+(symbol_short!("vote"), 1u32)
+
+// Quorum reached for proposal 1 — filter on topics == ("qrm_rchd", 1)
+(symbol_short!("qrm_rchd"), 1u32)
+
+// Dividend snapshot for epoch 1 — filter on topics == ("div_snap", 1)
+(symbol_short!("div_snap"), 1u32)
+```
+
+### TalosDividends
+
+| Event | Topics | Data | Emitted on |
+|-------|--------|------|-----------|
+| `ep_cmt` | `(symbol_short!("ep_cmt"), talos_id: u32)` | `(epoch_id: u64, total: i128, expiry_secs: u64)` | `commit_epoch` success |
+| `div_clm` | `(symbol_short!("div_clm"), epoch_id: u64, patron: Address)` | `(talos_id: u32, amount: i128, role: PatronRole)` | `claim_dividend` success |
+| `div_dst` | `(symbol_short!("div_dst"), epoch_id: u64)` | `(talos_id: u32, dust: i128)` | Rounding remainder recorded on first claim |
+| `ep_rcv` | `(symbol_short!("ep_rcv"), epoch_id: u64)` | `(talos_id: u32, recovered: i128, admin: Address)` | `recover_expired` success |
+
+**Filtering examples**
+
+```rust
+// All epochs committed for Talos 1 — filter on topics[1] == talos_id
+(symbol_short!("ep_cmt"), 1u32)
+
+// Claims for epoch 1 — filter on topics[1] == epoch_id
+(symbol_short!("div_clm"), 1u64)
+
+// Specific patron claim for epoch 1 — filter on topics == ("div_clm", epoch_id, patron)
+(symbol_short!("div_clm"), 1u64, patron_address)
+
+// Expired epoch funds recovery for epoch 1
+(symbol_short!("ep_rcv"), 1u64)
+```
+
 ### Design rationale
 
 - The first topic is always the event-type symbol so generic listeners can dispatch on it.
@@ -483,7 +937,7 @@ Both contracts emit typed Soroban events on every meaningful state change. Off-c
 
 ## Two-step Admin Transfer
 
-The protocol wallet (admin) of `TalosRegistry` can only be changed through a two-step handover. A direct one-call replacement is intentionally impossible to prevent permanent loss of control due to a typo or a compromised key.
+The admin of `TalosRegistry` and `TalosGovernance` can only be changed through a two-step handover. A direct one-call replacement is intentionally impossible to prevent permanent loss of control due to a typo or a compromised key.
 
 ### Flow
 
@@ -492,7 +946,7 @@ current admin                      new admin
       │                                │
       │── propose_admin(new_admin) ──► │  (PendingAdmin written; adm_prp emitted)
       │                                │
-      │                 accept_admin() ◄─── │  (ProtocolWallet updated; PendingAdmin removed; adm_acc emitted)
+      │                 accept_admin() ◄─── │  (Admin/ProtocolWallet updated; PendingAdmin removed; adm_acc emitted)
       │                                │
 ```
 
@@ -500,19 +954,19 @@ current admin                      new admin
 
 | Entry-point | Auth required | Effect |
 |-------------|--------------|--------|
-| `propose_admin(new_admin)` | Current admin | Writes `new_admin` to `PendingAdmin` storage. Replaces any existing pending nomination silently. Blocked when `min_delay > 0` — use `schedule_action(ProposeAdmin(...))` instead. |
-| `accept_admin()` | Pending admin | Moves `PendingAdmin` → `ProtocolWallet`; removes `PendingAdmin`. |
+| `propose_admin(new_admin)` | Current admin | Writes `new_admin` to `PendingAdmin` storage. Replaces any existing pending nomination silently. Blocked when `min_delay > 0` in Registry (use timelock) or when `PAUSE_GOVERNANCE_CONFIG` is paused in Governance. |
+| `accept_admin()` | Pending admin | Moves `PendingAdmin` → active admin (`ProtocolWallet` in Registry, `Admin` in Governance); removes `PendingAdmin`. |
 | `cancel_admin_transfer()` | Current admin | Removes `PendingAdmin`; nomination is voided. |
 | `pending_admin()` | None (read-only) | Returns `Option<Address>` — `Some` if a transfer is in progress, `None` otherwise. |
 
 ### Storage compatibility
 
-`PendingAdmin` is a new persistent storage key added to the `DataKey` enum. Existing deployed instances that have never called `propose_admin` will simply have no entry for this key — `pending_admin()` returns `None` and no behaviour changes. The key is written only by `propose_admin` and removed by `accept_admin` or `cancel_admin_transfer`. There are no migrations required.
+`PendingAdmin` is a persistent storage key in the `DataKey` enum. Existing deployed instances that have never called `propose_admin` have no entry for this key — `pending_admin()` returns `None` and no behaviour changes. The key is written only by `propose_admin` and removed by `accept_admin` or `cancel_admin_transfer`. There are no migrations required.
 
 | Key | Type | Lifecycle |
 |-----|------|-----------|
-| `ProtocolWallet` | `Address` | Set by `initialize`; updated by `accept_admin`. Never removed. |
-| `PendingAdmin` *(new)* | `Address` | Written by `propose_admin`; removed by `accept_admin` or `cancel_admin_transfer`. Absent when no transfer is in progress. |
+| `ProtocolWallet` / `Admin` | `Address` | Set by `initialize`; updated by `accept_admin`. Never removed. |
+| `PendingAdmin` | `Address` | Written by `propose_admin`; removed by `accept_admin` or `cancel_admin_transfer`. Absent when no transfer is in progress. |
 
 ### CLI example
 
@@ -786,7 +1240,7 @@ The pause control logic lives in a shared library crate (`pause-control`) used b
 | Domain | ID | Guarded functions |
 |--------|----|-------------------|
 | `PAUSE_NAME_REGISTRATION` | 5 | `register_name` |
-| `PAUSE_NAME_CONFIG` | 6 | `set_admin`, `set_registry_contract`, `set_timelock_config`, `schedule_action`, `cancel_action`, `touch_all_ttl`, `extend_ttl_batch` |
+| `PAUSE_NAME_CONFIG` | 6 | `set_admin`, `set_registry_contract`, `set_timelock_config`, `schedule_action`, `cancel_action`, `touch_all_ttl` (legacy), `extend_ttl_batch` |
 
 #### TalosGovernance
 
@@ -794,7 +1248,7 @@ The pause control logic lives in a shared library crate (`pause-control`) used b
 |--------|----|-------------------|
 | `PAUSE_PROPOSAL_CREATION` | 7 | `create_proposal` |
 | `PAUSE_GOVERNANCE_VOTING` | 8 | `vote` |
-| `PAUSE_GOVERNANCE_CONFIG` | 9 | `update_config`, `cache_token_balance`, `touch_all_ttl`, `extend_ttl_batch` |
+| `PAUSE_GOVERNANCE_CONFIG` | 9 | `update_config`, `propose_admin`, `cache_token_balance`, `touch_all_ttl`, `extend_ttl_batch` |
 
 ### Entry-points
 

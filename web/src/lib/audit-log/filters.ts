@@ -33,7 +33,7 @@ export interface AuditLogFilters {
   to?: string;
   /** Exclusive createdAt cursor (ISO-8601), paginating newest-first. */
   cursor?: string;
-  limit: number;
+  limit?: number;
 }
 
 export type FilterParseOk = { ok: true; filters: AuditLogFilters };

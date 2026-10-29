@@ -12,10 +12,13 @@ doctest = false
 soroban-sdk = { workspace = true }
 ttl-manager = { path = "../ttl_manager" }
 pause-control = { path = "../pause_control" }
+admin-controls = { path = "../admin_controls" }
 
 [dev-dependencies]
 talos-registry = { path = "../talos_registry" }
 proptest = "1.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

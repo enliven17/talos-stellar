@@ -179,16 +179,21 @@ class ConcurrencyController {
 
 class RetryManager {
   private config: OperationConfig;
+  private cancellationHandler?: CancellationHandler;
 
-  constructor(config: OperationConfig = DEFAULT_OPERATION_CONFIG) {
+  constructor(
+    config: OperationConfig = DEFAULT_OPERATION_CONFIG,
+    cancellationHandler?: CancellationHandler
+  ) {
     this.config = config;
+    this.cancellationHandler = cancellationHandler;
   }
 
   /**
    * Determine if an operation should be retried
    */
   shouldRetry(attempt: number, error: Error): boolean {
-    if (attempt >= this.config.maxRetries) return false;
+    if (attempt > this.config.maxRetries) return false;
 
     // Don't retry on certain error types
     const nonRetryableErrors = [
@@ -196,6 +201,7 @@ class RetryManager {
       "MISSING_REQUIRED_FIELDS",
       "INVALID_SIGNATURE",
       "DUPLICATE_REQUEST",
+      "OPERATION_CANCELLED",
     ];
 
     if (nonRetryableErrors.some(code => error.message.includes(code))) {
@@ -221,7 +227,12 @@ class RetryManager {
   ): Promise<T> {
     let lastError: Error | undefined;
 
-    for (let attempt = 1; attempt <= this.config.maxRetries; attempt++) {
+    for (let attempt = 1; attempt <= this.config.maxRetries + 1; attempt++) {
+      if (this.cancellationHandler?.isCancelled(context.operationId)) {
+        context.state = "cancelled";
+        throw new Error("OPERATION_CANCELLED");
+      }
+
       context.attempt = attempt;
       context.lastAttemptAt = new Date().toISOString();
 
@@ -235,7 +246,7 @@ class RetryManager {
         }
 
         context.state = "retrying";
-        const delay = this.getRetryDelay(attempt);
+        const delay = this.getRetryDelay(attempt - 1);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
@@ -250,12 +261,18 @@ class RetryManager {
     operation: () => Promise<T>,
     context: OperationContext
   ): Promise<T> {
-    return Promise.race([
+    const promises: Promise<T>[] = [
       operation(),
       new Promise<T>((_, reject) => 
         setTimeout(() => reject(new Error("OPERATION_TIMEOUT")), this.config.timeout)
       ),
-    ]);
+    ];
+
+    if (this.cancellationHandler) {
+      promises.push(this.cancellationHandler.waitForCancellation<T>(context.operationId));
+    }
+
+    return Promise.race(promises);
   }
 }
 
@@ -263,6 +280,7 @@ class RetryManager {
 
 class CancellationHandler {
   private cancelledOperations = new Set<string>();
+  private listeners = new Map<string, Set<() => void>>();
 
   /**
    * Cancel an operation
@@ -272,7 +290,31 @@ class CancellationHandler {
       return false; // Already cancelled
     }
     this.cancelledOperations.add(operationId);
+    const set = this.listeners.get(operationId);
+    if (set) {
+      set.forEach(cb => cb());
+    }
     return true;
+  }
+
+  /**
+   * Wait for an operation to be cancelled
+   */
+  waitForCancellation<T>(operationId: string): Promise<T> {
+    if (this.isCancelled(operationId)) {
+      return Promise.reject(new Error("OPERATION_CANCELLED"));
+    }
+
+    return new Promise<T>((_, reject) => {
+      const callback = () => {
+        reject(new Error("OPERATION_CANCELLED"));
+      };
+
+      if (!this.listeners.has(operationId)) {
+        this.listeners.set(operationId, new Set());
+      }
+      this.listeners.get(operationId)!.add(callback);
+    });
   }
 
   /**
@@ -287,6 +329,7 @@ class CancellationHandler {
    */
   clear(operationId: string): void {
     this.cancelledOperations.delete(operationId);
+    this.listeners.delete(operationId);
   }
 
   /**
@@ -294,6 +337,7 @@ class CancellationHandler {
    */
   clearAll(): void {
     this.cancelledOperations.clear();
+    this.listeners.clear();
   }
 }
 
@@ -310,8 +354,8 @@ export class A2AOperationManager {
     this.config = { ...DEFAULT_OPERATION_CONFIG, ...config };
     this.idempotencyManager = new IdempotencyManager(this.config.idempotencyWindow);
     this.concurrencyController = new ConcurrencyController(this.config.concurrencyLimit);
-    this.retryManager = new RetryManager(this.config);
     this.cancellationHandler = new CancellationHandler();
+    this.retryManager = new RetryManager(this.config, this.cancellationHandler);
   }
 
   /**
@@ -501,7 +545,7 @@ export class A2AOperationManager {
     this.config = { ...this.config, ...config };
     this.idempotencyManager = new IdempotencyManager(this.config.idempotencyWindow);
     this.concurrencyController = new ConcurrencyController(this.config.concurrencyLimit);
-    this.retryManager = new RetryManager(this.config);
+    this.retryManager = new RetryManager(this.config, this.cancellationHandler);
   }
 }
 
