@@ -945,3 +945,10 @@ export const buybackSchema = z
     (d) => d.usdcAmount !== undefined || d.mitosAmount !== undefined,
     { message: "usdcAmount or mitosAmount is required" },
   );
+
+
+  export const talosStatusPatchSchema = z.object({
+  agentOnline: z.boolean().optional(),
+  lifecycleStatus: z.string().optional(),
+  governanceApproved: z.boolean().optional(),
+});

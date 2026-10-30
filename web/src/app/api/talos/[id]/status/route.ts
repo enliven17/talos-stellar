@@ -4,6 +4,7 @@ import { tlsTalos, tlsCommerceJobs } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
 import { withTraceContext } from "@/lib/tracing";
+import { parseBody, talosStatusPatchSchema } from "@/lib/schemas";
 
 const VALID_LIFECYCLE_STATUSES = new Set(["Active", "Paused", "Retired"]);
 
@@ -26,11 +27,14 @@ async function handlePatch(
     const auth = await verifyAgentApiKey(request, id, ["settings:write"]);
     if (!auth.ok) return auth.response;
 
-    const body = await request.json();
-    const { agentOnline, lifecycleStatus, governanceApproved } = body as {
-      agentOnline?: boolean;
-      lifecycleStatus?: string;
-      governanceApproved?: boolean;
+    // Malformed JSON / non-object body -> 400 (instead of falling into the 500 catch)
+    const parsed = await parseBody(request, talosStatusPatchSchema);
+    if (!parsed.success) return parsed.response;
+
+    const { agentOnline, lifecycleStatus, governanceApproved } = parsed.data as {
+      agentOnline?: unknown;
+      lifecycleStatus?: unknown;
+      governanceApproved?: unknown;
     };
 
     if (typeof agentOnline !== "undefined" && typeof agentOnline !== "boolean") {
