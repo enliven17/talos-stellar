@@ -86,3 +86,92 @@ test("treats Stellar CLI as optional and uv as a required contributor tool", () 
   assert.equal(report.results.find((result) => result.name === "uv").optional, undefined);
   assert.equal(report.results.find((result) => result.name === "Stellar CLI").optional, true);
 });
+
+test("distinguishes a binary that exists but cannot be spawned from a missing one", () => {
+  const report = diagnose({
+    run: (command, args) => {
+      const key = `${command} ${args.join(" ")}`.trim();
+      if (command === "pnpm") {
+        const error = new Error("EACCES: permission denied, spawn pnpm");
+        error.code = "EACCES";
+        throw error;
+      }
+      if (!(key in healthyTools)) throw Object.assign(new Error(`${command} was not found`), { code: "ENOENT" });
+      return healthyTools[key];
+    },
+    nodeVersion: "v20.0.0",
+    platform: "linux",
+  });
+
+  const pnpm = report.results.find((result) => result.name === "pnpm");
+  assert.equal(pnpm.ok, false);
+  assert.match(pnpm.message, /pnpm is installed but could not be executed: permission denied/);
+  assert.doesNotMatch(pnpm.message, /pnpm not found/);
+  assert.equal(report.exitCode, 1);
+  assert.match(formatReport(report), /✗ pnpm is installed/);
+});
+
+test("surfaces the failure output when a tool exits non-zero", () => {
+  const report = diagnose({
+    run: (command, args) => {
+      if (command === "docker") throw new Error("Cannot connect to the Docker daemon");
+      const key = `${command} ${args.join(" ")}`.trim();
+      if (!(key in healthyTools)) throw Object.assign(new Error(`${command} was not found`), { code: "ENOENT" });
+      return healthyTools[key];
+    },
+    nodeVersion: "v20.0.0",
+    platform: "linux",
+  });
+
+  const docker = report.results.find((result) => result.name === "Docker");
+  assert.equal(docker.ok, false);
+  assert.match(docker.message, /could not be executed: Cannot connect to the Docker daemon/);
+  assert.equal(report.exitCode, 1);
+});
+
+test("reads the Windows shell's 'not recognized' message as a missing tool", () => {
+  const report = diagnose({
+    run: (command, args) => {
+      const key = `${command} ${args.join(" ")}`.trim();
+      if (command === "pnpm" || command === "pnpm.cmd") {
+        throw new Error("'pnpm' is not recognized as an internal or external command");
+      }
+      if (!(key in healthyTools)) throw Object.assign(new Error(`${command} was not found`), { code: "ENOENT" });
+      return healthyTools[key];
+    },
+    nodeVersion: "v22.0.0",
+    platform: "win32",
+  });
+
+  const pnpm = report.results.find((result) => result.name === "pnpm");
+  assert.match(pnpm.message, /pnpm not found/);
+  assert.doesNotMatch(pnpm.message, /could not be executed/);
+});
+
+test("an optional tool that fails to spawn is reported but does not fail the doctor", () => {
+  const report = diagnose({
+    run: (command, args) => {
+      if (command === "stellar") throw new Error("stellar exited with status 127");
+      const key = `${command} ${args.join(" ")}`.trim();
+      if (!(key in healthyTools)) throw Object.assign(new Error(`${command} was not found`), { code: "ENOENT" });
+      return healthyTools[key];
+    },
+    nodeVersion: "v20.0.0",
+    platform: "linux",
+  });
+
+  const stellar = report.results.find((result) => result.name === "Stellar CLI");
+  assert.equal(stellar.ok, false);
+  assert.equal(stellar.optional, true);
+  assert.match(stellar.message, /could not be executed/);
+  assert.equal(report.exitCode, 0);
+  assert.match(formatReport(report), /! Stellar CLI is installed/);
+});
+
+test("still reports the version of a tool that runs correctly after a failure elsewhere", () => {
+  const report = diagnose({ run: tools(healthyTools), nodeVersion: "v20.5.0", platform: "linux" });
+  const docker = report.results.find((result) => result.name === "Docker");
+  assert.equal(docker.ok, true);
+  assert.match(docker.message, /Docker 27\.3\.1/);
+  assert.equal(report.exitCode, 0);
+});
