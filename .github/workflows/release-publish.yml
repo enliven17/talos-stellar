@@ -188,7 +188,7 @@ jobs:
       - name: Restore contract artifact cache
         if: matrix.release.name == 'contracts'
         id: cache-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         continue-on-error: true
         with:
           path: contracts/target/wasm32-unknown-unknown/release
@@ -215,7 +215,7 @@ jobs:
 
       - name: Save contract artifact cache
         if: matrix.release.name == 'contracts' && steps.cache-restore.outcome == 'success' && steps.cache-restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         continue-on-error: true
         with:
           path: contracts/target/wasm32-unknown-unknown/release

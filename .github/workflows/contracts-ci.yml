@@ -75,7 +75,7 @@ jobs:
 
       - name: Restore contract artifact cache
         id: cache-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         continue-on-error: true
         with:
           path: contracts/target/wasm32-unknown-unknown/release
@@ -100,7 +100,7 @@ jobs:
         run: bash ../scripts/ci-contract-cache.sh verify target/wasm32-unknown-unknown/release
 
       - name: Save contract artifact cache
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         continue-on-error: true
         if: steps.cache-restore.outcome == 'success' && steps.cache-restore.outputs.cache-hit != 'true'
         with:
