@@ -1,7 +1,7 @@
 import { and, count, desc, eq, isNotNull, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { tlsOutboxEvents } from "@/db/schema";
-import type { OutboxEvent, OutboxStatus, WriteEventInput } from "./types";
+import type { OutboxEvent, OutboxStatus, PayloadValidationSummary, WriteEventInput } from "./types";
 import { decideRetry } from "./retry";
 import { outboxConfig } from "./config";
 import { logOutboxEvent, truncateError } from "./metrics";
@@ -99,10 +99,17 @@ export async function leaseBatch(
 }
 
 /** Marks a leased event dispatched. No-ops (returns null) if the lease was lost. */
-export async function ack(eventId: string, leaseId: string): Promise<OutboxEvent | null> {
+export async function ack(eventId: string, leaseId: string, schemaVersion?: number): Promise<OutboxEvent | null> {
   const [row] = await db
     .update(tlsOutboxEvents)
-    .set({ status: "dispatched", dispatchedAt: sql`now()`, leaseId: null, leaseOwner: null, leaseExpiresAt: null })
+    .set({
+      status: "dispatched",
+      dispatchedAt: sql`now()`,
+      leaseId: null,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      ...(schemaVersion !== undefined ? { schemaVersion } : {}),
+    })
     .where(and(eq(tlsOutboxEvents.id, eventId), eq(tlsOutboxEvents.leaseId, leaseId), eq(tlsOutboxEvents.status, "leased")))
     .returning();
   if (!row) return null;
@@ -142,6 +149,44 @@ export async function fail(eventId: string, leaseId: string, error: unknown): Pr
     .returning();
   if (!row) return null;
   logOutboxEvent("outbox_event_retry_scheduled", { eventId, eventType: row.eventType, attempts: row.attempts, delayMs: decision.delayMs });
+  return toEvent(row);
+}
+
+/**
+ * Quarantines a leased event whose payload violates its declared schema.
+ * Terminal: the event is never leased again and is NOT eligible for the
+ * dead-letter requeue action (retrying an invalid payload cannot succeed).
+ * Persists the bounded validation summary and the schema version checked.
+ * Lease-guarded: no-ops (returns null) if the lease was lost.
+ */
+export async function quarantine(
+  eventId: string,
+  leaseId: string,
+  summary: PayloadValidationSummary,
+): Promise<OutboxEvent | null> {
+  const lastError = truncateError(
+    `payload failed schema v${summary.schemaVersion} validation (${summary.issueCount} issue${summary.issueCount === 1 ? "" : "s"})`,
+  );
+  const [row] = await db
+    .update(tlsOutboxEvents)
+    .set({
+      status: "quarantined",
+      schemaVersion: summary.schemaVersion,
+      validationSummary: summary as unknown as Record<string, unknown>,
+      lastError,
+      leaseId: null,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    })
+    .where(and(eq(tlsOutboxEvents.id, eventId), eq(tlsOutboxEvents.leaseId, leaseId), eq(tlsOutboxEvents.status, "leased")))
+    .returning();
+  if (!row) return null;
+  logOutboxEvent("outbox_event_quarantined", {
+    eventId,
+    eventType: row.eventType,
+    schemaVersion: summary.schemaVersion,
+    issueCount: summary.issueCount,
+  });
   return toEvent(row);
 }
 

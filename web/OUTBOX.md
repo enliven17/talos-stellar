@@ -12,6 +12,7 @@ multiple app instances with no coordinator.
 pending → leased → dispatched
                  ↘ pending      (retry — runAt pushed out by backoff)
                  ↘ dead_letter  (retries exhausted, or no consumer registered)
+                 ↘ quarantined  (payload violates its declared schema; terminal)
 ```
 
 ## Atomic write
@@ -58,6 +59,41 @@ Two ways to drive it, same trade-off as the jobs framework:
 Crash recovery: every `dispatchOnce()` call reaps expired leases first
 (`reapExpiredLeases()`) — jobs with attempts left go back to `pending`,
 exhausted ones go to `dead_letter`. No separate recovery path.
+
+## Payload schema quarantine
+
+An event type may declare its payload contract:
+
+```ts
+import { z } from "zod";
+import { registerPayloadSchema } from "@/lib/outbox";
+
+registerPayloadSchema("commerce_job.completed", {
+  version: 1, // positive integer; bump when the contract changes
+  schema: z.object({ jobId: z.string(), amount: z.string() }),
+});
+```
+
+Before any consumer runs, `dispatchOnce()` validates the leased payload. If
+it violates the declared schema the event moves to the terminal
+**`quarantined`** status (lease-guarded, like `ack`/`fail`):
+
+- No consumer is invoked and no retry is scheduled — a structurally invalid
+  payload can never succeed, so it isn't re-leased or counted against
+  `maxAttempts`.
+- `schemaVersion` and a bounded `validationSummary` are persisted:
+  `{ schemaVersion, issueCount, issues: [{ path, code, message }], truncated }`
+  with at most 10 issues, paths/messages clipped to 200 chars, and **no
+  payload values**. `lastError` gets a one-line summary.
+- `POST /api/admin/outbox/:id/retry` does not requeue quarantined events
+  (409) — fix the producer and write a new event instead.
+- `DispatchSummary.quarantined` counts them; the transition logs
+  `outbox_event_quarantined` (eventId, eventType, schemaVersion, issueCount).
+- Successfully dispatched events record the `schemaVersion` they passed.
+
+Event types without a declared schema dispatch exactly as before
+(`schemaVersion` stays `null`). Migration:
+`drizzle/0023_outbox_payload_quarantine.sql` (two nullable columns, additive).
 
 ## Retry & deduplication
 

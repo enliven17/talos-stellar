@@ -9,7 +9,7 @@
  *
  * See web/OUTBOX.md for configuration, operational signals, and rollback.
  */
-export { writeOutboxEvent, getEvent, listEvents, requeue, summarizeDeadLetters } from "./store";
+export { writeOutboxEvent, getEvent, listEvents, requeue, summarizeDeadLetters, quarantine } from "./store";
 export {
   toDeadLetterView,
   sanitizeOutboxError,
@@ -19,6 +19,16 @@ export {
 } from "./dead-letter";
 export type { DeadLetterView, DeadLetterSummary, DeadLetterQuery } from "./dead-letter";
 export { registerConsumer } from "./registry";
+export { registerPayloadSchema, validatePayload, MAX_VALIDATION_ISSUES } from "./payload-schema";
+export type { PayloadSchemaDeclaration, PayloadValidationResult } from "./payload-schema";
 export { dispatchOnce } from "./dispatcher";
 export { outboxConfig, OUTBOX_ENABLED } from "./config";
-export type { Consumer, DispatchSummary, OutboxEvent, OutboxStatus, WriteEventInput } from "./types";
+export type {
+  Consumer,
+  DispatchSummary,
+  OutboxEvent,
+  OutboxStatus,
+  PayloadValidationIssue,
+  PayloadValidationSummary,
+  WriteEventInput,
+} from "./types";

@@ -53,7 +53,7 @@ describe("outbox/dispatcher — dispatchOnce", () => {
 
     const summary = await dispatchOnce();
 
-    expect(summary).toEqual({ leased: 0, dispatched: 0, retried: 0, deadLettered: 0, reaped: 2, pruned: 3 });
+    expect(summary).toEqual({ leased: 0, dispatched: 0, retried: 0, deadLettered: 0, quarantined: 0, reaped: 2, pruned: 3 });
   });
 
   it("runs all consumers and acks on success", async () => {

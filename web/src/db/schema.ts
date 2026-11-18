@@ -930,7 +930,7 @@ export const tlsOutboxEvents = pgTable(
     eventType: text("eventType").notNull(),             // e.g. "commerce_job.completed"
     payload: jsonb("payload").notNull().default({}),
 
-    // pending | leased | dispatched | dead_letter
+    // pending | leased | dispatched | dead_letter | quarantined
     status: text("status").notNull().default("pending"),
     runAt: timestamp("runAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
 
@@ -945,6 +945,11 @@ export const tlsOutboxEvents = pgTable(
     dedupeKey: text("dedupeKey"),
 
     lastError: text("lastError"),
+
+    // Declared payload schema version the event was validated against, and
+    // the bounded validation summary when it was quarantined (0023).
+    schemaVersion: integer("schemaVersion"),
+    validationSummary: jsonb("validationSummary"),
 
     createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
     updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
