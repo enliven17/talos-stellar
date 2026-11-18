@@ -1,4 +1,6 @@
 import { vi, describe, it, expect, beforeEach } from "vitest";
+import type { SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 const mocks = vi.hoisted(() => ({
   mockDb: { select: vi.fn(), insert: vi.fn(), update: vi.fn(), delete: vi.fn(), execute: vi.fn(), transaction: vi.fn() },
@@ -78,9 +80,16 @@ describe("outbox/store — ack", () => {
     expect(result?.status).toBe("dispatched");
   });
 
-  it("returns null when the lease was lost", async () => {
+  it("returns null when the lease was lost or expired", async () => {
     mockDb.update.mockReturnValue(chainable([]));
     expect(await store.ack("evt_1", "stale")).toBeNull();
+
+    const update = mockDb.update.mock.results[0].value as ReturnType<typeof chainable>;
+    const where = update.where.mock.calls[0][0] as SQL;
+    const query = new PgDialect().sqlToQuery(where);
+    expect(query.sql).toContain('"leaseId" =');
+    expect(query.sql).toContain('"leaseExpiresAt" > now()');
+    expect(query.sql).toContain('"status" =');
   });
 });
 
