@@ -35,7 +35,10 @@ pending|leased → cancelled   (cooperative — see Cancellation below)
 `JOBS_BATCH_SIZE` due jobs with `UPDATE ... WHERE id IN (SELECT ... FOR
 UPDATE SKIP LOCKED)`. A lease has an expiry (`JOBS_LEASE_DURATION_MS`); a
 running handler extends it by calling `ctx.heartbeat()`, which also reports
-back whether cancellation was requested.
+back whether cancellation was requested. Heartbeats arriving after the lease
+deadline has elapsed (`leaseExpiresAt <= now()`) are rejected (`ok: false`)
+without modifying the row, leaving expired ownership eligible for the normal
+reaper.
 
 If a worker process dies mid-job (crash, OOM, deploy), it simply stops
 heartbeating and the lease expires. There is no separate crash-recovery
@@ -65,9 +68,10 @@ immediately.
 Cancellation is cooperative, not preemptive — there's no way to kill a
 running handler mid-execution, so a leased job's `cancelRequested` flag is
 only observed the next time the handler calls `ctx.heartbeat()` (or checks
-`ctx.signal`). Write handlers that heartbeat periodically during any
-long-running loop. A `pending` job is cancelled immediately since nothing
-is running yet.
+`ctx.signal`). Similarly, if the lease deadline elapses before a heartbeat
+call, `ctx.heartbeat()` returns `ok: false` and signals the abort controller.
+Write handlers that heartbeat periodically during any long-running loop. A
+`pending` job is cancelled immediately since nothing is running yet.
 
 ## Idempotency
 

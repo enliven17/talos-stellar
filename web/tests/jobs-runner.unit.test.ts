@@ -139,6 +139,49 @@ describe("jobs/runner — runOnce", () => {
     expect(summary.completed).toBe(0);
   });
 
+  it("aborts signal and drops handler result without completing when heartbeat is rejected after deadline elapsed", async () => {
+    let observedAbortedInHandler = false;
+    const handler = vi.fn().mockImplementation(async (ctx) => {
+      const hb = await ctx.heartbeat();
+      expect(hb.ok).toBe(false);
+      observedAbortedInHandler = ctx.signal.aborted;
+      return { ok: true };
+    });
+    registerHandler("test_queue", handler);
+    mocks.store.leaseBatch.mockResolvedValue([makeJob()]);
+    mocks.store.heartbeat.mockResolvedValue({ ok: false, cancelled: false });
+
+    const summary = await runOnce({ heartbeatIntervalMs: 60_000 });
+
+    expect(observedAbortedInHandler).toBe(true);
+    expect(mocks.store.complete).not.toHaveBeenCalled();
+    expect(mocks.store.fail).not.toHaveBeenCalled();
+    expect(summary.completed).toBe(0);
+    expect(summary.retried).toBe(0);
+    expect(summary.deadLettered).toBe(0);
+  });
+
+  it("aborts signal and suppresses fail() when handler throws after heartbeat rejection due to expired lease", async () => {
+    const handler = vi.fn().mockImplementation(async (ctx) => {
+      const hb = await ctx.heartbeat();
+      if (!hb.ok) {
+        throw new Error("aborted due to lost lease");
+      }
+      return { ok: true };
+    });
+    registerHandler("test_queue", handler);
+    mocks.store.leaseBatch.mockResolvedValue([makeJob()]);
+    mocks.store.heartbeat.mockResolvedValue({ ok: false, cancelled: false });
+
+    const summary = await runOnce({ heartbeatIntervalMs: 60_000 });
+
+    expect(mocks.store.complete).not.toHaveBeenCalled();
+    expect(mocks.store.fail).not.toHaveBeenCalled();
+    expect(summary.completed).toBe(0);
+    expect(summary.retried).toBe(0);
+    expect(summary.deadLettered).toBe(0);
+  });
+
   it("counts a job cancelled mid-run and does not complete/fail it", async () => {
     const handler = vi.fn().mockImplementation(async (ctx) => {
       await ctx.heartbeat();
