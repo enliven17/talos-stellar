@@ -1093,6 +1093,9 @@ it("should fetch one activity page with typed cursor response", async () => {
         { url: "http://admin:pw123@127.0.0.1:3000", secrets: ["admin", "pw123"] },
         { url: "https://user%40name:s3cr3t%21@example.com", secrets: ["user%40name", "s3cr3t%21"] },
         { url: "https://:@example.com", secrets: [] },
+        { url: "https:////:@api.example.com", secrets: ["api.example.com"] },
+        { url: "https://///:@api.example.com/v1", secrets: ["api.example.com"] },
+        { url: "https:\\\\:@api.example.com", secrets: ["api.example.com"] },
       ];
 
       for (const { url, secrets } of credentialCases) {
@@ -1114,7 +1117,8 @@ it("should fetch one activity page with typed cursor response", async () => {
       expect(fetch).not.toHaveBeenCalled();
     });
 
-    it("rejects malformed, non-HTTP(S), or query/fragment base URLs at construction", () => {
+    it("rejects malformed, non-HTTP(S), or query/fragment base URLs (including bare delimiters) at construction", () => {
+      const fetchSpy = vi.fn();
       const invalidCases = [
         "",
         "   ",
@@ -1125,6 +1129,11 @@ it("should fetch one activity page with typed cursor response", async () => {
         "javascript:alert(1)",
         "https://example.com?apiKey=secret_val",
         "https://example.com/#frag",
+        "https://api.example.com/?",
+        "https://api.example.com/#",
+        "https://api.example.com?",
+        "https://api.example.com#",
+        "https://api.example.com/v1?#",
         "https://example.com\n/path",
         123 as unknown as string,
       ];
@@ -1132,15 +1141,20 @@ it("should fetch one activity page with typed cursor response", async () => {
       for (const bad of invalidCases) {
         let thrown: unknown;
         try {
-          new TalosClient({ baseUrl: bad });
+          new TalosClient({ baseUrl: bad, fetch: fetchSpy });
         } catch (err) {
           thrown = err;
         }
         expect(thrown).toBeInstanceOf(Error);
         const msg = (thrown as Error).message;
         expect(msg).not.toContain("secret_val");
+        expect(msg).not.toContain("example.com");
+        if (typeof bad === "string" && bad.length > 0) {
+          expect(msg).not.toContain(bad);
+        }
       }
 
+      expect(fetchSpy).not.toHaveBeenCalled();
       expect(fetch).not.toHaveBeenCalled();
     });
 
@@ -1151,6 +1165,9 @@ it("should fetch one activity page with typed cursor response", async () => {
 
       expect(() => resolveBaseUrl("https://user:pass@example.com")).toThrow(RangeError);
       expect(() => resolveBaseUrl("http://user@localhost:3000")).toThrow(RangeError);
+      expect(() => resolveBaseUrl("https:////:@api.example.com")).toThrow(RangeError);
+      expect(() => resolveBaseUrl("https://api.example.com/?")).toThrow(RangeError);
+      expect(() => resolveBaseUrl("https://api.example.com/#")).toThrow(RangeError);
       expect(() => resolveBaseUrl("ftp://example.com")).toThrow(RangeError);
       expect(() => resolveBaseUrl("not-a-url")).toThrow(TypeError);
       expect(() => resolveBaseUrl(42 as unknown as string)).toThrow(TypeError);
