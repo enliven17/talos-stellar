@@ -266,6 +266,7 @@ Every 2xx write response includes quota state headers:
 | `X-Quota-Used`      | Total calls used in this window                 |
 | `X-Quota-Reset`     | Unix timestamp (seconds) when the window resets |
 | `X-Quota-Resource`  | Which resource was checked                      |
+| `X-Quota-Incremented` | `true` when this decision consumed a unit, `false` when the quota is disabled (no write) or the call was a read-only usage lookup |
 
 When a limit is exceeded the API returns `429 Too Many Requests` with the same headers and a JSON body:
 
@@ -274,7 +275,8 @@ When a limit is exceeded the API returns `429 Too Many Requests` with the same h
   "error": "Quota exceeded",
   "resource": "activity_writes",
   "limit": 500,
-  "resetAt": "2026-07-25T00:00:00.000Z"
+  "resetAt": "2026-07-25T00:00:00.000Z",
+  "incremented": true
 }
 ```
 
