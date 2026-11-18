@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   TalosClient,
+  DEFAULT_BASE_URL,
+  resolveBaseUrl,
   TalosAPIError,
   TalosValidationError,
   TalosAuthenticationError,
@@ -990,6 +992,95 @@ it("should fetch one activity page with typed cursor response", async () => {
         "http://localhost:3000/api/talos/1",
         expect.any(Object)
       );
+    });
+
+    it("preserves credential-free local HTTP and HTTPS base URLs", () => {
+      const validUrls = [
+        { input: "https://talos-stellar.vercel.app", expected: "https://talos-stellar.vercel.app" },
+        { input: "https://api.example.com/v1/", expected: "https://api.example.com/v1" },
+        { input: "http://localhost:3000", expected: "http://localhost:3000" },
+        { input: "http://127.0.0.1:8080/", expected: "http://127.0.0.1:8080" },
+        { input: "http://[::1]:3000", expected: "http://[::1]:3000" },
+        { input: "https://example.com/@org", expected: "https://example.com/@org" },
+      ];
+
+      for (const { input, expected } of validUrls) {
+        const c = new TalosClient({ baseUrl: input });
+        expect(c.getBaseUrl()).toBe(expected);
+      }
+    });
+
+    it("rejects base URLs with embedded credentials before any fetch and without leaking secrets", () => {
+      const fetchSpy = vi.fn();
+      const credentialCases = [
+        { url: "https://alice:supersecret123@example.com", secrets: ["alice", "supersecret123"] },
+        { url: "https://alice@example.com", secrets: ["alice"] },
+        { url: "https://:supersecret123@example.com", secrets: ["supersecret123"] },
+        { url: "http://localuser:localpass@localhost:3000", secrets: ["localuser", "localpass"] },
+        { url: "http://admin:pw123@127.0.0.1:3000", secrets: ["admin", "pw123"] },
+        { url: "https://user%40name:s3cr3t%21@example.com", secrets: ["user%40name", "s3cr3t%21"] },
+        { url: "https://:@example.com", secrets: [] },
+      ];
+
+      for (const { url, secrets } of credentialCases) {
+        let thrown: unknown;
+        try {
+          new TalosClient({ baseUrl: url, fetch: fetchSpy });
+        } catch (err) {
+          thrown = err;
+        }
+        expect(thrown).toBeInstanceOf(Error);
+        const msg = (thrown as Error).message;
+        for (const secret of secrets) {
+          expect(msg).not.toContain(secret);
+        }
+        expect(msg).not.toContain(url);
+      }
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("rejects malformed, non-HTTP(S), or query/fragment base URLs at construction", () => {
+      const invalidCases = [
+        "",
+        "   ",
+        "not-a-url",
+        "/api/v1",
+        "localhost:3000",
+        "ftp://example.com",
+        "javascript:alert(1)",
+        "https://example.com?apiKey=secret_val",
+        "https://example.com/#frag",
+        "https://example.com\n/path",
+        123 as unknown as string,
+      ];
+
+      for (const bad of invalidCases) {
+        let thrown: unknown;
+        try {
+          new TalosClient({ baseUrl: bad });
+        } catch (err) {
+          thrown = err;
+        }
+        expect(thrown).toBeInstanceOf(Error);
+        const msg = (thrown as Error).message;
+        expect(msg).not.toContain("secret_val");
+      }
+
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("resolveBaseUrl normalizes defaults, trailing slashes, and rejects unsafe inputs", () => {
+      expect(resolveBaseUrl()).toBe(DEFAULT_BASE_URL);
+      expect(resolveBaseUrl("https://api.example.com///")).toBe("https://api.example.com");
+      expect(resolveBaseUrl("  http://localhost:3000/  ")).toBe("http://localhost:3000");
+
+      expect(() => resolveBaseUrl("https://user:pass@example.com")).toThrow(RangeError);
+      expect(() => resolveBaseUrl("http://user@localhost:3000")).toThrow(RangeError);
+      expect(() => resolveBaseUrl("ftp://example.com")).toThrow(RangeError);
+      expect(() => resolveBaseUrl("not-a-url")).toThrow(TypeError);
+      expect(() => resolveBaseUrl(42 as unknown as string)).toThrow(TypeError);
     });
   });
 });
