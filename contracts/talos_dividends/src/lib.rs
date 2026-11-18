@@ -3267,6 +3267,65 @@ mod tests {
         assert_eq!(recovered, 1, "1 unit of truncation dust is recovered");
     }
 
+    #[test]
+    fn conservation_is_independent_of_claim_order() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1397u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        let first_epoch = commit_epoch(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            talos_id,
+            103,
+            7_200,
+        );
+        let first_claimed = do_claim_with_shares(
+            &env, &contract_id, &client, &creator, talos_id, first_epoch, &creator, &investor,
+            &treasury, 50, 30, 20,
+        ) + do_claim_with_shares(
+            &env, &contract_id, &client, &investor, talos_id, first_epoch, &creator, &investor,
+            &treasury, 50, 30, 20,
+        ) + do_claim_with_shares(
+            &env, &contract_id, &client, &treasury, talos_id, first_epoch, &creator, &investor,
+            &treasury, 50, 30, 20,
+        );
+
+        let second_epoch = commit_epoch(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            talos_id,
+            103,
+            7_200,
+        );
+        let second_claimed = do_claim_with_shares(
+            &env, &contract_id, &client, &treasury, talos_id, second_epoch, &creator, &investor,
+            &treasury, 50, 30, 20,
+        ) + do_claim_with_shares(
+            &env, &contract_id, &client, &investor, talos_id, second_epoch, &creator, &investor,
+            &treasury, 50, 30, 20,
+        ) + do_claim_with_shares(
+            &env, &contract_id, &client, &creator, talos_id, second_epoch, &creator, &investor,
+            &treasury, 50, 30, 20,
+        );
+
+        assert_eq!(first_claimed, 101);
+        assert_eq!(second_claimed, first_claimed);
+        assert_eq!(client.get_rounding_dust(&talos_id, &first_epoch), Some(2));
+        assert_eq!(client.get_rounding_dust(&talos_id, &second_epoch), Some(2));
+        assert_eq!(
+            client.get_epoch(&talos_id, &first_epoch).unwrap().claimed_amount
+                + client.get_rounding_dust(&talos_id, &first_epoch).unwrap(),
+            103
+        );
+    }
+
     // ── Budget regression gates (#610) ───────────────────────────────────────
     //
     // These tests assert that key entry-points stay within CPU-instruction and
