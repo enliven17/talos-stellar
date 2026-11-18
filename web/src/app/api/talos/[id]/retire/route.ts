@@ -2,7 +2,7 @@ import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { retireAgentSchema, parseBody } from "@/lib/schemas";
 
 // POST /api/talos/:id/retire - Retire an agent (preserves history, prevents reuse)
@@ -17,7 +17,7 @@ async function _POST(
     const parsed = await parseBody(request, retireAgentSchema);
     if (parsed.error) return parsed.error;
 
-    const { reason, supersededBy, stellarPublicKey, signature, message } = parsed.data;
+    const { reason, supersededBy, stellarPublicKey, signature, message, expectedState } = parsed.data;
 
     // Verify the message contains the TALOS ID to prevent replay across TALOSes
     if (!message.includes(id)) {
@@ -77,6 +77,11 @@ async function _POST(
         return { error: "Invalid signature", status: 403 };
       }
 
+      const observedState = talos.status.toLowerCase();
+      if (expectedState && observedState !== expectedState) {
+        return { error: "Lifecycle state changed", status: 409 };
+      }
+
       // Update agent with retirement status
       const [retiredTalos] = await tx
         .update(tlsTalos)
@@ -88,8 +93,12 @@ async function _POST(
           agentOnline: false,
           updatedAt: new Date(),
         })
-        .where(eq(tlsTalos.id, id))
+        .where(and(eq(tlsTalos.id, id), eq(tlsTalos.status, talos.status), isNull(tlsTalos.retiredAt)))
         .returning();
+
+      if (!retiredTalos) {
+        return { error: "Lifecycle state changed", status: 409 };
+      }
 
       return { data: retiredTalos };
     });

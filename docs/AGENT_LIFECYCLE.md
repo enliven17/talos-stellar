@@ -66,7 +66,13 @@ rather than presenting an old snapshot as current.
 ```jsonc
 {
   "action": "retire",
-  "payload": { "reason": "...", "proposalId": "...", "confirmed": true, "drainJobs": true },
+  "payload": {
+    "reason": "...",
+    "proposalId": "...",
+    "confirmed": true,
+    "drainJobs": true,
+    "expectedState": "active"
+  },
   "address": "G...",          // the signer
   "message": "talos:<id>:lifecycle:retire:<ts>",  // must contain the agent id
   "signature": "<base64 ed25519>"
@@ -182,3 +188,6 @@ the governance audit trail.
   on-chain, not in this layer.
 - `assertPrerequisites` reads service count as `0` on the activate path; the
   service check is enforced by the provisioning `services` step instead.
+
+`expectedState` is optional and acts as a compare-and-set guard. A mismatch
+returns `409 LIFECYCLE_CONFLICT` without creating a run or emitting effects.
