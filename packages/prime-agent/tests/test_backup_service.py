@@ -103,7 +103,7 @@ def test_build_and_verify_roundtrip(tmp_path: Path, monkeypatch):
     # load to db.APP_DIR (= config.APP_DIR). Patch both so collect_agent_files
     # finds the seeded DB at the patched tmp_path.
     monkeypatch.setattr(bs, "APP_DIR", tmp_path)
-    monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)
+    monkeypatch.setattr("talos_agent.db.migrations.APP_DIR", tmp_path)
 
     out = tmp_path / "artifact.enc"
     pw = "test-passphrase-v1-long"
@@ -129,7 +129,7 @@ def test_verify_rejects_tampered_artifact(tmp_path: Path, monkeypatch):
     _seed_agent_db(db_path)
     from talos_agent import backup_service as bs
     monkeypatch.setattr(bs, "APP_DIR", tmp_path)
-    monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)
+    monkeypatch.setattr("talos_agent.db.migrations.APP_DIR", tmp_path)
 
     out = tmp_path / "tampered.enc"
     pw = "good-passphrase-long"
@@ -154,7 +154,7 @@ def test_verify_rejects_wrong_password(tmp_path: Path, monkeypatch):
     _seed_agent_db(db_path)
     from talos_agent import backup_service as bs
     monkeypatch.setattr(bs, "APP_DIR", tmp_path)
-    monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)
+    monkeypatch.setattr("talos_agent.db.migrations.APP_DIR", tmp_path)
 
     out = tmp_path / "wrong.enc"
     build_backup(password="correctpw-1", out_path=out)
@@ -206,7 +206,7 @@ def test_restore_is_idempotent_after_existing(tmp_path: Path, monkeypatch):
     _seed_agent_db(db_path)
     from talos_agent import backup_service as bs
     monkeypatch.setattr(bs, "APP_DIR", tmp_path)
-    monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)
+    monkeypatch.setattr("talos_agent.db.migrations.APP_DIR", tmp_path)
 
     out = tmp_path / "x.enc"
     pw = "idempotent-pass-long"
@@ -234,7 +234,7 @@ def test_concurrent_backup_busy(tmp_path: Path, monkeypatch):
         pytest.skip("fcntl flock not supported on Windows")
     from talos_agent import backup_service as bs
     monkeypatch.setattr(bs, "APP_DIR", tmp_path)
-    monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)
+    monkeypatch.setattr("talos_agent.db.migrations.APP_DIR", tmp_path)
 
     db_path = tmp_path / "agent.db"
     _seed_agent_db(db_path)
