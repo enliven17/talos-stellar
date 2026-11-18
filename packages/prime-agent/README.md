@@ -154,6 +154,7 @@ The agent is configured via environment variables and/or `~/.talos-agent/config.
 | `browser_headless` | `BROWSER_HEADLESS` | `false` | No | Run browser in headless mode |
 | `auto_repay_loans` | `AUTO_REPAY_LOANS` | `false` | No | Enable automatic loan repayment from treasury |
 | `tool_timeout_seconds` | `TALOS_TOOL_TIMEOUT_SECONDS` | `30` | No | Maximum seconds for a single external tool call before it is cancelled. |
+| `publish_timeout_seconds` | `TALOS_PUBLISH_TIMEOUT` | `90` | No | Maximum seconds for a single social publishing call before it is cancelled. |
 | `job_lease_ttl` | `JOB_LEASE_TTL` | `300` | No | Seconds for a claimed job lease TTL |
 | `job_heartbeat_interval` | `JOB_HEARTBEAT_INTERVAL` | `60` | No | Seconds between job lease heartbeats |
 | `talos_durable_job_effects_enabled` | `TALOS_DURABLE_JOB_EFFECTS_ENABLED` | `false` | No | Persist provider jobs and completion effects before external delivery |

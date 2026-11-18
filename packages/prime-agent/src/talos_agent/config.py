@@ -16,17 +16,15 @@ from talos_agent.http import validate_tool_timeout
 
 APP_DIR = Path.home() / ".talos-agent"
 
-_CONFIG_SECRET_FIELDS = re.compile(
-    r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|secret|password|private[_-]?key|seed|mnemonic|signature|payment)"
-)
 _CONFIG_SECRET_VALUE = re.compile(r"(?i)(input_value\s*=\s*)(['\"])(.*?)(\2)")
 
 
 def safe_config_error(error: BaseException) -> str:
     """Return a useful configuration error without exposing secret values."""
     text = str(error)
-    if _CONFIG_SECRET_FIELDS.search(text):
-        text = _CONFIG_SECRET_VALUE.sub(r"\1'[REDACTED]'", text)
+    # Never echo raw input values: a misconfigured env var may hold a secret
+    # even when the field name does not look sensitive.
+    text = _CONFIG_SECRET_VALUE.sub(r"\1'[REDACTED]'", text)
     return text or "configuration could not be loaded"
 
 
@@ -388,6 +386,22 @@ class Settings(BaseSettings):
         validation_alias="TALOS_TOOL_TIMEOUT_SECONDS",
         description="Maximum seconds for a single external tool call before it is cancelled.",
     )
+    publish_timeout_seconds: float = Field(
+        default=90.0,
+        validation_alias="TALOS_PUBLISH_TIMEOUT",
+        description=(
+            "Maximum seconds for a single social publishing call before it is "
+            "cancelled. Browser-based channels may need longer; API adapters "
+            "can fail faster."
+        ),
+    )
+
+    @field_validator("publish_timeout_seconds", mode="before")
+    @classmethod
+    def validate_publish_timeout(cls, value):
+        # Validate the raw input so a bad env value fails with a message that
+        # never echoes the supplied string back into logs.
+        return validate_tool_timeout(value)
 
     # Content history and research note bounds (Issue #974)
     content_history_max_limit: int = Field(

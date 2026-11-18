@@ -12,6 +12,11 @@ from typing import Any, Callable, Mapping, get_type_hints
 
 from talos_agent import metrics
 from talos_agent.config import Settings, resolve_setting_secret
+from talos_agent.http import (
+    ToolTimeoutError,
+    call_with_tool_timeout,
+    validate_tool_timeout,
+)
 from talos_agent.redact import redact_text
 from talos_agent.tracing import traced_span
 from talos_agent.tools import context as _context
@@ -26,7 +31,6 @@ from talos_agent.tools.permissions import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
-MAX_TOOL_TIMEOUT_SECONDS = 300.0
 
 MAX_VALIDATION_ERRORS = 10
 MAX_ERROR_MESSAGE_LEN = 1000
@@ -37,19 +41,6 @@ CODE_INVALID_ARGUMENTS = "INVALID_TOOL_ARGUMENTS"
 
 class _ToolTimeoutError(Exception):
     """Raised when a tool itself raises TimeoutError, distinct from wait_for expiry."""
-
-
-def _validate_tool_timeout(timeout: float | None) -> float:
-    """Normalize a per-tool timeout, applying the safe default and bound."""
-    if timeout is None:
-        return DEFAULT_TOOL_TIMEOUT_SECONDS
-    timeout = float(timeout)
-    if not math.isfinite(timeout) or timeout <= 0 or timeout > MAX_TOOL_TIMEOUT_SECONDS:
-        raise ValueError(
-            "tool timeout must be finite, greater than 0, and at most "
-            f"{MAX_TOOL_TIMEOUT_SECONDS}; got {timeout}"
-        )
-    return timeout
 
 
 @dataclass(frozen=True)
@@ -593,8 +584,8 @@ class ToolRegistry:
                     except asyncio.TimeoutError as exc:
                         raise _ToolTimeoutError(str(exc)) from exc
 
-                result = await asyncio.wait_for(
-                    _invoke_tool(), timeout=tool.timeout
+                result = await call_with_tool_timeout(
+                    _invoke_tool, tool_name=name, timeout=tool.timeout
                 )
                 return result
         except asyncio.CancelledError:
@@ -660,7 +651,6 @@ def _resolve_json_type(hint: Any) -> dict[str, Any]:
     - ``dict[K, V]`` → ``{"type": "object"}``
     - Anything unrecognised → ``{"type": "string"}``
     """
-    import types as _types
     import typing as _typing
 
     origin = _typing.get_origin(hint)
