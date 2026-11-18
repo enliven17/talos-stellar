@@ -90,6 +90,16 @@ class TestCommerceLifecycle:
 
         assert mock_db.count_pending_commerce_jobs() == 1
 
+    def test_get_commerce_jobs_is_bounded_and_excludes_payload(self, mock_db: LocalDB):
+        mock_db.add_commerce_job("job-1", "seller-a", "research", {"private": "payload"})
+        mock_db.add_commerce_job("job-2", "seller-b", "design", {"private": "payload"})
+
+        jobs = mock_db.get_commerce_jobs(limit=1)
+
+        assert len(jobs) == 1
+        assert jobs[0]["job_id"] == "job-2"
+        assert "payload" not in jobs[0]
+
 
 class TestPlaybookLookup:
     def test_find_playbook_by_name_returns_exact_match(self, mock_db: LocalDB):

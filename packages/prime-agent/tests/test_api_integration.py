@@ -449,6 +449,37 @@ class TestCommerceFlow:
         assert "error" in result
 
 
+class TestCommercePaymentStatus:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_get_commerce_payment_status(self, api_client: TalosAPIClient):
+        response = {
+            "jobId": "job-2024-001",
+            "finalityStatus": "CONFIRMED",
+            "confirmedLedger": 123,
+        }
+        respx.get(
+            "http://test.local/api/talos/seller-a/jobs/"
+            "job-2024-001/payment-status"
+        ).mock(return_value=Response(200, json=response))
+
+        assert await api_client.get_commerce_payment_status(
+            "seller-a", "job-2024-001"
+        ) == response
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_get_commerce_payment_status_not_found(self, api_client: TalosAPIClient):
+        respx.get(
+            "http://test.local/api/talos/seller-a/jobs/missing/payment-status"
+        ).mock(return_value=Response(404, json={"error": "Job not found"}))
+
+        assert await api_client.get_commerce_payment_status("seller-a", "missing") == {
+            "error": "Payment status query failed",
+            "http_status": 404,
+        }
+
+
 class TestDiscoverServices:
     """Test service discovery marketplace."""
 
