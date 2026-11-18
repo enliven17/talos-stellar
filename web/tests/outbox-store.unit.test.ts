@@ -19,10 +19,56 @@ function chainable<T>(result: T) {
 }
 
 const { mockDb } = mocks;
+const dialect = new PgDialect();
 
 beforeEach(() => {
   vi.clearAllMocks();
 });
+
+function useAckFixture(
+  row: {
+    id: string;
+    eventType: string;
+    status: string;
+    attempts: number;
+    leaseId: string | null;
+    leaseOwner: string | null;
+    leaseExpiresAt: Date | null;
+    dispatchedAt: Date | null;
+  },
+  databaseNow: Date,
+) {
+  mockDb.update.mockImplementation(() => {
+    let updates: Record<string, unknown> = {};
+    let condition: SQL | undefined;
+    const query: Record<string, unknown> = {};
+    query.set = vi.fn((values: Record<string, unknown>) => {
+      updates = values;
+      return query;
+    });
+    query.where = vi.fn((where: SQL) => {
+      condition = where;
+      return query;
+    });
+    query.returning = vi.fn(async () => {
+      if (!condition) throw new Error("Ack update did not include a WHERE clause");
+
+      const { sql, params } = dialect.sqlToQuery(condition);
+      const predicates = [...sql.matchAll(/"tls_outbox_events"\."([^"]+)"\s*(=|>)\s*(\$\d+|now\(\))/g)];
+      const matchesRow = predicates.length === 4 && predicates.every(([, column, operator, operand]) => {
+        const left = row[column as keyof typeof row];
+        const right = operand === "now()" ? databaseNow : params[Number(operand.slice(1)) - 1];
+        if (operator === "=") return left === right;
+        return left instanceof Date && right instanceof Date && left.getTime() > right.getTime();
+      });
+
+      if (!matchesRow) return [];
+      Object.assign(row, updates);
+      return [row];
+    });
+    return query;
+  });
+}
 
 describe("outbox/store — writeOutboxEvent", () => {
   it("inserts within the given tx when no dedupeKey is given", async () => {
@@ -74,22 +120,61 @@ describe("outbox/store — leaseBatch", () => {
 });
 
 describe("outbox/store — ack", () => {
-  it("marks dispatched and returns the row", async () => {
-    mockDb.update.mockReturnValue(chainable([{ id: "evt_1", eventType: "x", status: "dispatched", attempts: 1 }]));
-    const result = await store.ack("evt_1", "lease_1");
-    expect(result?.status).toBe("dispatched");
+  const databaseNow = new Date("2026-11-18T12:00:00.000Z");
+  const makeAckRow = (overrides: Partial<Parameters<typeof useAckFixture>[0]> = {}) => ({
+    id: "evt_1",
+    eventType: "x",
+    status: "leased",
+    attempts: 1,
+    leaseId: "lease_1",
+    leaseOwner: "worker_1",
+    leaseExpiresAt: new Date(databaseNow.getTime() + 1_000),
+    dispatchedAt: null,
+    ...overrides,
   });
 
-  it("returns null when the lease was lost or expired", async () => {
-    mockDb.update.mockReturnValue(chainable([]));
-    expect(await store.ack("evt_1", "stale")).toBeNull();
+  it("rejects an expired lease without changing the row", async () => {
+    const row = makeAckRow({ leaseExpiresAt: new Date(databaseNow.getTime() - 1) });
+    useAckFixture(row, databaseNow);
 
-    const update = mockDb.update.mock.results[0].value as ReturnType<typeof chainable>;
-    const where = update.where.mock.calls[0][0] as SQL;
-    const query = new PgDialect().sqlToQuery(where);
-    expect(query.sql).toContain('"leaseId" =');
-    expect(query.sql).toContain('"leaseExpiresAt" > now()');
-    expect(query.sql).toContain('"status" =');
+    const result = await store.ack("evt_1", "lease_1");
+
+    expect(result).toBeNull();
+    expect(row).toMatchObject({ status: "leased", leaseId: "lease_1", leaseOwner: "worker_1" });
+  });
+
+  it("rejects a lease whose deadline equals database time", async () => {
+    const row = makeAckRow({ leaseExpiresAt: databaseNow });
+    useAckFixture(row, databaseNow);
+
+    const result = await store.ack("evt_1", "lease_1");
+
+    expect(result).toBeNull();
+    expect(row).toMatchObject({ status: "leased", leaseId: "lease_1", leaseOwner: "worker_1" });
+  });
+
+  it("preserves a newer worker's active lease when an old worker acknowledges", async () => {
+    const row = makeAckRow({
+      leaseId: "new_lease",
+      leaseOwner: "worker_2",
+      leaseExpiresAt: new Date(databaseNow.getTime() + 5_000),
+    });
+    useAckFixture(row, databaseNow);
+
+    const result = await store.ack("evt_1", "old_lease");
+
+    expect(result).toBeNull();
+    expect(row).toMatchObject({ status: "leased", leaseId: "new_lease", leaseOwner: "worker_2" });
+  });
+
+  it("dispatches a matching lease that is still active", async () => {
+    const row = makeAckRow();
+    useAckFixture(row, databaseNow);
+
+    const result = await store.ack("evt_1", "lease_1");
+
+    expect(result?.status).toBe("dispatched");
+    expect(row).toMatchObject({ status: "dispatched", leaseId: null, leaseOwner: null, leaseExpiresAt: null });
   });
 });
 
