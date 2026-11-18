@@ -54,7 +54,11 @@ import {
   isWallClockExpired,
   isLedgerExpired,
   isTerminal,
+  getObservationAge,
+  isObservationStale,
+  getPaymentObservation,
 } from "../src/lib/reconciler/state-machine";
+import { isTrustedObservation } from "../src/lib/reconciler/horizon";
 import type { TxRecord, ReconcilerConfig, HorizonPollResult } from "../src/lib/reconciler/types";
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -455,5 +459,230 @@ describe("State machine edge cases", () => {
     const rec = makeRecord({ pollCount: 0 });
     const update = transitionFromPending(rec, NOT_FOUND_POLL, 1010, config);
     expect(update?.finalityStatus).toBe("NOT_FOUND");
+  });
+});
+
+// ─── Trusted Payment Observation Age & Staleness ─────────────────────────────
+
+describe("Payment Observation Age & Staleness", () => {
+  describe("getObservationAge - distinction between zero age and unknown age", () => {
+    it("returns exactly 0 (zero age) when observed in the current closed ledger", () => {
+      const rec = makeRecord({ confirmedLedger: 1050 });
+      const age = getObservationAge(rec, 1050);
+      expect(age).toBe(0);
+      expect(age).not.toBeNull();
+    });
+
+    it("returns null (unknown age) when record has no trusted observation (confirmedLedger is null)", () => {
+      const rec = makeRecord({ finalityStatus: "PENDING", confirmedLedger: null });
+      const age = getObservationAge(rec, 1050);
+      expect(age).toBeNull();
+    });
+
+    it("strictly distinguishes zero age (0) from unknown age (null)", () => {
+      const zeroAgeRec = makeRecord({ confirmedLedger: 1050 });
+      const unknownAgeRec = makeRecord({ confirmedLedger: null });
+
+      const zeroAge = getObservationAge(zeroAgeRec, 1050);
+      const unknownAge = getObservationAge(unknownAgeRec, 1050);
+
+      expect(zeroAge).toBe(0);
+      expect(unknownAge).toBeNull();
+      expect(zeroAge === unknownAge).toBe(false);
+      expect(zeroAge === 0).toBe(true);
+      expect(unknownAge === null).toBe(true);
+    });
+
+    it("computes positive age when currentLedger > confirmedLedger", () => {
+      const rec = makeRecord({ confirmedLedger: 1000 });
+      expect(getObservationAge(rec, 1045)).toBe(45);
+    });
+
+    it("returns null when currentLedger is null or undefined", () => {
+      const rec = makeRecord({ confirmedLedger: 1000 });
+      expect(getObservationAge(rec, null)).toBeNull();
+      expect(getObservationAge(rec, undefined)).toBeNull();
+    });
+
+    it("returns null when currentLedger is not a positive finite number", () => {
+      const rec = makeRecord({ confirmedLedger: 1000 });
+      expect(getObservationAge(rec, 0)).toBeNull();
+      expect(getObservationAge(rec, -10)).toBeNull();
+      expect(getObservationAge(rec, NaN)).toBeNull();
+    });
+
+    it("returns null when record is null or undefined", () => {
+      expect(getObservationAge(null, 1050)).toBeNull();
+      expect(getObservationAge(undefined, 1050)).toBeNull();
+    });
+
+    it("returns null on nonmonotonic anomaly (currentLedger < confirmedLedger)", () => {
+      const rec = makeRecord({ confirmedLedger: 1050 });
+      expect(getObservationAge(rec, 1040)).toBeNull();
+    });
+
+    it("computes age directly from a HorizonPollResult", () => {
+      expect(getObservationAge(CONFIRMED_POLL, 1010)).toBe(0); // ledger 1010, current 1010 => 0
+      expect(getObservationAge(CONFIRMED_POLL, 1025)).toBe(15);
+      expect(getObservationAge(FAILED_POLL, 1020)).toBe(10);
+      expect(getObservationAge(NOT_FOUND_POLL, 1020)).toBeNull();
+      expect(getObservationAge(ERROR_POLL_RETRYABLE, 1020)).toBeNull();
+    });
+  });
+
+  describe("isTrustedObservation", () => {
+    it("identifies confirmed and failed outcomes with valid ledgers as trusted", () => {
+      expect(isTrustedObservation(CONFIRMED_POLL)).toBe(true);
+      expect(isTrustedObservation(FAILED_POLL)).toBe(true);
+    });
+
+    it("identifies not_found and error outcomes as untrusted", () => {
+      expect(isTrustedObservation(NOT_FOUND_POLL)).toBe(false);
+      expect(isTrustedObservation(ERROR_POLL_RETRYABLE)).toBe(false);
+      expect(isTrustedObservation(ERROR_POLL_PERMANENT)).toBe(false);
+      expect(isTrustedObservation(null)).toBe(false);
+      expect(isTrustedObservation(undefined)).toBe(false);
+    });
+
+    it("rejects non-positive or non-finite ledger values", () => {
+      expect(isTrustedObservation({ outcome: "confirmed", ledger: 0, successful: true })).toBe(false);
+      expect(isTrustedObservation({ outcome: "confirmed", ledger: -5, successful: true })).toBe(false);
+      expect(isTrustedObservation({ outcome: "confirmed", ledger: NaN, successful: true })).toBe(false);
+    });
+  });
+
+  describe("isObservationStale", () => {
+    it("returns false for zero age", () => {
+      const rec = makeRecord({ confirmedLedger: 1000 });
+      expect(isObservationStale(rec, 1000, 120)).toBe(false);
+    });
+
+    it("returns false when age is within threshold", () => {
+      const rec = makeRecord({ confirmedLedger: 1000 });
+      expect(isObservationStale(rec, 1120, 120)).toBe(false); // age 120 == threshold 120
+    });
+
+    it("returns true when age strictly exceeds threshold", () => {
+      const rec = makeRecord({ confirmedLedger: 1000 });
+      expect(isObservationStale(rec, 1121, 120)).toBe(true); // age 121 > threshold 120
+    });
+
+    it("returns false when age is unknown", () => {
+      const rec = makeRecord({ confirmedLedger: null });
+      expect(isObservationStale(rec, 1121, 120)).toBe(false);
+    });
+
+    it("returns false for invalid threshold", () => {
+      const rec = makeRecord({ confirmedLedger: 1000 });
+      expect(isObservationStale(rec, 1121, -1)).toBe(false);
+    });
+  });
+
+  describe("getPaymentObservation", () => {
+    it("returns fresh status and age 0 for current ledger observation", () => {
+      const rec = makeRecord({ confirmedLedger: 1000 });
+      const obs = getPaymentObservation(rec, 1000, 120);
+      expect(obs).toEqual({
+        ledger: 1000,
+        age: 0,
+        status: "fresh",
+        isStale: false,
+      });
+    });
+
+    it("returns unknown status and age null when no trusted observation exists", () => {
+      const rec = makeRecord({ confirmedLedger: null });
+      const obs = getPaymentObservation(rec, 1000, 120);
+      expect(obs).toEqual({
+        ledger: null,
+        age: null,
+        status: "unknown",
+        isStale: false,
+      });
+    });
+
+    it("returns stale status when age exceeds threshold", () => {
+      const rec = makeRecord({ confirmedLedger: 1000 });
+      const obs = getPaymentObservation(rec, 1200, 120);
+      expect(obs).toEqual({
+        ledger: 1000,
+        age: 200,
+        status: "stale",
+        isStale: true,
+      });
+    });
+
+    it("handles null/undefined input safely", () => {
+      expect(getPaymentObservation(null, 1000)).toEqual({
+        ledger: null,
+        age: null,
+        status: "unknown",
+        isStale: false,
+      });
+    });
+  });
+
+  describe("stale observation status visible without changing terminal records", () => {
+    it("keeps stale status visible on CONFIRMED records while computeTransition returns null", () => {
+      const confirmedRec = makeRecord({
+        finalityStatus: "CONFIRMED",
+        confirmedLedger: 1000,
+        repairApplied: true,
+      });
+      const currentLedger = 1500; // 500 ledgers later (> threshold 120)
+
+      // 1. Stale observation status is visible
+      const obs = getPaymentObservation(confirmedRec, currentLedger, 120);
+      expect(obs.isStale).toBe(true);
+      expect(obs.status).toBe("stale");
+      expect(obs.age).toBe(500);
+      expect(obs.ledger).toBe(1000);
+
+      // 2. computeTransition returns null (terminal record is never changed)
+      const update = computeTransition(confirmedRec, null, currentLedger, BASE_CONFIG);
+      expect(update).toBeNull();
+
+      // 3. Status remains CONFIRMED (immutable)
+      expect(confirmedRec.finalityStatus).toBe("CONFIRMED");
+      expect(validateTransition(confirmedRec.finalityStatus, "EXPIRED")).not.toBeNull();
+    });
+
+    it("keeps stale status visible on FAILED records without altering terminal record", () => {
+      const failedRec = makeRecord({
+        finalityStatus: "FAILED",
+        confirmedLedger: 1000,
+        lastError: "tx_bad_seq",
+        repairApplied: true,
+      });
+      const currentLedger = 1300;
+
+      const obs = getPaymentObservation(failedRec, currentLedger, 120);
+      expect(obs.isStale).toBe(true);
+      expect(obs.status).toBe("stale");
+      expect(obs.age).toBe(300);
+
+      const update = computeTransition(failedRec, null, currentLedger, BASE_CONFIG);
+      expect(update).toBeNull();
+      expect(failedRec.finalityStatus).toBe("FAILED");
+    });
+
+    it("preserves EXPIRED and NOT_FOUND terminal records", () => {
+      const expiredRec = makeRecord({
+        finalityStatus: "EXPIRED",
+        confirmedLedger: null,
+        repairApplied: true,
+      });
+      const notFoundRec = makeRecord({
+        finalityStatus: "NOT_FOUND",
+        confirmedLedger: null,
+        repairApplied: true,
+      });
+
+      expect(getPaymentObservation(expiredRec, 1500).status).toBe("unknown");
+      expect(computeTransition(expiredRec, null, 1500, BASE_CONFIG)).toBeNull();
+
+      expect(getPaymentObservation(notFoundRec, 1500).status).toBe("unknown");
+      expect(computeTransition(notFoundRec, null, 1500, BASE_CONFIG)).toBeNull();
+    });
   });
 });

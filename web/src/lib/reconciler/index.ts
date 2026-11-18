@@ -6,7 +6,7 @@
  */
 export { startReconciler, stopReconciler, runOneTick, registerTx, getStats, isRunning } from "./scheduler";
 export { reconcilerConfig, loadReconcilerConfig } from "./config";
-export { pollTransaction, fetchCurrentLedger } from "./horizon";
+export { pollTransaction, fetchCurrentLedger, isTrustedObservation } from "./horizon";
 export { applyRepair } from "./repair";
 export {
   computeTransition,
@@ -17,6 +17,9 @@ export {
   isTerminal,
   isWallClockExpired,
   isLedgerExpired,
+  getObservationAge,
+  isObservationStale,
+  getPaymentObservation,
 } from "./state-machine";
 export type {
   FinalityStatus,
@@ -27,5 +30,7 @@ export type {
   RepairOutcome,
   ReconcilerConfig,
   ReconcilerStats,
+  ObservationStatus,
+  PaymentObservation,
 } from "./types";
 export { ACTIVE_STATES, TERMINAL_STATES } from "./types";

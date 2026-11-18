@@ -35,6 +35,11 @@ export function loadReconcilerConfig(): ReconcilerConfig {
     confirmationDepth: parseIntEnv("RECONCILER_CONFIRMATION_DEPTH", 1),
 
     concurrencyLimit: parseIntEnv("RECONCILER_CONCURRENCY_LIMIT", 5),
+
+    staleObservationThreshold: parseIntEnv(
+      "RECONCILER_STALE_OBSERVATION_THRESHOLD",
+      parseInt(process.env.RECONCILER_MAX_LEDGER_GAP || "120", 10) || 120,
+    ),
   };
 }
 
