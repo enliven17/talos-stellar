@@ -371,7 +371,14 @@ export interface DedupeInFlightGetsOptions {
  * behavior for backward compatibility.
  */
 export interface TalosClientOptions {
-  /** Base URL of the Talos API. Defaults to `https://talos-stellar.vercel.app`. */
+  /**
+   * Base URL of the Talos API. Defaults to `https://talos-stellar.vercel.app`.
+   *
+   * Validated at construction via {@link resolveBaseUrl}: must be a valid
+   * `http:` or `https:` URL without embedded credentials (`user:pass@`),
+   * query parameters, or fragments. Credential-free local HTTP endpoints
+   * (e.g. `http://localhost:3000`, `http://127.0.0.1:3000`) are supported.
+   */
   baseUrl?: string;
   /** Bearer token (TALOS API key). Adds `Authorization: Bearer <key>` header. */
   apiKey?: string;
@@ -780,6 +787,60 @@ function redactedRetryError(err: TalosAPIError): TalosAPIError {
   });
 }
 
+/** Default base URL for the hosted Talos Protocol API. */
+export const DEFAULT_BASE_URL = "https://talos-stellar.vercel.app";
+
+/**
+ * Validate and normalize {@link TalosClientOptions.baseUrl}.
+ *
+ * - Omitted (`undefined`) falls back to {@link DEFAULT_BASE_URL}.
+ * - Accepts credential-free `https:` and `http:` URLs (preserving local HTTP
+ *   development/test targets such as `http://localhost:3000` and `http://127.0.0.1:...`).
+ * - Rejects malformed URLs, non-HTTP(S) schemes, query strings / fragments, and
+ *   embedded credentials (`username` / `password` / `userinfo@`) with privacy-safe
+ *   `TypeError` / `RangeError` messages that never echo the URL or secrets.
+ */
+export function resolveBaseUrl(baseUrl?: string): string {
+  if (baseUrl === undefined) {
+    return DEFAULT_BASE_URL;
+  }
+  if (typeof baseUrl !== "string") {
+    throw new TypeError("baseUrl must be a string");
+  }
+  const trimmed = baseUrl.trim();
+  if (trimmed === "") {
+    throw new RangeError("baseUrl must be a non-empty URL");
+  }
+  if (/[\u0000-\u001f\u007f]/.test(trimmed)) {
+    throw new TypeError("baseUrl must be a valid absolute URL");
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new TypeError("baseUrl must be a valid absolute URL");
+  }
+
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new RangeError("baseUrl must use the http: or https: protocol");
+  }
+
+  // Reject any embedded credentials (including empty `:@` userinfo) before
+  // any request is issued, without echoing URL contents.
+  const afterScheme = trimmed.slice(parsed.protocol.length);
+  const authority = (afterScheme.startsWith("//") ? afterScheme.slice(2) : afterScheme).split(/[/?#\\]/, 1)[0];
+  if (parsed.username !== "" || parsed.password !== "" || authority.includes("@")) {
+    throw new RangeError("baseUrl must not contain embedded credentials");
+  }
+
+  if (parsed.search !== "" || parsed.hash !== "") {
+    throw new RangeError("baseUrl must not contain query parameters or fragments");
+  }
+
+  return parsed.toString().replace(/\/+$/, "");
+}
+
 /**
  * Talos Protocol API client. Wraps `fetch` with typed errors, optional
  * timeout, idempotency keys, request signing, chaos injection and bounded
@@ -789,7 +850,7 @@ function redactedRetryError(err: TalosAPIError): TalosAPIError {
 const DEFAULT_MAX_IN_FLIGHT = 256;
 
 export class TalosClient {
-  private baseUrl: string;
+  private readonly baseUrl: string;
   private headers: Record<string, string>;
   private readonly retryPolicy: Required<RetryPolicyOptions>;
   private readonly retry: Required<RetryOptions>;
@@ -845,13 +906,7 @@ export class TalosClient {
     this.onResponse = options.onResponse;
     this.fetchOverride = options.fetch;
     this.chaosInjector = options.chaosInjector;
-    this.baseUrl = (
-      options.baseUrl ?? "https://talos-stellar.vercel.app"
-    ).replace(/\/$/, "");
-    this.timeoutMs = options.timeoutMs;
-    this.fetchOverride = options.fetch;
-    this.onError = options.onError;
-    this.chaosInjector = options.chaosInjector;
+    this.baseUrl = resolveBaseUrl(options.baseUrl);
     this.headers = { "Content-Type": "application/json" };
     if (options.apiKey) {
       this.headers["Authorization"] = `Bearer ${options.apiKey}`;
