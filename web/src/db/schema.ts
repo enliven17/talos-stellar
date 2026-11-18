@@ -1058,7 +1058,8 @@ export const tlsLeaderboardAggregates = pgMaterializedView(
 
 export const capabilities = pgTable("capabilities", {
   id: uuid("id").primaryKey().defaultRandom(),
-  name: text("name").notNull().unique(),
+  name: text("name").notNull(),
+  version: integer("version").notNull().default(1),
   description: text("description").notNull(),
   category: text("category").notNull(),
   isActive: boolean("is_active").notNull().default(true),
