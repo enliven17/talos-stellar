@@ -760,15 +760,21 @@ export function resolveBaseUrl(baseUrl?: string): string {
     throw new RangeError("baseUrl must use the http: or https: protocol");
   }
 
-  // Reject any embedded credentials (including empty `:@` userinfo) before
-  // any request is issued, without echoing URL contents.
-  const afterScheme = trimmed.slice(parsed.protocol.length);
-  const authority = (afterScheme.startsWith("//") ? afterScheme.slice(2) : afterScheme).split(/[/?#\\]/, 1)[0];
+  // Reject any embedded credentials (including empty `:@` and non-canonical
+  // extra-slash userinfo such as `https:////:@host`) before any request is
+  // issued, without echoing URL contents.
+  const afterScheme = trimmed.slice(parsed.protocol.length).replace(/^[/\\]+/, "");
+  const authority = afterScheme.split(/[/?#\\]/, 1)[0];
   if (parsed.username !== "" || parsed.password !== "" || authority.includes("@")) {
     throw new RangeError("baseUrl must not contain embedded credentials");
   }
 
-  if (parsed.search !== "" || parsed.hash !== "") {
+  if (
+    parsed.search !== "" ||
+    parsed.hash !== "" ||
+    trimmed.includes("?") ||
+    trimmed.includes("#")
+  ) {
     throw new RangeError("baseUrl must not contain query parameters or fragments");
   }
 
