@@ -437,3 +437,220 @@ def test_prune_skips_undeletable_file_without_raising(tmp_path: Path, monkeypatc
     assert [p.name for p in deleted] == ["talos-agent-1.enc"]
     assert (tmp_path / "talos-agent-2.enc").exists()
     assert (tmp_path / "talos-agent-0.enc").exists()
+
+
+# ── Decompressed restore bounds (prevents disk/memory exhaustion) ─────
+
+
+def test_restore_rejects_oversized_decompressed_single_file(tmp_path: Path, monkeypatch):
+    """A malicious artifact with a single file exceeding MAX_DECOMPRESSED_RESTORE_BYTES
+    must fail before writing to disk."""
+    import json
+    from talos_agent.backup_service import (
+        MAX_DECOMPRESSED_RESTORE_BYTES,
+        restore_backup,
+        BackupError,
+    )
+    from talos_agent.crypto import encrypt_with_password
+
+    # Craft an artifact with a single oversized file body.
+    # The file claims to be 100 bytes in metadata but the actual b64-decoded
+    # body will exceed MAX_DECOMPRESSED_RESTORE_BYTES (10 MB).
+    oversized_raw = b"X" * (MAX_DECOMPRESSED_RESTORE_BYTES + 1024)
+    import base64
+    oversized_b64 = base64.b64encode(oversized_raw).decode("ascii")
+    
+    payload = {
+        "version": "1.0",
+        "encryption": "AES-256-GCM#PBKDF2-SHA256#200000",
+        "scope": "agent",
+        "timestamp": "2024-01-01T00:00:00Z",
+        "database": {"signalVersion": "3.0.0", "rowCountsSqlite": {}},
+        "filesMeta": {
+            "db/oversized.db": {
+                "sha256": "a" * 64,  # fake sha, won't matter because size check happens first
+                "size_bytes": len(oversized_raw),
+            }
+        },
+        "body": {"db/oversized.db": oversized_b64},
+        "manifest": {
+            "sha256": "b" * 64,
+            "rowCountTotal": 0,
+            "encryption": "AES-256-GCM#PBKDF2-SHA256#200000",
+            "formatVersion": "1.0",
+            "size_bytes": 100,
+        },
+    }
+    plaintext = json.dumps(payload, sort_keys=True)
+    pw = "malicious-artifact-pass"
+    encrypted = encrypt_with_password(plaintext, pw)
+    
+    artifact_path = tmp_path / "oversized.enc"
+    artifact_path.write_text(encrypted, encoding="utf8")
+    
+    restore_root = tmp_path / "restore-target"
+    restore_root.mkdir()
+    
+    with pytest.raises(BackupError) as exc_info:
+        restore_backup(
+            artifact_path=artifact_path,
+            password=pw,
+            confirm=True,
+            restore_root=restore_root,
+        )
+    
+    assert exc_info.value.code == "BAD_INPUT"
+    assert "MAX_DECOMPRESSED_RESTORE_BYTES" in str(exc_info.value)
+    # Verify no files were written to disk before the check triggered.
+    assert not (restore_root / "oversized.db").exists()
+
+
+def test_restore_rejects_cumulative_oversized_files(tmp_path: Path, monkeypatch):
+    """Multiple files that individually fit but cumulatively exceed the limit
+    must fail before exhausting disk."""
+    import json
+    from talos_agent.backup_service import (
+        MAX_DECOMPRESSED_RESTORE_BYTES,
+        restore_backup,
+        BackupError,
+    )
+    from talos_agent.crypto import encrypt_with_password
+    import hashlib
+    import base64
+    
+    # Create 3 files, each ~4 MB, totaling ~12 MB > 10 MB limit.
+    file_size = (MAX_DECOMPRESSED_RESTORE_BYTES // 3) + 1024 * 1024
+    files_meta = {}
+    body = {}
+    
+    for i in range(3):
+        name = f"db/file-{i}.db"
+        raw = b"Y" * file_size
+        sha = hashlib.sha256(raw).hexdigest()
+        files_meta[name] = {"sha256": sha, "size_bytes": len(raw)}
+        body[name] = base64.b64encode(raw).decode("ascii")
+    
+    payload = {
+        "version": "1.0",
+        "encryption": "AES-256-GCM#PBKDF2-SHA256#200000",
+        "scope": "agent",
+        "timestamp": "2024-01-01T00:00:00Z",
+        "database": {"signalVersion": "3.0.0", "rowCountsSqlite": {}},
+        "filesMeta": files_meta,
+        "body": body,
+        "manifest": {
+            "sha256": "c" * 64,
+            "rowCountTotal": 0,
+            "encryption": "AES-256-GCM#PBKDF2-SHA256#200000",
+            "formatVersion": "1.0",
+            "size_bytes": 100,
+        },
+    }
+    plaintext = json.dumps(payload, sort_keys=True)
+    pw = "cumulative-overflow-pass"
+    encrypted = encrypt_with_password(plaintext, pw)
+    
+    artifact_path = tmp_path / "cumulative.enc"
+    artifact_path.write_text(encrypted, encoding="utf8")
+    
+    restore_root = tmp_path / "restore-target-cumulative"
+    restore_root.mkdir()
+    
+    with pytest.raises(BackupError) as exc_info:
+        restore_backup(
+            artifact_path=artifact_path,
+            password=pw,
+            confirm=True,
+            restore_root=restore_root,
+        )
+    
+    assert exc_info.value.code == "BAD_INPUT"
+    assert "MAX_DECOMPRESSED_RESTORE_BYTES" in str(exc_info.value)
+    # The first file or two might have been staged, but the atomic swap
+    # never happened, so restore_root should be empty.
+    assert len(list(restore_root.glob("*.db"))) == 0
+
+
+def test_restore_accepts_at_boundary(tmp_path: Path, monkeypatch):
+    """A restore at exactly MAX_DECOMPRESSED_RESTORE_BYTES must succeed."""
+    import json
+    from talos_agent.backup_service import (
+        MAX_DECOMPRESSED_RESTORE_BYTES,
+        restore_backup,
+    )
+    from talos_agent.crypto import encrypt_with_password
+    import hashlib
+    import base64
+    
+    # Single file at exactly the limit.
+    raw = b"Z" * MAX_DECOMPRESSED_RESTORE_BYTES
+    sha = hashlib.sha256(raw).hexdigest()
+    name = "db/boundary.db"
+    
+    payload = {
+        "version": "1.0",
+        "encryption": "AES-256-GCM#PBKDF2-SHA256#200000",
+        "scope": "agent",
+        "timestamp": "2024-01-01T00:00:00Z",
+        "database": {"signalVersion": "3.0.0", "rowCountsSqlite": {}},
+        "filesMeta": {name: {"sha256": sha, "size_bytes": len(raw)}},
+        "body": {name: base64.b64encode(raw).decode("ascii")},
+        "manifest": {
+            "sha256": "d" * 64,
+            "rowCountTotal": 0,
+            "encryption": "AES-256-GCM#PBKDF2-SHA256#200000",
+            "formatVersion": "1.0",
+            "size_bytes": 100,
+        },
+    }
+    plaintext = json.dumps(payload, sort_keys=True)
+    pw = "boundary-test-pass-ok"
+    encrypted = encrypt_with_password(plaintext, pw)
+    
+    artifact_path = tmp_path / "boundary.enc"
+    artifact_path.write_text(encrypted, encoding="utf8")
+    
+    restore_root = tmp_path / "restore-target-boundary"
+    restore_root.mkdir()
+    
+    # Should succeed without raising.
+    result = restore_backup(
+        artifact_path=artifact_path,
+        password=pw,
+        confirm=True,
+        restore_root=restore_root,
+    )
+    
+    assert result.scope == "agent"
+    assert (restore_root / "boundary.db").exists()
+    assert (restore_root / "boundary.db").stat().st_size == MAX_DECOMPRESSED_RESTORE_BYTES
+
+
+def test_restore_preserves_existing_behavior_for_normal_backups(tmp_path: Path, monkeypatch):
+    """Normal-sized backups continue to work unchanged after adding the bounds check."""
+    db_path = tmp_path / "talos-agent.db"
+    _seed_agent_db(db_path)
+    from talos_agent import backup_service as bs
+    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
+    monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)
+
+    out = tmp_path / "normal.enc"
+    pw = "normal-backup-pass-long"
+    build_backup(password=pw, out_path=out)
+    
+    restore_root = tmp_path / "restore-normal"
+    restore_root.mkdir()
+    
+    result = restore_backup(
+        artifact_path=out,
+        password=pw,
+        confirm=True,
+        restore_root=restore_root,
+    )
+    
+    assert result.version == BACKUP_FORMAT_VERSION
+    assert (restore_root / "talos-agent.db").exists()
+    # Verify the restored DB is valid SQLite (can be opened).
+    import sqlite3
+    conn = sqlite3.connect(str(restore_root / "talos-agent.db"))
+    conn.close()
