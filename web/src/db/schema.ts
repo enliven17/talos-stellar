@@ -1011,6 +1011,27 @@ export const tlsQuotaUsage = pgTable(
   ],
 );
 
+// Optional per-scope usage breakdown. The total counter above remains the
+// source of truth for quota enforcement; this table is observability only.
+export const tlsQuotaScopeUsage = pgTable(
+  "tls_quota_scope_usage",
+  {
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    resource: text("resource").notNull(),
+    scope: text("scope").notNull(),
+    windowStart: timestamp("windowStart", { mode: "date", precision: 3 }).notNull(),
+    count: integer("count").notNull().default(0),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("tls_quota_scope_usage_key").on(t.talosId, t.resource, t.scope, t.windowStart),
+    index("tls_quota_scope_usage_talosId_resource_idx").on(t.talosId, t.resource),
+  ],
+);
+
 // ─── Backup Runs (DR audit trail) ──────────────────────────────────
 
 export const tlsBackupRuns = pgTable(

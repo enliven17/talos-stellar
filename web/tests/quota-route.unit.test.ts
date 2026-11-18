@@ -65,6 +65,7 @@ vi.mock("@/db/schema", () => ({
   tlsTalos: { id: "id", apiKey: "apiKey" },
   tlsQuotaConfigs: { talosId: "talosId", resource: "resource" },
   tlsQuotaUsage: { talosId: "talosId", resource: "resource", windowStart: "windowStart", count: "count" },
+  tlsQuotaScopeUsage: { talosId: "talosId", resource: "resource", scope: "scope", windowStart: "windowStart", count: "count" },
   tlsApiAuditLogs: { talosId: "talosId", method: "method", path: "path", statusCode: "statusCode", ipAddress: "ipAddress" },
 }));
 

@@ -6,6 +6,7 @@ import { eq, isNull, or, and } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
 import {
   readQuotaUsage,
+  readQuotaUsageBreakdown,
   resolveQuotaConfig,
   ALL_QUOTA_RESOURCES,
   type QuotaResource,
@@ -85,9 +86,10 @@ async function _GET(
   // Build the response for each resource in parallel
   const quotaEntries = await Promise.all(
     ALL_QUOTA_RESOURCES.map(async (resource: QuotaResource) => {
-      const [config, usage] = await Promise.all([
+      const [config, usage, byScope] = await Promise.all([
         resolveQuotaConfig(db, id, resource),
         readQuotaUsage(db, id, resource),
+        readQuotaUsageBreakdown(db, id, resource),
       ]);
 
       const isAgentOverride = configRows.some(
@@ -110,6 +112,7 @@ async function _GET(
             limit: usage.limit,
             resetAt: new Date(usage.resetAt).toISOString(),
             ok: usage.ok,
+            byScope,
           },
         },
       ] as const;

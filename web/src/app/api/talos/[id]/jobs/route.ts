@@ -268,7 +268,7 @@ async function _POST(
 
     // Submit + verify payment if signedXdr provided; otherwise use legacy txHash
     // Check quota before doing expensive payment work.
-    const quotaResult = await checkAndIncrementQuota(db, id, "job_writes");
+    const quotaResult = await checkAndIncrementQuota(db, id, "job_writes", "commerce:write");
     if (!quotaResult.ok) return quotaExceededResponse(quotaResult);
 
     let txHash: string;

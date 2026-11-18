@@ -56,6 +56,13 @@ vi.mock("@/db/schema", () => ({
     windowStart: "windowStart",
     count: "count",
   },
+  tlsQuotaScopeUsage: {
+    talosId: "talosId",
+    resource: "resource",
+    scope: "scope",
+    windowStart: "windowStart",
+    count: "count",
+  },
 }));
 
 vi.mock("drizzle-orm", () => ({
@@ -77,6 +84,7 @@ import {
   resolveQuotaConfig,
   checkAndIncrementQuota,
   readQuotaUsage,
+  readQuotaUsageBreakdown,
   quotaExceededResponse,
   buildQuotaHeaders,
   applyQuotaHeaders,
@@ -315,7 +323,39 @@ describe("checkAndIncrementQuota", () => {
 
     await checkAndIncrementQuota(fakeDb, "agent-1", "activity_writes");
 
-    expect(mocks.dbInsert).toHaveBeenCalledTimes(1);
+    expect(mocks.dbInsert).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps total enforcement working when the breakdown write fails", async () => {
+    const configRow = makeQuotaConfigRow({ talosId: "agent-1", maxCount: 5, enabled: true });
+    mocks.dbSelect.mockReturnValueOnce(mocks.makeSelectChain([configRow]));
+    mocks.dbInsert
+      .mockReturnValueOnce(mocks.makeInsertChain([{ count: 2 }]))
+      .mockImplementationOnce(() => { throw new Error("scope table unavailable"); });
+
+    const result = await checkAndIncrementQuota(fakeDb, "agent-1", "activity_writes");
+
+    expect(result).toMatchObject({ ok: true, used: 2, remaining: 3 });
+  });
+});
+
+describe("readQuotaUsageBreakdown", () => {
+  it("returns only bounded known scopes and preserves zero buckets", async () => {
+    const config = makeQuotaConfigRow({ resource: "activity_writes", windowSize: "daily" });
+    mocks.dbSelect
+      .mockReturnValueOnce(mocks.makeSelectChain([config]))
+      .mockReturnValueOnce(
+        mocks.makeSelectChain([
+          { scope: "activity:write", count: 7 },
+          { scope: "request:/arbitrary", count: 99 },
+        ]),
+      );
+
+    const breakdown = await readQuotaUsageBreakdown(fakeDb, "agent-1", "activity_writes");
+
+    expect(breakdown["activity:write"]).toBe(7);
+    expect(breakdown["commerce:read"]).toBe(0);
+    expect(Object.keys(breakdown)).not.toContain("request:/arbitrary");
   });
 });
 
