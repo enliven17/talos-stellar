@@ -138,6 +138,12 @@ describe("isWallClockExpired", () => {
     const rec = makeRecord({ expiresAt: now });
     expect(isWallClockExpired(rec, now)).toBe(true);
   });
+  it.each([new Date(Number.NaN), new Date(Number.POSITIVE_INFINITY)])(
+    "returns false for a nonfinite expiry timestamp",
+    (expiresAt) => {
+      expect(isWallClockExpired(makeRecord({ expiresAt }), new Date())).toBe(false);
+    },
+  );
 });
 
 // ─── isLedgerExpired ──────────────────────────────────────────────────────────
@@ -218,6 +224,11 @@ describe("transitionFromPending", () => {
     expect(update?.lastError).toMatch(/expiry/i);
   });
 
+  it("preserves PENDING when expiresAt is nonfinite", () => {
+    const rec = makeRecord({ expiresAt: new Date(Number.NaN) });
+    expect(transitionFromPending(rec, CONFIRMED_POLL, 1010, BASE_CONFIG)).toBeNull();
+  });
+
   it("transitions PENDING → EXPIRED when ledger gap exceeded", () => {
     const rec = makeRecord({ ledgerSubmitted: 1000, expiresAt: new Date(Date.now() + 99_999) });
     // currentLedger = 1000 + 120 + 1 = 1121
@@ -277,6 +288,11 @@ describe("transitionFromConfirming", () => {
     });
     const update = transitionFromConfirming(rec, 1011, BASE_CONFIG, new Date());
     expect(update?.finalityStatus).toBe("EXPIRED");
+  });
+
+  it("preserves CONFIRMING when now is nonfinite", () => {
+    const rec = makeRecord({ finalityStatus: "CONFIRMING", confirmedLedger: 1010 });
+    expect(transitionFromConfirming(rec, 1012, BASE_CONFIG, new Date(Number.NaN))).toBeNull();
   });
 
   it("transitions CONFIRMING → EXPIRED on ledger gap (counted from ledgerSubmitted)", () => {
