@@ -58,6 +58,7 @@ The webhook delivery system enables TALOS agents to send signed event notificati
 | `PATCH` | `api/webhooks/subscriptions/:id` | Update subscription |
 | `DELETE` | `api/webhooks/subscriptions/:id` | Delete subscription |
 | `POST` | `api/webhooks/subscriptions/:id/rotate` | Rotate the signing secret (dual-sign grace window) |
+| `POST` | `api/webhooks/subscriptions/:id/verify` | Perform or complete destination verification handshake |
 
 ### Operator UI (`/webhooks`)
 
@@ -116,6 +117,9 @@ All configuration is via environment variables:
 | `WEBHOOK_MAX_PAYLOAD_BYTES` | `64000` | Maximum payload size (bytes) |
 | `WEBHOOK_LEASE_TTL_SECONDS` | `300` | Delivery lease duration (s) |
 | `WEBHOOK_HEARTBEAT_EXTEND_SECONDS` | `300` | Heartbeat extension (s) |
+| `WEBHOOK_VERIFICATION_CHALLENGE_TTL_SECONDS` | `600` | Bounded challenge token expiration window (s) |
+| `WEBHOOK_VERIFICATION_TTL_SECONDS` | `2592000` | Bounded verification validity lifetime (s) |
+| `WEBHOOK_VERIFICATION_TIMEOUT_MS` | `5000` | HTTP timeout for verification handshake (ms) |
 
 ### Generating the Encryption Key
 
@@ -287,3 +291,29 @@ Migration `0019_webhook_secret_rotation.sql` adds:
 - `previous_secret_ciphertext`
 - `previous_secret_expires_at`
 - `secret_rotated_at`
+
+---
+
+## Destination Verification Handshake
+
+Before enabling outbound webhook deliveries to a configured URL, Talos verifies control of the destination endpoint via a challenge-response handshake.
+
+### Flow
+
+1. **Creation / URL Update** — When a subscription is created (`POST /api/webhooks/subscriptions`) or its `url` is updated (`PATCH /api/webhooks/subscriptions/:id`), its `destination_verification_status` starts at `pending`. Creation automatically attempts an initial handshake.
+2. **Handshake Request** — Talos sends a signed `POST` request to the destination URL via SSRF-guarded `safeFetch`:
+   - Headers: `X-Webhook-Event: endpoint.verification`, `X-Webhook-Challenge: <challenge>`, `X-Webhook-Signature: v1=<hmac>,t=<ts>`
+   - Body: `{ "type": "endpoint.verification", "challenge": "whver_...", "subscriptionId": "...", "talosId": "...", "timestamp": ... }`
+3. **Challenge Echo** — The destination must return an HTTP `2xx` response echoing the challenge (either JSON `{ "challenge": "whver_..." }` or plain text matching the challenge token).
+4. **Retry / Out-of-Band Completion** — Operators can trigger or complete verification via `POST /api/webhooks/subscriptions/:id/verify`:
+   - Empty body: re-runs the outbound HTTP handshake.
+   - `{ "token": "whver_..." }`: completes verification using the active challenge token before `WEBHOOK_VERIFICATION_CHALLENGE_TTL_SECONDS` expires.
+5. **Bounded Lifetime & Delivery Gating** — Verified destinations remain valid for `WEBHOOK_VERIFICATION_TTL_SECONDS`. Unverified or expired subscriptions are skipped by `emitWebhookEvent()` and rejected with `destination_unverified` by `attemptDelivery()`. Legacy rows with `NULL` status remain deliverable for backward compatibility.
+
+### Migration
+
+Migration `0023_webhook_destination_verification.sql` adds:
+- `destination_verification_status`
+- `destination_verification_token`
+- `destination_verification_expires_at`
+- `destination_verified_at`
