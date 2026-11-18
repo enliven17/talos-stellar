@@ -4,6 +4,8 @@ import { db } from "@/db";
 import { tlsTalos } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { retireAgentSchema, parseBody } from "@/lib/schemas";
+import { emitLifecycleEvent, LIFECYCLE_EVENTS } from "@/lib/governance/events";
+import { toLifecycleState } from "@/lib/governance/lifecycle";
 
 // POST /api/talos/:id/retire - Retire an agent (preserves history, prevents reuse)
 // Requires Stellar ED25519 signature proof of wallet ownership.
@@ -90,6 +92,20 @@ async function _POST(
         })
         .where(eq(tlsTalos.id, id))
         .returning();
+
+      await emitLifecycleEvent(
+        {
+          talosId: id,
+          eventType: LIFECYCLE_EVENTS.RETIRED,
+          fromState: toLifecycleState(talos.status),
+          toState: "retired",
+          actorId: stellarPublicKey,
+          actorRole: talos.creatorPublicKey === stellarPublicKey ? "creator" : "operator",
+          detail: { reason, supersededBy: supersededBy || null },
+          idempotencyKey: `retire:${id}:${message}`,
+        },
+        tx,
+      );
 
       return { data: retiredTalos };
     });
