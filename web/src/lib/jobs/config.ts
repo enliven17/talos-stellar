@@ -36,6 +36,12 @@ export const jobsConfig = {
   /** Grace period for in-flight jobs to finish during graceful shutdown, in ms. */
   shutdownGraceMs: envInt("JOBS_SHUTDOWN_GRACE_MS", 10_000),
 
+  /** Maximum serialized byte size of a persisted job `result` payload before truncation to a bounded diagnostic. */
+  maxResultBytes: envInt("JOBS_MAX_RESULT_BYTES", 65_536),
+
+  /** Maximum UTF-8 byte size of a persisted `lastError` diagnostic message before truncation. */
+  maxErrorBytes: envInt("JOBS_MAX_ERROR_BYTES", 500),
+
   /** Identifies this process in leaseOwner / logs. Stable per process lifetime. */
   workerId: process.env.JOBS_WORKER_ID || `${process.pid}-${randomUUID().slice(0, 8)}`,
 };

@@ -185,4 +185,31 @@ describe("jobs/runner — runOnce", () => {
     expect(summary.leased).toBe(3);
     expect(summary.completed).toBe(3);
   });
+
+  it("completes the job via store.complete even when the handler returns a large or unserializable result", async () => {
+    const oversizedResult = { blob: "x".repeat(200_000) };
+    const handler = vi.fn().mockResolvedValue(oversizedResult);
+    registerHandler("test_queue", handler);
+    mocks.store.leaseBatch.mockResolvedValue([makeJob()]);
+    mocks.store.complete.mockResolvedValue(
+      makeJob({
+        status: "completed",
+        result: {
+          truncated: true,
+          reason: "result_exceeds_max_bytes",
+          maxBytes: 65_536,
+          actualBytes: 200_011,
+          diagnostic: "job result size (200011 bytes) exceeded maxResultBytes (65536 bytes)",
+        },
+      }),
+    );
+
+    const summary = await runOnce({ heartbeatIntervalMs: 60_000 });
+
+    expect(mocks.store.complete).toHaveBeenCalledWith("job_1", "lease_1", oversizedResult, expect.any(Number));
+    expect(mocks.store.fail).not.toHaveBeenCalled();
+    expect(summary.completed).toBe(1);
+    expect(summary.retried).toBe(0);
+    expect(summary.deadLettered).toBe(0);
+  });
 });
