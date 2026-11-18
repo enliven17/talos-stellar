@@ -391,6 +391,7 @@ def _build_task_list(
         polling_task,
     )
 
+    task_slots = asyncio.BoundedSemaphore(settings.scheduler_max_concurrent_tasks)
     _shared = dict(
         shutdown_event=shutdown_event,
         settings=settings,
@@ -406,11 +407,16 @@ def _build_task_list(
                 policy_engine=policy_engine, policy_middleware=policy_middleware,
                 ensure_browser_healthy=ensure_browser_healthy,
                 effective_clock=effective_clock,
+                task_slots=task_slots,
             ),
             name="agent_cycle",
         ),
         asyncio.create_task(
-            polling_task(**_shared, job_effect_store=job_effect_store),
+            polling_task(
+                **_shared,
+                job_effect_store=job_effect_store,
+                task_slots=task_slots,
+            ),
             name="polling",
         ),
         asyncio.create_task(heartbeat_task(**_shared), name="heartbeat"),
@@ -422,29 +428,37 @@ def _build_task_list(
             ),
             name="job_heartbeat",
         ),
-        asyncio.create_task(activity_flush_task(**_shared), name="activity_flush"),
+        asyncio.create_task(
+            activity_flush_task(**_shared, task_slots=task_slots),
+            name="activity_flush",
+        ),
         asyncio.create_task(
             learning_cycle_task(
                 **_shared, agent_lock=agent_lock, tools=tools,
                 ensure_browser_healthy=ensure_browser_healthy,
                 effective_clock=effective_clock,
+                task_slots=task_slots,
             ),
             name="learning_cycle",
         ),
         asyncio.create_task(
             dividend_distribution_task(
                 **_shared, stellar=stellar, effective_clock=effective_clock,
+                task_slots=task_slots,
             ),
             name="dividend_distribution",
         ),
         asyncio.create_task(
-            loan_repayment_task(**_shared, agent_lock=agent_lock),
+            loan_repayment_task(
+                **_shared, agent_lock=agent_lock, task_slots=task_slots,
+            ),
             name="loan_repayment",
         ),
         asyncio.create_task(
             telemetry_log_task(
                 **_shared, adapter_health_reporter=adapter_health_reporter,
                 policy_engine=policy_engine,
+                task_slots=task_slots,
             ),
             name="telemetry_log",
         ),
@@ -455,6 +469,7 @@ def _build_task_list(
                 job_effect_dispatch_task(
                     shutdown_event=shutdown_event, settings=settings,
                     db=db, job_effect_dispatcher=job_effect_dispatcher,
+                    task_slots=task_slots,
                 ),
                 name="job_effect_dispatch",
             )
