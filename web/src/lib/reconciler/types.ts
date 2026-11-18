@@ -56,14 +56,41 @@ export interface TxRecord {
   updatedAt: Date;
 }
 
+// ─── Evidence Trail ─────────────────────────────────────────────────────────
+
+/** Observation sources recognized during payment finality reconciliation. */
+export type ObservationSource =
+  | "horizon"
+  | "wall_clock"
+  | "ledger_gap"
+  | "reconciler";
+
+/**
+ * Immutable evidence record capturing a payment finality decision:
+ *   - The closed ledger sequence number observed or evaluated
+ *   - The observation source (e.g., horizon, wall_clock, ledger_gap, reconciler)
+ *   - The transition reason explaining the state machine decision
+ */
+export interface FinalityEvidence {
+  txHash?: string;
+  txHashTruncated?: string;
+  ledger: number | null;
+  observationSource: string;
+  transitionReason: string;
+  fromStatus: FinalityStatus;
+  toStatus: FinalityStatus;
+  decidedAt: Date;
+  metadata?: Record<string, unknown>;
+}
+
 // ─── Horizon Poll Result ──────────────────────────────────────────────────────
 
 /** Discriminated union returned by the Horizon polling layer. */
 export type HorizonPollResult =
-  | { outcome: "confirmed"; ledger: number; successful: true }
-  | { outcome: "failed";    ledger: number; successful: false; detail?: string }
-  | { outcome: "not_found" }
-  | { outcome: "error";     message: string; retryable: boolean };
+  | { outcome: "confirmed"; ledger: number; successful: true; source?: string }
+  | { outcome: "failed";    ledger: number; successful: false; detail?: string; source?: string }
+  | { outcome: "not_found"; source?: string }
+  | { outcome: "error";     message: string; retryable: boolean; source?: string };
 
 // ─── State Transition ─────────────────────────────────────────────────────────
 
@@ -76,6 +103,9 @@ export interface TxRecordUpdate {
   lastError?: string | null;
   repairApplied?: boolean;
   updatedAt?: Date;
+  evidence?: FinalityEvidence;
+  observationSource?: string;
+  transitionReason?: string;
 }
 
 // ─── Repair Result ────────────────────────────────────────────────────────────
@@ -129,6 +159,12 @@ export interface ReconcilerConfig {
    * Default: 5.
    */
   concurrencyLimit?: number;
+
+  /**
+   * Maximum number of evidence trail entries retained in memory.
+   * Default: 500.
+   */
+  maxEvidenceEntries?: number;
 }
 
 // ─── Scheduler State (in-process singleton) ──────────────────────────────────

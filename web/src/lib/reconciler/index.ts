@@ -6,8 +6,19 @@
  */
 export { startReconciler, stopReconciler, runOneTick, registerTx, getStats, isRunning } from "./scheduler";
 export { reconcilerConfig, loadReconcilerConfig } from "./config";
-export { pollTransaction, fetchCurrentLedger } from "./horizon";
+export { pollTransaction, fetchCurrentLedger, extractObservationSource } from "./horizon";
 export { applyRepair } from "./repair";
+export {
+  recordEvidence,
+  getEvidenceTrail,
+  clearEvidenceTrail,
+  getEvidenceCount,
+  truncateTxHash,
+  sanitizeEvidenceMetadata,
+  DEFAULT_MAX_EVIDENCE_ENTRIES,
+  MAX_READ_LIMIT,
+  DEFAULT_READ_LIMIT,
+} from "./evidence";
 export {
   computeTransition,
   transitionFromPending,
@@ -17,6 +28,7 @@ export {
   isTerminal,
   isWallClockExpired,
   isLedgerExpired,
+  buildFinalityEvidence,
 } from "./state-machine";
 export type {
   FinalityStatus,
@@ -27,5 +39,7 @@ export type {
   RepairOutcome,
   ReconcilerConfig,
   ReconcilerStats,
+  FinalityEvidence,
+  ObservationSource,
 } from "./types";
 export { ACTIVE_STATES, TERMINAL_STATES } from "./types";
