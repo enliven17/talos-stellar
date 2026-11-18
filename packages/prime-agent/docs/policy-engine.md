@@ -76,6 +76,14 @@ Policies are JSON files or Python dataclasses. Example:
           "severity": "blocker",
           "reason": "Transfers over 1000 XLM blocked on weekends."
         }
+      ],
+      "exceptions": [
+        {
+          "rule_id": "no-large-weekend-transfers",
+          "actor": "operator@example.test",
+          "reason": "Approved testnet settlement window",
+          "expires_at": "2030-01-01T00:00:00Z"
+        }
       ]
     }
   ]
@@ -83,6 +91,16 @@ Policies are JSON files or Python dataclasses. Example:
 ```
 
 Save to `~/.talos-agent/policies.json`.  The engine hot-reloads on file change.
+
+### Time-bounded exceptions
+
+An exception is scoped to the containing policy and an exact `rule_id`. It
+must include a non-empty `actor`, a non-empty `reason`, and an explicit
+timezone-aware `expires_at` ISO-8601 timestamp. While active, it suppresses
+only that matching rule. At the expiry instant the exception is inactive and
+the original rule is enforced again; it never grants unrelated permissions.
+Expiry is exclusive, so an exception at exactly `expires_at` is already
+expired. Invalid exception metadata is rejected when the policy file loads.
 
 ### Supported operators
 
