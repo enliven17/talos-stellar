@@ -7,8 +7,11 @@ here so it can be unit-tested without starting the full scheduler loop.
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
 from datetime import datetime, time, timezone
-from typing import TYPE_CHECKING
+from fractions import Fraction
+from typing import TYPE_CHECKING, Literal
 
 try:
     from zoneinfo import ZoneInfo
@@ -17,6 +20,90 @@ except ImportError:
 
 if TYPE_CHECKING:
     from talos_agent.clock import ClockProtocol
+
+
+MissedRunPolicy = Literal["skip", "coalesce", "catch_up"]
+
+
+@dataclass(frozen=True)
+class IntervalRunDecision:
+    """Bounded execution plan for a recurring interval task."""
+
+    policy: MissedRunPolicy
+    due_runs: int
+    runs_to_execute: int
+    lateness_seconds: float
+    next_run_in_seconds: float
+
+
+def plan_interval_runs(
+    now: datetime,
+    last_run: datetime | None,
+    interval_seconds: float,
+    *,
+    policy: MissedRunPolicy = "coalesce",
+    max_catch_up_runs: int = 3,
+) -> IntervalRunDecision:
+    """Plan interval work and report lateness relative to its earliest due slot.
+
+    ``skip`` executes one due run normally, but drops all work when multiple
+    interval slots accumulated. ``coalesce`` executes once regardless of
+    backlog. ``catch_up`` executes at most ``max_catch_up_runs``.
+    """
+    if policy not in ("skip", "coalesce", "catch_up"):
+        raise ValueError("policy must be 'skip', 'coalesce', or 'catch_up'")
+    try:
+        interval = float(interval_seconds)
+    except (OverflowError, TypeError, ValueError):
+        interval = math.nan
+    if (
+        isinstance(interval_seconds, bool)
+        or not isinstance(interval_seconds, (int, float))
+        or not math.isfinite(interval)
+        or interval <= 0
+    ):
+        raise ValueError("interval_seconds must be a finite number greater than 0")
+    if (
+        isinstance(max_catch_up_runs, bool)
+        or not isinstance(max_catch_up_runs, int)
+        or not 1 <= max_catch_up_runs <= 10
+    ):
+        raise ValueError("max_catch_up_runs must be an integer between 1 and 10")
+
+    if last_run is None:
+        return IntervalRunDecision(policy, 1, 1, 0.0, 0.0)
+
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if last_run.tzinfo is None:
+        last_run = last_run.replace(tzinfo=timezone.utc)
+
+    elapsed = (now - last_run).total_seconds()
+    if elapsed < interval:
+        return IntervalRunDecision(
+            policy,
+            0,
+            0,
+            0.0,
+            interval - max(elapsed, 0.0),
+        )
+
+    due_runs = Fraction.from_float(elapsed) // Fraction.from_float(interval)
+    lateness_seconds = max(elapsed - interval, 0.0)
+    if policy == "skip":
+        runs_to_execute = 1 if due_runs == 1 else 0
+    elif policy == "coalesce":
+        runs_to_execute = 1
+    else:
+        runs_to_execute = min(due_runs, max_catch_up_runs)
+
+    return IntervalRunDecision(
+        policy=policy,
+        due_runs=due_runs,
+        runs_to_execute=runs_to_execute,
+        lateness_seconds=lateness_seconds,
+        next_run_in_seconds=0.0,
+    )
 
 
 def check_should_run(

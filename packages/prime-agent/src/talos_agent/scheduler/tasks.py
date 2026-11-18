@@ -27,7 +27,7 @@ from talos_agent.circuit_breaker import cb_registry
 from talos_agent.observability import log
 from talos_agent.scheduler.backoff import DurableBackoff
 from talos_agent.scheduler.helpers import run_dividend_distribution, run_loan_repayment
-from talos_agent.scheduler.policy import check_should_run
+from talos_agent.scheduler.policy import plan_interval_runs
 from talos_agent.tracing import traced_span
 
 if TYPE_CHECKING:
@@ -477,54 +477,79 @@ async def dividend_distribution_task(
         try:
             # Prevent duplicate runs after restart
             last_run = db.get_last_run("dividend_distribution")
-            if last_run and not check_should_run(
-                now=effective_clock.now_utc()
+            now = (
+                effective_clock.now_utc()
                 if hasattr(effective_clock, "now_utc")
-                else effective_clock.now(),
+                else effective_clock.now()
+            )
+            decision = plan_interval_runs(
+                now=now,
                 last_run=last_run,
                 interval_seconds=distribution_interval,
-                clock=effective_clock,
-            ):
-                now_val = (
-                    effective_clock.now_utc()
-                    if hasattr(effective_clock, "now_utc")
-                    else effective_clock.now()
+                policy=getattr(settings, "scheduler_missed_run_policy", "coalesce"),
+                max_catch_up_runs=getattr(settings, "scheduler_max_catch_up_runs", 3),
+            )
+            if decision.due_runs == 0:
+                console.print(
+                    f"[dim]Dividend distribution skipped — "
+                    f"next run in {int(decision.next_run_in_seconds)}s[/dim]"
                 )
-                elapsed = (now_val - last_run).total_seconds()
-                remaining = distribution_interval - elapsed
-                if remaining > 0:
-                    console.print(
-                        f"[dim]Dividend distribution skipped — "
-                        f"next run in {int(remaining)}s[/dim]"
+                try:
+                    await asyncio.wait_for(
+                        shutdown_event.wait(),
+                        timeout=decision.next_run_in_seconds,
                     )
-                    try:
-                        await asyncio.wait_for(shutdown_event.wait(), timeout=remaining)
-                        return  # shutdown requested during wait
-                    except asyncio.TimeoutError:
-                        pass
+                    return
+                except asyncio.TimeoutError:
                     continue
 
-            with _traced_task_run("dividend_distribution", talos_config):
-                result = await run_dividend_distribution(
-                    talos_id=settings.talos_id,
-                    talos_config=talos_config,
-                    settings=settings,
-                    stellar=stellar,
-                    api=api,
-                    db=db,
-                )
+            metrics.record_schedule_lateness(
+                "dividend_distribution",
+                decision.policy,
+                decision.lateness_seconds,
+            )
+            log.info(
+                "scheduler_interval_decision",
+                task="dividend_distribution",
+                missed_run_policy=decision.policy,
+                due_runs=decision.due_runs,
+                runs_to_execute=decision.runs_to_execute,
+                lateness_seconds=decision.lateness_seconds,
+            )
 
-            _RESULT_MESSAGES = {
-                "no_wallet": ("[dim yellow]", "No wallet public key configured — skipping dividend distribution"),
-                "missing_creator": ("[bold red]", "No creator public key configured — aborting dividend distribution"),
-                "balance_error": ("[bold red]", "USDC balance check failed — skipping dividend distribution"),
-                "below_threshold": ("[dim]", f"USDC balance below threshold {settings.dividend_usdc_threshold} — skipping"),
-                "preview_failed": ("[bold red]", "Distribution preview failed — aborting"),
-                "distribution_failed": ("[bold red]", "Dividend distribution failed"),
-                "success": ("[bold green]", "Dividend distribution successful"),
-            }
-            color, msg = _RESULT_MESSAGES.get(result, ("[dim]", f"Unknown result: {result}"))
-            console.print(f"{color}{msg}[/]")
+            if decision.runs_to_execute == 0:
+                log.info(
+                    "scheduler_missed_runs_skipped",
+                    task="dividend_distribution",
+                    missed_runs=decision.due_runs,
+                    lateness_seconds=decision.lateness_seconds,
+                )
+                db.update_schedule("dividend_distribution")
+            else:
+                for _ in range(decision.runs_to_execute):
+                    if shutdown_event.is_set():
+                        break
+                    with _traced_task_run("dividend_distribution", talos_config):
+                        result = await run_dividend_distribution(
+                            talos_id=settings.talos_id,
+                            talos_config=talos_config,
+                            settings=settings,
+                            stellar=stellar,
+                            api=api,
+                            db=db,
+                        )
+
+                    _RESULT_MESSAGES = {
+                        "no_wallet": ("[dim yellow]", "No wallet public key configured — skipping dividend distribution"),
+                        "missing_creator": ("[bold red]", "No creator public key configured — aborting dividend distribution"),
+                        "balance_error": ("[bold red]", "USDC balance check failed — skipping dividend distribution"),
+                        "below_threshold": ("[dim]", f"USDC balance below threshold {settings.dividend_usdc_threshold} — skipping"),
+                        "preview_failed": ("[bold red]", "Distribution preview failed — aborting"),
+                        "distribution_failed": ("[bold red]", "Dividend distribution failed"),
+                        "success": ("[bold green]", "Dividend distribution successful"),
+                    }
+                    color, msg = _RESULT_MESSAGES.get(result, ("[dim]", f"Unknown result: {result}"))
+                    console.print(f"{color}{msg}[/]")
 
         except Exception as e:
             console.print(f"[red]Dividend distribution task error: {e}[/red]")
