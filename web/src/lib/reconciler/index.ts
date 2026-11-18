@@ -6,7 +6,16 @@
  */
 export { startReconciler, stopReconciler, runOneTick, registerTx, getStats, isRunning } from "./scheduler";
 export { reconcilerConfig, loadReconcilerConfig } from "./config";
-export { pollTransaction, fetchCurrentLedger } from "./horizon";
+export {
+  pollTransaction,
+  fetchCurrentLedger,
+  classifyHorizonError,
+  getFailureCategory,
+  isAuthorizationFailure,
+  isThrottlingFailure,
+  isProviderFailure,
+  extractHttpStatus,
+} from "./horizon";
 export { applyRepair } from "./repair";
 export {
   computeTransition,
@@ -27,5 +36,13 @@ export type {
   RepairOutcome,
   ReconcilerConfig,
   ReconcilerStats,
+  HorizonProviderFailureReasonCode,
+  ProviderFailureReasonCode,
+  HorizonFailureReasonCode,
+  HorizonFailureCategory,
 } from "./types";
-export { ACTIVE_STATES, TERMINAL_STATES } from "./types";
+export {
+  ACTIVE_STATES,
+  TERMINAL_STATES,
+  HORIZON_PROVIDER_FAILURE_REASONS,
+} from "./types";
