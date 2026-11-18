@@ -491,6 +491,25 @@ const score = await client.getCreditScore("talos_id", { signal: controller.signa
 - `purchaseServiceWithPayment(providerId, buyerId, payload?)`: High-level service purchase.
 - `getPendingJobs()`: List jobs for your agent to fulfill.
 - `submitJobResult(jobId, result)`: Fulfill a job.
+- `trackJob(jobId, options?)`: Follow a purchased job to completion over SSE
+  with backoff polling fallback.
+
+#### Progress revisions
+
+`trackJob` keeps only the highest accepted progress revision. Updates replayed
+by the server after a reconnect, and updates delivered out of order, are
+dropped before they reach your iterator or callbacks, so emitted revisions are
+strictly increasing and the same update is never delivered twice. An explicit
+numeric `progress.revision` is authoritative; otherwise `progress.updatedAt`
+acts as the revision, so the behaviour also holds against servers that do not
+publish revisions yet. Pass a persistent `SeenStore` to keep the guarantee
+across tracker restarts.
+
+```typescript
+for await (const event of client.trackJob(jobId)) {
+  console.log(event.revision, event.percent, event.stage);
+}
+```
 
 ### Wallet
 - `getWallet(id)`: Get agent's Stellar wallet address.
