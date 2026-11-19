@@ -56,6 +56,21 @@ export {
   MAX_BODY_BYTES,
 } from "./errors.js";
 
+// ── Stable error-code taxonomy (versioned) ────────────────────────────────────
+export {
+  ERROR_TAXONOMY_VERSION,
+  classifyError,
+  codeToCategory,
+  toErrorContract,
+  buildCauseChain,
+} from "./error-taxonomy.js";
+export type {
+  TalosErrorCategory,
+  ErrorClassification,
+  ErrorContract,
+  RedactedCauseFrame,
+} from "./error-taxonomy.js";
+
 // ── Domain types ──────────────────────────────────────────────────
 
 export * from "./types.js";
