@@ -38,6 +38,16 @@ export const jobsConfig = {
 
   /** Identifies this process in leaseOwner / logs. Stable per process lifetime. */
   workerId: process.env.JOBS_WORKER_ID || `${process.pid}-${randomUUID().slice(0, 8)}`,
+
+  /**
+   * Maximum number of jobs any single queue may contribute to one drain batch.
+   * Set via JOBS_FAIR_BATCH_PER_QUEUE. Default 0 (unlimited — existing behaviour).
+   *
+   * When > 0, leaseBatch() rotates through each eligible queue and claims at
+   * most this many jobs per queue, bounding one queue's share of the batch so
+   * slower queues are not starved by a high-volume one.
+   */
+  fairBatchPerQueue: envInt("JOBS_FAIR_BATCH_PER_QUEUE", 0),
 };
 
 /** Bearer token for /api/admin/jobs/* inspection endpoints. */
