@@ -24,6 +24,15 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(FIXED_NOW);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("toCanonicalDecimalAmount", () => {
   it("accepts canonical six-digit strings", () => {
     expect(toCanonicalDecimalAmount("1.500000")).toBe("1.500000");

@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { 
   tlsTalos, 
@@ -19,6 +19,7 @@ import {
   suppressSparseRows,
 } from "@/lib/analytics-privacy";
 import { parseAnalyticsLimit } from "@/lib/analytics-limits";
+import { withRequestId } from "@/lib/with-request-id";
 
 export const dynamic = 'force-dynamic';
 
@@ -103,7 +104,7 @@ interface EcosystemMetrics {
   };
 }
 
-export async function GET(req: Request) {
+async function _GET(req: Request | NextRequest) {
   // For now, this is a public endpoint for ecosystem-wide metrics.
   // If authorization is needed, uncomment the following:
   // const wallet = req.nextUrl.searchParams.get("wallet");
@@ -512,3 +513,5 @@ export async function GET(req: Request) {
     );
   }
 }
+
+export const GET = withRequestId(_GET);
