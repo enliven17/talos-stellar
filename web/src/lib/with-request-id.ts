@@ -1,21 +1,28 @@
 import { NextRequest } from "next/server";
-import { randomUUID } from "crypto";
+import { getRequestId } from "./api-response";
 
-type RouteHandler = (
-  req: NextRequest,
-  ctx: { params: Promise<Record<string, string>> }
-) => Promise<Response>;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyRouteHandler = (...args: any[]) => any;
 
-export function withRequestId(handler: RouteHandler): RouteHandler {
-  return async (req, ctx) => {
-    const requestId = req.headers.get("x-request-id") ?? randomUUID();
-    const headers = new Headers(req.headers);
-    headers.set("x-request-id", requestId);
-    const newReq = new NextRequest(req, { headers });
-
-    const res = await handler(newReq, ctx);
-    const newRes = new Response(res.body, res);
+/**
+ * Wraps a route handler to ensure every response includes an x-request-id header.
+ * Supports both Request and NextRequest, async and synchronous handlers.
+ */
+export function withRequestId<H extends AnyRouteHandler>(handler: H): H {
+  return ((req?: Request | NextRequest, ...rest: unknown[]) => {
+    const requestId = getRequestId(req);
+    const request = req ?? new NextRequest("http://localhost");
+    const result = handler(request, ...rest);
+    if (result && typeof (result as Promise<Response>).then === "function") {
+      return (result as Promise<Response>).then((res: Response) => {
+        const newRes = new Response(res.body, res);
+        newRes.headers.set("x-request-id", requestId);
+        return newRes;
+      });
+    }
+    const res = result as Response;
+    const newRes = new Response(res?.body, res);
     newRes.headers.set("x-request-id", requestId);
     return newRes;
-  };
+  }) as unknown as H;
 }

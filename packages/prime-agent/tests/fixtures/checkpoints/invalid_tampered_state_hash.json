@@ -1,0 +1,24 @@
+{
+  "_comment": "INVALID: state section_hash has been tampered with; CheckpointHashError on 'state' must be raised.",
+  "config": {
+    "api_url": "https://talos-stellar.vercel.app",
+    "talos_id": "talos-vega-001"
+  },
+  "envelope_hash": "6ceea47306323637a06707dd86c5af9259db8e09754c2d8a37710ad09a645ddc",
+  "meta": {
+    "agent_id": "vega-001",
+    "created_at": "2026-07-28T12:00:00+00:00",
+    "schema_version": 1
+  },
+  "section_hashes": {
+    "config": "55bad005be8f3b8810f1fe7d68b133b08172a289b7ae9fdf109488255fdf692c",
+    "meta": "de0152be9949697718298791a687214476bdcda8dcf1bcb005605ae14d4145e4",
+    "state": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "state": {
+    "balance_usdc": 42.5,
+    "cycle_count": 7,
+    "last_task": "post_content",
+    "wallet_public_key": "GDQP2KPQGKIHYJGXNUIYOMHARUARCA7DJT5FO2FFOOKY3B2WSQHG4W37"
+  }
+}

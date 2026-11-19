@@ -1,0 +1,40 @@
+{
+  "meta": {
+    "contract": "TalosRegistry",
+    "generator": "scripts/generate-registry-fixtures.mjs v1",
+    "kind": "Talos",
+    "note": "creator is not a valid G... address – parser must reject",
+    "schema_version": 1
+  },
+  "storage_key": {
+    "id": 1,
+    "type": "Talos"
+  },
+  "value": {
+    "active": true,
+    "category": "Marketing",
+    "created_at": "1710000000",
+    "creator": "NOT_A_STELLAR_ADDRESS",
+    "description": "bad address",
+    "id": 1,
+    "kernel": {
+      "approval_threshold": "10",
+      "gtm_budget": "1000",
+      "min_patron_pulse": "100"
+    },
+    "name": "vega",
+    "patron": {
+      "creator_addr": "NOT_A_STELLAR_ADDRESS",
+      "creator_share": 60,
+      "investor_addr": "GDBYLOLNZLP5FPXG3CXHHZ47I5AKETMOMV2JVQJ3UDHLIQORPKYERYJI",
+      "investor_share": 25,
+      "treasury_addr": "GATSGV2VGSVIWSMOLRMFFVTAAANHPFINBC3EPLDCJ5A753UTM5WH7V5R",
+      "treasury_share": 15
+    },
+    "pulse": {
+      "price_usd_cents": "100",
+      "token_symbol": "VEGA",
+      "total_supply": "1000000"
+    }
+  }
+}

@@ -1,17 +1,23 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPatrons } from "@/db/schema";
 import { and, desc, eq } from "drizzle-orm";
 import { getAccountInfo, verifyStellarSignature } from "@/lib/stellar";
 import { becomePatronSchema, revokePatronSchema, parseBody } from "@/lib/schemas";
+import { parseAnalyticsLimit } from "@/lib/analytics-limits";
 
 // GET /api/talos/:id/patrons — List patrons for a TALOS
-export async function GET(
-  _request: NextRequest,
+async function _GET(
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id } = await params;
+    const { searchParams } = new URL(request.url);
+    const parsedLimit = parseAnalyticsLimit(searchParams.get("limit"), 50, 100);
+    if (!parsedLimit.ok) return parsedLimit.response;
+    const limit = parsedLimit.limit;
 
     const talos = await db
       .select({ id: tlsTalos.id })
@@ -28,7 +34,8 @@ export async function GET(
       .select()
       .from(tlsPatrons)
       .where(and(eq(tlsPatrons.talosId, id), eq(tlsPatrons.status, "active")))
-      .orderBy(desc(tlsPatrons.createdAt));
+      .orderBy(desc(tlsPatrons.createdAt))
+      .limit(limit);
 
     return Response.json(patrons);
   } catch {
@@ -39,7 +46,7 @@ export async function GET(
 // POST /api/talos/:id/patrons — Register as patron (requires min Pulse holding)
 // Caller must sign a message containing both the TALOS id and the literal
 // "register-patron" with their Stellar wallet, proving control of the key.
-export async function POST(
+async function _POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -172,7 +179,7 @@ export async function POST(
 // DELETE /api/talos/:id/patrons — Withdraw patron status
 // Caller must sign a message containing both the TALOS id and the literal
 // "revoke-patron" with their Stellar wallet, proving control of the key.
-export async function DELETE(
+async function _DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -238,3 +245,7 @@ export async function DELETE(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withRequestId(_GET);
+export const POST = withRequestId(_POST);
+export const DELETE = withRequestId(_DELETE);

@@ -7,7 +7,7 @@ export default function NotFound() {
         Talos
       </Link>
 
-      <div className="text-xs text-muted mb-4 tracking-wide">// 404</div>
+      <div className="text-xs text-muted mb-4 tracking-wide">{/* 404 */}</div>
 
       <h1 className="text-2xl font-bold text-accent mb-3">Page not found</h1>
 

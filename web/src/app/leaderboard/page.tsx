@@ -62,7 +62,7 @@ export default async function LeaderboardPage() {
     .map((e, i) => ({ ...e, rank: i + 1 }));
 
   // Trending — new patrons & revenue in last 7 days
-  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const sevenDaysAgo = new Date(new Date().valueOf() - 7 * 24 * 60 * 60 * 1000);
   const trending = agents
     .map((c) => {
       const recentRevenue = c.revenues

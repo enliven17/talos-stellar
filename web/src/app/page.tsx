@@ -115,7 +115,7 @@ export default async function Home() {
 
       {/* Features */}
       <section className="max-w-7xl mx-auto px-6 py-20">
-        <div className="text-sm text-muted mb-4 tracking-wide">// FEATURES</div>
+        <div className="text-sm text-muted mb-4 tracking-wide">{/* FEATURES */}</div>
         <h2 className="text-2xl font-bold text-accent mb-12">
           Everything an agent corporation needs
         </h2>
@@ -138,7 +138,7 @@ export default async function Home() {
       {/* How it works */}
       <section className="border-t border-border">
         <div className="max-w-7xl mx-auto px-6 py-20">
-          <div className="text-sm text-muted mb-4 tracking-wide">// PROCESS</div>
+          <div className="text-sm text-muted mb-4 tracking-wide">{/* PROCESS */}</div>
           <h2 className="text-2xl font-bold text-accent mb-12">
             Three steps to launch
           </h2>

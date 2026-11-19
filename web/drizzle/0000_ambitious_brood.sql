@@ -1,6 +1,4 @@
 -- Current sql file was generated after introspecting the database
--- If you want to run this migration please uncomment this code before executing migrations
-/*
 CREATE TABLE "tls_talos" (
 	"id" text PRIMARY KEY NOT NULL,
 	"name" text NOT NULL,
@@ -24,6 +22,12 @@ CREATE TABLE "tls_talos" (
 	"agentLastSeen" timestamp(3),
 	"walletPublicKey" text,
 	"creatorPublicKey" text,
+	"investorPublicKey" text,
+	"treasuryPublicKey" text,
+	"agentWalletId" text,
+	"agentWalletAddress" text,
+	"onChainId" integer,
+	"agentName" text,
 	"createdAt" timestamp(3) DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	"updatedAt" timestamp(3) NOT NULL,
 	"pulsePrice" numeric(18, 6) DEFAULT '0' NOT NULL,
@@ -65,6 +69,7 @@ CREATE TABLE "tls_commerce_jobs" (
 	"status" text DEFAULT 'pending' NOT NULL,
 	"paymentSig" text,
 	"amount" numeric(18, 6) NOT NULL,
+	"txHash" text,
 	"createdAt" timestamp(3) DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	"updatedAt" timestamp(3) NOT NULL
 );
@@ -79,6 +84,7 @@ CREATE TABLE "tls_commerce_services" (
 	"currency" text DEFAULT 'USDC' NOT NULL,
 	"stellarPublicKey" text NOT NULL,
 	"chains" text[] DEFAULT '{"stellar"}',
+	"fulfillmentMode" text DEFAULT 'async' NOT NULL,
 	"createdAt" timestamp(3) DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	"updatedAt" timestamp(3) NOT NULL
 );
@@ -94,6 +100,7 @@ CREATE TABLE "tls_approvals" (
 	"status" text DEFAULT 'pending' NOT NULL,
 	"decidedAt" timestamp(3),
 	"decidedBy" text,
+	"txHash" text,
 	"createdAt" timestamp(3) DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	"updatedAt" timestamp(3) NOT NULL
 );
@@ -126,6 +133,7 @@ CREATE TABLE "tls_playbooks" (
 	"engagementRate" numeric(5, 2) DEFAULT '0' NOT NULL,
 	"conversions" integer DEFAULT 0 NOT NULL,
 	"periodDays" integer DEFAULT 30 NOT NULL,
+	"content" jsonb,
 	"createdAt" timestamp(3) DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	"updatedAt" timestamp(3) NOT NULL
 );
@@ -147,13 +155,12 @@ ALTER TABLE "tls_approvals" ADD CONSTRAINT "tls_approvals_talosId_fkey" FOREIGN 
 ALTER TABLE "tls_revenues" ADD CONSTRAINT "tls_revenues_talosId_fkey" FOREIGN KEY ("talosId") REFERENCES "public"."tls_talos"("id") ON DELETE cascade ON UPDATE cascade;--> statement-breakpoint
 ALTER TABLE "tls_playbooks" ADD CONSTRAINT "tls_playbooks_talosId_fkey" FOREIGN KEY ("talosId") REFERENCES "public"."tls_talos"("id") ON DELETE cascade ON UPDATE cascade;--> statement-breakpoint
 ALTER TABLE "tls_playbook_purchases" ADD CONSTRAINT "tls_playbook_purchases_playbookId_fkey" FOREIGN KEY ("playbookId") REFERENCES "public"."tls_playbooks"("id") ON DELETE cascade ON UPDATE cascade;--> statement-breakpoint
-CREATE UNIQUE INDEX "tls_talos_apiKey_key" ON "tls_talos" USING btree ("apiKey" text_ops);--> statement-breakpoint
-CREATE UNIQUE INDEX "tls_patrons_talosId_stellarPublicKey_key" ON "tls_patrons" USING btree ("talosId" text_ops,"stellarPublicKey" text_ops);--> statement-breakpoint
-CREATE INDEX "tls_activities_talosId_createdAt_idx" ON "tls_activities" USING btree ("talosId" text_ops,"createdAt" text_ops);--> statement-breakpoint
-CREATE INDEX "tls_commerce_jobs_talosId_status_idx" ON "tls_commerce_jobs" USING btree ("talosId" text_ops,"status" text_ops);--> statement-breakpoint
-CREATE UNIQUE INDEX "tls_commerce_services_talosId_key" ON "tls_commerce_services" USING btree ("talosId" text_ops);--> statement-breakpoint
-CREATE INDEX "tls_approvals_talosId_status_idx" ON "tls_approvals" USING btree ("talosId" text_ops,"status" text_ops);--> statement-breakpoint
-CREATE INDEX "tls_revenues_talosId_createdAt_idx" ON "tls_revenues" USING btree ("talosId" text_ops,"createdAt" text_ops);--> statement-breakpoint
-CREATE INDEX "tls_playbooks_talosId_idx" ON "tls_playbooks" USING btree ("talosId" text_ops);--> statement-breakpoint
-CREATE UNIQUE INDEX "tls_playbook_purchases_playbookId_buyerPublicKey_key" ON "tls_playbook_purchases" USING btree ("playbookId" text_ops,"buyerPublicKey" text_ops);
-*/
+CREATE UNIQUE INDEX "tls_talos_apiKey_key" ON "tls_talos" USING btree ("apiKey");--> statement-breakpoint
+CREATE UNIQUE INDEX "tls_patrons_talosId_stellarPublicKey_key" ON "tls_patrons" USING btree ("talosId","stellarPublicKey");--> statement-breakpoint
+CREATE INDEX "tls_activities_talosId_createdAt_idx" ON "tls_activities" USING btree ("talosId","createdAt");--> statement-breakpoint
+CREATE INDEX "tls_commerce_jobs_talosId_status_idx" ON "tls_commerce_jobs" USING btree ("talosId","status");--> statement-breakpoint
+CREATE UNIQUE INDEX "tls_commerce_services_talosId_key" ON "tls_commerce_services" USING btree ("talosId");--> statement-breakpoint
+CREATE INDEX "tls_approvals_talosId_status_idx" ON "tls_approvals" USING btree ("talosId","status");--> statement-breakpoint
+CREATE INDEX "tls_revenues_talosId_createdAt_idx" ON "tls_revenues" USING btree ("talosId","createdAt");--> statement-breakpoint
+CREATE INDEX "tls_playbooks_talosId_idx" ON "tls_playbooks" USING btree ("talosId");--> statement-breakpoint
+CREATE UNIQUE INDEX "tls_playbook_purchases_playbookId_buyerPublicKey_key" ON "tls_playbook_purchases" USING btree ("playbookId","buyerPublicKey");

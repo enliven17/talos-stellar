@@ -1,13 +1,14 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
-import { tlsTalos } from "@/db/schema";
+import { tlsTalos, tlsApiAuditLogs } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { regenerateKeySchema, parseBody } from "@/lib/schemas";
 
 // POST /api/talos/:id/regenerate-key — Regenerate API key (invalidates old key)
 // Requires Stellar ED25519 signature proof of wallet ownership.
-export async function POST(
+async function _POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -59,13 +60,32 @@ export async function POST(
 
     const newApiKey = `tlk_${randomBytes(24).toString("hex")}`;
 
-    await db
-      .update(tlsTalos)
-      .set({ apiKey: newApiKey })
-      .where(eq(tlsTalos.id, id));
+    // Atomic transaction: invalidate old key, set new key, write audit log
+    await db.transaction(async (tx) => {
+      await tx
+        .update(tlsTalos)
+        .set({ apiKey: newApiKey })
+        .where(eq(tlsTalos.id, id));
+
+      // Write audit log (never log key material)
+      const ip =
+        request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+        request.headers.get("x-real-ip") ??
+        null;
+
+      await tx.insert(tlsApiAuditLogs).values({
+        talosId: id,
+        method: "POST",
+        path: `/api/talos/${id}/regenerate-key`,
+        statusCode: 200,
+        ipAddress: ip,
+      });
+    });
 
     return Response.json({ apiKey: newApiKey });
   } catch {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);
