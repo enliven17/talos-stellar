@@ -122,6 +122,9 @@ export {
   SCHEMA_VERSION_RESPONSE_HEADER,
   SchemaVersionMismatchError,
   negotiateSchemaVersion,
+  validateEventPayloadVersion,
+  UnsupportedEventPayloadVersionError,
+  MAX_SUPPORTED_EVENT_PAYLOAD_VERSION,
   SSE_MAX_FIELD_BYTES,
   SSE_MAX_DATA_LINES,
 } from "./events.js";

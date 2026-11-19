@@ -601,6 +601,14 @@ The SDK surfaces typed errors across its HTTP transport, pagination, idempotency
 
 Every HTTP and network error inherits from `TalosAPIError`, ensuring full backward compatibility with generic catch blocks (`error instanceof TalosAPIError`) while allowing granular narrowing on specific failure modes.
 
+Public event payloads are additive within supported versions. The SDK accepts
+payload version `1` and ignores unknown additive fields. A payload with a
+higher numeric version is rejected with `UnsupportedEventPayloadVersionError`,
+which exposes `version` and `maxSupportedVersion`. Use
+`validateEventPayloadVersion(payload)` or configure
+`maxSupportedEventPayloadVersion` on event streams and job trackers when
+consuming a compatible future payload version.
+
 ### Error classes reference
 
 The table below catalogs all 28 exported error classes, when they occur, whether they are retryable, and their key diagnostic properties.
