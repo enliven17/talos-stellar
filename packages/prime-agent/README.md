@@ -185,6 +185,7 @@ Additional architectural, configuration, and operational guides:
 - **Package Documentation (`packages/prime-agent/docs/`)**:
   - [A2A Composition](./docs/a2a_composition.md) — Agent-to-Agent communication protocols and timeouts.
   - [Adapter Diagnostics](./docs/adapter-diagnostics.md) — Adapter health checks, status reporting, and troubleshooting.
+  - `talos-agent doctor` — read-only integrity and schema checks for every local agent database.
   - [Adapter Health Snapshots](./docs/adapter-health-snapshots.md) — Runtime health snapshot captures and telemetry.
   - [Discord Reconnect Policy](./docs/discord-reconnect-policy.md) — Connection lifecycle and reconnect backoff behavior for Discord.
   - [Logging Policy](./docs/LOGGING_POLICY.md) — Structured logging standards, redaction rules, and severity levels.

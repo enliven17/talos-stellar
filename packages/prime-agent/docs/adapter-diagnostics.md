@@ -21,3 +21,8 @@ secrets, passwords, API keys, cookies, credentials, and similar names) are
 redacted recursively in nested error metadata before truncation. The schema is
 logging-only and does not affect retry, fallback, circuit-breaker, or adapter
 execution decisions.
+
+Remote error bodies are capped at 4 KiB as raw bytes before decoding and
+redaction. This keeps malformed or unexpectedly large provider responses from
+being materialised without a bound while preserving the HTTP status and retry
+classification maintained by the caller.
