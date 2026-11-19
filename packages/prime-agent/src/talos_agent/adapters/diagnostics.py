@@ -1,215 +1,86 @@
-"""Adapter diagnostics — pause control and in-flight outcome reporting.
-
-An operator can pause publications for a single adapter without touching any
-other adapter in the registry.  Sends that were already in-flight when the
-pause was issued are tracked so that callers can observe their outcomes.
-
-Usage
------
-Pause an adapter and inspect in-flight outcomes::
-
-    from talos_agent.adapters.diagnostics import AdapterPauseController
-
-    controller = AdapterPauseController()
-    controller.pause("discord")
-
-    # Record a send that was already in progress when the pause was set
-    controller.record_in_flight("discord", send_id="abc123")
-
-    # Later, mark it resolved
-    controller.resolve_in_flight("discord", send_id="abc123", outcome="posted")
-
-    report = controller.in_flight_report("discord")
-    # {"paused": True, "in_flight": [{"send_id": "abc123", "outcome": "posted"}]}
-
-Pause states
-------------
-running  — publications proceed normally.
-paused   — new publish calls should be suppressed; prior sends may still land.
-"""
+"""Bounded, redacted schema for adapter structured-log diagnostics."""
 
 from __future__ import annotations
 
-import datetime
-import enum
-from dataclasses import dataclass, field
-from typing import Literal
+import re
+from collections.abc import Mapping
+from typing import Any
+
+MAX_PROVIDER_LENGTH = 64
+MAX_OPERATION_LENGTH = 64
+MAX_STATUS_LENGTH = 32
+MAX_ERROR_LENGTH = 256
+MAX_OPERATION_ID_LENGTH = 128
+MAX_CAPABILITY_LENGTH = 32
+MAX_TARGET_LENGTH = 128
+MAX_RESOURCE_LENGTH = 32
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_SAFE_LABEL = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]*$")
+_SENSITIVE_KEY = re.compile(r"(?:token|authorization|secret|api[_-]?key|password|cookie|signature|credential|private[_-]?key|webhook)", re.I)
+_INLINE_SECRET = re.compile(r"(Bearer\s+)[^\s,;]+", re.I)
+_VALID_OPERATIONS = frozenset({"post", "reply", "get_mentions", "search", "get_post_performance", "get_profile_stats", "network", "browser"})
+_VALID_STATUSES = frozenset({"succeeded", "failed", "timed_out", "denied"})
+_VALID_CAPABILITIES = frozenset({"secret", "network", "browser", "browser_host", "filesystem_read", "filesystem_write", "tool", "manifest", "operation"})
+_VALID_RESOURCES = frozenset({"input", "output", "request", "network_requests", "network_response", "browser_actions"})
 
 
-# ── Pause state ──────────────────────────────────────────────────────────────
+def _redact(value: Any, seen: set[int] | None = None) -> Any:
+    """Redact sensitive keys recursively before a value is rendered or capped."""
+    seen = set() if seen is None else seen
+    if isinstance(value, Mapping):
+        if id(value) in seen:
+            return "[CYCLE]"
+        seen.add(id(value))
+        return {str(key): "[REDACTED]" if _SENSITIVE_KEY.search(str(key)) else _redact(child, seen) for key, child in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        if id(value) in seen:
+            return "[CYCLE]"
+        seen.add(id(value))
+        return [_redact(child, seen) for child in value]
+    return _INLINE_SECRET.sub(r"\1[REDACTED]", value) if isinstance(value, str) else value
 
 
-class PauseState(str, enum.Enum):
-    """Operational state of a single adapter's publication pipeline."""
-
-    RUNNING = "running"
-    PAUSED = "paused"
+def _text(value: Any, maximum: int) -> str:
+    """Render a redacted value as one bounded, single-line string."""
+    return _CONTROL_CHARS.sub(" ", str(value))[:maximum]
 
 
-# ── In-flight record ──────────────────────────────────────────���──────────────
+def _label(value: Any, maximum: int, allowed: frozenset[str] | None = None) -> str:
+    redacted = _redact(value)
+    raw_text = str(redacted)
+    if len(raw_text) > maximum:
+        return "unknown"
+    text = _text(redacted, maximum)
+    return text if _SAFE_LABEL.fullmatch(text) and (allowed is None or text in allowed) else "unknown"
 
 
-@dataclass
-class InFlightRecord:
-    """Tracks a single send that was started before or during a pause."""
+def safe_adapter_diagnostic_fields(**fields: Any) -> dict[str, Any]:
+    """Return only documented, bounded adapter-log fields.
 
-    send_id: str
-    """Caller-supplied identifier for this send (e.g. a job or message ID)."""
-
-    started_at: datetime.datetime = field(
-        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc)
-    )
-    """UTC timestamp of when the send was recorded."""
-
-    outcome: str | None = None
-    """Final outcome once known: ``"posted"``, ``"failed"``, or ``"pending"``."""
-
-    resolved_at: datetime.datetime | None = None
-    """UTC timestamp set when :meth:`AdapterPauseController.resolve_in_flight` is called."""
-
-    def to_dict(self) -> dict:
-        d: dict = {
-            "send_id": self.send_id,
-            "started_at": self.started_at.isoformat(),
-            "outcome": self.outcome,
-        }
-        if self.resolved_at is not None:
-            d["resolved_at"] = self.resolved_at.isoformat()
-        return d
-
-
-# ── Pause report ─────────────────────────────────────────────────────────────
-
-
-@dataclass
-class PauseReport:
-    """Snapshot of one adapter's pause state and its unresolved in-flight sends."""
-
-    adapter: str
-    """Canonical adapter name (case-insensitive normalised to lower-case)."""
-
-    paused: bool
-    """``True`` when new publications are suppressed."""
-
-    in_flight: list[InFlightRecord] = field(default_factory=list)
-    """All tracked sends, including resolved ones."""
-
-    generated_at: datetime.datetime = field(
-        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc)
-    )
-
-    def to_dict(self) -> dict:
-        return {
-            "adapter": self.adapter,
-            "paused": self.paused,
-            "in_flight": [r.to_dict() for r in self.in_flight],
-            "generated_at": self.generated_at.isoformat(),
-        }
-
-
-# ── Controller ───────────────────────────────────────────────────────────────
-
-
-class AdapterPauseController:
-    """Manages per-adapter pause state and in-flight outcome tracking.
-
-    All operations are synchronous and in-process only — no I/O is performed.
-    Thread safety is left to the caller; the agent loop is single-threaded.
+    Unknown fields are dropped. Redaction always occurs before control-character
+    replacement and truncation.
     """
-
-    def __init__(self) -> None:
-        self._states: dict[str, PauseState] = {}
-        self._in_flight: dict[str, dict[str, InFlightRecord]] = {}
-
-    # ── Pause control ────────────────────────────────────────
-
-    def pause(self, adapter: str) -> None:
-        """Pause new publications for *adapter*.
-
-        Unrelated adapters are not affected.  Calling pause on an already-paused
-        adapter is a no-op.
-        """
-        self._states[adapter.lower()] = PauseState.PAUSED
-
-    def resume(self, adapter: str) -> None:
-        """Resume publications for *adapter*."""
-        self._states[adapter.lower()] = PauseState.RUNNING
-
-    def is_paused(self, adapter: str) -> bool:
-        """Return ``True`` if *adapter* is currently paused."""
-        return self._states.get(adapter.lower()) == PauseState.PAUSED
-
-    def state(self, adapter: str) -> PauseState:
-        """Return the current :class:`PauseState` for *adapter*."""
-        return self._states.get(adapter.lower(), PauseState.RUNNING)
-
-    def all_states(self) -> dict[str, str]:
-        """Return a mapping of adapter name → state value for every tracked adapter."""
-        return {name: s.value for name, s in self._states.items()}
-
-    # ── In-flight tracking ───────────────────────────────────
-
-    def record_in_flight(self, adapter: str, send_id: str) -> InFlightRecord:
-        """Record a send that was started when the adapter may be pausing.
-
-        Parameters
-        ----------
-        adapter:
-            Canonical adapter name (case-insensitive).
-        send_id:
-            Caller-supplied identifier for this send.  Must be unique per adapter.
-
-        Returns
-        -------
-        InFlightRecord
-            The newly created record.
-        """
-        key = adapter.lower()
-        if key not in self._in_flight:
-            self._in_flight[key] = {}
-        record = InFlightRecord(send_id=send_id)
-        self._in_flight[key][send_id] = record
-        return record
-
-    def resolve_in_flight(
-        self,
-        adapter: str,
-        send_id: str,
-        outcome: Literal["posted", "failed", "pending"],
-    ) -> InFlightRecord | None:
-        """Set the final outcome for a previously recorded in-flight send.
-
-        Returns the updated :class:`InFlightRecord`, or ``None`` if *send_id*
-        was never registered for *adapter*.
-        """
-        key = adapter.lower()
-        record = self._in_flight.get(key, {}).get(send_id)
-        if record is None:
-            return None
-        record.outcome = outcome
-        record.resolved_at = datetime.datetime.now(datetime.timezone.utc)
-        return record
-
-    def in_flight_report(self, adapter: str) -> PauseReport:
-        """Return a :class:`PauseReport` for *adapter*.
-
-        The report includes every tracked in-flight record (resolved or not)
-        and the current pause state.  Adapters with no registered in-flight
-        sends return an empty list.
-        """
-        key = adapter.lower()
-        records = list(self._in_flight.get(key, {}).values())
-        return PauseReport(
-            adapter=key,
-            paused=self.is_paused(key),
-            in_flight=records,
-        )
-
-    def uncertain_sends(self, adapter: str) -> list[InFlightRecord]:
-        """Return in-flight records whose outcome has not been resolved yet.
-
-        These are sends that were in-progress when a pause was issued and whose
-        final delivery status is still unknown.
-        """
-        key = adapter.lower()
-        return [r for r in self._in_flight.get(key, {}).values() if r.outcome is None]
+    result: dict[str, Any] = {}
+    if "adapter" in fields or "provider" in fields:
+        result["adapter"] = _label(fields.get("adapter", fields.get("provider")), MAX_PROVIDER_LENGTH)
+    if "operation" in fields:
+        result["operation"] = _label(fields["operation"], MAX_OPERATION_LENGTH, _VALID_OPERATIONS)
+    if fields.get("operation_id") is not None:
+        result["operation_id"] = _label(fields["operation_id"], MAX_OPERATION_ID_LENGTH)
+    if "outcome" in fields or "status" in fields:
+        result["outcome"] = _label(fields.get("outcome", fields.get("status")), MAX_STATUS_LENGTH, _VALID_STATUSES)
+    if "error_type" in fields:
+        result["error_type"] = _label(fields["error_type"], MAX_ERROR_LENGTH)
+    if "error" in fields:
+        result["error"] = _text(_redact(fields["error"]), MAX_ERROR_LENGTH)
+    if "capability" in fields:
+        result["capability"] = _label(fields["capability"], MAX_CAPABILITY_LENGTH, _VALID_CAPABILITIES)
+    if "target" in fields:
+        result["target"] = _text(_redact(fields["target"]), MAX_TARGET_LENGTH)
+    if "resource" in fields:
+        result["resource"] = _label(fields["resource"], MAX_RESOURCE_LENGTH, _VALID_RESOURCES)
+    duration = fields.get("duration_ms")
+    if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+        result["duration_ms"] = max(0, min(round(duration, 2), 3_600_000))
+    return result

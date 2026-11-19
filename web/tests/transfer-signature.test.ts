@@ -6,12 +6,14 @@ import {
   canonicalizeTransferPayload,
   signTransferPayload,
   verifyTransferSignature,
+  validateNonceWindow,
   type TransferSignedPayload,
 } from "../src/lib/transfer-signature";
 
 const mocks = vi.hoisted(() => ({
   verifyAgentApiKey: vi.fn(),
   select: vi.fn(),
+  insert: vi.fn(),
   sendUSDC: vi.fn(),
 }));
 
@@ -22,6 +24,7 @@ vi.mock("@/lib/auth", () => ({
 vi.mock("@/db", () => ({
   db: {
     select: (...args: unknown[]) => mocks.select(...args),
+    insert: (...args: unknown[]) => mocks.insert(...args),
   },
 }));
 
@@ -99,6 +102,11 @@ describe("canonical transfer signatures", () => {
       }),
     });
     mocks.sendUSDC.mockResolvedValue({ txHash: "stellar-tx-hash" });
+
+    // By default, db.insert().values() succeeds (nonce is fresh).
+    mocks.insert.mockReturnValue({
+      values: vi.fn().mockResolvedValue([{ id: "nonce-1" }]),
+    });
   });
 
   it("defines a stable canonical payload containing every transfer field", () => {
@@ -200,6 +208,21 @@ describe("canonical transfer signatures", () => {
   it("rejects an exact signed request when its nonce is replayed", async () => {
     const body = signedBody();
 
+    // First request succeeds — db.insert returns fresh nonce row.
+    // Second request fails — simulate a PostgreSQL unique-violation error.
+    let callCount = 0;
+    mocks.insert.mockReturnValue({
+      values: vi.fn().mockImplementation(() => {
+        callCount += 1;
+        if (callCount === 1) {
+          return Promise.resolve([{ id: "nonce-1" }]);
+        }
+        const err = new Error('duplicate key value violates unique constraint "tls_consumed_nonces_talosId_nonce_key"');
+        (err as unknown as Record<string, unknown>).code = "23505";
+        return Promise.reject(err);
+      }),
+    });
+
     const first = await post(body);
     const replay = await post(body);
 
@@ -258,5 +281,77 @@ describe("canonical transfer signatures", () => {
     for (const candidate of cases) {
       expect(transferSchema.safeParse(candidate).success).toBe(false);
     }
+  });
+
+  describe("validateNonceWindow (pure, no DB)", () => {
+    it("returns ok for a valid expiry window", () => {
+      const now = 1_000_000_000;
+      const result = validateNonceWindow(
+        { expiry: String(now + 60) },
+        now,
+      );
+      expect(result).toEqual({ ok: true });
+    });
+
+    it("returns expired when expiry is in the past", () => {
+      const now = 1_000_000_000;
+      const result = validateNonceWindow(
+        { expiry: String(now - 1) },
+        now,
+      );
+      expect(result).toEqual({ ok: false, reason: "expired" });
+    });
+
+    it("returns expiry-too-far when expiry exceeds the five-minute window", () => {
+      const now = 1_000_000_000;
+      const result = validateNonceWindow(
+        { expiry: String(now + 3600) },
+        now,
+      );
+      expect(result).toEqual({ ok: false, reason: "expiry-too-far" });
+    });
+
+    it("returns expired for a non-integer expiry", () => {
+      const now = 1_000_000_000;
+      const result = validateNonceWindow(
+        { expiry: "not-a-number" },
+        now,
+      );
+      expect(result).toEqual({ ok: false, reason: "expired" });
+    });
+  });
+
+  describe("concurrent nonce consumption (race-condition scenario)", () => {
+    it("handles concurrent requests for the same nonce — exactly one succeeds", async () => {
+      const body = signedBody();
+
+      // Simulate two concurrent INSERT attempts for the same nonce.
+      // Both attempt the INSERT; the PG unique constraint lets exactly one
+      // through and the other gets code 23505.
+      let succeeded = false;
+      mocks.insert.mockReturnValue({
+        values: vi.fn().mockImplementation(() => {
+          if (!succeeded) {
+            succeeded = true;
+            return Promise.resolve([{ id: "nonce-1" }]);
+          }
+          const err = new Error('duplicate key value violates unique constraint "tls_consumed_nonces_talosId_nonce_key"');
+          (err as unknown as Record<string, unknown>).code = "23505";
+          return Promise.reject(err);
+        }),
+      });
+
+      const [resultA, resultB] = await Promise.all([
+        post(body),
+        post(body),
+      ]);
+
+      const successCount = [resultA, resultB].filter((r) => r.status === 200).length;
+      const replayCount = [resultA, resultB].filter((r) => r.status === 409).length;
+
+      expect(successCount).toBe(1);
+      expect(replayCount).toBe(1);
+      expect(mocks.sendUSDC).toHaveBeenCalledTimes(1);
+    });
   });
 });

@@ -1,10 +1,13 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { db } from "@/db";
 import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsPatrons, tlsRevenues, tlsTokenPurchases } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getAccountInfo, getNetworkPassphrase, getUSDCIssuer } from "@/lib/stellar";
 import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
+import { logger } from "@/lib/logger";
+import { registerTx } from "@/lib/reconciler";
 
 /**
  * Buy Mitos tokens from a Talos.
@@ -33,8 +36,8 @@ import { OPERATOR_PUBLIC_KEY } from "@/lib/stellar-config";
  * 6. Commit side effects in a single DB transaction (patron upsert + revenue
  *    insert + purchase status=completed + cached response)
  */
-export async function POST(
-  request: Request,
+async function _POST(
+  request: Request | NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
@@ -80,16 +83,36 @@ export async function POST(
 
   if (existing) {
     if (existing.status === "completed" && existing.responseBody) {
-      // Idempotent replay — return original response
-      return NextResponse.json(existing.responseBody, { status: 200 });
+      // Idempotent replay — return original response with echo headers
+      logger.info({
+        event: "idempotency_hit",
+        idempotencyKey: txHash,
+        talosId: id,
+        replayed: true,
+      }, "buy-token idempotent replay — returning cached response");
+      const replayRes = NextResponse.json(existing.responseBody, { status: 200 });
+      replayRes.headers.set("Idempotency-Key", txHash);
+      replayRes.headers.set("X-Idempotent-Replayed", "true");
+      return replayRes;
     }
     if (existing.status === "pending") {
+      logger.info({
+        event: "idempotency_inflight",
+        idempotencyKey: txHash,
+        talosId: id,
+      }, "buy-token purchase in progress");
       return NextResponse.json(
         { error: "Purchase is already in progress for this transaction" },
         { status: 409 },
       );
     }
     // "failed" — fall through and retry (row will be updated below)
+    logger.info({
+      event: "idempotency_miss",
+      idempotencyKey: txHash,
+      talosId: id,
+      retryOfFailed: true,
+    }, "buy-token retrying failed purchase");
   }
 
   // Claim the idempotency slot. For a brand-new request we insert a pending
@@ -111,11 +134,12 @@ export async function POST(
         .set({ status: "pending", responseBody: null, updatedAt: new Date() })
         .where(eq(tlsTokenPurchases.txHash, txHash));
     }
-  } catch (err: any) {
+  } catch (err: unknown) {
     // Unique constraint violation → another concurrent request already claimed
     // this txHash (race condition: two requests arrived simultaneously before
     // either read the existing row).
-    if (err?.code === "23505") {
+    const e = err as { code?: string };
+    if (e.code === "23505") {
       return NextResponse.json(
         { error: "Purchase is already in progress for this transaction" },
         { status: 409 },
@@ -130,8 +154,8 @@ export async function POST(
     const { Horizon } = await import("@stellar/stellar-sdk");
     const server = new Horizon.Server(process.env.STELLAR_HORIZON_URL ?? "https://horizon-testnet.stellar.org");
     txResult = await server.transactions().transaction(txHash).call();
-  } catch (err: any) {
-    console.error("[buy-token] Transaction fetch failed:", err?.message ?? err);
+  } catch (err: unknown) {
+    console.error("[buy-token] Transaction fetch failed:", err);
     // Mark failed so a later retry (with a corrected txHash) can proceed
     await db
       .update(tlsTokenPurchases)
@@ -202,8 +226,8 @@ export async function POST(
         { status: 400 },
       );
     }
-  } catch (err: any) {
-    console.error("[buy-token] Transaction verification failed:", err?.message ?? err);
+  } catch (err: unknown) {
+    console.error("[buy-token] Transaction verification failed:", err);
     await db
       .update(tlsTokenPurchases)
       .set({ status: "failed", updatedAt: new Date() })
@@ -267,8 +291,9 @@ export async function POST(
         const mitosTxResult = await server.submitTransaction(mitosTx);
         mitosTxHash = mitosTxResult.hash;
       }
-    } catch (err: any) {
-      console.error("[buy-token] Mitos transfer failed:", err?.response?.data ?? err?.message ?? err);
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: unknown }; message?: string };
+      console.error("[buy-token] Mitos transfer failed:", e.response?.data ?? e.message ?? err);
       await db
         .update(tlsTokenPurchases)
         .set({ status: "failed", updatedAt: new Date() })
@@ -370,5 +395,29 @@ export async function POST(
     { category: "TOKEN" }
   );
 
-  return NextResponse.json(responseBody);
+  logger.info({
+    event: "idempotency_commit",
+    idempotencyKey: txHash,
+    talosId: id,
+    replayed: false,
+  }, "buy-token purchase committed");
+
+  // Register the payment txHash with the finality reconciler so it can track
+  // on-chain settlement and apply repair if the tx is later found to be failed
+  // or expired.  Fire-and-forget: a registration failure never blocks the caller.
+  registerTx({
+    txHash,
+    sourceType: "token_purchase",
+    sourceId: txHash,           // tls_token_purchases PK is the txHash itself
+    expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000), // 2 h window
+  }).catch((err) =>
+    logger.error({ err, txHash, talosId: id }, "reconciler_register_tx_failed"),
+  );
+
+  const successRes = NextResponse.json(responseBody);
+  successRes.headers.set("Idempotency-Key", txHash);
+  successRes.headers.set("X-Idempotent-Replayed", "false");
+  return successRes;
 }
+
+export const POST = withRequestId(_POST);

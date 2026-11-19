@@ -1,0 +1,24 @@
+{
+  "_comment": "INVALID: agent_id is an empty string (whitespace-only); must be rejected.",
+  "config": {
+    "api_url": "https://talos-stellar.vercel.app",
+    "talos_id": "talos-vega-001"
+  },
+  "envelope_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "meta": {
+    "agent_id": "   ",
+    "created_at": "2026-07-28T12:00:00+00:00",
+    "schema_version": 1
+  },
+  "section_hashes": {
+    "config": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "meta": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "state": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "state": {
+    "balance_usdc": 10.0,
+    "cycle_count": 1,
+    "last_task": "post_content",
+    "wallet_public_key": "GDQP2KPQGKIHYJGXNUIYOMHARUARCA7DJT5FO2FFOOKY3B2WSQHG4W37"
+  }
+}

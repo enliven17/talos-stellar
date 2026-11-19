@@ -1,0 +1,406 @@
+# Performance Benchmarks
+
+This document describes the benchmark framework for the Talos Stellar API, scheduler, SDK, and contract-adjacent workflows.
+
+## Overview
+
+The benchmark system lives in `web/src/area/devx/` and provides:
+
+- **Typed interfaces** for benchmark config, metrics, and results
+- **Dataset generators** for reproducible benchmark inputs
+- **Warm/cold run separation** — warmup runs establish baseline before measured runs
+- **Percentile metrics** — p50, p75, p90, p95, p99 latency tracking
+- **Memory/CPU tracking** — per-sample resource monitoring via `process.memoryUsage()` and `process.cpuUsage()`
+- **Variance controls** — coefficient of variation (CV) tracking with configurable thresholds
+- **Threshold gates** — pass/fail decisions based on configurable rules
+- **Artifact persistence** — JSON artifacts written to `.benchmarks/` directory
+- **Trend reporting** — cross-run comparison detecting regressions
+- **Privacy-safe logging** — pino structured logger with sensitive-field redaction
+
+## Quick Start
+
+```bash
+# Run all benchmark unit tests
+pnpm test:bench
+
+# Run benchmark suites against simulated workloads
+pnpm bench:suite            # Run all suites
+pnpm bench:suite api        # API route benchmarks
+pnpm bench:suite scheduler  # Scheduler loop benchmarks
+pnpm bench:suite sdk        # SDK call benchmarks
+pnpm bench:suite contract   # Contract-adjacent workflow benchmarks
+
+# Set environment overrides
+BENCHMARK_RUNS=50 BENCHMARK_VARIANCE_THRESHOLD=0.2 BENCHMARK_PERFORMANCE_BUDGET_MS=4000 BENCHMARK_P99_THRESHOLD_MS=8000 pnpm bench:suite api
+```
+
+## Benchmark Suites
+
+The framework includes four runnable benchmark suites that exercise real code paths:
+
+### API Routes (`api-routes`)
+
+Exercises the hot API request/response cycle — health probes, talos list serialization, activity validation, transfer payload validation, and percentile computation:
+
+- `health-liveness` — calls GET /api/health/live handler (no I/O, pure response)
+- `health-liveness-json` — handler + JSON serialization
+- `talos-list-serialize-1000` — serializes 1000-entry talos list with cursor pagination
+- `talos-list-response-json` — constructs 50-item paginated JSON response
+- `activity-validate-500` — validates 500 activity entries against allowed types/channels
+- `activity-batch-response` — batches 100 activities into a JSON response
+- `transfer-validate-200` — validates 200 Stellar transfer payloads (address regex, nonce hex, asset)
+- `transfer-json-serialization` — serializes 200 transfer payloads
+- `percentile-10000-values` — computes p50/p75/p90/p95/p99 on 10,000 values
+- `summarize-stats-10000` — full stats (mean, median, stddev, variance) on 10,000 values
+
+### Scheduler Loops (`scheduler-loops`)
+
+Simulates the prime-agent scheduler decision loop — cycle iteration, job queue management, agent decision-making, and dividend preview computation:
+
+- `scheduler-simulate-cycles` — 100 full scheduler cycles (state transitions)
+- `scheduler-pending-jobs-check` — filters and sorts 100 pending jobs by amount
+- `scheduler-agent-decision` — 50 rounds of agent action decision logic
+- `scheduler-state-transitions` — 200 state transitions with periodic snapshot serialization
+- `scheduler-dividend-preview` — computes dividend breakdown for 50 patrons from a pool
+
+### SDK Calls (`sdk-client`)
+
+Exercises the TypeScript SDK `TalosClient` serialization and deserialization paths — request building, URL construction, payload serialization, response parsing:
+
+- `sdk-create-talos-serialize` — serializes a createTalos POST request with auth headers
+- `sdk-list-talos-url-build` — constructs a paginated list URL with query parameters
+- `sdk-report-activity-serialize` — serializes a reportActivity POST request
+- `sdk-transfer-serialize` — serializes a signed transfer POST request
+- `sdk-paginated-response-parse` — builds, serializes, and parses a 50-item paginated response
+- `sdk-large-batch-deserialize` — serializes and parses a 200-item batch response
+- `sdk-error-response-parse` — parses an error response body
+
+### Contract-Adjacent Workflows (`contract-workflows`)
+
+Simulates Stellar Soroban contract interaction patterns — address validation, keypair generation, transfer signing, contract call encoding/decoding, dividend math:
+
+- `contract-stellar-address-validate-1000` — validates 1000 Stellar G addresses via regex
+- `contract-keypair-gen-100` — generates 100 simulated Stellar keypairs
+- `contract-transfer-sign-200` — generates 200 HMAC-style hex signatures
+- `contract-call-encode` — encodes a Soroban contract call payload
+- `contract-call-decode` — decodes a Soroban contract response
+- `contract-register-name` — simulates a TalosNameService name registration
+- `contract-balance-query` — simulates a Stellar balance query
+- `contract-dividend-calc-100-patrons` — computes dividend shares for 100 patrons
+- `contract-name-resolve-simulation` — batch resolves 100 .talos names
+
+## Architecture
+
+```
+web/src/area/devx/
+  index.ts          # Public API exports
+  types.ts          # Core TypeScript interfaces
+  config.ts         # Configuration loading (env vars + overrides)
+  metrics.ts        # Statistical functions (percentiles, mean, stddev)
+  tracker.ts        # ResourceTracker — memory/CPU sampling
+  datasets.ts       # Reproducible dataset generators
+  runner.ts         # Benchmark orchestrator (warm/cold runs)
+  thresholds.ts     # Threshold rule engine (pass/fail gates)
+  artifacts.ts      # JSON artifact read/write
+  trend.ts          # Trend analysis and regression detection
+  logger.ts         # Privacy-safe pino logger
+  __tests__/        # Unit test suite
+```
+
+## Configuration
+
+All configuration is defined in the `BenchmarkConfig` interface. Values are loaded from environment variables or explicit overrides:
+
+| Variable | Default | Description |
+|---|---|---|
+| `BENCHMARK_RUNS` | 100 | Number of measured iterations per benchmark |
+| `BENCHMARK_WARMUP_RUNS` | 10 | Warmup iterations before measurement |
+| `BENCHMARK_CONCURRENCY` | 1 | Concurrency level |
+| `BENCHMARK_TIMEOUT_MS` | 30000 | Per-benchmark timeout |
+| `BENCHMARK_DATASET_SIZE` | 1000 | Dataset size for generators |
+| `BENCHMARK_VARIANCE_THRESHOLD` | 0.15 | Max acceptable coefficient of variation (warn) |
+| `BENCHMARK_PERFORMANCE_BUDGET_MS` | 5000 | Mean latency regression budget (fail) |
+| `BENCHMARK_P99_THRESHOLD_MS` | 10000 | p99 latency regression budget (fail) |
+| `BENCHMARK_MEMORY_THRESHOLD_MB` | 512 | Peak memory threshold (fail) |
+| `BENCHMARK_CPU_THRESHOLD_PCT` | 80 | Peak CPU threshold (warn) |
+| `BENCHMARK_ARTIFACT_DIR` | `.benchmarks` | Output directory for artifact files |
+| `BENCHMARK_TREND_WINDOW` | 10 | Number of past runs for trend comparison |
+
+## Writing Benchmarks
+
+```typescript
+import { runBenchmark, runSuite, loadConfig } from "@/area/devx";
+
+const config = loadConfig({ runs: 20 });
+
+// Simple synchronous benchmark
+const result = await runBenchmark({
+  label: "my-benchmark",
+  fn: () => {
+    // code to measure
+  },
+  config,
+});
+
+// Suite of benchmarks
+const run = await runSuite("my-suite", [
+  { label: "bench-a", fn: () => { ... }, config },
+  { label: "bench-b", fn: async () => { ... }, config },
+], config);
+
+console.log(run.summary);
+// { total: 2, passed: 2, failed: 0, totalDurationMs: ..., meanDurationMs: ... }
+```
+
+## Dataset Generators
+
+The `datasets.ts` module provides deterministic, seed-reproducible generators:
+
+- `generateTalosIds(size, seed)` — random 24-char alphanumeric IDs
+- `generatePayloads(size, seed)` — structured JSON payloads
+- `generateActivityEntries(size, seed)` — activity log entries
+- `generateTransferPayloads(size, seed)` — Stellar transfer payloads
+
+All generators use a seeded PRNG for deterministic output across runs:
+
+```typescript
+const ids = generateTalosIds(100, 42); // Always produces the same 100 IDs
+```
+
+## Thresholds
+
+Benchmark thresholds control pass/fail gates. Built-in rules:
+
+| Metric | Default | Severity | Comparator |
+|---|---|---|---|
+| `variance` | 0.15 | warn | gt |
+| `meanDurationMs` | 5000 | fail | gt |
+| `p99` | 10000 | fail | gt |
+| `peakMemoryMb` | 512 | fail | gt |
+| `peakCpuPercent` | 80 | warn | gt |
+
+Custom rules can be added via the `BENCHMARK_THRESHOLD_RULES` env var as JSON:
+
+```json
+[
+  { "metric": "meanDurationMs", "threshold": 2000, "severity": "fail", "comparator": "gt" },
+  { "metric": "p99", "threshold": 5000, "severity": "fail", "comparator": "gt" }
+]
+```
+
+## Artifacts
+
+Benchmark runs produce JSON artifacts in the configured artifact directory:
+
+```bash
+.benchmarks/
+  benchmark-api-routes-a1b2c3d4.json
+  benchmark-scheduler-e5f6g7h8.json
+```
+
+Each artifact contains the full run configuration, summary, per-result stats, percentiles, and threshold violations.
+
+## Trend Reporting
+
+The trend system compares recent benchmark runs against historical data:
+
+```typescript
+import { buildTrendReport, formatTrendReport } from "@/area/devx";
+
+const report = buildTrendReport("api-routes", ".benchmarks", 10);
+if (report.regression) {
+  console.warn("Performance regression detected:");
+  report.regressions.forEach(r => console.warn(`  - ${r}`));
+}
+```
+
+Regressions are flagged when:
+- p99 latency increases by >10% between consecutive runs
+- Mean memory usage increases by >20%
+
+## Database Schema
+
+Benchmark results can be persisted to the database via two tables:
+
+- `tls_benchmark_runs` — run metadata (suite, config, summary, CI info)
+- `tls_benchmark_results` — per-label results (percentiles, memory, CPU, violations)
+
+Migration: `drizzle/0014_add_benchmark_tables.sql`
+
+## Privacy & Security
+
+The benchmark logger (`logger.ts`) automatically redacts sensitive fields from log output:
+
+- API keys (matches `apiKey`, `secret`, `password`, `token`, `auth`, `signature`)
+- Stellar secret keys
+
+No benchmark data is transmitted externally. Artifacts are local files only.
+
+## CI Integration
+
+A dedicated CI workflow (`.github/workflows/benchmark-ci.yml`) runs on every push/PR to `main` that touches `web/src/` or `packages/sdk/src/`:
+
+```yaml
+# Runs: unit tests, API route suite, scheduler suite, SDK suite, contract suite
+# Artifacts: benchmark JSON files archived for 30 days
+# Failure: any benchmark that exceeds fail thresholds causes the workflow to fail
+```
+
+To run benchmarks locally as CI does:
+
+```bash
+CI=true BENCHMARK_RUNS=20 BENCHMARK_WARMUP_RUNS=3 BENCHMARK_PERFORMANCE_BUDGET_MS=5000 BENCHMARK_P99_THRESHOLD_MS=10000 pnpm bench:suite api
+```
+
+When `CI=true`:
+- Logger uses raw JSON output (no pretty-print)
+- CI fields (`commitSha`, `branch`) are populated from `GITHUB_SHA` and `GITHUB_REF_NAME`
+
+## Rollback
+
+To disable the benchmark system:
+1. Remove benchmark test files or exclude from test runner
+2. Drop `tls_benchmark_runs` and `tls_benchmark_results` tables if they exist
+3. Remove migration `drizzle/0014_add_benchmark_tables.sql`
+
+## Troubleshooting
+
+| Symptom | Likely Cause | Fix |
+|---|---|---|
+| High variance in results | System load variation | Increase `BENCHMARK_RUNS`, ensure isolated environment |
+| Thresholds failing on CI | CI runners are slower | Adjust `BENCHMARK_MEMORY_THRESHOLD_MB` or `BENCHMARK_VARIANCE_THRESHOLD` |
+| Artifact directory missing | Wrong working directory | Set `BENCHMARK_ARTIFACT_DIR` to absolute path |
+| Trend report empty | No prior artifacts | Run benchmarks, then re-run trend analysis |
+
+
+## Nightly Property Tests
+
+Property-based suites live alongside the benchmark framework in `web/src/area/devx/` and exercise invariants over datasets, metrics, thresholds, and the schedule config itself.
+
+### Schedule
+
+- **Cron (UTC):** `27 5 * * *` (single source of truth: `DEFAULT_PROPERTY_CRON` in `property-schedule.ts` and `.github/workflows/property-tests-nightly.yml`)
+- **Workflow:** `.github/workflows/property-tests-nightly.yml` (nightly + `workflow_dispatch` + path-filtered PR/push)
+- **Fail-closed:** malformed cron, empty/unknown suites, and non-finite iteration counts throw `PropertyScheduleError` and exit non-zero — they never silently skip.
+
+### Local commands
+
+```bash
+# Focused unit coverage for schedule + suites
+pnpm --dir web test:property
+
+# Execute the nightly property runner (writes `.property-artifacts/`)
+pnpm --dir web property:nightly
+
+# Useful overrides
+PROPERTY_TEST_ITERATIONS=50 PROPERTY_TEST_SEED=7 PROPERTY_TEST_SUITES=metrics,schedule \
+  pnpm --dir web property:nightly
+```
+
+### Suites
+
+| Suite | Invariants |
+| --- | --- |
+| `datasets` | id charset/length, payload shape, activity enums, Stellar transfer shape, seed determinism |
+| `metrics` | percentile ordering + in-range, mean/median within min/max, empty-input zeros |
+| `thresholds` | fail severity blocks pass; unknown metrics ignored |
+| `schedule` | default cron parse, malformed cron fail-closed, stable daily seed, privacy-safe describe |
+
+Logging goes through `sanitizeForLogging` — secrets, tokens, signatures, and payment proofs are never written to artifacts or logs.
+
+---
+
+## Prime-Agent Performance Budget (issue #645)
+
+The prime-agent Python package maintains a **performance regression budget** for
+synchronous hot-path functions.  Unlike the TypeScript benchmark framework above,
+this budget focuses on pure CPU / in-process code paths that must not regress as
+the codebase grows.
+
+### Budgeted hot paths
+
+| Function | Budget (p99) | Rationale |
+|---|---|---|
+| `commerce_quote.parse_iso8601_timestamp` (valid) | 0.10 ms | Called on every 402 payment response |
+| `commerce_quote.parse_iso8601_timestamp` (malformed) | 0.10 ms | Fail-fast path for bad input |
+| `commerce_quote.verify_quote_not_expired` (valid) | 0.10 ms | Per-payment expiry check |
+| `commerce_quote.verify_quote_not_expired` (expired) | 0.10 ms | Per-payment expiry check |
+| `commerce_quote.enforce_commerce_quote_expiry` (valid) | 0.20 ms | Full quote enforcement |
+| `commerce_quote.enforce_commerce_quote_expiry` (missing) | 0.10 ms | Fail-closed on missing expiry |
+| `metrics._normalize_task` (known) | 0.05 ms | Called on every scheduler cycle emission |
+| `metrics._normalize_task` (unknown → sentinel) | 0.05 ms | Cardinality guard |
+| `metrics._normalize_tool` (known) | 0.05 ms | Called on every tool invocation |
+| `metrics._normalize_model` (known) | 0.05 ms | Called on every LLM call |
+| `state_classify.registered_classification` | 0.10 ms | Dict lookup during checkpointing |
+| `state_classify.registered_classifications` (×100) | 1.00 ms | Full dict copy during restore validation |
+| `http._sanitize_response_text` (short, clean) | 0.50 ms | Before every logged response body |
+| `http._sanitize_response_text` (4 KB token-bearing) | 5.00 ms | Regex redaction on large bodies |
+| `PolicyEngine.evaluate` (disabled fast-path) | 0.50 ms | Per-tool call overhead when policy off |
+| `PolicyEngine.evaluate` (single APPROVE rule) | 5.00 ms | Minimal enabled policy evaluation |
+
+### Single source of truth
+
+All ceilings live in `packages/prime-agent/scripts/check-perf-budget.py` in the
+`PERF_BUDGET` list.  Both the standalone script and the pytest suite
+(`tests/test_perf_budget.py`) read from compatible tables so there is no drift.
+CI uses the script's ceilings directly; the pytest suite applies a 3× multiplier
+to absorb slow GitHub Actions runners.
+
+### Local commands
+
+```bash
+# Run with defaults (100 samples, 10 warmup)
+cd packages/prime-agent
+uv run python scripts/check-perf-budget.py
+
+# High-precision measurement (500 samples)
+uv run python scripts/check-perf-budget.py --samples 500 --warmup 20
+
+# Quick smoke run matching CI settings
+uv run python scripts/check-perf-budget.py --samples 50 --warmup 5 --quiet
+
+# Run via pytest (fast subset with 3× CI headroom)
+uv run pytest tests/test_perf_budget.py -v
+```
+
+### CI enforcement
+
+The `performance budget gate` step in `.github/workflows/ci-prime-agent.yml` runs:
+
+```yaml
+- name: Performance budget gate
+  run: uv run python scripts/check-perf-budget.py --samples 50 --warmup 5 --quiet
+  env:
+    OTEL_ENABLED: "false"
+    SENTRY_DSN: ""
+```
+
+The step fails closed: any p99 that exceeds its ceiling causes the workflow to
+fail with an `EXCEEDED` line identifying the function, its actual p99, and the
+overage.
+
+### Adding a new budget entry
+
+1. Add a row to `PERF_BUDGET` in `scripts/check-perf-budget.py` with a
+   `setup` helper that constructs test inputs without secrets or real network
+   calls.
+2. Add a matching test method to the appropriate class in
+   `tests/test_perf_budget.py` (pytest assertion uses 3× the ceiling).
+3. Add a row to the table above in `BENCHMARKS.md`.
+4. Run locally with `--samples 500` to calibrate the ceiling on your hardware;
+   pick a value that is ≥ 5× the measured p99 but tight enough to catch
+   obvious regressions.
+
+### Removing or relaxing a budget entry
+
+- Relaxing: increase the ceiling in `PERF_BUDGET` and the table above; document
+  the reason in the PR description (e.g. "policy engine now loads YAML fixtures
+  at startup").
+- Removing: delete the entry from `PERF_BUDGET`, the test class, and the table
+  above; justify in the PR description.
+
+### Privacy
+
+The script and tests measure only timing — they never log, return, or assert on
+the *output* of the function under test.  Setup helpers never use real secrets,
+seeds, Stellar keys, or payment proofs.

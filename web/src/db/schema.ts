@@ -5,12 +5,68 @@ import {
   integer,
   boolean,
   numeric,
+  bigint,
   timestamp,
   jsonb,
   index,
   uniqueIndex,
+  doublePrecision,
+  pgMaterializedView,
+  uuid,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+
+// ─── Benchmark Runs ───────────────────────────────────────────────
+
+export const tlsBenchmarkRuns = pgTable(
+  "tls_benchmark_runs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    suite: text("suite").notNull(),
+    config: jsonb("config").notNull(),
+    summary: jsonb("summary").notNull(),
+    status: text("status").notNull().default("completed"),
+    ciRun: boolean("ci_run").notNull().default(false),
+    commitSha: text("commit_sha"),
+    branch: text("branch"),
+    startedAt: timestamp("started_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tls_benchmark_runs_suite_started_at_idx").on(t.suite, t.startedAt),
+    index("tls_benchmark_runs_commit_sha_idx").on(t.commitSha),
+  ],
+);
+
+export const tlsBenchmarkResults = pgTable(
+  "tls_benchmark_results",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    runId: text("run_id").notNull().references(() => tlsBenchmarkRuns.id, { onDelete: "cascade" }),
+    label: text("label").notNull(),
+    passed: boolean("passed").notNull(),
+    meanMs: numeric("mean_ms", { precision: 18, scale: 4 }).notNull(),
+    medianMs: numeric("median_ms", { precision: 18, scale: 4 }).notNull(),
+    stddevMs: numeric("stddev_ms", { precision: 18, scale: 4 }).notNull(),
+    minMs: numeric("min_ms", { precision: 18, scale: 4 }).notNull(),
+    maxMs: numeric("max_ms", { precision: 18, scale: 4 }).notNull(),
+    variance: numeric("variance", { precision: 10, scale: 6 }).notNull(),
+    percentiles: jsonb("percentiles").notNull(),
+    meanMemoryMb: numeric("mean_memory_mb", { precision: 10, scale: 2 }).notNull(),
+    peakMemoryMb: numeric("peak_memory_mb", { precision: 10, scale: 2 }).notNull(),
+    meanCpuPercent: numeric("mean_cpu_percent", { precision: 6, scale: 2 }).notNull(),
+    peakCpuPercent: numeric("peak_cpu_percent", { precision: 6, scale: 2 }).notNull(),
+    thresholdViolations: jsonb("threshold_violations"),
+    sampleCount: integer("sample_count").notNull().default(0),
+    durationMs: integer("duration_ms").notNull().default(0),
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tls_benchmark_results_run_id_idx").on(t.runId),
+    index("tls_benchmark_results_label_passed_idx").on(t.label, t.passed),
+  ],
+);
 
 // ─── TALOS (Agent Corporation) ────────────────────────────────────
 
@@ -64,9 +120,34 @@ export const tlsTalos = pgTable(
     agentWalletId: text("agentWalletId"),             // Stellar public key (G...) — wallet identifier
     agentWalletAddress: text("agentWalletAddress"),   // Stellar public key (G...) — for display/payment routing
 
+    // Retirement tracking - preserves historical identity while preventing reuse
+    retiredAt: timestamp("retiredAt", { mode: "date", precision: 3 }),
+    retiredReason: text("retiredReason"),
+    supersededBy: text("supersededBy"),               // References tlsTalos.id of replacement agent
+
+    // Soft deletion - separates identity retirement from privacy deletion
+    deletedAt: timestamp("deletedAt", { mode: "date", precision: 3 }),
+    deletedReason: text("deletedReason"),
+
     createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
     updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
   },
+  (t) => [
+    // Partial unique index: agentName must be unique among non-retired agents
+    // This prevents name reuse while allowing retired agents to keep their names
+    uniqueIndex("tls_talos_agentName_active_key")
+      .on(t.agentName)
+      .where(sql`"retiredAt" IS NULL`),
+
+    // Dashboard owner lookups: the /api/dashboard route filters tls_talos by
+    // walletPublicKey OR creatorPublicKey OR investorPublicKey OR treasuryPublicKey.
+    // Without these indexes every dashboard load triggers a sequential scan.
+    // Separate single-column btree indexes let the planner bitmap-OR across them.
+    index("tls_talos_walletPublicKey_idx").on(t.walletPublicKey),
+    index("tls_talos_creatorPublicKey_idx").on(t.creatorPublicKey),
+    index("tls_talos_investorPublicKey_idx").on(t.investorPublicKey),
+    index("tls_talos_treasuryPublicKey_idx").on(t.treasuryPublicKey),
+  ],
 );
 
 // ─── Patron (Shareholder) ─────────────────────────────────────────
@@ -75,7 +156,7 @@ export const tlsPatrons = pgTable(
   "tls_patrons",
   {
     id: text("id").primaryKey().$defaultFn(() => createId()),
-    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "restrict" }),
     stellarPublicKey: text("stellarPublicKey").notNull(),
     role: text("role").notNull(),
     pulseAmount: integer("pulseAmount").notNull().default(0),
@@ -87,6 +168,11 @@ export const tlsPatrons = pgTable(
   },
   (t) => [
     uniqueIndex("tls_patrons_talosId_stellarPublicKey_key").on(t.talosId, t.stellarPublicKey),
+
+    // Dashboard patron lookup: /api/dashboard filters tls_patrons by stellarPublicKey
+    // alone. The composite unique index above is (talosId, stellarPublicKey), which
+    // cannot serve a wallet-only predicate, so this single-column index is needed.
+    index("tls_patrons_stellarPublicKey_idx").on(t.stellarPublicKey),
   ],
 );
 
@@ -96,7 +182,7 @@ export const tlsActivities = pgTable(
   "tls_activities",
   {
     id: text("id").primaryKey().$defaultFn(() => createId()),
-    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "restrict" }),
     type: text("type").notNull(),
     content: text("content").notNull(),
     channel: text("channel").notNull(),
@@ -109,13 +195,41 @@ export const tlsActivities = pgTable(
   ],
 );
 
+/*
+export const tlsReputationInputs = pgTable(
+  "tls_reputation_inputs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    jobId: text("jobId").notNull().unique(), // Unique to ensure idempotency per job
+    requesterTalosId: text("requesterTalosId").notNull(),
+    status: text("status").notNull(),
+    
+    // Explicit boundary signals
+    jobCreatedAt: timestamp("jobCreatedAt", { mode: "date", precision: 3 }).notNull(),
+    jobUpdatedAt: timestamp("jobUpdatedAt", { mode: "date", precision: 3 }),
+    deadlineAt: timestamp("deadlineAt", { mode: "date", precision: 3 }),
+    refundAmount: numeric("refundAmount", { precision: 18, scale: 6 }),
+    hasResult: boolean("hasResult").notNull().default(false),
+    txHash: text("txHash"), // Cryptographically linked outcome (if any)
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    index("tls_reputation_inputs_talosId_jobCreatedAt_idx").on(t.talosId, t.jobCreatedAt),
+    index("tls_reputation_inputs_talosId_requester_idx").on(t.talosId, t.requesterTalosId),
+  ],
+);
+*/
+
 // ─── Approval Request ─────────────────────────────────────────────
 
 export const tlsApprovals = pgTable(
   "tls_approvals",
   {
     id: text("id").primaryKey().$defaultFn(() => createId()),
-    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "restrict" }),
     type: text("type").notNull(),
     title: text("title").notNull(),
     description: text("description"),
@@ -140,7 +254,7 @@ export const tlsRevenues = pgTable(
   "tls_revenues",
   {
     id: text("id").primaryKey().$defaultFn(() => createId()),
-    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "restrict" }),
     amount: numeric("amount", { precision: 18, scale: 6 }).notNull(),
     currency: text("currency").notNull().default("USDC"),
     source: text("source").notNull(),
@@ -164,7 +278,7 @@ export const tlsDividends = pgTable(
   "tls_dividends",
   {
     id: text("id").primaryKey().$defaultFn(() => createId()),
-    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "restrict" }),
 
     // Total USDC (or other currency) distributed to patrons in this event
     amount: numeric("amount", { precision: 18, scale: 6 }).notNull(),
@@ -235,7 +349,7 @@ export const tlsCommerceJobs = pgTable(
   "tls_commerce_jobs",
   {
     id: text("id").primaryKey().$defaultFn(() => createId()),
-    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "restrict" }),
     requesterTalosId: text("requesterTalosId").notNull(),
     serviceName: text("serviceName").notNull(),
     payload: jsonb("payload"),
@@ -247,9 +361,11 @@ export const tlsCommerceJobs = pgTable(
     bidPrice: numeric("bidPrice", { precision: 18, scale: 6 }), // Negotiated bid price (nullable)
 
     // Client-supplied idempotency key (Idempotency-Key request header).
-    // Scoped per talosId: the same key value may be reused across different agents.
-    // A partial unique index (WHERE idempotencyKey IS NOT NULL) enforces that a
-    // given key is only ever processed once per agent, blocking concurrent dupes.
+    // Scoped per (talosId, requesterTalosId): the same key value may be
+    // reused across different agents or different buyers, but only ever
+    // processed once for a given buyer+service combination.  A partial
+    // unique index (WHERE idempotencyKey IS NOT NULL) enforces this,
+    // blocking concurrent duplicate jobs for the same buyer+service+key.
     idempotencyKey: text("idempotencyKey"),
 
     // Cached 201 response body so an identical retry returns the original result.
@@ -261,13 +377,17 @@ export const tlsCommerceJobs = pgTable(
     leaseExpiresAt: timestamp("leaseExpiresAt", { mode: "date", precision: 3 }), // lease TTL
     fencingToken: integer("fencingToken").notNull().default(0), // monotonic counter for stale-worker fencing
 
+    // Mid-flight progress reported by the provider (POST /api/jobs/:id/progress).
+    // Shape: { percent?, stage?, message?, updatedAt, reportedBy }. Nullable = no report yet.
+    progress: jsonb("progress"),
+
     createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
     updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
   },
   (t) => [
     index("tls_commerce_jobs_talosId_status_idx").on(t.talosId, t.status),
-    uniqueIndex("tls_commerce_jobs_talosId_idempotencyKey_unique")
-      .on(t.talosId, t.idempotencyKey)
+    uniqueIndex("tls_commerce_jobs_talos_requester_idempotencyKey_unique")
+      .on(t.talosId, t.requesterTalosId, t.idempotencyKey)
       .where(sql`"idempotencyKey" IS NOT NULL`),
   ],
 );
@@ -278,7 +398,7 @@ export const tlsPlaybooks = pgTable(
   "tls_playbooks",
   {
     id: text("id").primaryKey().$defaultFn(() => createId()),
-    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "restrict" }),
     title: text("title").notNull(),
     category: text("category").notNull(),
     channel: text("channel").notNull(),
@@ -357,13 +477,193 @@ export const tlsTokenPurchases = pgTable(
   ],
 );
 
+
+// ─── Buyback Requests (Idempotency Ledger) ───────────────────────
+//
+// One row per (talosId, Idempotency-Key) for POST .../revenue/buyback.
+// Inserted "pending" BEFORE the on-chain transfer so a retry or a concurrent
+// duplicate can never submit a second transfer; flipped to "completed" with
+// the cached response in the same DB transaction that records the revenue row.
+
+export const tlsBuybackRequests = pgTable(
+  "tls_buyback_requests",
+  {
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    idempotencyKey: text("idempotencyKey").notNull(),
+    // sha256 of the validated amounts; detects key reuse with a different body
+    requestHash: text("requestHash").notNull(),
+    // pending | completed | failed
+    status: text("status").notNull().default("pending"),
+    responseBody: jsonb("responseBody"),
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().defaultNow().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("tls_buyback_requests_talosId_idempotencyKey_key").on(t.talosId, t.idempotencyKey),
+  ],
+);
+
+// ─── Webhook Subscriptions ────────────────────────────────────────
+//
+// Each row represents an outbound webhook endpoint that a TALOS has configured
+// to receive signed event notifications. The webhook secret is encrypted at rest
+// using AES-256-GCM and is never exposed via the API.
+//
+// Zero-downtime rotation stores the previous ciphertext until
+// previousSecretExpiresAt so deliveries can dual-sign during the grace window.
+
+export const tlsWebhookSubscriptions = pgTable(
+  "tls_webhook_subscriptions",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talos_id").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    url: text("url").notNull(),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    /** Previous secret retained during rotation grace (encrypted). */
+    previousSecretCiphertext: text("previous_secret_ciphertext"),
+    /** When the previous secret stops being dual-signed. */
+    previousSecretExpiresAt: timestamp("previous_secret_expires_at", { mode: "date", precision: 3 }),
+    /** Wall-clock time of the most recent secret rotation. */
+    secretRotatedAt: timestamp("secret_rotated_at", { mode: "date", precision: 3 }),
+    signatureVersion: integer("signature_version").notNull().default(1),
+    eventTypes: text("event_types").array().notNull().default([]),
+    description: text("description"),
+    active: boolean("active").notNull().default(true),
+
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    index("tls_webhook_subscriptions_talos_id_idx").on(t.talosId),
+    index("tls_webhook_subscriptions_previous_expires_idx").on(t.previousSecretExpiresAt),
+  ],
+);
+
+// ─── Webhook Deliveries ────────────────────────────────────────────
+//
+// Records every delivery attempt for a webhook event. Supports retries,
+// dead-letter transitions, and concurrent-safe lease acquisition using the
+// same fencing-token pattern as tls_commerce_jobs.
+
+export const tlsWebhookDeliveries = pgTable(
+  "tls_webhook_deliveries",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    subscriptionId: text("subscription_id").notNull().references(() => tlsWebhookSubscriptions.id, { onDelete: "cascade" }),
+    eventType: text("event_type").notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(5),
+    lastStatusCode: integer("last_status_code"),
+    lastError: text("last_error"),
+    lastAttemptAt: timestamp("last_attempt_at", { mode: "date", precision: 3 }),
+    nextAttemptAt: timestamp("next_attempt_at", { mode: "date", precision: 3 }),
+    completedAt: timestamp("completed_at", { mode: "date", precision: 3 }),
+    responseBody: text("response_body"),
+
+    // Lease fields (same pattern as tls_commerce_jobs)
+    leasedBy: text("leased_by"),
+    leasedAt: timestamp("leased_at", { mode: "date", precision: 3 }),
+    leaseExpiresAt: timestamp("lease_expires_at", { mode: "date", precision: 3 }),
+    fencingToken: integer("fencing_token").notNull().default(0),
+
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tls_webhook_deliveries_sub_id_payload_hash_unique").on(t.subscriptionId, t.payloadHash),
+    index("tls_webhook_deliveries_pending_idx").on(t.nextAttemptAt, t.status)
+      .where(sql`${t.status} = ANY(ARRAY['pending', 'failed'])`),
+  ],
+);
+
+
+// ─── Stellar Transaction Finality Record ─────────────────────────
+//
+// Tracks the settlement lifecycle of every Stellar transaction Talos submits
+// or monitors.  The reconciler polls Horizon and drives each row through the
+// finality state machine until it reaches a terminal state.
+//
+// States: PENDING → CONFIRMING → CONFIRMED | FAILED | EXPIRED | NOT_FOUND
+
+export const tlsStellarTxRecords = pgTable(
+  "tls_stellar_tx_records",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+
+    // The Stellar transaction hash being tracked (unique per record)
+    txHash: text("tx_hash").notNull(),
+
+    // Which subsystem originated the tx: "commerce_job" | "token_purchase" | "other"
+    sourceType: text("source_type").notNull().default("other"),
+
+    // Opaque reference back to the originating row (job id, txHash of token purchase, etc.)
+    sourceId: text("source_id"),
+
+    // Current state-machine position
+    finalityStatus: text("finality_status").notNull().default("PENDING"),
+
+    // Ledger sequence number when the tx was submitted (if known at submission time)
+    ledgerSubmitted: integer("ledger_submitted"),
+
+    // Most recent ledger number polled; the reconciler uses this to bound re-scan
+    lastLedgerChecked: integer("last_ledger_checked"),
+
+    // Ledger in which the tx was permanently included (set when CONFIRMED)
+    confirmedLedger: integer("confirmed_ledger"),
+
+    // Running count of poll attempts (for back-off and alerting)
+    pollCount: integer("poll_count").notNull().default(0),
+
+    // Last error message from Horizon — never contains secrets or user payloads
+    lastError: text("last_error"),
+
+    // True once the reconciler has applied the downstream repair for this tx
+    repairApplied: boolean("repair_applied").notNull().default(false),
+
+    // PENDING/CONFIRMING rows older than this become EXPIRED
+    expiresAt: timestamp("expires_at", { mode: "date", precision: 3 }),
+
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { mode: "date", precision: 3 }).notNull().defaultNow().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("tls_stellar_tx_records_tx_hash_unique").on(t.txHash),
+    index("tls_stellar_tx_records_status_updated_idx").on(t.finalityStatus, t.updatedAt),
+    index("tls_stellar_tx_records_source_idx").on(t.sourceType, t.sourceId),
+  ],
+);
+
+// ─── Scoped API Keys ───────────────────────────────────────────────
+
+export const tlsApiKeys = pgTable(
+  "tls_api_keys",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    keyHash: text("keyHash").notNull().unique(),
+    scopes: text("scopes").array().notNull().default([]),
+    expiresAt: timestamp("expiresAt", { mode: "date", precision: 3 }),
+    lastUsedAt: timestamp("lastUsedAt", { mode: "date", precision: 3 }),
+    status: text("status").notNull().default("active"),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("tls_api_keys_keyHash_unique").on(t.keyHash),
+    index("tls_api_keys_talosId_status_idx").on(t.talosId, t.status),
+  ],
+);
+
 // ─── API Key Audit Log ────────────────────────────────────────────
 
 export const tlsApiAuditLogs = pgTable(
   "tls_api_audit_logs",
   {
     id: text("id").primaryKey().$defaultFn(() => createId()),
-    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "restrict" }),
 
     // Which endpoint was called
     method: text("method").notNull(),   // GET | POST | PATCH | PUT | DELETE
@@ -371,9 +671,17 @@ export const tlsApiAuditLogs = pgTable(
 
     // Result
     statusCode: integer("statusCode").notNull(),
+    denialReason: text("denialReason"),
+    scopesRequired: text("scopesRequired").array(),
 
     // Caller info
     ipAddress: text("ipAddress"),
+
+    // ── Hash chain columns (tamper-evidence) ──
+    sequenceNumber: integer("sequenceNumber"),          // Monotonic per-agent (0, 1, 2, ...)
+    previousHash: text("previousHash"),                 // SHA-256 hex of prior entry ("GENESIS" for first)
+    entryHash: text("entryHash"),                       // SHA-256 hex of this entry (canonical encoding)
+    chainVersion: text("chainVersion"),                 // Schema version ("1" for current)
 
     createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
   },
@@ -381,3 +689,438 @@ export const tlsApiAuditLogs = pgTable(
     index("tls_api_audit_logs_talosId_createdAt_idx").on(t.talosId, t.createdAt),
   ],
 );
+
+
+
+// ─── Lifecycle Event Log ──────────────────────────────────────────
+//
+// Append-only, canonical record of every governed lifecycle transition.
+// `sequence` is monotonic per talosId and forms the replay cursor: an indexer
+// or UI resumes from the last sequence it committed. Rows are never updated.
+
+export const tlsLifecycleEvents = pgTable(
+  "tls_lifecycle_events",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+
+    sequence: integer("sequence").notNull(),      // monotonic per talosId, starts at 1
+    eventType: text("eventType").notNull(),       // canonical name, see lib/governance/events.ts
+    fromState: text("fromState"),                 // null for the initial "proposed" event
+    toState: text("toState").notNull(),
+
+    // Who caused it. `actorId` is a Stellar G-address or the literal "system".
+    actorId: text("actorId").notNull(),
+    actorRole: text("actorRole").notNull(),       // creator | operator | governance | system
+
+    jobId: text("jobId"),                         // durable job that produced this event
+    stepName: text("stepName"),                   // provisioning step, when applicable
+
+    // Redacted diagnostic payload — never stores secrets or raw request bodies.
+    detail: jsonb("detail").notNull().default({}),
+
+    // Dedupe key for at-least-once producers (worker retries, duplicate delivery).
+    idempotencyKey: text("idempotencyKey"),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tls_lifecycle_events_talosId_sequence_key").on(t.talosId, t.sequence),
+    index("tls_lifecycle_events_talosId_createdAt_idx").on(t.talosId, t.createdAt),
+    uniqueIndex("tls_lifecycle_events_talosId_idempotencyKey_unique")
+      .on(t.talosId, t.idempotencyKey)
+      .where(sql`"idempotencyKey" IS NOT NULL`),
+  ],
+);
+
+// ─── Consumed Nonces (replay protection) ────────────────────────────
+//
+// Every signed transfer nonce is persisted here with a UNIQUE constraint on
+// (talosId, nonce) so the database enforces single-use semantics across
+// process restarts and concurrent requests.  Rows are retained for a short
+// window after the nonce expires so delayed replays are still caught, then
+// pruned by a periodic vacuum.
+//
+// expiry — the original transfer-authorization expiry (Unix seconds).
+//          Used by the vacuum to safely remove expired rows without
+//          consulting external state.
+// consumedAt — wall-clock time when the nonce was first consumed.
+//              Present for audit and to bound the vacuum window.
+
+export const tlsConsumedNonces = pgTable(
+  "tls_consumed_nonces",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull(),
+    nonce: text("nonce").notNull(),
+    expiry: integer("expiry").notNull(),             // original auth expiry (Unix seconds)
+    consumedAt: timestamp("consumedAt", { mode: "date", precision: 3 })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tls_consumed_nonces_talosId_nonce_key").on(t.talosId, t.nonce),
+    index("tls_consumed_nonces_expiry_idx").on(t.expiry),
+  ],
+);
+
+// ─── Provisioning Job (durable, compensated workflow) ─────────────
+//
+// One row per durable lifecycle run (activate / retire / recover). Step state
+// lives in `steps` so a run is fully resumable after a process restart: the
+// worker leases a row, replays completed steps from the record rather than
+// re-executing them, and unwinds via each step's compensation on failure.
+
+export const tlsProvisioningJobs = pgTable(
+  "tls_provisioning_jobs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+
+    action: text("action").notNull(),             // activate | retire | recover
+    // pending | running | completed | compensating | compensated | failed
+    status: text("status").notNull().default("pending"),
+
+    // [{ name, status, attempts, startedAt, completedAt, idempotencyKey, output, error }]
+    steps: jsonb("steps").notNull().default([]),
+    cursor: integer("cursor").notNull().default(0), // index of the next step to run
+
+    attempt: integer("attempt").notNull().default(0),
+    maxAttempts: integer("maxAttempts").notNull().default(3),
+    lastError: text("lastError"),                 // redacted, operator-facing
+
+    // Same lease/fencing contract as tls_commerce_jobs — see 0012_add_job_leases.
+    leasedBy: text("leasedBy"),
+    leaseExpiresAt: timestamp("leaseExpiresAt", { mode: "date", precision: 3 }),
+    fencingToken: integer("fencingToken").notNull().default(0),
+
+    requestedBy: text("requestedBy").notNull(),   // Stellar G-address of the requester
+    // Scoped per talosId; a duplicate submission returns the original run.
+    idempotencyKey: text("idempotencyKey").notNull(),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+    completedAt: timestamp("completedAt", { mode: "date", precision: 3 }),
+  },
+  (t) => [
+    uniqueIndex("tls_provisioning_jobs_talosId_idempotencyKey_unique").on(t.talosId, t.idempotencyKey),
+    index("tls_provisioning_jobs_status_idx").on(t.status, t.leaseExpiresAt),
+    index("tls_provisioning_jobs_talosId_createdAt_idx").on(t.talosId, t.createdAt),
+  ],
+);
+
+// ─── Reputation Input Ledger ──────────────────────────────────────
+
+export const tlsReputationInputs = pgTable(
+  "tls_reputation_inputs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    jobId: text("jobId").notNull().unique(), // Unique to ensure idempotency per job
+    requesterTalosId: text("requesterTalosId").notNull(),
+    status: text("status").notNull(),
+    
+    // Explicit boundary signals
+    jobCreatedAt: timestamp("jobCreatedAt", { mode: "date", precision: 3 }).notNull(),
+    jobUpdatedAt: timestamp("jobUpdatedAt", { mode: "date", precision: 3 }),
+    deadlineAt: timestamp("deadlineAt", { mode: "date", precision: 3 }),
+    refundAmount: numeric("refundAmount", { precision: 18, scale: 6 }),
+    hasResult: boolean("hasResult").notNull().default(false),
+    txHash: text("txHash"), // Cryptographically linked outcome (if any)
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    index("tls_reputation_inputs_talosId_jobCreatedAt_idx").on(t.talosId, t.jobCreatedAt),
+    index("tls_reputation_inputs_talosId_requester_idx").on(t.talosId, t.requesterTalosId),
+  ],
+);
+
+// ─── Background Jobs (Durable Execution Queue) ────────────────────
+//
+// Postgres-backed durable job queue for slow/retryable web-side work.
+// Leasing uses `SELECT ... FOR UPDATE SKIP LOCKED` (see src/lib/jobs/store.ts)
+// so multiple app instances can safely pull from the same queue without a
+// broker. Status lifecycle:
+//
+//   pending → leased → completed
+//                    ↘ pending (transient failure, runAt pushed out)
+//                    ↘ dead_letter (retries exhausted / fatal error)
+//   pending|leased → cancelled (cooperative — handler observes cancelRequested)
+//
+// A lease is a (leaseId, leaseExpiresAt) pair. Workers extend it via
+// heartbeat while processing; if a worker dies mid-job the lease simply
+// expires and the reaper returns the row to pending (or dead_letter once
+// maxAttempts is exhausted) — no separate crash-recovery path needed.
+
+export const tlsJobs = pgTable(
+  "tls_jobs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+
+    // Job type — maps to a handler registered in src/lib/jobs/registry.ts
+    queue: text("queue").notNull(),
+    payload: jsonb("payload").notNull().default({}),
+
+    // pending | leased | completed | dead_letter | cancelled
+    status: text("status").notNull().default("pending"),
+    priority: integer("priority").notNull().default(0),
+
+    // Earliest time this job is eligible to be leased (supports delayed retry)
+    runAt: timestamp("runAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+
+    // Lease ownership — leaseId is a random token so a reaped-and-relaunched
+    // lease can never be mistaken for the original by a slow worker.
+    leaseId: text("leaseId"),
+    leaseOwner: text("leaseOwner"),
+    leaseExpiresAt: timestamp("leaseExpiresAt", { mode: "date", precision: 3 }),
+    heartbeatAt: timestamp("heartbeatAt", { mode: "date", precision: 3 }),
+
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("maxAttempts").notNull().default(8),
+
+    // transient | rate_limited | fatal — see src/lib/jobs/retry.ts
+    retryClass: text("retryClass").notNull().default("transient"),
+
+    // Cooperative cancellation — handler polls this via the heartbeat() call
+    cancelRequested: boolean("cancelRequested").notNull().default(false),
+
+    // Caller-supplied dedupe key, scoped per queue. Nullable — most jobs don't need one.
+    idempotencyKey: text("idempotencyKey"),
+
+    // Sanitized, truncated error message from the most recent failed attempt.
+    // Never store raw payloads/secrets here — see src/lib/jobs/metrics.ts.
+    lastError: text("lastError"),
+    result: jsonb("result"),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+    completedAt: timestamp("completedAt", { mode: "date", precision: 3 }),
+  },
+  (t) => [
+    index("tls_jobs_status_runAt_idx").on(t.status, t.runAt),
+    index("tls_jobs_queue_status_idx").on(t.queue, t.status),
+    index("tls_jobs_leaseExpiresAt_idx").on(t.leaseExpiresAt),
+    uniqueIndex("tls_jobs_queue_idempotencyKey_unique")
+      .on(t.queue, t.idempotencyKey)
+      .where(sql`"idempotencyKey" IS NOT NULL`),
+  ],
+);
+
+// ─── Transactional Outbox (Domain Events) ──────────────────────────
+//
+// Written atomically (same db.transaction) alongside the domain mutation
+// that produces the event, so a row here can never diverge from the state
+// change it describes. Dispatch is a separate, lease-based step — see
+// src/lib/outbox/store.ts — using the same SELECT ... FOR UPDATE SKIP
+// LOCKED technique as the jobs queue so multiple instances can drain safely.
+//
+// Status lifecycle: pending → leased → dispatched
+//                                    ↘ pending (retry, runAt pushed out)
+//                                    ↘ dead_letter (retries exhausted)
+
+export const tlsOutboxEvents = pgTable(
+  "tls_outbox_events",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+
+    aggregateType: text("aggregateType").notNull(),   // e.g. "commerce_job"
+    aggregateId: text("aggregateId").notNull(),        // e.g. the job id
+    eventType: text("eventType").notNull(),             // e.g. "commerce_job.completed"
+    payload: jsonb("payload").notNull().default({}),
+
+    // pending | leased | dispatched | dead_letter
+    status: text("status").notNull().default("pending"),
+    runAt: timestamp("runAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+
+    leaseId: text("leaseId"),
+    leaseOwner: text("leaseOwner"),
+    leaseExpiresAt: timestamp("leaseExpiresAt", { mode: "date", precision: 3 }),
+
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("maxAttempts").notNull().default(8),
+
+    // Caller-supplied dedupe key, scoped per eventType. Nullable — optional.
+    dedupeKey: text("dedupeKey"),
+
+    lastError: text("lastError"),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+    dispatchedAt: timestamp("dispatchedAt", { mode: "date", precision: 3 }),
+  },
+  (t) => [
+    index("tls_outbox_events_status_runAt_idx").on(t.status, t.runAt),
+    index("tls_outbox_events_eventType_status_idx").on(t.eventType, t.status),
+    index("tls_outbox_events_leaseExpiresAt_idx").on(t.leaseExpiresAt),
+    index("tls_outbox_events_dispatchedAt_idx").on(t.dispatchedAt),
+    uniqueIndex("tls_outbox_events_eventType_dedupeKey_unique")
+      .on(t.eventType, t.dedupeKey)
+      .where(sql`"dedupeKey" IS NOT NULL`),
+  ],
+);
+
+// ─── Quota Configuration ─────────────────────────────────────────
+//
+// One row per (talosId, resource) defining the limit and reset window.
+// A NULL talosId row is the platform default applied when no agent-specific
+// override exists.
+//
+// resources: activity_writes | job_writes | revenue_writes | sse_connections
+// windowSize: hourly | daily | monthly
+
+export const tlsQuotaConfigs = pgTable(
+  "tls_quota_configs",
+  {
+    // NULL = platform default; non-NULL = per-agent override
+    talosId: text("talosId").references(() => tlsTalos.id, { onDelete: "cascade" }),
+
+    resource: text("resource").notNull(),
+    maxCount: integer("maxCount").notNull().default(1000),
+    windowSize: text("windowSize").notNull().default("daily"),
+    enabled: boolean("enabled").notNull().default(true),
+    notes: text("notes"),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+  },
+  // Composite PK: (talosId, resource) — PostgreSQL allows multiple NULL talosId
+  // rows, so platform-level defaults coexist without collision.
+);
+
+// ─── Quota Usage ─────────────────────────────────────────────────
+//
+// Atomic per-window usage counter. Incremented via INSERT … ON CONFLICT
+// DO UPDATE to prevent double-counting under concurrency.
+
+export const tlsQuotaUsage = pgTable(
+  "tls_quota_usage",
+  {
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    resource: text("resource").notNull(),
+
+    // UTC-floored window start timestamp (hour / day / month)
+    windowStart: timestamp("windowStart", { mode: "date", precision: 3 }).notNull(),
+
+    count: integer("count").notNull().default(0),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().defaultNow().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    index("tls_quota_usage_talosId_resource_idx").on(t.talosId, t.resource),
+  ],
+);
+
+// ─── Backup Runs (DR audit trail) ──────────────────────────────────
+
+export const tlsBackupRuns = pgTable(
+  "tls_backup_runs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    op: text("op").notNull(),                    // 'backup' | 'restore' | 'verify'
+    scope: text("scope").notNull(),              // 'system' | 'config'
+    talosId: text("talosId"),
+    agentId: text("agentId"),
+    status: text("status").notNull().default("pending"), // 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+    triggeredBy: text("triggeredBy"),             // 'cli' | 'api' | 'ci' | 'cron' (free-form, privacy-safe)
+
+    artifactPath: text("artifactPath"),
+    encryption: text("encryption"),              // e.g. 'AES-256-GCM#PBKDF2-SHA256#200000'
+    sizeBytes: bigint("sizeBytes", { mode: "number" }),
+    sha256: text("sha256"),
+    durationMs: integer("durationMs"),
+
+    errorMessage: text("errorMessage"),          // sanitised: no secrets/keys/payloads
+    metadata: jsonb("metadata"),                 // { rowCounts, signalVersion, ... } — privacy-safe only
+
+    startedAt: timestamp("startedAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    finishedAt: timestamp("finishedAt", { mode: "date", precision: 3 }),
+  },
+  (t) => [
+    index("tls_backup_runs_status_idx").on(t.status),
+    index("tls_backup_runs_startedAt_idx").on(t.startedAt),
+    index("tls_backup_runs_op_status_idx").on(t.op, t.status),
+  ],
+);
+
+// ─── Leaderboard aggregates (materialized view, created in drizzle/0021_*.sql) ───
+
+export const tlsLeaderboardAggregates = pgMaterializedView(
+  "tls_leaderboard_aggregates",
+  {
+    talosId: text("talosId").notNull(),
+    patronCount: integer("patronCount").notNull(),
+    activityCount: integer("activityCount").notNull(),
+    totalRevenue: doublePrecision("totalRevenue").notNull(),
+  },
+).existing();
+// ─── Marketplace ───────────────────────────────────────────────────
+
+export const capabilities = pgTable("capabilities", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  description: text("description").notNull(),
+  category: text("category").notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { mode: "date" }).defaultNow().notNull(),
+});
+
+export const marketplaceItems = pgTable("marketplace_items", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  title: text("title").notNull(),
+  description: text("description").notNull(),
+  price: integer("price").notNull(),
+  currency: text("currency").notNull().default("USD"),
+  provider: text("provider").notNull(),
+  rating: integer("rating").notNull().default(0),
+  createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { mode: "date" }).defaultNow().notNull(),
+});
+
+export const itemCapabilities = pgTable("item_capabilities", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  itemId: uuid("item_id")
+    .references(() => marketplaceItems.id)
+    .notNull(),
+  capabilityId: uuid("capability_id")
+    .references(() => capabilities.id)
+    .notNull(),
+  createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+});
+
+
+// ─── Idempotency Keys (general-purpose reservation store) ────────
+//
+// Backs web/src/lib/idempotency/reservation-store.ts. One row per
+// in-flight or completed cross-cutting idempotent operation. Complements
+// the per-domain idempotency already embedded in tls_commerce_jobs and
+// tls_token_purchases with a reusable primitive for any operation that
+// needs request deduplication without coupling to a specific domain table.
+//
+// States:
+//   reserved  — a request is currently executing the guarded operation
+//   completed — the operation finished; `result` holds the replay payload
+//
+// Expired rows (expiresAt < now) are treated as free and periodically
+// removed by the cleanup job.
+
+export const tlsIdempotencyKeys = pgTable(
+  "tls_idempotency_keys",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    key: text("key").notNull().unique(),
+    payloadHash: text("payloadHash").notNull(),
+    status: text("status").notNull().default("reserved"),  // "reserved" | "completed"
+    result: jsonb("result"),
+    expiresAt: timestamp("expiresAt", { mode: "date", precision: 3 }).notNull(),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    index("tls_idempotency_keys_expiresAt_idx").on(t.expiresAt),
+  ],
+);
+
+export { tlsContractEvents, tlsEventCursor } from "../../drizzle/schema";

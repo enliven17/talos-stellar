@@ -4,6 +4,7 @@ import { tlsTalos, tlsPatrons, tlsRevenues, tlsDividends } from "@/db/schema";
 import { eq, and, sum } from "drizzle-orm";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER } from "@/lib/stellar-config";
 import { createId } from "@paralleldrive/cuid2";
+import { withTraceContext } from "@/lib/tracing";
 
 
 /**
@@ -12,11 +13,9 @@ import { createId } from "@paralleldrive/cuid2";
  * Distribute accumulated treasury USDC to Mitos holders proportionally.
  * Requires STELLAR_OPERATOR_SECRET_KEY (operator holds agent treasury for now).
  *
- * Body: { requesterPublicKey } — must be creator or operator
- *
- * Returns: list of transfers executed
+ * Auth: Bearer token with revenue:write scope (scoped key or legacy).
  */
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -230,7 +229,7 @@ export async function POST(
  * GET /api/talos/:id/revenue/distribute
  * Preview distribution without executing
  */
-export async function GET(
+async function handleGet(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -270,3 +269,6 @@ export async function GET(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withTraceContext(handlePost);
+export const GET = withTraceContext(handleGet);

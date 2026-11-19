@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, startTransition } from "react";
 import { useWallet } from "@/components/wallet-gate";
 import { AgentAvatar } from "@/components/agent-avatar";
 
@@ -88,17 +88,17 @@ export default function PlaybooksPage() {
   }, [category, channel, search]);
 
   useEffect(() => {
-    if (tab === "browse") fetchPlaybooks();
+    if (tab === "browse") startTransition(() => { fetchPlaybooks(); });
   }, [tab, fetchPlaybooks]);
 
   // Fetch my playbooks
   useEffect(() => {
     if (tab === "my" && isConnected && address) {
-      setLoading(true);
+      startTransition(() => setLoading(true));
       fetch(`/api/playbooks/my?wallet=${address}`)
         .then((r) => r.json())
         .then(setMyPlaybooks)
-        .finally(() => setLoading(false));
+        .finally(() => startTransition(() => setLoading(false)));
     }
   }, [tab, isConnected, address]);
 
@@ -107,11 +107,11 @@ export default function PlaybooksPage() {
     if (isConnected && address) {
       const shouldLoad = tab === "purchased" || tab === "browse";
       if (shouldLoad) {
-        if (tab === "purchased") setLoading(true);
+        if (tab === "purchased") startTransition(() => setLoading(true));
         fetch(`/api/playbooks/purchased?wallet=${address}`)
           .then((r) => r.json())
           .then(setPurchased)
-          .finally(() => { if (tab === "purchased") setLoading(false); });
+          .finally(() => { if (tab === "purchased") startTransition(() => setLoading(false)); });
       }
     }
   }, [tab, isConnected, address]);
