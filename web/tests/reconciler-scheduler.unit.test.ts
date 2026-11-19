@@ -24,11 +24,13 @@ import {
   startReconciler,
   stopReconciler,
   runOneTick,
+  registerTx,
   getStats,
   getActiveCount,
   getQueueCount,
   isRunning,
 } from "../src/lib/reconciler/scheduler";
+import { TxAssociationConflictError } from "../src/lib/reconciler/state-machine";
 import type { TxRecord, ReconcilerConfig } from "../src/lib/reconciler/types";
 
 function chainable<T>(result: T) {
@@ -251,5 +253,61 @@ describe("reconciler/scheduler - Cancellation & Graceful Shutdown", () => {
 
     expect(getActiveCount()).toBe(0);
     expect(getQueueCount()).toBe(0);
+  });
+});
+
+describe("reconciler/scheduler - registerTx conflict detection", () => {
+  it("returns existing id idempotently when txHash is re-registered for the same job", async () => {
+    mocks.mockDb.select.mockReturnValue(
+      chainable([
+        {
+          id: "rec_existing",
+          txHash: "tx_same_1",
+          sourceType: "commerce_job",
+          sourceId: "job_1",
+        },
+      ]),
+    );
+
+    const id = await registerTx({
+      txHash: "tx_same_1",
+      sourceType: "commerce_job",
+      sourceId: "job_1",
+    });
+
+    expect(id).toBe("rec_existing");
+    expect(mocks.mockDb.insert).not.toHaveBeenCalled();
+    expect(mocks.mockDb.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects conflicting job association, records conflict in lastError, and does not insert a duplicate row", async () => {
+    mocks.mockDb.select.mockReturnValue(
+      chainable([
+        {
+          id: "rec_existing",
+          txHash: "tx_conflict_1",
+          sourceType: "commerce_job",
+          sourceId: "job_1",
+        },
+      ]),
+    );
+    const updateChain = chainable([{}]);
+    mocks.mockDb.update.mockReturnValue(updateChain);
+
+    await expect(
+      registerTx({
+        txHash: "tx_conflict_1",
+        sourceType: "commerce_job",
+        sourceId: "job_2",
+      }),
+    ).rejects.toThrow(TxAssociationConflictError);
+
+    expect(mocks.mockDb.insert).not.toHaveBeenCalled();
+    expect(mocks.mockDb.update).toHaveBeenCalledTimes(1);
+    expect(updateChain.set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lastError: expect.stringContaining("ASSOCIATION_CONFLICT:"),
+      }),
+    );
   });
 });
