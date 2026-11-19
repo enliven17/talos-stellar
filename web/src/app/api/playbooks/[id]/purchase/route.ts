@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPlaybooks, tlsPlaybookPurchases, tlsRevenues } from "@/db/schema";
@@ -5,7 +6,7 @@ import { and, eq } from "drizzle-orm";
 import { verifyX402Payment, settleX402Payment } from "@/lib/stellar-x402";
 
 // POST /api/playbooks/:id/purchase — Purchase a playbook via Stellar x402 payment
-export async function POST(
+async function _POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -111,7 +112,15 @@ export async function POST(
       txHash = settled.txHash;
     } catch (err) {
       console.error("Playbook purchase settlement failed:", err);
-      return Response.json({ error: "On-chain payment settlement failed" }, { status: 502 });
+      return Response.json(
+        {
+          error: "On-chain payment settlement failed",
+          retryable: true,
+          retryAfterMs: 5000,
+          hint: "The payment may not have settled yet. Wait a few seconds and retry with the same payment token.",
+        },
+        { status: 502 },
+      );
     }
 
     // Record purchase + revenue
@@ -133,3 +142,5 @@ export async function POST(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);

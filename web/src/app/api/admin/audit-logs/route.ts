@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { verifyAdminKey } from "@/lib/admin-auth";
 import { listAuditLogs, parseAuditLogFilters } from "@/lib/audit-log";
@@ -12,7 +13,7 @@ import { listAuditLogs, parseAuditLogFilters } from "@/lib/audit-log";
  * Auth: `Authorization: Bearer <ADMIN_API_KEY>` (same as /api/admin/jobs).
  * Responses never include API keys, request bodies, or other secrets.
  */
-export async function GET(request: NextRequest) {
+async function _GET(request: NextRequest) {
   const auth = verifyAdminKey(request);
   if (!auth.ok) return auth.response;
 
@@ -30,3 +31,5 @@ export async function GET(request: NextRequest) {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withRequestId(_GET);

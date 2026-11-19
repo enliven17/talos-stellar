@@ -1,0 +1,77 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Next.js: dev server",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "pnpm --dir web dev",
+      "cwd": "${workspaceFolder}",
+      "serverReadyAction": {
+        "pattern": "Local:.*(https?://\\S+)",
+        "uriFormat": "%s",
+        "action": "openExternally"
+      }
+    },
+    {
+      "name": "Vitest: current file",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/web/node_modules/vitest/vitest.mjs",
+      "args": ["run", "${file}"],
+      "cwd": "${workspaceFolder}/web",
+      "autoAttachChildProcesses": true,
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Pytest: current file",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["${file}"],
+      "cwd": "${workspaceFolder}/packages/prime-agent",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Cargo: test crate",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--lib",
+          "--no-run",
+          "--manifest-path",
+          "${workspaceFolder}/contracts/Cargo.toml",
+          "--package",
+          "${input:contractPackage}"
+        ],
+        "filter": {
+          "kind": "lib"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}/contracts",
+      "sourceLanguages": ["rust"]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "contractPackage",
+      "type": "pickString",
+      "description": "Select the contract crate to test",
+      "options": [
+        "talos-registry",
+        "pause-control",
+        "talos-name-service",
+        "talos-governance",
+        "ttl-manager",
+        "storage-migration",
+        "talos-dividends",
+        "indexer-fixtures"
+      ]
+    }
+  ]
+}

@@ -11,8 +11,8 @@
  * an optional exporter at the bottom of this file.
  */
 
-import { logger } from "../logger.js";
-import type { DriftViolation, DriftMode } from "./types.js";
+import { logger } from "../logger";
+import type { DriftViolation, DriftMode } from "./types";
 
 // ── In-process counters (lightweight; reset on restart) ───────────────────────
 
