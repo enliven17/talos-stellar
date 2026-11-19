@@ -16,7 +16,7 @@ import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Final, Mapping
+from typing import Any, Final
 
 _SUPPORTED: Final[frozenset[str]] = frozenset({"sqlite", "memory"})
 
@@ -43,6 +43,22 @@ class SecretHeadRecord:
     active_version: int
     previous_version: int | None
     generation: int = 1
+
+
+@dataclass(frozen=True)
+class SecretRollbackCheckpointRecord:
+    name: str
+    checkpoint_id: str
+    active_version: int
+    previous_version: int | None
+    generation: int
+    request_id: str
+    actor: str
+    reason: str | None
+    status: str
+    created_at: str
+    restored_at: str | None
+    discarded_at: str | None
 
 
 def _utcnow() -> str:
@@ -129,6 +145,61 @@ class SecretStoreBackend(ABC):
 
     @abstractmethod
     def clear_previous_if(self, scope: str, name: str, previous_version: int) -> None:
+        ...
+
+    @abstractmethod
+    def get_rollback_checkpoint_by_request_id(
+        self, scope: str, name: str, request_id: str
+    ) -> SecretRollbackCheckpointRecord | None:
+        ...
+
+    @abstractmethod
+    def get_rollback_checkpoint(
+        self, scope: str, name: str, checkpoint_id: str
+    ) -> SecretRollbackCheckpointRecord | None:
+        ...
+
+    @abstractmethod
+    def insert_rollback_checkpoint(
+        self,
+        *,
+        scope: str,
+        name: str,
+        checkpoint_id: str,
+        active_version: int,
+        previous_version: int | None,
+        generation: int,
+        request_id: str,
+        actor: str,
+        reason: str | None,
+    ) -> None:
+        ...
+
+    @abstractmethod
+    def list_rollback_checkpoints(
+        self, scope: str, name: str
+    ) -> list[SecretRollbackCheckpointRecord]:
+        ...
+
+    @abstractmethod
+    def update_rollback_checkpoint_status(
+        self,
+        scope: str,
+        name: str,
+        checkpoint_id: str,
+        status: str,
+        *,
+        set_restored: bool = False,
+        set_discarded: bool = False,
+    ) -> None:
+        ...
+
+    @abstractmethod
+    def supersede_unless_revoked(self, scope: str, name: str, version: int) -> None:
+        ...
+
+    @abstractmethod
+    def restore_version_activation(self, scope: str, name: str, version: int) -> None:
         ...
 
     @abstractmethod
@@ -326,6 +397,141 @@ class SqliteSecretStoreBackend(SecretStoreBackend):
             (scope, name, previous_version),
         )
 
+    def get_rollback_checkpoint_by_request_id(
+        self, scope: str, name: str, request_id: str
+    ) -> SecretRollbackCheckpointRecord | None:
+        row = self._conn.execute(
+            """
+            SELECT name, checkpoint_id, active_version, previous_version, generation,
+                   request_id, actor, reason, status, created_at, restored_at, discarded_at
+            FROM secret_rollback_checkpoints
+            WHERE scope = ? AND name = ? AND request_id = ?
+            """,
+            (scope, name, request_id),
+        ).fetchone()
+        return self._row_to_checkpoint(row) if row else None
+
+    def get_rollback_checkpoint(
+        self, scope: str, name: str, checkpoint_id: str
+    ) -> SecretRollbackCheckpointRecord | None:
+        row = self._conn.execute(
+            """
+            SELECT name, checkpoint_id, active_version, previous_version, generation,
+                   request_id, actor, reason, status, created_at, restored_at, discarded_at
+            FROM secret_rollback_checkpoints
+            WHERE scope = ? AND name = ? AND checkpoint_id = ?
+            """,
+            (scope, name, checkpoint_id),
+        ).fetchone()
+        return self._row_to_checkpoint(row) if row else None
+
+    def insert_rollback_checkpoint(
+        self,
+        *,
+        scope: str,
+        name: str,
+        checkpoint_id: str,
+        active_version: int,
+        previous_version: int | None,
+        generation: int,
+        request_id: str,
+        actor: str,
+        reason: str | None,
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO secret_rollback_checkpoints
+                (scope, name, checkpoint_id, active_version, previous_version,
+                 generation, request_id, actor, reason, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
+            """,
+            (
+                scope,
+                name,
+                checkpoint_id,
+                active_version,
+                previous_version,
+                generation,
+                request_id,
+                actor,
+                reason,
+            ),
+        )
+
+    def list_rollback_checkpoints(
+        self, scope: str, name: str
+    ) -> list[SecretRollbackCheckpointRecord]:
+        rows = self._conn.execute(
+            """
+            SELECT name, checkpoint_id, active_version, previous_version, generation,
+                   request_id, actor, reason, status, created_at, restored_at, discarded_at
+            FROM secret_rollback_checkpoints
+            WHERE scope = ? AND name = ?
+            ORDER BY created_at DESC, checkpoint_id DESC
+            """,
+            (scope, name),
+        ).fetchall()
+        return [self._row_to_checkpoint(row) for row in rows]
+
+    def update_rollback_checkpoint_status(
+        self,
+        scope: str,
+        name: str,
+        checkpoint_id: str,
+        status: str,
+        *,
+        set_restored: bool = False,
+        set_discarded: bool = False,
+    ) -> None:
+        if set_restored:
+            self._conn.execute(
+                """
+                UPDATE secret_rollback_checkpoints
+                SET status = ?, restored_at = datetime('now')
+                WHERE scope = ? AND name = ? AND checkpoint_id = ?
+                """,
+                (status, scope, name, checkpoint_id),
+            )
+        elif set_discarded:
+            self._conn.execute(
+                """
+                UPDATE secret_rollback_checkpoints
+                SET status = ?, discarded_at = datetime('now')
+                WHERE scope = ? AND name = ? AND checkpoint_id = ?
+                """,
+                (status, scope, name, checkpoint_id),
+            )
+        else:
+            self._conn.execute(
+                """
+                UPDATE secret_rollback_checkpoints SET status = ?
+                WHERE scope = ? AND name = ? AND checkpoint_id = ?
+                """,
+                (status, scope, name, checkpoint_id),
+            )
+
+    def supersede_unless_revoked(self, scope: str, name: str, version: int) -> None:
+        self._conn.execute(
+            """
+            UPDATE secret_versions
+            SET status = 'superseded', revoked_at = NULL
+            WHERE scope = ? AND name = ? AND version = ? AND status != 'revoked'
+            """,
+            (scope, name, version),
+        )
+
+    def restore_version_activation(self, scope: str, name: str, version: int) -> None:
+        self._conn.execute(
+            """
+            UPDATE secret_versions
+            SET status = 'active',
+                activated_at = COALESCE(activated_at, datetime('now')),
+                revoked_at = NULL
+            WHERE scope = ? AND name = ? AND version = ?
+            """,
+            (scope, name, version),
+        )
+
     def list_versions(self, scope: str, name: str) -> list[SecretVersionRecord]:
         rows = self._conn.execute(
             """
@@ -393,6 +599,25 @@ class SqliteSecretStoreBackend(SecretStoreBackend):
             request_id=row["request_id"] if "request_id" in row.keys() else None,
         )
 
+    @staticmethod
+    def _row_to_checkpoint(row: Any) -> SecretRollbackCheckpointRecord:
+        return SecretRollbackCheckpointRecord(
+            name=row["name"],
+            checkpoint_id=row["checkpoint_id"],
+            active_version=int(row["active_version"]),
+            previous_version=(
+                int(row["previous_version"]) if row["previous_version"] is not None else None
+            ),
+            generation=int(row["generation"]),
+            request_id=row["request_id"],
+            actor=row["actor"],
+            reason=row["reason"],
+            status=row["status"],
+            created_at=row["created_at"],
+            restored_at=row["restored_at"],
+            discarded_at=row["discarded_at"],
+        )
+
 
 class MemorySecretStoreBackend(SecretStoreBackend):
     """Process-local backend for tests and dependency-free fakes.
@@ -410,6 +635,8 @@ class MemorySecretStoreBackend(SecretStoreBackend):
         self._versions: dict[tuple[str, str, int], dict[str, Any]] = {}
         self._by_request: dict[tuple[str, str, str], int] = {}
         self._heads: dict[tuple[str, str], dict[str, Any]] = {}
+        self._checkpoints: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._checkpoints_by_request: dict[tuple[str, str, str], str] = {}
         self._audit: list[dict[str, Any]] = []
         self._snapshot: dict[str, Any] | None = None
 
@@ -424,6 +651,8 @@ class MemorySecretStoreBackend(SecretStoreBackend):
             "versions": copy.deepcopy(self._versions),
             "by_request": copy.deepcopy(self._by_request),
             "heads": copy.deepcopy(self._heads),
+            "checkpoints": copy.deepcopy(self._checkpoints),
+            "checkpoints_by_request": copy.deepcopy(self._checkpoints_by_request),
             "audit": copy.deepcopy(self._audit),
         }
         self._in_tx = True
@@ -442,6 +671,8 @@ class MemorySecretStoreBackend(SecretStoreBackend):
         self._versions = self._snapshot["versions"]
         self._by_request = self._snapshot["by_request"]
         self._heads = self._snapshot["heads"]
+        self._checkpoints = self._snapshot["checkpoints"]
+        self._checkpoints_by_request = self._snapshot["checkpoints_by_request"]
         self._audit = self._snapshot["audit"]
         self._in_tx = False
         self._snapshot = None
@@ -548,6 +779,98 @@ class MemorySecretStoreBackend(SecretStoreBackend):
         if head and head.get("previous_version") == previous_version:
             head["previous_version"] = None
 
+    def get_rollback_checkpoint_by_request_id(
+        self, scope: str, name: str, request_id: str
+    ) -> SecretRollbackCheckpointRecord | None:
+        checkpoint_id = self._checkpoints_by_request.get((scope, name, request_id))
+        if checkpoint_id is None:
+            return None
+        return self.get_rollback_checkpoint(scope, name, checkpoint_id)
+
+    def get_rollback_checkpoint(
+        self, scope: str, name: str, checkpoint_id: str
+    ) -> SecretRollbackCheckpointRecord | None:
+        raw = self._checkpoints.get((scope, name, checkpoint_id))
+        if raw is None:
+            return None
+        return SecretRollbackCheckpointRecord(**raw)
+
+    def insert_rollback_checkpoint(
+        self,
+        *,
+        scope: str,
+        name: str,
+        checkpoint_id: str,
+        active_version: int,
+        previous_version: int | None,
+        generation: int,
+        request_id: str,
+        actor: str,
+        reason: str | None,
+    ) -> None:
+        key = (scope, name, checkpoint_id)
+        if key in self._checkpoints:
+            raise ValueError("duplicate rollback checkpoint")
+        now = _utcnow()
+        self._checkpoints[key] = {
+            "name": name,
+            "checkpoint_id": checkpoint_id,
+            "active_version": active_version,
+            "previous_version": previous_version,
+            "generation": generation,
+            "request_id": request_id,
+            "actor": actor,
+            "reason": reason,
+            "status": "open",
+            "created_at": now,
+            "restored_at": None,
+            "discarded_at": None,
+        }
+        self._checkpoints_by_request[(scope, name, request_id)] = checkpoint_id
+
+    def list_rollback_checkpoints(
+        self, scope: str, name: str
+    ) -> list[SecretRollbackCheckpointRecord]:
+        rows = [
+            SecretRollbackCheckpointRecord(**raw)
+            for (s, n, _cid), raw in self._checkpoints.items()
+            if s == scope and n == name
+        ]
+        rows.sort(
+            key=lambda r: (r.created_at, r.checkpoint_id), reverse=True
+        )
+        return rows
+
+    def update_rollback_checkpoint_status(
+        self,
+        scope: str,
+        name: str,
+        checkpoint_id: str,
+        status: str,
+        *,
+        set_restored: bool = False,
+        set_discarded: bool = False,
+    ) -> None:
+        raw = self._checkpoints[(scope, name, checkpoint_id)]
+        raw["status"] = status
+        if set_restored:
+            raw["restored_at"] = _utcnow()
+        if set_discarded:
+            raw["discarded_at"] = _utcnow()
+
+    def supersede_unless_revoked(self, scope: str, name: str, version: int) -> None:
+        raw = self._versions[(scope, name, version)]
+        if raw["status"] != "revoked":
+            raw["status"] = "superseded"
+            raw["revoked_at"] = None
+
+    def restore_version_activation(self, scope: str, name: str, version: int) -> None:
+        raw = self._versions[(scope, name, version)]
+        raw["status"] = "active"
+        if raw["activated_at"] is None:
+            raw["activated_at"] = _utcnow()
+        raw["revoked_at"] = None
+
     def list_versions(self, scope: str, name: str) -> list[SecretVersionRecord]:
         rows = [
             SecretVersionRecord(**raw)
@@ -632,6 +955,7 @@ __all__ = [
     "BackendBusyError",
     "MemorySecretStoreBackend",
     "SecretHeadRecord",
+    "SecretRollbackCheckpointRecord",
     "SecretStoreBackend",
     "SecretVersionRecord",
     "SqliteSecretStoreBackend",
