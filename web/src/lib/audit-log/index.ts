@@ -1,4 +1,8 @@
-export { listAuditLogs } from "./store";
+export {
+  listAuditLogs,
+  exportAuditCheckpointBundle,
+  type ExportAuditCheckpointFilter,
+} from "./store";
 export {
   parseAuditLogFilters,
   escapeIlikePattern,
