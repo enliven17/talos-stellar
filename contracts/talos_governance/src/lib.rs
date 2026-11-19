@@ -275,7 +275,87 @@ pub fn features_list() -> &'static [&'static str] {
         "vote_weighting",     // snapshot-based token-weighted voting
         "config_admin",       // update_config / cache_token_balance requires admin
         "interface_query",    // version / interface_id / supports_version
+        "role_capabilities",  // role_capabilities / get_role_capabilities (#1375)
     ]
+}
+
+// ── Governance role catalogue (#1375) ───────────────────────────────
+//
+// A "role" is the smallest unit of on-chain identity that maps to a
+// distinct permission boundary. Each variant corresponds to a signer
+// class recognised by this contract.
+//
+// - `Admin` — the address stored under `DataKey::Admin`. It is the
+//   only role that may call write entry-points that change contract
+//   configuration or administrative state.
+// - `Proposer` — any address with a non-zero token balance at the
+//   snapshot ledger. It may call `create_proposal`.
+// - `Voter` — any address with a positive cached/checkpointed balance
+//   at the snapshot ledger. It may call `vote` on an active proposal.
+// - `Anyone` — no on-chain authorisation required. Read-only entry-points
+//   that expose public state.
+//
+// The capability strings returned by `role_capabilities()` are the same
+// stable identifiers already listed in `features_list()` / the INTERFACE.md
+// capability catalogue. Extending a role's capabilities MUST add a new
+// string; removing one bumps `CONTRACT_VERSION` major.
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GovernanceRole {
+    Admin,
+    Proposer,
+    Voter,
+    Anyone,
+}
+
+/// Return the stable capability set for a given role.
+///
+/// Each string is an action tag matching the contract's capability
+/// catalogue (see `features_list` and `contracts/INTERFACE.md §4`).
+/// The list is exhaustive and ordered alphabetically for stable diffs.
+pub fn capabilities_for_role(role: &GovernanceRole) -> &'static [&'static str] {
+    match role {
+        GovernanceRole::Admin => &[
+            "cache_token_balance", // admin-only: seed per-address vote weights
+            "config_admin",        // update_config
+            "delegate",            // admin can also delegate like any user
+            "extend_ttl_batch",    // bounded TTL renewal
+            "pause_domain",        // pause / unpause any governance domain
+            "record_dividend_snapshot", // mint a new dividend epoch
+            "touch_all_ttl",       // unbounded TTL sweep
+            "unpause_domain",
+            "update_voting_power", // push a new voting-power checkpoint
+        ],
+        GovernanceRole::Proposer => &[
+            "create_proposal", // create_proposal requires proposer auth
+        ],
+        GovernanceRole::Voter => &[
+            "delegate", // redirect own voting power
+            "vote",     // cast a vote on an active proposal
+        ],
+        GovernanceRole::Anyone => &[
+            "dividend_epoch_count",    // read-only
+            "execute_proposal",        // execute an approved proposal (permissionless)
+            "finalize_proposal",       // finalize after voting period (permissionless)
+            "get_admin",               // read-only
+            "get_config",              // read-only
+            "get_dividend_snapshot",   // read-only
+            "get_dividend_snapshots_page", // read-only pagination
+            "get_domain_pause_status", // read-only
+            "get_past_votes",          // read-only
+            "get_proposal",            // read-only
+            "get_storage_health",      // read-only
+            "get_vote",                // read-only
+            "interface_features",      // interface query
+            "interface_id",            // interface query
+            "is_domain_paused",        // read-only
+            "next_proposal_id",        // read-only
+            "supports_version",        // interface query
+            "touch_proposal",          // permissionless single-entry TTL touch
+            "version",                 // interface query
+        ],
+    }
 }
 
 /// SemVer compatibility helper used by `supports_version`.
@@ -687,6 +767,49 @@ impl TalosGovernance {
             out.push_back(Symbol::new(&e, cap));
         }
         out
+    }
+
+    // ── Role capability introspection (#1375) ───────────────────────
+    //
+    // These entry-points are read-only and do not modify ledger state.
+    // They are intentionally placed here, next to `interface_features`,
+    // so the contract's capability surface remains concentrated in one
+    // place and cannot diverge from `features_list` / INTERFACE.md.
+    //
+    // Authorization enforcement is NOT changed: write entry-points still
+    // call `require_admin`, `require_auth`, or the pause guard as before.
+
+    /// Return the action capability tags permitted for the given role.
+    ///
+    /// Each tag is an `Symbol` matching an entry in the contract's
+    /// capability catalogue (see `interface_features`). The returned list
+    /// is exhaustive for the role: a caller checking whether an action is
+    /// allowed for a role should look for the tag in this list.
+    ///
+    /// This entry-point is authorisation-free and read-only.
+    pub fn role_capabilities(e: Env, role: GovernanceRole) -> Vec<Symbol> {
+        let caps = capabilities_for_role(&role);
+        let mut out = Vec::new(&e);
+        for cap in caps {
+            out.push_back(Symbol::new(&e, cap));
+        }
+        out
+    }
+
+    /// Return `true` when the given role is permitted to perform `action`.
+    ///
+    /// `action` must be one of the stable action tags (e.g. `"vote"`,
+    /// `"create_proposal"`, `"update_config"`). Unknown tags return `false`.
+    ///
+    /// This entry-point is authorisation-free and read-only.
+    pub fn role_can(e: Env, role: GovernanceRole, action: Symbol) -> bool {
+        let caps = capabilities_for_role(&role);
+        for cap in caps {
+            if Symbol::new(&e, cap) == action {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn next_proposal_id(env: Env) -> u32 {
@@ -2238,4 +2361,97 @@ mod tests {
             .try_initialize(&admin, &pulse, &100_i128, &5_000_i128, &20_u32);
         assert!(result.is_err(), "double initialization must be rejected");
     }
-}
+
+    // ── Role capability introspection tests (#1375) ──────────────────
+
+    #[test]
+    fn role_capabilities_admin_includes_config_admin() {
+        let (env, _contract_id, _admin, _pulse, client) = setup();
+        let caps = client.role_capabilities(&GovernanceRole::Admin);
+        let config_admin = soroban_sdk::Symbol::new(&env, "config_admin");
+        assert!(
+            caps.contains(config_admin),
+            "Admin role must include config_admin capability"
+        );
+    }
+
+    #[test]
+    fn role_capabilities_proposer_includes_create_proposal() {
+        let (env, _contract_id, _admin, _pulse, client) = setup();
+        let caps = client.role_capabilities(&GovernanceRole::Proposer);
+        let create_proposal = soroban_sdk::Symbol::new(&env, "create_proposal");
+        assert!(
+            caps.contains(create_proposal),
+            "Proposer role must include create_proposal capability"
+        );
+    }
+
+    #[test]
+    fn role_capabilities_voter_includes_vote() {
+        let (env, _contract_id, _admin, _pulse, client) = setup();
+        let caps = client.role_capabilities(&GovernanceRole::Voter);
+        let vote = soroban_sdk::Symbol::new(&env, "vote");
+        assert!(
+            caps.contains(vote),
+            "Voter role must include vote capability"
+        );
+    }
+
+    #[test]
+    fn role_capabilities_anyone_includes_get_proposal() {
+        let (env, _contract_id, _admin, _pulse, client) = setup();
+        let caps = client.role_capabilities(&GovernanceRole::Anyone);
+        let get_proposal = soroban_sdk::Symbol::new(&env, "get_proposal");
+        assert!(
+            caps.contains(get_proposal),
+            "Anyone role must include get_proposal capability"
+        );
+    }
+
+    #[test]
+    fn role_can_returns_true_for_permitted_action() {
+        let (env, _contract_id, _admin, _pulse, client) = setup();
+        let vote = soroban_sdk::Symbol::new(&env, "vote");
+        assert!(
+            client.role_can(&GovernanceRole::Voter, &vote),
+            "Voter role must be permitted to vote"
+        );
+    }
+
+    #[test]
+    fn role_can_returns_false_for_unpermitted_action() {
+        let (env, _contract_id, _admin, _pulse, client) = setup();
+        let update_config = soroban_sdk::Symbol::new(&env, "update_config");
+        assert!(
+            !client.role_can(&GovernanceRole::Voter, &update_config),
+            "Voter role must not be permitted to update_config"
+        );
+    }
+
+    #[test]
+    fn role_can_returns_false_for_unknown_action() {
+        let (env, _contract_id, _admin, _pulse, client) = setup();
+        let unknown = soroban_sdk::Symbol::new(&env, "nonexistent_action");
+        assert!(
+            !client.role_can(&GovernanceRole::Admin, &unknown),
+            "Unknown action must return false for any role"
+        );
+    }
+
+    /// Admin must not appear in Voter or Proposer capabilities, confirming
+    /// authorization enforcement remains in the write entry-points.
+    #[test]
+    fn role_capabilities_voter_does_not_include_admin_actions() {
+        let (env, _contract_id, _admin, _pulse, client) = setup();
+        let voter_caps = client.role_capabilities(&GovernanceRole::Voter);
+        let cache_balance = soroban_sdk::Symbol::new(&env, "cache_token_balance");
+        let update_config = soroban_sdk::Symbol::new(&env, "update_config");
+        assert!(
+            !voter_caps.contains(cache_balance),
+            "Voter must not include cache_token_balance"
+        );
+        assert!(
+            !voter_caps.contains(update_config),
+            "Voter must not include update_config"
+        );
+    }

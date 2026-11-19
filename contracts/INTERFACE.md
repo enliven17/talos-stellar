@@ -103,6 +103,21 @@ is a `major` bump.
 | `vote_weighting`    | Snapshot-based token-weighted voting.                        |
 | `config_admin`      | `update_config` / `cache_token_balance` (admin only).        |
 | `interface_query`   | `version` / `interface_id` / `supports_version`.             |
+| `role_capabilities` | `role_capabilities` / `role_can` — read-only role introspection. |
+
+### Role catalogue (TalosGovernance)
+
+`role_capabilities(role)` returns the full set of action tags for a
+given `GovernanceRole` variant. `role_can(role, action)` answers a
+single point query. Both entry-points are authorisation-free and
+read-only; they do NOT replace enforcement in the write entry-points.
+
+| Role       | Permitted actions                                                                               |
+|------------|-------------------------------------------------------------------------------------------------|
+| `Admin`    | `cache_token_balance`, `config_admin`, `delegate`, `extend_ttl_batch`, `pause_domain`, `record_dividend_snapshot`, `touch_all_ttl`, `unpause_domain`, `update_voting_power` |
+| `Proposer` | `create_proposal`                                                                               |
+| `Voter`    | `delegate`, `vote`                                                                              |
+| `Anyone`   | All read-only entry-points: `get_proposal`, `get_vote`, `get_config`, `get_admin`, `version`, `interface_id`, `interface_features`, `supports_version`, `role_capabilities`, `role_can`, `finalize_proposal`, `execute_proposal`, `touch_proposal`, etc. |
 
 ## 5. Deprecation table
 
