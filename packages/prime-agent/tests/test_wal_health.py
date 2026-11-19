@@ -5,7 +5,6 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-import pytest
 
 from talos_agent.db import LocalDB
 from talos_agent.wal_health import WalHealthState, collect_wal_health

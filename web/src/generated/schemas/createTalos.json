@@ -1,3 +1,174 @@
 {
-  "type": "string"
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "Marketing",
+        "Development",
+        "Research",
+        "Design",
+        "Finance",
+        "Analytics",
+        "Operations",
+        "Sales",
+        "Support",
+        "Education"
+      ]
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "totalSupply": {
+      "default": 1000000,
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 100000000
+    },
+    "persona": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "targetAudience": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "channels": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "toneVoice": {
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 500
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "approvalThreshold": {
+      "default": 10,
+      "type": "number",
+      "minimum": 0
+    },
+    "gtmBudget": {
+      "default": 200,
+      "type": "number",
+      "minimum": 0
+    },
+    "creatorPublicKey": {
+      "type": "string",
+      "minLength": 56,
+      "maxLength": 56,
+      "pattern": "^G.*"
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 1
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    },
+    "walletPublicKey": {
+      "type": "string",
+      "minLength": 1
+    },
+    "onChainId": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "agentName": {
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 100
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "initialPrice": {
+      "default": 0,
+      "type": "number",
+      "minimum": 0
+    },
+    "minPatronPulse": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "stellarAssetCode": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tokenSymbol": {
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 20
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "serviceName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "serviceDescription": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "servicePrice": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1000000
+    }
+  },
+  "required": [
+    "name",
+    "category",
+    "description",
+    "creatorPublicKey",
+    "signature",
+    "message"
+  ]
 }

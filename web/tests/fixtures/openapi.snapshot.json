@@ -1072,6 +1072,35 @@
           }
         }
       },
+      "DeleteAgentRequest": {
+        "type": "object",
+        "required": [
+          "reason",
+          "stellarPublicKey",
+          "signature",
+          "message"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000,
+            "description": "Reason for privacy deletion"
+          },
+          "stellarPublicKey": {
+            "type": "string",
+            "description": "Creator or wallet public key"
+          },
+          "signature": {
+            "type": "string",
+            "description": "Base64-encoded ED25519 signature of `message`"
+          },
+          "message": {
+            "type": "string",
+            "description": "Must include the TALOS ID to prevent replay attacks"
+          }
+        }
+      },
       "SignPaymentRequest": {
         "type": "object",
         "required": [
@@ -2936,6 +2965,91 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFoundError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/api/talos/{id}/delete": {
+      "post": {
+        "tags": [
+          "TALOS"
+        ],
+        "summary": "Delete TALOS agent (privacy soft-delete)",
+        "description": "Soft deletes an agent record for privacy while preserving identity and historical links. Clears sensitive keys and wallet addresses. Requires an ED25519 signature over a message containing the TALOS ID from the creator or wallet public key. Repeated deletes return 409 Conflict.",
+        "operationId": "deleteTalos",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/talosId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteAgentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Agent soft-deleted successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "agentName": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "deletedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "deletedReason": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundError"
+          },
+          "409": {
+            "description": "TALOS already deleted (conflict on repeated delete)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "example": "TALOS already deleted"
+                    }
+                  }
+                }
+              }
+            }
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
