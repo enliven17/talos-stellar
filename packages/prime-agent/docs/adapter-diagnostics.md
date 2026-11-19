@@ -6,7 +6,8 @@ dropped before logging.
 
 | Field | Maximum | Handling |
 | --- | ---: | --- |
-| `adapter` (provider) | 64 chars | identifier characters only |
+| `adapter` (provider) | 64 chars | identifier characters only; case-preserving safe display value |
+| `account` (remote account) | 64 chars | identifier characters only; case-preserving safe display value |
 | `operation` | 64 chars | built-in adapter operations only |
 | `operation_id` | 128 chars | identifier characters only |
 | `outcome` (status) | 32 chars | `succeeded`, `failed`, `timed_out`, or `denied` |

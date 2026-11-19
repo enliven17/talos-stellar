@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 MAX_PROVIDER_LENGTH = 64
+MAX_ACCOUNT_LENGTH = 64
 MAX_OPERATION_LENGTH = 64
 MAX_STATUS_LENGTH = 32
 MAX_ERROR_LENGTH = 256
@@ -63,7 +64,13 @@ def safe_adapter_diagnostic_fields(**fields: Any) -> dict[str, Any]:
     """
     result: dict[str, Any] = {}
     if "adapter" in fields or "provider" in fields:
-        result["adapter"] = _label(fields.get("adapter", fields.get("provider")), MAX_PROVIDER_LENGTH)
+        provider_val = fields.get("adapter") if fields.get("adapter") is not None else fields.get("provider")
+        result["adapter"] = _label(provider_val, MAX_PROVIDER_LENGTH)
+    account_val = fields.get("account") if fields.get("account") is not None else fields.get("remote_account")
+    if account_val is None:
+        account_val = fields.get("account_id")
+    if account_val is not None:
+        result["account"] = _label(account_val, MAX_ACCOUNT_LENGTH)
     if "operation" in fields:
         result["operation"] = _label(fields["operation"], MAX_OPERATION_LENGTH, _VALID_OPERATIONS)
     if fields.get("operation_id") is not None:
