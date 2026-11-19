@@ -1,4 +1,12 @@
-export { listAuditLogs } from "./store";
+export {
+  listAuditLogs,
+  exportAuditLogs,
+  serializeAuditLogExport,
+} from "./store";
+export type {
+  AuditLogExportBundle,
+  AuditLogExportOptions,
+} from "./store";
 export {
   parseAuditLogFilters,
   escapeIlikePattern,

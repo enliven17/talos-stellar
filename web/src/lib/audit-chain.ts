@@ -102,6 +102,134 @@ export interface ChainVerificationResult {
   chainVersion: string | null;
 }
 
+export const AUDIT_EXPORT_FORMATS = ["json", "csv"] as const;
+export type AuditExportFormat = (typeof AUDIT_EXPORT_FORMATS)[number];
+
+/** Maximum character length for a validated raw identifier input. */
+export const MAX_AUDIT_IDENTIFIER_INPUT_LENGTH = 128;
+
+/** Maximum character length for a sanitized identifier segment in a filename. */
+export const MAX_AUDIT_FILENAME_SEGMENT_LENGTH = 32;
+
+/** Maximum character length for a complete audit export filename. */
+export const MAX_AUDIT_EXPORT_FILENAME_LENGTH = 96;
+
+/**
+ * Strict allowlist pattern for safe audit export identifiers.
+ * Only ASCII alphanumeric characters, hyphens, and underscores are accepted,
+ * starting with an alphanumeric character and bounded in length.
+ */
+const SAFE_AUDIT_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
+
+/**
+ * Validate and normalize a trusted identifier segment for use in an audit
+ * export filename.
+ *
+ * Returns `null` if the input is missing, exceeds bounds, contains path
+ * separators, control characters, Unicode/non-ASCII actor text, or does not
+ * match the strict ASCII identifier pattern (`[A-Za-z0-9][A-Za-z0-9_-]{0,31}`).
+ */
+export function sanitizeAuditExportIdentifier(
+  rawIdentifier: string | null | undefined,
+): string | null {
+  if (typeof rawIdentifier !== "string") return null;
+  const trimmed = rawIdentifier.trim();
+  if (
+    !trimmed ||
+    trimmed.length > MAX_AUDIT_IDENTIFIER_INPUT_LENGTH ||
+    trimmed.length > MAX_AUDIT_FILENAME_SEGMENT_LENGTH
+  ) {
+    return null;
+  }
+  if (!SAFE_AUDIT_IDENTIFIER_PATTERN.test(trimmed)) {
+    return null;
+  }
+  return trimmed.toLowerCase();
+}
+
+export interface BuildAuditExportFilenameOptions {
+  /**
+   * Optional validated identifier (e.g. `talosId`). If untrusted actor text,
+   * Unicode, path traversal, or oversized strings are passed, the segment is
+   * rejected (or falls back to `"filtered"` when `allowFallback` is true).
+   */
+  talosId?: string | null;
+  /** Export file format (`"json"` or `"csv"`, defaults to `"json"`). */
+  format?: AuditExportFormat;
+  /** Optional export timestamp (Date or ISO-8601 string). */
+  exportedAt?: Date | string | null;
+  /**
+   * When false (default in strict mode if not set), invalid `talosId` values
+   * fall back to `"filtered"` so untrusted actor text never enters the filename.
+   * When `strict: true`, throws an Error on an invalid identifier or timestamp.
+   */
+  strict?: boolean;
+}
+
+function formatFilenameTimestamp(
+  value: Date | string | null | undefined,
+  strict: boolean,
+): string | null {
+  if (value === undefined || value === null) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    if (strict) {
+      throw new Error("Invalid audit export timestamp");
+    }
+    return null;
+  }
+  // Compact UTC timestamp: YYYYMMDDTHHMMSSZ (16 ASCII chars)
+  return date
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace(/\.\d{3}Z$/, "Z");
+}
+
+/**
+ * Generate a bounded, ASCII-only, Content-Disposition-safe filename for audit
+ * log exports from validated identifiers.
+ *
+ * Untrusted actor text (free-form queries, paths, denial reasons, Unicode names,
+ * or malformed IDs) is never interpolated into the filename.
+ */
+export function buildAuditExportFilename(
+  options: BuildAuditExportFilenameOptions = {},
+): string {
+  const strict = options.strict ?? false;
+  const format: AuditExportFormat = options.format ?? "json";
+  if (!AUDIT_EXPORT_FORMATS.includes(format)) {
+    throw new Error(`Invalid audit export format: ${String(format)}`);
+  }
+
+  let scopeSegment = "all";
+  if (options.talosId !== undefined && options.talosId !== null && options.talosId !== "") {
+    const safeId = sanitizeAuditExportIdentifier(options.talosId);
+    if (!safeId) {
+      if (strict) {
+        throw new Error("Invalid audit export identifier");
+      }
+      scopeSegment = "filtered";
+    } else {
+      scopeSegment = safeId;
+    }
+  }
+
+  const tsSegment = formatFilenameTimestamp(options.exportedAt, strict);
+  const baseName = tsSegment
+    ? `audit-logs-${scopeSegment}-${tsSegment}`
+    : `audit-logs-${scopeSegment}`;
+  const filename = `${baseName}.${format}`;
+
+  if (
+    filename.length > MAX_AUDIT_EXPORT_FILENAME_LENGTH ||
+    !/^[a-z0-9][A-Za-z0-9_-]*\.(json|csv)$/.test(filename)
+  ) {
+    throw new Error("Generated audit export filename failed safety bounds");
+  }
+
+  return filename;
+}
+
 /**
  * Verify a sequence of audit log entries against the hash chain.
  *

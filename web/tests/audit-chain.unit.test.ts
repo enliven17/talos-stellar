@@ -5,6 +5,10 @@ import {
   sealChainRoot,
   verifyChainRootSeal,
   verifyChain,
+  sanitizeAuditExportIdentifier,
+  buildAuditExportFilename,
+  MAX_AUDIT_FILENAME_SEGMENT_LENGTH,
+  MAX_AUDIT_EXPORT_FILENAME_LENGTH,
   AUDIT_CHAIN_VERSION,
   GENESIS_HASH,
   isAuditChainEnabled,
@@ -361,6 +365,83 @@ describe("audit-chain", () => {
     it("returns true when set to '1'", () => {
       process.env.AUDIT_HASH_CHAIN_ENABLED = "1";
       expect(isAuditChainEnabled()).toBe(true);
+    });
+  });
+
+  describe("sanitizeAuditExportIdentifier / buildAuditExportFilename", () => {
+    it("accepts and normalizes bounded valid ASCII identifiers", () => {
+      expect(sanitizeAuditExportIdentifier("tal_Agent-01")).toBe("tal_agent-01");
+      expect(sanitizeAuditExportIdentifier("cly123abc456def789")).toBe("cly123abc456def789");
+      expect(
+        sanitizeAuditExportIdentifier("a".repeat(MAX_AUDIT_FILENAME_SEGMENT_LENGTH)),
+      ).toBe("a".repeat(MAX_AUDIT_FILENAME_SEGMENT_LENGTH));
+    });
+
+    it("rejects untrusted actor text, Unicode, path traversal, quotes, and oversized identifiers", () => {
+      expect(sanitizeAuditExportIdentifier("")).toBeNull();
+      expect(sanitizeAuditExportIdentifier("   ")).toBeNull();
+      expect(sanitizeAuditExportIdentifier("../etc/passwd")).toBeNull();
+      expect(sanitizeAuditExportIdentifier("agent/../../secret")).toBeNull();
+      expect(sanitizeAuditExportIdentifier('actor"; filename="evil.sh')).toBeNull();
+      expect(sanitizeAuditExportIdentifier("agent\r\nX-Injected: 1")).toBeNull();
+      expect(sanitizeAuditExportIdentifier("talos-אгент-🚀")).toBeNull();
+      expect(sanitizeAuditExportIdentifier("日本-agent")).toBeNull();
+      expect(sanitizeAuditExportIdentifier("-leading-hyphen")).toBeNull();
+      expect(
+        sanitizeAuditExportIdentifier("a".repeat(MAX_AUDIT_FILENAME_SEGMENT_LENGTH + 1)),
+      ).toBeNull();
+    });
+
+    it("generates bounded safe filenames from validated identifiers and timestamps", () => {
+      const filename = buildAuditExportFilename({
+        talosId: "tal_Agent_42",
+        format: "csv",
+        exportedAt: "2026-09-30T12:34:56.789Z",
+      });
+
+      expect(filename).toBe("audit-logs-tal_agent_42-20260930T123456Z.csv");
+      expect(filename.length).toBeLessThanOrEqual(MAX_AUDIT_EXPORT_FILENAME_LENGTH);
+      expect(filename).toMatch(/^[a-z0-9][A-Za-z0-9_-]*\.(json|csv)$/);
+    });
+
+    it("defaults to 'all' when no identifier is provided", () => {
+      expect(buildAuditExportFilename({ format: "json" })).toBe("audit-logs-all.json");
+    });
+
+    it("falls back to 'filtered' instead of leaking untrusted actor text or Unicode into the filename", () => {
+      const unicodeAttempt = buildAuditExportFilename({
+        talosId: "actor-🚀-Ümlaut/../../pwn",
+        format: "json",
+        exportedAt: new Date("2026-09-30T00:00:00.000Z"),
+      });
+
+      expect(unicodeAttempt).toBe("audit-logs-filtered-20260930T000000Z.json");
+      expect(unicodeAttempt).not.toContain("🚀");
+      expect(unicodeAttempt).not.toContain("Ü");
+      expect(unicodeAttempt).not.toContain("..");
+
+      const oversizedAttempt = buildAuditExportFilename({
+        talosId: "x".repeat(MAX_AUDIT_FILENAME_SEGMENT_LENGTH + 5),
+        format: "csv",
+      });
+      expect(oversizedAttempt).toBe("audit-logs-filtered.csv");
+    });
+
+    it("throws on invalid identifiers or timestamps when strict mode is enabled", () => {
+      expect(() =>
+        buildAuditExportFilename({
+          talosId: "untrusted actor text / 🚀",
+          strict: true,
+        }),
+      ).toThrow(/Invalid audit export identifier/);
+
+      expect(() =>
+        buildAuditExportFilename({
+          talosId: "tal_1",
+          exportedAt: "not-a-valid-date",
+          strict: true,
+        }),
+      ).toThrow(/Invalid audit export timestamp/);
     });
   });
 });
