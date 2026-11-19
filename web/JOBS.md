@@ -126,6 +126,7 @@ All under `Authorization: Bearer <ADMIN_API_KEY>`:
 - `GET /api/admin/jobs?status=&queue=&cursor=&limit=` — list, cursor-paginated by `createdAt` descending (same convention as the rest of the API — see `OBSERVABILITY.md`).
 - `GET /api/admin/jobs/:id` — full record, including `payload` and `result`, for debugging a stuck or dead-lettered job.
 - `POST /api/admin/jobs/:id/retry` — requeue a `dead_letter`/`cancelled` job (resets attempts, clears `lastError`). 409 if the job isn't in one of those states.
+- `POST /api/admin/jobs/bulk-retry` — dry-run bulk retry preview (`dryRun: true`, default) that filters candidate jobs, counts eligible vs. ineligible jobs with explicit reasons (`eligible`, `not_found`, `status_not_failed`, `cancelled_excluded`, `queue_mismatch`, `retry_class_mismatch`, `fatal_retry_class`), and returns each eligible job's `revision` (`updatedAt` ISO timestamp). Executing (`dryRun: false`) requires explicit `selections: [{ id, revision }]` and atomically verifies each job's revision is unchanged before requeuing (returning `409` if all requested jobs fail with `revision_mismatch`).
 - `POST /api/admin/jobs/:id/cancel` — cooperative cancel. 409 if the job is already in a terminal state.
 
 ## Observability
