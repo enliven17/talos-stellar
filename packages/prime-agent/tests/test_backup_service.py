@@ -16,6 +16,7 @@ Critical invariants checked:
 from __future__ import annotations
 
 import base64
+import json
 import os
 import stat
 from pathlib import Path
@@ -39,6 +40,16 @@ def _seed_agent_db(db_path: Path) -> None:
     """Create a small but readable LocalDB at `db_path`."""
     LocalDB(path=db_path)
     # SQLite hot backup uses Connection.backup, so any LocalDB is fine.
+
+
+def _patch_app_dir(monkeypatch, tmp_path: Path):
+    """Patch APP_DIR in both backup_service and config modules."""
+    from talos_agent import backup_service as bs
+    from talos_agent import config
+    from talos_agent.db import migrations
+    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
+    monkeypatch.setattr(config, "APP_DIR", tmp_path)
+    monkeypatch.setattr(migrations, "APP_DIR", tmp_path)
 
 
 # ── Encryption primitives ─────────────────────────────────────────
@@ -97,13 +108,7 @@ def test_build_and_verify_roundtrip(tmp_path: Path, monkeypatch):
     """A backup created with a known passphrase verifies cleanly."""
     db_path = tmp_path / "talos-agent.db"
     _seed_agent_db(db_path)
-    # Patch both APP_DIR (modern callers) and DB_PATH (legacy constant cache).
-    from talos_agent import backup_service as bs
-    # backup_service delegates to db.get_db_path which is bound at module
-    # load to db.APP_DIR (= config.APP_DIR). Patch both so collect_agent_files
-    # finds the seeded DB at the patched tmp_path.
-    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
-    monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)
+    _patch_app_dir(monkeypatch, tmp_path)
 
     out = tmp_path / "artifact.enc"
     pw = "test-passphrase-v1-long"
@@ -127,9 +132,7 @@ def test_verify_rejects_tampered_artifact(tmp_path: Path, monkeypatch):
     """Flipping a byte inside the ENC:: blob must yield AUTH_FAILED on verify."""
     db_path = tmp_path / "talos-agent.db"
     _seed_agent_db(db_path)
-    from talos_agent import backup_service as bs
-    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
-    monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)
+    _patch_app_dir(monkeypatch, tmp_path)
 
     out = tmp_path / "tampered.enc"
     pw = "good-passphrase-long"
@@ -152,9 +155,7 @@ def test_verify_rejects_tampered_artifact(tmp_path: Path, monkeypatch):
 def test_verify_rejects_wrong_password(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "talos-agent.db"
     _seed_agent_db(db_path)
-    from talos_agent import backup_service as bs
-    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
-    monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)
+    _patch_app_dir(monkeypatch, tmp_path)
 
     out = tmp_path / "wrong.enc"
     build_backup(password="correctpw-1", out_path=out)
@@ -204,9 +205,7 @@ def test_restore_is_idempotent_after_existing(tmp_path: Path, monkeypatch):
     bytes (so re-running a restore is safe if the first ran into a lock)."""
     db_path = tmp_path / "talos-agent.db"
     _seed_agent_db(db_path)
-    from talos_agent import backup_service as bs
-    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
-    monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)
+    _patch_app_dir(monkeypatch, tmp_path)
 
     out = tmp_path / "x.enc"
     pw = "idempotent-pass-long"
@@ -242,9 +241,8 @@ def test_concurrent_backup_busy(tmp_path: Path, monkeypatch):
     @bs.single_flight("agent_backup")
     def hold():
         # Inside the lock, another caller should immediately back off.
-        with pytest.raises(BackupBusyError):
-            with bs.single_flight("agent_backup"):
-                pass
+        with pytest.raises(BackupBusyError), bs.single_flight("agent_backup"):
+            pass
         return "ok"
 
     assert hold() == "ok"
@@ -269,7 +267,7 @@ def test_artifact_not_found_error_is_safe():
 
 def test_stream_encrypted_artifact_roundtrip(tmp_path: Path):
     from talos_agent.backup_service import stream_encrypted_artifact
-    from talos_agent.crypto import encrypt_with_password, decrypt_with_password
+    from talos_agent.crypto import decrypt_with_password, encrypt_with_password
 
     payload = "hello-stream-" + ("x" * 5000)
     encrypted = encrypt_with_password(payload, "stream-pass-ok")
@@ -282,7 +280,7 @@ def test_stream_encrypted_artifact_roundtrip(tmp_path: Path):
 
 
 def test_stream_encrypted_artifact_rejects_tiny_chunk(tmp_path: Path):
-    from talos_agent.backup_service import stream_encrypted_artifact, BackupError
+    from talos_agent.backup_service import BackupError, stream_encrypted_artifact
     with pytest.raises(BackupError):
         stream_encrypted_artifact("abc", tmp_path / "x.enc", chunk_size=8)
 
@@ -437,3 +435,251 @@ def test_prune_skips_undeletable_file_without_raising(tmp_path: Path, monkeypatc
     assert [p.name for p in deleted] == ["talos-agent-1.enc"]
     assert (tmp_path / "talos-agent-2.enc").exists()
     assert (tmp_path / "talos-agent-0.enc").exists()
+
+
+# ── Schema Compatibility (Issue: database schema compatibility report) ─────
+
+
+def test_check_schema_compatibility_same_version():
+    """Backup and current agent at same schema version → compatible, no migrations."""
+    from talos_agent.backup_service import (
+        _get_current_schema_version,
+        check_schema_compatibility,
+    )
+
+    current = _get_current_schema_version()
+    compat = check_schema_compatibility(current, current_schema_version=current)
+
+    assert compat["compatible"] is True
+    assert compat["backup_schema_version"] == current
+    assert compat["current_schema_version"] == current
+    assert compat["required_migrations"] == []
+    assert compat["unsupported_downgrade"] is False
+    assert "compatible" in compat["message"].lower()
+
+
+def test_check_schema_compatibility_older_backup():
+    """Backup older than current agent → compatible, migrations listed."""
+    from talos_agent.backup_service import (
+        _get_current_schema_version,
+        check_schema_compatibility,
+    )
+
+    current = _get_current_schema_version()
+    # Use a version at least 2 behind so we get multiple migrations
+    backup_version = max(1, current - 3)
+    compat = check_schema_compatibility(backup_version, current_schema_version=current)
+
+    assert compat["compatible"] is True
+    assert compat["backup_schema_version"] == backup_version
+    assert compat["current_schema_version"] == current
+    assert compat["required_migrations"] == list(range(backup_version + 1, current + 1))
+    assert compat["unsupported_downgrade"] is False
+    assert str(backup_version) in compat["message"]
+    assert str(current) in compat["message"]
+
+
+def test_check_schema_compatibility_unsupported_downgrade():
+    """Backup newer than current agent → incompatible, unsupported_downgrade=True."""
+    from talos_agent.backup_service import (
+        _get_current_schema_version,
+        check_schema_compatibility,
+    )
+
+    current = _get_current_schema_version()
+    future_version = current + 2
+    compat = check_schema_compatibility(future_version, current_schema_version=current)
+
+    assert compat["compatible"] is False
+    assert compat["backup_schema_version"] == future_version
+    assert compat["current_schema_version"] == current
+    assert compat["required_migrations"] == []
+    assert compat["unsupported_downgrade"] is True
+    assert "unsupported downgrade" in compat["message"].lower()
+
+
+def test_build_backup_includes_schema_versions(tmp_path: Path, monkeypatch):
+    """Backup artifact includes per-database schemaVersions in database metadata."""
+    from talos_agent import backup_service as bs
+    from talos_agent.db import LocalDB
+
+    _patch_app_dir(monkeypatch, tmp_path)
+
+    # Create a database with current schema
+    db_path = tmp_path / "talos-agent.db"
+    db = LocalDB(path=db_path)
+    db.close()
+
+    out = tmp_path / "artifact.enc"
+    pw = "test-passphrase-v1-long"
+    run = bs.build_backup(password=pw, out_path=out, scope="agent")
+
+    # Verify the backup includes schemaVersions
+    assert "schemaVersions" in run.database
+    assert "talos-agent.db" in run.database["schemaVersions"]
+    schema_ver = run.database["schemaVersions"]["talos-agent.db"]
+    assert isinstance(schema_ver, int)
+    assert schema_ver >= 1  # At least the initial migration
+
+
+def test_verify_backup_includes_schema_compatibility(tmp_path: Path, monkeypatch):
+    """verify_backup returns schemaCompatibility report in database metadata."""
+    from talos_agent import backup_service as bs
+    from talos_agent.db import LocalDB
+
+    _patch_app_dir(monkeypatch, tmp_path)
+
+    db_path = tmp_path / "talos-agent.db"
+    db = LocalDB(path=db_path)
+    db.close()
+
+    out = tmp_path / "artifact.enc"
+    pw = "test-passphrase-v1-long"
+    bs.build_backup(password=pw, out_path=out, scope="agent")
+
+    verified = bs.verify_backup(artifact_path=out, password=pw)
+
+    # Check schemaCompatibility is present
+    assert "schemaCompatibility" in verified.database
+    compat = verified.database["schemaCompatibility"]
+    assert "talos-agent.db" in compat
+    db_compat = compat["talos-agent.db"]
+    assert "compatible" in db_compat
+    assert "backup_schema_version" in db_compat
+    assert "current_schema_version" in db_compat
+    assert "required_migrations" in db_compat
+    assert "unsupported_downgrade" in db_compat
+    assert "message" in db_compat
+    # Since we just created the DB with current code, it should be compatible
+    assert db_compat["compatible"] is True
+    assert db_compat["unsupported_downgrade"] is False
+
+
+def test_restore_rejects_unsupported_downgrade(tmp_path: Path, monkeypatch):
+    """restore_backup rejects backup with newer schema version without changing local state."""
+    from talos_agent import backup_service as bs
+    from talos_agent.backup_service import BackupError
+    from talos_agent.crypto import decrypt_with_password, encrypt_with_password
+    from talos_agent.db import LocalDB
+
+    _patch_app_dir(monkeypatch, tmp_path)
+
+    # Create a database
+    db_path = tmp_path / "talos-agent.db"
+    db = LocalDB(path=db_path)
+    db.close()  # Close the connection so the file isn't locked on Windows
+
+    # Build a backup
+    out = tmp_path / "artifact.enc"
+    pw = "test-passphrase-v1-long"
+    bs.build_backup(password=pw, out_path=out, scope="agent")
+
+    # Read the backup and manually modify the schema version to simulate a future backup
+    blob = out.read_text(encoding="utf8")
+    plaintext = decrypt_with_password(blob, pw)
+    payload = json.loads(plaintext.decode("utf8"))
+
+    # Bump the schema version to a future version
+    current = bs._get_current_schema_version()
+    future_version = current + 2
+    payload["database"]["schemaVersions"]["talos-agent.db"] = future_version
+
+    # Re-encrypt and write back
+    new_plaintext = json.dumps(payload, sort_keys=True).encode("utf8")
+    new_encrypted = encrypt_with_password(new_plaintext.decode("utf8"), pw)
+    out.write_text(new_encrypted, encoding="utf8")
+
+    # Attempt to restore - should fail with UNSUPPORTED_DOWNGRADE
+    with pytest.raises(BackupError) as exc_info:
+        bs.restore_backup(artifact_path=out, password=pw, confirm=True)
+
+    assert getattr(exc_info.value, "code", "") == "UNSUPPORTED_DOWNGRADE"
+    assert "unsupported" in str(exc_info.value).lower()
+
+    # Verify local state was not changed (original DB still exists and is intact)
+    assert db_path.exists()
+    # The DB should still be readable
+    LocalDB(path=db_path)  # Should not raise
+
+
+def test_restore_allows_compatible_older_backup(tmp_path: Path, monkeypatch):
+    """restore_backup allows backup with older (compatible) schema version."""
+    from talos_agent import backup_service as bs
+    from talos_agent.crypto import decrypt_with_password, encrypt_with_password
+    from talos_agent.db import LocalDB
+
+    _patch_app_dir(monkeypatch, tmp_path)
+
+    # Create a database
+    db_path = tmp_path / "talos-agent.db"
+    db = LocalDB(path=db_path)
+    db.close()  # Close the connection so the file isn't locked on Windows
+
+    # Build a backup
+    out = tmp_path / "artifact.enc"
+    pw = "test-passphrase-v1-long"
+    bs.build_backup(password=pw, out_path=out, scope="agent")
+
+    # Modify the backup to have an older schema version (simulate older backup)
+    blob = out.read_text(encoding="utf8")
+    plaintext = decrypt_with_password(blob, pw)
+    payload = json.loads(plaintext.decode("utf8"))
+
+    # Set schema version to an older version (but not too old)
+    older_version = max(1, bs._get_current_schema_version() - 2)
+    payload["database"]["schemaVersions"]["talos-agent.db"] = older_version
+
+    # Re-encrypt and write back
+    new_plaintext = json.dumps(payload, sort_keys=True).encode("utf8")
+    new_encrypted = encrypt_with_password(new_plaintext.decode("utf8"), pw)
+    out.write_text(new_encrypted, encoding="utf8")
+
+    # Restore should succeed (migrations will run on first use)
+    verified = bs.restore_backup(artifact_path=out, password=pw, confirm=True)
+
+    # Verify the restore completed
+    assert verified is not None
+    assert db_path.exists()
+
+    # The restored DB should be readable and migrations will run on first access
+    LocalDB(path=db_path)  # Should not raise
+
+
+def test_schema_compatibility_report_lists_required_migrations(tmp_path: Path, monkeypatch):
+    """Schema compatibility report correctly lists required migration versions."""
+    from talos_agent import backup_service as bs
+    from talos_agent.crypto import decrypt_with_password, encrypt_with_password
+    from talos_agent.db import LocalDB
+
+    _patch_app_dir(monkeypatch, tmp_path)
+
+    db_path = tmp_path / "talos-agent.db"
+    db = LocalDB(path=db_path)
+    db.close()
+
+    out = tmp_path / "artifact.enc"
+    pw = "test-passphrase-v1-long"
+    bs.build_backup(password=pw, out_path=out, scope="agent")
+
+    # Modify backup to have an older schema version
+    blob = out.read_text(encoding="utf8")
+    plaintext = decrypt_with_password(blob, pw)
+    payload = json.loads(plaintext.decode("utf8"))
+
+    older_version = max(1, bs._get_current_schema_version() - 3)
+    payload["database"]["schemaVersions"]["talos-agent.db"] = older_version
+
+    new_plaintext = json.dumps(payload, sort_keys=True).encode("utf8")
+    new_encrypted = encrypt_with_password(new_plaintext.decode("utf8"), pw)
+    out.write_text(new_encrypted, encoding="utf8")
+
+    # Verify and check the compatibility report
+    verified = bs.verify_backup(artifact_path=out, password=pw)
+    compat = verified.database["schemaCompatibility"]["talos-agent.db"]
+
+    assert compat["backup_schema_version"] == older_version
+    assert compat["current_schema_version"] == bs._get_current_schema_version()
+    expected_migrations = list(range(older_version + 1, bs._get_current_schema_version() + 1))
+    assert compat["required_migrations"] == expected_migrations
+    assert len(compat["required_migrations"]) >= 2  # At least 2 migrations
+    assert compat["compatible"] is True
