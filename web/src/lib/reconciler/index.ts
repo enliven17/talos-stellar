@@ -17,6 +17,8 @@ export {
   isTerminal,
   isWallClockExpired,
   isLedgerExpired,
+  normalizeNetworkPassphrase,
+  isMatchingNetwork,
 } from "./state-machine";
 export type {
   FinalityStatus,

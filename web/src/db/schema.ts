@@ -594,6 +594,9 @@ export const tlsStellarTxRecords = pgTable(
     // The Stellar transaction hash being tracked (unique per record)
     txHash: text("tx_hash").notNull(),
 
+    // Pinned Stellar network identity (network passphrase) against which this payment is tracked
+    networkPassphrase: text("network_passphrase"),
+
     // Which subsystem originated the tx: "commerce_job" | "token_purchase" | "other"
     sourceType: text("source_type").notNull().default("other"),
 
