@@ -1,6 +1,11 @@
-import { and, desc, eq, gte, lte, lt, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNotNull, lte, lt, or, sql, type SQL } from "drizzle-orm";
 import { db } from "@/db";
 import { tlsApiAuditLogs } from "@/db/schema";
+import {
+  verifyChainRange,
+  type AuditChainPredecessor,
+  type ChainRangeVerificationResult,
+} from "@/lib/audit-chain";
 import {
   escapeIlikePattern,
   statusClassRange,
@@ -86,4 +91,114 @@ export async function listAuditLogs(
     : null;
 
   return { logs: page.map(toRecord), nextCursor };
+}
+
+export interface VerifyAuditChainRangeFilter {
+  talosId: string;
+  /** Inclusive lower bound (ISO-8601 or Date). */
+  from?: string | Date;
+  /** Inclusive upper bound (ISO-8601 or Date). */
+  to?: string | Date;
+  /** Maximum entries to verify in the window (default 1000, max 10000). */
+  limit?: number;
+}
+
+/**
+ * Verify the tamper-evident audit hash chain for an agent over an optional
+ * `[from, to]` time range.
+ *
+ * When `from` is specified, also queries the immediate chained predecessor
+ * prior to `from` to verify boundary linkage and distinguish an incomplete
+ * range (e.g. truncated by `limit` or missing predecessor records) from a
+ * cryptographically broken chain.
+ */
+export async function verifyAuditChainRange(
+  filter: VerifyAuditChainRangeFilter,
+): Promise<ChainRangeVerificationResult> {
+  const limit = Math.min(Math.max(filter.limit ?? 1000, 1), 10000);
+  const fromDate =
+    filter.from !== undefined
+      ? filter.from instanceof Date
+        ? filter.from
+        : new Date(filter.from)
+      : null;
+  const toDate =
+    filter.to !== undefined
+      ? filter.to instanceof Date
+        ? filter.to
+        : new Date(filter.to)
+      : null;
+
+  if (
+    (fromDate !== null && Number.isNaN(fromDate.getTime())) ||
+    (toDate !== null && Number.isNaN(toDate.getTime())) ||
+    (fromDate !== null && toDate !== null && fromDate.getTime() > toDate.getTime())
+  ) {
+    return verifyChainRange([], {
+      from: fromDate,
+      to: toDate,
+    });
+  }
+
+  const conditions: SQL[] = [
+    eq(tlsApiAuditLogs.talosId, filter.talosId),
+    isNotNull(tlsApiAuditLogs.entryHash),
+  ];
+
+  if (fromDate !== null) {
+    conditions.push(gte(tlsApiAuditLogs.createdAt, fromDate));
+  }
+  if (toDate !== null) {
+    conditions.push(lte(tlsApiAuditLogs.createdAt, toDate));
+  }
+
+  let predecessor: AuditChainPredecessor | null = null;
+  if (fromDate !== null) {
+    const predecessorRows = await db
+      .select({
+        sequenceNumber: tlsApiAuditLogs.sequenceNumber,
+        entryHash: tlsApiAuditLogs.entryHash,
+        createdAt: tlsApiAuditLogs.createdAt,
+      })
+      .from(tlsApiAuditLogs)
+      .where(
+        and(
+          eq(tlsApiAuditLogs.talosId, filter.talosId),
+          isNotNull(tlsApiAuditLogs.entryHash),
+          lt(tlsApiAuditLogs.createdAt, fromDate),
+        ),
+      )
+      .orderBy(desc(tlsApiAuditLogs.createdAt), desc(tlsApiAuditLogs.sequenceNumber))
+      .limit(1);
+
+    predecessor = predecessorRows[0] ?? null;
+  }
+
+  const rows = await db
+    .select({
+      sequenceNumber: tlsApiAuditLogs.sequenceNumber,
+      entryHash: tlsApiAuditLogs.entryHash,
+      previousHash: tlsApiAuditLogs.previousHash,
+      chainVersion: tlsApiAuditLogs.chainVersion,
+      talosId: tlsApiAuditLogs.talosId,
+      method: tlsApiAuditLogs.method,
+      path: tlsApiAuditLogs.path,
+      statusCode: tlsApiAuditLogs.statusCode,
+      ipAddress: tlsApiAuditLogs.ipAddress,
+      createdAt: tlsApiAuditLogs.createdAt,
+    })
+    .from(tlsApiAuditLogs)
+    .where(and(...conditions))
+    .orderBy(asc(tlsApiAuditLogs.createdAt), asc(tlsApiAuditLogs.sequenceNumber))
+    .limit(limit + 1);
+
+  const truncated = rows.length > limit;
+  const windowRows = truncated ? rows.slice(0, limit) : rows;
+
+  return verifyChainRange(windowRows, {
+    predecessor,
+    from: fromDate,
+    to: toDate,
+    truncated,
+  });
 }

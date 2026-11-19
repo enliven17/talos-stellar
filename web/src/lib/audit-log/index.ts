@@ -1,4 +1,5 @@
-export { listAuditLogs } from "./store";
+export { listAuditLogs, verifyAuditChainRange } from "./store";
+export type { VerifyAuditChainRangeFilter } from "./store";
 export {
   parseAuditLogFilters,
   escapeIlikePattern,
