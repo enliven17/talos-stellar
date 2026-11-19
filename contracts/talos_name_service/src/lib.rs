@@ -133,6 +133,10 @@ pub enum ContractError {
     DomainLockedByAdmin = 6,
     InvalidPauseDuration = 7,
     GuardianLimitReached = 8,
+    /// Returned when a name is already registered to the same talos_id —
+    /// the operation would be a no-op self-transfer. No storage or events
+    /// are touched before this error is returned.
+    SelfTransfer = 9,
 }
 
 // ── Events ──────────────────────────────────────────────────────────
@@ -585,6 +589,19 @@ impl TalosNameService {
 
         if creator != Some(owner.clone()) {
             panic_with_error!(&e, ContractError::UnauthorizedCaller);
+        }
+
+        // Reject self-transfer: if the talos already holds exactly this name,
+        // the call is a no-op. Return a typed error without touching storage,
+        // preserving the existing revision counter and TTL unchanged.
+        if let Some(existing_name) = e
+            .storage()
+            .persistent()
+            .get::<_, String>(&DataKey::TalosName(talos_id))
+        {
+            if existing_name == name {
+                panic_with_error!(&e, ContractError::SelfTransfer);
+            }
         }
 
         // Retrieve the old name via TalosName(talos_id) and delete NameRecord(old_name)
@@ -4244,5 +4261,140 @@ mod tests {
         assert_eq!(client.name_of(&talos_id), Some(max_name.clone()));
         assert_eq!(client.resolve_name(&min_name), None);
         assert!(client.is_name_available(&min_name));
+    }
+
+    // ── SelfTransfer rejection tests (#1380) ────────────────────────
+
+    #[test]
+    fn self_transfer_rejected_returns_typed_error() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name = s(&env, "selfbot");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+
+        // First registration succeeds.
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name,
+        );
+        assert_eq!(client.resolve_name(&name), Some(talos_id));
+
+        // Re-registering the same name for the same talos_id is a self-transfer.
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, name.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &name);
+
+        assert_eq!(
+            result,
+            Err(Ok(ContractError::SelfTransfer)),
+            "self-transfer must return ContractError::SelfTransfer"
+        );
+    }
+
+    #[test]
+    fn self_transfer_does_not_alter_storage_or_emit_events() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name = s(&env, "nodelta");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name,
+        );
+
+        let events_before = env.events().all().len();
+
+        // Attempt self-transfer — must not emit any event.
+        let _ = client
+            .mock_auths(&[MockAuth {
+                address: &owner,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "register_name",
+                    args: (owner.clone(), talos_id, name.clone()).into_val(&env),
+                    sub_invokes: &[MockAuthInvoke {
+                        contract: &registry_contract,
+                        fn_name: "creator_of",
+                        args: (talos_id,).into_val(&env),
+                        sub_invokes: &[],
+                    }],
+                },
+            }])
+            .try_register_name(&owner, &talos_id, &name);
+
+        // Storage must be unchanged.
+        assert_eq!(client.resolve_name(&name), Some(talos_id));
+        assert_eq!(client.name_of(&talos_id), Some(name.clone()));
+        // No new events beyond what were emitted during the first registration.
+        assert_eq!(
+            env.events().all().len(),
+            events_before,
+            "self-transfer must not emit events"
+        );
+    }
+
+    #[test]
+    fn different_name_still_allowed_after_first_registration() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name_a = s(&env, "alpha");
+        let name_b = s(&env, "beta");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name_a,
+        );
+
+        // Registering a different name must succeed without SelfTransfer.
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name_b,
+        );
+
+        assert_eq!(client.resolve_name(&name_b), Some(talos_id));
+        assert_eq!(client.name_of(&talos_id), Some(name_b.clone()));
+        // Old name freed.
+        assert_eq!(client.resolve_name(&name_a), None);
+    }
+
+    #[test]
+    fn first_registration_always_allowed() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name = s(&env, "freshname");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+
+        // No prior registration — must never trigger SelfTransfer.
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name,
+        );
+        assert_eq!(client.resolve_name(&name), Some(talos_id));
     }
 }
