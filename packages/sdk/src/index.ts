@@ -84,6 +84,7 @@ export {
   TalosEventStream,
   TalosStreamError,
   InMemorySeenStore,
+  InMemoryCheckpointStore,
 } from "./events.js";
 export type {
   TalosEventType,
@@ -93,6 +94,11 @@ export type {
   TalosStreamCloseHandler,
   TalosEventStreamOptions,
   SeenStore,
+  EventStreamCheckpoint,
+  CheckpointStore,
+  CheckpointAckMode,
+  HistoryGapInfo,
+  HistoryGapSignal,
 } from "./events.js";
 
 // ── Contract event decoding ───────────────────────────────────────────────────
