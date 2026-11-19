@@ -13,17 +13,33 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class AdapterCapabilityConflictError(ValueError):
+    """Raised when a channel is registered with conflicting capabilities.
+
+    Re-registering the same adapter, or another adapter with identical
+    :class:`~talos_agent.adapters.base.ChannelCapabilities`, is idempotent and
+    keeps the first registration.  A capability conflict is rejected during
+    startup wiring, before tasks can publish through the registry.
+
+    Subclasses :class:`ValueError` so callers written against the previous
+    duplicate-registration guard keep working.
+    """
+
+
 class AdapterRegistry:
     """Holds all registered channel adapters and routes publishing calls.
 
-    Duplicate registration behaviour is controlled by the ``on_duplicate``
-    constructor parameter:
+    Re-registering a channel is idempotent when the incoming adapter has the
+    same :class:`~talos_agent.adapters.base.ChannelCapabilities` as the
+    registered one; the first adapter is kept and no error is raised.  A
+    duplicate registration whose capabilities differ is a capability conflict,
+    handled according to the ``on_duplicate`` constructor parameter:
 
-    * ``"raise"`` (default) — raise :class:`ValueError` immediately so
-      mis-configuration is caught at startup.
-    * ``"warn"``            — log a warning and keep the *existing* adapter
-      (the duplicate is silently dropped).
-    * ``"skip"``            — silently ignore the duplicate and keep the
+    * ``"raise"`` (default) — raise
+      :class:`AdapterCapabilityConflictError` immediately so mis-configuration
+      is caught at startup.
+    * ``"warn"``            — log a warning and keep the *existing* adapter.
+    * ``"skip"``            — silently ignore the conflict and keep the
       existing adapter without any log output.
 
     Use :meth:`replace` for intentional, deliberate adapter swaps.
@@ -52,38 +68,51 @@ class AdapterRegistry:
     def register(self, adapter: BaseSocialAdapter) -> None:
         """Register *adapter* under its ``channel_name`` (case-insensitive key).
 
-        Raises :class:`ValueError` (or logs / skips, depending on
-        ``on_duplicate``) when a channel with the same key is already
-        registered.  Use :meth:`replace` for intentional swaps.
+        Idempotent when the adapter already registered for that channel has
+        identical capabilities: the first adapter is kept.  Raises
+        :class:`AdapterCapabilityConflictError` (or logs / skips, depending on
+        ``on_duplicate``) when the capabilities differ.  Use :meth:`replace`
+        for intentional swaps.
         """
-        if self._sandbox is not None:
-            adapter = self._sandbox.wrap(adapter)
+        incoming = self._sandbox.wrap(adapter) if self._sandbox is not None else adapter
 
-        key = adapter.channel_name.lower()
+        key = incoming.channel_name.lower()
+        existing = self._adapters.get(key)
 
-        if key in self._adapters:
-            existing = self._adapters[key]
-            msg = (
-                f"Duplicate adapter registration for channel {key!r}: "
-                f"an adapter of type {type(existing).__name__!r} is already "
-                f"registered. Use replace() for intentional swaps."
-            )
-            if self._on_duplicate == "raise":
-                raise ValueError(msg)
-            elif self._on_duplicate == "warn":
-                logger.warning(msg)
-                return  # keep the existing adapter
-            else:  # "skip"
-                return  # silently ignore
+        if existing is None:
+            self._adapters[key] = incoming
+            return
 
-        self._adapters[key] = adapter
+        if existing is incoming or existing is adapter:
+            return
+        if self._capabilities_match(existing, incoming):
+            return
+
+        msg = (
+            f"Duplicate adapter registration for channel {key!r} with conflicting "
+            f"capabilities: an adapter of type {type(existing).__name__!r} is "
+            f"already registered. Use replace() for intentional swaps."
+        )
+        if self._on_duplicate == "raise":
+            raise AdapterCapabilityConflictError(msg)
+        elif self._on_duplicate == "warn":
+            logger.warning(msg)
+            return  # keep the existing adapter
+        else:  # "skip"
+            return  # silently ignore
+
+    @staticmethod
+    def _capabilities_match(first: BaseSocialAdapter, second: BaseSocialAdapter) -> bool:
+        """Return whether two adapters declare identical channel capabilities."""
+        return first.get_capabilities() == second.get_capabilities()
 
     def replace(self, adapter: BaseSocialAdapter) -> BaseSocialAdapter | None:
         """Intentionally swap out the adapter for *adapter.channel_name*.
 
         Unlike :meth:`register`, ``replace`` never raises on a pre-existing
-        entry — it is the explicit, deliberate path for hot-swapping adapters
-        at runtime (e.g. rotating credentials or switching environments).
+        entry, even when capabilities differ — it is the explicit, deliberate
+        path for hot-swapping adapters at runtime (e.g. rotating credentials or
+        switching environments).
 
         Parameters
         ----------

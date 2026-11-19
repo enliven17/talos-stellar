@@ -24,7 +24,7 @@ from talos_agent.adapters.health import (
     XProbe,
 )
 from talos_agent.adapters.mastodon import MastodonAdapter, MastodonAdapterConfig
-from talos_agent.adapters.registry import AdapterRegistry
+from talos_agent.adapters.registry import AdapterCapabilityConflictError, AdapterRegistry
 from talos_agent.adapters.snapshots import (
     AdapterHealthSnapshot,
     DiscordHealthSnapshot,
@@ -50,6 +50,7 @@ __all__ = [
     "BaseSocialAdapter",
     "ChannelCapabilities",
     "PublishResult",
+    "AdapterCapabilityConflictError",
     "AdapterRegistry",
     "AdapterCapabilityManifest",
     "AdapterResourceLimits",
