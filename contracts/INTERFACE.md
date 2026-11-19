@@ -20,6 +20,7 @@ emitted bytes (otherwise the deployed WASM has been tampered with).
 | `TalosRegistry`         | `(1, 1, 0)`        | `"TalosRegistry"`     | `54 61 6C 6F 73 52 65 67 69 73 74 72 79 00 00 00` ("TalosRegistry\0\0\0") |
 | `TalosNameService`      | `(1, 1, 0)`        | `"TalosNameService"`  | `54 61 6C 6F 73 4E 61 6D 65 53 65 72 76 69 63 65` ("TalosNameService") |
 | `TalosGovernance`       | `(1, 1, 0)`        | `"TalosGovernance"`   | `54 61 6C 6F 73 47 6F 76 65 72 6E 61 6E 63 65 00` ("TalosGovernance\0") |
+| `TalosDividends`        | `(1, 3, 0)`        | `"TalosDividends"`    | `54 61 6C 6F 73 44 69 76 69 64 65 6E 64 73 00 00` ("TalosDividends\0\0") |
 
 A new contract added later MUST keep `major = 1` until a hard upgrade is
 scheduled — bumping `major` is a deployment-grade event and operators
@@ -121,6 +122,17 @@ is a `major` bump.
 | `interface_query`   | `version` / `interface_id` / `supports_version`.             |
 | `quorum_state`      | `get_proposal_quorum_state` query; `EventQuorumReached` emitted once per proposal when quorum is first crossed. |
 | `proposal_threshold`| `create_proposal` requires the proposer's snapshot voting power to meet `proposal_threshold` (default `0` preserves prior behavior). |
+
+### TalosDividends
+
+| Capability             | Description                                                                 |
+|------------------------|-----------------------------------------------------------------------------|
+| `epoch_commitment`     | `commit_epoch` — admin-gated distribution round creation.                   |
+| `pull_claims`          | `claim_dividend` — patron-initiated O(1) claim per epoch.                   |
+| `expiry_recovery`      | `recover_expired` — admin sweeps unclaimed funds after the claim window.    |
+| `rounding_dust`        | `get_rounding_dust` — remainder from integer share division, stored once.   |
+| `interface_query`      | `version` / `interface_id` / `supports_version` / `interface_features`.    |
+| `unclaimed_liabilities`| `get_epoch_liability` / `get_total_unclaimed` — bounded reads of per-epoch and aggregate unclaimed amounts; distinguishes empty rounds from fully-claimed rounds without iterating recipients. |
 
 #### Storage & Input Bounds
 
