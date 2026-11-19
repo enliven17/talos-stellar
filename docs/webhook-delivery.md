@@ -129,15 +129,25 @@ This produces a 64-character hex string. Set it as `WEBHOOK_SECRET_ENCRYPTION_KE
 
 ## Signature Format
 
-Outgoing webhook payloads are signed using HMAC-SHA256:
+Outgoing webhook payloads are signed using HMAC-SHA256 and include deterministic,
+non-reversible signing key identifiers (`whkid_<16-hex>`):
 
 ```
 X-Webhook-Signature: v1=<hmac>,t=<unix_timestamp>
+X-Webhook-Key-Id: whkid_<active_key_id>
+```
+
+During a controlled rotation overlap window, both headers list the active key
+first followed by the overlapping previous key in matching positional order:
+
+```
+X-Webhook-Signature: v1=<hmac_current>,v1=<hmac_previous>,t=<unix_timestamp>
+X-Webhook-Key-Id: whkid_<current_key_id>,whkid_<previous_key_id>
 ```
 
 The recipient should:
-1. Parse the `v1=<hmac>` and `t=<timestamp>` parts
-2. Verify the HMAC using the shared secret
+1. Parse the `v1=<hmac>` and `t=<timestamp>` parts (and optionally `X-Webhook-Key-Id`)
+2. Verify the HMAC using the matching shared secret (or key-ID map via `verifySignatureWithDetails`)
 3. Reject timestamps older than 5 minutes (replay protection)
 
 ---
@@ -257,23 +267,26 @@ consumers that still verify with the previous secret.
 
 1. **Rotate** — `POST /api/webhooks/subscriptions/:id/rotate`
    - Body: `{ "secret": "<new>" }` **or** `{ "generate": true }`
-   - Optional: `{ "graceSeconds": 86400 }` (default 24h, min 5m, max 30d)
+   - Optional: `{ "overlapSeconds": 86400 }` (or `graceSeconds` alias; bounded to `[300, 2592000]` seconds — min 5m, max 30d, default 24h; out-of-bounds values are rejected with HTTP `400`)
    - Current ciphertext moves to `previous_secret_ciphertext`
-   - New secret becomes current; `previous_secret_expires_at` is set
+   - New secret becomes current; `previous_secret_expires_at` (`overlapExpiresAt`) is set
+   - Response includes deterministic key identifiers `activeKeyId` and `previousKeyId` (`whkid_<16-hex>`)
    - When `generate: true`, the plaintext is returned **once** in the response
-2. **Overlap** — Deliveries dual-sign with both secrets:
-   `X-Webhook-Signature: v1=<current>,v1=<previous>,t=<ts>`
+2. **Overlap** — Deliveries dual-sign with both secrets and advertise both key IDs:
+   - `X-Webhook-Signature: v1=<current>,v1=<previous>,t=<ts>`
+   - `X-Webhook-Key-Id: whkid_<current>,whkid_<previous>`
+   - Consumers holding either key (or a `Record<keyId, secret>` map with `verifySignatureWithDetails`) verify in-flight and overlapping deliveries without downtime
 3. **Finalize** (optional, early) — `POST .../rotate` with `{ "finalize": true }`
    clears the previous secret before grace expiry
-4. **Lazy expiry** — After `previous_secret_expires_at`, previous is ignored even
-   if not explicitly finalized
+4. **Lazy expiry** — At or after `previous_secret_expires_at`, the previous key is omitted from `X-Webhook-Signature` and `X-Webhook-Key-Id` even if not explicitly finalized
 
 ### Compatibility
 
-- Existing single-signature consumers continue to work (first `v1=` matches)
-- Consumers that already accept `secret: string[]` (SDK) can hold both keys
+- Existing single-signature consumers continue to work (`X-Webhook-Signature` format is unchanged and first `v1=` matches)
+- Consumers that already accept `secret: string[]` (SDK) or a key-ID map (`Record<string, string>`) can verify in-flight deliveries across rotation
 - `PATCH /subscriptions/:id` with `{ "secret": "..." }` uses the same rotation path
-- Secrets are never logged; API responses never include ciphertext
+- `POST /subscriptions` returns `activeKeyId` and `rotationActive: false`; `GET /subscriptions` includes `secretRotatedAt`, `previousSecretExpiresAt`, and `rotationActive`
+- Secrets are never logged; API responses never include ciphertext or raw secrets (except one-time `generate: true` rotate)
 
 ### Env
 

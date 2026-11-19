@@ -20,13 +20,17 @@ import {
   MAX_SECRET_ROTATION_GRACE_SECONDS,
   MIN_SECRET_ROTATION_GRACE_SECONDS,
 } from "./config";
-import { decryptSecret, encryptSecret } from "./signing";
+import { decryptSecret, deriveSigningKeyId, encryptSecret, type SigningKey } from "./signing";
 
 export interface RotationResult {
   id: string;
   secretRotatedAt: Date;
   previousSecretExpiresAt: Date;
+  overlapExpiresAt: Date;
   graceSeconds: number;
+  overlapSeconds: number;
+  activeKeyId: string;
+  previousKeyId: string | null;
   /** Present only when the server generated the secret — shown once. */
   secret?: string;
   rotationActive: true;
@@ -41,17 +45,49 @@ export interface FinalizeResult {
 export interface SigningSecretBundle {
   /** Secrets to dual-sign with (current first, then previous if in grace). */
   secrets: string[];
+  /** Ordered signing keys with deterministic key identifiers. */
+  keys: SigningKey[];
+  /** Key identifier for the active (current) signing secret. */
+  activeKeyId: string;
+  /** Key identifier for the overlapping previous secret, or null if inactive/expired. */
+  previousKeyId: string | null;
+  /** Expiration timestamp of the overlap window, or null when not rotating. */
+  overlapExpiresAt: Date | null;
   signatureVersion: number;
   rotationActive: boolean;
 }
 
-function clampGraceSeconds(raw: number | undefined): number {
-  const fallback = DEFAULT_SECRET_ROTATION_GRACE_SECONDS;
-  if (raw === undefined || !Number.isFinite(raw)) return fallback;
-  const n = Math.floor(raw);
-  if (n < MIN_SECRET_ROTATION_GRACE_SECONDS) return MIN_SECRET_ROTATION_GRACE_SECONDS;
-  if (n > MAX_SECRET_ROTATION_GRACE_SECONDS) return MAX_SECRET_ROTATION_GRACE_SECONDS;
-  return n;
+export type OverlapValidationResult =
+  | { ok: true; seconds: number }
+  | { ok: false; error: string };
+
+/**
+ * Validate a requested rotation overlap interval against configured bounds.
+ *
+ * When omitted (`undefined`), returns `DEFAULT_SECRET_ROTATION_GRACE_SECONDS`.
+ * Explicit values outside `[MIN_SECRET_ROTATION_GRACE_SECONDS, MAX_SECRET_ROTATION_GRACE_SECONDS]`
+ * or non-integers are rejected so callers cannot accidentally create unbounded
+ * or zero-length overlap windows.
+ */
+export function validateOverlapSeconds(
+  raw: number | undefined,
+): OverlapValidationResult {
+  if (raw === undefined) {
+    return { ok: true, seconds: DEFAULT_SECRET_ROTATION_GRACE_SECONDS };
+  }
+  if (!Number.isFinite(raw) || !Number.isInteger(raw)) {
+    return {
+      ok: false,
+      error: `Overlap interval must be an integer between ${MIN_SECRET_ROTATION_GRACE_SECONDS} and ${MAX_SECRET_ROTATION_GRACE_SECONDS} seconds`,
+    };
+  }
+  if (raw < MIN_SECRET_ROTATION_GRACE_SECONDS || raw > MAX_SECRET_ROTATION_GRACE_SECONDS) {
+    return {
+      ok: false,
+      error: `Overlap interval must be between ${MIN_SECRET_ROTATION_GRACE_SECONDS} and ${MAX_SECRET_ROTATION_GRACE_SECONDS} seconds`,
+    };
+  }
+  return { ok: true, seconds: raw };
 }
 
 /** Generate a webhook signing secret (`whsec_` + 32 random bytes hex). */
@@ -60,23 +96,36 @@ export function generateWebhookSecret(): string {
 }
 
 /**
- * Resolve the plaintext secrets that should sign an outbound delivery.
+ * Resolve the plaintext secrets and key identifiers that should sign an outbound delivery.
  * Expired previous secrets are omitted (lazy expiry — no write required).
  */
-export function resolveSigningSecrets(subscription: {
-  secretCiphertext: string;
-  previousSecretCiphertext?: string | null;
-  previousSecretExpiresAt?: Date | null;
-  signatureVersion: number;
-}): SigningSecretBundle {
-  const secrets: string[] = [decryptSecret(subscription.secretCiphertext)];
+export function resolveSigningSecrets(
+  subscription: {
+    secretCiphertext: string;
+    previousSecretCiphertext?: string | null;
+    previousSecretExpiresAt?: Date | null;
+    signatureVersion: number;
+  },
+  now: Date = new Date(),
+): SigningSecretBundle {
+  const currentSecret = decryptSecret(subscription.secretCiphertext);
+  const activeKeyId = deriveSigningKeyId(currentSecret);
+  const secrets: string[] = [currentSecret];
+  const keys: SigningKey[] = [{ id: activeKeyId, secret: currentSecret }];
+  let previousKeyId: string | null = null;
+  let overlapExpiresAt: Date | null = null;
   let rotationActive = false;
 
   const prevCipher = subscription.previousSecretCiphertext;
   const expiresAt = subscription.previousSecretExpiresAt;
-  if (prevCipher && expiresAt && expiresAt.getTime() > Date.now()) {
+  if (prevCipher && expiresAt && expiresAt.getTime() > now.getTime()) {
     try {
-      secrets.push(decryptSecret(prevCipher));
+      const previousSecret = decryptSecret(prevCipher);
+      const prevId = deriveSigningKeyId(previousSecret);
+      secrets.push(previousSecret);
+      keys.push({ id: prevId, secret: previousSecret });
+      previousKeyId = prevId;
+      overlapExpiresAt = expiresAt;
       rotationActive = true;
     } catch (err) {
       // Previous secret unreadable — continue with current only.
@@ -89,6 +138,10 @@ export function resolveSigningSecrets(subscription: {
 
   return {
     secrets,
+    keys,
+    activeKeyId,
+    previousKeyId,
+    overlapExpiresAt,
     signatureVersion: subscription.signatureVersion,
     rotationActive,
   };
@@ -97,7 +150,7 @@ export function resolveSigningSecrets(subscription: {
 /**
  * Rotate the signing secret for a subscription.
  *
- * Moves the current ciphertext into the previous slot (with grace expiry)
+ * Moves the current ciphertext into the previous slot (with bounded overlap expiry)
  * and installs the new secret as current. Delivery dual-signs until expiry.
  */
 export async function rotateWebhookSecret(opts: {
@@ -106,6 +159,7 @@ export async function rotateWebhookSecret(opts: {
   newSecret?: string;
   generate?: boolean;
   graceSeconds?: number;
+  overlapSeconds?: number;
 }): Promise<RotationResult | { error: string; status: number }> {
   const { subscriptionId, talosId, generate } = opts;
 
@@ -121,9 +175,16 @@ export async function rotateWebhookSecret(opts: {
     return { error: "Secret must be 16–256 characters", status: 400 };
   }
 
-  const graceSeconds = clampGraceSeconds(opts.graceSeconds);
+  const requestedOverlap = opts.overlapSeconds ?? opts.graceSeconds;
+  const overlapValidation = validateOverlapSeconds(requestedOverlap);
+  if (!overlapValidation.ok) {
+    return { error: overlapValidation.error, status: 400 };
+  }
+
+  const graceSeconds = overlapValidation.seconds;
   const now = new Date();
   const previousSecretExpiresAt = new Date(now.getTime() + graceSeconds * 1000);
+  const activeKeyId = deriveSigningKeyId(plaintext);
 
   let newCiphertext: string;
   try {
@@ -153,6 +214,13 @@ export async function rotateWebhookSecret(opts: {
 
   if (!existing) {
     return { error: "Subscription not found", status: 404 };
+  }
+
+  let previousKeyId: string | null = null;
+  try {
+    previousKeyId = deriveSigningKeyId(decryptSecret(existing.secretCiphertext));
+  } catch {
+    previousKeyId = null;
   }
 
   const [updated] = await db
@@ -186,6 +254,8 @@ export async function rotateWebhookSecret(opts: {
       subscriptionId,
       talosId,
       graceSeconds,
+      activeKeyId,
+      previousKeyId,
       previousSecretExpiresAt: updated.previousSecretExpiresAt.toISOString(),
     },
     "webhook_secret_rotated",
@@ -195,7 +265,11 @@ export async function rotateWebhookSecret(opts: {
     id: updated.id,
     secretRotatedAt: updated.secretRotatedAt,
     previousSecretExpiresAt: updated.previousSecretExpiresAt,
+    overlapExpiresAt: updated.previousSecretExpiresAt,
     graceSeconds,
+    overlapSeconds: graceSeconds,
+    activeKeyId,
+    previousKeyId,
     rotationActive: true,
   };
 
