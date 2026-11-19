@@ -148,7 +148,7 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
 - **Purpose**: Pull-based dividend distribution and claim management for the Talos protocol. Allows distributors to commit payout epochs on ledger, enabling patrons to independently claim their allocations without unbounded on-chain loops, with rounding dust accounting and expiry recovery.
 - **Features**:
   - **Pull-based claim architecture**: Bounded O(1) gas per transaction regardless of patron count. The distributor commits an epoch, and patrons pull their own shares.
-  - **Single claim guarantee**: `Claimed(epoch_id, claimant)` storage key prevents double-claims.
+  - **Single claim guarantee**: `ClaimedByTalos(talos_id, epoch_id, claimant)` storage key prevents double-claims per agent and epoch, with fallback to legacy `Claimed(epoch_id, claimant)` for backwards compatibility.
   - **Proportional role allocation**: Calculates payouts from on-chain patron shares (`creator_share`, `investor_share`, `treasury_share`), enforcing `creator_share + investor_share + treasury_share == 100`.
   - **Rounding dust tracking**: Computes and stores rounding remainder (`RoundingDust`) on first claim, ensuring exact conservation of funds. Emits `div_dst`.
   - **Accounting invariant enforcement**: Tracks `claimed_amount <= total_amount` on every claim; prevents over-distribution (`AccountingOverflow`).
@@ -169,7 +169,8 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
   - `claim_dividend(claimant, talos_id, epoch_id, patron_creator, patron_investor, patron_treasury, creator_share, investor_share, treasury_share) -> Result<i128, ContractError>`: Claim dividend allocation for a patron role (claimant auth).
   - `recover_expired(admin, talos_id, epoch_id) -> Result<i128, ContractError>`: Sweep unclaimed funds after epoch expiration (admin auth).
   - `get_epoch(talos_id, epoch_id) -> Option<EpochRecord>`: Query epoch metadata, amounts, and lifecycle status (`Active`, `Expired`, `Recovered`).
-  - `has_claimed(epoch_id, claimant) -> bool`: Query whether a claimant has claimed an epoch.
+  - `has_claimed(epoch_id, claimant) -> bool`: Query whether a claimant has claimed an epoch (legacy query checking `Claimed`).
+  - `has_claimed_talos(talos_id, epoch_id, claimant) -> bool`: Query whether a claimant has claimed an epoch for a specific agent (checking `ClaimedByTalos` and fallback `Claimed`).
   - `get_rounding_dust(talos_id, epoch_id) -> Option<i128>`: Query recorded rounding dust for an epoch.
   - `next_epoch_id(talos_id) -> u64`: Query next sequential epoch ID for a Talos.
   - `get_admin() -> Option<Address>`: Query contract admin address.
