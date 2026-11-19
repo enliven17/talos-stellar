@@ -187,3 +187,84 @@ class TestApplyPlaybook:
         assert result == {"error": "No playbook found named 'Growth'"}
         mock_db.find_playbook_by_name.assert_called_once_with("Growth")
         mock_db.apply_playbook.assert_not_called()
+
+
+class TestPurchaseServiceSellerAllowlist:
+    """Issue #1443 — seller allowlist gate before paid request dispatch."""
+
+    def _stubs(self, payee: str):
+        mock_signer = MagicMock()
+        mock_signer.initialize = AsyncMock()
+        mock_signer.sign_payment = AsyncMock(return_value={
+            "status": "signed",
+            "payment_header": "x402-header-value",
+        })
+
+        mock_api = MagicMock()
+        mock_api.get_service = AsyncMock(return_value=MagicMock(
+            status_code=402,
+            json=lambda: {"price": 1.00, "payee": payee},
+        ))
+        mock_api.submit_commerce = AsyncMock(return_value={"jobId": "j", "status": "submitted"})
+
+        mock_db = MagicMock()
+        mock_db.get_talos_config.return_value = {"gtmBudget": 200}
+        mock_db.get_spending_period.return_value = 0.0
+        mock_db.add_commerce_job.return_value = None
+        mock_db.record_spending.return_value = None
+        return mock_api, mock_signer, mock_db
+
+    @pytest.mark.asyncio
+    async def test_empty_allowlist_preserves_legacy_behavior(self):
+        payee = "GALLOWEDSELLER000000000000000000000000000000000000000"
+        mock_api, mock_signer, mock_db = self._stubs(payee)
+        mock_settings = MagicMock()
+        mock_settings.approval_threshold = "50"
+        mock_settings.talos_id = "talos-test"
+        mock_settings.purchase_seller_allowlist = []
+
+        with patch("talos_agent.tools.commerce._api", mock_api), \
+             patch("talos_agent.tools.commerce._db", mock_db), \
+             patch("talos_agent.tools.commerce._settings", mock_settings), \
+             patch("talos_agent.tools.commerce._get_signer", return_value=mock_signer):
+            result = await purchase_service("s", "analytics", "{}")
+
+        assert "SELLER_NOT_ALLOWLISTED" not in str(result.get("code", ""))
+        mock_signer.sign_payment.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_allowlisted_seller_proceeds_to_signing(self):
+        payee = "GALLOWEDSELLER000000000000000000000000000000000000000"
+        mock_api, mock_signer, mock_db = self._stubs(payee)
+        mock_settings = MagicMock()
+        mock_settings.approval_threshold = "50"
+        mock_settings.talos_id = "talos-test"
+        mock_settings.purchase_seller_allowlist = [payee]
+
+        with patch("talos_agent.tools.commerce._api", mock_api), \
+             patch("talos_agent.tools.commerce._db", mock_db), \
+             patch("talos_agent.tools.commerce._settings", mock_settings), \
+             patch("talos_agent.tools.commerce._get_signer", return_value=mock_signer):
+            await purchase_service("s", "analytics", "{}")
+
+        mock_signer.sign_payment.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_non_allowlisted_seller_blocked_before_signing(self):
+        blocked = "GBLOCKEDSELLER00000000000000000000000000000000000000"
+        mock_api, mock_signer, mock_db = self._stubs(blocked)
+        mock_settings = MagicMock()
+        mock_settings.approval_threshold = "50"
+        mock_settings.talos_id = "talos-test"
+        mock_settings.purchase_seller_allowlist = ["GOTHERSELLER000000000000000000000000000000000000000"]
+
+        with patch("talos_agent.tools.commerce._api", mock_api), \
+             patch("talos_agent.tools.commerce._db", mock_db), \
+             patch("talos_agent.tools.commerce._settings", mock_settings), \
+             patch("talos_agent.tools.commerce._get_signer", return_value=mock_signer):
+            result = await purchase_service("s", "analytics", "{}")
+
+        assert result["code"] == "SELLER_NOT_ALLOWLISTED"
+        assert result["requires_approval"] is True
+        assert result["seller"] == blocked
+        mock_signer.sign_payment.assert_not_called()
