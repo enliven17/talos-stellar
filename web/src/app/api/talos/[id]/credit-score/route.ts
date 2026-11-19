@@ -1,12 +1,13 @@
 import { db } from "@/db";
 import { tlsTalos, tlsRevenues, tlsApprovals, tlsPatrons } from "@/db/schema";
 import { and, eq, gte, sql } from "drizzle-orm";
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { verifyAgentApiKey } from "@/lib/auth";
 
 // GET /api/talos/:id/credit-score — Credit scoring based on financial health
 // Requires revenue:read scope (scoped key or legacy).
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -263,3 +264,5 @@ export async function GET(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withRequestId(_GET);

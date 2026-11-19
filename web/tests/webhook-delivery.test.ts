@@ -46,6 +46,15 @@ vi.mock("@/lib/fulfillment", () => ({
   fulfillInstant: vi.fn(),
 }));
 
+vi.mock("@/lib/security/ssrf", () => ({
+  validateUrl: vi.fn(async (url) => {
+    if (url === "not-a-url") throw new Error("Invalid URL format");
+    if (url.includes("internal")) throw new Error("Restricted IP address");
+    return new URL(url);
+  }),
+  safeFetch: vi.fn(),
+}));
+
 // ─── Helpers ──────────────────────────────────────────────────────
 
 function selectChain(result: any) {
@@ -390,6 +399,29 @@ describe("Webhook Subscription API", () => {
 
       const response = await POST(request);
       expect(response.status).toBe(400);
+    });
+
+    it("rejects internal/restricted URLs for SSRF protection", async () => {
+      const { POST } = await import("../src/app/api/webhooks/subscriptions/route");
+      mockDb.select.mockReturnValueOnce(selectChain([{ id: "agent_1" }]));
+
+      const request = new NextRequest("http://localhost:3000/api/webhooks/subscriptions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer tok_agent_1",
+        },
+        body: JSON.stringify({
+          url: "http://internal.service.local",
+          secret: "whsec_test_secret_key_1234",
+          eventTypes: ["test.event"],
+        }),
+      });
+
+      const response = await POST(request);
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.issues[0]).toContain("Restricted IP address");
     });
 
     it("rejects short secrets", async () => {

@@ -130,7 +130,7 @@ No additional setup needed. Omit `REDIS_URL` from your `.env.local`:
 
 ```bash
 cd web
-cp env.example .env.local   # remove or leave blank REDIS_URL
+cp .env.example .env.local   # remove or leave blank REDIS_URL
 npm run dev
 ```
 

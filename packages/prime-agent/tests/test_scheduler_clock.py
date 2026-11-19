@@ -19,8 +19,9 @@ import pytest
 try:
     from zoneinfo import ZoneInfo
 
+    ZoneInfo("America/New_York")
     _HAS_ZONEINFO = True
-except ImportError:
+except Exception:
     ZoneInfo = None  # type: ignore[assignment,misc]
     _HAS_ZONEINFO = False
 
