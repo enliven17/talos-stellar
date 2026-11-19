@@ -5,12 +5,13 @@
  * Verifies that the published `exports` map of `@talos-protocol/sdk` actually
  * works, rather than trusting that the manifest looks right:
  *
- *   1. `package.json` parses and its `exports["."]` passes the shared
- *      validation rules (see scripts/export-map-lib.mjs).
+ *   1. `package.json` parses and every declared entry of its `exports` map —
+ *      the root barrel and each subpath — passes the shared validation rules
+ *      (see scripts/export-map-lib.mjs).
  *   2. Every declared target exists on disk and is non-empty (post-build).
- *   3. `require()` resolves the package through the real exports map to the
+ *   3. `require()` resolves each entry through the real exports map to the
  *      declared CJS target, and `import` resolves to the declared ESM target.
- *   4. The ESM and CJS builds expose the same public surface.
+ *   4. The ESM and CJS builds expose the same public surface, per entry.
  *   5. Every target is actually present in the published tarball
  *      (`npm pack --dry-run --json`), not just present on disk.
  *
@@ -27,7 +28,7 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { validateExportMap } from "./export-map-lib.mjs";
+import { REQUIRED_SUBPATHS, validateExportMap } from "./export-map-lib.mjs";
 
 const PKG_NAME = "@talos-protocol/sdk";
 const here = dirname(fileURLToPath(import.meta.url));
@@ -59,6 +60,10 @@ const canonical = (absolute) => {
   }
 };
 
+/** The bare specifier that resolves to a given export-map key. */
+const specifierFor = (subpath) =>
+  subpath === "." ? PKG_NAME : `${PKG_NAME}${subpath.slice(1)}`;
+
 // ── 1. Manifest parses and validates ────────────────────────────────
 if (!existsSync(PACKAGE_JSON)) {
   fail("package.json is missing");
@@ -71,94 +76,140 @@ try {
   fail(`package.json is not valid JSON: ${err.message}`);
 }
 
-const { ok, errors, warnings, targets } = validateExportMap(pkg);
+const { ok, errors, warnings, subpaths } = validateExportMap(pkg);
 for (const warning of warnings) warn(warning);
 if (!ok) {
   for (const error of errors) console.error(`[compat:exports]   x ${error}`);
   fail(`export map is invalid (${errors.length} error(s))`);
 }
-pass(`exports["."] declares ${targets.map((t) => t.condition).join(", ")}`);
+
+const declared = subpaths.map((entry) => entry.subpath);
+for (const required of REQUIRED_SUBPATHS) {
+  if (!declared.includes(required)) {
+    fail(`exports is missing the required "${required}" subpath`);
+  }
+}
+for (const entry of subpaths) {
+  pass(
+    `exports[${JSON.stringify(entry.subpath)}] declares ` +
+      entry.targets.map((t) => t.condition).join(", "),
+  );
+}
 
 if (pkg.type !== "module") {
   fail('package.json "type" must be "module" so the "import" target loads as ESM');
 }
 
-const targetFor = (condition) => targets.find((t) => t.condition === condition);
-const importTarget = targetFor("import");
-const requireTarget = targetFor("require");
+const allTargets = subpaths.flatMap((entry) =>
+  entry.targets.map((target) => ({ ...target, subpath: entry.subpath })),
+);
 
 // ── 2. Every declared target exists on disk ─────────────────────────
-for (const { condition, target } of targets) {
+for (const { subpath, condition, target } of allTargets) {
   const absolute = resolve(PKG_ROOT, target);
   if (!absolute.startsWith(PKG_ROOT + sep)) {
-    fail(`export target "${target}" (${condition}) escapes the package root`);
+    fail(`export target "${target}" (${subpath}.${condition}) escapes the package root`);
   }
   if (!existsSync(absolute)) {
-    fail(`export target "${target}" (${condition}) is missing — run "npm run build" first`);
+    fail(
+      `export target "${target}" (${subpath}.${condition}) is missing — ` +
+        'run "npm run build" first',
+    );
   }
   const size = statSync(absolute).size;
   if (size === 0) {
-    fail(`export target "${target}" (${condition}) is empty`);
+    fail(`export target "${target}" (${subpath}.${condition}) is empty`);
   }
-  pass(`${condition} -> ${target} (${size} bytes)`);
+  pass(`${subpath} ${condition} -> ${target} (${size} bytes)`);
 }
 
 // ── 3. Live resolution through the real exports map ─────────────────
 const requireFromHere = createRequire(import.meta.url);
 
-let cjsResolved;
-try {
-  cjsResolved = requireFromHere.resolve(PKG_NAME);
-} catch (err) {
-  fail(`"require" resolution of ${PKG_NAME} failed: ${err.message}`);
-}
-if (canonical(cjsResolved) !== canonical(resolve(PKG_ROOT, requireTarget.target))) {
-  fail(
-    `"require" resolved to ${rel(cjsResolved)} but exports declares ${requireTarget.target}`,
-  );
-}
-pass(`require("${PKG_NAME}") -> ${requireTarget.target}`);
-
-if (typeof import.meta.resolve !== "function") {
+const esmResolveAvailable = typeof import.meta.resolve === "function";
+if (!esmResolveAvailable) {
   warn("import.meta.resolve is unavailable on this Node — skipping live ESM resolution");
-} else {
+}
+
+for (const entry of subpaths) {
+  const specifier = specifierFor(entry.subpath);
+  const targetFor = (condition) => entry.targets.find((t) => t.condition === condition);
+  const importTarget = targetFor("import");
+  const requireTarget = targetFor("require");
+
+  let cjsResolved;
+  try {
+    cjsResolved = requireFromHere.resolve(specifier);
+  } catch (err) {
+    fail(`"require" resolution of ${specifier} failed: ${err.message}`);
+  }
+  if (canonical(cjsResolved) !== canonical(resolve(PKG_ROOT, requireTarget.target))) {
+    fail(
+      `require("${specifier}") resolved to ${rel(cjsResolved)} ` +
+        `but exports declares ${requireTarget.target}`,
+    );
+  }
+  pass(`require("${specifier}") -> ${requireTarget.target}`);
+
+  if (!esmResolveAvailable) continue;
+
   let esmResolved;
   try {
-    esmResolved = fileURLToPath(import.meta.resolve(PKG_NAME));
+    esmResolved = fileURLToPath(import.meta.resolve(specifier));
   } catch (err) {
-    fail(`"import" resolution of ${PKG_NAME} failed: ${err.message}`);
+    fail(`"import" resolution of ${specifier} failed: ${err.message}`);
   }
   if (canonical(esmResolved) !== canonical(resolve(PKG_ROOT, importTarget.target))) {
     fail(
-      `"import" resolved to ${rel(esmResolved)} but exports declares ${importTarget.target}`,
+      `import("${specifier}") resolved to ${rel(esmResolved)} ` +
+        `but exports declares ${importTarget.target}`,
     );
   }
-  pass(`import("${PKG_NAME}") -> ${importTarget.target}`);
+  pass(`import("${specifier}") -> ${importTarget.target}`);
 }
 
-// ── 4. CJS and ESM expose the same public surface ───────────────────
-const cjsModule = requireFromHere(PKG_NAME);
-let esmModule;
-try {
-  esmModule = await import(PKG_NAME);
-} catch (err) {
-  fail(`dynamic import of ${PKG_NAME} threw: ${err.message}`);
-}
+// ── 4. CJS and ESM expose the same public surface, per entry ────────
+for (const entry of subpaths) {
+  const specifier = specifierFor(entry.subpath);
 
-const esmKeys = Object.keys(esmModule).sort();
-const cjsKeys = Object.keys(cjsModule).sort();
-const onlyEsm = esmKeys.filter((key) => !cjsKeys.includes(key));
-const onlyCjs = cjsKeys.filter((key) => !esmKeys.includes(key));
+  let cjsModule;
+  try {
+    cjsModule = requireFromHere(specifier);
+  } catch (err) {
+    fail(`require("${specifier}") threw: ${err.message}`);
+  }
 
-if (onlyEsm.length > 0 || onlyCjs.length > 0) {
-  if (onlyEsm.length > 0) console.error(`[compat:exports]   x ESM-only exports: ${onlyEsm.join(", ")}`);
-  if (onlyCjs.length > 0) console.error(`[compat:exports]   x CJS-only exports: ${onlyCjs.join(", ")}`);
-  fail("CJS and ESM builds expose different public surfaces");
+  let esmModule;
+  try {
+    esmModule = await import(specifier);
+  } catch (err) {
+    fail(`dynamic import of ${specifier} threw: ${err.message}`);
+  }
+
+  const surface = (module) =>
+    Object.keys(module)
+      .filter((key) => key !== "default")
+      .sort();
+
+  const esmKeys = surface(esmModule);
+  const cjsKeys = surface(cjsModule);
+  const onlyEsm = esmKeys.filter((key) => !cjsKeys.includes(key));
+  const onlyCjs = cjsKeys.filter((key) => !esmKeys.includes(key));
+
+  if (onlyEsm.length > 0 || onlyCjs.length > 0) {
+    if (onlyEsm.length > 0) {
+      console.error(`[compat:exports]   x ${specifier} ESM-only exports: ${onlyEsm.join(", ")}`);
+    }
+    if (onlyCjs.length > 0) {
+      console.error(`[compat:exports]   x ${specifier} CJS-only exports: ${onlyCjs.join(", ")}`);
+    }
+    fail(`CJS and ESM builds of ${specifier} expose different public surfaces`);
+  }
+  if (esmKeys.length === 0) {
+    fail(`${specifier} exposes no public exports`);
+  }
+  pass(`${specifier} CJS and ESM expose the same ${esmKeys.length} public exports`);
 }
-if (esmKeys.length === 0) {
-  fail("the package exposes no public exports");
-}
-pass(`CJS and ESM expose the same ${esmKeys.length} public exports`);
 
 // ── 5. Every target is actually published ───────────────────────────
 function packedTargets() {
@@ -181,12 +232,15 @@ try {
 }
 
 if (packed) {
-  for (const { condition, target } of targets) {
+  for (const { subpath, condition, target } of allTargets) {
     if (!packed.has(target.replace(/^\.\//, ""))) {
-      fail(`export target "${target}" (${condition}) is not included in the published tarball`);
+      fail(
+        `export target "${target}" (${subpath}.${condition}) is not included in ` +
+          "the published tarball",
+      );
     }
   }
-  pass(`all ${targets.length} export targets are present in the publish tarball`);
+  pass(`all ${allTargets.length} export targets are present in the publish tarball`);
 }
 
 log("ALL CHECKS PASSED");

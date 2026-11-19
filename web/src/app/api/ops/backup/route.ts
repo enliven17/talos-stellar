@@ -31,7 +31,7 @@ import {
   backupDefaultTimeoutMs,
   backupMaxBytes,
 } from "@/lib/backup-config";
-import { rateLimit, rateLimitResponse } from "@/lib/rate-limit";
+import { applyRateLimitHeaders, rateLimit, rateLimitResponse } from "@/lib/rate-limit";
 import { withRequestId } from "@/lib/with-request-id";
 import { logger } from "@/lib/logger";
 import { TriggerBackupRequestSchema } from "@/lib/backup-types";
@@ -76,6 +76,7 @@ const rawPost = async (req: NextRequest): Promise<Response> => {
 
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "anon";
   const rl = await rateLimit(`ops:backup:${ip}`, RATE_LIMIT);
+  rl.policy = "ops-backup";
   if (!rl.ok) {
     logger.warn(
       { ip, requestId: req.headers.get("x-request-id") ?? null },
@@ -88,27 +89,36 @@ const rawPost = async (req: NextRequest): Promise<Response> => {
   try {
     body = await req.json();
   } catch {
-    return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+    return applyRateLimitHeaders(Response.json({ error: "Invalid JSON body" }, { status: 400 }), rl);
   }
   const parsed = TriggerBackupRequestSchema.safeParse(body);
   if (!parsed.success) {
-    return Response.json(
-      { error: "Validation failed", issues: parsed.error.issues.map((i) => i.message) },
-      { status: 400 },
+    return applyRateLimitHeaders(
+      Response.json(
+        { error: "Validation failed", issues: parsed.error.issues.map((i) => i.message) },
+        { status: 400 },
+      ),
+      rl,
     );
   }
 
   const passphrase = req.headers.get("x-backup-passphrase") ?? "";
   if (passphrase.length < 8) {
-    return Response.json(
-      { error: "X-Backup-Passphrase header required (≥ 8 chars)" },
-      { status: 400 },
+    return applyRateLimitHeaders(
+      Response.json(
+        { error: "X-Backup-Passphrase header required (≥ 8 chars)" },
+        { status: 400 },
+      ),
+      rl,
     );
   }
   if (passphrase.length > 1024) {
-    return Response.json(
-      { error: "X-Backup-Passphrase too long (max 1024 chars)" },
-      { status: 400 },
+    return applyRateLimitHeaders(
+      Response.json(
+        { error: "X-Backup-Passphrase too long (max 1024 chars)" },
+        { status: 400 },
+      ),
+      rl,
     );
   }
 
@@ -185,21 +195,24 @@ const rawPost = async (req: NextRequest): Promise<Response> => {
     // fetch the artifact out-of-band. The metadata returned is sufficient
     // to drive downstream pipeline: rotate secrets, push to S3, etc.
     const rowCountTotal = Object.values(result.rowCounts).reduce((a, b) => a + b, 0);
-    return Response.json({
-      ok: true,
-      runId,
-      status: "completed",
-      scope: requestedScope,
-      rowCounts: result.rowCounts,
-      rowCountTotal,
-      sizeBytes: result.encryptedBytes,
-      plaintextSizeBytes: result.plaintextBytes,
-      sha256Plaintext: result.sha256Plaintext,
-      encryption: "AES-256-GCM#PBKDF2-SHA256#200000",
-      signalVersion: result.plaintext.database.signalVersion,
-      timestamp: result.plaintext.timestamp,
-      durationMs: result.durationMs,
-    });
+    return applyRateLimitHeaders(
+      Response.json({
+        ok: true,
+        runId,
+        status: "completed",
+        scope: requestedScope,
+        rowCounts: result.rowCounts,
+        rowCountTotal,
+        sizeBytes: result.encryptedBytes,
+        plaintextSizeBytes: result.plaintextBytes,
+        sha256Plaintext: result.sha256Plaintext,
+        encryption: "AES-256-GCM#PBKDF2-SHA256#200000",
+        signalVersion: result.plaintext.database.signalVersion,
+        timestamp: result.plaintext.timestamp,
+        durationMs: result.durationMs,
+      }),
+      rl,
+    );
   } catch (err) {
     const safeErrMsg = (err instanceof BackupCryptoError)
       ? err.message
@@ -223,9 +236,12 @@ const rawPost = async (req: NextRequest): Promise<Response> => {
       },
       "ops backup failed",
     );
-    return Response.json(
-      { error: "Backup failed", runId, details: safeErrMsg },
-      { status: 500 },
+    return applyRateLimitHeaders(
+      Response.json(
+        { error: "Backup failed", runId, details: safeErrMsg },
+        { status: 500 },
+      ),
+      rl,
     );
   } finally {
     if (pool) await pool.end().catch(() => undefined);

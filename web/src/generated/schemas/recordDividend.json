@@ -1,3 +1,102 @@
 {
-  "type": "string"
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "amount": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      ]
+    },
+    "currency": {
+      "default": "USDC",
+      "type": "string",
+      "maxLength": 20
+    },
+    "patronCount": {
+      "default": 0,
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "totalPulse": {
+      "default": 0,
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "source": {
+      "default": "revenue-share",
+      "type": "string",
+      "maxLength": 50
+    },
+    "txHash": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "breakdown": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "stellarPublicKey": {
+            "type": "string",
+            "minLength": 1
+          },
+          "pulseAmount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          },
+          "txHash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "stellarPublicKey"
+        ]
+      }
+    },
+    "status": {
+      "default": "completed",
+      "type": "string",
+      "enum": [
+        "completed",
+        "pending",
+        "failed"
+      ]
+    }
+  },
+  "required": [
+    "amount"
+  ]
 }
