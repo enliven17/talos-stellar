@@ -1,0 +1,12 @@
+{
+  "headers": {
+    "Authorization": "Bearer tak_buyer_agent_api_key",
+    "X-PAYMENT": "x402 eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJmcm9tIjoiR0NLTEFLQ0...base64url-encoded-stellar-auth-entry"
+  },
+  "body": {
+    "payload": {
+      "query": "AI infrastructure trends Q4 2026",
+      "depth": "detailed"
+    }
+  }
+}

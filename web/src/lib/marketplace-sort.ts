@@ -127,97 +127,87 @@ export function buildMarketplaceOrderBy<TField extends string>(
   return [order(columns[sort.field]), desc(idColumn)];
 }
 
-// ─── Ranked cursor (sort + filter-bound) ─────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Directory (GET /api/talos) — sort fields and filter validators
+// ---------------------------------------------------------------------------
+
+/** Allowed sort fields for the Talos directory endpoint. */
+export const DIRECTORY_SORT_FIELDS = ["createdAt", "name"] as const;
+export type DirectorySortField = (typeof DIRECTORY_SORT_FIELDS)[number];
 
 /**
- * Encode a cursor that binds sort + filter identity.
+ * Valid `status` filter values for the Talos directory.
+ * "Deleted" is intentionally excluded from the public-facing filter set.
+ */
+export const DIRECTORY_STATUS_FILTER = ["Active", "Retired"] as const;
+export type DirectoryStatusFilter = (typeof DIRECTORY_STATUS_FILTER)[number];
+
+/**
+ * Parse and validate the `status` filter for the talos directory.
  *
- * The cursor carries: sort field, sort direction, filterHash, createdAt, and
- * id.  Any change in sort or filters invalidates the cursor so stale pages
- * never silently skip or duplicate rows.
+ * - Absent (`null`) → `{ ok: true, status: null }` (no filter applied)
+ * - Empty string  → 400
+ * - Unknown value → 400
+ * - Valid value   → `{ ok: true, status: <value> }`
  */
-export interface RankedMarketplaceCursor {
-  sortField: string;
-  sortDirection: MarketplaceSortDirection;
-  /** SHA-256 hex of the canonical filter string. */
-  filterHash: string;
-  /** ISO timestamp of the last item on the previous page (for createdAt). */
-  createdAt: string;
-  /** id of the last item on the previous page (tiebreaker). */
-  id: string;
-}
-
-/** base64url-encode a RankedMarketplaceCursor. */
-export function encodeRankedCursor(cursor: RankedMarketplaceCursor): string {
-  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
-}
-
-/**
- * Decode a base64url cursor string.
- * Returns null for any input that is not a structurally valid
- * RankedMarketplaceCursor (parse errors, missing fields, bad date).
- */
-export function decodeRankedCursor(raw: string): RankedMarketplaceCursor | null {
-  try {
-    const parsed = JSON.parse(
-      Buffer.from(raw, "base64url").toString("utf8"),
-    ) as Partial<RankedMarketplaceCursor>;
-
-    if (
-      typeof parsed.sortField !== "string" ||
-      parsed.sortField.length === 0 ||
-      typeof parsed.sortDirection !== "string" ||
-      !MARKETPLACE_SORT_DIRECTIONS.includes(
-        parsed.sortDirection as MarketplaceSortDirection,
-      ) ||
-      typeof parsed.filterHash !== "string" ||
-      parsed.filterHash.length === 0 ||
-      typeof parsed.createdAt !== "string" ||
-      Number.isNaN(new Date(parsed.createdAt).getTime()) ||
-      typeof parsed.id !== "string" ||
-      parsed.id.length === 0
-    ) {
-      return null;
-    }
-
+export function parseDirectoryStatusFilter(
+  raw: string | null,
+): { ok: true; status: DirectoryStatusFilter | null } | { ok: false; response: Response } {
+  if (raw === null) return { ok: true, status: null };
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
     return {
-      sortField: parsed.sortField,
-      sortDirection: parsed.sortDirection as MarketplaceSortDirection,
-      filterHash: parsed.filterHash,
-      createdAt: new Date(parsed.createdAt).toISOString(),
-      id: parsed.id,
+      ok: false,
+      response: Response.json(
+        { error: "status must be a non-empty string" },
+        { status: 400 },
+      ),
     };
-  } catch {
-    return null;
   }
+  if (!DIRECTORY_STATUS_FILTER.includes(trimmed as DirectoryStatusFilter)) {
+    return {
+      ok: false,
+      response: Response.json(
+        {
+          error: `Invalid status filter. Supported values: ${DIRECTORY_STATUS_FILTER.join(", ")}`,
+        },
+        { status: 400 },
+      ),
+    };
+  }
+  return { ok: true, status: trimmed as DirectoryStatusFilter };
 }
 
 /**
- * Canonical filter hash — SHA-256 hex of a stable JSON string of the filters.
- * Keys are sorted so the hash is order-independent.
+ * Parse and validate the `category` filter for the talos directory.
+ *
+ * - Absent (`null`) → `{ ok: true, category: null }` (no filter applied)
+ * - Empty string   → 400
+ * - > 128 chars    → 400
+ * - Valid string   → `{ ok: true, category: <trimmed> }`
  */
-export function hashFilters(filters: Record<string, string | null>): string {
-  const sorted = Object.keys(filters)
-    .sort()
-    .reduce<Record<string, string | null>>((acc, key) => {
-      acc[key] = filters[key];
-      return acc;
-    }, {});
-  return createHash("sha256").update(JSON.stringify(sorted)).digest("hex");
-}
-
-/**
- * Returns true when the cursor's encoded sort and filter hash match the
- * current request parameters exactly.
- */
-export function isCursorCompatible(
-  cursor: RankedMarketplaceCursor,
-  sort: MarketplaceSort<string>,
-  filterHash: string,
-): boolean {
-  return (
-    cursor.sortField === sort.field &&
-    cursor.sortDirection === sort.direction &&
-    cursor.filterHash === filterHash
-  );
+export function parseDirectoryCategoryFilter(
+  raw: string | null,
+): { ok: true; category: string | null } | { ok: false; response: Response } {
+  if (raw === null) return { ok: true, category: null };
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return {
+      ok: false,
+      response: Response.json(
+        { error: "category must be a non-empty string" },
+        { status: 400 },
+      ),
+    };
+  }
+  if (trimmed.length > 128) {
+    return {
+      ok: false,
+      response: Response.json(
+        { error: "category must be 128 characters or fewer" },
+        { status: 400 },
+      ),
+    };
+  }
+  return { ok: true, category: trimmed };
 }

@@ -1,14 +1,24 @@
 """OpenClaw tool functions for Talos Protocol.
 
 Each function is a standalone tool that OpenClaw can call.
-They use module-level _client which is initialized on first use.
+They use a module-level _client which is initialized on first use.
+
+HTTP errors are caught and returned as structured ``{"error": ..., "status": ...}``
+dicts so the host agent can handle them gracefully rather than receiving a raw
+``httpx.HTTPStatusError`` exception.  The raw API key is never included in the
+error payload.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+import httpx
+
 from talos_skill.client import TalosClient
+
+logger = logging.getLogger(__name__)
 
 _client: TalosClient | None = None
 
@@ -18,6 +28,33 @@ def _get_client() -> TalosClient:
     if _client is None:
         _client = TalosClient()
     return _client
+
+
+def _http_error_result(exc: httpx.HTTPStatusError) -> dict[str, Any]:
+    """Convert an HTTP error into a structured result without leaking the API key."""
+    return {
+        "error": exc.response.reason_phrase or "HTTP error",
+        "status": exc.response.status_code,
+    }
+
+
+# ── talos_shutdown ────────────────────────────────────────────
+
+async def talos_shutdown() -> None:
+    """Close the shared HTTP client.
+
+    OpenClaw hosts that support lifecycle hooks should register this as an
+    ``on_shutdown`` callback so that the underlying ``httpx.AsyncClient`` is
+    closed cleanly and no unclosed-client warnings are emitted.
+
+    Usage (OpenClaw native plugin ``register`` function)::
+
+        api.register_shutdown(talos_shutdown)
+    """
+    global _client
+    if _client is not None:
+        await _client.close()
+        _client = None
 
 
 # ── talos_register ───────────────────────────────────────────
@@ -58,7 +95,11 @@ async def talos_register(
     if service_price is not None:
         params["servicePrice"] = service_price
 
-    result = await client.create_talos(params)
+    try:
+        result = await client.create_talos(params)
+    except httpx.HTTPStatusError as exc:
+        return _http_error_result(exc)
+
     # Cache the talos_id and api_key for subsequent calls
     if "id" in result:
         client.talos_id = result["id"]
@@ -86,7 +127,11 @@ async def talos_discover(
     Find services offered by other agents that you can purchase.
     """
     client = _get_client()
-    services = await client.discover_services(category=category, target=target)
+    try:
+        services = await client.discover_services(category=category, target=target)
+    except httpx.HTTPStatusError as exc:
+        return _http_error_result(exc)
+
     return {
         "count": len(services),
         "services": [
@@ -115,33 +160,37 @@ async def talos_purchase(
     """
     client = _get_client()
 
-    # Step 1: GET service endpoint — expect 402 with payment details
-    response = await client.get_service(talos_id)
+    try:
+        # Step 1: GET service endpoint — expect 402 with payment details
+        response = await client.get_service(talos_id)
 
-    if response.status_code == 402:
-        payment_info = response.json()
-        payee = payment_info.get("payee", "")
-        price = payment_info.get("price", 0)
+        if response.status_code == 402:
+            payment_info = response.json()
+            payee = payment_info.get("payee", "")
+            price = payment_info.get("price", 0)
 
-        # Step 2: Sign the payment via Stellar wallet
-        sig = await client.sign_payment(payee=payee, amount=f"{price:.2f}")
-        signature = sig.get("paymentHeader", "")
+            # Step 2: Sign the payment via Stellar wallet
+            sig = await client.sign_payment(payee=payee, amount=f"{price:.2f}")
+            signature = sig.get("paymentHeader", "")
 
-        # Step 3: Submit with payment header
-        result = await client.purchase_service(
-            talos_id, payment_header=signature, payload=payload,
-        )
-        return {
-            "status": "purchased",
-            "job_id": result.get("id"),
-            "amount": price,
-            "message": f"Service purchased for {price} USDC. Job ID: {result.get('id')}",
-        }
+            # Step 3: Submit with payment header
+            result = await client.purchase_service(
+                talos_id, payment_header=signature, payload=payload,
+            )
+            return {
+                "status": "purchased",
+                "job_id": result.get("id"),
+                "amount": price,
+                "message": f"Service purchased for {price} USDC. Job ID: {result.get('id')}",
+            }
 
-    if response.status_code == 200:
-        return {"status": "free", "result": response.json()}
+        if response.status_code == 200:
+            return {"status": "free", "result": response.json()}
 
-    return {"status": "error", "code": response.status_code, "body": response.text}
+        return {"status": "error", "code": response.status_code, "body": response.text}
+
+    except httpx.HTTPStatusError as exc:
+        return _http_error_result(exc)
 
 
 # ── talos_fulfill ────────────────────────────────────────────
@@ -175,15 +224,21 @@ async def talos_submit_result(
 ) -> dict[str, Any]:
     """Submit the result of a completed job and report the earned revenue."""
     client = _get_client()
-    job_result = await client.submit_job_result(job_id, result)
+    try:
+        job_result = await client.submit_job_result(job_id, result)
+    except httpx.HTTPStatusError as exc:
+        return _http_error_result(exc)
 
     # Auto-report revenue
     amount = float(job_result.get("amount", 0))
     if amount > 0:
-        await client.report_revenue(
-            amount=amount,
-            source="commerce",
-        )
+        try:
+            await client.report_revenue(
+                amount=amount,
+                source="commerce",
+            )
+        except httpx.HTTPStatusError as exc:
+            logger.warning("talos_submit_result: revenue report failed: %s", exc)
 
     return {
         "status": "completed",
@@ -212,18 +267,22 @@ async def talos_report(
     """
     client = _get_client()
 
-    if action == "revenue" and amount is not None:
-        await client.report_revenue(
-            amount=amount,
-            source=source or "direct",
-        )
-        return {"status": "recorded", "type": "revenue", "amount": amount}
+    try:
+        if action == "revenue" and amount is not None:
+            await client.report_revenue(
+                amount=amount,
+                source=source or "direct",
+            )
+            return {"status": "recorded", "type": "revenue", "amount": amount}
 
-    result = await client.report_activity(
-        type_=activity_type,
-        content=content,
-        channel=channel,
-    )
+        result = await client.report_activity(
+            type_=activity_type,
+            content=content,
+            channel=channel,
+        )
+    except httpx.HTTPStatusError as exc:
+        return _http_error_result(exc)
+
     return {"status": "recorded", "type": "activity", "activity_id": result.get("id")}
 
 
@@ -232,8 +291,11 @@ async def talos_report(
 async def talos_status() -> dict[str, Any]:
     """Get your Talos dashboard summary."""
     client = _get_client()
-    # Use get_talos (with ID) to get full detail including relations
-    talos = await client.get_talos()
+    try:
+        # Use get_talos (with ID) to get full detail including relations
+        talos = await client.get_talos()
+    except httpx.HTTPStatusError as exc:
+        return _http_error_result(exc)
 
     revenues = talos.get("revenues", [])
     total_revenue = sum(float(r.get("amount", 0)) for r in revenues)

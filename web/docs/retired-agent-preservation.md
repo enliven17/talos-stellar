@@ -206,13 +206,17 @@ The partial unique index (`WHERE retiredAt IS NULL`) allows:
 
 This approach provides flexibility while preventing confusion in historical analysis.
 
-### Soft Deletion
+### Soft Deletion & Listing Exclusions
 
 Privacy deletion uses soft deletion (setting `deletedAt`) rather than hard deletion to:
 - Maintain referential integrity
 - Preserve audit trails
 - Allow historical analysis
 - Support potential data recovery
+
+#### Direct Detail Lookups vs. Public Listings
+- **Public Listings**: To prevent deleted agents from selling services, ranking, or being discovered, `isNull(tlsTalos.deletedAt)` is enforced on marketplace listings (`/api/services`), rankings (`/api/leaderboard`), and directory discovery (`/api/talos`).
+- **Direct Detail Lookups (`/api/talos/[id]`)**: Direct detail lookups continue to return the historical record (HTTP 200 with `deletedAt` populated and sensitive credentials like API keys stripped) rather than returning `410 Gone`. This fulfills the requirement that historical identity, governance, reputation, and commerce records remain queryable and auditable after privacy soft-deletion without breaking historical links or client audit trails.
 
 ## Rollback
 

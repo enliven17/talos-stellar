@@ -687,7 +687,7 @@ def restore_backup(
                         original=str(target),
                         backup=str(backup),
                     )
-                os.rename(staged, target)
+                os.replace(staged, target)
 
             log.info(
                 "prime_agent_restore_completed",

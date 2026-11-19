@@ -145,7 +145,7 @@ def test_transaction_safety(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def test_secret_rotation_upgrade_from_version_6_preserves_existing_data(tmp_path: Path):
-    """Migration 7 adds secret tables without rewriting legacy agent state."""
+    """Secret tables (migration 10) are added without rewriting legacy agent state."""
     db_file = tmp_path / "secret-upgrade.db"
     db = LocalDB(path=db_file)
     db._conn.execute(
@@ -206,5 +206,5 @@ def test_adapter_sandbox_upgrade_from_version_7_preserves_existing_data(tmp_path
     assert upgraded._conn.execute(
         "SELECT value FROM talos_config WHERE key = 'sandbox-upgrade'"
     ).fetchone()[0] == "preserved"
-    assert upgraded._conn.execute("PRAGMA user_version").fetchone()[0] == 8
+    assert upgraded._conn.execute("PRAGMA user_version").fetchone()[0] == _MIGRATIONS[-1][0]
     upgraded.close()
