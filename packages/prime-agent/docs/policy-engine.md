@@ -170,6 +170,26 @@ Traces include per-rule and per-condition steps.  Secret-shaped fields
 `[redacted]` and never logged or returned in cleartext.  BLOCKER
 short-circuits still emit the full trace up to the denying rule.
 
+To export one simulated action's explanation as JSON:
+
+```python
+sim.export_decision(
+  "transfer_xlm",
+  "decision.json",
+  params={"amount": 500, "beneficiary_note": "..."},
+  private_arguments={"beneficiary_note"},
+)
+```
+
+The export includes the decision, matched policy/rule IDs, bounded reasons,
+condition trace steps, and bounded arguments. Built-in sensitive field names
+are redacted automatically; pass `private_arguments` for tool arguments whose
+privacy classification comes from the tool schema or caller. Nested arguments
+can be classified with dotted paths; classified values are also redacted if a
+policy condition references them. The export is a simulation and does not
+enforce or execute the action. Existing `export_scenarios` batch exports and
+`PolicyResult` interfaces are unchanged.
+
 ## Observability
 
 The engine exposes counters via `engine.metrics`:
