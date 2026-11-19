@@ -84,6 +84,10 @@ Policies are JSON files or Python dataclasses. Example:
 
 Save to `~/.talos-agent/policies.json`.  The engine hot-reloads on file change.
 
+Each `rule_id` must be non-empty and unique across the complete loaded policy
+set. Duplicate or empty identifiers are rejected before policies are installed;
+rule IDs remain the stable link between decision traces and policy overrides.
+
 ### Supported operators
 
 | Operator | Description |
