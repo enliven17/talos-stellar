@@ -38,6 +38,16 @@ export const jobsConfig = {
 
   /** Identifies this process in leaseOwner / logs. Stable per process lifetime. */
   workerId: process.env.JOBS_WORKER_ID || `${process.pid}-${randomUUID().slice(0, 8)}`,
+
+  /**
+   * Maximum age a pending job may wait before being transitioned to
+   * dead_letter without consuming a retry attempt. Set via
+   * JOBS_QUEUE_AGE_DEADLINE_MS. Default 0 (disabled).
+   *
+   * When 0, expireAgedPendingJobs() is a no-op and pending jobs are
+   * never expired by age alone — only by lease reaping or manual action.
+   */
+  queueAgeDeadlineMs: envInt("JOBS_QUEUE_AGE_DEADLINE_MS", 0),
 };
 
 /** Bearer token for /api/admin/jobs/* inspection endpoints. */

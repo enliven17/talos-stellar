@@ -322,3 +322,40 @@ export async function getJob(jobId: string): Promise<JobRecord | null> {
   const row = await db.select().from(tlsJobs).where(eq(tlsJobs.id, jobId)).limit(1).then((r) => r[0] ?? null);
   return row ? toRecord(row) : null;
 }
+
+/**
+ * Expires pending jobs that have waited longer than the configured
+ * queue-age deadline without being claimed by any worker. Transitions
+ * matching rows directly to dead_letter without consuming a retry attempt —
+ * the job never ran, so the attempt ceiling is preserved for manual requeue.
+ *
+ * Returns the number of jobs expired. When queueAgeDeadlineMs is 0 (the
+ * default) the function is a no-op and returns 0 immediately.
+ *
+ * Configuration: JOBS_QUEUE_AGE_DEADLINE_MS (default 0 = disabled).
+ */
+export async function expireAgedPendingJobs(
+  queueAgeDeadlineMs: number = jobsConfig.queueAgeDeadlineMs,
+): Promise<number> {
+  if (queueAgeDeadlineMs <= 0) return 0;
+
+  const cutoff = sql`now() - (${queueAgeDeadlineMs}::text || ' milliseconds')::interval`;
+  const expired = await db
+    .update(tlsJobs)
+    .set({
+      status: "dead_letter",
+      lastError: `queue-age deadline exceeded: job waited more than ${queueAgeDeadlineMs}ms without being claimed`,
+    })
+    .where(
+      and(
+        eq(tlsJobs.status, "pending"),
+        lt(tlsJobs.createdAt, cutoff),
+      ),
+    )
+    .returning({ id: tlsJobs.id, queue: tlsJobs.queue });
+
+  for (const row of expired) {
+    logJobEvent("job_dead_letter", { jobId: row.id, queue: row.queue });
+  }
+  return expired.length;
+}

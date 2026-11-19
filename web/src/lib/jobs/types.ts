@@ -78,4 +78,6 @@ export interface RunOnceSummary {
   deadLettered: number;
   cancelled: number;
   reaped: number;
+  /** Pending jobs expired by queue-age deadline (never ran; attempts unchanged). */
+  agedOut: number;
 }
