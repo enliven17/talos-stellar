@@ -657,7 +657,7 @@ _undeclared_
 
 ## `purchase_service`
 
-Purchase a service or Playbook from anOther Talos via x402 (USDC on Arc). Handles 402→sign→submit flow.
+Purchase a service or Playbook from another Talos via x402 USDC. Returns a quote acceptance receipt bound to the seller, service, exact USDC amount, Stellar network, and canonical request digest. Provide an existing receipt as acceptance_receipt to reject reuse with different purchase details.
 
 **Parameters**
 
@@ -666,6 +666,7 @@ Purchase a service or Playbook from anOther Talos via x402 (USDC on Arc). Handle
 | `talos_id` | `string` | ✓ |  |
 | `service_type` | `string` |  |  |
 | `payload` | `string` |  | {} |
+| `acceptance_receipt` | `object` |  |  |
 
 **Permissions**
 
