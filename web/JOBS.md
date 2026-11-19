@@ -24,7 +24,7 @@ pending|leased → cancelled   (cooperative — see Cancellation below)
 ```
 
 - **pending** — eligible for leasing once `runAt <= now()`.
-- **leased** — a worker holds it; `leaseId`/`leaseExpiresAt` identify the claim.
+- **leased** — a worker holds it; `leaseId`/`leaseGeneration`/`leaseExpiresAt` identify the claim.
 - **completed** — terminal, success. `result` holds the handler's return value.
 - **dead_letter** — terminal, failure. `lastError` holds the last (truncated) error message.
 - **cancelled** — terminal, cooperative cancellation.
@@ -44,6 +44,21 @@ path — every `runOnce()` call starts by reaping expired leases
 jobs that already exhausted their budget go straight to `dead_letter`. This
 is what makes leasing safe to run from multiple instances with no
 coordinator.
+
+### Lease fencing (monotonic generation)
+
+Every `leaseBatch()` claim atomically increments `leaseGeneration` (a monotonic
+integer that is never reset, even across retries, reaps, releases, or admin
+requeues). `runner.ts` carries `(jobId, leaseId, leaseGeneration)` into:
+
+- `ctx.leaseId` and `ctx.leaseGeneration` on `JobContext`
+- `ctx.applyEffect((fence) => ...)` — verifies the active `(jobId, leaseId, leaseGeneration)` via `withLeaseFence()` before executing a result-side effect and throws `StaleLeaseError` if the lease was replaced
+- `store.heartbeat()`, `store.complete()`, `store.fail()`, and `store.release()` — all reject updates when `leaseGeneration` no longer matches the active lease, emitting a `job_lease_fenced` log event
+
+Handlers performing external or database side effects should wrap them in
+`ctx.applyEffect(...)` (or pass `ctx.leaseGeneration` as a fencing token to
+downstream writes) so a slow worker whose lease was reaped and replaced cannot
+apply stale results.
 
 ## Retry classes
 
@@ -133,7 +148,7 @@ All under `Authorization: Bearer <ADMIN_API_KEY>`:
 Every state transition is a structured `pino` log line via `src/lib/jobs/metrics.ts`
 (`job_enqueued`, `job_leased`, `job_heartbeat`, `job_completed`,
 `job_retry_scheduled`, `job_dead_letter`, `job_cancelled`,
-`job_lease_reaped`) with `jobId`, `queue`, `attempts`, `durationMs`, etc.
+`job_lease_reaped`, `job_lease_fenced`) with `jobId`, `queue`, `attempts`, `leaseGeneration`, `durationMs`, etc.
 **Never** `payload`, `result`, or a raw error object — `lastError` on the
 row (and in logs) is `truncateError()`'d down to the error's `message`
 only, capped at 500 characters, no stack, no cause chain. If a job's
@@ -154,7 +169,7 @@ occasionally on deploys, a signal of a stuck/crashing handler if frequent).
 
 ## Migration / rollback
 
-- **Forward migration**: `drizzle/0012_add_background_jobs.sql` — additive only, one new table (`tls_jobs`), no changes to existing tables. `pnpm db:migrate` applies it; safe to run against a live database with no downtime.
+- **Forward migration**: `drizzle/0016_add_background_jobs.sql` (table creation) and `drizzle/0024_add_job_lease_generation.sql` (additive `leaseGeneration` column with `DEFAULT 0 NOT NULL`). `pnpm db:migrate` applies them; safe to run against a live database with no downtime.
 - **Rollback**: `JOBS_ENABLED=false` (or unset) immediately stops all new enqueue/processing behavior — everything currently integrated (the audit-log write in `src/lib/auth.ts`) reverts to its pre-existing direct-write behavior with no code change. The `tls_jobs` table can be left in place (inert) or dropped (`DROP TABLE tls_jobs;`) independently, since nothing else references it via a foreign key.
 - **Compatibility**: the table is new, so there's no existing-data migration to reason about. The one integrated call site (audit-log write) is behind the same flag, so its behavior is unchanged unless an operator opts in.
 

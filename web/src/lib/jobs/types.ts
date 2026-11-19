@@ -19,6 +19,8 @@ export interface JobRecord<TPayload = unknown> {
   priority: number;
   runAt: Date;
   leaseId: string | null;
+  /** Monotonic fencing token incremented on every lease claim and never reset. */
+  leaseGeneration: number;
   leaseOwner: string | null;
   leaseExpiresAt: Date | null;
   heartbeatAt: Date | null;
@@ -51,12 +53,32 @@ export interface HeartbeatResult {
   cancelled: boolean;
 }
 
+/**
+ * Monotonic fencing token identifying a specific lease claim for a job.
+ * Carried into result-side effects so a worker whose lease was replaced
+ * cannot apply stale effects or overwrite a newer worker's state.
+ */
+export interface LeaseFence {
+  jobId: string;
+  leaseId: string;
+  leaseGeneration: number;
+}
+
 export interface JobContext<TPayload = unknown> {
   id: string;
   queue: string;
   attempts: number;
   maxAttempts: number;
   payload: TPayload;
+  /** Active lease token for this claim. */
+  leaseId: string;
+  /** Monotonic lease generation fencing token for this claim. */
+  leaseGeneration: number;
+  /**
+   * Executes a result-side effect only if this worker's lease generation is
+   * still active. Throws `StaleLeaseError` if the lease was replaced or lost.
+   */
+  applyEffect: <T>(effect: (fence: LeaseFence) => Promise<T>) => Promise<T>;
   /**
    * Extends the lease and checks for cooperative cancellation. Long-running
    * handlers should call this periodically and abort (via `signal`) when

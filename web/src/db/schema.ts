@@ -870,9 +870,12 @@ export const tlsJobs = pgTable(
     // Earliest time this job is eligible to be leased (supports delayed retry)
     runAt: timestamp("runAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
 
-    // Lease ownership — leaseId is a random token so a reaped-and-relaunched
-    // lease can never be mistaken for the original by a slow worker.
+    // Lease ownership — leaseId is a random token and leaseGeneration is a
+    // monotonic fencing token incremented on every lease claim (never reset),
+    // so a reaped-and-replaced lease can never be mistaken for the original by
+    // a slow worker applying side effects or finalizing results.
     leaseId: text("leaseId"),
+    leaseGeneration: integer("leaseGeneration").notNull().default(0),
     leaseOwner: text("leaseOwner"),
     leaseExpiresAt: timestamp("leaseExpiresAt", { mode: "date", precision: 3 }),
     heartbeatAt: timestamp("heartbeatAt", { mode: "date", precision: 3 }),
