@@ -94,6 +94,7 @@ export default async function TalosDetailPage({
     pulsePrice: `$${Number(talos.pulsePrice).toFixed(2)}`,
     totalSupply: talos.totalSupply,
     creatorPublicKey: talos.creatorPublicKey,
+    walletPublicKey: talos.walletPublicKey,
     persona: talos.persona ?? "",
     targetAudience: talos.targetAudience ?? "",
     channels: talos.channels,

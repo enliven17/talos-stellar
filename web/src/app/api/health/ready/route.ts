@@ -24,7 +24,8 @@
 
 import { db } from "@/db";
 import { sql } from "drizzle-orm";
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { withRequestId } from "@/lib/with-request-id";
 import {
   DEFAULT_HORIZON,
   resolveDbTimeoutMs,
@@ -116,7 +117,7 @@ export async function performHealthCheck(
   };
 }
 
-export async function GET() {
+async function _GET(_req?: NextRequest) {
   const result = await performHealthCheck({
     db,
     fetch,
@@ -133,3 +134,12 @@ export async function GET() {
     headers: { "Cache-Control": "no-store" },
   });
 }
+
+const wrappedGet = withRequestId(_GET);
+
+export function GET(): Promise<Response>;
+export function GET(request: NextRequest): Promise<Response>;
+export function GET(request?: NextRequest): Promise<Response> {
+  return wrappedGet(request);
+}
+

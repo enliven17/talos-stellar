@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
-from talos_agent.payments import USDC_TESTNET_ISSUER
+from talos_agent.payments import USDC_DECIMALS, USDC_TESTNET_ISSUER, USDC_UNIT_SCALE
 from talos_agent.tools.commerce import (
     ALL_CATEGORIES,
     apply_playbook,
@@ -15,26 +15,60 @@ from talos_agent.tools.commerce import (
 
 
 class TestPriceToUsdcUnits:
-    def test_standard_decimal(self):
-        assert price_to_usdc_units("1.05") == 1_050_000
+    @pytest.mark.parametrize(
+        ("price", "expected"),
+        [
+            ("0", 0),
+            ("0.000001", 1),
+            ("0.50", 500_000),
+            ("1.05", 1_050_000),
+            ("1.999999", 1_999_999),
+            ("10", 10_000_000),
+            ("10.000000", 10_000_000),
+            ("1000000", 1_000_000_000_000),
+        ],
+    )
+    def test_valid_prices(self, price, expected):
+        assert price_to_usdc_units(price) == expected
 
-    def test_half_dollar(self):
-        assert price_to_usdc_units("0.50") == 500_000
+    def test_matches_unit_scale_constant(self):
+        assert price_to_usdc_units("1") == USDC_UNIT_SCALE
+        assert USDC_UNIT_SCALE == 10**USDC_DECIMALS
 
-    def test_whole_number(self):
-        assert price_to_usdc_units("10") == 10_000_000
+    @pytest.mark.parametrize(
+        "price",
+        [
+            "1.2.3",  # extra dot was previously read as 1200000
+            "-1",  # negative sign was previously read as -1000000
+            "",  # previously raised ValueError from int('')
+            "1.",
+            ".5",
+            "abc",
+            "1.1234567",  # more precision than USDC supports
+            "1e6",
+            "0x10",
+            "nan",
+            "inf",
+            " 1.05",
+            "1.05 ",
+            "+1.05",
+            "1,05",
+        ],
+    )
+    def test_malformed_prices_raise(self, price):
+        with pytest.raises(ValueError, match="Invalid price") as exc_info:
+            price_to_usdc_units(price)
+        message = str(exc_info.value)
+        assert repr(price) in message
+        assert str(USDC_DECIMALS) in message
 
-    def test_six_decimals(self):
-        assert price_to_usdc_units("1.999999") == 1_999_999
+    def test_rejects_non_decimal_types(self):
+        with pytest.raises(ValueError, match="Invalid price"):
+            price_to_usdc_units(None)
 
-    def test_truncates_beyond_six(self):
-        assert price_to_usdc_units("1.1234567") == 1_123_456
-
-    def test_zero(self):
-        assert price_to_usdc_units("0") == 0
-
-    def test_smallest_unit(self):
-        assert price_to_usdc_units("0.000001") == 1
+    def test_accepts_numeric_inputs(self):
+        assert price_to_usdc_units(1) == 1_000_000
+        assert price_to_usdc_units(1.05) == 1_050_000
 
 
 def test_all_categories_has_ten_entries():
@@ -145,6 +179,42 @@ class TestPurchaseServiceSignPayment:
         _, call_kwargs = mock_sign.call_args
         assert "token_address" not in call_kwargs
         assert "chain_id" not in call_kwargs
+
+
+class TestPurchaseServiceRejectsMalformedPrice:
+    """A price that cannot be converted exactly must not reach the signer."""
+
+    @pytest.mark.asyncio
+    async def test_over_precise_price_is_rejected_before_signing(self):
+        mock_signer = MagicMock()
+        mock_signer.initialize = AsyncMock()
+        mock_signer.sign_payment = AsyncMock(return_value={"status": "signed"})
+
+        mock_api = MagicMock()
+        mock_api.get_service = AsyncMock(return_value=MagicMock(
+            status_code=402,
+            json=lambda: {"price": "1.0000001", "payee": "GPAY..."},
+        ))
+        mock_api.submit_commerce = AsyncMock()
+
+        mock_db = MagicMock()
+        mock_db.get_talos_config.return_value = {"gtmBudget": 200}
+        mock_db.get_spending_period.return_value = 0.0
+
+        mock_settings = MagicMock()
+        mock_settings.approval_threshold = "50"
+        mock_settings.talos_id = "talos-test"
+
+        with patch("talos_agent.tools.commerce._api", mock_api), \
+             patch("talos_agent.tools.commerce._db", mock_db), \
+             patch("talos_agent.tools.commerce._settings", mock_settings), \
+             patch("talos_agent.tools.commerce._get_signer", return_value=mock_signer):
+            result = await purchase_service("other-talos", "research", "{}")
+
+        assert result["code"] == "INVALID_QUOTE"
+        mock_signer.sign_payment.assert_not_called()
+        mock_api.submit_commerce.assert_not_called()
+        mock_db.record_spending.assert_not_called()
 
 
 class TestApplyPlaybook:

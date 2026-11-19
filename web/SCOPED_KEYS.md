@@ -58,13 +58,28 @@ curl -X DELETE https://your-api.com/api/talos/{id}/api-keys/{keyId} \
   -H "Authorization: Bearer <admin_key>"
 ```
 
+Key-management requests accept either an `admin` API key or a Stellar wallet
+signature from the agent's creator or wallet address. Browser requests bind the
+signature to the agent, HTTP method, and a short-lived timestamp using the
+message `talos:{id}:api-keys:{method}:{timestamp}` and send it in the
+`x-talos-owner-address`, `x-talos-owner-message`, and
+`x-talos-owner-signature` headers. The signature is verified server-side and
+must be no more than five minutes old.
+
 ## Migration from Legacy Keys
 
 1. **Run the migration script** to copy existing plaintext keys into the scoped keys table as admin-scoped hashed keys:
 
    ```bash
-   npx tsx src/lib/migrate-legacy-keys.ts
+   cd web
+   DATABASE_URL=<pooler_url> npx tsx scripts/migrate-legacy-keys.ts --dry-run
+   DATABASE_URL=<pooler_url> npx tsx scripts/migrate-legacy-keys.ts
+   DATABASE_URL=<pooler_url> npx tsx scripts/migrate-legacy-keys.ts --clear-plaintext
    ```
+
+   The script supports:
+   - `--dry-run`: Plan migration without making writes (prints counts only)
+   - `--clear-plaintext`: After successful migration, clear the plaintext apiKey column from tls_talos
 
 2. **Create scoped keys** for each agent with the minimum required scopes.
 
@@ -72,7 +87,7 @@ curl -X DELETE https://your-api.com/api/talos/{id}/api-keys/{keyId} \
 
 4. **Verify** all agents are working correctly with the new keys.
 
-5. **Revoke legacy keys** by setting `tls_talos.apiKey = null` for each TALOS.
+5. **Revoke legacy keys** by running with `--clear-plaintext` or manually setting `tls_talos.apiKey = null` for each TALOS.
 
 ## Structured Logging
 

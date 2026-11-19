@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsReputationInputs, tlsTalos } from "@/db/schema";
@@ -54,7 +55,7 @@ const querySchema = z.object({
  * roadmap item may tighten this to Patron-only readers; until then, the
  * endpoint exposes no PII (only TALOS ids, counts, and shares).
  */
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -217,3 +218,5 @@ function parseQuery(request: NextRequest): Record<string, string> {
   }
   return out;
 }
+
+export const GET = withRequestId(_GET);

@@ -5,6 +5,7 @@
  * Uses the same fencing-token pattern as commerce jobs.
  */
 
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsWebhookDeliveries } from "@/db/schema";
@@ -34,7 +35,7 @@ const submitResultSchema = z.object({
   fencingToken: z.number().int().nonnegative(),
 });
 
-export async function POST(
+async function _POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -131,3 +132,5 @@ export async function POST(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);

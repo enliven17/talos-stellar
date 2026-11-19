@@ -19,27 +19,27 @@ import type { JsonSchemaObject } from "./drift/types.js";
 // ── Import generated schemas ──────────────────────────────────────────────────
 // These JSON files are produced by web/scripts/generate-schemas.ts.
 
-import createTalos from "../generated/schemas/createTalos.json" assert { type: "json" };
-import reportActivity from "../generated/schemas/reportActivity.json" assert { type: "json" };
-import createApproval from "../generated/schemas/createApproval.json" assert { type: "json" };
-import decideApproval from "../generated/schemas/decideApproval.json" assert { type: "json" };
-import transfer from "../generated/schemas/transfer.json" assert { type: "json" };
-import becomePatron from "../generated/schemas/becomePatron.json" assert { type: "json" };
-import revokePatron from "../generated/schemas/revokePatron.json" assert { type: "json" };
-import registerService from "../generated/schemas/registerService.json" assert { type: "json" };
-import crossChainWebhook from "../generated/schemas/crossChainWebhook.json" assert { type: "json" };
-import submitBid from "../generated/schemas/submitBid.json" assert { type: "json" };
-import claimJob from "../generated/schemas/claimJob.json" assert { type: "json" };
-import heartbeatJob from "../generated/schemas/heartbeatJob.json" assert { type: "json" };
-import releaseJob from "../generated/schemas/releaseJob.json" assert { type: "json" };
-import submitJobResult from "../generated/schemas/submitJobResult.json" assert { type: "json" };
-import reportRevenue from "../generated/schemas/reportRevenue.json" assert { type: "json" };
-import recordDividend from "../generated/schemas/recordDividend.json" assert { type: "json" };
-import updateStatus from "../generated/schemas/updateStatus.json" assert { type: "json" };
-import regenerateKey from "../generated/schemas/regenerateKey.json" assert { type: "json" };
-import signPayment from "../generated/schemas/signPayment.json" assert { type: "json" };
-import buyToken from "../generated/schemas/buyToken.json" assert { type: "json" };
-import createPlaybook from "../generated/schemas/createPlaybook.json" assert { type: "json" };
+import createTalos from "../generated/schemas/createTalos.json" with { type: "json" };
+import reportActivity from "../generated/schemas/reportActivity.json" with { type: "json" };
+import createApproval from "../generated/schemas/createApproval.json" with { type: "json" };
+import decideApproval from "../generated/schemas/decideApproval.json" with { type: "json" };
+import transfer from "../generated/schemas/transfer.json" with { type: "json" };
+import becomePatron from "../generated/schemas/becomePatron.json" with { type: "json" };
+import revokePatron from "../generated/schemas/revokePatron.json" with { type: "json" };
+import registerService from "../generated/schemas/registerService.json" with { type: "json" };
+import crossChainWebhook from "../generated/schemas/crossChainWebhook.json" with { type: "json" };
+import submitBid from "../generated/schemas/submitBid.json" with { type: "json" };
+import claimJob from "../generated/schemas/claimJob.json" with { type: "json" };
+import heartbeatJob from "../generated/schemas/heartbeatJob.json" with { type: "json" };
+import releaseJob from "../generated/schemas/releaseJob.json" with { type: "json" };
+import submitJobResult from "../generated/schemas/submitJobResult.json" with { type: "json" };
+import reportRevenue from "../generated/schemas/reportRevenue.json" with { type: "json" };
+import recordDividend from "../generated/schemas/recordDividend.json" with { type: "json" };
+import updateStatus from "../generated/schemas/updateStatus.json" with { type: "json" };
+import regenerateKey from "../generated/schemas/regenerateKey.json" with { type: "json" };
+import signPayment from "../generated/schemas/signPayment.json" with { type: "json" };
+import buyToken from "../generated/schemas/buyToken.json" with { type: "json" };
+import createPlaybook from "../generated/schemas/createPlaybook.json" with { type: "json" };
 
 // ── Registration ──────────────────────────────────────────────────────────────
 

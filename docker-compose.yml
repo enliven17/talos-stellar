@@ -32,6 +32,11 @@ services:
       - .:/app
     environment:
       PORT: 4010
+      FAULT_INJECTION_ENABLED: ${FAULT_INJECTION_ENABLED:-false}
+      FAULT_LATENCY_MS: ${FAULT_LATENCY_MS:-0}
+      FAULT_ERROR_RATE: ${FAULT_ERROR_RATE:-0}
+      FAULT_TIMEOUT_RATE: ${FAULT_TIMEOUT_RATE:-0}
+      FAULT_MALFORMED_RATE: ${FAULT_MALFORMED_RATE:-0}
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4010/health >/dev/null 2>&1 || exit 1"]
       interval: 5s
