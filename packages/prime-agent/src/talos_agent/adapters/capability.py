@@ -115,12 +115,17 @@ class NetworkRule:
             raise ManifestValidationError("network rule port is out of range")
 
     def matches(self, host: str, port: int, method: str, path: str) -> bool:
-        """Explicit wildcard matching for network rules."""
+        """Explicit wildcard matching for network rules.
+
+        A rule without an explicit port matches the HTTPS default (443);
+        a rule with a port only matches that exact port.
+        """
         if not isinstance(host, str) or not isinstance(method, str) or not isinstance(path, str):
             return False
         if self.host != host:
             return False
-        if self.port is not None and self.port != port:
+        effective_rule_port = self.port if self.port is not None else 443
+        if effective_rule_port != port:
             return False
         return method.upper() in self.methods and path.startswith(self.path_prefix)
 
@@ -288,6 +293,18 @@ def default_manifests(limits: AdapterResourceLimits) -> dict[str, AdapterCapabil
             operations=frozenset({"post", "reply"}),
             secrets=frozenset({"telegram_bot_token"}),
             network=(NetworkRule("api.telegram.org", "/", frozenset({"POST"})),),
+            limits=limits,
+        ),
+        "mastodon": AdapterCapabilityManifest(
+            adapter_id="mastodon",
+            operations=frozenset({"post", "reply"}),
+            secrets=frozenset({"mastodon_access_token"}),
+            # The instance URL is operator-configured; network rules are
+            # validated at runtime in MastodonAdapter._build_url so the
+            # manifest purposefully leaves the host unset here.  A deployment
+            # that enables the sandbox should override this manifest via
+            # TALOS_ADAPTER_CAPABILITY_MANIFESTS with the concrete host.
+            network=(),
             limits=limits,
         ),
         "x": AdapterCapabilityManifest(
@@ -739,6 +756,10 @@ class AdapterInvocationStore:
                         lease.isoformat(),
                     ),
                 )
+                self._conn.execute(
+                    "UPDATE adapter_invocations SET attempt_count = 1 WHERE operation_id = ?",
+                    (operation_id,),
+                )
                 self._conn.commit()
                 return
             if (
@@ -763,6 +784,10 @@ class AdapterInvocationStore:
                     SET state = 'indeterminate', updated_at = datetime('now')
                     WHERE operation_id = ?
                     """,
+                    (operation_id,),
+                )
+                self._conn.execute(
+                    "UPDATE adapter_invocations SET attempt_count = attempt_count + 1 WHERE operation_id = ?",
                     (operation_id,),
                 )
                 self._conn.commit()

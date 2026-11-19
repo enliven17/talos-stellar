@@ -8,12 +8,26 @@
  *   4. ISSUER sends totalSupply tokens to OPERATOR (operator becomes the distributor)
  *   5. Save issuerPublicKey + stellarAssetCode to DB
  *
+ * Security changes (see #928):
+ *   - Issuer secret keys are NEVER printed to stdout.
+ *   - Instead they are written to an output file (default: ~/mitos-issuer-secrets.json)
+ *     with mode 0600 so only the current OS user can read it.
+ *   - Only the output file path and public keys are printed to stdout.
+ *   - The script refuses to run unless the configured network passphrase matches
+ *     Stellar TESTNET.  Pass --allow-network to override (e.g. for a private network).
+ *
  * Run:
  *   DATABASE_URL=... STELLAR_OPERATOR_SECRET_KEY=... npx tsx scripts/mint-mitos.ts
+ *   DATABASE_URL=... npx tsx scripts/mint-mitos.ts --out /safe/path/secrets.json
+ *   DATABASE_URL=... npx tsx scripts/mint-mitos.ts --allow-network
  *
- * IMPORTANT: Save the printed issuer secret keys. They are never stored in DB.
+ * IMPORTANT: The output file contains issuer secret keys.  Store it securely.
+ *            It is never stored in the database and cannot be recovered if lost.
  */
 
+import { writeFileSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { eq } from "drizzle-orm";
 import pg from "pg";
@@ -29,27 +43,82 @@ import {
 
 import { tlsTalos } from "../src/db/schema";
 
-// ── Config ─────────────────────────────────────────────────────────────────
+// ── Network guard ──────────────────────────────────────────────────────────
+
+/**
+ * Asserts that the given passphrase is the Stellar testnet passphrase, or that
+ * the caller has explicitly opted in to a non-testnet run.
+ *
+ * Exported for unit-testing.
+ *
+ * @throws {Error} when the passphrase is not testnet and allowNetwork is false.
+ */
+export function assertTestnetPassphrase(
+  passphrase: string,
+  allowNetwork: boolean,
+): void {
+  if (passphrase === Networks.TESTNET) return;
+  if (allowNetwork) {
+    console.warn(
+      "⚠️  --allow-network is set: running against a non-testnet network passphrase.",
+    );
+    return;
+  }
+  throw new Error(
+    `mint-mitos refuses to run against a non-testnet network passphrase.\n` +
+      `  configured: "${passphrase}"\n` +
+      `  expected:   "${Networks.TESTNET}"\n` +
+      `Pass --allow-network to override (only do this on a private/local network).`,
+  );
+}
+
+// ── Secret-file writer ────────────────────────────────────────────────────
+
+/**
+ * Writes issuer secrets to a JSON file with mode 0600.
+ *
+ * The file is written atomically-ish (writeFileSync) so a crash mid-write
+ * does not leave a partially written file readable by other users.
+ *
+ * Exported for unit-testing.
+ *
+ * @param secrets  Map of Talos name → issuer secret key.
+ * @param outPath  Absolute path to the output file.
+ */
+export function writeSecretsFile(
+  secrets: Record<string, string>,
+  outPath: string,
+): void {
+  const payload = JSON.stringify(
+    {
+      warning:
+        "These are ISSUER SECRET KEYS. Never commit, share, or expose them. Store securely.",
+      generatedAt: new Date().toISOString(),
+      secrets,
+    },
+    null,
+    2,
+  );
+
+  // Write with mode 0600 (owner read/write only)
+  writeFileSync(outPath, payload, { encoding: "utf8", mode: 0o600 });
+}
+
+// ── Script entry point ────────────────────────────────────────────────────
+// Guards below only execute when the file is run directly (not imported by
+// tests or other modules).
 
 const HORIZON_URL = "https://horizon-testnet.stellar.org";
 const NETWORK_PASSPHRASE = Networks.TESTNET;
 const FRIENDBOT_URL = "https://friendbot.stellar.org";
 
-const OPERATOR_SECRET = process.env.STELLAR_OPERATOR_SECRET_KEY;
-if (!OPERATOR_SECRET) {
-  console.error("❌  STELLAR_OPERATOR_SECRET_KEY is not set");
-  process.exit(1);
+// Detect whether this module is the direct entry point.
+// tsx sets process.argv[1] to the resolved file path.
+function isEntryPoint(): boolean {
+  return process.argv[1]?.endsWith("mint-mitos.ts") ||
+    process.argv[1]?.endsWith("mint-mitos.js") ||
+    false;
 }
-
-const DATABASE_URL = process.env.DATABASE_URL;
-if (!DATABASE_URL) {
-  console.error("❌  DATABASE_URL is not set");
-  process.exit(1);
-}
-
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-const server = new Horizon.Server(HORIZON_URL);
 
 async function friendbot(publicKey: string): Promise<void> {
   const res = await fetch(`${FRIENDBOT_URL}?addr=${encodeURIComponent(publicKey)}`);
@@ -60,12 +129,35 @@ async function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// ── Main ───────────────────────────────────────────────────────────────────
-
 async function main() {
+  // Parse CLI flags
+  const args = process.argv.slice(2);
+  const allowNetwork = args.includes("--allow-network");
+  const outFlagIdx = args.indexOf("--out");
+  const outPath =
+    outFlagIdx !== -1 && args[outFlagIdx + 1]
+      ? args[outFlagIdx + 1]
+      : join(homedir(), "mitos-issuer-secrets.json");
+
+  const OPERATOR_SECRET = process.env.STELLAR_OPERATOR_SECRET_KEY;
+  if (!OPERATOR_SECRET) {
+    console.error("❌  STELLAR_OPERATOR_SECRET_KEY is not set");
+    process.exit(1);
+  }
+
+  const DATABASE_URL = process.env.DATABASE_URL;
+  if (!DATABASE_URL) {
+    console.error("❌  DATABASE_URL is not set");
+    process.exit(1);
+  }
+
+  // Enforce testnet-only by default
+  assertTestnetPassphrase(NETWORK_PASSPHRASE, allowNetwork);
+
   const pool = new pg.Pool({ connectionString: DATABASE_URL });
   const db = drizzle(pool);
 
+  const server = new Horizon.Server(HORIZON_URL);
   const operatorKeypair = Keypair.fromSecret(OPERATOR_SECRET!);
   const operatorPubkey = operatorKeypair.publicKey();
   console.log(`\nOperator: ${operatorPubkey}\n`);
@@ -99,6 +191,7 @@ async function main() {
 
     // 1. Fresh issuer keypair
     const issuer = Keypair.random();
+    // Store secret for file output only — never printed to stdout
     secrets[talos.name] = issuer.secret();
     console.log(`   Issuer public:  ${issuer.publicKey()}`);
 
@@ -161,19 +254,27 @@ async function main() {
     await sleep(1000);
   }
 
-  // Print all issuer secrets at the end
-  console.log("\n" + "=".repeat(60));
-  console.log("ISSUER SECRET KEYS — save these securely, never shared again:");
-  console.log("=".repeat(60));
-  for (const [name, secret] of Object.entries(secrets)) {
-    console.log(`  ${name.padEnd(20)} ${secret}`);
+  if (Object.keys(secrets).length === 0) {
+    console.log("\nNo new tokens were minted — nothing to write.\n");
+    await pool.end();
+    return;
   }
+
+  // Write secrets to file with 0600 permissions — not to stdout
+  writeSecretsFile(secrets, outPath);
+
+  console.log("\n" + "=".repeat(60));
+  console.log("ISSUER SECRET KEYS written to (mode 0600):");
+  console.log(`  ${outPath}`);
+  console.log("Keep that file secure. It cannot be recovered if lost.");
   console.log("=".repeat(60) + "\n");
 
   await pool.end();
 }
 
-main().catch((err) => {
-  console.error("Fatal:", err);
-  process.exit(1);
-});
+if (isEntryPoint()) {
+  main().catch((err) => {
+    console.error("Fatal:", err);
+    process.exit(1);
+  });
+}

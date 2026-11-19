@@ -42,6 +42,7 @@ export type SigningErrorCode =
   | "SATURATED"
   | "TIMEOUT"
   | "CANCELLED"
+  | "REJECTED"
   | "INVALID_RESULT"
   | "SIGNING_FAILED";
 
@@ -390,8 +391,8 @@ export class StellarKeypairSigner implements RequestSigner {
     return { capabilities: this.supported, algorithms: ["ed25519"], maxConcurrent: 64 };
   }
 
-  async sign(payload: SigningPayload, options?: SignOptions): Promise<SignatureResult> {
-    if (options?.signal?.aborted) throw cancelled(options.signal.reason);
+  async sign(payload: SigningPayload, options: SignOptions = {}): Promise<SignatureResult> {
+    if (options.signal?.aborted) throw cancelled(options.signal.reason);
     if (!this.supported.includes(payload.kind)) {
       throw new SigningError("UNSUPPORTED", `Signer does not support ${payload.kind}`, false);
     }
@@ -403,6 +404,123 @@ export class StellarKeypairSigner implements RequestSigner {
   }
 }
 
-export function encodeSignature(bytes: Uint8Array): string {
-  return base64Url(bytes);
+export interface WalletSignMessageResult {
+  signature: string | Uint8Array;
+  signerAddress?: string;
+}
+
+export type WalletSignMessageFn = (
+  message: string,
+  options?: { signal?: AbortSignal; address?: string },
+) => Promise<WalletSignMessageResult | string | Uint8Array>;
+
+export interface WalletMessageSignerOptions {
+  signMessage: WalletSignMessageFn;
+  keyId: string;
+  address?: string;
+  algorithm?: string;
+  capabilities?: readonly SigningCapability[];
+  maxConcurrent?: number;
+}
+
+function isUserRejection(cause: unknown): boolean {
+  if (!cause || typeof cause !== "object") return false;
+  const record = cause as { code?: unknown; name?: unknown; message?: unknown };
+  if (record.name === "AbortError") return true;
+  if (typeof record.code === "number" && record.code === 4001) return true;
+  if (typeof record.code === "string" && /reject|denied|cancel/i.test(record.code)) return true;
+  return typeof record.message === "string" && /reject|denied|user (cancel|declin)/i.test(record.message);
+}
+
+function decodeWalletSignature(value: string | Uint8Array): Uint8Array {
+  if (value instanceof Uint8Array) return value;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new SigningError("INVALID_RESULT", "Wallet returned an empty signature", false);
+  }
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(value)) {
+    throw new SigningError("INVALID_RESULT", "Wallet returned a malformed signature encoding", false);
+  }
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+  let binary: string;
+  try {
+    binary = typeof atob === "function" ? atob(padded) : Buffer.from(padded, "base64").toString("binary");
+  } catch (cause) {
+    throw new SigningError("INVALID_RESULT", "Wallet returned an undecodable signature", false, { cause });
+  }
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+/**
+ * Browser signer backed by an injected wallet `signMessage` function (e.g. a
+ * Freighter-compatible adapter). The SDK never imports a wallet package.
+ */
+export class WalletMessageSigner implements RequestSigner {
+  private readonly signMessage: WalletSignMessageFn;
+  private readonly keyId: string;
+  private readonly address?: string;
+  private readonly algorithm: string;
+  private readonly supported: readonly SigningCapability[];
+  private readonly maxConcurrent?: number;
+
+  constructor(options: WalletMessageSignerOptions) {
+    if (typeof options?.signMessage !== "function") {
+      throw new SigningError("INVALID_INPUT", "A signMessage function is required", false);
+    }
+    if (!options.keyId) {
+      throw new SigningError("INVALID_INPUT", "A keyId is required", false);
+    }
+    this.signMessage = options.signMessage;
+    this.keyId = options.keyId;
+    this.address = options.address;
+    this.algorithm = options.algorithm ?? "ed25519";
+    this.supported = options.capabilities ?? ["http-request-v1", "stellar-transaction-v1"];
+    this.maxConcurrent = options.maxConcurrent;
+  }
+
+  getCapabilities(): SignerCapabilities {
+    return {
+      capabilities: this.supported,
+      algorithms: [this.algorithm],
+      maxConcurrent: this.maxConcurrent,
+    };
+  }
+
+  async sign(payload: SigningPayload, options: SignOptions = {}): Promise<SignatureResult> {
+    if (options.signal?.aborted) {
+      throw new SigningError("CANCELLED", "Signing was cancelled", false, {
+        cause: options.signal.reason,
+      });
+    }
+    if (!this.supported.includes(payload.kind)) {
+      throw new SigningError("UNSUPPORTED", `Signer does not support ${payload.kind}`, false);
+    }
+    const message = new TextDecoder().decode(payload.bytes);
+    let raw: WalletSignMessageResult | string | Uint8Array;
+    try {
+      raw = await this.signMessage(message, { signal: options.signal, address: this.address });
+    } catch (cause) {
+      if (options.signal?.aborted) {
+        throw new SigningError("CANCELLED", "Signing was cancelled", false, { cause });
+      }
+      if (isUserRejection(cause)) {
+        throw new SigningError("REJECTED", "User rejected the signing request", false, { cause });
+      }
+      throw new SigningError("SIGNING_FAILED", "Wallet failed to sign the message", true, { cause });
+    }
+    const value = typeof raw === "object" && raw !== null && !(raw instanceof Uint8Array)
+      ? raw.signature
+      : raw;
+    const signature = decodeWalletSignature(value);
+    if (signature.length === 0) {
+      throw new SigningError("INVALID_RESULT", "Wallet returned an empty signature", false);
+    }
+    const metadata =
+      typeof raw === "object" && raw !== null && !(raw instanceof Uint8Array) && raw.signerAddress
+        ? { signerAddress: raw.signerAddress }
+        : undefined;
+    return { algorithm: this.algorithm, keyId: this.keyId, signature, metadata };
+  }
 }

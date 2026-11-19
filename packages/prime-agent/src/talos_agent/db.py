@@ -294,6 +294,76 @@ CREATE INDEX IF NOT EXISTS idx_completion_markers_expires_at
     ),
     (
         10,
+        # Secret rotation tables (re-homed after checkpoint migrations claimed 7-9)
+        # plus named rollback checkpoints for safe rotation recovery.
+        """
+CREATE TABLE IF NOT EXISTS secret_versions (
+    scope           TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    version         INTEGER NOT NULL,
+    ciphertext      TEXT NOT NULL,
+    key_id          TEXT NOT NULL,
+    status          TEXT NOT NULL CHECK (status IN ('staged', 'active', 'superseded', 'revoked')),
+    request_id      TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    activated_at    TEXT,
+    revoked_at      TEXT,
+    PRIMARY KEY (scope, name, version),
+    UNIQUE (scope, name, request_id)
+);
+
+CREATE TABLE IF NOT EXISTS secret_heads (
+    scope             TEXT NOT NULL,
+    name              TEXT NOT NULL,
+    active_version    INTEGER NOT NULL,
+    previous_version  INTEGER,
+    generation        INTEGER NOT NULL DEFAULT 1,
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (scope, name)
+);
+
+CREATE TABLE IF NOT EXISTS secret_audit_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id    TEXT NOT NULL UNIQUE,
+    scope       TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    version     INTEGER,
+    event_type  TEXT NOT NULL,
+    outcome     TEXT NOT NULL,
+    actor       TEXT NOT NULL,
+    reason      TEXT,
+    metadata    TEXT NOT NULL DEFAULT '{}',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS secret_rollback_checkpoints (
+    scope              TEXT NOT NULL,
+    name               TEXT NOT NULL,
+    checkpoint_id      TEXT NOT NULL,
+    active_version     INTEGER NOT NULL,
+    previous_version   INTEGER,
+    generation         INTEGER NOT NULL,
+    request_id         TEXT NOT NULL,
+    actor              TEXT NOT NULL,
+    reason             TEXT,
+    status             TEXT NOT NULL CHECK (status IN ('open', 'restored', 'discarded')),
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    restored_at        TEXT,
+    discarded_at       TEXT,
+    PRIMARY KEY (scope, name, checkpoint_id),
+    UNIQUE (scope, name, request_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_secret_versions_status
+    ON secret_versions(scope, name, status);
+CREATE INDEX IF NOT EXISTS idx_secret_audit_lookup
+    ON secret_audit_events(scope, name, id);
+CREATE INDEX IF NOT EXISTS idx_secret_checkpoints_status
+    ON secret_rollback_checkpoints(scope, name, status);
+        """,
+    ),
+    (
+        11,
         # Restore durable job inbox/outbox if an earlier migration collision
         # dropped them, and add an append-only audit trail for effect replay.
         """
@@ -410,6 +480,81 @@ CREATE INDEX IF NOT EXISTS idx_telegram_send_queue_state
     ON telegram_send_queue(state, id);
 CREATE INDEX IF NOT EXISTS idx_telegram_send_queue_attempts
     ON telegram_send_queue(chat_id, last_attempt_at);
+        """,
+    ),
+    (
+        12,
+        # Capability-sandbox adapter invocation records (idempotency + leases)
+        # and deterministic replay sessions for incident analysis.
+        # Both were lost to a migration-collision splice and are restored here.
+        """
+CREATE TABLE IF NOT EXISTS adapter_invocations (
+    operation_id       TEXT PRIMARY KEY,
+    adapter_name       TEXT NOT NULL,
+    operation          TEXT NOT NULL,
+    input_digest       TEXT NOT NULL,
+    state              TEXT NOT NULL CHECK (
+        state IN ('running', 'succeeded', 'failed', 'indeterminate')
+    ),
+    owner_id           TEXT NOT NULL,
+    lease_expires_at   TEXT NOT NULL,
+    attempt_count      INTEGER NOT NULL DEFAULT 1,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_adapter_invocations_state_lease
+    ON adapter_invocations(state, lease_expires_at);
+
+CREATE TABLE IF NOT EXISTS replay_sessions (
+    session_id    TEXT PRIMARY KEY,
+    talos_id      TEXT NOT NULL,
+    agent_version TEXT NOT NULL,
+    started_at    TEXT NOT NULL,
+    ended_at      TEXT,
+    status        TEXT NOT NULL DEFAULT 'recording',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS replay_events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT NOT NULL REFERENCES replay_sessions(session_id),
+    event_id     TEXT NOT NULL UNIQUE,
+    event_type   TEXT NOT NULL,
+    payload      TEXT NOT NULL,
+    redacted     INTEGER NOT NULL DEFAULT 0,
+    recorded_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_events_session ON replay_events(session_id);
+        """,
+    ),
+    (
+        13,
+        # Cycle summaries: one row per completed agent cycle (including error
+        # cycles).  Tool arguments are NEVER stored here — only redacted tool
+        # names, counts, and structured outcome fields that are safe to log per
+        # LOGGING_POLICY.md.  Older rows are pruned by
+        # LocalDB.prune_old_cycle_summaries once the table grows beyond the
+        # configured keep_last limit.
+        """
+CREATE TABLE IF NOT EXISTS cycle_summaries (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    talos_id        TEXT NOT NULL DEFAULT '',
+    cycle_id        TEXT NOT NULL,
+    started_at      TEXT NOT NULL,
+    ended_at        TEXT NOT NULL,
+    duration_ms     REAL NOT NULL DEFAULT 0,
+    tool_calls      INTEGER NOT NULL DEFAULT 0,
+    tool_names      TEXT NOT NULL DEFAULT '[]',
+    error_type      TEXT,
+    error_category  TEXT,
+    outcome         TEXT NOT NULL DEFAULT 'completed',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_cycle_summaries_talos_id
+    ON cycle_summaries(talos_id, created_at DESC);
         """,
     ),
 ]
@@ -536,12 +681,27 @@ class LocalDB:
 
     # ── Content History ────────────────────────────────────
 
-    def add_content(self, content: str, channel: str) -> None:
-        self._conn.execute(
+    def add_content(self, content: str, channel: str) -> int:
+        cursor = self._conn.execute(
             "INSERT INTO content_history (content, channel) VALUES (?, ?)",
             (content, channel),
         )
         self._conn.commit()
+        return int(cursor.lastrowid)
+
+    def get_content(self, content_id: int) -> dict | None:
+        row = self._conn.execute(
+            "SELECT id, content, channel, posted_at FROM content_history WHERE id = ?",
+            (content_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def content_exists(self, content_id: int) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM content_history WHERE id = ?",
+            (content_id,),
+        ).fetchone()
+        return row is not None
 
     def get_recent_content(self, limit: int = 20) -> list[dict]:
         rows = self._conn.execute(
@@ -573,6 +733,12 @@ class LocalDB:
             (status, job_id),
         )
         self._conn.commit()
+
+    def count_pending_commerce_jobs(self) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) as cnt FROM commerce_queue WHERE status = 'pending'"
+        ).fetchone()
+        return row["cnt"] if row else 0
 
     # ── Approval Cache ─────────────────────────────────────
 
@@ -676,6 +842,42 @@ class LocalDB:
             (f"-{days} days",),
         ).fetchone()
         return float(row["total"]) if row else 0.0
+
+    def get_spending_by_category_today(self) -> dict[str, float]:
+        """Today's spending per category. Same day boundary as ``get_spending_today``."""
+        rows = self._conn.execute(
+            "SELECT category, SUM(amount) as total FROM spending_log "
+            "WHERE date(created_at) = date('now') GROUP BY category "
+            "ORDER BY total DESC, category ASC"
+        ).fetchall()
+        return {row["category"]: float(row["total"]) for row in rows}
+
+    def get_spending_by_category_period(self, days: int = 30) -> dict[str, float]:
+        """Spending per category over the last ``days`` days. Same window as ``get_spending_period``."""
+        rows = self._conn.execute(
+            "SELECT category, SUM(amount) as total FROM spending_log "
+            "WHERE created_at >= datetime('now', ?) GROUP BY category "
+            "ORDER BY total DESC, category ASC",
+            (f"-{days} days",),
+        ).fetchall()
+        return {row["category"]: float(row["total"]) for row in rows}
+
+    def get_pending_approval_totals(self) -> dict:
+        """Count and amount of approvals still waiting for a decision.
+
+        Same rows as ``get_pending_approvals``. An approval with no amount is
+        counted but adds nothing to the total, and is reported separately.
+        """
+        row = self._conn.execute(
+            "SELECT COUNT(*) as cnt, COALESCE(SUM(amount), 0) as total, "
+            "COALESCE(SUM(CASE WHEN amount IS NULL THEN 1 ELSE 0 END), 0) as unpriced "
+            "FROM approval_cache WHERE status = 'pending'"
+        ).fetchone()
+        return {
+            "count": int(row["cnt"]),
+            "total": float(row["total"]),
+            "without_amount": int(row["unpriced"]),
+        }
 
     # ── Content Performance ─────────────────────────────────
 
@@ -1011,6 +1213,22 @@ class LocalDB:
         )
         self._conn.commit()
 
+    def save_retry_state(
+        self,
+        task_name: str,
+        *,
+        attempt_count: int,
+        next_attempt_at: datetime | None,
+        terminal: bool = False,
+    ) -> None:
+        """Keyword-alias for :meth:`upsert_retry_state` (optional next_attempt_at)."""
+        self.upsert_retry_state(
+            task_name,
+            attempt_count,
+            next_attempt_at or datetime.now(timezone.utc),
+            terminal,
+        )
+
     def get_retry_state(self, task_name: str) -> dict | None:
         """Return the persisted retry state for a task, or None if absent.
 
@@ -1188,12 +1406,40 @@ class LocalDB:
         return [dict(r) for r in rows]
 
     def prune_expired_completion_markers(self) -> int:
-        """Delete expired completion markers. Returns the number of rows removed."""
-        cursor = self._conn.execute(
-            "DELETE FROM completion_markers WHERE expires_at <= datetime('now')"
-        )
-        self._conn.commit()
-        return cursor.rowcount
+        """Delete expired completion markers. Returns the number of rows removed.
+
+        Only rows with a parseable ISO-8601 ``expires_at`` that is at or before
+        the current UTC time are pruned. Malformed or NULL timestamps are left
+        untouched so the sweep is safe and non-destructive for invalid data.
+        """
+        rows = self._conn.execute(
+            "SELECT id, expires_at FROM completion_markers"
+        ).fetchall()
+        expired_ids: list[int] = []
+        now = datetime.now(timezone.utc)
+
+        for row in rows:
+            expires_at = row["expires_at"]
+            if not expires_at:
+                continue
+            try:
+                expires_dt = datetime.fromisoformat(expires_at)
+                if expires_dt.tzinfo is None:
+                    expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                continue
+
+            if expires_dt <= now:
+                expired_ids.append(int(row["id"]))
+
+        if expired_ids:
+            self._conn.executemany(
+                "DELETE FROM completion_markers WHERE id = ?",
+                [(marker_id,) for marker_id in expired_ids],
+            )
+            self._conn.commit()
+
+        return len(expired_ids)
 
     # ── WAL health ─────────────────────────────────────────
 
@@ -1216,6 +1462,114 @@ class LocalDB:
             run_checkpoint=run_checkpoint,
             run_quick_check=run_quick_check,
         )
+
+    # ── Cycle Summaries (#1002) ────────────────────────────
+
+    def save_cycle_summary(
+        self,
+        *,
+        talos_id: str,
+        cycle_id: str,
+        started_at: str,
+        ended_at: str,
+        duration_ms: float,
+        tool_calls: int,
+        tool_names: list[str],
+        error_type: str | None = None,
+        error_category: str | None = None,
+        outcome: str = "completed",
+    ) -> int:
+        """Persist one cycle summary row. Returns the new row id."""
+        cursor = self._conn.execute(
+            """INSERT INTO cycle_summaries
+               (talos_id, cycle_id, started_at, ended_at, duration_ms,
+                tool_calls, tool_names, error_type, error_category, outcome)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                talos_id,
+                cycle_id,
+                started_at,
+                ended_at,
+                duration_ms,
+                tool_calls,
+                json.dumps(tool_names),
+                error_type,
+                error_category,
+                outcome,
+            ),
+        )
+        self._conn.commit()
+        return cursor.lastrowid
+
+    def get_recent_cycle_summaries(
+        self,
+        talos_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Return recent cycle summaries, newest first.
+
+        When *talos_id* is given only that agent's rows are returned.
+        """
+        if talos_id:
+            rows = self._conn.execute(
+                """SELECT id, talos_id, cycle_id, started_at, ended_at, duration_ms,
+                          tool_calls, tool_names, error_type, error_category, outcome,
+                          created_at
+                   FROM cycle_summaries WHERE talos_id = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (talos_id, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT id, talos_id, cycle_id, started_at, ended_at, duration_ms,
+                          tool_calls, tool_names, error_type, error_category, outcome,
+                          created_at
+                   FROM cycle_summaries
+                   ORDER BY created_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["tool_names"] = json.loads(d["tool_names"])
+            except (TypeError, ValueError):
+                d["tool_names"] = []
+            result.append(d)
+        return result
+
+    def prune_old_cycle_summaries(
+        self,
+        talos_id: str | None = None,
+        keep_last: int = 200,
+    ) -> int:
+        """Delete all but the *keep_last* most-recent cycle summary rows.
+
+        When *talos_id* is given, pruning is scoped to that agent only.
+        Returns the number of rows deleted.
+        """
+        if keep_last <= 0:
+            raise ValueError("keep_last must be a positive integer")
+
+        if talos_id:
+            rows = self._conn.execute(
+                "SELECT id FROM cycle_summaries WHERE talos_id = ? "
+                "ORDER BY created_at DESC",
+                (talos_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT id FROM cycle_summaries ORDER BY created_at DESC"
+            ).fetchall()
+
+        ids_to_delete = [r["id"] for r in rows[keep_last:]]
+        if ids_to_delete:
+            self._conn.executemany(
+                "DELETE FROM cycle_summaries WHERE id = ?",
+                [(rid,) for rid in ids_to_delete],
+            )
+            self._conn.commit()
+        return len(ids_to_delete)
 
     # ── Cleanup ────────────────────────────────────────────
 

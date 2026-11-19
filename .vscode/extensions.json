@@ -1,0 +1,12 @@
+{
+  "recommendations": [
+    "bradlc.vscode-tailwindcss",
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "ms-python.black-formatter",
+    "ms-python.debugpy",
+    "ms-python.python",
+    "rust-lang.rust-analyzer",
+    "vadimcn.vscode-lldb"
+  ]
+}

@@ -30,6 +30,10 @@ from talos_agent.metrics import (
     record_llm_call,
     record_tool_call,
 )
+from talos_agent.telemetry import (
+    _ALLOWED_CIRCUIT_BREAKER_PROVIDERS,
+    _normalize_circuit_breaker_provider,
+)
 
 # ── _normalize_task ───────────────────────────────────────────────────────────
 
@@ -308,6 +312,12 @@ class TestAllowlistConsistency:
     def test_retry_count_allowlist_contains_five_plus(self) -> None:
         assert "5+" in _ALLOWED_RETRY_COUNTS
 
+    def test_stellar_horizon_provider_is_allowlisted(self) -> None:
+        assert _normalize_circuit_breaker_provider("stellar_horizon") == "stellar_horizon"
+
+    def test_unknown_circuit_breaker_provider_is_bounded(self) -> None:
+        assert _normalize_circuit_breaker_provider("unregistered-provider") == "other"
+
     def test_all_allowlists_are_frozensets(self) -> None:
         for name, obj in [
             ("_ALLOWED_TASKS", _ALLOWED_TASKS),
@@ -316,6 +326,7 @@ class TestAllowlistConsistency:
             ("_ALLOWED_OUTCOMES", _ALLOWED_OUTCOMES),
             ("_ALLOWED_STATUS_CODES", _ALLOWED_STATUS_CODES),
             ("_ALLOWED_RETRY_COUNTS", _ALLOWED_RETRY_COUNTS),
+            ("_ALLOWED_CIRCUIT_BREAKER_PROVIDERS", _ALLOWED_CIRCUIT_BREAKER_PROVIDERS),
         ]:
             assert isinstance(obj, frozenset), f"{name} should be a frozenset"
 

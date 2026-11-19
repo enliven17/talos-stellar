@@ -14,19 +14,9 @@ import {
 import { logger } from "@/lib/logger";
 import { enqueue, jobsConfig } from "@/lib/jobs";
 import { AUDIT_LOG_WRITE_QUEUE } from "@/lib/jobs/handlers/audit-log";
+import { VALID_SCOPES } from "@/lib/api-scopes";
 
-export const VALID_SCOPES = [
-  "admin",
-  "activity:write",
-  "commerce:read",
-  "commerce:write",
-  "wallet:read",
-  "wallet:sign",
-  "settings:read",
-  "settings:write",
-  "revenue:read",
-  "revenue:write",
-] as const;
+export { VALID_SCOPES } from "@/lib/api-scopes";
 
 export type Scope = typeof VALID_SCOPES[number];
 // Backwards-compatible name used by route authorization tests and consumers.
