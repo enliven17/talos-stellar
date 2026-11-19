@@ -10,9 +10,11 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from talos_agent.scheduler import (
+    MIN_RECURRING_TASK_INTERVAL_SECONDS,
     check_should_run,
     run_dividend_distribution,
     run_loan_repayment,
+    validate_recurring_task_interval,
 )
 
 
@@ -25,6 +27,17 @@ class FixedClock:
 
 
 # ── Scheduler core tests ───────────────────────────────────────────────────────
+
+def test_recurring_interval_rejects_values_below_supported_minimum():
+    with pytest.raises(ValueError, match="at least 1 seconds"):
+        validate_recurring_task_interval("dividend_distribution", 0.5)
+
+
+def test_recurring_interval_accepts_supported_boundary():
+    validate_recurring_task_interval(
+        "dividend_distribution",
+        MIN_RECURRING_TASK_INTERVAL_SECONDS,
+    )─
 
 def test_check_should_run_uses_clock_and_utc_boundaries():
     clock = FixedClock(datetime(2024, 1, 2, 6, 0, 0, tzinfo=timezone.utc))
