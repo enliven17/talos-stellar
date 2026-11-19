@@ -82,6 +82,17 @@ is idempotent per cursor (see §4).
 | (`name_reg2`, talos_id: u32) | (version: u32, name: String, owner: Address) |
 | (`reg_upd`,) | (old_registry: Address, new_registry: Address) |
 | (`tl_sch`/`tl_exec`/`tl_cnl`/`tl_cfg`) | same shape as registry timelock events |
+| (`nm_prp`, proposal_id: u64) | (action_kind: Symbol, subject: Address, actor: Address, recorded_at: u64) |
+| (`nm_acc`, proposal_id: u64) | (action_kind: Symbol, subject: Address, actor: Address, recorded_at: u64) |
+| (`nm_cnl`, proposal_id: u64) | (action_kind: Symbol, subject: Address, actor: Address, recorded_at: u64) |
+| (`nm_exp`, proposal_id: u64) | (action_kind: Symbol, subject: Address, actor: Address, recorded_at: u64) |
+
+The `nm_*` events are the bounded name-transfer history: `action_kind` is
+`set_admin` or `set_registry`, `subject` is the transfer target, and
+`actor` is the proposer/canceller. They mirror a bounded on-chain log
+(`transfer_history_len` / `transfer_record_at`), FIFO-capped at
+`MAX_TRANSFER_HISTORY`. Historical agent identifiers (`talos_id`) are never
+mutated by these transfers, so name ownership stays stable across them.
 
 ### talos_dividends
 | topics | data |

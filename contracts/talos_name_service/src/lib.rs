@@ -52,6 +52,10 @@ pub enum ProposalStatus {
     Scheduled,
     Executed,
     Cancelled,
+    /// A scheduled transfer that matured past its grace window and was
+    /// explicitly expired via `expire_transfer`. Appended additively so
+    /// existing decoders keep working.
+    Expired,
 }
 
 #[contracttype]
@@ -70,6 +74,26 @@ pub struct TimelockProposal {
 pub struct TimelockConfig {
     pub min_delay: u64,
     pub grace_period: u64,
+}
+
+/// A single entry in the bounded name-transfer history log.
+///
+/// Records every proposal/acceptance/cancellation/expiry of an ownership or
+/// registry transfer (a `SetAdmin` or `SetRegistryContract` timelock action).
+/// `action_kind` and `reference` are stable `Symbol`s (`set_admin` /
+/// `set_registry` and `proposed` / `accepted` / `cancelled` / `expired`).
+/// `subject` is the target address of the transfer (the new admin or the new
+/// registry contract). Historical agent identifiers (`talos_id`) are never
+/// mutated by these transfers, so name ownership stays stable across them.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransferRecord {
+    pub proposal_id: u64,
+    pub action_kind: Symbol,
+    pub reference: Symbol,
+    pub actor: Address,
+    pub subject: Address,
+    pub recorded_at: u64,
 }
 
 /// A narrowly-scoped write path that can be independently paused.
@@ -120,6 +144,11 @@ pub enum DataKey {
     NameFeeAmount,
     Guardians,
     PauseState(PauseDomain),
+    /// Bounded name-transfer history log: `TransferHistoryLen` is the number
+    /// of records currently retained (capped at `MAX_TRANSFER_HISTORY`);
+    /// `TransferHistory(i)` is the i-th retained record, oldest first.
+    TransferHistoryLen,
+    TransferHistory(u32),
 }
 
 #[contracterror]
@@ -227,6 +256,95 @@ fn emit_name_fee_paid(env: &Env, talos_id: u32, payer: &Address, asset: &Address
     env.events().publish(topics, (payer.clone(), asset.clone(), fee));
 }
 
+// ── Bounded name-transfer history events ────────────────────────────
+//
+// Every ownership/registry transfer (a `SetAdmin` or `SetRegistryContract`
+// timelock action) emits a bounded event and appends a `TransferRecord` to
+// the on-chain bounded log so an indexer can reconstruct transfer history:
+//
+//   nm_prp : (symbol, proposal_id: u64) → (action_kind: Symbol, subject: Address, actor: Address, recorded_at: u64)
+//   nm_acc : (symbol, proposal_id: u64) → (action_kind: Symbol, subject: Address, actor: Address, recorded_at: u64)
+//   nm_cnl : (symbol, proposal_id: u64) → (action_kind: Symbol, subject: Address, actor: Address, recorded_at: u64)
+//   nm_exp : (symbol, proposal_id: u64) → (action_kind: Symbol, subject: Address, actor: Address, recorded_at: u64)
+//
+// The log is bounded by `MAX_TRANSFER_HISTORY` (FIFO eviction). Historical
+// agent identifiers (`talos_id`) are never mutated by these transfers, so
+// name ownership stays stable across ownership changes.
+
+/// Map a transfer `AdminAction` to its stable kind symbol and subject address.
+fn transfer_subject(env: &Env, action: &AdminAction) -> (Symbol, Address) {
+    match action {
+        AdminAction::SetAdmin(new_admin) => (Symbol::new(env, "set_admin"), new_admin.clone()),
+        AdminAction::SetRegistryContract(new_registry) => {
+            (Symbol::new(env, "set_registry"), new_registry.clone())
+        }
+    }
+}
+
+/// Append a `TransferRecord` to the bounded log, evicting the oldest entry
+/// (FIFO) once `MAX_TRANSFER_HISTORY` is reached.
+fn append_transfer(env: &Env, record: TransferRecord) {
+    let len: u32 = env
+        .storage()
+        .persistent()
+        .get(&DataKey::TransferHistoryLen)
+        .unwrap_or(0);
+
+    if len < MAX_TRANSFER_HISTORY {
+        env.storage()
+            .persistent()
+            .set(&DataKey::TransferHistory(len), &record);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TransferHistoryLen, &(len + 1));
+    } else {
+        // Drop the oldest retained record and shift the rest down by one,
+        // leaving room for the newest at the tail. Bounded by
+        // `MAX_TRANSFER_HISTORY` so this is O(cap) storage writes, only on
+        // overflow — transfers are admin-frequency, not per-transaction.
+        for i in 1..MAX_TRANSFER_HISTORY {
+            let rec: TransferRecord = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TransferHistory(i))
+                .expect("retained transfer entry must exist when log is full");
+            env.storage()
+                .persistent()
+                .set(&DataKey::TransferHistory(i - 1), &rec);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::TransferHistory(MAX_TRANSFER_HISTORY - 1), &record);
+    }
+}
+
+/// Record a transfer reference: append to the bounded log and emit the
+/// matching bounded event (`nm_prp` / `nm_acc` / `nm_cnl` / `nm_exp`).
+fn record_transfer(
+    env: &Env,
+    proposal_id: u64,
+    action: &AdminAction,
+    reference: Symbol,
+    topic: Symbol,
+    actor: Address,
+) {
+    let (action_kind, subject) = transfer_subject(env, action);
+    let recorded_at = env.ledger().timestamp();
+
+    let record = TransferRecord {
+        proposal_id,
+        action_kind: action_kind.clone(),
+        reference: reference.clone(),
+        actor: actor.clone(),
+        subject: subject.clone(),
+        recorded_at,
+    };
+    append_transfer(env, record);
+
+    env.events()
+        .publish((topic, proposal_id), (action_kind, subject, actor, recorded_at));
+}
+
 // ── Emergency Pause Helpers ────────────────────────────────────────
 
 fn get_guardians(e: &Env) -> Vec<Address> {
@@ -264,6 +382,11 @@ const MAX_MIN_DELAY: u64 = 2_592_000; // 30 days in seconds
 const MAX_GUARDIAN_PAUSE_SECS: u64 = 604_800; // 7 days — bounds guardian blast radius
 const MAX_ADMIN_PAUSE_SECS: u64 = 2_592_000; // 30 days; 0 (indefinite) is also allowed for admin
 const MAX_GUARDIANS: u32 = 10; // bounds unbounded storage growth
+
+/// Maximum number of name-transfer history records retained on-chain.
+/// Older records are dropped (FIFO) so the history stays bounded; the
+/// `sch_mig`-style bounded event stream still emits one event per transfer.
+const MAX_TRANSFER_HISTORY: u32 = 32;
 
 // ── Stable interface (v1.x.x) ──────────────────────────────────────
 //
@@ -462,6 +585,9 @@ pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 3, 0);
 pub const PAUSE_NAME_REGISTRATION: u32 = 5;
 /// Pause domain for name service configuration (admin, registry, timelock).
 pub const PAUSE_NAME_CONFIG: u32 = 6;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod name_transfer_history_tests;
 
 #[contract]
 pub struct TalosNameService;
@@ -862,7 +988,16 @@ impl TalosNameService {
             .persistent()
             .set(&DataKey::NextTimelockId, &(id + 1));
 
-        emit_timelock_scheduled(&e, id, &action, eta, admin);
+        emit_timelock_scheduled(&e, id, &action, eta, admin.clone());
+        // Bounded name-transfer history: emit + log the proposal reference.
+        record_transfer(
+            &e,
+            id,
+            &action,
+            Symbol::new(&e, "proposed"),
+            symbol_short!("nm_prp"),
+            admin,
+        );
         id
     }
 
@@ -903,7 +1038,16 @@ impl TalosNameService {
             .set(&DataKey::TimelockProposal(proposal_id), &proposal);
 
         let executor = proposal.scheduled_by.clone();
-        emit_timelock_executed(&e, proposal_id, &proposal.action, executor);
+        emit_timelock_executed(&e, proposal_id, &proposal.action, executor.clone());
+        // Bounded name-transfer history: emit + log the acceptance reference.
+        record_transfer(
+            &e,
+            proposal_id,
+            &proposal.action,
+            Symbol::new(&e, "accepted"),
+            symbol_short!("nm_acc"),
+            executor,
+        );
     }
 
     /// Cancel a scheduled action.
@@ -932,7 +1076,16 @@ impl TalosNameService {
             .persistent()
             .set(&DataKey::TimelockProposal(proposal_id), &proposal);
 
-        emit_timelock_cancelled(&e, proposal_id, &proposal.action, admin);
+        emit_timelock_cancelled(&e, proposal_id, &proposal.action, admin.clone());
+        // Bounded name-transfer history: emit + log the cancellation reference.
+        record_transfer(
+            &e,
+            proposal_id,
+            &proposal.action,
+            Symbol::new(&e, "cancelled"),
+            symbol_short!("nm_cnl"),
+            admin,
+        );
     }
 
     /// Retrieve a timelock proposal by ID.
@@ -940,6 +1093,73 @@ impl TalosNameService {
         e.storage()
             .persistent()
             .get(&DataKey::TimelockProposal(proposal_id))
+    }
+
+    /// Expire a scheduled transfer that has matured past its grace window.
+    ///
+    /// Emits and logs the expiry reference (`nm_exp`). A proposal that is not
+    /// `Scheduled`, or whose `eta + grace_period` has not yet elapsed, is
+    /// rejected. Marking the proposal `Expired` keeps it from being executed
+    /// or cancelled afterwards.
+    ///
+    /// # Authorization
+    /// Requires the admin to sign.
+    pub fn expire_transfer(e: Env, proposal_id: u64) {
+        pause_control::check_not_paused(&e, PAUSE_NAME_CONFIG);
+
+        let admin: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Admin not configured");
+        admin.require_auth();
+
+        let mut proposal: TimelockProposal = e
+            .storage()
+            .persistent()
+            .get(&DataKey::TimelockProposal(proposal_id))
+            .expect("Timelock proposal not found");
+
+        if proposal.status != ProposalStatus::Scheduled {
+            panic!("Proposal not active");
+        }
+
+        let now = e.ledger().timestamp();
+        let config = Self::get_timelock_config(e.clone());
+        if now <= proposal.eta.saturating_add(config.grace_period) {
+            panic!("Proposal has not expired yet");
+        }
+
+        proposal.status = ProposalStatus::Expired;
+        e.storage()
+            .persistent()
+            .set(&DataKey::TimelockProposal(proposal_id), &proposal);
+
+        record_transfer(
+            &e,
+            proposal_id,
+            &proposal.action,
+            Symbol::new(&e, "expired"),
+            symbol_short!("nm_exp"),
+            admin,
+        );
+    }
+
+    /// Number of name-transfer history records currently retained. Bounded
+    /// by `MAX_TRANSFER_HISTORY`; never grows unbounded.
+    pub fn transfer_history_len(e: Env) -> u32 {
+        e.storage()
+            .persistent()
+            .get(&DataKey::TransferHistoryLen)
+            .unwrap_or(0)
+    }
+
+    /// Fetch a single retained name-transfer history record, oldest first.
+    /// Returns `None` when `index >= transfer_history_len()`.
+    pub fn transfer_record_at(e: Env, index: u32) -> Option<TransferRecord> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::TransferHistory(index))
     }
 
     // ── Emergency Pause Controls ──────────────────────────────────────
