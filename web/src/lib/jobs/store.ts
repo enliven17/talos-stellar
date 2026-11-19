@@ -6,6 +6,15 @@ import { decideRetry } from "./retry";
 import { jobsConfig } from "./config";
 import { logJobEvent, truncateError } from "./metrics";
 
+/** Typed result returned when cancellation races with completion. */
+export class CancellationConflictError extends Error {
+  readonly code = "CANCELLATION_CONFLICT" as const;
+  constructor(readonly jobId: string) {
+    super(`cancellation conflict: job ${jobId} already completed`);
+    this.name = "CancellationConflictError";
+  }
+}
+
 function toRecord(row: typeof tlsJobs.$inferSelect): JobRecord {
   return row as unknown as JobRecord;
 }
@@ -219,7 +228,20 @@ export async function requestCancel(jobId: string): Promise<JobRecord | null> {
     .set({ cancelRequested: true })
     .where(and(eq(tlsJobs.id, jobId), eq(tlsJobs.status, "leased")))
     .returning();
-  return leasedRow ? toRecord(leasedRow) : null;
+  if (leasedRow) return toRecord(leasedRow);
+
+  // A conditional probe: if the job has already completed, the cancellation
+  // raced with completion and must not be reported as successful.
+  const finished = await db
+    .select({ status: tlsJobs.status })
+    .from(tlsJobs)
+    .where(eq(tlsJobs.id, jobId))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+  if (finished?.status === "completed") {
+    throw new CancellationConflictError(jobId);
+  }
+  return null;
 }
 
 /**
