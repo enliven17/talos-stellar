@@ -1,0 +1,100 @@
+import { withRequestId } from "@/lib/with-request-id";
+import { NextRequest } from "next/server";
+import { db } from "@/db";
+import { tlsApiKeys } from "@/db/schema";
+import { eq, and } from "drizzle-orm";
+import { authorizeApiKeyManagement } from "@/lib/api-key-owner-auth";
+import { parseBody } from "@/lib/schemas";
+import { updateApiKeySchema } from "@/lib/schemas";
+
+// PATCH /api/talos/:id/api-keys/:keyId — Update scopes, name, expiry
+async function _PATCH(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string; keyId: string }> }
+) {
+  const { id, keyId } = await params;
+
+  try {
+    const authorizationError = await authorizeApiKeyManagement(request, id);
+    if (authorizationError) return authorizationError;
+
+    const key = await db
+      .select()
+      .from(tlsApiKeys)
+      .where(and(eq(tlsApiKeys.id, keyId), eq(tlsApiKeys.talosId, id)))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    if (!key) {
+      return Response.json({ error: "API key not found" }, { status: 404 });
+    }
+
+    const parsed = await parseBody(request, updateApiKeySchema);
+    if (parsed.error) return parsed.error;
+
+    const { name, scopes, expiresAt } = parsed.data;
+    const updates: Record<string, unknown> = {};
+
+    if (name !== undefined) updates.name = name;
+    if (scopes !== undefined) updates.scopes = scopes;
+    if (expiresAt !== undefined) updates.expiresAt = expiresAt ? new Date(expiresAt) : null;
+
+    if (Object.keys(updates).length === 0) {
+      return Response.json({ error: "No fields to update" }, { status: 400 });
+    }
+
+    const [updated] = await db
+      .update(tlsApiKeys)
+      .set(updates)
+      .where(eq(tlsApiKeys.id, keyId))
+      .returning({
+        id: tlsApiKeys.id,
+        name: tlsApiKeys.name,
+        scopes: tlsApiKeys.scopes,
+        expiresAt: tlsApiKeys.expiresAt,
+        status: tlsApiKeys.status,
+        createdAt: tlsApiKeys.createdAt,
+        updatedAt: tlsApiKeys.updatedAt,
+      });
+
+    return Response.json(updated);
+  } catch {
+    return Response.json({ error: "Internal server error" }, { status: 500 });
+  }
+}
+
+// DELETE /api/talos/:id/api-keys/:keyId — Revoke a key (soft-delete)
+async function _DELETE(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string; keyId: string }> }
+) {
+  const { id, keyId } = await params;
+
+  try {
+    const authorizationError = await authorizeApiKeyManagement(request, id);
+    if (authorizationError) return authorizationError;
+
+    const key = await db
+      .select()
+      .from(tlsApiKeys)
+      .where(and(eq(tlsApiKeys.id, keyId), eq(tlsApiKeys.talosId, id)))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    if (!key) {
+      return Response.json({ error: "API key not found" }, { status: 404 });
+    }
+
+    await db
+      .update(tlsApiKeys)
+      .set({ status: "revoked" })
+      .where(eq(tlsApiKeys.id, keyId));
+
+    return Response.json({ success: true, message: "API key revoked" });
+  } catch {
+    return Response.json({ error: "Internal server error" }, { status: 500 });
+  }
+}
+
+export const PATCH = withRequestId(_PATCH);
+export const DELETE = withRequestId(_DELETE);

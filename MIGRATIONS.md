@@ -4,6 +4,30 @@
 `Web Migrations CI` workflow ([`.github/workflows/web-migrations-ci.yml`](.github/workflows/web-migrations-ci.yml))
 validates every migration against an ephemeral Postgres 16 service before merge.
 
+## Migration drift gate
+
+Offline structural gate that keeps `web/drizzle/meta/_journal.json` aligned with
+committed SQL migration files. It does **not** need Postgres or `drizzle-kit` and
+fails closed on missing, malformed, or ambiguous journal input.
+
+```bash
+pnpm migrations:check                 # structural (journal ↔ SQL)
+pnpm migrations:check:strict          # also fail on orphan SQL / prefix collisions
+pnpm test:migration-drift             # focused fixture suite (pass/fail/boundary)
+```
+
+What it enforces:
+
+1. **Journal integrity** — `_journal.json` parses, `entries` is non-empty, idxs are
+   unique and contiguous from `0`, tags are unique.
+2. **SQL presence** — every journal tag has a matching `web/drizzle/<tag>.sql`.
+3. **Bootstrap file** — `bootstrap-roles.sql` is present.
+4. **Strict extras** — orphan `NNNN_*.sql` files not listed in the journal, and
+   ambiguous shared numeric prefixes, fail under `--strict`.
+
+Schema.ts ↔ migration file drift (generate-and-diff) remains covered by the
+Postgres-backed workflow below; run both before merging migration changes.
+
 ## What CI checks
 
 On any PR touching `web/drizzle/**`, `web/src/db/**`, or `web/drizzle.config.ts`:
@@ -65,10 +89,22 @@ later migration once the application no longer reads the old shape.
   databases already have these roles.
 - **Schema drift failure in CI** — you changed `web/src/db/schema.ts` without committing a
   matching migration. Run `pnpm db:generate` inside `web/` and commit the generated file(s) in
-  `web/drizzle/`.
-- **Migration times out** — check the `migration-logs` artifact from the failed run; a hang
-  usually means a lock is held by a concurrent migration or long-running transaction against the
-  same database.
+  `web/drizzle/`.- **Migration times out** — check the `migration-logs` artifact from the failed run; a hang
+  usually means a lock is held by a concurrent migration or long-running transaction against
+  the same database.
+
+## Backup / DR
+
+Migration `0013_add_backup_runs.sql` is **purely additive** — it adds the
+`tls_backup_runs` table that records every backup, restore, and verify
+operation. The migration does not alter any existing table and is forward
+compatible with prior backups. Restore flows skip unknown tables in the
+artifact and accept partial overlap with the live DB schema, so a backup
+made against migration N+5 can be restored on a database that has already
+been migrated to N+8 (one-way upgrade only).
+
+See [`docs/DR_RUNBOOK.md`](docs/DR_RUNBOOK.md) for the related restore
+endpoints, RPO/RTO targets, and the manifest format.
 - **Advisory lock check fails** — a previous migrator run crashed mid-migration and left its lock
   held. On a real database, restart the connection pool holding the lock, or open a new session
   and run `SELECT pg_advisory_unlock_all();` after confirming no migration is genuinely in

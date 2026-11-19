@@ -1,0 +1,23 @@
+{
+  "config": {
+    "api_url": "https://talos-stellar.vercel.app",
+    "talos_id": "talos-atlas-002"
+  },
+  "envelope_hash": "734df8837ac3f8cbc0b5a609827fb958e59531fb4be0849874ad1eabffbc0dc5",
+  "meta": {
+    "agent_id": "atlas-002",
+    "created_at": "2026-07-28T00:00:00+00:00",
+    "schema_version": 1
+  },
+  "section_hashes": {
+    "config": "b128e3286a3dfcc199b86b92c2cdcd0a78dc02a986bd51912901ffbededca391",
+    "meta": "901a625f76f56edacceca0858a896eb4043e6ec5dc364cd15c465910ccad7be8",
+    "state": "12ddca320c247e65b88f330ef320f008fe54f934d761d8d2ec83f956cd30b993"
+  },
+  "state": {
+    "balance_usdc": 0.0,
+    "cycle_count": 0,
+    "last_task": "",
+    "wallet_public_key": "GBIRUHZQUEQEXX57OKZHNX6FI4M52CSDBNYD3S7TVHSH6IPIVFGYDTIC"
+  }
+}

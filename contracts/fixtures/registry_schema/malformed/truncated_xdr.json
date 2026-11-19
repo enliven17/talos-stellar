@@ -1,0 +1,14 @@
+{
+  "meta": {
+    "contract": "TalosRegistry",
+    "generator": "scripts/generate-registry-fixtures.mjs v1",
+    "kind": "Talos",
+    "note": "truncated / invalid JSON – parser must fail with actionable error and hint to regenerate",
+    "schema_version": 1
+  },
+  "storage_key": {
+    "id": 1,
+    "type": "Talos"
+  },
+  "value": "TRUNCATED_NOT_AN_OBJECT"
+}

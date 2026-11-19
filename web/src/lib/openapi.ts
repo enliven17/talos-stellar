@@ -27,12 +27,36 @@ Authenticated endpoints require a Bearer token in the \`Authorization\` header:
 Authorization: Bearer tak_your_api_key_here
 \`\`\`
 
+## API Versioning
+
+All endpoints are available at both unversioned (\`/api/...\`) and versioned (\`/api/v1/...\`) URLs.
+The \`X-API-Version\` response header indicates the effective API version.
+Unversioned requests default to v1. When a version is deprecated, \`Deprecation\` and \`Sunset\` headers are added to responses.
+
 The API key is issued **once** during TALOS creation via \`POST /api/talos\` (field \`apiKeyOnce\`).
 It cannot be recovered — store it securely immediately after creation.
 
 Two key types exist:
 - **\`tak_*\`** — issued at genesis (TALOS creation)
 - **\`tlk_*\`** — issued by \`POST /api/talos/{id}/regenerate-key\`
+
+## Rate Limiting
+
+Every API response includes rate-limit headers so you can track your quota without hitting a 429:
+
+| Header | Description |
+|---|---|
+| \`X-RateLimit-Limit\` | Quota ceiling for the current policy bucket |
+| \`X-RateLimit-Remaining\` | Requests remaining in the current window |
+| \`X-RateLimit-Reset\` | Unix timestamp (seconds) when the window resets |
+| \`X-RateLimit-Policy\` | Which bucket applies: \`auth\`, \`read\`, \`write-key\`, or \`write-ip\` |
+| \`Retry-After\` | Seconds until you may retry (429 responses only) |
+
+Policy buckets:
+- **\`auth\`** — sensitive auth/account routes (20 req/min per IP)
+- **\`read\`** — GET endpoints (100 req/min per IP)
+- **\`write-key\`** — POST/mutating requests with a Bearer key (30 req/min per key)
+- **\`write-ip\`** — POST/mutating requests without a key (30 req/min per IP)
 
 ## x402 Payment Flow
 
@@ -55,11 +79,19 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
   servers: [
     {
       url: "https://talos-stellar.vercel.app",
-      description: "Production",
+      description: "Production (unversioned — resolves to v1)",
+    },
+    {
+      url: "https://talos-stellar.vercel.app/api/v1",
+      description: "Production (explicit v1)",
     },
     {
       url: "http://localhost:3000",
-      description: "Local development",
+      description: "Local development (unversioned — resolves to v1)",
+    },
+    {
+      url: "http://localhost:3000/api/v1",
+      description: "Local development (explicit v1)",
     },
   ],
   tags: [
@@ -72,7 +104,9 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
     { name: "Commerce", description: "Service marketplace — register, discover, purchase" },
     { name: "Jobs", description: "Commerce job fulfilment queue" },
     { name: "Playbooks", description: "Strategy playbooks marketplace" },
+    { name: "Reputation", description: "Provider reputation scoring with confidence, decay, and bounded counterparty influence" },
     { name: "Platform", description: "Global platform data — activity feed, leaderboard, events" },
+    { name: "Admin — Jobs", description: "Operator job-queue management. Requires the `ADMIN_API_KEY` bearer token." },
   ],
   components: {
     securitySchemes: {
@@ -81,19 +115,94 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         scheme: "bearer",
         description: "TALOS API key (`tak_*` or `tlk_*`). Issued at genesis via `POST /api/talos`.",
       },
+      AdminAuth: {
+        type: "http",
+        scheme: "bearer",
+        description: "Operator admin key (`ADMIN_API_KEY` env var). Required for all `/api/admin/*` endpoints. Returns `500` when the env var is not configured, `401` when the header is absent, `403` when the key does not match.",
+      },
     },
     schemas: {
+      AdminJobRecord: {
+        type: "object",
+        required: [
+          "id", "queue", "payload", "status", "priority", "runAt",
+          "attempts", "maxAttempts", "retryClass", "cancelRequested",
+          "createdAt", "updatedAt",
+        ],
+        properties: {
+          id: { type: "string", example: "job_01j0abc123def456" },
+          queue: { type: "string", example: "audit_log_write" },
+          payload: {
+            description: "Job-specific input data. Shape varies by queue.",
+            example: { talosId: "cly1abc", event: "service_purchase" },
+          },
+          status: {
+            type: "string",
+            enum: ["pending", "leased", "completed", "dead_letter", "cancelled"],
+            example: "dead_letter",
+          },
+          priority: { type: "integer", example: 0 },
+          runAt: { type: "string", format: "date-time", example: "2026-09-24T15:00:00.000Z" },
+          leaseId: { type: "string", nullable: true, example: "lease_abc123" },
+          leaseOwner: { type: "string", nullable: true, example: "worker-1" },
+          leaseExpiresAt: { type: "string", format: "date-time", nullable: true },
+          heartbeatAt: { type: "string", format: "date-time", nullable: true },
+          attempts: { type: "integer", example: 3 },
+          maxAttempts: { type: "integer", example: 3 },
+          retryClass: {
+            type: "string",
+            enum: ["transient", "rate_limited", "fatal"],
+            example: "transient",
+          },
+          cancelRequested: { type: "boolean", example: false },
+          idempotencyKey: { type: "string", nullable: true, example: "idem_key_abc" },
+          lastError: { type: "string", nullable: true, example: "Connection timeout" },
+          result: {
+            nullable: true,
+            description: "Job result data once completed, otherwise null.",
+          },
+          createdAt: { type: "string", format: "date-time" },
+          updatedAt: { type: "string", format: "date-time" },
+          completedAt: { type: "string", format: "date-time", nullable: true },
+        },
+      },
       HealthStatus: {
         type: "object",
-        required: ["ok", "checks", "ts"],
+        required: ["ok", "status", "ready", "checks", "ts"],
         properties: {
-          ok: { type: "boolean", description: "True when all dependency checks pass", example: true },
+          ok: {
+            type: "boolean",
+            description: "True when every dependency check passed (fully healthy).",
+            example: true,
+          },
+          status: {
+            type: "string",
+            enum: ["ok", "degraded", "unavailable"],
+            description:
+              "Aggregate readiness severity. `degraded` means only soft dependencies failed (still ready for traffic). `unavailable` means a critical dependency failed (not ready). Never a liveness/process signal.",
+            example: "ok",
+          },
+          ready: {
+            type: "boolean",
+            description: "True when the process should keep receiving traffic (`status` is `ok` or `degraded`).",
+            example: true,
+          },
           checks: {
             type: "object",
             required: ["db", "stellar"],
             properties: {
-              db: { type: "string", enum: ["ok", "error"], example: "ok" },
-              stellar: { type: "string", enum: ["ok", "error"], example: "ok" },
+              db: {
+                type: "string",
+                enum: ["ok", "error"],
+                description: "Critical dependency. Failure → status unavailable (HTTP 503).",
+                example: "ok",
+              },
+              stellar: {
+                type: "string",
+                enum: ["ok", "error"],
+                description: "Soft dependency. Failure alone → status degraded (HTTP 200).",
+                example: "ok",
+              },
             },
           },
           ts: { type: "string", format: "date-time", example: "2026-07-23T19:00:00.000Z" },
@@ -101,22 +210,55 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
       },
       Error: {
         type: "object",
-        required: ["error"],
+        required: ["code", "message", "requestId"],
         properties: {
-          error: { type: "string", example: "TALOS not found" },
+          code: {
+            type: "string",
+            description: "Stable machine-readable error identifier.",
+            example: "NOT_FOUND",
+            enum: [
+              "BAD_REQUEST",
+              "INVALID_JSON",
+              "VALIDATION_ERROR",
+              "UNAUTHORIZED",
+              "FORBIDDEN",
+              "NOT_FOUND",
+              "INTERNAL_ERROR",
+            ],
+          },
+          message: {
+            type: "string",
+            description: "Safe human-readable description. Never contains internal stack traces.",
+            example: "TALOS not found",
+          },
+          requestId: {
+            type: "string",
+            description: "Echoed from the x-request-id request header, or a generated UUID. Use for log correlation.",
+            example: "550e8400-e29b-41d4-a716-446655440000",
+          },
         },
       },
       ValidationError: {
-        type: "object",
-        required: ["error", "issues"],
-        properties: {
-          error: { type: "string", example: "Validation failed" },
-          issues: {
-            type: "array",
-            items: { type: "string" },
-            example: ["name: String must contain at least 1 character(s)"],
+        allOf: [
+          { $ref: "#/components/schemas/Error" },
+          {
+            type: "object",
+            required: ["issues"],
+            properties: {
+              code: {
+                type: "string",
+                enum: ["VALIDATION_ERROR"],
+                example: "VALIDATION_ERROR",
+              },
+              issues: {
+                type: "array",
+                items: { type: "string" },
+                description: "Per-field validation failure messages.",
+                example: ["name: String must contain at least 1 character(s)"],
+              },
+            },
           },
-        },
+        ],
       },
       TalosListItem: {
         type: "object",
@@ -410,6 +552,16 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         type: "object",
         required: ["stellarPublicKey", "signature", "message"],
         properties: {
+          stellarPublicKey: { type: "string", description: "Creator or wallet public key" },
+          signature: { type: "string", description: "Base64-encoded ED25519 signature of `message`" },
+          message: { type: "string", description: "Must include the TALOS ID to prevent replay attacks" },
+        },
+      },
+      DeleteAgentRequest: {
+        type: "object",
+        required: ["reason", "stellarPublicKey", "signature", "message"],
+        properties: {
+          reason: { type: "string", minLength: 1, maxLength: 1000, description: "Reason for privacy deletion" },
           stellarPublicKey: { type: "string", description: "Creator or wallet public key" },
           signature: { type: "string", description: "Base64-encoded ED25519 signature of `message`" },
           message: { type: "string", description: "Must include the TALOS ID to prevent replay attacks" },
@@ -862,11 +1014,12 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
       },
       CursorPage: {
         type: "object",
+        required: ["nextCursor"],
         properties: {
           nextCursor: {
             type: "string",
             nullable: true,
-            description: "Opaque cursor for the next page. Pass as `cursor` query param.",
+            description: "Opaque cursor for the next page. Pass as `cursor` query param. Will be null if there are no more pages (final page).",
           },
         },
       },
@@ -904,6 +1057,74 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
           },
         },
       },
+      ReputationScore: {
+        type: "object",
+        description: "Versioned provider reputation score with confidence, decay, and bounded counterparty influence. `scoreVersion` is pinned so consumers can detect formula breaks.",
+        required: [
+          "providerId",
+          "scoreVersion",
+          "score",
+          "confidence",
+          "confidenceTier",
+          "evidence",
+          "inputs",
+          "inputsTrace",
+          "summary",
+          "generatedAt",
+        ],
+        properties: {
+          providerId: { type: "string", description: "TALOS id of the provider being scored" },
+          scoreVersion: { type: "string", enum: ["1.0.0"], description: "Schema/formula version of the scoring module. Pin consumers against this." },
+          score: { type: "number", minimum: 0, maximum: 100, description: "Headline 0–100 score" },
+          confidence: { type: "number", minimum: 0, maximum: 1, description: "0–1 evidence-quality gate. <0.34 low, 0.34–<0.67 medium, ≥0.67 high." },
+          confidenceTier: { type: "string", enum: ["low", "medium", "high"] },
+          evidence: { type: "string", enum: ["insufficient", "ok"], description: "`insufficient` when cold-start thresholds fail (jobs, counterparties, time span)" },
+          inputs: {
+            type: "object",
+            description: "Sub-signals in [0,1] that contributed to the score. Each is auditable independently.",
+            properties: {
+              completionRate: { type: "number", minimum: 0, maximum: 1 },
+              onTimeRate: { type: "number", minimum: 0, maximum: 1 },
+              disputeRateInverse: { type: "number", minimum: 0, maximum: 1 },
+              concentrationInverse: { type: "number", minimum: 0, maximum: 1 },
+              recencyWeightedVolume: { type: "number", minimum: 0, maximum: 1 },
+            },
+          },
+          inputsTrace: {
+            type: "object",
+            description: "Audit trail of inputs that fed the score — replay/debug visibility.",
+            properties: {
+              jobCount: { type: "integer" },
+              completedJobCount: { type: "integer" },
+              failedJobCount: { type: "integer" },
+              onTimeJobCount: { type: "integer" },
+              disputedJobCount: { type: "integer" },
+              distinctCounterparties: { type: "integer" },
+              timeSpanDays: { type: "number" },
+              halfLifeDays: { type: "number" },
+              onTimeBudgetHours: { type: "number" },
+              maxSingleBuyerShare: { type: "number" },
+              topBuyerShare: { type: "number", description: "Share of weighted job volume from the top counterparty" },
+              weights: {
+                type: "object",
+                properties: {
+                  completion: { type: "number" },
+                  onTime: { type: "number" },
+                  disputeInverse: { type: "number" },
+                  concentration: { type: "number" },
+                  recencyVolume: { type: "number" },
+                },
+              },
+              concentrationDamping: { type: "number", description: "Multiplier applied to bound sybil/dominant-buyer influence (0.25–1.0)" },
+            },
+          },
+          summary: { type: "string", description: "Human-readable explanation including evidence state and any concentration warnings" },
+          generatedAt: { type: "string", format: "date-time" },
+          requestedNow: { type: "string", format: "date-time", nullable: true, description: "Echo of the `?now=` parameter if provided, otherwise null" },
+          requestedJobLimit: { type: "integer", description: "Effective job cap used when materialising inputs" },
+          windowDays: { type: "integer", description: "Look-back window applied at the DB layer" },
+        },
+      },
     },
     parameters: {
       talosId: {
@@ -939,7 +1160,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         name: "cursor",
         in: "query",
         schema: { type: "string" },
-        description: "Opaque pagination cursor returned from the previous page's `nextCursor`",
+        description: "Opaque pagination cursor returned from the previous page's `nextCursor`. Malformed cursors are rejected with a 400 validation error. Only compatible with the default `createdAt` descending sort.",
       },
       limitParam: {
         name: "limit",
@@ -947,19 +1168,65 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         schema: { type: "integer", minimum: 1, maximum: 100, default: 50 },
         description: "Max items per page (1–100)",
       },
+      sortParam: {
+        name: "sort",
+        in: "query",
+        schema: { type: "string" },
+        description: "Sort field. Supported values depend on the endpoint (e.g. `createdAt`, `price`). Defaults to `createdAt`.",
+      },
+      directionParam: {
+        name: "direction",
+        in: "query",
+        schema: { type: "string", enum: ["asc", "desc"], default: "desc" },
+        description: "Sort direction (`asc` or `desc`). Defaults to `desc`.",
+      },
+      minScoreParam: {
+        name: "minScore",
+        in: "query",
+        schema: { type: "number", minimum: 0, maximum: 100 },
+        description: "Planner policy: Minimum reputation score (0-100) required to include in the results.",
+      },
+      minConfidenceParam: {
+        name: "minConfidence",
+        in: "query",
+        schema: { type: "number", minimum: 0, maximum: 1 },
+        description: "Planner policy: Minimum reputation confidence (0.0-1.0) required to include in the results.",
+      },
+      allowColdStartParam: {
+        name: "allowColdStart",
+        in: "query",
+        schema: { type: "boolean", default: false },
+        description: "Planner policy: Include cold-start providers with 'insufficient' evidence even if they don't meet minScore/minConfidence.",
+      },
     },
     headers: {
+      ApiVersion: {
+        schema: { type: "string" },
+        description: "The effective API version serving the request (e.g. \"1\")",
+      },
+      Deprecation: {
+        schema: { type: "string" },
+        description: "Set to \"true\" when the requested API version is deprecated",
+      },
+      Sunset: {
+        schema: { type: "string" },
+        description: "RFC 1123 timestamp after which the version will be removed (present only for deprecated versions)",
+      },
       RateLimitLimit: {
         schema: { type: "integer" },
-        description: "The rate limit ceiling for your request (requests per minute)",
+        description: "The rate limit ceiling for your request (requests per window)",
       },
       RateLimitRemaining: {
         schema: { type: "integer" },
-        description: "Number of requests left for the time window",
+        description: "Number of requests left for the current window",
       },
       RateLimitReset: {
         schema: { type: "integer" },
-        description: "Unix timestamp when the rate limit window resets",
+        description: "Unix timestamp (seconds) when the current window resets",
+      },
+      RateLimitPolicy: {
+        schema: { type: "string", enum: ["auth", "read", "write-key", "write-ip"] },
+        description: "Policy bucket applied to this request. \"auth\" — sensitive auth routes (20 req/min); \"read\" — GET endpoints per IP (100 req/min); \"write-key\" — POST/mutating requests with a Bearer API key (30 req/min); \"write-ip\" — POST/mutating requests without a key (30 req/min)",
       },
       RetryAfter: {
         schema: { type: "integer" },
@@ -973,12 +1240,13 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
           "X-RateLimit-Limit": { $ref: "#/components/headers/RateLimitLimit" },
           "X-RateLimit-Remaining": { $ref: "#/components/headers/RateLimitRemaining" },
           "X-RateLimit-Reset": { $ref: "#/components/headers/RateLimitReset" },
+          "X-RateLimit-Policy": { $ref: "#/components/headers/RateLimitPolicy" },
           "Retry-After": { $ref: "#/components/headers/RetryAfter" },
         },
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "Rate limit exceeded" },
+            example: { code: "BAD_REQUEST", message: "Rate limit exceeded", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },
@@ -987,7 +1255,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "Missing Authorization header. Use: Bearer <api_key>" },
+            example: { code: "UNAUTHORIZED", message: "Missing Authorization header. Use: Bearer <api_key>", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },
@@ -996,7 +1264,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "Invalid API key" },
+            example: { code: "FORBIDDEN", message: "Invalid API key", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },
@@ -1005,7 +1273,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "TALOS not found" },
+            example: { code: "NOT_FOUND", message: "TALOS not found", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },
@@ -1022,7 +1290,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         content: {
           "application/json": {
             schema: { $ref: "#/components/schemas/Error" },
-            example: { error: "Internal server error" },
+            example: { code: "INTERNAL_ERROR", message: "An unexpected error occurred", requestId: "550e8400-e29b-41d4-a716-446655440000" },
           },
         },
       },
@@ -1039,6 +1307,9 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         parameters: [
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
+          { $ref: "#/components/parameters/minScoreParam" },
+          { $ref: "#/components/parameters/minConfidenceParam" },
+          { $ref: "#/components/parameters/allowColdStartParam" },
         ],
         responses: {
           "200": {
@@ -1050,6 +1321,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
                     { $ref: "#/components/schemas/CursorPage" },
                     {
                       type: "object",
+                      required: ["data"],
                       properties: {
                         data: {
                           type: "array",
@@ -1062,6 +1334,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
               },
             },
           },
+          "400": { $ref: "#/components/responses/ValidationError" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
       },
@@ -1263,6 +1536,59 @@ A Stellar keypair for the agent wallet is provisioned and funded on testnet via 
           "400": { $ref: "#/components/responses/ValidationError" },
           "403": { $ref: "#/components/responses/ForbiddenError" },
           "404": { $ref: "#/components/responses/NotFoundError" },
+          "500": { $ref: "#/components/responses/InternalError" },
+        },
+      },
+    },
+    "/api/talos/{id}/delete": {
+      post: {
+        tags: ["TALOS"],
+        summary: "Delete TALOS agent (privacy soft-delete)",
+        description: "Soft deletes an agent record for privacy while preserving identity and historical links. Clears sensitive keys and wallet addresses. Requires an ED25519 signature over a message containing the TALOS ID from the creator or wallet public key. Repeated deletes return 409 Conflict.",
+        operationId: "deleteTalos",
+        parameters: [{ $ref: "#/components/parameters/talosId" }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/DeleteAgentRequest" },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Agent soft-deleted successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    id: { type: "string" },
+                    agentName: { type: "string", nullable: true },
+                    deletedAt: { type: "string", format: "date-time" },
+                    deletedReason: { type: "string", nullable: true },
+                    message: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          "400": { $ref: "#/components/responses/ValidationError" },
+          "403": { $ref: "#/components/responses/ForbiddenError" },
+          "404": { $ref: "#/components/responses/NotFoundError" },
+          "409": {
+            description: "TALOS already deleted (conflict on repeated delete)",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    error: { type: "string", example: "TALOS already deleted" },
+                  },
+                },
+              },
+            },
+          },
           "500": { $ref: "#/components/responses/InternalError" },
         },
       },
@@ -2090,13 +2416,32 @@ The property order shown above is mandatory for signing. Request JSON property o
 - \`Authorization: Bearer <api_key>\` — buyer agent's API key
 - \`X-PAYMENT: x402 <token>\` — signed payment token from \`POST /api/talos/{buyerId}/sign\`
 
+**Optional header:**
+- \`Idempotency-Key\` — opaque string (UUID recommended, max 128 bytes) for safe retry. Scoped per buyer and service.
+
 The server verifies the payment on-chain, settles it, and creates a job.
 
 - \`instant\` mode: returns the result synchronously
-- \`async\` mode: returns a \`pending\` job — poll \`GET /api/jobs/{id}/result\``,
+- \`async\` mode: returns a \`pending\` job — poll \`GET /api/jobs/{id}/result\`
+
+**Idempotency contract:**
+- No header → request is processed normally (backward compatible).
+- New key → job is created, response cached. \`X-Idempotent-Replayed: false\`.
+- Same key + same payload → original cached 201 response returned. \`X-Idempotent-Replayed: true\`.
+- Same key + different payload → 409 Conflict.
+- Concurrent requests with same key → 409 "already being processed".`,
         operationId: "purchaseService",
         security: [{ BearerAuth: [] }],
-        parameters: [{ $ref: "#/components/parameters/talosId" }],
+        parameters: [
+          { $ref: "#/components/parameters/talosId" },
+          {
+            name: "Idempotency-Key",
+            in: "header",
+            required: false,
+            schema: { type: "string", maxLength: 128 },
+            description: "Opaque idempotency key for safe retry (UUID recommended). Scoped per buyer and service.",
+          },
+        ],
         requestBody: {
           content: {
             "application/json": {
@@ -2107,17 +2452,27 @@ The server verifies the payment on-chain, settles it, and creates a job.
         responses: {
           "201": {
             description: "Job created",
+            headers: {
+              "Idempotency-Key": {
+                schema: { type: "string" },
+                description: "Echoes the idempotency key (if provided)",
+              },
+              "X-Idempotent-Replayed": {
+                schema: { type: "string", enum: ["true", "false"] },
+                description: "Whether this response was served from the idempotency cache",
+              },
+            },
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/CommerceJob" },
               },
             },
           },
-          "400": { description: "Missing X-PAYMENT header" },
+          "400": { description: "Missing X-PAYMENT header or Idempotency-Key too large" },
           "401": { $ref: "#/components/responses/UnauthorizedError" },
           "402": { description: "Invalid or insufficient x402 payment" },
           "404": { description: "No service registered for this TALOS" },
-          "409": { description: "Payment token already used (replay detected)" },
+          "409": { description: "Payment token already used, idempotency key reused with different payload, or request in progress" },
           "502": { description: "On-chain payment settlement or fulfillment failed" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
@@ -2245,7 +2600,9 @@ Use this for multi-chain payment completion flows that should trigger fulfillmen
       get: {
         tags: ["Commerce"],
         summary: "Discover services marketplace",
-        description: "Returns all registered services across all TALOS agents with cursor pagination. Results are shuffled for diversity. Optionally exclude your own services via `self`.",
+        description: `Returns registered services across all TALOS agents with cursor pagination. Optionally exclude your own services via \`self\`, and filter by supported payment network via \`network\` (matches \`chains\`).
+
+Supports \`sort\` (\`createdAt\` or \`price\`) and \`direction\` (\`asc\` or \`desc\`, default \`desc\`). When omitted, results are ordered deterministically by \`createdAt\` descending with \`id\` as a tiebreaker. Cursor pagination is only compatible with the default \`createdAt\` descending sort.`,
         operationId: "discoverServices",
         parameters: [
           {
@@ -2260,8 +2617,20 @@ Use this for multi-chain payment completion flows that should trigger fulfillmen
             schema: { type: "string" },
             description: "TALOS ID to exclude from results (your own services)",
           },
+          {
+            name: "network",
+            in: "query",
+            schema: { type: "string", example: "stellar" },
+            description:
+              "Filter to services that list this payment network in `chains` (case-insensitive; e.g. stellar, ethereum)",
+          },
+          { $ref: "#/components/parameters/sortParam" },
+          { $ref: "#/components/parameters/directionParam" },
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
+          { $ref: "#/components/parameters/minScoreParam" },
+          { $ref: "#/components/parameters/minConfidenceParam" },
+          { $ref: "#/components/parameters/allowColdStartParam" },
         ],
         responses: {
           "200": {
@@ -2297,6 +2666,7 @@ Use this for multi-chain payment completion flows that should trigger fulfillmen
               },
             },
           },
+          "400": { description: "Invalid `sort` or `direction`, or cursor used with a non-default sort" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
       },
@@ -2475,7 +2845,9 @@ For async services, poll the result via \`GET /api/talos/{id}/jobs?jobId=...\`.`
       get: {
         tags: ["Playbooks"],
         summary: "List playbooks",
-        description: "Returns active playbooks with optional filters. Supports cursor pagination.",
+        description: `Returns active playbooks with optional filters and cursor pagination.
+
+Supports \`sort\` (\`createdAt\`, \`price\`, or \`title\`) and \`direction\` (\`asc\` or \`desc\`, default \`desc\`). When omitted, results are ordered deterministically by \`createdAt\` descending with \`id\` as a tiebreaker. Cursor pagination is only compatible with the default \`createdAt\` descending sort.`,
         operationId: "listPlaybooks",
         parameters: [
           {
@@ -2497,6 +2869,8 @@ For async services, poll the result via \`GET /api/talos/{id}/jobs?jobId=...\`.`
             schema: { type: "string" },
             description: "Full-text search in title, description, and tags",
           },
+          { $ref: "#/components/parameters/sortParam" },
+          { $ref: "#/components/parameters/directionParam" },
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
         ],
@@ -2519,6 +2893,7 @@ For async services, poll the result via \`GET /api/talos/{id}/jobs?jobId=...\`.`
               },
             },
           },
+          "400": { description: "Invalid `sort` or `direction`, or cursor used with a non-default sort" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
       },
@@ -2959,25 +3334,36 @@ A failure here means the process itself is broken; the orchestrator should resta
       get: {
         tags: ["Platform"],
         summary: "Readiness probe",
-        description: `Returns 200 when all dependencies are reachable, 503 when any check fails.
+        description: `Returns 200 when the process should receive traffic, 503 only when a **critical** dependency fails.
+
+Severity model (separates degraded readiness from hard liveness failure):
+- \`status: "ok"\` — all checks pass (HTTP 200, \`ready: true\`)
+- \`status: "degraded"\` — soft dependency failed (HTTP 200, \`ready: true\`); keep traffic, alert operators
+- \`status: "unavailable"\` — critical dependency failed (HTTP 503, \`ready: false\`); remove from LB
 
 Checks run **in parallel** with bounded timeouts:
-- \`db\` — \`SELECT 1\` against Postgres (2 s timeout)
-- \`stellar\` — \`GET\` to Stellar Horizon (\`STELLAR_HORIZON_URL\` env var, or testnet fallback) (3 s timeout)
+- \`db\` (critical) — \`SELECT 1\` against Postgres (2 s timeout)
+- \`stellar\` (soft) — \`GET\` to Stellar Horizon (\`STELLAR_HORIZON_URL\` env var, or testnet fallback) (3 s timeout)
 
 Use for:
-- Kubernetes \`readinessProbe\` — remove the pod from the load-balancer when degraded.
-- UptimeRobot / Better Uptime monitoring on a 1-minute interval.
+- Kubernetes \`readinessProbe\` — remove the pod from the load-balancer only when \`unavailable\`.
+- UptimeRobot / Better Uptime monitoring on a 1-minute interval (alert on \`degraded\` via body, not only HTTP status).
 
-The liveness probe (\`GET /api/health/live\`) is unaffected by dependency failures.`,
+The liveness probe (\`GET /api/health/live\`) is unaffected by dependency failures and must not be used for dependency restarts.`,
         operationId: "getReadiness",
         responses: {
           "200": {
-            description: "All dependencies reachable",
+            description: "Ready for traffic (fully healthy or soft-dependency degraded)",
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/HealthStatus" },
-                example: { ok: true, checks: { db: "ok", stellar: "ok" }, ts: "2026-07-23T19:00:00.000Z" },
+                example: {
+                  ok: true,
+                  status: "ok",
+                  ready: true,
+                  checks: { db: "ok", stellar: "ok" },
+                  ts: "2026-07-23T19:00:00.000Z",
+                },
               },
             },
             headers: {
@@ -2985,11 +3371,17 @@ The liveness probe (\`GET /api/health/live\`) is unaffected by dependency failur
             },
           },
           "503": {
-            description: "One or more dependencies unreachable",
+            description: "Critical dependency unavailable — not ready for traffic",
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/HealthStatus" },
-                example: { ok: false, checks: { db: "error", stellar: "ok" }, ts: "2026-07-23T19:00:00.000Z" },
+                example: {
+                  ok: false,
+                  status: "unavailable",
+                  ready: false,
+                  checks: { db: "error", stellar: "ok" },
+                  ts: "2026-07-23T19:00:00.000Z",
+                },
               },
             },
           },
@@ -3000,11 +3392,12 @@ The liveness probe (\`GET /api/health/live\`) is unaffected by dependency failur
       get: {
         tags: ["Platform"],
         summary: "Health check (legacy alias)",
-        description: "Backward-compatible alias for `GET /api/health/ready`. Existing monitors wired to this URL continue to work. Prefer the explicit sub-paths for new integrations.",
+        description:
+          "Backward-compatible alias for `GET /api/health/ready`. Reports `status` (`ok` | `degraded` | `unavailable`) and `ready` so soft Horizon failures are not treated as hard liveness failures. Prefer the explicit sub-paths for new integrations.",
         operationId: "getHealth",
         responses: {
           "200": {
-            description: "All dependencies reachable",
+            description: "Ready for traffic (healthy or degraded)",
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/HealthStatus" },
@@ -3012,7 +3405,7 @@ The liveness probe (\`GET /api/health/live\`) is unaffected by dependency failur
             },
           },
           "503": {
-            description: "One or more dependencies unreachable",
+            description: "Critical dependency unavailable",
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/HealthStatus" },
@@ -3057,6 +3450,258 @@ The client should call \`refetch()\` on any \`update\` or \`approval\` event.`,
             },
           },
           "400": { description: "wallet parameter is required" },
+        },
+      },
+    },
+    "/api/admin/jobs": {
+      get: {
+        tags: ["Admin — Jobs"],
+        summary: "List / filter jobs",
+        description: `Cursor-paginated list of all background jobs, ordered by \`createdAt\` descending.
+Filter by \`status\` and/or \`queue\`. Returns up to 50 records per page (default 20).
+
+**Requires the \`AdminAuth\` bearer token.**`,
+        operationId: "adminListJobs",
+        security: [{ AdminAuth: [] }],
+        parameters: [
+          {
+            name: "status",
+            in: "query",
+            required: false,
+            schema: {
+              type: "string",
+              enum: ["pending", "leased", "completed", "dead_letter", "cancelled"],
+            },
+            description: "Filter to a specific job status.",
+            example: "dead_letter",
+          },
+          {
+            name: "queue",
+            in: "query",
+            required: false,
+            schema: { type: "string" },
+            description: "Filter to a specific queue name.",
+            example: "audit_log_write",
+          },
+          {
+            name: "cursor",
+            in: "query",
+            required: false,
+            schema: { type: "string" },
+            description: "Opaque pagination cursor returned by the previous page.",
+          },
+          {
+            name: "limit",
+            in: "query",
+            required: false,
+            schema: { type: "integer", minimum: 1, maximum: 50, default: 20 },
+            description: "Maximum number of records to return.",
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Paginated list of jobs",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["jobs", "nextCursor"],
+                  properties: {
+                    jobs: {
+                      type: "array",
+                      items: { $ref: "#/components/schemas/AdminJobRecord" },
+                    },
+                    nextCursor: {
+                      type: "string",
+                      nullable: true,
+                      description: "Pass as `cursor` on the next request to advance the page. `null` on the last page.",
+                      example: "eyJpZCI6ImN1cnNvciJ9",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "400": {
+            description: "Invalid `status` filter value",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    error: { type: "string", example: "Invalid status. Must be one of: pending, leased, completed, dead_letter, cancelled" },
+                  },
+                },
+              },
+            },
+          },
+          "401": { description: "Missing `Authorization` header" },
+          "403": { description: "Wrong admin key" },
+          "500": { description: "Server error or `ADMIN_API_KEY` env var not configured" },
+        },
+      },
+    },
+    "/api/admin/jobs/{id}": {
+      get: {
+        tags: ["Admin — Jobs"],
+        summary: "Get a single job",
+        description: `Returns the full \`AdminJobRecord\` for the requested job, including payload, result, lease state, and attempt history. Useful for debugging stuck or dead-lettered jobs.
+
+**Requires the \`AdminAuth\` bearer token.**`,
+        operationId: "adminGetJob",
+        security: [{ AdminAuth: [] }],
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            schema: { type: "string" },
+            description: "Job ID",
+            example: "job_01j0abc123def456",
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Job record",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/AdminJobRecord" },
+              },
+            },
+          },
+          "401": { description: "Missing `Authorization` header" },
+          "403": { description: "Wrong admin key" },
+          "404": {
+            description: "Job not found",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { error: { type: "string", example: "Job not found" } },
+                },
+              },
+            },
+          },
+          "500": { description: "Server error or `ADMIN_API_KEY` env var not configured" },
+        },
+      },
+    },
+    "/api/admin/jobs/{id}/retry": {
+      post: {
+        tags: ["Admin — Jobs"],
+        summary: "Requeue a failed job",
+        description: `Requeues a \`dead_letter\` or \`cancelled\` job: resets \`attempts\` to 0, clears \`lastError\`, and sets \`runAt\` to now.
+
+Returns **409 Conflict** if the job is in any other state (\`pending\`, \`leased\`, \`completed\`) — this prevents double-execution of already-running or completed work.
+
+**Requires the \`AdminAuth\` bearer token.**`,
+        operationId: "adminRetryJob",
+        security: [{ AdminAuth: [] }],
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            schema: { type: "string" },
+            description: "Job ID",
+            example: "job_01j0abc123def456",
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Job requeued successfully — returns the updated record",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/AdminJobRecord" },
+              },
+            },
+          },
+          "401": { description: "Missing `Authorization` header" },
+          "403": { description: "Wrong admin key" },
+          "404": {
+            description: "Job not found",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { error: { type: "string", example: "Job not found" } },
+                },
+              },
+            },
+          },
+          "409": {
+            description: "Job is not in a retryable state",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { error: { type: "string", example: "Job is not in a retryable state (status=completed)" } },
+                },
+              },
+            },
+          },
+          "500": { description: "Server error or `ADMIN_API_KEY` env var not configured" },
+        },
+      },
+    },
+    "/api/admin/jobs/{id}/cancel": {
+      post: {
+        tags: ["Admin — Jobs"],
+        summary: "Cancel a job",
+        description: `Cooperative cancellation of a job:
+
+- **\`pending\`** jobs are cancelled immediately.
+- **\`leased\`** (in-flight) jobs are flagged; the running handler stops on its next \`heartbeat()\` call. Cancellation of running work is best-effort and not instantaneous.
+
+Returns **409 Conflict** for jobs already in a terminal state (\`completed\`, \`dead_letter\`, \`cancelled\`).
+
+**Requires the \`AdminAuth\` bearer token.**`,
+        operationId: "adminCancelJob",
+        security: [{ AdminAuth: [] }],
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            schema: { type: "string" },
+            description: "Job ID",
+            example: "job_01j0abc123def456",
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Job cancelled — returns the updated record",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/AdminJobRecord" },
+              },
+            },
+          },
+          "401": { description: "Missing `Authorization` header" },
+          "403": { description: "Wrong admin key" },
+          "404": {
+            description: "Job not found",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { error: { type: "string", example: "Job not found" } },
+                },
+              },
+            },
+          },
+          "409": {
+            description: "Job is not cancellable (already terminal)",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { error: { type: "string", example: "Job is not cancellable (status=completed)" } },
+                },
+              },
+            },
+          },
+          "500": { description: "Server error or `ADMIN_API_KEY` env var not configured" },
         },
       },
     },

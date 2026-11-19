@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsRevenues, tlsActivities, tlsPatrons } from "@/db/schema";
@@ -26,14 +27,14 @@ interface FinancialProjection {
 }
 
 // GET /api/talos/:id/financial-projection - AI-driven financial projections
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   try {
-    const auth = await verifyAgentApiKey(request, id);
+    const auth = await verifyAgentApiKey(request, id, ["revenue:read"]);
     if (!auth.ok) return auth.response;
 
     // Fetch TALOS basic info
@@ -65,7 +66,8 @@ export async function GET(
     const patrons = await db
       .select()
       .from(tlsPatrons)
-      .where(eq(tlsPatrons.talosId, id));
+      .where(eq(tlsPatrons.talosId, id))
+      .limit(100);
 
     // Calculate revenue summary
     const totalRevenue = revenues.reduce(
@@ -232,8 +234,10 @@ Generate projections for the next 12 months.`;
   } catch (error) {
     console.error("Financial projection error:", error);
     return Response.json(
-      { error: "Internal server error", details: error instanceof Error ? error.message : "Unknown error" },
+      { error: "Internal server error" },
       { status: 500 }
     );
   }
 }
+
+export const GET = withRequestId(_GET);

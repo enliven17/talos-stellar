@@ -1,0 +1,904 @@
+/**
+ * Stable, typed SDK error hierarchy for the Talos Protocol.
+ *
+ * All errors thrown by {@link TalosClient} extend {@link TalosAPIError}, so
+ * existing `try { } catch (e) { if (e instanceof TalosAPIError) … }` blocks
+ * continue to work unchanged. New typed subclasses surface actionable
+ * information (parsed validation issues, parsed x402 challenge, retry hints,
+ * rate-limit counters, request-id, sanitized response headers) for callers
+ * that want to react to specific failure modes.
+ *
+ * Privacy / safety guarantees:
+ *   - Bodies are sanitized: parsed JSON is truncated to 1024 bytes; raw text
+ *     is reduced to the same cap; common secret-like fields (`token`,
+ *     `authorization`, `secret`, `apiKey`) are redacted in `body`/`data`.
+ *   - Headers are stored with lowercased keys and only contain the safe set
+ *     (`x-request-id`, `retry-after`, `www-authenticate`, `x-ratelimit-*`).
+ *   - No request bodies (which may contain signatures, secrets, amounts) are
+ *     ever surfaced through errors.
+ *
+ * @module errors
+ */
+
+/** Stable string discriminator for `switch`-style error handling. */
+export type TalosErrorCode =
+  | "validation_error"
+  | "authentication_error"
+  | "forbidden"
+  | "not_found_error"
+  | "conflict_error"
+  | "payment_error"
+  | "rate_limit_error"
+  | "server_error"
+  | "transport_error"
+  | "timeout_error"
+  | "api_error";
+
+/**
+ * Maximum number of bytes retained from a response body when building an
+ * error. Bounded so that error logs / propagations stay small and predictable.
+ */
+export const MAX_BODY_BYTES = 1024;
+
+/**
+ * Maximum number of bytes retained from a serialized `data` payload when
+ * surfaced via {@link TalosAPIError.dataForLog}. Mirrors {@link MAX_BODY_BYTES}
+ * to keep error logs bounded in both directions.
+ */
+export const MAX_DATA_BYTES = 4096;
+
+/**
+ * Names of fields whose values potentially contain credentials or other
+ * sensitive material. We redact them in the surfaced error body and `data`.
+ */
+export const SENSITIVE_FIELD_PATTERN = /^(token|authorization|secret|api[_-]?key|password|cookie|signature|message|nonce|hash)$/i;
+
+/**
+ * Options accepted by every TalosAPIError subclass via the 4th constructor
+ * argument. All fields are optional and additive.
+ */
+export interface TalosAPIErrorOptions {
+  /** Override the default error message (used to preserve raw network message). */
+  message?: string;
+  /** Stable machine-readable code from the API response envelope. */
+  apiCode?: string;
+  /** Safe human-readable message from the API response envelope. */
+  apiMessage?: string;
+  /** Validation details from the API response envelope. */
+  validationDetails?: string[];
+  /** Stable string discriminator (set automatically by subclasses). */
+  code?: TalosErrorCode;
+  /** Whether the failure is transient and safe to retry. */
+  isRetryable?: boolean;
+  /** Server-supplied retry hint (already normalized to milliseconds). */
+  retryAfterMs?: number;
+  /** Explicitly supplied rate-limit counters (falls back to parsing `headers`). */
+  rateLimit?: RateLimitInfo;
+  /** Snapshot of relevant response headers (lowercased keys). */
+  headers?: Record<string, string>;
+  /** `x-request-id` for correlation with server logs. */
+  requestId?: string;
+  /** Parsed response body (JSON-decoded, sanitized). */
+  data?: unknown;
+  /** Original cause (transport / parse failure). */
+  cause?: unknown;
+  /** ISO 8601 timestamp captured when the error was constructed. */
+  timestamp?: string;
+}
+
+/**
+ * Sanitize a response body. Returns `{ body, data }` where:
+ *   - `body` is a JSON-safe string with sensitive fields redacted and size
+ *     capped at {@link MAX_BODY_BYTES}.
+ *   - `data` is the parsed JSON object (or `undefined` if not parseable).
+ *
+ * Non-JSON bodies (HTML error pages, proxy fallbacks, plain text) are
+ * truncated and returned as a single-line string.
+ */
+export function sanitizeBody(raw: string | undefined | null): {
+  body: string;
+  data?: unknown;
+} {
+  if (raw == null || raw.length === 0) {
+    return { body: "" };
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    const safe = redactSecrets(parsed);
+    const compact = JSON.stringify(safe);
+    return { body: truncate(compact), data: safe };
+  } catch {
+    // Not JSON — collapse to a single line, truncate.
+    const single = redactInlineSecrets(raw.replace(/\s+/g, " ").trim());
+    return { body: truncate(single) };
+  }
+}
+
+function redactInlineSecrets(value: string): string {
+  return value
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [REDACTED]")
+    .replace(
+      /\b(token|access[_-]?token|api[_-]?key|authorization|secret|password|cookie|signature|nonce)\b\s*[:=]\s*("[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      "$1=[REDACTED]",
+    );
+}
+
+/** Truncate a string to MAX_BODY_BYTES, suffixing with an ellipsis marker. */
+function truncate(s: string): string {
+  if (s.length <= MAX_BODY_BYTES) return s;
+  return s.slice(0, MAX_BODY_BYTES) + "…[truncated]";
+}
+
+/**
+ * Recursively redact sensitive fields inside a parsed JSON value. Mutates a
+ * copy so the original (if any) is not aliased. Public callers should use
+ * this single-arg form; cycle detection is handled internally.
+ */
+export function redactSecrets(value: unknown): unknown {
+  return redactSecretsInternal(value, new WeakSet<object>());
+}
+
+function redactSecretsInternal(value: unknown, seen: WeakSet<object>): unknown {
+  if (value == null) return value;
+  if (typeof value !== "object") return value;
+  const obj = value as Record<string, unknown>;
+  if (seen.has(obj)) return "[Circular]";
+  seen.add(obj);
+
+  if (Array.isArray(obj)) {
+    return obj.map((item) => redactSecretsInternal(item, seen));
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (SENSITIVE_FIELD_PATTERN.test(k)) {
+      out[k] = "[REDACTED]";
+    } else {
+      out[k] = redactSecretsInternal(v, seen);
+    }
+  }
+  return out;
+}
+
+/**
+ * Header source accepted by the header helpers: a `Headers` instance or a
+ * plain lowercased record (as used by mocked fetch responses in tests).
+ */
+export type HeaderSource = Headers | Record<string, string> | undefined | null;
+
+/** Case-insensitive header read that works for `Headers` and plain records. */
+function readHeader(headers: HeaderSource, key: string): string | null {
+  if (!headers) return null;
+  if (typeof (headers as Headers).get === "function") {
+    return (headers as Headers).get(key);
+  }
+  const rec = headers as Record<string, string>;
+  return rec[key.toLowerCase()] ?? rec[key] ?? null;
+}
+
+/** Pull a small, safe set of headers off a `Headers` object. */
+export function snapshotHeaders(headers: HeaderSource): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!headers) return out;
+  const get = (key: string): string | null => readHeader(headers, key);
+  const SAFE_HEADER_KEYS = [
+    "x-request-id",
+    "retry-after",
+    "www-authenticate",
+    "x-ratelimit-limit",
+    "x-ratelimit-remaining",
+    "x-ratelimit-reset",
+  ];
+  for (const key of SAFE_HEADER_KEYS) {
+    const v = get(key);
+    if (v != null) out[key] = v;
+  }
+  return out;
+}
+
+/**
+ * Parse `Retry-After` header to milliseconds. Accepts:
+ *   - Plain seconds (e.g. `60`)
+ *   - HTTP date (e.g. `Wed, 21 Oct 2015 07:28:00 GMT`)
+ *
+ * Returns `undefined` if the value cannot be parsed.
+ */
+export function parseRetryAfter(value: string | undefined | null, nowMs: number = Date.now()): number | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    const seconds = parseFloat(trimmed);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+  }
+  const date = Date.parse(trimmed);
+  if (Number.isFinite(date)) {
+    return Math.max(0, date - nowMs);
+  }
+  return undefined;
+}
+
+/**
+ * Structured `X-RateLimit-*` counters parsed from a response.
+ *
+ * Headers are optional on the wire, so every field is optional: a request
+ * that only carries some of the counters still yields the subset that was
+ * present. When none of the counters can be parsed, {@link parseRateLimit}
+ * returns `undefined` rather than throwing.
+ */
+export interface RateLimitInfo {
+  /** Quota for the current bucket (`X-RateLimit-Limit`). */
+  limit?: number;
+  /** Requests left in the current window (`X-RateLimit-Remaining`). */
+  remaining?: number;
+  /**
+   * Unix epoch **milliseconds** at which the window resets
+   * (`X-RateLimit-Reset`, which the API sends in seconds).
+   */
+  resetAt?: number;
+}
+
+/** Parse a non-negative integer header value; returns `undefined` when absent or malformed. */
+function parseRateLimitCounter(value: string | null): number | undefined {
+  if (value == null) return undefined;
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+/**
+ * Parse the `X-RateLimit-Limit` / `X-RateLimit-Remaining` / `X-RateLimit-Reset`
+ * response headers into a typed {@link RateLimitInfo}.
+ *
+ * Accepts a `Headers` instance (case-insensitive per the fetch spec) or a
+ * plain record (use lowercased keys). Malformed or missing headers are simply
+ * omitted, and a response that carries none of them returns `undefined` —
+ * this never throws, so it is safe to call on every response.
+ */
+export function parseRateLimit(headers: HeaderSource): RateLimitInfo | undefined {
+  const limit = parseRateLimitCounter(readHeader(headers, "x-ratelimit-limit"));
+  const remaining = parseRateLimitCounter(readHeader(headers, "x-ratelimit-remaining"));
+  const resetSeconds = parseRateLimitCounter(readHeader(headers, "x-ratelimit-reset"));
+
+  if (limit === undefined && remaining === undefined && resetSeconds === undefined) {
+    return undefined;
+  }
+
+  const info: RateLimitInfo = {};
+  if (limit !== undefined) info.limit = limit;
+  if (remaining !== undefined) info.remaining = remaining;
+  if (resetSeconds !== undefined) info.resetAt = resetSeconds * 1000;
+  return info;
+}
+
+/**
+ * Parse an `x402` `WWW-Authenticate` header value.
+ * Format: `x402 price="0.50", payee="G…", token="USDC", network="stellar:testnet"`
+ *
+ * Requires `price` and `payee` to be present — partial challenges are rejected
+ * so callers cannot accidentally feed `NaN` into `parseFloat(undefined)`.
+ */
+export function parseX402Challenge(header: string | undefined | null): Record<string, string> | undefined {
+  if (!header) return undefined;
+  const trimmed = header.trim();
+  if (!trimmed.startsWith("x402")) return undefined;
+  const rest = trimmed.slice(4).replace(/^[ ,]+/, "");
+  const out: Record<string, string> = {};
+  // Split on `, ` (comma + space) outside of quotes.
+  const parts = rest.match(/(?:[^,"]|"[^"]*")+/g) ?? [];
+  for (const part of parts) {
+    const eq = part.indexOf("=");
+    if (eq <= 0) continue;
+    const rawKey = part.slice(0, eq).trim();
+    let rawVal = part.slice(eq + 1).trim();
+    if (rawVal.startsWith('"') && rawVal.endsWith('"')) {
+      rawVal = rawVal.slice(1, -1);
+    }
+    if (rawKey) out[rawKey] = rawVal;
+  }
+  if (!out.price || !out.payee) return undefined;
+  return out;
+}
+
+/**
+ * Base class for all SDK errors. Preserves the legacy
+ * `(status, body, path)` constructor signature so existing catch blocks and
+ * import sites keep working.
+ *
+ * New in this version:
+ *   - `code`: stable string discriminator (subclasses set this).
+ *   - `isRetryable`: hint to callers whether a retry is safe.
+ *   - `retryAfterMs`: server-supplied retry delay.
+ *   - `requestId`: `x-request-id` for log correlation.
+ *   - `headers`: subset of safe response headers.
+ *   - `data`: parsed JSON body (sanitized, optional).
+ *   - `cause`: original error if this wraps a transport/parse failure.
+ *   - `timestamp`: ISO 8601 string captured at construction time.
+ */
+export class TalosAPIError extends Error {
+  public code: TalosErrorCode = "api_error";
+  public isRetryable: boolean = false;
+  public readonly apiCode?: string;
+  public readonly apiMessage: string;
+  public readonly validationDetails: string[];
+  public readonly retryAfterMs?: number;
+  /** Parsed `X-RateLimit-*` counters from the response, or `undefined` when absent. */
+  public readonly rateLimit?: RateLimitInfo;
+  public readonly requestId?: string;
+  public readonly headers: Record<string, string>;
+  public readonly data?: unknown;
+  public readonly cause?: unknown;
+  public readonly timestamp: string;
+
+  constructor(
+    public readonly status: number,
+    public readonly body: string,
+    public readonly path: string,
+    options: TalosAPIErrorOptions = {},
+  ) {
+    const message = options.message ?? `Talos API error ${status} on ${path}: ${body}`;
+    super(message);
+    this.name = "TalosAPIError";
+    this.code = options.code ?? "api_error";
+    this.isRetryable = options.isRetryable ?? false;
+    this.apiCode = options.apiCode;
+    this.apiMessage = options.apiMessage ?? `Request failed with status ${status}`;
+    this.validationDetails = options.validationDetails?.slice() ?? [];
+    this.retryAfterMs = options.retryAfterMs;
+    this.rateLimit = options.rateLimit ?? parseRateLimit(options.headers);
+    this.requestId = options.requestId;
+    this.headers = options.headers ?? {};
+    // Apply the same redaction + size cap to `data` that `body` already
+    // gets via `sanitizeBody`. This way direct access (`error.data`) and the
+    // `toJSON()` / `dataForLog()` paths agree: no raw hostile 5xx payload
+    // ever leaks through.
+    this.data = sanitizeDataForInstance(options.data);
+    this.cause = options.cause;
+    this.timestamp = options.timestamp ?? new Date().toISOString();
+  }
+
+  /**
+   * Compact JSON-safe representation suitable for logging. `body` is omitted
+   * (already capped at MAX_BODY_BYTES on the property) but `data` is **NOT**
+   * included — callers that want the parsed payload should access `error.data`
+   * directly so they apply their own size limits. This prevents hostile 5xx
+   * bodies from OOM'ing structured log sinks.
+   */
+  toJSON(): Record<string, unknown> {
+    return {
+      name: this.name,
+      code: this.code,
+      status: this.status,
+      path: this.path,
+      isRetryable: this.isRetryable,
+      retryAfterMs: this.retryAfterMs,
+      rateLimit: this.rateLimit,
+      requestId: this.requestId,
+      timestamp: this.timestamp,
+    };
+  }
+
+  /**
+   * Bounded helper for safely surfacing `data` to structured log sinks.
+   * Returns the parsed JSON object when it stringifies to <= {@link MAX_DATA_BYTES},
+   * otherwise `undefined`. Prefer this over piping `error.data` directly when
+   * the payload source (5xx error body, proxy fallback) is untrusted.
+   */
+  dataForLog(): unknown {
+    if (this.data === undefined) return undefined;
+    try {
+      const json = JSON.stringify(this.data);
+      if (json.length <= MAX_DATA_BYTES) return this.data;
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+/** 400 — request body or parameters failed validation. */
+export class TalosValidationError extends TalosAPIError {
+  public readonly issues: string[];
+  constructor(
+    status: number,
+    body: string,
+    path: string,
+    issues: string[] = [],
+    options: TalosAPIErrorOptions = {},
+  ) {
+    super(status, body, path, {
+      ...options,
+      code: "validation_error",
+      validationDetails: options.validationDetails ?? issues,
+    });
+    this.name = "TalosValidationError";
+    this.issues = issues;
+  }
+}
+
+/**
+ * 401 — credentials missing or malformed.
+ * Distinct from {@link TalosForbiddenError}, which represents credentials
+ * being rejected (403). Keeping the split prevents `instanceof
+ * TalosAuthenticationError` from silently matching 403 responses.
+ */
+export class TalosAuthenticationError extends TalosAPIError {
+  constructor(status: number, body: string, path: string, options: TalosAPIErrorOptions = {}) {
+    super(status, body, path, { ...options, code: "authentication_error" });
+    this.name = "TalosAuthenticationError";
+  }
+}
+
+/** 403 — credentials supplied but rejected. */
+export class TalosForbiddenError extends TalosAPIError {
+  constructor(status: number, body: string, path: string, options: TalosAPIErrorOptions = {}) {
+    super(status, body, path, { ...options, code: "forbidden" });
+    this.name = "TalosForbiddenError";
+  }
+}
+
+/** 404 — resource not found. */
+export class TalosNotFoundError extends TalosAPIError {
+  constructor(status: number, body: string, path: string, options: TalosAPIErrorOptions = {}) {
+    super(status, body, path, options);
+    this.name = "TalosNotFoundError";
+    // Subclasses can override code via options, but we set the default.
+    if (this.code === "api_error") this.code = "not_found_error";
+  }
+}
+
+/** 409 — state conflict (lease, idempotency key, duplicate request). */
+export class TalosConflictError extends TalosAPIError {
+  constructor(status: number, body: string, path: string, options: TalosAPIErrorOptions = {}) {
+    super(status, body, path, options);
+    this.name = "TalosConflictError";
+    if (this.code === "api_error") this.code = "conflict_error";
+  }
+}
+
+/** 402 — payment required (x402 challenge) or generic payment failure. */
+export class TalosPaymentError extends TalosAPIError {
+  public readonly challenge?: Record<string, string>;
+  constructor(status: number, body: string, path: string, options: TalosAPIErrorOptions = {}) {
+    super(status, body, path, { ...options, code: "payment_error" });
+    this.name = "TalosPaymentError";
+    this.challenge = parseX402Challenge(options.headers?.["www-authenticate"]);
+  }
+}
+
+/** 429 — rate limited. */
+export class TalosRateLimitError extends TalosAPIError {
+  /** Convenience projection of {@link TalosAPIError.rateLimit}.limit. */
+  public readonly limit?: number;
+  /** Convenience projection of {@link TalosAPIError.rateLimit}.remaining. */
+  public readonly remaining?: number;
+  /** Convenience projection of {@link TalosAPIError.rateLimit}.resetAt (epoch ms). */
+  public readonly resetAt?: number;
+  constructor(
+    status: number,
+    body: string,
+    path: string,
+    options: TalosAPIErrorOptions = {},
+  ) {
+    super(status, body, path, {
+      ...options,
+      code: "rate_limit_error",
+      isRetryable: true,
+    });
+    this.name = "TalosRateLimitError";
+    // Parsed once by the base class from the same headers, so the typed
+    // `rateLimit` object and these legacy fields can never disagree.
+    this.limit = this.rateLimit?.limit;
+    this.remaining = this.rateLimit?.remaining;
+    this.resetAt = this.rateLimit?.resetAt;
+  }
+}
+
+/** 5xx — server returned a non-retryable error (use ServerRetryableError for transient 5xx). */
+export class TalosServerError extends TalosAPIError {
+  constructor(status: number, body: string, path: string, options: TalosAPIErrorOptions = {}) {
+    super(status, body, path, options);
+    this.name = "TalosServerError";
+    if (this.code === "api_error") this.code = "server_error";
+  }
+}
+
+/**
+ * 502/503/504 — transient server failure, safe to retry with backoff.
+ * Surfaces as the same type as {@link TalosServerError} but with
+ * `isRetryable = true`.
+ */
+export class TalosServerRetryableError extends TalosServerError {
+  constructor(
+    status: number,
+    body: string,
+    path: string,
+    options: TalosAPIErrorOptions = {},
+  ) {
+    super(status, body, path, { ...options, isRetryable: true });
+    this.name = "TalosServerRetryableError";
+  }
+}
+
+/** Status `0` — network/transport failure (DNS, ECONNREFUSED, EOS, etc.). */
+export class TalosTransportError extends TalosAPIError {
+  constructor(
+    status: 0,
+    body: string,
+    path: string,
+    options: TalosAPIErrorOptions = {},
+  ) {
+    super(status, body, path, {
+      ...options,
+      code: "transport_error",
+      isRetryable: true,
+    });
+    this.name = "TalosTransportError";
+  }
+}
+
+/** Status `0` — timeout or abort. */
+export class TalosTimeoutError extends TalosAPIError {
+  constructor(
+    status: 0,
+    body: string,
+    path: string,
+    options: TalosAPIErrorOptions = {},
+  ) {
+    super(status, body, path, {
+      ...options,
+      code: "timeout_error",
+      isRetryable: true,
+    });
+    this.name = "TalosTimeoutError";
+  }
+}
+
+/**
+ * Sanitize an `options.data` value into a privacy-safe shape:
+ *   - `undefined`/`null` pass through as `undefined`.
+ *   - Non-JSON-serializable values return `undefined`.
+ *   - Strings, numbers, booleans pass through if their textual length
+ *     is `<= MAX_DATA_BYTES`.
+ *   - Objects run through {@link redactSecrets} (deep), then get checked
+ *     against `MAX_DATA_BYTES` after a dry-run `JSON.stringify` — if too
+ *     big, the field is dropped rather than risk an OOM downstream.
+ *
+ * Kept internal because the consumer does not need to call it directly;
+ * the {@link TalosAPIError} constructor applies it.
+ */
+function sanitizeDataForInstance(input: unknown): unknown {
+  if (input === undefined || input === null) return undefined;
+  if (typeof input !== "object") {
+    return typeof input === "string" && input.length > MAX_DATA_BYTES
+      ? undefined
+      : input;
+  }
+  const redacted = redactSecrets(input);
+  try {
+    const serialized = JSON.stringify(redacted);
+    if (serialized.length > MAX_DATA_BYTES) return undefined;
+    return redacted;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Pattern matching query-parameter names whose values should be redacted
+ * before the path is surfaced in a {@link TalosErrorEvent}.
+ *
+ * This is intentionally broader than {@link SENSITIVE_FIELD_PATTERN} because
+ * parameter names in query strings often use different conventions (e.g.
+ * `api_key`, `apikey`, `access_token`, `bearer`).
+ */
+const SENSITIVE_QUERY_PARAM_PATTERN =
+  /^(token|authorization|auth|api[_-]?key|access[_-]?token|secret|bearer|password|credential|key|sig(nature)?|hash|nonce|seed|proof)$/i;
+
+/**
+ * Strip sensitive credential values from query-string parameters in a path or
+ * URL string, replacing the value with `[REDACTED]`.
+ *
+ * - Path strings without a query component are returned unchanged.
+ * - Any query-parameter name matching {@link SENSITIVE_QUERY_PARAM_PATTERN}
+ *   has its value replaced with the literal string `[REDACTED]`.
+ * - Non-URL-encoded fragments and other edge cases are handled gracefully;
+ *   a malformed query string is returned as-is so error context is never lost.
+ *
+ * This function is applied to the `path` field of every {@link TalosErrorEvent}
+ * before it is delivered to the caller's `onError` hook, providing a safety
+ * net even if a caller accidentally includes credentials in a query string.
+ */
+export function redactEventPath(rawPath: string): string {
+  const qIdx = rawPath.indexOf("?");
+  if (qIdx === -1) return rawPath;
+
+  const base = rawPath.slice(0, qIdx);
+  const queryString = rawPath.slice(qIdx + 1);
+
+  try {
+    const params = new URLSearchParams(queryString);
+    let changed = false;
+    for (const [key] of params.entries()) {
+      if (SENSITIVE_QUERY_PARAM_PATTERN.test(key)) {
+        params.set(key, "[REDACTED]");
+        changed = true;
+      }
+    }
+    if (!changed) return rawPath;
+    return `${base}?${params.toString()}`;
+  } catch {
+    // Malformed query string — return the path without the query portion to
+    // avoid leaking anything unparseable.
+    return base;
+  }
+}
+
+// ── x402 Buyer Proof Diagnostics ─────────────────────────────────────────────
+
+import type {
+  BuyerProofDiagnostics,
+  X402ProofStage,
+} from "./types.js";
+
+/**
+ * Maximum character length for `signingFailureReason` in proof diagnostics.
+ * Keeps the field from becoming a vector for large raw error payloads.
+ */
+const MAX_SIGNING_FAILURE_REASON_BYTES = 200;
+
+/**
+ * Build a privacy-safe {@link BuyerProofDiagnostics} snapshot from the
+ * components of an x402 buyer-proof exchange. This is a pure function —
+ * it never performs I/O, never logs, and never throws.
+ *
+ * ### What is redacted
+ * - The X-PAYMENT / `paymentHeader` value is **never** included.
+ * - The raw WWW-Authenticate header is **never** included; only the parsed,
+ *   typed `challenge` sub-object is surfaced.
+ * - `signingFailureReason` is truncated to
+ *   {@link MAX_SIGNING_FAILURE_REASON_BYTES} characters.
+ *
+ * ### What is included
+ * - `payee` — Stellar public key (`G…`); not a secret.
+ * - `price` — raw challenge price string.
+ * - `parsedAmount` — the numeric value of `price` (may be `NaN`).
+ * - `signingSucceeded` / `proofResponseStatus` / `stage`.
+ *
+ * @param path - The API path being purchased (credentials in query-params
+ *   are redacted by the caller before passing here; this function does
+ *   not re-apply redactEventPath to avoid double-encoding).
+ * @param challenge - Parsed x402 challenge as returned by
+ *   {@link parseX402Challenge}, or `undefined` when the 402 lacked one.
+ * @param stage - The lifecycle stage reached.
+ * @param opts - Optional extra fields for later lifecycle stages.
+ */
+export function diagnoseBuyerProof(
+  path: string,
+  challenge: Record<string, string> | undefined,
+  stage: X402ProofStage,
+  opts: {
+    signingSucceeded?: boolean;
+    signingFailureReason?: string;
+    proofResponseStatus?: number;
+  } = {},
+): BuyerProofDiagnostics {
+  const capturedAt = new Date().toISOString();
+
+  // Build the safe challenge sub-object, excluding all raw header text.
+  let challengeDiag: BuyerProofDiagnostics["challenge"];
+  let parsedAmount: number | undefined;
+  if (challenge) {
+    challengeDiag = {
+      payee: challenge.payee ?? "",
+      price: challenge.price ?? "",
+      ...(challenge.token !== undefined ? { token: challenge.token } : {}),
+      ...(challenge.network !== undefined ? { network: challenge.network } : {}),
+    };
+    parsedAmount = parseFloat(challenge.price ?? "");
+  }
+
+  const succeeded =
+    stage === "proof_accepted" ||
+    (stage === "proof_submitted" && opts.proofResponseStatus !== undefined && opts.proofResponseStatus < 400);
+
+  // Truncate signing failure reason to prevent large raw error text.
+  const signingFailureReason =
+    opts.signingFailureReason != null
+      ? opts.signingFailureReason.slice(0, MAX_SIGNING_FAILURE_REASON_BYTES)
+      : undefined;
+
+  // Human-readable summary — no secrets, no header values.
+  let summary: string;
+  switch (stage) {
+    case "no_challenge":
+      summary = `x402 proof failed: 402 response did not carry a valid challenge on ${path}`;
+      break;
+    case "challenge_parsed":
+      summary = `x402 challenge parsed (payee=${challengeDiag?.payee ?? "?"}, price=${challengeDiag?.price ?? "?"}) on ${path}`;
+      break;
+    case "signing_requested":
+      summary = `x402 signing requested for ${path}`;
+      break;
+    case "proof_submitted":
+      summary = `x402 proof submitted on ${path} → HTTP ${opts.proofResponseStatus ?? "?"}`;
+      break;
+    case "proof_accepted":
+      summary = `x402 proof accepted on ${path}`;
+      break;
+    case "proof_rejected":
+      summary = `x402 proof rejected on ${path} (HTTP ${opts.proofResponseStatus ?? "?"})`;
+      break;
+    default:
+      summary = `x402 proof exchange stage "${stage as string}" on ${path}`;
+  }
+
+  return {
+    stage,
+    capturedAt,
+    path,
+    ...(challengeDiag !== undefined ? { challenge: challengeDiag } : {}),
+    ...(parsedAmount !== undefined ? { parsedAmount } : {}),
+    ...(opts.signingSucceeded !== undefined ? { signingSucceeded: opts.signingSucceeded } : {}),
+    ...(signingFailureReason !== undefined ? { signingFailureReason } : {}),
+    ...(opts.proofResponseStatus !== undefined ? { proofResponseStatus: opts.proofResponseStatus } : {}),
+    succeeded,
+    summary,
+  };
+}
+
+/**
+ * Build the right {@link TalosAPIError} subclass for a given HTTP response.
+ * Pure function — kept small so tests can exercise it directly.
+ */
+export function errorFromResponse(
+  status: number,
+  path: string,
+  rawBody: string,
+  headers: HeaderSource,
+): TalosAPIError {
+  const { body, data } = sanitizeBody(rawBody);
+  const envelope = parseErrorEnvelope(rawBody);
+  const safeHeaders = snapshotHeaders(headers);
+  const requestId = safeHeaders["x-request-id"] ?? envelope.requestId;
+  // `Retry-After` is valid on any error response (RFC 9110 §10.2.3), not just
+  // 429 — a 503 during a maintenance window is a common real-world source.
+  // Parse it once so every subclass preserves the same structured hint that
+  // `.headers["retry-after"]` already carries in raw form.
+  const retryAfterMs = parseRetryAfter(safeHeaders["retry-after"]);
+  const issues = envelope.issues;
+  const options = {
+    headers: safeHeaders,
+    requestId,
+    data,
+    retryAfterMs,
+    apiCode: envelope.code,
+    apiMessage: envelope.message ?? `Request failed with status ${status}`,
+    validationDetails: issues,
+  };
+
+  switch (status) {
+    case 400:
+    case 422:
+      return new TalosValidationError(status, body, path, issues, options);
+    case 401:
+      return new TalosAuthenticationError(status, body, path, options);
+    case 402:
+      return new TalosPaymentError(status, body, path, options);
+    case 403:
+      return new TalosForbiddenError(status, body, path, options);
+    case 404:
+      return new TalosNotFoundError(status, body, path, options);
+    case 409:
+      return new TalosConflictError(status, body, path, options);
+    case 429:
+      return new TalosRateLimitError(status, body, path, options);
+    case 502:
+    case 503:
+    case 504:
+      return new TalosServerRetryableError(status, body, path, options);
+    default:
+      if (status >= 500) {
+        return new TalosServerError(status, body, path, options);
+      }
+      return new TalosAPIError(status, body, path, options);
+  }
+}
+
+function parseErrorEnvelope(rawBody: string): {
+  code?: string;
+  message?: string;
+  requestId?: string;
+  issues: string[];
+} {
+  try {
+    const parsed: unknown = JSON.parse(rawBody);
+    if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { issues: [] };
+    }
+    const envelope = parsed as Record<string, unknown>;
+    const safeText = (value: unknown): string | undefined => {
+      if (typeof value !== "string") return undefined;
+      const normalized = redactInlineSecrets(
+        value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim(),
+      );
+      return normalized ? normalized.slice(0, 512) : undefined;
+    };
+    const requestId = safeText(envelope.requestId);
+    return {
+      code: safeText(envelope.code),
+      message: safeText(envelope.message) ?? safeText(envelope.error),
+      requestId: requestId && /^[A-Za-z0-9._~:-]{1,128}$/.test(requestId) ? requestId : undefined,
+      issues: Array.isArray(envelope.issues)
+        ? envelope.issues
+            .slice(0, 50)
+            .map(safeText)
+            .filter((issue): issue is string => issue !== undefined)
+        : [],
+    };
+  } catch {
+    return { issues: [] };
+  }
+}
+
+/**
+ * Classify a raw error thrown by `fetch` (or its underlying transport) into
+ * the appropriate typed error. The original message string is preserved on
+ * the `message` property so legacy `rejects.toThrow("…")` patterns keep
+ * working.
+ */
+export function classifyTransportError(
+  cause: unknown,
+  path: string,
+): TalosTransportError | TalosTimeoutError {
+  const name = (cause as { name?: string } | null)?.name ?? "";
+  const message = (cause as { message?: string } | null)?.message ?? String(cause ?? "");
+  // AbortError covers timeouts, manual cancels, and signal-driven aborts.
+  if (name === "AbortError" || message.toLowerCase().includes("aborted")) {
+    return new TalosTimeoutError(0, truncate(message), path, { message });
+  }
+  if (
+    name === "TimeoutError" ||
+    message.toLowerCase().includes("timeout") ||
+    message.toLowerCase().includes("timed out")
+  ) {
+    return new TalosTimeoutError(0, truncate(message), path, { message });
+  }
+  const safeBody = truncate(message.replace(/\s+/g, " ").trim());
+  return new TalosTransportError(0, safeBody, path, { message, cause });
+}
+
+// ── Contract reader errors ─────────────────────────────────────────────────
+
+/**
+ * Base class for errors surfaced by {@link RegistryReader} and
+ * {@link NameServiceReader}. Extends {@link TalosAPIError} so existing
+ * `instanceof TalosAPIError` guards continue to work.
+ */
+export class TalosContractError extends TalosAPIError {
+  constructor(message: string, options: TalosAPIErrorOptions = {}) {
+    super(0, message, "soroban", { ...options, code: "api_error" });
+    this.name = "TalosContractError";
+  }
+}
+
+/**
+ * A requested on-chain resource (Talos ID, name, etc.) was not found.
+ * Maps to a `not_found_error` code for consistent switch-style handling.
+ */
+export class TalosContractNotFoundError extends TalosContractError {
+  constructor(message: string, options: TalosAPIErrorOptions = {}) {
+    super(message, { ...options, code: "not_found_error" });
+    this.name = "TalosContractNotFoundError";
+  }
+}
+
+/**
+ * The Soroban `simulateTransaction` call returned a contract or RPC-level
+ * error. Inspect `cause` for the raw RPC error object.
+ */
+export class TalosContractSimulateError extends TalosContractError {
+  constructor(message: string, options: TalosAPIErrorOptions = {}) {
+    super(message, options);
+    this.name = "TalosContractSimulateError";
+  }
+}

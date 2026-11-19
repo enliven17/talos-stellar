@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from rich.console import Console
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
+from talos_agent.adapters.capability import SecretProvider
+from talos_agent.adapters.snapshots import XHealthSnapshot
+from talos_agent.config import resolve_setting_secret
 
 if TYPE_CHECKING:
     from talos_agent.browser.session import BrowserSession
@@ -23,16 +27,66 @@ _SEARCH_URL = "https://x.com/search?q={query}&src=typed_query&f=live"
 _PROFILE_URL = "https://x.com/{username}"
 
 
+def sanitize_outbound_x_content(text: str | None, *, max_len: int = _CHAR_LIMIT) -> str:
+    """Sanitize outbound X/Twitter content (issue #553).
+
+    - Rejects None/empty after strip
+    - Strips control chars and credential-like secrets
+    - Bounds length to platform limit
+    """
+    import re as _re
+
+    if text is None:
+        raise ValueError("outbound X content is required")
+    cleaned = "".join(ch for ch in str(text) if ch in "\n\t" or ord(ch) >= 32)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        raise ValueError("outbound X content is empty")
+    if _re.search(r"(?i)(api[_-]?key|secret|password|bearer\s+\S+|ghp_[A-Za-z0-9]+)", cleaned):
+        raise ValueError("outbound X content contains sensitive material")
+    if len(cleaned) > max_len:
+        cleaned = cleaned[: max_len - 1].rstrip() + "…"
+    return cleaned
+
+
+@dataclass(frozen=True)
+class XAdapterConfig:
+    username: str = ""
+    email: str = ""
+
+
 class XAdapter(BaseSocialAdapter):
     """Publishes to X (Twitter) using Stagehand browser automation."""
 
     channel_name = "X"
 
-    def __init__(self, browser: BrowserSession, settings: Settings) -> None:
+    def __init__(
+        self,
+        browser: BrowserSession,
+        config: Settings | XAdapterConfig,
+        *,
+        secrets: SecretProvider | None = None,
+    ) -> None:
         self._browser = browser
-        self._settings = settings
+        self._settings: Settings | None
+        if isinstance(config, XAdapterConfig):
+            self._settings = None
+            self._username = config.username
+            self._email = config.email
+        else:
+            self._settings = config
+            self._username = config.x_username
+            self._email = config.x_email
+        self._secrets = secrets
         self._logged_in = False
         self._cookie_dismissed = False
+
+    @property
+    def _password(self) -> str:
+        if self._secrets is not None:
+            return self._secrets.get("x_password")
+        assert self._settings is not None
+        return resolve_setting_secret(self._settings, "x_password")
 
     # ── Capabilities ─────────────────────────────────────────
 
@@ -45,6 +99,21 @@ class XAdapter(BaseSocialAdapter):
             supports_search=True,
             supports_mentions=True,
             supports_analytics=True,
+        )
+
+    def health_snapshot(self) -> XHealthSnapshot:
+        live_check = getattr(self._browser, "is_live", None)
+        if callable(live_check):
+            browser_live = bool(live_check())
+        else:
+            stagehand = getattr(self._browser, "_stagehand", None)
+            browser_live = bool(
+                stagehand is not None and getattr(stagehand, "page", None) is not None
+            )
+        return XHealthSnapshot(
+            has_username=bool(self._username),
+            has_password=bool(self._password),
+            browser_live=browser_live,
         )
 
     # ── Auth ─────────────────────────────────────────────────
@@ -63,7 +132,8 @@ class XAdapter(BaseSocialAdapter):
         if self._logged_in:
             return
 
-        if not self._settings.x_username or not self._settings.x_password:
+        password = self._password
+        if not self._username or not password:
             console.print("[yellow]X credentials not configured — skipping login.[/yellow]")
             return
 
@@ -91,7 +161,7 @@ class XAdapter(BaseSocialAdapter):
         await asyncio.sleep(4)
 
         await self._browser.act(
-            f"Click on the username or email input field and type: {self._settings.x_username}"
+            f"Click on the username or email input field and type: {self._username}"
         )
         await asyncio.sleep(2)
         await self._browser.act("Click the Next button")
@@ -106,16 +176,16 @@ class XAdapter(BaseSocialAdapter):
             schema={"type": "object", "properties": {"type": {"type": "string"}}, "required": ["type"]},
         )
         page_type = check.get("type", "other") if isinstance(check, dict) else "other"
-        if page_type == "verification" and self._settings.x_email:
+        if page_type == "verification" and self._email:
             await self._browser.act(
-                f"Click on the input field and type: {self._settings.x_email}"
+                f"Click on the input field and type: {self._email}"
             )
             await asyncio.sleep(1)
             await self._browser.act("Click the Next button")
             await asyncio.sleep(4)
 
         await self._browser.act(
-            f"Click on the password input field and type: {self._settings.x_password}"
+            f"Click on the password input field and type: {password}"
         )
         await asyncio.sleep(1)
         await self._browser.act("Click the Log in button")
@@ -136,6 +206,15 @@ class XAdapter(BaseSocialAdapter):
     # ── Publishing ───────────────────────────────────────────
 
     async def post(self, content: str, **kwargs) -> PublishResult:
+        try:
+            content = sanitize_outbound_x_content(content)
+        except ValueError as exc:
+            return PublishResult(
+                status="failed",
+                channel=self.channel_name,
+                content=content or "",
+                error=str(exc),
+            )
         valid, error = self.validate_content(content)
         if not valid:
             return PublishResult(status="failed", channel=self.channel_name, content=content, error=error)
@@ -175,6 +254,7 @@ class XAdapter(BaseSocialAdapter):
         return PublishResult(status="posted", channel=self.channel_name, content=content)
 
     async def reply(self, target_url: str, content: str, **kwargs) -> PublishResult:
+        content = sanitize_outbound_x_content(content)
         await self._ensure_login()
         await self._browser.goto(target_url)
         await asyncio.sleep(2)
@@ -212,7 +292,7 @@ class XAdapter(BaseSocialAdapter):
 
     async def get_post_performance(self, content_snippet: str, **kwargs) -> dict:
         await self._ensure_login()
-        username = self._settings.x_username
+        username = self._username
         if not username:
             return {"error": "X username not configured"}
         await self._browser.goto(_PROFILE_URL.format(username=username))
@@ -239,7 +319,7 @@ class XAdapter(BaseSocialAdapter):
 
     async def get_profile_stats(self, **kwargs) -> dict:
         await self._ensure_login()
-        username = self._settings.x_username
+        username = self._username
         if not username:
             return {"error": "X username not configured"}
         await self._browser.goto(_PROFILE_URL.format(username=username))

@@ -1,0 +1,150 @@
+{
+  "_comment": "Deny-by-default regression fixtures for talos_agent.adapters.capability. 'overrides' is the raw ADAPTER_CAPABILITY_MANIFESTS JSON applied over the reviewed defaults (\"\" = defaults only). 'checks' are evaluated against the resulting manifest for 'adapter'. '{root}' in a path is replaced with a per-test temporary directory. 'invalid_manifests' must all be rejected by load_manifests with ManifestValidationError.",
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "unknown-adapter-has-no-manifest",
+      "description": "An adapter absent from both defaults and overrides cannot be sandboxed at all.",
+      "adapter": "mastodon",
+      "overrides": "",
+      "checks": [
+        {"kind": "manifest", "expect": "deny"}
+      ]
+    },
+    {
+      "id": "custom-adapter-gets-only-what-it-declares",
+      "description": "A newly declared adapter with only an operation list gets no secrets, network, filesystem or tools.",
+      "adapter": "custom",
+      "overrides": "{\"custom\": {\"operations\": [\"post\"]}}",
+      "checks": [
+        {"kind": "manifest", "expect": "allow"},
+        {"kind": "secret", "name": "telegram_bot_token", "expect": "deny"},
+        {"kind": "secret", "name": "x_password", "expect": "deny"},
+        {"kind": "network", "method": "POST", "url": "https://api.telegram.org/bot/sendMessage", "expect": "deny"},
+        {"kind": "tool", "name": "shell", "expect": "deny"},
+        {"kind": "path", "path": "{root}/data.txt", "expect": "deny"},
+        {"kind": "path", "path": "{root}/data.txt", "write": true, "expect": "deny"}
+      ]
+    },
+    {
+      "id": "override-replaces-rather-than-merges-defaults",
+      "description": "Overriding a default adapter replaces its grants; omitted fields become empty, never inherited.",
+      "adapter": "telegram",
+      "overrides": "{\"telegram\": {\"operations\": [\"post\"]}}",
+      "checks": [
+        {"kind": "secret", "name": "telegram_bot_token", "expect": "deny"},
+        {"kind": "network", "method": "POST", "url": "https://api.telegram.org/bot/sendMessage", "expect": "deny"}
+      ]
+    },
+    {
+      "id": "telegram-default-network-surface",
+      "description": "The reviewed telegram manifest allows exactly HTTPS POST to api.telegram.org:443.",
+      "adapter": "telegram",
+      "overrides": "",
+      "checks": [
+        {"kind": "network", "method": "POST", "url": "https://api.telegram.org/bot/sendMessage", "expect": "allow"},
+        {"kind": "network", "method": "post", "url": "https://API.Telegram.org./bot/sendMessage", "expect": "allow"},
+        {"kind": "network", "method": "POST", "url": "https://api.telegram.org:443/bot/sendMessage", "expect": "allow"},
+        {"kind": "network", "method": "GET", "url": "https://api.telegram.org/bot/getMe", "expect": "deny"},
+        {"kind": "network", "method": "DELETE", "url": "https://api.telegram.org/bot/x", "expect": "deny"},
+        {"kind": "network", "method": "POST", "url": "http://api.telegram.org/bot/sendMessage", "expect": "deny"},
+        {"kind": "network", "method": "POST", "url": "https://api.telegram.org:8443/bot/sendMessage", "expect": "deny"},
+        {"kind": "network", "method": "POST", "url": "https://api.telegram.org.evil.example/bot", "expect": "deny"},
+        {"kind": "network", "method": "POST", "url": "https://evil.example/?h=api.telegram.org", "expect": "deny"},
+        {"kind": "network", "method": "POST", "url": "https://user:pass@api.telegram.org/bot", "expect": "deny"},
+        {"kind": "network", "method": "POST", "url": "https://api.telegram.org/bot#frag", "expect": "deny"},
+        {"kind": "network", "method": "POST", "url": "https://149.154.167.220/bot", "expect": "deny"},
+        {"kind": "network", "method": "POST", "url": "", "expect": "deny"},
+        {"kind": "network", "method": "POST", "url": "not a url", "expect": "deny"},
+        {"kind": "secret", "name": "telegram_bot_token", "expect": "allow"},
+        {"kind": "secret", "name": "discord_bot_token", "expect": "deny"},
+        {"kind": "secret", "name": "x_password", "expect": "deny"},
+        {"kind": "tool", "name": "search_web", "expect": "deny"}
+      ]
+    },
+    {
+      "id": "discord-default-path-prefix",
+      "description": "Discord is confined to /api/ on its two hosts; traversal and encoded traversal are denied.",
+      "adapter": "discord",
+      "overrides": "",
+      "checks": [
+        {"kind": "network", "method": "POST", "url": "https://discord.com/api/webhooks/1/abc", "expect": "allow"},
+        {"kind": "network", "method": "GET", "url": "https://discordapp.com/api/v10/users/@me", "expect": "allow"},
+        {"kind": "network", "method": "POST", "url": "https://discord.com/apix", "expect": "deny"},
+        {"kind": "network", "method": "POST", "url": "https://discord.com/", "expect": "deny"},
+        {"kind": "network", "method": "POST", "url": "https://discord.com/api/../admin", "expect": "deny"},
+        {"kind": "network", "method": "POST", "url": "https://discord.com/api/%2e%2e/admin", "expect": "deny"},
+        {"kind": "network", "method": "POST", "url": "https://discord.com/api/%252e%252e/admin", "expect": "deny"},
+        {"kind": "network", "method": "POST", "url": "https://cdn.discord.com/api/x", "expect": "deny"},
+        {"kind": "secret", "name": "discord_webhook_url", "expect": "allow"},
+        {"kind": "secret", "name": "telegram_bot_token", "expect": "deny"}
+      ]
+    },
+    {
+      "id": "x-default-has-no-http-surface",
+      "description": "The X adapter is browser-only; it has no direct HTTP rules at all.",
+      "adapter": "x",
+      "overrides": "",
+      "checks": [
+        {"kind": "network", "method": "GET", "url": "https://x.com/home", "expect": "deny"},
+        {"kind": "network", "method": "POST", "url": "https://api.x.com/2/tweets", "expect": "deny"},
+        {"kind": "secret", "name": "x_password", "expect": "allow"},
+        {"kind": "secret", "name": "discord_bot_token", "expect": "deny"}
+      ]
+    },
+    {
+      "id": "filesystem-roots-are-confining",
+      "description": "Declared roots allow only paths inside them; read roots never imply write, and traversal out is denied.",
+      "adapter": "custom",
+      "overrides": "{\"custom\": {\"operations\": [\"post\"], \"filesystem_read_roots\": [\"{root}/in\"], \"tools\": [\"summarize\"]}}",
+      "checks": [
+        {"kind": "path", "path": "{root}/in/notes.txt", "expect": "allow"},
+        {"kind": "path", "path": "{root}/in/notes.txt", "write": true, "expect": "deny"},
+        {"kind": "path", "path": "{root}/in/../secrets.txt", "expect": "deny"},
+        {"kind": "path", "path": "{root}/in-sibling/notes.txt", "expect": "deny"},
+        {"kind": "path", "path": "{root}", "expect": "deny"},
+        {"kind": "tool", "name": "summarize", "expect": "allow"},
+        {"kind": "tool", "name": "Summarize", "expect": "deny"},
+        {"kind": "tool", "name": "summarize ", "expect": "deny"}
+      ]
+    }
+  ],
+  "invalid_manifests": [
+    {"id": "not-json", "raw": "{not json"},
+    {"id": "top-level-array", "raw": "[]"},
+    {"id": "top-level-string", "raw": "\"telegram\""},
+    {"id": "adapter-value-not-object", "raw": "{\"custom\": [\"post\"]}"},
+    {"id": "unsafe-adapter-id", "raw": "{\"../custom\": {}}"},
+    {"id": "uppercase-adapter-id", "raw": "{\"Custom\": {}}"},
+    {"id": "unknown-field", "raw": "{\"custom\": {\"operations\": [\"post\"], \"allow_all\": true}}"},
+    {"id": "unknown-operation", "raw": "{\"custom\": {\"operations\": [\"delete_account\"]}}"},
+    {"id": "operations-not-a-list", "raw": "{\"custom\": {\"operations\": \"post\"}}"},
+    {"id": "operations-non-string-item", "raw": "{\"custom\": {\"operations\": [1]}}"},
+    {"id": "unsafe-secret-name", "raw": "{\"custom\": {\"secrets\": [\"../../.env\"]}}"},
+    {"id": "wildcard-network-host", "raw": "{\"custom\": {\"network\": [{\"host\": \"*.telegram.org\"}]}}"},
+    {"id": "ip-literal-network-host", "raw": "{\"custom\": {\"network\": [{\"host\": \"127.0.0.1\"}]}}"},
+    {"id": "single-label-network-host", "raw": "{\"custom\": {\"network\": [{\"host\": \"localhost\"}]}}"},
+    {"id": "userinfo-network-host", "raw": "{\"custom\": {\"network\": [{\"host\": \"u@api.telegram.org\"}]}}"},
+    {"id": "network-host-with-path", "raw": "{\"custom\": {\"network\": [{\"host\": \"api.telegram.org/bot\"}]}}"},
+    {"id": "relative-path-prefix", "raw": "{\"custom\": {\"network\": [{\"host\": \"api.telegram.org\", \"path_prefix\": \"bot\"}]}}"},
+    {"id": "traversal-path-prefix", "raw": "{\"custom\": {\"network\": [{\"host\": \"api.telegram.org\", \"path_prefix\": \"/a/../b\"}]}}"},
+    {"id": "unsupported-method", "raw": "{\"custom\": {\"network\": [{\"host\": \"api.telegram.org\", \"methods\": [\"CONNECT\"]}]}}"},
+    {"id": "empty-method-list", "raw": "{\"custom\": {\"network\": [{\"host\": \"api.telegram.org\", \"methods\": []}]}}"},
+    {"id": "port-out-of-range", "raw": "{\"custom\": {\"network\": [{\"host\": \"api.telegram.org\", \"port\": 70000}]}}"},
+    {"id": "port-as-string", "raw": "{\"custom\": {\"network\": [{\"host\": \"api.telegram.org\", \"port\": \"443\"}]}}"},
+    {"id": "port-boolean", "raw": "{\"custom\": {\"network\": [{\"host\": \"api.telegram.org\", \"port\": true}]}}"},
+    {"id": "path-prefix-not-string", "raw": "{\"custom\": {\"network\": [{\"host\": \"api.telegram.org\", \"path_prefix\": 7}]}}"},
+    {"id": "network-rule-unknown-field", "raw": "{\"custom\": {\"network\": [{\"host\": \"api.telegram.org\", \"scheme\": \"http\"}]}}"},
+    {"id": "network-rule-missing-host", "raw": "{\"custom\": {\"network\": [{\"path_prefix\": \"/\"}]}}"},
+    {"id": "wildcard-browser-host", "raw": "{\"custom\": {\"browser_hosts\": [\"*\"]}}"},
+    {"id": "unknown-browser-action", "raw": "{\"custom\": {\"browser_actions\": [\"evaluate_js\"]}}"},
+    {"id": "relative-filesystem-root", "raw": "{\"custom\": {\"filesystem_read_roots\": [\"data\"]}}"},
+    {"id": "unsafe-tool-name", "raw": "{\"custom\": {\"tools\": [\"rm -rf\"]}}"},
+    {"id": "limits-not-object", "raw": "{\"custom\": {\"limits\": 5}}"},
+    {"id": "unknown-limit", "raw": "{\"custom\": {\"limits\": {\"max_everything\": 1}}}"},
+    {"id": "limit-below-minimum", "raw": "{\"custom\": {\"limits\": {\"max_concurrency\": 0}}}"},
+    {"id": "limit-above-maximum", "raw": "{\"custom\": {\"limits\": {\"timeout_seconds\": 3600}}}"},
+    {"id": "limit-boolean", "raw": "{\"custom\": {\"limits\": {\"max_concurrency\": true}}}"},
+    {"id": "limit-float-for-integer", "raw": "{\"custom\": {\"limits\": {\"max_concurrency\": 1.5}}}"}
+  ]
+}
