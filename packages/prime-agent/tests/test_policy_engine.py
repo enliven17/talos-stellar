@@ -249,6 +249,28 @@ class TestPolicyEngine:
         result = engine.evaluate(ActionSpec("purchase_service", {"price": 100}))
         assert result.decision == PolicyDecision.APPROVE
 
+    def test_unknown_action_category_is_denied_with_reason(self, engine):
+        engine.enabled = True
+        engine.load([])
+
+        result = engine.evaluate(ActionSpec("unregistered_action", {}))
+
+        assert result.decision == PolicyDecision.DENY
+        assert result.evidence == (
+            "Unknown policy action category: unregistered_action; action denied.",
+        )
+        assert result.trace is not None
+        assert result.trace.summary == result.evidence[0]
+
+    def test_unknown_action_category_is_denied_when_engine_disabled(self, engine):
+        engine.enabled = False
+        engine.load([])
+
+        result = engine.evaluate(ActionSpec("unregistered_action", {}))
+
+        assert result.decision == PolicyDecision.DENY
+        assert "Unknown policy action category" in result.evidence[0]
+
     def test_load_sorts_by_priority(self, engine):
         p1 = Policy(name="low", priority=1)
         p2 = Policy(name="high", priority=100)
@@ -304,7 +326,7 @@ class TestPolicyEngine:
     def test_disabled_policy_skipped(self, engine, sample_policies):
         engine.enabled = True
         engine.load(sample_policies)
-        spec = ActionSpec("anything", {})
+        spec = ActionSpec("purchase_service", {})
         result = engine.evaluate(spec)
         # Disabled policy should be skipped
         assert result.decision == PolicyDecision.APPROVE
@@ -314,6 +336,14 @@ class TestPolicyEngine:
         engine.load(sample_policies)
         spec = ActionSpec("discover_services", {})
         result = engine.evaluate(spec)
+        assert result.decision == PolicyDecision.APPROVE
+
+    def test_registered_action_without_policy_category_remains_supported(self, engine):
+        engine.enabled = True
+        engine.load([])
+
+        result = engine.evaluate(ActionSpec("report_activity", {}))
+
         assert result.decision == PolicyDecision.APPROVE
 
     def test_result_includes_evidence(self, engine, sample_policies):
@@ -507,6 +537,37 @@ class TestPolicyMiddleware:
         assert called
         assert result == {"services": []}
 
+    def test_wrap_tool_registered_compat_action_still_executes(self, middleware):
+        called = False
+
+        async def mock_report():
+            nonlocal called
+            called = True
+            return {"status": "ok"}
+
+        import asyncio
+        wrapped = middleware.wrap_tool("report_activity", mock_report)
+        result = asyncio.run(wrapped())
+
+        assert called
+        assert result == {"status": "ok"}
+
+    def test_wrap_tool_unknown_action_category_is_denied(self, middleware):
+        called = False
+
+        async def mock_unknown():
+            nonlocal called
+            called = True
+            return {"status": "ok"}
+
+        import asyncio
+        wrapped = middleware.wrap_tool("future_unregistered_action", mock_unknown)
+        result = asyncio.run(wrapped())
+
+        assert not called
+        assert result["policy_decision"] == "deny"
+        assert "Unknown policy action category" in result["evidence"][0]
+
     def test_wrap_tool_gated_action_approve(self, middleware):
         """Gated actions with passing policy should proceed."""
         called = False
@@ -586,6 +647,12 @@ class TestPolicySimulator:
             {"budget_remaining": 100},
         )
         assert result.decision == PolicyDecision.ESCALATE
+
+    def test_simulate_unknown_action_returns_explicit_deny(self, sim):
+        result = sim.simulate("unregistered_action")
+
+        assert result.decision == PolicyDecision.DENY
+        assert "Unknown policy action category" in result.evidence[0]
 
     def test_simulate_batch(self, sim):
         scenarios = [
