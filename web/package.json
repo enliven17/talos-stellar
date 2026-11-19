@@ -4,9 +4,9 @@
   "private": true,
   "license": "AGPL-3.0-only",
   "scripts": {
-    "dev": "next dev --webpack --hostname 0.0.0.0",
-    "build": "next build --webpack",
-    "start": "next start",
+    "dev": "node init && next dev --webpack --hostname 0.0.0.0",
+    "build": "node init && next build --webpack",
+    "start": "node init && next start",
     "lint": "eslint",
     "test": "vitest run",
     "test:payment-coverage": "vitest run --config vitest.payment-coverage.config.ts --coverage",

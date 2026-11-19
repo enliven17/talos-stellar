@@ -1,3 +1,4 @@
+import type { ChaosInjector } from "./chaos.js";
 import type {
   Talos,
   TalosCreated,
@@ -76,7 +77,6 @@ import {
   isPayloadConflict,
   IdempotencyConflictError,
 } from "./idempotency.js";
-import type { ChaosInjector } from "./chaos.js";
 import { FaultType } from "./chaos.js";
 import {
   SigningController,
