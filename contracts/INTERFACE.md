@@ -129,7 +129,7 @@ To prevent unbounded storage writes and spam when creating proposals, `TalosGove
 - `MAX_TITLE_LEN`: `128` bytes (non-empty, maximum 128 bytes)
 - `MAX_DESCRIPTION_LEN`: `2048` bytes (non-empty, maximum 2048 bytes)
 
-Inputs at the limit succeed; inputs exceeding the limit (or empty) are rejected before writing to persistent storage.
+Inputs at the limit succeed; inputs exceeding the limit (or empty) are rejected before writing to persistent storage. Rejections are returned as typed contract errors (`TitleTooLong`, `DescriptionTooLong`, `EmptyTitle`, `EmptyDescription`), and validation runs fully before any write, so a rejected call never leaves a partially created proposal behind.
 
 #### Proposal threshold
 

@@ -11,6 +11,7 @@ This page documents errors exposed by the contract sources in this workspace. Nu
 | 1 | `InvalidPatronShares` | Patron shares do not sum to 100; correct the three share values. |
 | 2 | `TalosNotFound` | Requested Talos ID has no storage record; verify the ID and registry state. Added in v1.5.0. |
 | 3 | `MetadataFieldTooLong` | A caller-supplied field in `update_creator_metadata` exceeds its byte limit (`name` > 64, `category` > 32, `description` > 512); shorten the field and retry. Added in v1.5.0. |
+| 4 | `GovernanceTitleTooLong` | (TalosGovernance proposal title exceeds the byte limit; shorten the title and retry. No partial proposal is persisted. Added with governance metadata validation.) |
 
 ### TalosNameService (`ContractError`)
 
@@ -72,6 +73,7 @@ This page documents errors exposed by the contract sources in this workspace. Nu
 | 18 | `InvalidTtlBounds` | `extend_ttl_batch` bounds were rejected by the shared `ttl-manager` validator. |
 | 19 | `InvalidProposalThreshold` | Proposal threshold must be non-negative; submit a value >= 0. |
 | 20 | `InsufficientVotingPower` | Proposer's voting power at the snapshot ledger is below the configured `proposal_threshold`; acquire more voting power before proposing. |
+| 21 | `GovernanceSummaryTooLong` | Proposal summary exceeds the byte limit; shorten the summary and retry. No partial proposal is persisted. Validation runs before any persistent write. |
 
 ### Storage migration helper (`MigrationError`)
 
@@ -106,6 +108,7 @@ These are returned by the `storage_migration` library used by the registry, not 
 | Registry | `Name cannot be empty`; `Name exceeds maximum byte length` | Caller-supplied Talos name is missing or exceeds 64 bytes. |
 | Registry | `Category exceeds maximum byte length`; `Description exceeds maximum byte length` | Talos category (> 32 bytes) or description (> 512 bytes) metadata is too long. |
 | Registry | `Name cannot be empty` (in `update_creator_metadata`) | Name field supplied to `update_creator_metadata` is empty; use a non-empty name. |
+| Governance | Proposal title/summary byte-limit rejections | Title or summary exceeds its byte limit; metadata is validated before any persistent write so no partial proposal is created. Prefer the typed `GovernanceTitleTooLong` / `GovernanceSummaryTooLong` codes. |
 | Registry | `Token symbol cannot be empty`; `Token symbol exceeds maximum byte length` | Pulse `token_symbol` is missing or exceeds 12 bytes. |
 | Registry | `Migration target must be greater than or equal to current version`; `Migration target exceeds supported schema version`; Migration/rollback rejection diagnostics | Explicit migration target is below current version, exceeds latest supported schema version, or migration helper rejected ordering/lock state. |
 | Registry, Governance, Name service | `Domain is paused` | The write path's pause domain is active (or was paused indefinitely). |
