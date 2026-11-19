@@ -106,6 +106,40 @@ pub struct PauseInfo {
     pub expires_at: Option<u64>,
 }
 
+// ── Name Normalization Preview ───────────────────────────────────────
+
+/// Bounded reason code for a name validation preview.
+///
+/// Variants are additive-only (new variants appended at the end).
+/// Removing or reordering a variant is a breaking ABI change.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NameValidationReason {
+    /// Name passes all rules and would be accepted by `register_name`.
+    Valid = 0,
+    /// Name length is below the 3-char minimum or above the 32-char maximum.
+    InvalidLength = 1,
+    /// Name contains a character other than lowercase ASCII letters, digits, or hyphens.
+    InvalidCharacters = 2,
+    /// Name starts or ends with a hyphen.
+    LeadingOrTrailingHyphen = 3,
+    /// Name contains two or more consecutive hyphens.
+    ConsecutiveHyphens = 4,
+}
+
+/// Result returned by the read-only `preview_name` entry-point.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamePreview {
+    /// The candidate name as supplied (names must already be lowercase per
+    /// registration rules; no server-side lowercasing is applied).
+    pub canonical: String,
+    /// Bounded validation result for the candidate.
+    pub reason: NameValidationReason,
+    /// `true` when `reason == Valid` and the name would be accepted by `register_name`.
+    pub is_valid: bool,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -438,6 +472,41 @@ fn validate_name(name: &String) -> bool {
     }
 
     true
+}
+
+/// Returns a detailed, bounded reason code for why a name passes or fails
+/// validation. Mirrors the exact rules of `validate_name` but reports the
+/// first failing constraint instead of a bare bool, so callers can present
+/// a human-readable explanation without a round-trip.
+fn validate_name_detailed(name: &String) -> NameValidationReason {
+    let len = name.len();
+    if len < 3 || len > 32 {
+        return NameValidationReason::InvalidLength;
+    }
+
+    let mut buf = [0u8; 32];
+    name.copy_into_slice(&mut buf[..len as usize]);
+
+    if buf[0] == b'-' || buf[(len - 1) as usize] == b'-' {
+        return NameValidationReason::LeadingOrTrailingHyphen;
+    }
+
+    let mut prev_hyphen = false;
+    for i in 0..len as usize {
+        let b = buf[i];
+        if b.is_ascii_lowercase() || b.is_ascii_digit() {
+            prev_hyphen = false;
+        } else if b == b'-' {
+            if prev_hyphen {
+                return NameValidationReason::ConsecutiveHyphens;
+            }
+            prev_hyphen = true;
+        } else {
+            return NameValidationReason::InvalidCharacters;
+        }
+    }
+
+    NameValidationReason::Valid
 }
 
 // ── Contract ────────────────────────────────────────────────────────
@@ -1169,6 +1238,32 @@ impl TalosNameService {
             .persistent()
             .get::<_, String>(&DataKey::TalosName(talos_id))
             .is_some()
+    }
+
+    /// Return the canonical candidate and a bounded validation reason without
+    /// touching any state.
+    ///
+    /// This entry-point is a pure read: no storage is written and no events
+    /// are emitted. It applies the same validation rules as `register_name`
+    /// and returns a `NamePreview` that tells the caller whether the candidate
+    /// would be accepted and, if not, why.
+    ///
+    /// Names must already be lowercase — the contract does not normalise
+    /// capitalisation on behalf of callers.
+    ///
+    /// # Returns
+    /// `NamePreview { canonical, reason, is_valid }` where:
+    /// - `canonical` is the candidate string as supplied.
+    /// - `reason` is the first failing rule, or `Valid` on success.
+    /// - `is_valid` is `true` iff `reason == Valid`.
+    pub fn preview_name(e: Env, candidate: String) -> NamePreview {
+        let reason = validate_name_detailed(&candidate);
+        let is_valid = matches!(reason, NameValidationReason::Valid);
+        NamePreview {
+            canonical: candidate,
+            reason,
+            is_valid,
+        }
     }
 
     // ── Storage TTL Management ───────────────────────────────────
@@ -4244,5 +4339,125 @@ mod tests {
         assert_eq!(client.name_of(&talos_id), Some(max_name.clone()));
         assert_eq!(client.resolve_name(&min_name), None);
         assert!(client.is_name_available(&min_name));
+    }
+
+    // ── preview_name() tests (#1386) ─────────────────────────────────
+
+    #[test]
+    fn preview_name_valid_returns_valid_reason() {
+        let (env, _, _, _, _, client) = setup();
+        let name = s(&env, "marketbot");
+        let result = client.preview_name(&name);
+        assert!(result.is_valid, "valid name must return is_valid=true");
+        assert_eq!(result.reason, NameValidationReason::Valid);
+        assert_eq!(result.canonical, name);
+    }
+
+    #[test]
+    fn preview_name_too_short_returns_invalid_length() {
+        let (env, _, _, _, _, client) = setup();
+        let name = s(&env, "ab");
+        let result = client.preview_name(&name);
+        assert!(!result.is_valid);
+        assert_eq!(result.reason, NameValidationReason::InvalidLength);
+    }
+
+    #[test]
+    fn preview_name_too_long_returns_invalid_length() {
+        let (env, _, _, _, _, client) = setup();
+        // 33 characters — one over the 32-char maximum.
+        let name = s(&env, "abcdefghijklmnopqrstuvwxyz0123456");
+        let result = client.preview_name(&name);
+        assert!(!result.is_valid);
+        assert_eq!(result.reason, NameValidationReason::InvalidLength);
+    }
+
+    #[test]
+    fn preview_name_uppercase_returns_invalid_characters() {
+        let (env, _, _, _, _, client) = setup();
+        let name = s(&env, "MarketBot");
+        let result = client.preview_name(&name);
+        assert!(!result.is_valid);
+        assert_eq!(result.reason, NameValidationReason::InvalidCharacters);
+    }
+
+    #[test]
+    fn preview_name_leading_hyphen_returns_leading_trailing() {
+        let (env, _, _, _, _, client) = setup();
+        let name = s(&env, "-mybot");
+        let result = client.preview_name(&name);
+        assert!(!result.is_valid);
+        assert_eq!(result.reason, NameValidationReason::LeadingOrTrailingHyphen);
+    }
+
+    #[test]
+    fn preview_name_trailing_hyphen_returns_leading_trailing() {
+        let (env, _, _, _, _, client) = setup();
+        let name = s(&env, "mybot-");
+        let result = client.preview_name(&name);
+        assert!(!result.is_valid);
+        assert_eq!(result.reason, NameValidationReason::LeadingOrTrailingHyphen);
+    }
+
+    #[test]
+    fn preview_name_consecutive_hyphens_returns_consecutive() {
+        let (env, _, _, _, _, client) = setup();
+        let name = s(&env, "my--bot");
+        let result = client.preview_name(&name);
+        assert!(!result.is_valid);
+        assert_eq!(result.reason, NameValidationReason::ConsecutiveHyphens);
+    }
+
+    #[test]
+    fn preview_name_does_not_mutate_state() {
+        let (env, _, _, _, _, client) = setup();
+        let name = s(&env, "statecheck");
+
+        // State before preview.
+        assert!(client.is_name_available(&name));
+        assert_eq!(client.resolve_name(&name), None);
+
+        client.preview_name(&name);
+
+        // State must be unchanged after preview.
+        assert!(
+            client.is_name_available(&name),
+            "preview_name must not register the name"
+        );
+        assert_eq!(
+            client.resolve_name(&name),
+            None,
+            "preview_name must not create a name record"
+        );
+    }
+
+    #[test]
+    fn preview_name_canonical_matches_input() {
+        let (env, _, _, _, _, client) = setup();
+        let name = s(&env, "canonical");
+        let result = client.preview_name(&name);
+        assert_eq!(
+            result.canonical, name,
+            "canonical field must equal the input string"
+        );
+    }
+
+    #[test]
+    fn preview_name_min_length_boundary_valid() {
+        let (env, _, _, _, _, client) = setup();
+        let name = s(&env, "abc");
+        let result = client.preview_name(&name);
+        assert!(result.is_valid, "3-char name must be valid");
+        assert_eq!(result.reason, NameValidationReason::Valid);
+    }
+
+    #[test]
+    fn preview_name_max_length_boundary_valid() {
+        let (env, _, _, _, _, client) = setup();
+        let name = s(&env, "abcdefghijklmnopqrstuvwxyz012345");
+        assert_eq!(name.len(), 32);
+        let result = client.preview_name(&name);
+        assert!(result.is_valid, "32-char name must be valid");
+        assert_eq!(result.reason, NameValidationReason::Valid);
     }
 }
