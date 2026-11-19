@@ -86,6 +86,53 @@ function makeJob(status: "pending" | "completed" | "failed" | "cancelled", progr
   };
 }
 
+describe("JobTracker backpressure", () => {
+  it("rejects a queue size below the supported positive-integer boundary", () => {
+    const client = new TalosClient({ baseUrl: "http://localhost" });
+    expect(
+      () => new JobTracker(client, "job-queue", { queueMaxSize: 0 }),
+    ).toThrow("queueMaxSize must be a positive integer");
+  });
+
+  it("pauses consumption and bounds drop-newest overflow", () => {
+    const client = new TalosClient({ baseUrl: "http://localhost" });
+    const tracker = new JobTracker(client, "job-queue", {
+      queueMaxSize: 2,
+      queueOverflow: "drop-newest",
+    });
+
+    tracker.pause();
+    expect(tracker.isPaused).toBe(true);
+
+    const event = (type: "snapshot" | "progress"): TrackJobEvent => ({
+      type,
+      jobId: "job-queue",
+      status: "pending",
+      progress: null,
+      percent: null,
+      stage: type,
+      message: null,
+      result: null,
+      source: "stream",
+      receivedAt: new Date(),
+      raw: {},
+    });
+
+    const queue = tracker as unknown as {
+      enqueue(entry: { kind: "value"; value: TrackJobEvent }): void;
+    };
+    queue.enqueue({ kind: "value", value: event("snapshot") });
+    queue.enqueue({ kind: "value", value: event("progress") });
+    queue.enqueue({ kind: "value", value: event("progress") });
+
+    expect(tracker.queuedEventCount).toBe(2);
+    expect(tracker.droppedEventCount).toBe(1);
+
+    tracker.resume();
+    expect(tracker.isPaused).toBe(false);
+  });
+});
+
 describe("TalosClient.trackJob (#1017)", () => {
   beforeEach(() => {
     vi.useFakeTimers();
