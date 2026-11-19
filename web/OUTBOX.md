@@ -111,6 +111,7 @@ page through, and **Retry** a row via `POST /api/admin/outbox/:id/retry`).
     "aggregateType": "commerce_job", "aggregateId": "…",
     "attempts": 8, "maxAttempts": 8,
     "lastError": "consumer failed: [redacted]",
+    "originalEventId": null,
     "createdAt": "…", "deadLetteredAt": "…"
   }],
   "nextCursor": "2026-09-01T00:00:00.000Z",
@@ -123,6 +124,8 @@ page through, and **Retry** a row via `POST /api/admin/outbox/:id/retry`).
   TALOS API keys, bearer tokens, long hex and base64 blobs replaced by
   `[redacted]`. Use `GET /api/admin/outbox/:id` when the full record is
   genuinely needed.
+- `originalEventId` links back to the original failure attempt when an event
+  was requeued from dead-letter; it is `null` for initial business events.
 - **Validation** (400, nothing queried): `limit` must be an integer 1–100
   (default 25; not clamped), `cursor` must be a `nextCursor` value
   (ISO-8601), `eventType` ≤128 chars of `[A-Za-z0-9_.:-]`.
