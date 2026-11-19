@@ -86,11 +86,11 @@ else
 fi
 
 # Check Soroban CLI
-if command -v soroban &> /dev/null; then
-    echo -e "${GREEN}✅ Soroban CLI: installed${NC}"
+if command -v stellar &> /dev/null; then
+    echo -e "${GREEN}✅ Stellar CLI: installed${NC}"
     PASS=$((PASS + 1))
 else
-    echo -e "${YELLOW}⚠️  Soroban CLI not found (required for contracts)${NC}"
+    echo -e "${YELLOW}⚠️  Stellar CLI not found (required for contracts)${NC}"
     WARN=$((WARN + 1))
 fi
 

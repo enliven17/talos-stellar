@@ -35,7 +35,7 @@ function getSecurityScheme(name: string) {
 
 describe("Admin — Jobs tag", () => {
   it("is registered in the top-level tags array", () => {
-    const tag = (openApiSpec.tags as Array<{ name: string; description: string }>).find(
+    const tag = (openApiSpec.tags as unknown as Array<{ name: string; description: string }>).find(
       (t) => t.name === "Admin — Jobs",
     );
     expect(tag).toBeDefined();

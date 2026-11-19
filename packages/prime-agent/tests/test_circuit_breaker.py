@@ -82,6 +82,10 @@ class TestCircuitBreakerConfig:
         config = CircuitBreakerConfig.for_provider("talos_web_api")
         assert config.failure_threshold == 8
 
+    def test_stellar_horizon_has_its_own_provider_defaults(self):
+        config = CircuitBreakerConfig.for_provider("stellar_horizon")
+        assert config == CircuitBreakerConfig.PROVIDER_DEFAULTS["stellar_horizon"]
+
     def test_for_provider_returns_discord_defaults(self):
         config = CircuitBreakerConfig.for_provider("discord")
         assert config.failure_threshold == 3
@@ -138,8 +142,11 @@ class TestResolveProviderFromUrl:
     def test_x(self):
         assert _resolve_provider_from_url("https://x.com/i/api/2/tweets") == "x"
 
+    def test_stellar_horizon(self):
+        assert _resolve_provider_from_url("https://horizon.stellar.org/accounts") == "stellar_horizon"
+
     def test_unknown_falls_back_to_talos_web_api(self):
-        assert _resolve_provider_from_url("https://horizon.stellar.org/accounts") == "talos_web_api"
+        assert _resolve_provider_from_url("https://api.example.com/accounts") == "talos_web_api"
 
     def test_empty_url(self):
         assert _resolve_provider_from_url("") == "talos_web_api"

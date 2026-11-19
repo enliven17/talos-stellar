@@ -517,7 +517,8 @@ describe("GET /api/proposals", () => {
     const res = await getProposals(req);
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(Array.isArray(body)).toBe(true);
+    expect(Array.isArray(body.proposals)).toBe(true);
+    expect(body.nextCursor).toBeNull();
   });
 
   it("returns 500 envelope on DB error", async () => {
