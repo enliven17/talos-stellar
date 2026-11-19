@@ -89,6 +89,7 @@ is a `major` bump.
 |---------------------|--------------------------------------------------------------|
 | `name_registration` | `register_name` / `resolve_name` / `is_name_available`.      |
 | `name_lifecycle`    | `update_name` / `has_name` / `name_of` — revoke + aliasing.  |
+| `name_reservation` | Read-only `name_reservation` (owner + ledger expiry; active/expired/nonexistent). |
 | `admin_transfer`    | `set_admin` for admin handover.                              |
 | `timelock_admin`    | `schedule_action` / `execute_action` / `cancel_action`.      |
 | `registry_pointer`  | `set_registry_contract` — points at the TalosRegistry.       |

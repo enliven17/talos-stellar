@@ -18,6 +18,9 @@ use soroban_sdk::{
 use ttl_manager;
 use pause_control;
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod name_reservation_tests;
+
 // ── Event Schema Version ────────────────────────────────────────────
 
 /// Major event-schema version supported by this contract.
@@ -104,6 +107,25 @@ pub struct PauseInfo {
     pub paused_at: Option<u64>,
     /// `None` when not paused, or when paused indefinitely by the admin.
     pub expires_at: Option<u64>,
+}
+
+/// A read-only view of a name reservation's owner and ledger expiry.
+///
+/// `status` is `active` while the underlying persistent record is within its
+/// TTL window, `expired` once the ledger has advanced past the computed
+/// expiry, and the whole record is `None` (i.e. the query returns `None`)
+/// when the name was never registered — so callers can distinguish expired,
+/// active and nonexistent reservations. `owner` mirrors the Talos creator
+/// (`creator_of` on the configured registry); it is `None` only if the
+/// registry reports no creator for the bound `talos_id`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NameReservation {
+    pub name: String,
+    pub talos_id: u32,
+    pub owner: Option<Address>,
+    pub status: Symbol,
+    pub expiry_ledger: u32,
 }
 
 #[contracttype]
@@ -261,6 +283,14 @@ fn require_not_paused(e: &Env, domain: PauseDomain) {
 
 const DEFAULT_GRACE_PERIOD: u64 = 604_800; // 7 days in seconds
 const MAX_MIN_DELAY: u64 = 2_592_000; // 30 days in seconds
+/// Ledger span a name reservation stays active after it was last touched.
+/// Mirrors `ttl_manager::RENEWAL_THRESHOLD` (the ledger age at which a name
+/// record is due for renewal): past this span the reservation is lapsed
+/// (`status == "expired"`) even though the underlying persistent entry may
+/// still be live up to Soroban's max TTL. Deriving `expiry_ledger =
+/// last_touched + this` from existing state keeps the query read-only — it
+/// never mutates storage.
+const NAME_RESERVATION_LEDGERS: u32 = 2_000_000;
 const MAX_GUARDIAN_PAUSE_SECS: u64 = 604_800; // 7 days — bounds guardian blast radius
 const MAX_ADMIN_PAUSE_SECS: u64 = 2_592_000; // 30 days; 0 (indefinite) is also allowed for admin
 const MAX_GUARDIANS: u32 = 10; // bounds unbounded storage growth
@@ -1169,6 +1199,66 @@ impl TalosNameService {
             .persistent()
             .get::<_, String>(&DataKey::TalosName(talos_id))
             .is_some()
+    }
+
+    /// Read-only reservation expiry query for a name.
+    ///
+    /// Returns the reservation owner and the ledger at which the reservation
+    /// lapses, **without mutating storage**.
+    ///
+    /// - `None` — the name was never registered (a *nonexistent* reservation).
+    /// - `Some { status: active }` — the record exists and the current ledger
+    ///   has not advanced past `expiry_ledger`.
+    /// - `Some { status: expired }` — the record exists but the current ledger
+    ///   has advanced past `expiry_ledger` (the reservation has lapsed and is
+    ///   due for renewal).
+    ///
+    /// `expiry_ledger` is derived as `last_touched + NAME_RESERVATION_LEDGERS`
+    /// (the renewal window, mirroring `ttl_manager::RENEWAL_THRESHOLD`), and
+    /// `owner` mirrors the Talos creator via a read-only `creator_of` call
+    /// against the configured registry pointer. Requires no authorization.
+    pub fn name_reservation(e: Env, name: String) -> Option<NameReservation> {
+        // Nonexistent: no forward record → None.
+        let talos_id: u32 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::NameRecord(name.clone()))?;
+
+        let current_ledger = e.ledger().sequence();
+        let last_touched: u32 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::LastTouched(talos_id))
+            .unwrap_or(0);
+        let expiry_ledger = last_touched.saturating_add(NAME_RESERVATION_LEDGERS);
+
+        let status = if current_ledger > expiry_ledger {
+            Symbol::new(&e, "expired")
+        } else {
+            Symbol::new(&e, "active")
+        };
+
+        // Owner mirrors the Talos creator (read-only cross-contract).
+        let owner: Option<Address> = match e
+            .storage()
+            .persistent()
+            .get::<_, Address>(&DataKey::RegistryContract)
+        {
+            Some(registry) => e.invoke_contract(
+                &registry,
+                &Symbol::new(&e, "creator_of"),
+                soroban_sdk::vec![&e, talos_id.into_val(&e)],
+            ),
+            None => None,
+        };
+
+        Some(NameReservation {
+            name,
+            talos_id,
+            owner,
+            status,
+            expiry_ledger,
+        })
     }
 
     // ── Storage TTL Management ───────────────────────────────────
