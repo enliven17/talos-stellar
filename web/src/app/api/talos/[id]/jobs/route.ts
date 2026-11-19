@@ -1,10 +1,17 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
+import { logger } from "@/lib/logger";
 import { db } from "@/db";
 import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsCommerceServices, tlsCommerceJobs, tlsRevenues } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { fulfillInstant } from "@/lib/fulfillment";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER } from "@/lib/stellar-config";
+import { ingestJobToLedger } from "@/lib/reputation-ledger";
+import { applyQuotaHeaders, checkAndIncrementQuota, quotaExceededResponse } from "@/lib/quota";
+import { registerTx } from "@/lib/reconciler";
+
+const IDEMPOTENCY_KEY_MAX_BYTES = 128;
 
 /**
  * POST /api/talos/:id/jobs
@@ -19,18 +26,24 @@ import { OPERATOR_PUBLIC_KEY, USDC_ISSUER } from "@/lib/stellar-config";
  * Idempotency contract
  * ────────────────────
  * The caller may include an `Idempotency-Key` request header with any opaque
- * string value (UUID recommended).  The key is scoped per talosId so the same
- * value may be reused safely across different agents.
+ * string value (UUID recommended, max 128 bytes).  The key is scoped per
+ * talosId so the same value may be reused safely across different agents.
  *
  * Behaviour:
  *   No header supplied   → request is processed normally with no idempotency.
  *
  *   New key              → job is created and the response body is cached in
  *                          idempotencyResponse.  Status 201 returned.
+ *                          Response includes:
+ *                            Idempotency-Key: <key>
+ *                            X-Idempotent-Replayed: false
  *
  *   Same key, equivalent payload (same serviceName + payload contents)
  *                        → original cached 201 response returned immediately.
  *                          No side effects are repeated.
+ *                          Response includes:
+ *                            Idempotency-Key: <key>
+ *                            X-Idempotent-Replayed: true
  *
  *   Same key, different payload (serviceName or payload mismatch)
  *                        → 409 Conflict.  Conflicting reuse of an idempotency
@@ -46,6 +59,34 @@ import { OPERATOR_PUBLIC_KEY, USDC_ISSUER } from "@/lib/stellar-config";
  * response in idempotencyResponse.  Both columns are nullable so existing jobs
  * without a key are completely unaffected.
  */
+
+/** Build a JSON response with standard idempotency echo headers. */
+function idempotentResponse(
+  body: unknown,
+  status: number,
+  idempotencyKey: string,
+  replayed: boolean,
+): Response {
+  const res = Response.json(body, { status });
+  res.headers.set("Idempotency-Key", idempotencyKey);
+  res.headers.set("X-Idempotent-Replayed", String(replayed));
+  return res;
+}
+
+/**
+ * Thrown when a transaction was submitted to the Stellar network but its
+ * operations do not satisfy the expected payment terms (wrong amount, wrong
+ * payee, or wrong asset).  The user's funds have been transferred — this is
+ * NOT retryable.
+ */
+class PaymentVerificationError extends Error {
+  readonly retryable = false as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "PaymentVerificationError";
+  }
+}
+
 async function submitAndVerifyPayment(
   signedXdr: string,
   expectedAmount: string,
@@ -54,10 +95,17 @@ async function submitAndVerifyPayment(
   const { TransactionBuilder, Horizon, Networks, Asset } = await import("@stellar/stellar-sdk");
   const server = new Horizon.Server("https://horizon-testnet.stellar.org");
   const tx = TransactionBuilder.fromXDR(signedXdr, Networks.TESTNET);
+
+  // Any error thrown here (network outage, node error, XDR parse failure)
+  // means the transaction has NOT landed on-chain — the user was NOT charged
+  // and the caller may safely retry with the same signed XDR.
   const result = await server.submitTransaction(tx);
   const txHash = result.hash;
 
-  // Verify at least one operation is a USDC payment to the expected recipient
+  // The payment has now been submitted on-chain.  Verification checks that
+  // the submitted operations match what the service expects.  A mismatch
+  // (wrong payee, wrong asset, insufficient amount) means the user's funds
+  // have already been transferred — this is NOT retryable.
   const USDC_ISSUER_VAL = USDC_ISSUER;
   const usdc = new Asset("USDC", USDC_ISSUER_VAL);
   const ops = tx.operations as unknown as Array<{
@@ -75,13 +123,15 @@ async function submitAndVerifyPayment(
       parseFloat(op.amount ?? "0") >= parseFloat(expectedAmount),
   );
   if (!valid) {
-    throw new Error("Payment TX does not include required USDC payment to service recipient");
+    throw new PaymentVerificationError(
+      "Payment was submitted but did not match the expected amount or recipient",
+    );
   }
 
   return { txHash };
 }
 
-export async function POST(
+async function _POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -105,16 +155,37 @@ export async function POST(
 
     // Read optional idempotency key from the request header.
     // Trim whitespace; treat an empty string as absent.
-    const idempotencyKey = request.headers.get("Idempotency-Key")?.trim() || null;
+    const rawKey = request.headers.get("Idempotency-Key")?.trim() || null;
+
+    // Validate key length (prevent header-size abuse)
+    if (rawKey !== null) {
+      const byteLength = Buffer.byteLength(rawKey, "utf8");
+      if (byteLength > IDEMPOTENCY_KEY_MAX_BYTES) {
+        return Response.json(
+          {
+            error: `Idempotency-Key must be at most ${IDEMPOTENCY_KEY_MAX_BYTES} bytes`,
+          },
+          { status: 400 },
+        );
+      }
+    }
+
+    const idempotencyKey = rawKey;
 
     const [service, talos] = await Promise.all([
       db.select().from(tlsCommerceServices).where(eq(tlsCommerceServices.talosId, id)).limit(1).then(r => r[0] ?? null),
-      db.select({ id: tlsTalos.id, agentOnline: tlsTalos.agentOnline, name: tlsTalos.name, agentWalletAddress: tlsTalos.agentWalletAddress })
+      db.select({ id: tlsTalos.id, agentOnline: tlsTalos.agentOnline, status: tlsTalos.status, name: tlsTalos.name, agentWalletAddress: tlsTalos.agentWalletAddress })
         .from(tlsTalos).where(eq(tlsTalos.id, id)).limit(1).then(r => r[0] ?? null),
     ]);
 
     if (!talos) return Response.json({ error: "TALOS not found" }, { status: 404 });
     if (!service) return Response.json({ error: "This agent offers no services" }, { status: 404 });
+    if (talos.status === "Paused") {
+      return Response.json({ error: "This agent is paused and cannot accept new work" }, { status: 409 });
+    }
+    if (talos.status === "Retired") {
+      return Response.json({ error: "This agent is retired and cannot accept new work" }, { status: 409 });
+    }
 
     // ── Idempotency check ─────────────────────────────────────────────
     // If the caller supplied a key, look it up before doing any payment work.
@@ -141,6 +212,14 @@ export async function POST(
           existing.serviceName !== service.serviceName ||
           incomingPayloadJson !== storedPayloadJson
         ) {
+          logger.warn({
+            event: "idempotency_conflict",
+            idempotencyKey,
+            talosId: id,
+            existingServiceName: existing.serviceName,
+            incomingServiceName: service.serviceName,
+          }, "idempotency key reused with different payload");
+
           return Response.json(
             {
               error:
@@ -153,27 +232,76 @@ export async function POST(
 
         // Equivalent retry — return the original response from cache.
         if (existing.idempotencyResponse) {
-          return Response.json(existing.idempotencyResponse, { status: 201 });
+          logger.info({
+            event: "idempotency_hit",
+            idempotencyKey,
+            talosId: id,
+            jobId: existing.id,
+            replayed: true,
+          }, "idempotent replay — returning cached response");
+
+          return idempotentResponse(existing.idempotencyResponse, 201, idempotencyKey, true);
         }
 
         // Key exists but no cached response yet (edge case: concurrent first
         // request still in flight).  Treat as a duplicate in progress.
+        logger.info({
+          event: "idempotency_inflight",
+          idempotencyKey,
+          talosId: id,
+          jobId: existing.id,
+        }, "idempotent request in flight");
+
         return Response.json(
           { error: "Request with this Idempotency-Key is already being processed" },
           { status: 409 },
         );
       }
+
+      // First time seeing this key
+      logger.info({
+        event: "idempotency_miss",
+        idempotencyKey,
+        talosId: id,
+      }, "new idempotent request");
     }
 
     // Submit + verify payment if signedXdr provided; otherwise use legacy txHash
+    // Check quota before doing expensive payment work.
+    const quotaResult = await checkAndIncrementQuota(db, id, "job_writes");
+    if (!quotaResult.ok) return quotaExceededResponse(quotaResult);
+
     let txHash: string;
     if (signedXdr) {
       const OPERATOR = OPERATOR_PUBLIC_KEY;
       const recipient = service.stellarPublicKey ?? talos.agentWalletAddress ?? OPERATOR;
       try {
         ({ txHash } = await submitAndVerifyPayment(signedXdr, String(service.price), recipient));
-      } catch (err: any) {
-        return Response.json({ error: err?.message ?? "Payment submission failed" }, { status: 402 });
+      } catch (err: unknown) {
+        // PaymentVerificationError: the TX was submitted and funds were
+        // transferred, but the operations did not match the expected payment
+        // terms.  The user's payment cannot be undone — NOT retryable.
+        if (err instanceof PaymentVerificationError) {
+          return Response.json(
+            {
+              error: err.message,
+              retryable: false,
+            },
+            { status: 402 },
+          );
+        }
+        // All other errors (network outage, Horizon node error, XDR parse
+        // failure, etc.) mean the transaction has NOT landed on-chain.
+        // The user has NOT been charged and may safely retry.
+        return Response.json(
+          {
+            error: err instanceof Error ? err.message : "Payment submission failed",
+            retryable: true,
+            retryAfterMs: 5000,
+            hint: "The Stellar network may be temporarily busy. Wait a few seconds and retry.",
+          },
+          { status: 402 },
+        );
       }
     } else {
       txHash = legacyTxHash!;
@@ -196,9 +324,14 @@ export async function POST(
       let result: Record<string, unknown>;
       try {
         result = await fulfillInstant(service.serviceName, payload ?? {});
-      } catch (err: any) {
+      } catch (err: unknown) {
+        // Fulfillment failed after payment was confirmed — payment was charged.
+        // NOT retryable: the user should contact support.
         return Response.json(
-          { error: `Fulfillment failed: ${err?.message ?? "unknown error"}` },
+          {
+            error: `Fulfillment failed: ${err instanceof Error ? err.message : "unknown error"}`,
+            retryable: false,
+          },
           { status: 502 },
         );
       }
@@ -243,13 +376,16 @@ export async function POST(
               .where(eq(tlsCommerceJobs.id, job.id));
           }
 
+          // Record terminal status to the reputation input ledger idempotently
+          await ingestJobToLedger(job.id, tx);
+
           return [job];
         },
         { category: "JOB" }
       );
 
       const finalBody = { ...responseBody, jobId: job.id };
-      return Response.json(finalBody, { status: 201 });
+      return applyQuotaHeaders(Response.json(finalBody, { status: 201 }), quotaResult);
     }
 
     // ── Async: queue for agent to process ─────────────────────────────
@@ -291,7 +427,21 @@ export async function POST(
     );
 
     const finalBody = { ...responseBody, jobId: job.id };
-    return Response.json(finalBody, { status: 201 });
+
+    // Register the payment txHash with the finality reconciler so it can
+    // track on-chain settlement and apply repair if the tx is later found to
+    // be failed or expired.  Fire-and-forget: a registration failure never
+    // blocks the caller.
+    registerTx({
+      txHash,
+      sourceType: "commerce_job",
+      sourceId: job.id,           // tls_commerce_jobs.id is the repair target
+      expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000), // 2 h window
+    }).catch((err) =>
+      logger.error({ err, txHash, jobId: job.id, talosId: id }, "reconciler_register_tx_failed"),
+    );
+
+    return applyQuotaHeaders(Response.json(finalBody, { status: 201 }), quotaResult);
   } catch (err: unknown) {
     const e = err as Record<string, unknown>;
     if (e?.code === "23505") {
@@ -305,7 +455,7 @@ export async function POST(
       }
       return Response.json({ error: "Transaction already used for a job (replay)" }, { status: 409 });
     }
-    console.error("[jobs POST]", err);
+    logger.error({ err, event: "jobs_post_error" }, "[jobs POST] Unhandled error");
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
@@ -314,7 +464,7 @@ export async function POST(
  * GET /api/talos/:id/jobs?txHash=xxx  or  ?jobId=xxx
  * Poll job status
  */
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -350,3 +500,6 @@ export async function GET(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);
+export const GET = withRequestId(_GET);

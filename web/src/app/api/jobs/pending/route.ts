@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { tlsTalos, tlsCommerceJobs } from "@/db/schema";
 import { and, asc, eq, lt, or, sql } from "drizzle-orm";
 import { logger } from "@/lib/logger";
+import { withTraceContext } from "@/lib/tracing";
 
 async function resolveCallerTalos(request: NextRequest): Promise<string | null> {
   const authHeader = request.headers.get("authorization");
@@ -18,7 +19,7 @@ async function resolveCallerTalos(request: NextRequest): Promise<string | null> 
 }
 
 // GET /api/jobs/pending — Get pending jobs for the authenticated TALOS (as service provider)
-export async function GET(request: NextRequest) {
+async function handleGet(request: NextRequest) {
   try {
     const callerTalosId = await resolveCallerTalos(request);
     if (!callerTalosId) {
@@ -38,6 +39,7 @@ export async function GET(request: NextRequest) {
     const conditions = [
       eq(tlsCommerceJobs.talosId, callerTalosId),
       eq(tlsCommerceJobs.status, "pending"),
+      eq(tlsTalos.status, "Active"),
       or(
         eq(tlsCommerceJobs.leasedBy, null as unknown as string),
         eq(tlsCommerceJobs.leasedBy, callerTalosId),
@@ -47,8 +49,29 @@ export async function GET(request: NextRequest) {
     if (cursor) conditions.push(sql`${tlsCommerceJobs.createdAt} > ${new Date(cursor)}`);
 
     const rows = await db
-      .select()
+      .select({
+        id: tlsCommerceJobs.id,
+        talosId: tlsCommerceJobs.talosId,
+        requesterTalosId: tlsCommerceJobs.requesterTalosId,
+        serviceName: tlsCommerceJobs.serviceName,
+        payload: tlsCommerceJobs.payload,
+        result: tlsCommerceJobs.result,
+        status: tlsCommerceJobs.status,
+        paymentSig: tlsCommerceJobs.paymentSig,
+        txHash: tlsCommerceJobs.txHash,
+        amount: tlsCommerceJobs.amount,
+        bidPrice: tlsCommerceJobs.bidPrice,
+        idempotencyKey: tlsCommerceJobs.idempotencyKey,
+        idempotencyResponse: tlsCommerceJobs.idempotencyResponse,
+        leasedBy: tlsCommerceJobs.leasedBy,
+        leasedAt: tlsCommerceJobs.leasedAt,
+        leaseExpiresAt: tlsCommerceJobs.leaseExpiresAt,
+        fencingToken: tlsCommerceJobs.fencingToken,
+        createdAt: tlsCommerceJobs.createdAt,
+        updatedAt: tlsCommerceJobs.updatedAt,
+      })
       .from(tlsCommerceJobs)
+      .innerJoin(tlsTalos, eq(tlsCommerceJobs.talosId, tlsTalos.id))
       .where(and(...conditions))
       .orderBy(asc(tlsCommerceJobs.createdAt))
       .limit(limit + 1);
@@ -68,3 +91,5 @@ export async function GET(request: NextRequest) {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withTraceContext(handleGet);

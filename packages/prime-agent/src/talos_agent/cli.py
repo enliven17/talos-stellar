@@ -5,14 +5,20 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
+import time
+import uuid
+from dataclasses import asdict
+from datetime import datetime, timezone
+from pathlib import Path
 
 import click
 from rich.console import Console
-import re
 
 from talos_agent import __version__
-from talos_agent.config import APP_DIR, Settings, ensure_app_dir
+from talos_agent.checkpoint_cli import checkpoint
+from talos_agent.config import APP_DIR, Settings, ensure_app_dir, safe_config_error
 
 console = Console()
 
@@ -23,13 +29,94 @@ def main():
     """Talos Protocol Prime Agent — autonomous GTM agent."""
 
 
+main.add_command(checkpoint)
+
+
+@main.command()
+@click.option(
+    "--allow",
+    "allowlist_extra",
+    multiple=True,
+    help="Additional tool name(s) to expose beyond the default read-only allowlist (repeatable).",
+)
+@click.option(
+    "--allow-only",
+    "allowlist_only",
+    multiple=True,
+    help="Expose ONLY these tool names, overriding the default allowlist entirely (repeatable).",
+)
+def mcp(allowlist_extra: tuple[str, ...], allowlist_only: tuple[str, ...]):
+    """Start a stdio MCP server exposing selected agent tools.
+
+    External MCP-compatible clients (Claude Desktop, Cursor, etc.) can
+    list and call the allowlisted tools. Read-only by default; the
+    agent's permission enforcer and policy middleware apply to every
+    call, so even allowlisted tools that trigger gated actions are
+    subject to the same policy checks as the internal agent loop.
+
+    \b
+    Examples:
+      # Default read-only allowlist
+      talos-agent mcp
+
+      # Add specific tools to the default allowlist
+      talos-agent mcp --allow get_xlm_balance --allow get_pulse_balance
+
+      # Expose only a custom set
+      talos-agent mcp --allow-only discover_services --allow-only get_pending_jobs
+    """
+    import asyncio
+
+    from talos_agent.mcp_server import DEFAULT_ALLOWLIST, build_mcp_server
+    from talos_agent.tools.registry import build_all_tools
+
+    settings = Settings()
+    if not settings.talos_api_key and not settings.talos_api_keys:
+        console.print("[yellow]Warning:[/yellow] TALOS_API_KEY not set; some tools may fail at call time.")
+
+    # Build the tool registry with the same DI as the agent loop. Browser
+    # and API client are None-safe for read-only tools; the MCP server does
+    # not need a live browser session for discovery/balance tools.
+    from talos_agent.db import LocalDB
+
+    ensure_app_dir()
+    db = LocalDB()
+
+    try:
+        registry = build_all_tools(
+            api=None,
+            db=db,
+            browser=None,
+            settings=settings,
+        )
+
+        if allowlist_only:
+            allowlist = frozenset(allowlist_only)
+        else:
+            allowlist = frozenset(DEFAULT_ALLOWLIST | set(allowlist_extra))
+
+        server = build_mcp_server(registry, allowlist=allowlist)
+
+        console.print(f"[bold green]MCP server starting[/bold green] ({len(allowlist)} tools exposed)", file=sys.stderr)
+        for name in sorted(allowlist):
+            console.print(f"  - {name}", file=sys.stderr)
+
+        asyncio.run(_run_mcp_stdio(server))
+    finally:
+        db.close()
+
+
+async def _run_mcp_stdio(server) -> None:
+    """Thin async wrapper so the db.close() in the caller still runs."""
+    from talos_agent.mcp_server import run_stdio
+    await run_stdio(server)
+
+
 @main.command()
 @click.option("--talos-id", default=None, help="Talos ID (overrides TALOS_ID in .env)")
 @click.option("--env-file", default=".env", help="Path to .env file")
 def start(talos_id: str | None, env_file: str):
     """Start the Prime Agent for a Talos."""
-    from pathlib import Path
-
     ensure_app_dir()
 
     # Load .env into os.environ so child processes (Stagehand SEA) inherit them
@@ -63,7 +150,7 @@ def start(talos_id: str | None, env_file: str):
                     dec = decrypt_with_password(value, master_key)
                     os.environ.setdefault(key, dec)
                 except Exception as e:
-                    console.print(f"[red]Error decrypting {key}:[/red] {e}")
+                    console.print(f"[red]Error decrypting {key}:[/red] {safe_config_error(e)}")
                     sys.exit(1)
             else:
                 os.environ.setdefault(key, value)
@@ -71,7 +158,11 @@ def start(talos_id: str | None, env_file: str):
     kwargs: dict = {"_env_file": env_file}
     if talos_id:
         kwargs["talos_id"] = talos_id
-    settings = Settings(**kwargs)
+    try:
+        settings = Settings(**kwargs)
+    except Exception as exc:
+        console.print(f"[red]Configuration error:[/red] {safe_config_error(exc)}")
+        raise click.exceptions.Exit(1) from None
 
     all_keys = settings.get_all_api_keys()
     if not all_keys:
@@ -95,16 +186,31 @@ def start(talos_id: str | None, env_file: str):
 
 
 @main.command()
-@click.option("--api-key", prompt="Talos API Key", help="API key issued at Talos creation")
-@click.option("--openai-key", prompt="OpenAI API Key", help="OpenAI API key")
+@click.option(
+    "--api-key",
+    prompt="Talos API Key",
+    hide_input=True,
+    help="API key issued at Talos creation",
+)
+@click.option(
+    "--openai-key",
+    prompt="OpenAI API Key",
+    hide_input=True,
+    help="OpenAI API key",
+)
 def config(api_key: str, openai_key: str):
     """Configure agent credentials (saved to ~/.talos-agent/config.json)."""
+    if Settings().secret_rotation_enabled:
+        raise click.ClickException(
+            "plaintext config writes are disabled while secret rotation is enabled; "
+            "use `talos-agent secrets rotate`"
+        )
     ensure_app_dir()
     cfg_path = APP_DIR / "config.json"
 
     existing = {}
     if cfg_path.exists():
-        existing = json.loads(cfg_path.read_text())
+        existing = json.loads(cfg_path.read_text(encoding="utf-8"))
 
     existing.update({
         k: v for k, v in {
@@ -113,7 +219,19 @@ def config(api_key: str, openai_key: str):
         }.items() if v
     })
 
-    cfg_path.write_text(json.dumps(existing, indent=2))
+    content = json.dumps(existing, indent=2)
+    # Write file with mode 0o600 (owner read/write only) on POSIX.
+    # Note on Windows: Windows NTFS uses Access Control Lists (ACLs) rather than
+    # POSIX permission bits. os.chmod only controls the read-only attribute on
+    # Windows and does not restrict file access permissions to the owner.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(cfg_path, flags, 0o600)
+    with open(fd, "w", encoding="utf-8") as f:
+        f.write(content)
+    try:
+        os.chmod(cfg_path, 0o600)
+    except OSError:
+        pass
     console.print(f"[green]Config saved to {cfg_path}[/green]")
 
 
@@ -123,6 +241,7 @@ def config(api_key: str, openai_key: str):
 def encrypt_keys(env_file: str):
     """Encrypt plaintext secret-like values in an .env file using a master password."""
     from pathlib import Path
+
     from talos_agent.crypto import encrypt_with_password
 
     path = Path(env_file)
@@ -168,32 +287,1140 @@ def encrypt_keys(env_file: str):
     console.print(f"[green]Encrypted {changed} values. Original saved to {backup}[/green]")
 
 
-@main.command()
-def status():
-    """Show agent status."""
+@main.group()
+def jobs():
+    """Inspect and safely requeue durable job effects."""
+
+
+def _job_store(db_path: str | None, talos_id: str):
+    from pathlib import Path
+
     from talos_agent.db import LocalDB
+    from talos_agent.job_effects import JobEffectLimits, JobEffectStore
+
+    settings = Settings()
+    limits = JobEffectLimits(
+        max_inbox_records=settings.talos_job_effect_max_inbox_records,
+        max_outbox_records=settings.talos_job_effect_max_outbox_records,
+        max_payload_bytes=settings.talos_job_effect_max_payload_bytes,
+        max_result_bytes=settings.talos_job_effect_max_result_bytes,
+        batch_size=settings.talos_job_effect_batch_size,
+        lease_seconds=settings.talos_job_effect_lease_seconds,
+        max_attempts=settings.talos_job_effect_max_attempts,
+        retry_base_seconds=settings.talos_job_effect_retry_base_seconds,
+        dispatch_timeout_seconds=settings.talos_job_effect_dispatch_timeout_seconds,
+        remote_lease_ttl_seconds=settings.job_lease_ttl,
+        busy_timeout_ms=settings.talos_job_effect_db_timeout_ms,
+    )
+    db = LocalDB(path=Path(db_path)) if db_path else LocalDB()
+    return db, JobEffectStore(db, owner_talos_id=talos_id, limits=limits)
+
+
+@jobs.command(name="inspect")
+@click.option("--talos-id", required=True, help="Talos scope whose effects may be inspected")
+@click.option("--db-path", default=None, type=click.Path(dir_okay=False))
+@click.option(
+    "--status",
+    default=None,
+    type=click.Choice(
+        [
+            "pending",
+            "dispatching",
+            "succeeded",
+            "retryable",
+            "indeterminate",
+            "conflict",
+            "dead",
+        ],
+        case_sensitive=True,
+    ),
+)
+@click.option("--limit", default=50, type=click.IntRange(1, 200))
+@click.option("--json", "as_json", is_flag=True, help="Emit metadata as JSON")
+def inspect_jobs(
+    talos_id: str,
+    db_path: str | None,
+    status: str | None,
+    limit: int,
+    as_json: bool,
+):
+    """List replay metadata without printing payloads or results."""
+    from talos_agent.job_effects import JobEffectError
+
+    db = None
+    try:
+        db, store = _job_store(db_path, talos_id)
+        rows = store.inspect(status=status, limit=limit)
+        if as_json:
+            console.print_json(json.dumps({"effects": rows, "count": len(rows)}))
+            return
+        if not rows:
+            console.print("[dim]No matching durable job effects.[/dim]")
+            return
+        for row in rows:
+            console.print(
+                f"{row['effect_id']} job={row['job_id']} state={row['state']} "
+                f"attempts={row['attempt_count']} "
+                f"error={row['last_error_code'] or '-'}"
+            )
+    except JobEffectError as exc:
+        raise click.ClickException(f"{exc.code}: {exc}") from exc
+    finally:
+        if db is not None:
+            db.close()
+
+
+
+@jobs.command(name="audit")
+@click.option("--talos-id", required=True, help="Talos scope whose audit trail may be inspected")
+@click.option("--db-path", default=None, type=click.Path(dir_okay=False))
+@click.option("--effect-id", default=None, help="Filter audit trail to one effect")
+@click.option("--job-id", default=None, help="Filter audit trail to one job")
+@click.option("--limit", default=50, type=click.IntRange(1, 200))
+@click.option("--json", "as_json", is_flag=True, help="Emit metadata as JSON")
+def audit_jobs(
+    talos_id: str,
+    db_path: str | None,
+    effect_id: str | None,
+    job_id: str | None,
+    limit: int,
+    as_json: bool,
+):
+    """List durable effect replay audit entries (metadata only)."""
+    from talos_agent.job_effects import JobEffectError
+
+    db = None
+    try:
+        db, store = _job_store(db_path, talos_id)
+        rows = store.audit_trail(effect_id=effect_id, job_id=job_id, limit=limit)
+        if as_json:
+            console.print_json(json.dumps({"audit": rows, "count": len(rows)}))
+            return
+        if not rows:
+            console.print("[dim]No matching replay audit entries.[/dim]")
+            return
+        for row in rows:
+            console.print(
+                f"{row['created_at']} {row['action']} effect={row['effect_id']} "
+                f"job={row['job_id']} {row['from_state'] or '-'}->{row['to_state']} "
+                f"attempts={row['attempt_count']} actor={row['actor']} "
+                f"error={row['error_code'] or '-'}"
+            )
+    except JobEffectError as exc:
+        raise click.ClickException(f"{exc.code}: {exc}") from exc
+    finally:
+        if db is not None:
+            db.close()
+
+
+@jobs.command(name="retry")
+@click.argument("effect_id")
+@click.option("--talos-id", required=True, help="Talos scope that owns the effect")
+@click.option("--db-path", default=None, type=click.Path(dir_okay=False))
+@click.option("--expected-attempt", required=True, type=click.IntRange(min=0))
+def retry_job_effect(
+    effect_id: str,
+    talos_id: str,
+    db_path: str | None,
+    expected_attempt: int,
+):
+    """Requeue one failed effect with a stale-decision guard."""
+    from talos_agent.job_effects import JobEffectError
+
+    db = None
+    try:
+        db, store = _job_store(db_path, talos_id)
+        result = store.requeue(effect_id, expected_attempt=expected_attempt)
+        console.print_json(json.dumps(result))
+    except JobEffectError as exc:
+        raise click.ClickException(f"{exc.code}: {exc}") from exc
+    finally:
+        if db is not None:
+            db.close()
+
+
+@main.command()
+@click.option(
+    "--talos-id",
+    default=None,
+    envvar="TALOS_ID",
+    help="Talos agent ID to inspect (defaults to TALOS_ID env var or primary DB).",
+)
+@click.option(
+    "--db-path",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help="Explicit SQLite DB path (overrides --talos-id resolution).",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit status as stable JSON (suitable for scripting and monitoring).",
+)
+def status(talos_id: str | None, db_path: str | None, as_json: bool):
+    """Show a one-shot health snapshot for a local agent.
+
+    Reports adapter readiness, circuit-breaker states, WAL diagnostics,
+    pending durable job effects, and the last agent-cycle time — all from
+    local SQLite state. No network calls are made.
+
+    Identifiers are redacted via the shared sanitization helper so secret
+    keys, tokens, and signed payloads never appear in the output.
+
+    \b
+    Exit codes
+    ----------
+    0  All adapters healthy (or disabled) — no breakers open, WAL healthy.
+    1  One or more adapters degraded / timed out, or WAL degraded.
+    2  CLI usage error.
+    """
+    from pathlib import Path as _Path
+
+    from talos_agent.adapters.health import (
+        AdapterState,
+        _sanitize_health_detail,
+    )
+    from talos_agent.circuit_breaker import CircuitState, cb_registry
+    from talos_agent.db import LocalDB, get_db_path
+    from talos_agent.job_effects import (
+        JobEffectLimits,
+        JobEffectStore,
+    )
+    from talos_agent.wal_health import WalHealthState, collect_wal_health
+
+    ensure_app_dir()
+
+    # ── Resolve DB path ────────────────────────────────────────────────────
+    resolved_db_path: _Path
+    if db_path:
+        resolved_db_path = _Path(db_path)
+    else:
+        resolved_db_path = get_db_path(talos_id)
+
+    db = LocalDB(path=resolved_db_path) if resolved_db_path.exists() else None
+
+    # ── Collect data ───────────────────────────────────────────────────────
+
+    # Basic agent info from DB
+    talos_cfg: dict = {}
+    last_cycle_str: str | None = None
+    posts_today: int = 0
+    pending_approvals: int = 0
+    pending_effects: int = 0
+
+    if db is not None:
+        try:
+            talos_cfg = db.get_talos_config() or {}
+            last_cycle = db.get_last_run("agent_cycle")
+            last_cycle_str = last_cycle.isoformat() if last_cycle else None
+            posts_today = db.count_today("post")
+            pending_approvals_list = db.get_pending_approvals()
+            pending_approvals = len(pending_approvals_list) if pending_approvals_list else 0
+        except Exception as exc:  # noqa: BLE001
+            if not as_json:
+                console.print(f"[yellow]Warning: DB read error:[/yellow] {_sanitize_health_detail(str(exc))}")
+
+        # Durable job effects count
+        try:
+            settings = Settings()
+            limits = JobEffectLimits(
+                max_inbox_records=settings.talos_job_effect_max_inbox_records,
+                max_outbox_records=settings.talos_job_effect_max_outbox_records,
+                max_payload_bytes=settings.talos_job_effect_max_payload_bytes,
+                max_result_bytes=settings.talos_job_effect_max_result_bytes,
+                batch_size=settings.talos_job_effect_batch_size,
+                lease_seconds=settings.talos_job_effect_lease_seconds,
+                max_attempts=settings.talos_job_effect_max_attempts,
+                retry_base_seconds=settings.talos_job_effect_retry_base_seconds,
+                dispatch_timeout_seconds=settings.talos_job_effect_dispatch_timeout_seconds,
+                remote_lease_ttl_seconds=settings.job_lease_ttl,
+                busy_timeout_ms=settings.talos_job_effect_db_timeout_ms,
+            )
+            _scope_id = talos_id or talos_cfg.get("talos_id", "unknown")
+            effect_store = JobEffectStore(db, owner_talos_id=_scope_id, limits=limits)
+            pending_rows = effect_store.inspect(status="pending", limit=200)
+            dispatching_rows = effect_store.inspect(status="dispatching", limit=200)
+            retryable_rows = effect_store.inspect(status="retryable", limit=200)
+            pending_effects = len(pending_rows) + len(dispatching_rows) + len(retryable_rows)
+        except Exception:  # noqa: BLE001
+            pending_effects = -1  # -1 signals "unavailable"
+
+    # WAL health
+    wal_report = None
+    try:
+        wal_report = collect_wal_health(
+            resolved_db_path if resolved_db_path.exists() else None,
+            run_checkpoint=False,  # read-only — never trigger a checkpoint here
+            run_quick_check=True,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Circuit-breaker states
+    breaker_states: dict[str, str] = {}
+    try:
+        for name, state_dict in cb_registry.all_metrics().items():
+            breaker_states[str(name)] = state_dict.get("state", "unknown")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # ── Determine overall health ───────────────────────────────────────────
+    is_degraded = False
+    if wal_report and wal_report.state in (WalHealthState.DEGRADED, WalHealthState.ERROR):
+        is_degraded = True
+    if any(v == CircuitState.OPEN.value for v in breaker_states.values()):
+        is_degraded = True
+    if pending_effects > 0:
+        # Pending effects are informational — not a hard degraded signal
+        pass
+
+    # ── Output ─────────────────────────────────────────────────────────────
+    if as_json:
+        payload = {
+            "agent": {
+                "talos_id": _sanitize_health_detail(
+                    talos_id or talos_cfg.get("talos_id", "unknown")
+                ),
+                "name": _sanitize_health_detail(talos_cfg.get("name", "unknown")),
+                "db_path": str(resolved_db_path),
+                "db_exists": resolved_db_path.exists(),
+                "last_cycle_at": last_cycle_str,
+                "posts_today": posts_today,
+                "pending_approvals": pending_approvals,
+            },
+            "circuit_breakers": breaker_states,
+            "pending_job_effects": pending_effects,
+            "wal": wal_report.to_dict() if wal_report else None,
+            "overall": "degraded" if is_degraded else "healthy",
+        }
+        console.print_json(json.dumps(payload))
+    else:
+        _id = _sanitize_health_detail(talos_id or talos_cfg.get("talos_id", "unknown"))
+        _name = _sanitize_health_detail(talos_cfg.get("name", "unknown"))
+        console.print(f"\n[bold]Talos Agent Status[/bold]  id=[cyan]{_id}[/cyan]  name=[cyan]{_name}[/cyan]")
+        console.print(f"  db:              {resolved_db_path}  ({'exists' if resolved_db_path.exists() else '[red]missing[/red]'})")
+        console.print(f"  last cycle:      {last_cycle_str or '[dim]never[/dim]'}")
+        console.print(f"  posts today:     {posts_today}")
+        console.print(f"  pending approvals: {pending_approvals}")
+
+        # Circuit breakers
+        console.print("\n[bold]Circuit Breakers[/bold]")
+        if breaker_states:
+            for name, state in sorted(breaker_states.items()):
+                colour = "green" if state == CircuitState.CLOSED.value else "red" if state == CircuitState.OPEN.value else "yellow"
+                console.print(f"  {name:<24} [{colour}]{state}[/{colour}]")
+        else:
+            console.print("  [dim](no breakers registered — agent not yet started)[/dim]")
+
+        # Pending job effects
+        console.print("\n[bold]Pending Job Effects[/bold]")
+        if pending_effects < 0:
+            console.print("  [dim]unavailable (DB not accessible or agent ID unknown)[/dim]")
+        elif pending_effects == 0:
+            console.print("  [green]0 pending[/green]")
+        else:
+            console.print(f"  [yellow]{pending_effects} pending/retryable[/yellow]  (run `talos-agent jobs inspect --talos-id {_id}` for details)")
+
+        # WAL diagnostics
+        console.print("\n[bold]WAL Diagnostics[/bold]")
+        if wal_report is None:
+            console.print("  [dim]unavailable (DB not found)[/dim]")
+        else:
+            wal_colour = (
+                "green" if wal_report.state == WalHealthState.HEALTHY
+                else "yellow" if wal_report.state == WalHealthState.DEGRADED
+                else "red"
+            )
+            console.print(f"  state:           [{wal_colour}]{wal_report.state.value}[/{wal_colour}]")
+            console.print(f"  detail:          {_sanitize_health_detail(wal_report.detail)}")
+            if wal_report.wal_exists:
+                wal_kb = (wal_report.wal_size_bytes or 0) // 1024
+                console.print(f"  wal size:        {wal_kb} KB")
+            if wal_report.findings:
+                for finding in wal_report.findings:
+                    console.print(f"  [yellow]⚠[/yellow]  {_sanitize_health_detail(finding)}")
+
+        # Overall
+        overall_colour = "red" if is_degraded else "green"
+        console.print(f"\n[bold]Overall:[/bold] [{overall_colour}]{'degraded' if is_degraded else 'healthy'}[/{overall_colour}]\n")
+
+    if db is not None:
+        db.close()
+
+    sys.exit(1 if is_degraded else 0)
+
+
+# ─── Backup / Restore / Verify ──────────────────────────────────────
+
+
+@main.command()
+@click.option("--output", default=None, help="Output artifact path (default: ~/.talos-agent/backups/talos-agent-YYYYMMDD-HHMMSS.enc)")
+@click.option("--agent-id", default=None, help="Talos ID for multi-agent mode")
+@click.option("--passphrase", default=None, help="Backup passphrase (≥ 8 chars). Prompted if not provided.")
+@click.option("--web-endpoint", is_flag=True, help="Also trigger POST /api/ops/backup on the Talos web API for Postgres coverage.")
+@click.option(
+    "--web-api-url",
+    default=None,
+    help="Talos web API URL for --web-endpoint (defaults to TALOS_API_URL env or https://talos-stellar.vercel.app)",
+)
+@click.option(
+    "--ops-token",
+    default=None,
+    help="OPS_ADMIN_SECRET for the web endpoint (env: TALOS_OPS_TOKEN). Required when --web-endpoint is set.",
+)
+def backup(output, agent_id, passphrase, web_endpoint, web_api_url, ops_token):
+    """Create an encrypted backup of this agent's local state.
+
+    The artifact is smaller and independent from the web-side Postgres
+    backup. With --web-endpoint, also kicks the web /api/ops/backup route
+    so a single `backup` covers both the SQLite state and the Postgres
+    rows.
+
+    Bounded: writes are streamed through a tempdir, the encrypted output
+    is bounded by MAX_PLAINTEXT_BYTES (10 MiB by default), and a
+    single-flight lock prevents concurrent overwrites of the same WAL.
+    """
+    from pathlib import Path as _Path
+    from talos_agent.backup_service import (
+        BACKUP_ENCRYPTION_LABEL,
+        BackupBusyError,
+        BackupError,
+        build_backup,
+    )
+
+    ensure_app_dir()
+    if not passphrase:
+        passphrase = click.prompt("Backup passphrase (≥8 chars)", hide_input=True, confirmation_prompt=True)
+    if len(passphrase) < 8:
+        console.print("[red]Error:[/red] passphrase must be ≥ 8 chars.")
+        sys.exit(2)
+
+    default_name = f"talos-agent-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.enc"
+    out = _Path(output) if output else (APP_DIR / "backups" / default_name)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    t0 = time.monotonic()
+    try:
+        run = build_backup(
+            password=passphrase,
+            out_path=out,
+            agent_id=agent_id,
+            scope="agent",
+        )
+    except BackupBusyError as exc:
+        console.print(f"[red]Busy:[/red] {exc}")
+        sys.exit(75)
+    except BackupError as exc:
+        console.print(f"[red]Backup failed:[/red] {exc}")
+        sys.exit(1)
+
+    elapsed = time.monotonic() - t0
+    console.print(f"[green]Backup written to[/green] {out}")
+    console.print(f"  encryption:    {BACKUP_ENCRYPTION_LABEL}")
+    console.print(f"  scope:         {run.scope}")
+    console.print(f"  files:         {len(run.files)}")
+    console.print(f"  row_count:     {run.manifest.get('rowCountTotal', 0)}")
+    console.print(f"  duration_s:    {elapsed:.2f}")    
+    settings = Settings()
+    if settings.backup_retention_enabled:
+        from talos_agent.backup_service import prune_backups
+
+        try:
+            deleted = prune_backups(
+                directory=out.parent,
+                max_count=settings.backup_retention_max_count,
+                max_age_days=settings.backup_retention_max_age_days,
+            )
+        except BackupError as exc:
+            # Retention is best-effort cleanup; the backup itself already
+            # succeeded above, so a policy misconfiguration must not turn
+            # into a failed `backup` command. Report and continue.
+            console.print(f"[yellow]Retention pruning skipped:[/yellow] {exc}")
+        else:
+            if deleted:
+                console.print(f"  pruned:        {len(deleted)} old backup(s) removed")
+    if web_endpoint:
+        import asyncio
+        import os
+
+        from talos_agent.backup_service import trigger_web_backup
+
+        url = (
+            web_api_url
+            or os.environ.get("TALOS_API_URL")
+            or "https://talos-stellar.vercel.app"
+        )
+        token = ops_token or os.environ.get("TALOS_OPS_TOKEN")
+        if not token:
+            console.print("[red]--web-endpoint requires --ops-token or TALOS_OPS_TOKEN[/red]")
+            sys.exit(2)
+        try:
+            result = asyncio.run(
+                trigger_web_backup(
+                    api_url=url,
+                    api_key=token,
+                    passphrase=passphrase,
+                    scope="system",
+                    timeout_s=60.0,
+                )
+            )
+            console.print("[green]Web /api/ops/backup completed[/green]")
+            console.print(f"  run_id:        {result.get('runId')}")
+            console.print(f"  row_count:     {result.get('rowCountTotal')}")
+        except Exception as exc:  # noqa: BLE001 — boundary, re-format below
+            console.print(f"[red]Web backup trigger failed:[/red] {exc}")
+            sys.exit(1)
+
+
+@main.command()
+@click.argument("artifact", type=click.Path(exists=True, dir_okay=False))
+@click.option("--passphrase", default=None, help="Backup passphrase (Prompted if not provided.)")
+@click.option("--confirm", is_flag=True, help="Overwrite existing agent DB. Required if state already exists.")
+@click.option("--agent-id", default=None, help="Talos ID for multi-agent mode")
+@click.option("--restore-root", default=None, help="Override restore root (default: ~/.talos-agent)")
+def restore(artifact, passphrase, confirm, agent_id, restore_root):
+    """Restore agent state from an encrypted backup artifact.
+
+    By default this is a dry run that prints the manifest. Pass --confirm
+    to actually replace the local SQLite state. Any existing files are
+    backed up to `.pre-restore` siblings first.
+    """
+    from pathlib import Path as _Path
+    from talos_agent.backup_service import (
+        BACKUP_ENCRYPTION_LABEL,
+        BackupError,
+        restore_backup,
+        verify_backup,
+    )
+
+    ensure_app_dir()
+    if not passphrase:
+        passphrase = click.prompt("Backup passphrase", hide_input=True)
+
+    path = _Path(artifact).resolve()
+    try:
+        verified = verify_backup(artifact_path=path, password=passphrase)
+    except BackupError as exc:
+        code = getattr(exc, "code", "BAD_INPUT")
+        if code == "AUTH_FAILED":
+            console.print("[red]Passphrase rejected[/red]")
+            sys.exit(3)
+        console.print(f"[red]Verify failed:[/red] {exc}")
+        sys.exit(1)
+
+    files = list(verified.files.keys())
+    console.print(f"[green]Verified[/green] {path}")
+    console.print(f"  encryption:     {BACKUP_ENCRYPTION_LABEL}")
+    console.print(f"  scope:          {verified.scope}")
+    console.print(f"  timestamp:      {verified.timestamp}")
+    console.print(f"  files:          {files}")
+    console.print(f"  row_count:      {verified.manifest.get('rowCountTotal', 0)}")
+    console.print(f"  plaintext_size: {verified.manifest.get('size_bytes', 0)} B")
+
+    if not confirm:
+        console.print("[yellow]Dry run only.[/yellow] Re-run with --confirm to apply the restore.")
+        return
+
+    try:
+        restore_backup(
+            artifact_path=path,
+            password=passphrase,
+            confirm=True,
+            agent_id=agent_id,
+            restore_root=_Path(restore_root) if restore_root else None,
+        )
+    except BackupError as exc:
+        console.print(f"[red]Restore failed:[/red] {exc}")
+        sys.exit(1)
+    console.print(f"[green]Restore applied to {_Path(restore_root) if restore_root else APP_DIR}[/green]")
+
+
+@main.command(name="backup-doctor")
+@click.argument("artifact", type=click.Path(exists=True, dir_okay=False))
+@click.option("--passphrase", default=None, help="Backup passphrase (Prompted if not provided.)")
+def backup_doctor(artifact, passphrase):
+    """Print integrity-check results for a backup artifact without applying it.
+
+    Useful for incident-response checklists: this command reveals scope,
+    timestamp, row counts, file sha256s, and the cipher label so an
+    operator can sanity-check a backup years later without source code
+    at hand.
+    """
+    from pathlib import Path as _Path
+    from talos_agent.backup_service import (
+        BACKUP_ENCRYPTION_LABEL,
+        BackupError,
+        verify_backup,
+    )
+
+    if not passphrase:
+        passphrase = click.prompt("Backup passphrase", hide_input=True)
+    path = _Path(artifact).resolve()
+    try:
+        verified = verify_backup(artifact_path=path, password=passphrase)
+    except BackupError as exc:
+        code = getattr(exc, "code", "BAD_INPUT")
+        if code == "AUTH_FAILED":
+            console.print("[red]Passphrase mismatched or artifact tampered[/red]")
+            sys.exit(3)
+        console.print(f"[red]Doctor failed:[/red] {exc}")
+        sys.exit(1)
+
+    console.print(f"[bold green]OK[/bold green] {path}")
+    console.print(f"  encryption:     {BACKUP_ENCRYPTION_LABEL}")
+    console.print(f"  formatVersion:  {verified.version}")
+    console.print(f"  scope:          {verified.scope}")
+    console.print(f"  timestamp:      {verified.timestamp}")
+    console.print(f"  rows_total:     {verified.manifest.get('rowCountTotal', 0)}")
+    console.print(f"  plaintext_size: {verified.manifest.get('size_bytes', 0)} B")
+    console.print("  files:")
+    for name, meta in verified.files.items():
+        console.print(f"    - {name}")
+        console.print(f"        sha256:    {meta.get('sha256')}")
+        console.print(f"        size_bytes:{meta.get('size_bytes')}")
+@main.command()
+@click.option("--json", "json_output", is_flag=True, help="Output raw JSON instead of a formatted summary.")
+def telemetry(json_output: bool):
+    """Show privacy-safe runtime telemetry for the agent.
+
+    Aggregates task counts, retries, queue depth, and circuit-breaker
+    metrics.  The output is safe to log or forward to a dashboard — no
+    prompts, API keys, signatures, or wallet secrets are exposed.
+    """
+    from talos_agent.db import LocalDB
+    from talos_agent.telemetry import TelemetryCollector
+    from talos_agent.circuit_breaker import cb_registry
 
     ensure_app_dir()
     db = LocalDB()
 
     talos_cfg = db.get_talos_config()
-    if talos_cfg:
-        console.print(f"[bold]Talos:[/bold] {talos_cfg.get('name', 'Unknown')}")
-    else:
-        console.print("[yellow]No Talos config cached. Run `talos-agent start` first.[/yellow]")
+    agent_name = talos_cfg.get("name", "unknown") if talos_cfg else "unknown"
 
-    last_cycle = db.get_last_run("agent_cycle")
-    if last_cycle:
-        console.print(f"[bold]Last agent cycle:[/bold] {last_cycle.isoformat()}")
+    collector = TelemetryCollector(db=db, agent_name=agent_name)
+    report = collector.collect(cb_registry=cb_registry)
 
-    posts_today = db.count_today("post")
-    console.print(f"[bold]Posts today:[/bold] {posts_today}")
+    if json_output:
+        console.print(report.to_json())
+        return
 
-    playbook = db.get_active_playbook()
-    if playbook:
-        console.print(f"[bold]Active playbook:[/bold] {playbook['name']}")
+    # ── Formatted summary ─────────────────────────────────────
+    console.print(f"[bold]Runtime Telemetry:[/bold] {agent_name}")
+    console.print(f"  Collected at: {report.collected_at}")
+    console.print()
 
-    pending = db.get_pending_approvals()
-    console.print(f"[bold]Pending approvals:[/bold] {len(pending)}")
+    console.print("[bold]Scheduler Tasks[/bold]")
+    for task in report.tasks:
+        if task.last_run_at or task.retry_attempts > 0:
+            retry_info = ""
+            if task.retry_attempts > 0:
+                retry_info = f" [yellow]retries={task.retry_attempts}[/yellow]"
+                if task.retry_remaining_seconds > 0:
+                    retry_info += f" [dim](next in {task.retry_remaining_seconds:.0f}s)[/dim]"
+                if task.is_terminal:
+                    retry_info += " [red]TERMINAL[/red]"
+            console.print(f"  {task.name}: last_run={task.last_run_at or 'never'}{retry_info}")
+    console.print()
+
+    console.print("[bold]Queue Depth[/bold]")
+    for q in report.queues:
+        console.print(f"  {q.name}: {q.pending_count} pending / {q.total_count} total")
+    console.print()
+
+    if report.circuit_breakers:
+        console.print("[bold]Circuit Breakers[/bold]")
+        for cb in report.circuit_breakers:
+            state = cb.get("state", "unknown")
+            color = {"closed": "green", "half_open": "yellow", "open": "red"}.get(state, "dim")
+            console.print(
+                f"  {cb.get('provider', '?')}: [{color}]{state}[/{color}] "
+                f"(failures={cb.get('failures_in_window', 0)}, "
+                f"successes={cb.get('total_successes', 0)})"
+            )
+        console.print()
+
+    if report.adapters:
+        console.print("[bold]Adapter Health[/bold]")
+        for a in report.adapters:
+            color = {"healthy": "green", "disabled": "dim", "degraded": "yellow", "timeout": "red"}.get(a.state, "dim")
+            cat_str = f" [{a.error_category}]" if a.error_category and a.error_category != "none" else ""
+            console.print(f"  {a.name}: [{color}]{a.state}[/{color}]{cat_str} — {a.detail}")
+        console.print()
+
+    console.print("[bold]Content Performance (7d)[/bold]")
+    console.print(f"  Posts: {report.total_posts_7d}")
+    console.print(f"  Impressions: {report.total_impressions_7d}")
+    console.print(f"  Avg engagement: {report.avg_engagement_7d:.1f}")
+    console.print()
+
+    console.print("[bold]Policy Engine[/bold]")
+    console.print(f"  Evaluations: {report.policy_evaluation_count}")
+    console.print(f"  Denies: {report.policy_deny_count}")
+    console.print(f"  Escalations: {report.policy_escalate_count}")
 
     db.close()
+
+
+@main.command(name="diagnostics")
+@click.option("--json", "json_output", is_flag=True, help="Output raw JSON instead of a formatted summary.")
+def diagnostics(json_output: bool):
+    """Run health probes across social, browser, and payment adapters.
+
+    Evaluates in-process readiness, credentials, and dependency states
+    without performing side effects, external HTTP calls, or transactions.
+    """
+    import asyncio
+    import json
+    from talos_agent.config import Settings
+    from talos_agent.adapters.health import AdapterHealthReporter
+    from talos_agent.adapters.discord import DiscordAdapter
+    from talos_agent.adapters.telegram import TelegramAdapter
+    from talos_agent.adapters.x import XAdapter
+    from talos_agent.adapters.registry import AdapterRegistry
+    from talos_agent.payments.stellar_kit import StellarKit
+    from talos_agent.payments.x402_signer import X402Signer
+    from talos_agent.api_client import TalosAPIClient
+
+    settings = Settings()
+    registry = AdapterRegistry()
+
+    # Register social adapters safely
+    try:
+        registry.register(DiscordAdapter(settings))
+    except Exception:
+        pass
+    try:
+        registry.register(TelegramAdapter(settings))
+    except Exception:
+        pass
+    try:
+        registry.register(XAdapter(None, settings))
+    except Exception:
+        pass
+
+    # Payment components
+    api_client = None
+    if settings.talos_api_url and settings.talos_api_key and settings.talos_id:
+        try:
+            api_client = TalosAPIClient(settings)
+        except Exception:
+            pass
+
+    stellar_kit = StellarKit(api_client) if api_client else None
+    x402_signer = X402Signer(api_client) if api_client else None
+
+    reporter = AdapterHealthReporter(
+        registry=registry,
+        browser=None,
+        stellar_kit=stellar_kit,
+        x402_signer=x402_signer,
+    )
+
+    report = asyncio.run(reporter.report())
+
+    if json_output:
+        console.print(json.dumps(report.to_dict(), indent=2))
+        return
+
+    overall_color = {
+        "healthy": "green",
+        "disabled": "dim",
+        "degraded": "yellow",
+        "timeout": "red",
+    }.get(report.overall.value, "dim")
+
+    console.print(f"[bold]Adapter Health & Diagnostics:[/bold] [{overall_color}]{report.overall.value.upper()}[/{overall_color}]")
+    console.print(f"  Checked at: {report.checked_at.isoformat()}")
+    console.print()
+
+    for a in report.adapters:
+        color = {"healthy": "green", "disabled": "dim", "degraded": "yellow", "timeout": "red"}.get(a.state.value, "dim")
+        cat_str = f" [{a.error_category.value}]" if a.error_category.value != "none" else ""
+        console.print(f"  [bold]{a.adapter}[/bold]: [{color}]{a.state.value}[/{color}]{cat_str}")
+        if a.detail:
+            console.print(f"    Detail: {a.detail}")
+    console.print()
+
+
+@main.group()
+@click.option(
+    "--db-path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Secret database path (defaults to the prime-agent database)",
+)
+@click.pass_context
+def secrets(ctx: click.Context, db_path: Path | None):
+    """Manage encrypted, versioned runtime secrets."""
+    from talos_agent.db import DB_PATH, LocalDB
+    from talos_agent.secret_store import SecretStore, decode_keyring
+
+    settings = Settings()
+    try:
+        db = LocalDB(
+            path=db_path or DB_PATH,
+            timeout_ms=settings.secret_db_timeout_ms,
+        )
+        store = SecretStore(
+            db,
+            keyring=decode_keyring(settings.secret_keyring),
+            active_key_id=settings.secret_active_key_id,
+            scope=settings.secret_scope,
+            max_value_bytes=settings.secret_max_bytes,
+            dual_read=settings.secret_dual_read,
+            legacy_fallback=settings.secret_legacy_fallback,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    ctx.obj = {"db": db, "store": store}
+    ctx.call_on_close(db.close)
+
+
+@secrets.command("stage")
+@click.argument("name")
+@click.option("--request-id", default=None, help="Idempotency key (generated if omitted)")
+@click.option("--actor", default="operator", show_default=True)
+@click.option("--reason", default=None, help="Lowercase audit reason code")
+@click.pass_obj
+def stage_secret(obj: dict, name: str, request_id: str | None, actor: str, reason: str | None):
+    """Prompt for and stage an encrypted value without activating it."""
+    value = click.prompt("Secret value", hide_input=True, confirmation_prompt=True)
+    try:
+        version = obj["store"].stage(
+            name,
+            value,
+            request_id=request_id or str(uuid.uuid4()),
+            actor=actor,
+            reason=reason,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=asdict(version))
+
+
+@secrets.command("activate")
+@click.argument("name")
+@click.argument("version", type=click.IntRange(min=1))
+@click.option("--expected-version", type=click.IntRange(min=1), default=None)
+@click.option("--actor", default="operator", show_default=True)
+@click.option("--reason", default=None, help="Lowercase audit reason code")
+@click.option(
+    "--with-checkpoint",
+    "checkpoint_request_id",
+    default=None,
+    help="Idempotency key; creates a pre-activation rollback checkpoint",
+)
+@click.pass_obj
+def activate_secret(
+    obj: dict,
+    name: str,
+    version: int,
+    expected_version: int | None,
+    actor: str,
+    reason: str | None,
+    checkpoint_request_id: str | None,
+):
+    """Atomically activate a staged version using compare-and-swap."""
+    store = obj["store"]
+    expected = expected_version if expected_version is not None else store.current_version(name)
+    try:
+        result = store.activate(
+            name,
+            version,
+            expected_active_version=expected,
+            actor=actor,
+            reason=reason,
+            checkpoint_request_id=checkpoint_request_id,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=asdict(result))
+
+
+@secrets.command("rotate")
+@click.argument("name")
+@click.option("--request-id", default=None, help="Idempotency key (generated if omitted)")
+@click.option("--expected-version", type=click.IntRange(min=1), default=None)
+@click.option("--actor", default="operator", show_default=True)
+@click.option("--reason", default="routine_rotation", show_default=True)
+@click.option(
+    "--with-checkpoint/--no-checkpoint",
+    default=True,
+    show_default=True,
+    help="Create a rollback checkpoint of the pre-rotation head",
+)
+@click.pass_obj
+def rotate_secret(
+    obj: dict,
+    name: str,
+    request_id: str | None,
+    expected_version: int | None,
+    actor: str,
+    reason: str,
+    with_checkpoint: bool,
+):
+    """Prompt for, stage, and atomically activate a new encrypted version."""
+    store = obj["store"]
+    expected = expected_version if expected_version is not None else store.current_version(name)
+    value = click.prompt("New secret value", hide_input=True, confirmation_prompt=True)
+    rid = request_id or str(uuid.uuid4())
+    try:
+        staged = store.stage(
+            name,
+            value,
+            request_id=rid,
+            actor=actor,
+            reason=reason,
+        )
+        active = store.activate(
+            name,
+            staged.version,
+            expected_active_version=expected,
+            actor=actor,
+            reason=reason,
+            checkpoint_request_id=(f"ckpt-{rid}" if with_checkpoint and expected is not None else None),
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=asdict(active))
+
+
+@secrets.command("recover")
+@click.argument("name")
+@click.argument("version", type=click.IntRange(min=1))
+@click.option("--expected-version", type=click.IntRange(min=1), required=True)
+@click.option("--actor", default="operator", show_default=True)
+@click.option("--reason", default="credential_rejected", show_default=True)
+@click.pass_obj
+def recover_secret(
+    obj: dict,
+    name: str,
+    version: int,
+    expected_version: int,
+    actor: str,
+    reason: str,
+):
+    """Recover a prior non-revoked version with an atomic CAS."""
+    try:
+        result = obj["store"].recover(
+            name,
+            version,
+            expected_active_version=expected_version,
+            actor=actor,
+            reason=reason,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=asdict(result))
+
+
+@secrets.command("revoke")
+@click.argument("name")
+@click.argument("version", type=click.IntRange(min=1))
+@click.option("--actor", default="operator", show_default=True)
+@click.option("--reason", default="rotation_complete", show_default=True)
+@click.pass_obj
+def revoke_secret(obj: dict, name: str, version: int, actor: str, reason: str):
+    """Permanently exclude a non-active version from runtime reads."""
+    try:
+        result = obj["store"].revoke(name, version, actor=actor, reason=reason)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=asdict(result))
+
+
+@secrets.command("list")
+@click.argument("name")
+@click.pass_obj
+def list_secrets(obj: dict, name: str):
+    """List lifecycle metadata. Ciphertext and key IDs are never displayed."""
+    try:
+        versions = obj["store"].list_versions(name)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=[asdict(version) for version in versions])
+
+
+@secrets.command("audit")
+@click.argument("name")
+@click.option("--limit", type=click.IntRange(min=1, max=500), default=50)
+@click.pass_obj
+def audit_secrets(obj: dict, name: str, limit: int):
+    """Show bounded secret lifecycle audit events."""
+    try:
+        events = obj["store"].audit_events(name, limit)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=events)
+
+
+@secrets.group("checkpoint")
+def secrets_checkpoint():
+    """Manage secret-rotation rollback checkpoints."""
+
+
+@secrets_checkpoint.command("create")
+@click.argument("name")
+@click.option("--request-id", default=None, help="Idempotency key (generated if omitted)")
+@click.option("--actor", default="operator", show_default=True)
+@click.option("--reason", default="pre_rotation", show_default=True)
+@click.pass_obj
+def checkpoint_create(
+    obj: dict, name: str, request_id: str | None, actor: str, reason: str
+):
+    """Snapshot the current secret head for later rollback."""
+    try:
+        result = obj["store"].create_rollback_checkpoint(
+            name,
+            request_id=request_id or str(uuid.uuid4()),
+            actor=actor,
+            reason=reason,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=asdict(result))
+
+
+@secrets_checkpoint.command("list")
+@click.argument("name")
+@click.pass_obj
+def checkpoint_list(obj: dict, name: str):
+    """List rollback checkpoints (no ciphertext or key material)."""
+    try:
+        result = obj["store"].list_rollback_checkpoints(name)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=[asdict(item) for item in result])
+
+
+@secrets_checkpoint.command("rollback")
+@click.argument("name")
+@click.argument("checkpoint_id")
+@click.option("--expected-version", type=click.IntRange(min=1), required=True)
+@click.option("--actor", default="operator", show_default=True)
+@click.option("--reason", default="checkpoint_rollback", show_default=True)
+@click.pass_obj
+def checkpoint_rollback(
+    obj: dict,
+    name: str,
+    checkpoint_id: str,
+    expected_version: int,
+    actor: str,
+    reason: str,
+):
+    """Restore the secret head captured by a checkpoint (CAS)."""
+    try:
+        result = obj["store"].rollback_to_checkpoint(
+            name,
+            checkpoint_id,
+            expected_active_version=expected_version,
+            actor=actor,
+            reason=reason,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=asdict(result))
+
+
+@secrets_checkpoint.command("discard")
+@click.argument("name")
+@click.argument("checkpoint_id")
+@click.option("--actor", default="operator", show_default=True)
+@click.option("--reason", default="checkpoint_discarded", show_default=True)
+@click.pass_obj
+def checkpoint_discard(
+    obj: dict, name: str, checkpoint_id: str, actor: str, reason: str
+):
+    """Discard an open checkpoint so it cannot be restored."""
+    try:
+        result = obj["store"].discard_rollback_checkpoint(
+            name, checkpoint_id, actor=actor, reason=reason
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print_json(data=asdict(result))
+
+
+@main.command(name="wal-health")
+@click.option("--db", "db_path", default=None, help="Path to SQLite DB (default: agent local DB).")
+@click.option("--agent-id", default=None, help="Resolve per-agent DB path when --db is omitted.")
+@click.option("--json", "json_output", is_flag=True, help="Output raw JSON instead of a formatted summary.")
+@click.option("--no-checkpoint", is_flag=True, help="Skip PRAGMA wal_checkpoint(PASSIVE).")
+@click.option("--no-quick-check", is_flag=True, help="Skip PRAGMA quick_check.")
+def wal_health_cmd(db_path, agent_id, json_output, no_checkpoint, no_quick_check):
+    """Show SQLite WAL health diagnostics for the agent database.
+
+    Reports journal mode, WAL/SHM sidecar sizes, checkpoint progress, and a
+    quick integrity probe. Output is privacy-safe — no row payloads, secrets,
+    seeds, or payment proofs are included.
+    """
+    from pathlib import Path as _Path
+
+    from talos_agent.db import LocalDB, get_db_path
+    from talos_agent.wal_health import collect_wal_health
+
+    ensure_app_dir()
+
+    path = _Path(db_path).resolve() if db_path else get_db_path(agent_id)
+    db = None
+    try:
+        if path.exists():
+            db = LocalDB(path=path)
+            report = db.wal_health(
+                run_checkpoint=not no_checkpoint,
+                run_quick_check=not no_quick_check,
+            )
+        else:
+            report = collect_wal_health(
+                path,
+                run_checkpoint=not no_checkpoint,
+                run_quick_check=not no_quick_check,
+            )
+    finally:
+        if db is not None:
+            db.close()
+
+    if json_output:
+        console.print(report.to_json())
+        return
+
+    color = {
+        "healthy": "green",
+        "degraded": "yellow",
+        "missing": "dim",
+        "error": "red",
+    }.get(report.state.value, "dim")
+
+    console.print(
+        f"[bold]SQLite WAL Health:[/bold] [{color}]{report.state.value.upper()}[/{color}]"
+    )
+    console.print(f"  Database:   {report.db_basename}")
+    console.print(f"  Checked at: {report.checked_at.isoformat()}")
+    console.print(f"  Detail:     {report.detail}")
+    console.print()
+    console.print("[bold]Pragmas[/bold]")
+    console.print(f"  journal_mode:       {report.journal_mode or 'n/a'}")
+    console.print(f"  wal_autocheckpoint: {report.wal_autocheckpoint}")
+    console.print(f"  busy_timeout_ms:    {report.busy_timeout_ms}")
+    console.print(f"  synchronous:        {report.synchronous or 'n/a'}")
+    console.print(f"  page_count:         {report.page_count}")
+    console.print(f"  page_size:          {report.page_size}")
+    console.print(f"  freelist_count:     {report.freelist_count}")
+    console.print()
+    console.print("[bold]Files[/bold]")
+    console.print(f"  db_size_bytes:  {report.db_size_bytes}")
+    console.print(f"  wal_exists:     {report.wal_exists}  size={report.wal_size_bytes}")
+    console.print(f"  shm_exists:     {report.shm_exists}  size={report.shm_size_bytes}")
+    console.print()
+    console.print("[bold]Checkpoint / Integrity[/bold]")
+    console.print(
+        f"  wal_checkpoint(PASSIVE): busy={report.checkpoint_busy} "
+        f"log={report.checkpoint_log} checkpointed={report.checkpoint_checkpointed}"
+    )
+    console.print(f"  quick_check: {report.integrity or 'skipped'}")
+    if report.findings:
+        console.print()
+        console.print("[bold]Findings[/bold]")
+        for finding in report.findings:
+            console.print(f"  - {finding}")

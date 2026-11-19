@@ -4,6 +4,7 @@ import { tlsTalos, tlsCommerceJobs } from "@/db/schema";
 import { eq, and, lt, or, sql } from "drizzle-orm";
 import { logger } from "@/lib/logger";
 import { parseBody, claimJobSchema } from "@/lib/schemas";
+import { withTraceContext } from "@/lib/tracing";
 
 const DEFAULT_LEASE_TTL_SECONDS = 300;
 
@@ -20,7 +21,7 @@ async function resolveCallerTalos(request: NextRequest): Promise<string | null> 
   return talos?.id ?? null;
 }
 
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -34,6 +35,20 @@ export async function POST(
 
     const { data, error } = await parseBody(request, claimJobSchema);
     if (error) return error;
+
+    const talos = await db
+      .select({ id: tlsTalos.id, status: tlsTalos.status })
+      .from(tlsTalos)
+      .where(eq(tlsTalos.id, callerTalosId))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    if (!talos) {
+      return Response.json({ error: "TALOS not found" }, { status: 404 });
+    }
+    if (talos.status !== "Active") {
+      return Response.json({ error: "This agent is not accepting new work" }, { status: 409 });
+    }
 
     const ttlSeconds = data.ttlSeconds ?? DEFAULT_LEASE_TTL_SECONDS;
     const now = new Date();
@@ -102,3 +117,5 @@ export async function POST(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withTraceContext(handlePost);

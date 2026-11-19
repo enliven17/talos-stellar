@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { eq } from "drizzle-orm";
+import { assertSafeSeedDatabaseUrl } from "./seed-guard";
 import {
   tlsTalos,
   tlsPatrons,
@@ -14,7 +14,37 @@ import {
   tlsCommerceServices,
 } from "./schema";
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL! });
+interface TalosSeedItem {
+  name: string;
+  category: string;
+  description: string;
+  status: string;
+  stellarAssetCode: string;
+  tokenSymbol: string;
+  pulsePrice: string;
+  totalSupply: number;
+  creatorShare: number;
+  investorShare: number;
+  treasuryShare: number;
+  persona: string;
+  targetAudience: string;
+  channels: string[];
+  approvalThreshold: string;
+  gtmBudget: string;
+  creatorAddress: string;
+  onChainId: number;
+  agentName: string;
+  serviceName: string;
+  servicePrice: string;
+  serviceDesc: string;
+  toneVoice?: string | null;
+  agentWalletId?: string | null;
+  agentWalletAddress?: string | null;
+}
+
+assertSafeSeedDatabaseUrl(process.env.DATABASE_URL);
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const db = drizzle(pool);
 
 async function main() {
@@ -241,7 +271,7 @@ async function main() {
     },
   ];
 
-  for (const c of talosData) {
+  for (const c of talosData as TalosSeedItem[]) {
     const [talos] = await db
       .insert(tlsTalos)
       .values({
@@ -249,8 +279,8 @@ async function main() {
         category: c.category,
         description: c.description,
         status: c.status,
-        stellarAssetCode: (c as any).stellarAssetCode ?? null,
-        tokenSymbol: (c as any).tokenSymbol ?? null,
+        stellarAssetCode: c.stellarAssetCode ?? null,
+        tokenSymbol: c.tokenSymbol ?? null,
         pulsePrice: c.pulsePrice,
         totalSupply: c.totalSupply,
         creatorShare: c.creatorShare,
@@ -264,9 +294,9 @@ async function main() {
         creatorPublicKey: c.creatorAddress,
         onChainId: c.onChainId,
         agentName: c.agentName,
-        toneVoice: (c as any).toneVoice ?? null,
-        agentWalletId: (c as any).agentWalletId ?? null,
-        agentWalletAddress: (c as any).agentWalletAddress ?? null,
+        toneVoice: c.toneVoice ?? null,
+        agentWalletId: c.agentWalletId ?? null,
+        agentWalletAddress: c.agentWalletAddress ?? null,
         agentOnline: c.status === "Active",
       })
       .returning();
@@ -345,13 +375,27 @@ async function main() {
     // Register x402 commerce service (instant fulfillment)
     await db.insert(tlsCommerceServices).values({
       talosId: talos.id,
-      serviceName: (c as any).serviceName,
-      description: (c as any).serviceDesc,
-      price: (c as any).servicePrice,
+      serviceName: c.serviceName,
+      description: c.serviceDesc,
+      price: c.servicePrice,
       stellarPublicKey: c.creatorAddress,
       chains: ["stellar"],
       fulfillmentMode: "instant",
     });
+
+    if (c.agentName === "community-voice") {
+      await db.insert(tlsCommerceJobs).values({
+        talosId: talos.id,
+        requesterTalosId: "seed-demo-buyer",
+        serviceName: c.serviceName,
+        payload: { product: "local-seed-demo", format: "structured-review" },
+        result: { verdict: "completed", score: 8, source: "local-seed" },
+        status: "completed",
+        paymentSig: "seed-payment-community-voice-v1",
+        txHash: "seed-tx-community-voice-v1",
+        amount: c.servicePrice,
+      });
+    }
 
     // Activities — unique per agent
     const activitySets: Record<string, Array<{ type: string; content: string; channel: string; status: string }>> = {
@@ -731,7 +775,7 @@ async function main() {
       content: {
         schedule: { scans_per_day: 3, best_hours_utc: [10, 15, 20], platforms: ["X", "Discord", "GitHub"] },
         templates: [
-          { type: "integration", pattern: "import { Nexus } from '@nexus/sdk'\nconst pay = new Nexus({ apiKey: 'pk_...' })\npay.checkout({ amount: {price}, currency: '{token}' })", usage: "3-line checkout" },
+          { type: "integration", pattern: "import { Nexus } from '@nexus/sdk'\nconst pay = new Nexus({ apiKey: '<demo-key>' })\npay.checkout({ amount: {price}, currency: '{token}' })", usage: "3-line checkout" },
           { type: "webhook", pattern: "pay.on('payment.confirmed', (tx) => { /* settle */ })", usage: "webhook handler" },
         ],
         hashtags: ["#cryptopayments", "#web3dev", "#usdc"],

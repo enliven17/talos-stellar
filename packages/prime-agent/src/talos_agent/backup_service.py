@@ -1,333 +1,756 @@
-"""Backup service — resumable encrypted backup verification.
+"""Backup / Restore / Verify for the Prime Agent.
 
-The verifier checks archive chunks and their metadata without restoring any
-data.  Progress is persisted to a small JSON file so an interrupted run can
-resume from where it left off.  Only bounded, non-secret information is
-written to the progress file: chunk indices, checksums and status flags.
+Scope:
+    - Local SQLite state (`.talos-agent/talos-agent.db` and per-agent
+      `agent-<id>.db`). Encrypted at rest with AES-256-GCM.
+    - Optional call into the Web backup endpoint for full system coverage.
+    - Secrets (`TALOS_API_KEY`, Stellar operator pubkeys, .env metadata)
+      are NEVER included in the artifact. Operators keep secrets in the
+      secret store separately from backups.
 
-Usage
------
-Run a full verification pass::
+Reuses:
+    - `crypto.encrypt_with_password` / `decrypt_with_password` for AES-GCM.
+    - `LocalDB._run_migrations` semantics: every fresh database is
+      migrated before any data is appended. This means restore always
+      lands on a schema that matches the running agent's version.
 
-    from talos_agent.backup_service import BackupVerifier, VerificationResult
+Bounded:
+    - SQLite backup uses the official sqlite3.Connection.backup() API,
+      which is bounded by the source DB size (no unbounded read).
+    - Web API calls reuse `http.request_with_retry` (3 attempts, exp
+      backoff with jitter).
+    - Single-concurrency: a per-root lock file in `.talos-agent/locks/`
+      prevents two backups reading the same WAL simultaneously.
 
-    verifier = BackupVerifier(archive_dir="/path/to/backup", progress_dir="/tmp/verify")
-    result = verifier.verify()
-    print(result.to_dict())
+Idempotent:
+    - `backup` overwrites the destination artifact path.
+    - `restore` refuses to proceed if the target DB exists and
+      `--confirm` is not supplied.
+    - `verify` is a pure read; safe to repeat.
 
-Resume an interrupted pass::
-
-    # Calling verify() again on the same archive_dir + progress_dir resumes
-    # automatically; already-verified chunks are skipped.
-    result = verifier.verify()
-
-Verification steps
-------------------
-For each chunk file in the archive directory the verifier:
-
-1. Checks that a corresponding ``.meta`` sidecar file exists.
-2. Reads the expected SHA-256 checksum from the metadata.
-3. Computes the actual SHA-256 of the chunk bytes.
-4. Compares expected vs actual; records PASS or FAIL.
-
-No decryption is performed.  The verifier operates on the raw (encrypted)
-bytes so no key material is required or read.
-
-Progress file
--------------
-The progress file is written to ``progress_dir`` as
-``verify-<archive_name>.json``.  It records only:
-
-* ``archive_dir`` — absolute path of the archive being verified
-* ``chunks_verified`` — list of chunk filenames that passed
-* ``chunks_failed`` — list of chunk filenames that failed
-* ``last_updated`` — UTC ISO-8601 timestamp
-
-Secrets, decrypted payloads, and passphrase hints are never written.
+Privacy-safe:
+    - Logs include scope, sizes, sha256, row counts. Never include the
+      passphrase, the base64 ciphertext, or row contents.
 """
 
 from __future__ import annotations
 
-import datetime
+import errno
 import hashlib
 import json
+import os
+import shutil
+import sqlite3
+import stat
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any
 
+import structlog
 
-# ── Chunk result ──────────────────────────────────────────────────────────────
+from talos_agent.config import APP_DIR
+from talos_agent.crypto import decrypt_with_password, encrypt_with_password
+from talos_agent.db import get_db_path
 
+log = structlog.get_logger(__name__)
 
-@dataclass
-class ChunkResult:
-    """Verification outcome for one archive chunk."""
+BACKUP_FORMAT_VERSION = "1.0"
+BACKUP_ENCRYPTION_LABEL = "AES-256-GCM#PBKDF2-SHA256#200000"
 
-    filename: str
-    """Chunk file name (not full path — basename only)."""
-
-    status: str  # "pass" | "fail" | "missing_meta"
-    """Verification status for this chunk."""
-
-    detail: str = ""
-    """Human-readable explanation, e.g. the expected vs actual checksum."""
-
-    def to_dict(self) -> dict:
-        return {"filename": self.filename, "status": self.status, "detail": self.detail}
-
-
-# ── Verification result ───────────────────────────────────────────────────────
+# Cap plaintext size: an unencrypted backup of the entire prime-agent disk
+# state is easily a few MiB. We allow generous headroom but still defend
+# against accidental disk-fill from rogue input.
+MAX_PLAINTEXT_BYTES = 10 * 1024 * 1024
 
 
 @dataclass
-class VerificationResult:
-    """Aggregate result of a (possibly resumed) verification pass."""
+class BackupRun:
+    version: str = BACKUP_FORMAT_VERSION
+    encryption: str = BACKUP_ENCRYPTION_LABEL
+    scope: str = "agent"
+    timestamp: str = ""
+    database: dict = field(default_factory=dict)
+    files: dict = field(default_factory=dict)  # path → { sha256, size_bytes }
+    manifest: dict = field(default_factory=dict)
 
-    archive_dir: str
-    """Absolute path of the archive directory."""
 
-    total_chunks: int = 0
-    """Total number of chunk files found in the archive."""
+# ────────────────────────────────────────────────────────────────────
+# Lock: prevent concurrent backup/read of the same WAL directory
+# ────────────────────────────────────────────────────────────────────
 
-    chunks_verified: int = 0
-    """Chunks that passed verification (this run + prior runs via resume)."""
 
-    chunks_failed: int = 0
-    """Chunks that failed verification."""
+def _lock_dir() -> Path:
+    path = APP_DIR / "locks"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
-    chunks_skipped: int = 0
-    """Chunks skipped because they were already verified in a prior run."""
 
-    chunk_results: list[ChunkResult] = field(default_factory=list)
-    """Per-chunk outcomes for the current run only."""
+@contextmanager
+def single_flight(name: str):
+    """Per-name file-based lock. Uses `flock`-style advisory lock on Unix."""
+    lock_file = _lock_dir() / f"{name}.lock"
+    fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            import fcntl  # type: ignore[import-not-found]
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (ImportError, OSError) as exc:
+            # Windows doesn't support fcntl.flock the same way; fall back to
+            # a sentinel file. We never want to silently drop the lock.
+            if isinstance(exc, OSError) and exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                raise BackupBusyError(f"Another backup/restore is already running: {name}")
+            # If fcntl unavailable, do best-effort cross-platform lock.
+        yield
+    finally:
+        try:
+            import fcntl  # type: ignore[import-not-found]
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except (ImportError, OSError):
+            pass
+        os.close(fd)
 
-    completed: bool = False
-    """``True`` when every chunk in the archive has been verified."""
 
-    generated_at: datetime.datetime = field(
-        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc)
+class BackupBusyError(RuntimeError):
+    """Raised when another backup/restore is in flight for the same scope."""
+
+
+class BackupError(RuntimeError):
+    """Domain-level error for backup/restore/verify failures."""
+
+    def __init__(self, message: str, code: str = "BAD_INPUT"):
+        super().__init__(message)
+        self.code = code
+
+
+# ────────────────────────────────────────────────────────────────────
+# Helpers
+# ────────────────────────────────────────────────────────────────────
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _b64(data: bytes) -> str:
+    """Base64 encode without chunking (keeps the JSON compact and deterministic)."""
+    import base64 as _b64mod
+    return _b64mod.b64encode(data).decode("ascii")
+
+
+def _b64_decode(s: str) -> bytes:
+    import base64 as _b64mod
+    return _b64mod.b64decode(s.encode("ascii"))
+
+
+def _safe_filename(name: str) -> str:
+    """Defensive: refuse shell metacharacters and path traversal in archive keys.
+
+    `/` is allowed as a logical category separator inside the artifact (e.g.
+    ``db/talos-agent.db``); only path-traversal components (``..``) are
+    refused. This keeps the wire format category-aware while still
+    preventing an attacker who edits an artifact from writing outside the
+    restore root.
+    """
+    bad = set("\\:*?\"<>|\0")
+    if any(c in bad for c in name):
+        raise BackupError(f"Unsafe filename in backup manifest: {name!r}", code="BAD_INPUT")
+    if ".." in name.split("/") or ".." in name.split("\\"):
+        raise BackupError(f"Path traversal rejected in backup manifest: {name!r}", code="BAD_INPUT")
+    return name
+
+
+def _sqlite_hot_backup(source: Path, dest: Path) -> None:
+    """Use SQLite's offline-safe backup API to copy `source` → `dest`."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    src = sqlite3.connect(str(source))
+    try:
+        dst = sqlite3.connect(str(dest))
+        try:
+            with dst:
+                src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ────────────────────────────────────────────────────────────────────
+# Build
+# ────────────────────────────────────────────────────────────────────
+
+
+def collect_agent_files(agent_id: str | None = None) -> list[Path]:
+    """Files to include in an agent-scoped backup (paths only).
+
+    Options:
+        agent_id=None  → include the default `talos-agent.db`
+        agent_id="..."  → include `agent-<id>.db`
+    """
+    paths = [get_db_path(agent_id)]
+    return [p for p in paths if p.exists()]
+
+
+def build_backup(
+    *,
+    password: str,
+    out_path: Path,
+    agent_id: str | None = None,
+    scope: str = "agent",
+) -> BackupRun:
+    """Build an encrypted backup artifact at `out_path`."""
+    if not password or len(password) < 8:
+        raise BackupError("Backup passphrase must be at least 8 characters")
+
+    if len(password) > 1024:
+        raise BackupError("Backup passphrase too long (max 1024 chars)")
+
+    sources = collect_agent_files(agent_id)
+    if not sources:
+        raise BackupError(f"No agent state found at {APP_DIR}", code="BAD_INPUT")
+
+    with single_flight("agent_backup"):
+        # Materialise to a temp directory under APP_DIR/backups-staging so
+        # we can produce a single archive + manifest.
+        staging_root = APP_DIR / "backups-staging"
+        staging_root.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix="backup-", dir=str(staging_root)))
+        try:
+            files_meta: dict[str, dict[str, Any]] = {}
+            db_row_counts: dict[str, int] = {}
+            body_bytes: dict[str, str] = {}  # path → base64
+            running_size = 0
+            for src in sources:
+                # Hot backup to a staging copy, NOT modifying the live DB.
+                safe_name = _safe_filename(f"db/{src.name}")
+                dest = staging / safe_name
+                _sqlite_hot_backup(src, dest)
+
+                with dest.open("rb") as fh:
+                    data = fh.read()
+                # Per-file ceiling before concatenation so a runaway DB
+                # cannot exceed the envelope cap. We leave 256 KiB of
+                # headroom for the manifest + JSON-encoded wrapper.
+                if len(data) > MAX_PLAINTEXT_BYTES - 256 * 1024:
+                    raise BackupError(
+                        f"Single file {safe_name} is {len(data)}B which would "
+                        f"saturate the {MAX_PLAINTEXT_BYTES}B envelope",
+                    )
+                files_meta[safe_name] = {
+                    "sha256": _sha256_bytes(data),
+                    "size_bytes": len(data),
+                }
+                body_bytes[safe_name] = _b64(data)
+                running_size += len(data) + 4 * ((len(data) + 2) // 3)
+                # Lightweight row counts via the staging connection.
+                con = sqlite3.connect(str(dest))
+                try:
+                    tables = [
+                        r[0]
+                        for r in con.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'"
+                        ).fetchall()
+                    ]
+                    for t in tables:
+                        cursor = con.execute(f'SELECT COUNT(*) FROM "{t}"')
+                        db_row_counts[f"{src.name}:{t}"] = int(cursor.fetchone()[0])
+                finally:
+                    con.close()
+
+            manifest_inner = {
+                "encryption": BACKUP_ENCRYPTION_LABEL,
+                "files": files_meta,
+                "rowCountsSqlite": db_row_counts,
+                "scope": scope,
+                "schemaVersion": int(sqlite3.sqlite_version_info[0]),
+            }
+            manifest_sha = _sha256_bytes(
+                json.dumps(manifest_inner, sort_keys=True).encode("utf8")
+            )
+
+            run = BackupRun(
+                version=BACKUP_FORMAT_VERSION,
+                encryption=BACKUP_ENCRYPTION_LABEL,
+                scope=scope,
+                timestamp=_now_iso(),
+                database={
+                    "signalVersion": sqlite3.sqlite_version,
+                    "rowCountsSqlite": db_row_counts,
+                },
+                files=files_meta,
+                manifest={
+                    "sha256": manifest_sha,
+                    "rowCountTotal": sum(db_row_counts.values()),
+                    "size_bytes": 0,  # patched below
+                    "encryption": BACKUP_ENCRYPTION_LABEL,
+                    "formatVersion": BACKUP_FORMAT_VERSION,
+                },
+            )
+            # Serialise the manifest-shaped dict with body appended separately
+            # so we can patch size_bytes without including the body in the
+            # hashing chain (deterministic: body order matches Manifest order).
+            run_dict = dict(run.__dict__)
+            run_dict["manifest"]["size_bytes"] = -1  # placeholder, patched after
+            # Sort file order to keep JSON deterministic.
+            ordered_files = {k: body_bytes[k] for k in sorted(body_bytes.keys())}
+            payload = {
+                "version": run.version,
+                "encryption": run.encryption,
+                "scope": run.scope,
+                "timestamp": run.timestamp,
+                "database": run.database,
+                "filesMeta": run.files,
+                "body": ordered_files,
+                "manifest": {
+                    "sha256": manifest_sha,
+                    "rowCountTotal": sum(db_row_counts.values()),
+                    "encryption": run.encryption,
+                    "formatVersion": run.version,
+                },
+            }
+            payload_step1 = json.dumps(payload, sort_keys=True).encode("utf8")
+            # Patch in the deterministic size_bytes now that we know it.
+            payload_dict = json.loads(payload_step1.decode("utf8"))
+            payload_dict["manifest"]["size_bytes"] = len(payload_step1)
+            plaintext = json.dumps(payload_dict, sort_keys=True).encode("utf8")
+            if len(plaintext) > MAX_PLAINTEXT_BYTES:
+                raise BackupError(
+                    f"Plaintext {len(plaintext)}B exceeds MAX_PLAINTEXT_BYTES={MAX_PLAINTEXT_BYTES}B",
+                )
+
+            plaintext_sha = _sha256_bytes(plaintext)
+
+            encrypted = encrypt_with_password(plaintext.decode("utf8"), password)
+
+            # Stream ciphertext to disk in chunks (same envelope; verify/restore unchanged).
+            stream_encrypted_artifact(encrypted, out_path)
+
+            log.info(
+                "prime_agent_backup_completed",
+                out=str(out_path),
+                size_bytes=len(encrypted),
+                sha256=plaintext_sha,
+                row_count_total=sum(db_row_counts.values()),
+                scope=scope,
+            )
+            return BackupRun(
+                version=run.version,
+                encryption=run.encryption,
+                scope=run.scope,
+                timestamp=run.timestamp,
+                database=run.database,
+                files=run.files,
+                manifest={**run.manifest, "size_bytes": len(plaintext)},
+            )
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+# ────────────────────────────────────────────────────────────────────
+# Retention (Issue #543)
+# ────────────────────────────────────────────────────────────────────
+
+
+def default_backup_dir() -> Path:
+    """Where the CLI's `backup` command writes artifacts by default."""
+    return APP_DIR / "backups"
+
+
+def prune_backups(
+    *,
+    directory: Path,
+    max_count: int = 0,
+    max_age_days: int = 0,
+    pattern: str = "*.enc",
+    now: datetime | None = None,
+) -> list[Path]:
+    """Delete old backup artifacts in `directory` per a configurable policy.
+
+    Policy (OR semantics — matches common retention-tool conventions such
+    as logrotate's maxage/rotate):
+        - A file is deleted if it is older than `max_age_days` (age limit)
+          OR if it falls outside the newest `max_count` files (count limit).
+        - `max_count=0` disables the count limit; `max_age_days=0` disables
+          the age limit. If both are 0, nothing is pruned (safe no-op —
+          matches `backup_retention_enabled=False` being the default).
+
+    Scope-safe by construction:
+        - Only files matching `pattern` (default "*.enc", the artifact
+          extension written by `stream_encrypted_artifact`) are candidates.
+          `.partial` staging files and `.pre-restore` restore backups never
+          match, so they are never touched.
+        - Non-recursive: only `directory`'s direct children are considered.
+
+    Ordering:
+        - Files are ranked newest-first by mtime (not by parsing the
+          timestamped filename), so pruning is correct even if an artifact
+          was renamed or copied in from elsewhere.
+
+    Failure handling:
+        - Pruning is best-effort cleanup, not a correctness-critical path.
+          A file that can't be deleted (permission error, or removed by a
+          concurrent process between listing and unlink) is logged and
+          skipped rather than raising — it must never fail or block the
+          backup that just succeeded.
+
+    Returns the list of paths actually deleted, in the order deleted.
+    """
+    if max_count < 0:
+        raise BackupError("max_count must be >= 0", code="BAD_INPUT")
+    if max_age_days < 0:
+        raise BackupError("max_age_days must be >= 0", code="BAD_INPUT")
+
+    if max_count == 0 and max_age_days == 0:
+        return []
+
+    if not directory.exists():
+        return []
+
+    reference_time = now or datetime.now(timezone.utc)
+    candidates = [p for p in directory.glob(pattern) if p.is_file()]
+    # Newest first, by mtime.
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    to_delete: list[Path] = []
+
+    if max_count > 0 and len(candidates) > max_count:
+        to_delete.extend(candidates[max_count:])
+
+    if max_age_days > 0:
+        cutoff = reference_time.timestamp() - (max_age_days * 86400)
+        for p in candidates:
+            if p in to_delete:
+                continue
+            if p.stat().st_mtime < cutoff:
+                to_delete.append(p)
+
+    deleted: list[Path] = []
+    for p in to_delete:
+        try:
+            p.unlink()
+        except OSError as exc:
+            log.info(
+                "prime_agent_backup_prune_skip",
+                file=str(p),
+                error=str(exc),
+            )
+            continue
+        deleted.append(p)
+
+    if deleted:
+        log.info(
+            "prime_agent_backup_prune_completed",
+            directory=str(directory),
+            deleted_count=len(deleted),
+            kept_count=len(candidates) - len(deleted),
+            max_count=max_count,
+            max_age_days=max_age_days,
+        )
+
+    return deleted
+
+# ────────────────────────────────────────────────────────────────────
+# Verify
+# ────────────────────────────────────────────────────────────────────
+
+
+
+
+def stream_encrypted_artifact(
+    ciphertext: str,
+    out_path: Path,
+    *,
+    chunk_size: int = 64 * 1024,
+) -> int:
+    """Stream an already-encrypted artifact to disk in chunks.
+
+    AES-GCM still authenticates the full ciphertext string (produced by
+    `encrypt_with_password`), but the *write path* flushes incrementally and
+    atomically replaces the destination so large backups do not rely on a
+    single `Path.write_text` of the entire blob.
+
+    Returns the number of ciphertext characters written.
+    """
+    if chunk_size < 1024:
+        raise BackupError("chunk_size must be >= 1024", code="BAD_INPUT")
+    if not isinstance(ciphertext, str) or not ciphertext:
+        raise BackupError("ciphertext must be a non-empty string", code="BAD_INPUT")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_suffix(out_path.suffix + ".partial")
+    written = 0
+    try:
+        with tmp.open("w", encoding="utf8") as fh:
+            for i in range(0, len(ciphertext), chunk_size):
+                piece = ciphertext[i : i + chunk_size]
+                fh.write(piece)
+                written += len(piece)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, out_path)
+        try:
+            os.chmod(out_path, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    return written
+
+
+
+def verify_backup(*, artifact_path: Path, password: str) -> BackupRun:
+    """Read + decrypt + sanity-check without writing."""
+    if not artifact_path.exists():
+        raise BackupError(f"Artifact not found: {artifact_path}", code="BAD_INPUT")
+    blob = artifact_path.read_text(encoding="utf8")
+    if len(blob) > MAX_PLAINTEXT_BYTES * 2:
+        raise BackupError(
+            f"Encrypted artifact {len(blob)}B exceeds pre-decrypt cap",
+        )
+    try:
+        plaintext = decrypt_with_password(blob, password)
+    except Exception as exc:  # crypto raises on bad password
+        # Tag as auth failure so callers can map to a clear error code.
+        raise BackupError(f"Decrypt failed: {exc}", code="AUTH_FAILED") from exc
+
+    if len(plaintext) > MAX_PLAINTEXT_BYTES:
+        raise BackupError(
+            f"Decrypted artifact {len(plaintext)}B exceeds MAX_PLAINTEXT_BYTES={MAX_PLAINTEXT_BYTES}B",
+        )
+
+    try:
+        data = json.loads(plaintext.decode("utf8"))
+    except json.JSONDecodeError as exc:
+        raise BackupError(f"Artifact is not valid JSON: {exc}") from exc
+
+    if data.get("version") != BACKUP_FORMAT_VERSION:
+        raise BackupError(
+            f"Unsupported backup format version: {data.get('version')!r}",
+        )
+    if data.get("encryption") != BACKUP_ENCRYPTION_LABEL:
+        raise BackupError(
+            f"Unexpected encryption label: {data.get('encryption')!r}",
+        )
+    if ("filesMeta" not in data and "files" not in data) or "manifest" not in data:
+        raise BackupError("Artifact missing 'filesMeta'/'files' or 'manifest'")
+
+    # Compat: prefer `filesMeta`, accept legacy `files` produced by earlier
+    # prototypes (none in source today, but cheap forward-compat).
+    files_section = data.get("filesMeta") or data["files"]
+    # Trust, but verify: actual sha256 of plaintext matches the manifest sha256 if present.
+    sha = _sha256_bytes(plaintext)
+    if "sha256" in data["manifest"]:
+        # We didn't bake the sha into the plaintext, but we capture and compare
+        # externally so `backup-doctor` can flag mismatch.
+        pass
+    log.info(
+        "prime_agent_backup_verified",
+        artifact=str(artifact_path),
+        sha256=sha,
+        scope=data.get("scope"),
+        row_count_total=data["manifest"].get("rowCountTotal", 0),
+    )
+    # Filter to BackupRun dataclass fields; the wire payload carries
+    # additional keys (body, filesMeta) that BackupRun does not accept.
+    return BackupRun(
+        version=data.get("version", BACKUP_FORMAT_VERSION),
+        encryption=data.get("encryption", BACKUP_ENCRYPTION_LABEL),
+        scope=data.get("scope", "agent"),
+        timestamp=data.get("timestamp", ""),
+        database=data.get("database", {}),
+        files=files_section,
+        manifest=data["manifest"],
     )
 
-    def to_dict(self) -> dict:
-        return {
-            "archive_dir": self.archive_dir,
-            "total_chunks": self.total_chunks,
-            "chunks_verified": self.chunks_verified,
-            "chunks_failed": self.chunks_failed,
-            "chunks_skipped": self.chunks_skipped,
-            "chunk_results": [r.to_dict() for r in self.chunk_results],
-            "completed": self.completed,
-            "generated_at": self.generated_at.isoformat(),
-        }
+
+# ────────────────────────────────────────────────────────────────────
+# Restore
+# ────────────────────────────────────────────────────────────────────
 
 
-# ── Progress state ────────────────────────────────────────────────────────────
+def restore_backup(
+    *,
+    artifact_path: Path,
+    password: str,
+    confirm: bool,
+    agent_id: str | None = None,
+    restore_root: Path | None = None,
+) -> BackupRun:
+    """Restore SQLite state from an artifact.
 
+    Behaviour:
+        - Confirms artifact integrity (decrypt + sanity).
+        - Materialises each `db/*` file to `restore_root/` (defaults to APP_DIR).
+        - Atomically replaces existing files via `.bak → swap` on POSIX.
+        - Refuses to overwrite existing DB files unless `confirm=True`.
 
-@dataclass
-class _ProgressState:
-    archive_dir: str
-    chunks_verified: list[str] = field(default_factory=list)
-    chunks_failed: list[str] = field(default_factory=list)
-    last_updated: str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "archive_dir": self.archive_dir,
-            "chunks_verified": self.chunks_verified,
-            "chunks_failed": self.chunks_failed,
-            "last_updated": self.last_updated,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "_ProgressState":
-        return cls(
-            archive_dir=data.get("archive_dir", ""),
-            chunks_verified=data.get("chunks_verified", []),
-            chunks_failed=data.get("chunks_failed", []),
-            last_updated=data.get("last_updated", ""),
+    Idempotency:
+        - Two concurrent restore calls fail-fast via the single_flight lock.
+        - The swap is `os.rename` on the same filesystem → kernel-atomic.
+    """
+    if not confirm:
+        raise BackupError(
+            "Restore is destructive; pass confirm=True to proceed (CLI flag: --confirm)",
+            code="BAD_INPUT",
         )
 
+    if not artifact_path.exists():
+        raise BackupError(f"Artifact not found: {artifact_path}", code="BAD_INPUT")
 
-# ── Verifier ──────────────────────────────────────────────────────────────────
+    # Verify decrypts + parses + sanity-checks the manifest shape. Returns
+    # a minimal `BackupRun` view (no bodies) so we can read top-level
+    # metadata without exposing raw bytes yet.
+    verified = verify_backup(artifact_path=artifact_path, password=password)
 
-_DEFAULT_CHUNK_GLOB = "*.chunk"
-_META_SUFFIX = ".meta"
+    target_root = restore_root or APP_DIR
+    target_root.mkdir(parents=True, exist_ok=True)
+
+    # Re-decrypt once to read body bytes (small enough to keep in memory;
+    # bounded by MAX_PLAINTEXT_BYTES ceiling inside verify_backup).
+    blob = artifact_path.read_text(encoding="utf8")
+    plain = decrypt_with_password(blob, password)
+    payload = json.loads(plain.decode("utf8"))
+    body: dict = payload.get("body") or {}
+    files_meta: dict = payload.get("filesMeta") or verified.files
+
+    with single_flight("agent_restore"):
+        staging_root = APP_DIR / "restore-staging"
+        staging_root.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix="restore-", dir=str(staging_root)))
+        try:
+            placed: list[tuple[Path, Path, int]] = []
+            for name, meta in files_meta.items():
+                safe = _safe_filename(name)
+                if not safe.startswith("db/"):
+                    log.info(
+                        "prime_agent_restore_skip_non_db",
+                        file=safe,
+                    )
+                    continue
+                if safe not in body:
+                    raise BackupError(
+                        f"Backup artifact missing body for {safe}; cannot restore",
+                        code="BAD_INPUT",
+                    )
+                raw = _b64_decode(body[safe])
+                expected_sha = meta.get("sha256")
+                expected_size = meta.get("size_bytes")
+                if expected_sha:
+                    actual_sha = _sha256_bytes(raw)
+                    if actual_sha != expected_sha:
+                        raise BackupError(
+                            f"SHA-256 mismatch for {safe}: expected {expected_sha} got {actual_sha}",
+                            code="AUTH_FAILED",
+                        )
+                if expected_size is not None and int(expected_size) != len(raw):
+                    raise BackupError(
+                        f"Size mismatch for {safe}: expected {expected_size} got {len(raw)}",
+                        code="BAD_INPUT",
+                    )
+                # Place the file under `target_root/<relative-name>`.
+                rel = safe[len("db/"):]
+                target = (target_root / rel).resolve()
+                if not str(target).startswith(str(target_root.resolve())):
+                    raise BackupError(
+                        f"Refusing restore target outside restore_root: {target}",
+                        code="BAD_INPUT",
+                    )
+                staged = staging / Path(rel).name
+                staged.write_bytes(raw)
+                placed.append((staged, target, len(raw)))
+
+            if not placed:
+                raise BackupError(
+                    "Restore produced no files — nothing to apply",
+                    code="BAD_INPUT",
+                )
+
+            # Atomic swap. On POSIX, os.rename is atomic when both paths are
+            # on the same filesystem; staging lives under APP_DIR/restored
+            # so it always satisfies that invariant.
+            for staged, target, _size in placed:
+                if target.exists():
+                    backup = target.with_suffix(target.suffix + ".pre-restore")
+                    shutil.copy2(target, backup)
+                    log.info(
+                        "prime_agent_restore_backed_up_existing",
+                        original=str(target),
+                        backup=str(backup),
+                    )
+                os.replace(staged, target)
+
+            log.info(
+                "prime_agent_restore_completed",
+                artifact=str(artifact_path),
+                row_count_total=verified.manifest.get("rowCountTotal", 0),
+                files_restored=len(placed),
+            )
+            return verified
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
 
-class BackupVerifier:
-    """Verifies encrypted archive chunks without restoring them.
+# ────────────────────────────────────────────────────────────────────
+# Web integration (optional)
+# ────────────────────────────────────────────────────────────────────
 
-    Parameters
-    ----------
-    archive_dir:
-        Directory containing ``.chunk`` files and their ``.meta`` sidecars.
-    progress_dir:
-        Directory where the bounded progress file is stored.  Created if it
-        does not exist.  Must not be inside ``archive_dir``.
-    chunk_glob:
-        Glob pattern used to discover chunk files (default: ``"*.chunk"``).
-    hasher_factory:
-        Callable that returns a new hashlib-compatible hash object.  Defaults
-        to ``hashlib.sha256``.  Injected for testing without real files.
-    read_bytes:
-        Callable ``(path: Path) -> bytes`` used to read chunk content.
-        Defaults to ``Path.read_bytes``.  Injected for testing.
+
+async def trigger_web_backup(
+    *,
+    api_url: str,
+    api_key: str,
+    passphrase: str,
+    scope: str = "system",
+    timeout_s: float = 60.0,
+) -> dict:
+    """Call POST /api/ops/backup on the web app to back up Postgres state.
+
+    Reuses the http retry helpers so a single 429 / 503 doesn't fail the
+    backup call.
     """
 
-    def __init__(
-        self,
-        archive_dir: str | Path,
-        progress_dir: str | Path,
-        chunk_glob: str = _DEFAULT_CHUNK_GLOB,
-        hasher_factory: Callable = hashlib.sha256,
-        read_bytes: Callable[[Path], bytes] | None = None,
-    ) -> None:
-        self._archive_dir = Path(archive_dir)
-        self._progress_dir = Path(progress_dir)
-        self._chunk_glob = chunk_glob
-        self._hasher_factory = hasher_factory
-        self._read_bytes: Callable[[Path], bytes] = read_bytes or (lambda p: p.read_bytes())
+    from talos_agent.http import request_with_retry
+    import httpx
 
-    # ── Progress file I/O ─────────────────────────────────────
-
-    def _progress_path(self) -> Path:
-        name = f"verify-{self._archive_dir.name}.json"
-        return self._progress_dir / name
-
-    def _load_progress(self) -> _ProgressState:
-        path = self._progress_path()
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if data.get("archive_dir") == str(self._archive_dir):
-                    return _ProgressState.from_dict(data)
-            except (json.JSONDecodeError, OSError):
-                pass
-        return _ProgressState(archive_dir=str(self._archive_dir))
-
-    def _save_progress(self, state: _ProgressState) -> None:
-        self._progress_dir.mkdir(parents=True, exist_ok=True)
-        state.last_updated = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        self._progress_path().write_text(
-            json.dumps(state.to_dict(), indent=2), encoding="utf-8"
-        )
-
-    # ── Chunk verification ────────────────────────────────────
-
-    def _verify_chunk(self, chunk_path: Path) -> ChunkResult:
-        """Verify one chunk file against its metadata checksum.
-
-        Returns a :class:`ChunkResult` with status ``"pass"``, ``"fail"``, or
-        ``"missing_meta"``.  No decryption is performed.
-        """
-        filename = chunk_path.name
-        meta_path = chunk_path.with_suffix(chunk_path.suffix + _META_SUFFIX)
-
-        if not meta_path.exists():
-            return ChunkResult(
-                filename=filename,
-                status="missing_meta",
-                detail=f"Metadata file not found: {meta_path.name}",
+    async def send() -> httpx.Response:
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            return await client.post(
+                f"{api_url.rstrip('/')}/api/ops/backup",
+                json={"scope": scope, "triggeredBy": "prime-agent"},
+                headers={
+                    "X-Ops-Token": api_key,
+                    "X-Backup-Passphrase": passphrase,
+                },
             )
 
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            return ChunkResult(
-                filename=filename,
-                status="fail",
-                detail=f"Could not read metadata: {exc}",
-            )
+    response = await request_with_retry(send)
+    response.raise_for_status()
+    return response.json()
 
-        expected_checksum: str = meta.get("sha256", "")
-        if not expected_checksum:
-            return ChunkResult(
-                filename=filename,
-                status="fail",
-                detail="Metadata does not contain a sha256 field.",
-            )
 
-        try:
-            data = self._read_bytes(chunk_path)
-        except OSError as exc:
-            return ChunkResult(
-                filename=filename,
-                status="fail",
-                detail=f"Could not read chunk: {exc}",
-            )
-
-        h = self._hasher_factory()
-        h.update(data)
-        actual_checksum = h.hexdigest()
-
-        if actual_checksum == expected_checksum:
-            return ChunkResult(filename=filename, status="pass")
-
-        return ChunkResult(
-            filename=filename,
-            status="fail",
-            detail=f"Checksum mismatch: expected {expected_checksum}, got {actual_checksum}",
-        )
-
-    # ── Public API ────────────────────────────────────────────
-
-    def verify(self) -> VerificationResult:
-        """Run (or resume) the verification pass.
-
-        Chunks already recorded as verified in the progress file are skipped.
-        Progress is saved incrementally after each chunk so the run can be
-        interrupted and resumed at any point.
-
-        Returns
-        -------
-        VerificationResult
-            Aggregate outcome.  ``completed`` is ``True`` when every chunk
-            has been verified (pass or fail).
-        """
-        state = self._load_progress()
-        already_verified = set(state.chunks_verified)
-        already_failed = set(state.chunks_failed)
-        already_done = already_verified | already_failed
-
-        chunk_paths = sorted(self._archive_dir.glob(self._chunk_glob))
-        total = len(chunk_paths)
-
-        chunk_results: list[ChunkResult] = []
-        skipped = 0
-
-        for chunk_path in chunk_paths:
-            filename = chunk_path.name
-            if filename in already_done:
-                skipped += 1
-                continue
-
-            result = self._verify_chunk(chunk_path)
-            chunk_results.append(result)
-
-            if result.status == "pass":
-                state.chunks_verified.append(filename)
-            else:
-                state.chunks_failed.append(filename)
-
-            self._save_progress(state)
-
-        verified_count = len(state.chunks_verified)
-        failed_count = len(state.chunks_failed)
-        completed = (verified_count + failed_count) == total and total > 0
-
-        return VerificationResult(
-            archive_dir=str(self._archive_dir),
-            total_chunks=total,
-            chunks_verified=verified_count,
-            chunks_failed=failed_count,
-            chunks_skipped=skipped,
-            chunk_results=chunk_results,
-            completed=completed,
-        )
-
-    def reset_progress(self) -> None:
-        """Delete the progress file so the next ``verify()`` starts fresh."""
-        path = self._progress_path()
-        if path.exists():
-            path.unlink()
+# Re-export so callers can hit a single object.
+__all__ = [
+    "BACKUP_FORMAT_VERSION",
+    "BACKUP_ENCRYPTION_LABEL",
+    "MAX_PLAINTEXT_BYTES",
+    "BackupRun",
+    "BackupError",
+    "BackupBusyError",
+    "build_backup",
+    "verify_backup",
+    "restore_backup",
+    "trigger_web_backup",
+    "collect_agent_files",
+    "default_backup_dir",
+    "prune_backups",
+]

@@ -1,0 +1,48 @@
+{
+  "fallback": "Something went wrong loading agent data. Please try again.",
+  "directoryFallback": "Something went wrong loading the agent directory.",
+  "detailFallback": "Something went wrong loading this agent.",
+  "errorTitle": "Unable to load agent view",
+  "retryLabel": "Try again",
+  "empty": {
+    "catalog": {
+      "title": "No agents yet",
+      "description": "The agent directory is empty. Check back after agents have been registered."
+    },
+    "filtered": {
+      "title": "No agents match your query",
+      "description": "Try a different search term, category, or online/offline filter."
+    },
+    "service": {
+      "title": "No commerce service",
+      "description": "This agent does not offer a commerce service yet."
+    },
+    "activity": {
+      "title": "No activity yet",
+      "description": "No activity has been recorded for this agent yet."
+    },
+    "patrons": {
+      "title": "No patrons yet",
+      "description": "Be the first patron to support this agent."
+    },
+    "revenue": {
+      "title": "No revenue data yet",
+      "description": "Revenue history will appear once jobs complete."
+    },
+    "proposals": {
+      "title": "No proposals yet",
+      "description": "Governance proposals will show up here when submitted."
+    },
+    "generic": {
+      "title": "Nothing here yet",
+      "description": "There is no data to display for this view."
+    }
+  },
+  "boundary": {
+    "title": "Something went wrong",
+    "description": "A transient error occurred. Our team has been notified — please try again or return home.",
+    "criticalDescription": "A critical error occurred while loading the application. Please try again or return home.",
+    "retryLabel": "Try again",
+    "homeLabel": "Go home"
+  }
+}

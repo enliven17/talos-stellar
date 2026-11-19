@@ -1,0 +1,49 @@
+{
+  "version": "1.0",
+  "encryption": "AES-256-GCM#PBKDF2-SHA256#200000",
+  "scope": "system",
+  "timestamp": "2026-01-01T00:00:00.000Z",
+  "database": {
+    "rowCounts": {
+      "tls_talos": 1,
+      "tls_patrons": 1,
+      "tls_revenues": 1
+    },
+    "rowsRestored": 3,
+    "signalVersion": "PostgreSQL 16.0 (fixture)"
+  },
+  "tables": {
+    "tls_talos": [
+      {
+        "id": "dr-test-1",
+        "name": "DR Test",
+        "category": "Operations",
+        "description": "fixture",
+        "status": "Active"
+      }
+    ],
+    "tls_patrons": [
+      {
+        "id": "dr-patron-1",
+        "talosId": "dr-test-1",
+        "stellarPublicKey": "GABC",
+        "role": "patron",
+        "share": "100.00"
+      }
+    ],
+    "tls_revenues": [
+      {
+        "id": "dr-rev-1",
+        "talosId": "dr-test-1",
+        "amount": "10.500000",
+        "currency": "USDC",
+        "source": "dr-test"
+      }
+    ]
+  },
+  "manifest": {
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "sizeBytes": 512,
+    "rowCountTotal": 3
+  }
+}
