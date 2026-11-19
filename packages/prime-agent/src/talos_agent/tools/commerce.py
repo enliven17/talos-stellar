@@ -53,7 +53,10 @@ ALL_CATEGORIES = [
 # Non-negative decimal with at most USDC_DECIMALS fractional digits, e.g.
 # "10", "1.05", "0.000001". Rejects signs, exponents, whitespace, empty input
 # and over-precise fractions rather than silently normalising them.
-_PRICE_PATTERN = re.compile(rf"\A\d+(?:\.\d{{1,{USDC_DECIMALS}}})?\Z")
+MAX_PRICE_FRACTION_DIGITS = 7
+_PRICE_PATTERN = re.compile(
+    rf"\A\d+(?:\.\d{{1,{MAX_PRICE_FRACTION_DIGITS}}})?\Z"
+)
 
 
 def price_to_usdc_units(price_str: str) -> int:
@@ -72,7 +75,7 @@ def price_to_usdc_units(price_str: str) -> int:
     if not _PRICE_PATTERN.match(price):
         raise ValueError(
             f"Invalid price {price!r}: expected a non-negative decimal with at "
-            f"most {USDC_DECIMALS} fractional digits"
+            f"most {MAX_PRICE_FRACTION_DIGITS} fractional digits"
         )
     whole, _, frac = price.partition(".")
     return int(whole) * USDC_UNIT_SCALE + int(frac.ljust(USDC_DECIMALS, "0"))

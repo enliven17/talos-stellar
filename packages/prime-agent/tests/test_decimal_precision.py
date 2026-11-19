@@ -63,6 +63,18 @@ class TestDecimalParsingAndFormatting:
         """Values beyond 7 decimals are quantized."""
         assert format_stellar_amount("1.12345678") == "1.1234568"
 
+    def test_format_stellar_amount_rejects_more_than_seven_fractional_digits(self):
+        """Price strings with more than seven fractional digits are rejected, never rounded."""
+        with pytest.raises(ValueError):
+            to_stellar_amount("1.12345678")
+        with pytest.raises(ValueError):
+            to_stellar_amount("0.00000001")
+
+    def test_format_stellar_amount_accepts_exactly_seven_fractional_digits(self):
+        """Boundary: exactly seven fractional digits is accepted unchanged."""
+        assert to_stellar_amount("1.1234567") == Decimal("1.1234567")
+        assert format_stellar_amount("1.1234567") == "1.1234567"
+
 
 class TestStellarKitDecimalPrecision:
     """Test StellarKit methods preserve Decimal precision and 7-decimal string outputs."""

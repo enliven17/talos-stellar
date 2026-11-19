@@ -1,7 +1,5 @@
 node_modules/
 .next/
-.env
-.env.local
 .env.*.local
 dist/
 out/
@@ -34,3 +32,4 @@ pnpm-debug.log*
 
 
 .pnpm-store/
+config.bat
