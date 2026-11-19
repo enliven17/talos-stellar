@@ -567,6 +567,7 @@ describe("Webhook Subscription API", () => {
         fencingToken: 1,
         status: "pending",
         subscriptionId: "sub_1",
+        attempts: 0,
       };
 
       process.env.WEBHOOK_DELIVERY_ENABLED = "true";
@@ -584,6 +585,7 @@ describe("Webhook Subscription API", () => {
       const body = await response.json();
       expect(body.fencingToken).toBe(1);
       expect(body.leasedBy).toBe("worker_1");
+      expect(body.attempts).toBe(0);
     });
 
     it("rejects claim on non-existent delivery", async () => {
@@ -604,6 +606,119 @@ describe("Webhook Subscription API", () => {
 
       const response = await POST(request, { params: Promise.resolve({ id: "nonexistent" }) });
       expect(response.status).toBe(404);
+    });
+  });
+
+  describe("POST /api/webhooks/deliveries/:id/result", () => {
+    it("accepts valid result matching the delivery attempt", async () => {
+      const { POST } = await import("../src/app/api/webhooks/deliveries/[id]/result/route");
+
+      mockDb.select
+        .mockReturnValueOnce(selectChain([{ id: "worker_1" }])) // resolveCallerTalos
+        .mockReturnValueOnce(
+          selectChain([
+            {
+              id: "delivery_1",
+              status: "pending",
+              attempts: 1,
+              maxAttempts: 5,
+              fencingToken: 2,
+            },
+          ]),
+        );
+
+      mockDb.update.mockReturnValue(updateChain([]));
+
+      const request = new NextRequest("http://localhost:3000/api/webhooks/deliveries/delivery_1/result", {
+        method: "POST",
+        headers: { Authorization: "Bearer tok_worker_1" },
+        body: JSON.stringify({
+          fencingToken: 2,
+          attempt: 1,
+          statusCode: 200,
+        }),
+      });
+
+      const response = await POST(request, { params: Promise.resolve({ id: "delivery_1" }) });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.status).toBe("delivered");
+      expect(body.attempts).toBe(2);
+      expect(mockDb.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects stale attempt acknowledgement from older attempt and preserves lease/status", async () => {
+      const { POST } = await import("../src/app/api/webhooks/deliveries/[id]/result/route");
+
+      mockDb.select
+        .mockReturnValueOnce(selectChain([{ id: "worker_1" }])) // resolveCallerTalos
+        .mockReturnValueOnce(
+          selectChain([
+            {
+              id: "delivery_1",
+              status: "failed",
+              attempts: 2,
+              maxAttempts: 5,
+              fencingToken: 3,
+            },
+          ]),
+        );
+
+      mockDb.update.mockReturnValue(updateChain([]));
+
+      const request = new NextRequest("http://localhost:3000/api/webhooks/deliveries/delivery_1/result", {
+        method: "POST",
+        headers: { Authorization: "Bearer tok_worker_1" },
+        body: JSON.stringify({
+          fencingToken: 3,
+          attempt: 1, // older attempt than current attempts: 2
+          statusCode: 500,
+          error: "Timeout error from stale attempt",
+        }),
+      });
+
+      const response = await POST(request, { params: Promise.resolve({ id: "delivery_1" }) });
+      expect(response.status).toBe(409);
+      const body = await response.json();
+      expect(body.error).toBe("Stale attempt acknowledgement");
+      expect(body.detail).toContain("Acknowledgement is for attempt 1, but delivery is currently at attempt 2");
+      // Verify no DB update occurred, preserving current attempt's lease and status
+      expect(mockDb.update).not.toHaveBeenCalled();
+    });
+
+    it("preserves backward compatibility when attempt is not provided", async () => {
+      const { POST } = await import("../src/app/api/webhooks/deliveries/[id]/result/route");
+
+      mockDb.select
+        .mockReturnValueOnce(selectChain([{ id: "worker_1" }])) // resolveCallerTalos
+        .mockReturnValueOnce(
+          selectChain([
+            {
+              id: "delivery_1",
+              status: "pending",
+              attempts: 0,
+              maxAttempts: 5,
+              fencingToken: 1,
+            },
+          ]),
+        );
+
+      mockDb.update.mockReturnValue(updateChain([]));
+
+      const request = new NextRequest("http://localhost:3000/api/webhooks/deliveries/delivery_1/result", {
+        method: "POST",
+        headers: { Authorization: "Bearer tok_worker_1" },
+        body: JSON.stringify({
+          fencingToken: 1,
+          statusCode: 200,
+        }),
+      });
+
+      const response = await POST(request, { params: Promise.resolve({ id: "delivery_1" }) });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.status).toBe("delivered");
+      expect(mockDb.update).toHaveBeenCalledTimes(1);
     });
   });
 });
