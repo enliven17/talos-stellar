@@ -1,28 +1,40 @@
 ## Summary
 
-Prevent the reconciler state machine from expiring transactions or applying state
-transitions when wall-clock or expiry dates are non-finite (`NaN` or
-`Infinity`).
+Provide a brief description of the changes, background context, and what these changes accomplish.
 
-- Validate `expiresAt` and the supplied `now` date before wall-clock expiry checks.
-- Return no transition for `PENDING` or `CONFIRMING` records when an expiry timestamp is invalid.
-- Add focused coverage for non-finite expiry values and non-finite `now` values.
+Include whether this change updates shared request parsing, config defaults, or any API error contract.
 
 ## Related Issues
 
-Closes #1294
+Closes #N (Replace N with the issue number, e.g. Closes #1)
 
 ## Test Plan
 
-- [x] Focused state-machine test:
-  `pnpm --dir web exec vitest run tests/reconciler-state-machine.unit.test.ts`
-  - Maintainer-checked PR merge revision: **64 tests passed**.
-- [ ] Frozen workspace installation/build validation:
-  `pnpm install --frozen-lockfile`
-  - Blocked in the shared workspace dependency setup by
-    `ERR_PNPM_LOCKFILE_MISSING_DEPENDENCY` for
-    `@sentry/opentelemetry@9.47.1(...)`.
-  - Tracked by [#1502](https://github.com/enliven17/talos-stellar/issues/1502);
-    this PR does not modify lockfiles or unrelated workspace dependencies.
+Detail the steps you took to test these changes.
 
-No additional failure was investigated, so no base-versus-PR comparison is included.
+- [ ] Automated tests run (e.g. `cargo test`, `uv run pytest`, `pnpm test:e2e`)
+- [ ] Focused regression tests for request parsing / body limits pass
+- [ ] Manual verification steps performed:
+  - 1. ...
+  - 2. ...
+- [ ] Relevant docs updated when setup, environment variables, or workflows changed
+
+## Visual Changes (if applicable)
+
+For any user interface changes, please add screenshots or screen recordings showing:
+
+- Before
+- After
+
+## Checklist
+
+- [ ] I have read the [CONTRIBUTING.md](../CONTRIBUTING.md) guide.
+- [ ] My code follows the style guidelines of this project.
+- [ ] I have updated `.env.example` files and documentation if I changed environment variables.
+- [ ] I have documented any config defaults or API error contracts that changed.
+- [ ] I have commented my code, particularly in hard-to-understand areas.
+- [ ] I have made corresponding changes to the documentation.
+- [ ] I have added tests that prove my fix is effective or that my feature works.
+- [ ] I have verified the request-body guard rejects oversize requests before JSON parsing.
+- [ ] My changes generate no new warnings or errors.
+- [ ] New and existing unit tests pass locally with my changes.
