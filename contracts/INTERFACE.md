@@ -82,6 +82,8 @@ is a `major` bump.
 | `protocol_fee`      | `set_protocol_fee` / `calculate_protocol_fee`.               |
 | `interface_query`   | `version` / `interface_id` / `supports_version`.             |
 | `fees_collector`    | Capture 3% fee on Talos creation (configurable).             |
+| `schema_migrations` | `schema_version` / `run_migrations` / `rollback_schema` + history log. |
+| `migration_manifest`| Read-only `migration_key_manifest_version` + `migration_manifest/` key-mapping fixtures. |
 
 ### TalosNameService
 
