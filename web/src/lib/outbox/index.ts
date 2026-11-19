@@ -9,7 +9,8 @@
  *
  * See web/OUTBOX.md for configuration, operational signals, and rollback.
  */
-export { writeOutboxEvent, getEvent, listEvents, requeue, summarizeDeadLetters } from "./store";
+export { writeOutboxEvent, getEvent, listEvents, requeue, summarizeDeadLetters, getLagDiagnostics } from "./store";
+export type { ConsumerLagStats, LagDiagnostics } from "./store";
 export {
   toDeadLetterView,
   sanitizeOutboxError,

@@ -238,6 +238,82 @@ export async function getEvent(eventId: string): Promise<OutboxEvent | null> {
   return row ? toEvent(row) : null;
 }
 
+// ─── Consumer lag diagnostics ──────────────────────────────────────────────
+
+/**
+ * Per-consumer lag stats returned by getLagDiagnostics.
+ *
+ * "consumer" here is the registered eventType string — it identifies the
+ * logical consumer bucket without exposing event IDs or payload content.
+ */
+export interface ConsumerLagStats {
+  /** The eventType that identifies this consumer. */
+  eventType: string;
+  /** Total pending (not yet leased) events for this eventType. */
+  pendingCount: number;
+  /**
+   * Age in milliseconds of the oldest pending event (runAt relative to now).
+   * null when pendingCount is 0.
+   */
+  oldestPendingAgeMs: number | null;
+}
+
+/** Overall lag diagnostics snapshot. */
+export interface LagDiagnostics {
+  /** Total pending events across all consumers. */
+  totalPending: number;
+  /**
+   * Age in milliseconds of the single oldest pending event across all consumers.
+   * null when there are no pending events.
+   */
+  oldestPendingAgeMs: number | null;
+  /** Per-eventType breakdown, sorted by pendingCount descending. */
+  byConsumer: ConsumerLagStats[];
+}
+
+/**
+ * Report oldest pending age and bounded counts per known consumer (eventType).
+ *
+ * Uses aggregate SQL — never reads event IDs or payload data as metric labels,
+ * so the diagnostics surface is safe to log and expose via an operator endpoint.
+ *
+ * @param maxConsumers  Cap on how many distinct eventTypes are returned (default 50).
+ *                      Prevents unbounded result sets when many event types exist.
+ */
+export async function getLagDiagnostics(maxConsumers = 50): Promise<LagDiagnostics> {
+  // One query: group pending events by eventType, aggregate count + min(runAt).
+  // "pending" covers both status=pending and any that have never been leased.
+  const rows = await db
+    .select({
+      eventType: tlsOutboxEvents.eventType,
+      pendingCount: count(),
+      oldestRunAt: sql<string>`min(${tlsOutboxEvents.runAt})`,
+    })
+    .from(tlsOutboxEvents)
+    .where(eq(tlsOutboxEvents.status, "pending"))
+    .groupBy(tlsOutboxEvents.eventType)
+    .orderBy(desc(count()), tlsOutboxEvents.eventType)
+    .limit(maxConsumers);
+
+  const now = Date.now();
+
+  const byConsumer: ConsumerLagStats[] = rows.map((r) => {
+    const pendingCount = Number(r.pendingCount);
+    const oldestRunAt = r.oldestRunAt ? new Date(r.oldestRunAt).getTime() : null;
+    const oldestPendingAgeMs =
+      oldestRunAt !== null ? Math.max(0, now - oldestRunAt) : null;
+    return { eventType: r.eventType, pendingCount, oldestPendingAgeMs };
+  });
+
+  const totalPending = byConsumer.reduce((sum, c) => sum + c.pendingCount, 0);
+  const oldestPendingAgeMs =
+    byConsumer.length > 0
+      ? Math.max(...byConsumer.map((c) => c.oldestPendingAgeMs ?? 0))
+      : null;
+
+  return { totalPending, oldestPendingAgeMs, byConsumer };
+}
+
 /**
  * Dead-letter backlog grouped by eventType (largest first), for the
  * operator dead-letter view. Counts only; never reads payloads.
