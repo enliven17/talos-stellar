@@ -74,6 +74,13 @@ export interface DiscoverServicesParams {
    * regardless of the client default. Surfaces as `TalosTimeoutError`.
    */
   timeoutMs?: number;
+  /**
+   * Per-request required endpoint capabilities. After a 2xx response, the
+   * client reads a bounded capability snapshot from the response headers and
+   * throws {@link TalosCapabilityError} when a required API version or feature
+   * flag is not advertised. Omit to skip negotiation.
+   */
+  requireCapabilities?: RequiredCapabilities;
 }
 
 export interface PurchaseServiceParams {
@@ -94,6 +101,13 @@ export interface CursorRequestOptions extends CursorPageParams {
    * regardless of the client default. Surfaces as `TalosTimeoutError`.
    */
   timeoutMs?: number;
+  /**
+   * Per-request required endpoint capabilities. After a 2xx response, the
+   * client reads a bounded capability snapshot from the response headers and
+   * throws {@link TalosCapabilityError} when a required API version or feature
+   * flag is not advertised. Omit to skip negotiation.
+   */
+  requireCapabilities?: RequiredCapabilities;
 }
 
 export interface ActivityPageOptions extends CursorRequestOptions {
@@ -416,3 +430,40 @@ export interface BuyerProofDiagnostics {
  * are available. Must not throw; exceptions are silently swallowed.
  */
 export type BuyerProofDiagnosticCallback = (diag: BuyerProofDiagnostics) => void;
+
+// ── Endpoint capability negotiation ───────────────────────────────────────────
+
+/**
+ * Capabilities an endpoint advertises on a single response. Parsed from a
+ * bounded subset of response headers by {@link parseEndpointCapabilities}.
+ *
+ * - `apiVersion`: the API version the endpoint serves (e.g. `"v1"`), or
+ *   `undefined` when the endpoint did not advertise one.
+ * - `features`: feature flags the endpoint supports. Trimmed, deduplicated,
+ *   and bounded in count/length so a hostile or misconfigured endpoint cannot
+ *   exhaust memory. The array is frozen.
+ */
+export interface EndpointCapabilities {
+  /** Advertised API version string (e.g. `"v1"`), or `undefined` if absent. */
+  apiVersion?: string;
+  /** Advertised feature flags (trimmed, deduplicated, bounded). Frozen. */
+  features: readonly string[];
+}
+
+/**
+ * Capabilities a caller requires of an endpoint for a single request.
+ *
+ * - `apiVersion`: a single version string, or a list of acceptable versions.
+ *   The endpoint must advertise exactly one of them.
+ * - `features`: feature flags the endpoint must advertise. The endpoint must
+ *   advertise every listed flag.
+ *
+ * Matching is exact and case-sensitive after trimming whitespace; see
+ * {@link satisfiesCapabilities}.
+ */
+export interface RequiredCapabilities {
+  /** A single acceptable API version, or a list of acceptable versions. */
+  apiVersion?: string | string[];
+  /** Feature flags the endpoint must advertise. */
+  features?: string[];
+}

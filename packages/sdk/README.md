@@ -418,6 +418,7 @@ working — new behavior is purely additive.
 | 502/503/504 | `TalosServerRetryableError` | `server_error` | yes | — |
 | network | `TalosTransportError` | `transport_error` | yes | `cause?: unknown` |
 | abort/timeout | `TalosTimeoutError` | `timeout_error` | yes | — |
+| 2xx (negotiation) | `TalosCapabilityError` | `capability_error` | no | `required`, `available` |
 
 Every error also exposes:
 
@@ -479,10 +480,56 @@ switch (error.code) {
   case "forbidden":                return refreshApiKey();
   case "transport_error":          return scheduleRetry(2000);
   case "timeout_error":            return scheduleRetry(2000);
+  case "capability_error":         return failFast(error); // endpoint can't serve this call
   default:
     throw error;
 }
 ```
+
+### Per-request endpoint capability negotiation
+
+Every read/write/list call accepts an optional `requireCapabilities` field on
+its per-call options (`ReadOptions`, `WriteOptions`, `CursorRequestOptions`).
+After a 2xx response, the client reads a **bounded** capability snapshot from
+the response headers and fails explicitly when a required capability is not
+advertised — before the body is consumed, so a caller never acts on a response
+from an endpoint it cannot safely talk to.
+
+The endpoint advertises capabilities via two response headers:
+
+- `x-talos-api-version` — a single version string (e.g. `"v1"`).
+- `x-talos-features` — a comma-separated list of feature flags.
+
+Both are trimmed on read; feature flags are deduplicated and bounded in count
+and length so a hostile or misconfigured endpoint cannot exhaust memory.
+Matching is exact and case-sensitive after trimming. A mismatch throws a
+`TalosCapabilityError` (code `capability_error`, not retryable) carrying the
+`required` constraints and the bounded `available` snapshot the endpoint
+actually returned.
+
+```typescript
+import { TalosCapabilityError } from "@talos-protocol/sdk";
+
+try {
+  const talos = await client.getTalos("talos-1", {
+    requireCapabilities: {
+      apiVersion: "v1",          // single version, or ["v1", "v2"]
+      features: ["streaming"],   // every flag must be advertised
+    },
+  });
+} catch (error) {
+  if (error instanceof TalosCapabilityError) {
+    // Deterministic endpoint state — do not retry.
+    log.error("endpoint missing capability:", error.message, error.available);
+  }
+}
+```
+
+`requireCapabilities` is purely opt-in: omit it to preserve the prior
+accept-any-2xx behavior. A capability mismatch is never retried and never
+routed to the `onError` observer (the endpoint returned a usable 2xx). The
+pure parsers `parseEndpointCapabilities`, `satisfiesCapabilities`, and
+`describeCapabilityMismatch` are exported for direct testing.
 
 ### Retry, Timeout & Observability
 
