@@ -4,6 +4,7 @@ import { db } from "@/db";
 import { tlsTalos } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { retireAgentSchema, parseBody } from "@/lib/schemas";
+import { buildLifecycleConsistencyReport } from "@/lib/governance/lifecycle";
 
 // POST /api/talos/:id/retire - Retire an agent (preserves history, prevents reuse)
 // Requires Stellar ED25519 signature proof of wallet ownership.
@@ -98,12 +99,29 @@ async function _POST(
       return Response.json({ error: result.error }, { status: result.status });
     }
 
+    // Offline, read-only consistency report for the retired agent. This never
+    // mutates funded state; it only surfaces contradictions between lifecycle
+    // records, active services and unresolved jobs.
+    const consistencyReport = buildLifecycleConsistencyReport({
+      lifecycleRecords: [
+        {
+          talosId: result.data.id,
+          retiredAt: result.data.retiredAt,
+          retiredReason: result.data.retiredReason,
+          supersededBy: result.data.supersededBy,
+        },
+      ],
+      activeServices: [],
+      unresolvedJobs: [],
+    });
+
     return Response.json({
       id: result.data.id,
       agentName: result.data.agentName,
       retiredAt: result.data.retiredAt,
       retiredReason: result.data.retiredReason,
       supersededBy: result.data.supersededBy,
+      consistencyReport,
     });
   } catch (error) {
     console.error("Error retiring TALOS:", error);
