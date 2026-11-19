@@ -359,7 +359,9 @@ impl TalosGovernance {
         let current_ledger = env.ledger().sequence();
         let snapshot_ledger = current_ledger.saturating_sub(10);
         let proposal_id = Self::next_proposal_id(env.clone());
-        let end_ledger = current_ledger + config.voting_period_ledgers;
+        let end_ledger = current_ledger
+            .checked_add(config.voting_period_ledgers)
+            .expect("Voting deadline overflows ledger sequence");
 
         let proposal = Proposal {
             id: proposal_id,
@@ -2238,4 +2240,124 @@ mod tests {
             .try_initialize(&admin, &pulse, &100_i128, &5_000_i128, &20_u32);
         assert!(result.is_err(), "double initialization must be rejected");
     }
-}
+
+    // ── Deadline overflow protection tests (#1370) ───────────────────
+
+    /// Normal case: a small voting period well within u32::MAX succeeds.
+    #[test]
+    fn create_proposal_normal_deadline_succeeds() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        // ledger = 100, voting_period = 20 → end_ledger = 120 (no overflow)
+        let proposer = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.end_ledger, 120);
+    }
+
+    /// Boundary: current_ledger near u32::MAX with a voting period that
+    /// would overflow must be rejected, and the proposal must NOT be stored.
+    #[test]
+    fn create_proposal_overflowing_deadline_is_rejected_and_leaves_storage_unchanged() {
+        let env = Env::default();
+        // Place the ledger one step before overflow: u32::MAX - 10
+        env.ledger().with_mut(|li| {
+            li.sequence_number = u32::MAX - 10;
+            li.timestamp = 1_000;
+        });
+
+        let contract_id = env.register_contract(None, TalosGovernance);
+        let client = TalosGovernanceClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let pulse = Address::generate(&env);
+
+        // voting_period_ledgers = 20 → end_ledger = (u32::MAX - 10) + 20 overflows
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "initialize",
+                    args: (admin.clone(), pulse.clone(), 100_i128, 5_100_i128, 20_u32)
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .initialize(&admin, &pulse, &100_i128, &5_100_i128, &20_u32);
+
+        let proposer = Address::generate(&env);
+        let title = s(&env, "Overflow test");
+        let description = s(&env, "Should not be stored");
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &proposer,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_proposal",
+                    args: (proposer.clone(), 1_u32, title.clone(), description.clone())
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_proposal(&proposer, &1_u32, &title, &description);
+
+        assert!(
+            result.is_err(),
+            "overflowing deadline must be rejected"
+        );
+
+        // Proposal storage must be unchanged — next id is still 1 (none created).
+        let next_id = client.next_proposal_id();
+        assert_eq!(next_id, 1, "no proposal must have been stored after overflow rejection");
+    }
+
+    /// Exact boundary: voting period of exactly 1 from u32::MAX - 1
+    /// succeeds (u32::MAX - 1 + 1 = u32::MAX, no overflow).
+    #[test]
+    fn create_proposal_at_exact_boundary_succeeds() {
+        let env = Env::default();
+        env.ledger().with_mut(|li| {
+            li.sequence_number = u32::MAX - 1;
+            li.timestamp = 1_000;
+        });
+
+        let contract_id = env.register_contract(None, TalosGovernance);
+        let client = TalosGovernanceClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let pulse = Address::generate(&env);
+
+        // voting_period_ledgers = 1 → end_ledger = u32::MAX - 1 + 1 = u32::MAX (exact, no overflow)
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "initialize",
+                    args: (admin.clone(), pulse.clone(), 100_i128, 5_100_i128, 1_u32)
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .initialize(&admin, &pulse, &100_i128, &5_100_i128, &1_u32);
+
+        let proposer = Address::generate(&env);
+        let title = s(&env, "Boundary proposal");
+        let description = s(&env, "Should succeed");
+
+        let result = client
+            .mock_auths(&[MockAuth {
+                address: &proposer,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "create_proposal",
+                    args: (proposer.clone(), 1_u32, title.clone(), description.clone())
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_proposal(&proposer, &1_u32, &title, &description);
+
+        assert!(result.is_ok(), "exact boundary must succeed");
+        let proposal = client.get_proposal(&1).unwrap();
+        assert_eq!(proposal.end_ledger, u32::MAX);
+    }
