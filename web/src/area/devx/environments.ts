@@ -4,6 +4,7 @@ import { logEnvStateTransition } from "./logger";
 export interface EnvironmentProvider {
   provision(prNumber: number, branch: string): Promise<EnvironmentMetadata>;
   teardown(prNumber: number): Promise<void>;
+  cleanup(prNumber: number): Promise<void>;
   getStatus(prNumber: number): Promise<EnvState>;
 }
 
@@ -56,6 +57,17 @@ export class MockEnvironmentProvider implements EnvironmentProvider {
       to: "destroyed",
       at: Date.now(),
     });
+  }
+
+  async cleanup(prNumber: number): Promise<void> {
+    try {
+      const status = await this.getStatus(prNumber);
+      if (status !== "destroyed") {
+        await this.teardown(prNumber);
+      }
+    } catch (err) {
+      throw new Error(`Failed to safely clean up environment for PR #${prNumber}. Provider error.`);
+    }
   }
 
   async getStatus(prNumber: number): Promise<EnvState> {

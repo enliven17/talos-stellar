@@ -1,0 +1,10 @@
+{
+  "_comment": "Per-contract WASM binary size budgets in bytes. CI fails if any contract exceeds its budget.",
+  "_how_to_raise": "To raise a budget: (1) confirm the growth is intentional, (2) increase the value below, (3) document the reason in your PR description.",
+  "talos_registry": 204800,
+  "talos_name_service": 204800,
+  "talos_governance": 204800,
+  "ttl_manager": 102400,
+  "talos_dividends": 204800,
+  "pause_control": 102400
+}

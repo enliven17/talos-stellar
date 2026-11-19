@@ -1,3 +1,17 @@
 {
-  "type": "string"
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "bidPrice": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "negotiating",
+        "counter_offer"
+      ]
+    }
+  }
 }

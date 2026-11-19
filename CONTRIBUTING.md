@@ -14,14 +14,49 @@ Install these before you start working locally:
 - Python 3.11 or newer
 - `uv`
 - Rust stable toolchain and `cargo`
-- Soroban CLI, installed as `stellar` via `cargo install --locked stellar-cli --features opt`
+- `pre-commit` (or install via `uv tool install pre-commit` / `pip install pre-commit`)
+- Docker (for `scripts/local-stack.sh`)
+- Optional: Soroban CLI, installed as `stellar` via `cargo install --locked stellar-cli --features opt`
 - [`gitleaks`](https://github.com/gitleaks/gitleaks) secret scanner — `brew install gitleaks`, or download a binary from the [releases page](https://github.com/gitleaks/gitleaks/releases) (required for `pnpm run secrets:check`)
+
+Before starting, run `pnpm doctor` to check the required local tool versions
+and the Rust Wasm target. The optional Stellar CLI is reported as a warning;
+missing or outdated required tools make the command exit with a non-zero code.
+Run its mocked platform-independent checks with `pnpm doctor:test`.
 
 For the Rust contracts, also add the Wasm target:
 
 ```bash
 rustup target add wasm32-unknown-unknown
 ```
+
+## Cross-Package Task Runner
+
+A `justfile` is provided for short, discoverable commands that run the same checks used by CI across all packages. Install `just`:
+
+- **Linux/macOS**: `cargo install just`
+- **Windows**: `winget install casey.just` or `scoop install just`
+
+Run from the repository root:
+
+```bash
+just                    # List all available recipes
+just test-web           # Run web package tests
+just test-sdk           # Run SDK package tests
+just test-agent         # Run prime-agent package tests
+just test-contracts     # Run contracts package tests
+just test-all           # Run all package tests
+just lint-all           # Run lint for all packages
+just stack-up           # Start local integration stack
+just stack-down         # Stop local integration stack
+just stack-logs         # View stack logs
+just stack-reset        # Reset the stack
+just stack-reset-data --yes    # Reset local test data
+```
+
+Each recipe runs the exact command used by the corresponding CI workflow, so local runs match CI behavior. The root `package.json` scripts remain unchanged; `just` is a convenience layer for contributors.
+
+**Windows note**: The `just` tool runs on Windows, but some recipes (e.g., `stack-*`) use Bash scripts. On Windows, use WSL or Git Bash for those commands, or use the equivalent `pnpm` scripts from the root `package.json`.
 
 ## Repository Layout
 
@@ -46,6 +81,16 @@ Install the workspace dependencies from the repository root:
 ```bash
 pnpm install
 ```
+Generate the dependency license report from the installed workspace graph:
+
+```bash
+pnpm licenses:report
+```
+
+The command writes `dist/licenses/dependency-licenses.json` and
+`dist/licenses/dependency-licenses.md`. It fails closed when pnpm cannot read
+the dependency graph or any dependency has missing or ambiguous license
+metadata. The generated directory is a CI artifact and should not be committed.
 
 If you only need the web app, you can still work from the root with `pnpm dev` because the root package forwards to `web/`.
 
@@ -80,6 +125,21 @@ To deploy the contracts to testnet, use the provided script from a Bash-compatib
 ```
 
 The script prints the deployed contract IDs that need to be copied into the web app environment file.
+
+### 5. Install pre-commit hooks
+
+To automatically catch formatting, lint, and secret leaks before committing:
+
+```bash
+pre-commit install
+```
+
+To run all configured hooks manually against changed files or all files:
+
+```bash
+pre-commit run
+pre-commit run --all-files
+```
 
 ## Environment Files
 
@@ -143,6 +203,22 @@ pnpm stack:logs
 pnpm stack:down
 pnpm stack:reset
 ```
+
+`pnpm stack:reset` destroys the stack volumes and re-imports everything. To clear
+local test data without recreating the stack, use the safe reset instead:
+
+```bash
+pnpm stack:reset-data --dry-run    # preview the tables and row counts
+pnpm stack:reset-data --yes        # truncate local test data
+pnpm stack:reset-data --yes --seed # truncate, then re-run db:seed
+```
+
+It only ever targets a loopback database, requires `--yes` to destroy anything,
+and never logs credentials. See
+[docs/local-test-data-reset.md](./docs/local-test-data-reset.md) for the full
+behavior contract. Regression tests for the shell layer: `bash scripts/local-stack.test.sh`.
+
+For symptoms, root causes, and fixes for common local setup failures (port conflicts, stale volumes, migration journal mismatches, seed guard refusals, and missing environment variables), see the [Local Stack Troubleshooting Guide](./docs/TROUBLESHOOTING.md).
 
 The stack defaults to the web service and a mock Stellar provider. Add the optional prime-agent service with:
 
@@ -279,9 +355,10 @@ Choose the focused command by area:
 | `web/drizzle/**`, `web/src/db/**`, `web/drizzle.config.ts` | `pnpm --dir web run db:migrate`, then the specific DB test with `pnpm --dir web exec vitest run tests/<name>.test.ts` | `Web Migrations CI` |
 | `web/src/area/devx/**` | `pnpm --dir web exec vitest run src/area/devx/__tests__/runner.test.ts` | `Benchmark CI - regression gates` |
 | API route or library unit tests | `pnpm --dir web exec vitest run tests/<name>.test.ts` | `Deploy Web -> Vercel` |
+| Local test-data reset (`web/src/lib/local-test-data-reset.ts`, `web/src/db/reset-test-data.ts`, `scripts/local-stack.sh`) | `pnpm --dir web exec vitest run tests/local-test-data-reset.unit.test.ts; bash scripts/local-stack.test.sh` | `Deploy Web -> Vercel` |
 | Backup or restore paths | `pnpm --dir web exec vitest run tests/backup-restore-fixture.test.ts tests/backup-crypto.test.ts tests/backup-types.test.ts` | `Web Backups CI` |
 
-Use `pnpm --dir web run test:e2e` only when API route behavior depends on the running app or cross-route state. Use the local stack with `pnpm stack:up` when you need Postgres plus the mock Stellar provider, and clean it up with `pnpm stack:down`. Do not use `pnpm stack:reset` unless you intentionally want to destroy and recreate local stack data.
+Use `pnpm --dir web run test:e2e` only when API route behavior depends on the running app or cross-route state. Use the local stack with `pnpm stack:up` when you need Postgres plus the mock Stellar provider, and clean it up with `pnpm stack:down`. Do not use `pnpm stack:reset` unless you intentionally want to destroy and recreate local stack data; `pnpm stack:reset-data` clears test rows without touching the stack volumes.
 
 ### SDK changes
 
@@ -417,6 +494,11 @@ errors, and finding zero runbooks at all is treated as an error rather than sile
 | `gitleaks is not installed` | The secret scanner is missing from PATH | Install gitleaks (see Prerequisites) and re-run `pnpm run secrets:check`. |
 | `secret-scan: FAILED` with `file:line:rule` | A staged change contains a detected secret | Remove the secret and load it from the environment/secrets manager. Sanctioned false positives get a trailing `# gitleaks:allow` comment. |
 | `unable to load gitleaks config` | `.gitleaks.toml` is missing or malformed | Restore/fix `.gitleaks.toml`; `pnpm run secrets:check` fails closed until the config is valid. |
+| `Refusing to delete local test data without --yes` | The safe reset guards against accidental truncation | Re-run with `--yes`, or preview with `--dry-run`. |
+| `Refusing to reset database "…" on non-local host "…"` (or `non-local host`) | `DATABASE_URL` points at a hosted database such as Supabase | Use `pnpm stack:reset-data` for the compose stack, or export a loopback `DATABASE_URL`. Remote hosts are refused by design — there is no override flag. |
+| `local-stack: the postgres service is not running` | `pnpm stack:reset-data` was run before the stack came up | `pnpm stack:up`, then retry. The reset CLI is never invoked in this state. |
+| `missing modelled tables` or `No Talos tables found` | The local database is not migrated | `pnpm --dir web run db:migrate`, then retry. |
+| `Could not reach 127.0.0.1:5432` | The local database is unreachable after retries | Check `pnpm stack:logs`; start the stack with `pnpm stack:up`. |
 | PR preview comment is present but Vercel URL is absent | The repo preview workflow provisions the mock DB; Vercel attaches previews separately | Check Vercel's GitHub integration/status before treating it as an application failure. |
 
 ## Code Style
@@ -622,6 +704,9 @@ Cost limits and TTLs (Time-To-Live) are enforced programmatically. If an environ
 
 ### Troubleshooting
 
+For common local integration stack failures (Docker, port allocation, stale volumes, migration drift, seed guard refusals, or missing environment variables), see the [Local Stack Troubleshooting Guide](./docs/TROUBLESHOOTING.md).
+
+For preview environments specifically:
 - **Database provisioning fails**: Check the GitHub Actions logs for `PR Preview Provision`. Ensure your branch passes linting and type checks, as migration errors often cause provisioning failures.
 - **Preview URL is missing**: Vercel manages the web preview natively. Ensure the Vercel GitHub integration is active for the repository.
 - **Stale data**: The environment is seeded once upon provisioning. If you change the seed script, you may need to close and reopen the PR to provision a fresh database.
@@ -720,9 +805,11 @@ bash scripts/ci-contract-cache.test.sh
 1. Create a branch from the latest `main`
 2. Make your changes
 3. Update documentation when setup steps or environment variables change
-4. Run the relevant tests for the area you touched, plus `pnpm run secrets:check` for the local secret scan
+4. Run the relevant tests for the area you touched, plus `pnpm run secrets:check` (or `pre-commit run`) for the local contribution checks
 5. Open a pull request using the template in [`.github/PULL_REQUEST_TEMPLATE.md`](./.github/PULL_REQUEST_TEMPLATE.md)
 6. Link the issue in your PR description, for example `Closes #39`
+
+**Note:** PR descriptions belong in the GitHub PR itself, not as markdown files in the repository. Do not add PR description files (e.g., `pr-*.md` or `pr-description.md`) to the repository root or elsewhere in the codebase.
 
 ## Releases
 

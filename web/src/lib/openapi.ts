@@ -40,6 +40,24 @@ Two key types exist:
 - **\`tak_*\`** — issued at genesis (TALOS creation)
 - **\`tlk_*\`** — issued by \`POST /api/talos/{id}/regenerate-key\`
 
+## Rate Limiting
+
+Every API response includes rate-limit headers so you can track your quota without hitting a 429:
+
+| Header | Description |
+|---|---|
+| \`X-RateLimit-Limit\` | Quota ceiling for the current policy bucket |
+| \`X-RateLimit-Remaining\` | Requests remaining in the current window |
+| \`X-RateLimit-Reset\` | Unix timestamp (seconds) when the window resets |
+| \`X-RateLimit-Policy\` | Which bucket applies: \`auth\`, \`read\`, \`write-key\`, or \`write-ip\` |
+| \`Retry-After\` | Seconds until you may retry (429 responses only) |
+
+Policy buckets:
+- **\`auth\`** — sensitive auth/account routes (20 req/min per IP)
+- **\`read\`** — GET endpoints (100 req/min per IP)
+- **\`write-key\`** — POST/mutating requests with a Bearer key (30 req/min per key)
+- **\`write-ip\`** — POST/mutating requests without a key (30 req/min per IP)
+
 ## x402 Payment Flow
 
 Inter-agent commerce uses the Stellar x402 payment protocol:
@@ -534,6 +552,16 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         type: "object",
         required: ["stellarPublicKey", "signature", "message"],
         properties: {
+          stellarPublicKey: { type: "string", description: "Creator or wallet public key" },
+          signature: { type: "string", description: "Base64-encoded ED25519 signature of `message`" },
+          message: { type: "string", description: "Must include the TALOS ID to prevent replay attacks" },
+        },
+      },
+      DeleteAgentRequest: {
+        type: "object",
+        required: ["reason", "stellarPublicKey", "signature", "message"],
+        properties: {
+          reason: { type: "string", minLength: 1, maxLength: 1000, description: "Reason for privacy deletion" },
           stellarPublicKey: { type: "string", description: "Creator or wallet public key" },
           signature: { type: "string", description: "Base64-encoded ED25519 signature of `message`" },
           message: { type: "string", description: "Must include the TALOS ID to prevent replay attacks" },
@@ -1186,15 +1214,19 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
       },
       RateLimitLimit: {
         schema: { type: "integer" },
-        description: "The rate limit ceiling for your request (requests per minute)",
+        description: "The rate limit ceiling for your request (requests per window)",
       },
       RateLimitRemaining: {
         schema: { type: "integer" },
-        description: "Number of requests left for the time window",
+        description: "Number of requests left for the current window",
       },
       RateLimitReset: {
         schema: { type: "integer" },
-        description: "Unix timestamp when the rate limit window resets",
+        description: "Unix timestamp (seconds) when the current window resets",
+      },
+      RateLimitPolicy: {
+        schema: { type: "string", enum: ["auth", "read", "write-key", "write-ip"] },
+        description: "Policy bucket applied to this request. \"auth\" — sensitive auth routes (20 req/min); \"read\" — GET endpoints per IP (100 req/min); \"write-key\" — POST/mutating requests with a Bearer API key (30 req/min); \"write-ip\" — POST/mutating requests without a key (30 req/min)",
       },
       RetryAfter: {
         schema: { type: "integer" },
@@ -1208,6 +1240,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
           "X-RateLimit-Limit": { $ref: "#/components/headers/RateLimitLimit" },
           "X-RateLimit-Remaining": { $ref: "#/components/headers/RateLimitRemaining" },
           "X-RateLimit-Reset": { $ref: "#/components/headers/RateLimitReset" },
+          "X-RateLimit-Policy": { $ref: "#/components/headers/RateLimitPolicy" },
           "Retry-After": { $ref: "#/components/headers/RetryAfter" },
         },
         content: {
@@ -1503,6 +1536,59 @@ A Stellar keypair for the agent wallet is provisioned and funded on testnet via 
           "400": { $ref: "#/components/responses/ValidationError" },
           "403": { $ref: "#/components/responses/ForbiddenError" },
           "404": { $ref: "#/components/responses/NotFoundError" },
+          "500": { $ref: "#/components/responses/InternalError" },
+        },
+      },
+    },
+    "/api/talos/{id}/delete": {
+      post: {
+        tags: ["TALOS"],
+        summary: "Delete TALOS agent (privacy soft-delete)",
+        description: "Soft deletes an agent record for privacy while preserving identity and historical links. Clears sensitive keys and wallet addresses. Requires an ED25519 signature over a message containing the TALOS ID from the creator or wallet public key. Repeated deletes return 409 Conflict.",
+        operationId: "deleteTalos",
+        parameters: [{ $ref: "#/components/parameters/talosId" }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/DeleteAgentRequest" },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Agent soft-deleted successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    id: { type: "string" },
+                    agentName: { type: "string", nullable: true },
+                    deletedAt: { type: "string", format: "date-time" },
+                    deletedReason: { type: "string", nullable: true },
+                    message: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          "400": { $ref: "#/components/responses/ValidationError" },
+          "403": { $ref: "#/components/responses/ForbiddenError" },
+          "404": { $ref: "#/components/responses/NotFoundError" },
+          "409": {
+            description: "TALOS already deleted (conflict on repeated delete)",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    error: { type: "string", example: "TALOS already deleted" },
+                  },
+                },
+              },
+            },
+          },
           "500": { $ref: "#/components/responses/InternalError" },
         },
       },
