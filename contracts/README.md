@@ -152,7 +152,7 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
   - **Proportional role allocation**: Calculates payouts from on-chain patron shares (`creator_share`, `investor_share`, `treasury_share`), enforcing `creator_share + investor_share + treasury_share == 100`.
   - **Rounding dust tracking**: Computes and stores rounding remainder (`RoundingDust`) on first claim, ensuring exact conservation of funds. Emits `div_dst`.
   - **Accounting invariant enforcement**: Tracks `claimed_amount <= total_amount` on every claim; prevents over-distribution (`AccountingOverflow`).
-  - **Idempotent epoch commits**: `commit_epoch` prevents duplicate epoch creation with identical `(talos_id, epoch_id)` (`EpochAlreadyExists`).
+  - **Idempotent epoch commits**: `commit_epoch` prevents duplicate epoch creation with identical `(talos_id, epoch_id)` (`EpochAlreadyExists`); `commit_epoch_idempotent` binds an administrator-supplied 32-byte key to canonical parameters, safely replaying on duplicates and rejecting conflicting key reuse (`IdempotencyConflict`).
   - **Expiry & unclaimed fund recovery**: Unclaimed allocations after epoch expiry can be swept back by the admin via `recover_expired`.
   - **Interface versioning**: Constant SemVer `version()` returning `(1, 1, 0)`.
 - **Dividend Claim Windows & Expiry Rules**:
@@ -165,6 +165,7 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
 - **Entry Points**:
   - `initialize(admin, registry_contract) -> Result<(), ContractError>`: Initialize contract admin and registry contract address.
   - `commit_epoch(admin, talos_id, total_amount, expiry_secs) -> Result<u64, ContractError>`: Commit a new dividend epoch with total funds and expiry window (admin auth).
+  - `commit_epoch_idempotent(admin, idempotency_key, talos_id, total_amount, expiry_secs) -> Result<u64, ContractError>`: Commit a new dividend epoch bound to an administrator-supplied 32-byte key; returns the original epoch ID on identical replay and rejects conflicting key reuse with `IdempotencyConflict` (admin auth).
   - `claim_dividend(claimant, talos_id, epoch_id, patron_creator, patron_investor, patron_treasury, creator_share, investor_share, treasury_share) -> Result<i128, ContractError>`: Claim dividend allocation for a patron role (claimant auth).
   - `recover_expired(admin, talos_id, epoch_id) -> Result<i128, ContractError>`: Sweep unclaimed funds after epoch expiration (admin auth).
   - `get_epoch(talos_id, epoch_id) -> Option<EpochRecord>`: Query epoch metadata, amounts, and lifecycle status (`Active`, `Expired`, `Recovered`).

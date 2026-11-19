@@ -122,6 +122,8 @@ pub enum ContractError {
     NoPendingAdmin = 18,
     /// The new registry contract does not expose the expected TalosRegistry interface.
     IncompatibleRegistry = 19,
+    /// An idempotency key was reused with conflicting epoch parameters.
+    IdempotencyConflict = 20,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
@@ -197,6 +199,18 @@ pub enum DataKey {
     PendingAdmin,
     /// Ledger sequence when an epoch's persistent records were last refreshed: `(talos_id: u32, epoch_id: u64)`.
     LastTouched(u32, u64),
+    /// Idempotency record for caller-bound epoch commits: `(caller: Address, key: BytesN<32>)`.
+    Idempotency(Address, BytesN<32>),
+}
+
+/// Record of an idempotently committed epoch bound to caller and canonical parameters.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IdempotencyRecord {
+    pub epoch_id: u64,
+    pub talos_id: u32,
+    pub total_amount: i128,
+    pub expiry_secs: u64,
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -399,18 +413,6 @@ fn compute_rounding_dust(
 /// - `actual.minor == required.minor` and `actual.patch >= required.patch`
 ///                                          → supported.
 /// - `actual.minor < required.minor`        → not supported.
-fn version_supports(actual: (u32, u32, u32), required: (u32, u32, u32)) -> bool {
-    if actual.0 != required.0 {
-        return false;
-    }
-    if actual.1 > required.1 {
-        return true;
-    }
-    if actual.1 < required.1 {
-        return false;
-    }
-    actual.2 >= required.2
-}
 
 /// Cross-contract compatibility helper.
 ///
@@ -554,6 +556,101 @@ impl TalosDividends {
         env.storage()
             .persistent()
             .set(&DataKey::LastTouched(talos_id, epoch_id), &current_ledger);
+
+        emit_epoch_committed(&env, talos_id, epoch_id, total_amount, expiry_secs);
+
+        Ok(epoch_id)
+    }
+
+    /// Commit a new distribution epoch for `talos_id` with caller-bound idempotency.
+    ///
+    /// Binds an administrator-supplied `idempotency_key` to canonical `talos_id`,
+    /// `total_amount`, and `expiry_secs` parameters.
+    ///
+    /// - For an identical request from the same admin, returns the original `epoch_id`
+    ///   without creating a duplicate epoch or incrementing sequence numbers.
+    /// - For a conflicting request (same admin + key with different parameters), returns
+    ///   [`ContractError::IdempotencyConflict`].
+    /// - Different administrators using the same key operate in isolated namespaces.
+    ///
+    /// # Authorization
+    /// Requires the configured admin to sign the transaction.
+    ///
+    /// # Panics / Errors
+    /// - [`ContractError::Unauthorized`]        — caller is not admin.
+    /// - [`ContractError::InvalidEpochParams`]  — `total_amount` or `expiry_secs` out of bounds.
+    /// - [`ContractError::IdempotencyConflict`] — key was previously used with different parameters.
+    pub fn commit_epoch_idempotent(
+        env: Env,
+        admin: Address,
+        idempotency_key: BytesN<32>,
+        talos_id: u32,
+        total_amount: i128,
+        expiry_secs: u64,
+    ) -> Result<u64, ContractError> {
+        require_admin(&env, &admin)?;
+
+        let idemp_key = DataKey::Idempotency(admin.clone(), idempotency_key);
+        if let Some(record) = env.storage().persistent().get::<_, IdempotencyRecord>(&idemp_key) {
+            if record.talos_id == talos_id
+                && record.total_amount == total_amount
+                && record.expiry_secs == expiry_secs
+            {
+                return Ok(record.epoch_id);
+            } else {
+                return Err(ContractError::IdempotencyConflict);
+            }
+        }
+
+        if total_amount < MIN_EPOCH_AMOUNT {
+            return Err(ContractError::InvalidEpochParams);
+        }
+        if expiry_secs < MIN_EXPIRY_SECS || expiry_secs > MAX_EXPIRY_SECS {
+            return Err(ContractError::InvalidEpochParams);
+        }
+
+        let epoch_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextEpochId(talos_id))
+            .unwrap_or(1u64);
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Epoch(talos_id, epoch_id))
+        {
+            return Err(ContractError::EpochAlreadyExists);
+        }
+
+        let record = EpochRecord {
+            epoch_id,
+            talos_id,
+            total_amount,
+            claimed_amount: 0,
+            created_at: env.ledger().timestamp(),
+            expiry_secs,
+            status: EpochStatus::Active,
+        };
+
+        let current_ledger = env.ledger().sequence();
+        env.storage()
+            .persistent()
+            .set(&DataKey::Epoch(talos_id, epoch_id), &record);
+        env.storage()
+            .persistent()
+            .set(&DataKey::NextEpochId(talos_id), &(epoch_id + 1));
+        env.storage()
+            .persistent()
+            .set(&DataKey::LastTouched(talos_id, epoch_id), &current_ledger);
+
+        let idemp_record = IdempotencyRecord {
+            epoch_id,
+            talos_id,
+            total_amount,
+            expiry_secs,
+        };
+        env.storage().persistent().set(&idemp_key, &idemp_record);
 
         emit_epoch_committed(&env, talos_id, epoch_id, total_amount, expiry_secs);
 
@@ -1587,6 +1684,223 @@ mod tests {
             }])
             .try_commit_epoch(&impostor, &1u32, &1_000_i128, &7_200_u64);
         assert_eq!(res, Err(Ok(ContractError::Unauthorized)));
+    }
+
+    // ── commit_epoch_idempotent() ─────────────────────────────────────────────
+
+    #[test]
+    fn commit_epoch_idempotent_creates_epoch_and_replays_cleanly() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let total_amount = 50_000_i128;
+        let expiry_secs = 7_200_u64;
+        let key = BytesN::from_array(&env, &[42u8; 32]);
+
+        // First call creates the epoch
+        let res1 = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch_idempotent",
+                    args: (admin.clone(), key.clone(), talos_id, total_amount, expiry_secs).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .commit_epoch_idempotent(&admin, &key, &talos_id, &total_amount, &expiry_secs);
+        assert_eq!(res1, 1u64);
+        assert_eq!(client.next_epoch_id(&talos_id), 2u64);
+
+        let rec = client.get_epoch(&talos_id, &res1).expect("epoch record exists");
+        assert_eq!(rec.epoch_id, 1u64);
+        assert_eq!(rec.total_amount, total_amount);
+        assert_eq!(rec.expiry_secs, expiry_secs);
+        assert_eq!(rec.status, EpochStatus::Active);
+
+        // Identical replay returns original epoch_id without creating a new epoch or incrementing next_epoch_id
+        let res2 = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch_idempotent",
+                    args: (admin.clone(), key.clone(), talos_id, total_amount, expiry_secs).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .commit_epoch_idempotent(&admin, &key, &talos_id, &total_amount, &expiry_secs);
+        assert_eq!(res2, 1u64);
+        assert_eq!(client.next_epoch_id(&talos_id), 2u64);
+    }
+
+    #[test]
+    fn commit_epoch_idempotent_rejects_conflicting_key_reuse() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let total_amount = 50_000_i128;
+        let expiry_secs = 7_200_u64;
+        let key = BytesN::from_array(&env, &[7u8; 32]);
+
+        // Commit first with canonical params
+        let epoch_id = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch_idempotent",
+                    args: (admin.clone(), key.clone(), talos_id, total_amount, expiry_secs).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .commit_epoch_idempotent(&admin, &key, &talos_id, &total_amount, &expiry_secs);
+        assert_eq!(epoch_id, 1u64);
+
+        // 1. Conflict on talos_id
+        let res_talos_conflict = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch_idempotent",
+                    args: (admin.clone(), key.clone(), 2u32, total_amount, expiry_secs).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_commit_epoch_idempotent(&admin, &key, &2u32, &total_amount, &expiry_secs);
+        assert_eq!(res_talos_conflict, Err(Ok(ContractError::IdempotencyConflict)));
+
+        // 2. Conflict on total_amount
+        let res_amount_conflict = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch_idempotent",
+                    args: (admin.clone(), key.clone(), talos_id, total_amount + 1, expiry_secs).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_commit_epoch_idempotent(&admin, &key, &talos_id, &(total_amount + 1), &expiry_secs);
+        assert_eq!(res_amount_conflict, Err(Ok(ContractError::IdempotencyConflict)));
+
+        // 3. Conflict on expiry_secs
+        let res_expiry_conflict = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch_idempotent",
+                    args: (admin.clone(), key.clone(), talos_id, total_amount, expiry_secs + 100).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_commit_epoch_idempotent(&admin, &key, &talos_id, &total_amount, &(expiry_secs + 100));
+        assert_eq!(res_expiry_conflict, Err(Ok(ContractError::IdempotencyConflict)));
+    }
+
+    #[test]
+    fn commit_epoch_idempotent_caller_isolation() {
+        let (env, contract_id, admin1, _, client) = setup();
+        let talos_id = 1u32;
+        let total_amount = 20_000_i128;
+        let expiry_secs = 7_200_u64;
+        let key = BytesN::from_array(&env, &[99u8; 32]);
+
+        // admin1 commits an epoch with `key`
+        let id1 = client
+            .mock_auths(&[MockAuth {
+                address: &admin1,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch_idempotent",
+                    args: (admin1.clone(), key.clone(), talos_id, total_amount, expiry_secs).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .commit_epoch_idempotent(&admin1, &key, &talos_id, &total_amount, &expiry_secs);
+        assert_eq!(id1, 1u64);
+
+        // Rotate admin to admin2
+        let admin2 = Address::generate(&env);
+        mock_propose(&env, &client, &contract_id, &admin1, &admin2);
+        mock_accept(&env, &client, &contract_id, &admin2);
+
+        // admin2 using the same key creates a distinct epoch in its own caller namespace
+        let id2 = client
+            .mock_auths(&[MockAuth {
+                address: &admin2,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch_idempotent",
+                    args: (admin2.clone(), key.clone(), talos_id, 30_000_i128, 8_000_u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .commit_epoch_idempotent(&admin2, &key, &talos_id, &30_000_i128, &8_000_u64);
+        assert_eq!(id2, 2u64);
+    }
+
+    #[test]
+    fn commit_epoch_idempotent_validates_bounds_and_auth() {
+        let (env, contract_id, admin, _, client) = setup();
+        let key = BytesN::from_array(&env, &[123u8; 32]);
+        let impostor = Address::generate(&env);
+
+        // Unauthorized caller
+        let res_unauth = client
+            .mock_auths(&[MockAuth {
+                address: &impostor,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch_idempotent",
+                    args: (impostor.clone(), key.clone(), 1u32, 10_000_i128, 7_200_u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_commit_epoch_idempotent(&impostor, &key, &1u32, &10_000_i128, &7_200_u64);
+        assert_eq!(res_unauth, Err(Ok(ContractError::Unauthorized)));
+
+        // Zero amount rejected
+        let res_zero = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch_idempotent",
+                    args: (admin.clone(), key.clone(), 1u32, 0_i128, 7_200_u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_commit_epoch_idempotent(&admin, &key, &1u32, &0_i128, &7_200_u64);
+        assert_eq!(res_zero, Err(Ok(ContractError::InvalidEpochParams)));
+
+        // Expiry too short
+        let res_short = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch_idempotent",
+                    args: (admin.clone(), key.clone(), 1u32, 10_000_i128, 3_599_u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_commit_epoch_idempotent(&admin, &key, &1u32, &10_000_i128, &3_599_u64);
+        assert_eq!(res_short, Err(Ok(ContractError::InvalidEpochParams)));
+
+        // Expiry too long
+        let res_long = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch_idempotent",
+                    args: (admin.clone(), key.clone(), 1u32, 10_000_i128, 31_536_001_u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_commit_epoch_idempotent(&admin, &key, &1u32, &10_000_i128, &31_536_001_u64);
+        assert_eq!(res_long, Err(Ok(ContractError::InvalidEpochParams)));
     }
 
     #[test]
