@@ -125,3 +125,88 @@ export function buildMarketplaceOrderBy<TField extends string>(
   const order = sort.direction === "asc" ? asc : desc;
   return [order(columns[sort.field]), desc(idColumn)];
 }
+
+// ---------------------------------------------------------------------------
+// Directory (GET /api/talos) — sort fields and filter validators
+// ---------------------------------------------------------------------------
+
+/** Allowed sort fields for the Talos directory endpoint. */
+export const DIRECTORY_SORT_FIELDS = ["createdAt", "name"] as const;
+export type DirectorySortField = (typeof DIRECTORY_SORT_FIELDS)[number];
+
+/**
+ * Valid `status` filter values for the Talos directory.
+ * "Deleted" is intentionally excluded from the public-facing filter set.
+ */
+export const DIRECTORY_STATUS_FILTER = ["Active", "Retired"] as const;
+export type DirectoryStatusFilter = (typeof DIRECTORY_STATUS_FILTER)[number];
+
+/**
+ * Parse and validate the `status` filter for the talos directory.
+ *
+ * - Absent (`null`) → `{ ok: true, status: null }` (no filter applied)
+ * - Empty string  → 400
+ * - Unknown value → 400
+ * - Valid value   → `{ ok: true, status: <value> }`
+ */
+export function parseDirectoryStatusFilter(
+  raw: string | null,
+): { ok: true; status: DirectoryStatusFilter | null } | { ok: false; response: Response } {
+  if (raw === null) return { ok: true, status: null };
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return {
+      ok: false,
+      response: Response.json(
+        { error: "status must be a non-empty string" },
+        { status: 400 },
+      ),
+    };
+  }
+  if (!DIRECTORY_STATUS_FILTER.includes(trimmed as DirectoryStatusFilter)) {
+    return {
+      ok: false,
+      response: Response.json(
+        {
+          error: `Invalid status filter. Supported values: ${DIRECTORY_STATUS_FILTER.join(", ")}`,
+        },
+        { status: 400 },
+      ),
+    };
+  }
+  return { ok: true, status: trimmed as DirectoryStatusFilter };
+}
+
+/**
+ * Parse and validate the `category` filter for the talos directory.
+ *
+ * - Absent (`null`) → `{ ok: true, category: null }` (no filter applied)
+ * - Empty string   → 400
+ * - > 128 chars    → 400
+ * - Valid string   → `{ ok: true, category: <trimmed> }`
+ */
+export function parseDirectoryCategoryFilter(
+  raw: string | null,
+): { ok: true; category: string | null } | { ok: false; response: Response } {
+  if (raw === null) return { ok: true, category: null };
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return {
+      ok: false,
+      response: Response.json(
+        { error: "category must be a non-empty string" },
+        { status: 400 },
+      ),
+    };
+  }
+  if (trimmed.length > 128) {
+    return {
+      ok: false,
+      response: Response.json(
+        { error: "category must be 128 characters or fewer" },
+        { status: 400 },
+      ),
+    };
+  }
+  return { ok: true, category: trimmed };
+}
