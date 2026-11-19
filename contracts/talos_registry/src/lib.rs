@@ -185,6 +185,7 @@ pub enum DataKey {
     PauseState(PauseDomain),
     PauseController(u32),
     ResumeController(u32),
+    TalosRevision(u32), // talos_id → metadata revision counter (u32)
 }
 
 // ── Events ──────────────────────────────────────────────────────────
@@ -330,6 +331,31 @@ fn emit_talos_paused(env: &Env, talos_id: u32, controller: Address) {
 fn emit_talos_resumed(env: &Env, talos_id: u32, controller: Address) {
     let topics = (symbol_short!("tls_resu"), talos_id);
     env.events().publish(topics, controller);
+}
+
+/// Emitted after every successful metadata mutation (update_patron, update_kernel,
+/// update_pulse). Binds the change to its predecessor revision so off-chain
+/// indexers can order edits without duplicating private state.
+///
+/// Event schema: topics (`meta_rev`, talos_id: u32) → data (prev_revision: u32, new_revision: u32)
+fn emit_metadata_revised(env: &Env, talos_id: u32, prev_revision: u32, new_revision: u32) {
+    let topics = (symbol_short!("meta_rev"), talos_id);
+    env.events().publish(topics, (prev_revision, new_revision));
+}
+
+/// Increment the per-talos revision counter and return (prev, new).
+/// Starts at 0 implicitly; first call returns (0, 1).
+fn increment_talos_revision(e: &Env, talos_id: u32) -> (u32, u32) {
+    let prev: u32 = e
+        .storage()
+        .persistent()
+        .get(&DataKey::TalosRevision(talos_id))
+        .unwrap_or(0);
+    let next = prev + 1;
+    e.storage()
+        .persistent()
+        .set(&DataKey::TalosRevision(talos_id), &next);
+    (prev, next)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -621,12 +647,32 @@ impl TalosRegistry {
             talos.category.clone(),
         );
 
+        // Initialise revision to 1 for this talos.
+        e.storage()
+            .persistent()
+            .set(&DataKey::TalosRevision(next_id), &1u32);
+
         next_id
     }
 
     /// Get Talos by ID.
     pub fn get_talos(e: Env, talos_id: u32) -> Option<Talos> {
         e.storage().persistent().get(&DataKey::Talos(talos_id))
+    }
+
+    /// Return the current metadata revision counter for a Talos.
+    ///
+    /// The revision starts at 1 when the Talos is created and increments by 1
+    /// on every successful call to `update_patron`, `update_kernel`, or
+    /// `update_pulse`. Off-chain indexers can compare the revision they cached
+    /// with the on-chain value to detect a stale metadata view without
+    /// fetching the full record.
+    ///
+    /// Returns `None` if the Talos does not exist.
+    pub fn get_talos_revision(e: Env, talos_id: u32) -> Option<u32> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::TalosRevision(talos_id))
     }
 
     /// Get the creator address of a Talos.
@@ -673,6 +719,9 @@ impl TalosRegistry {
             .set(&DataKey::Talos(talos_id), &talos);
 
         emit_patron_updated(&e, talos_id, &patron);
+
+        let (prev_rev, new_rev) = increment_talos_revision(&e, talos_id);
+        emit_metadata_revised(&e, talos_id, prev_rev, new_rev);
     }
 
     /// Update kernel policy for a Talos.
@@ -692,6 +741,9 @@ impl TalosRegistry {
         e.storage()
             .persistent()
             .set(&DataKey::Talos(talos_id), &talos);
+
+        let (prev_rev, new_rev) = increment_talos_revision(&e, talos_id);
+        emit_metadata_revised(&e, talos_id, prev_rev, new_rev);
     }
 
     /// Update pulse token config for a Talos.
@@ -713,6 +765,9 @@ impl TalosRegistry {
         e.storage()
             .persistent()
             .set(&DataKey::Talos(talos_id), &talos);
+
+        let (prev_rev, new_rev) = increment_talos_revision(&e, talos_id);
+        emit_metadata_revised(&e, talos_id, prev_rev, new_rev);
     }
 
     /// Deactivate a Talos.
@@ -5729,5 +5784,188 @@ mod tests {
 
         // Attempting update_kernel on a deactivated talos without auth must fail
         assert!(client.try_update_kernel(&id, &kernel()).is_err());
+    }
+
+    // ── get_talos_revision / meta_rev event tests (#1382) ────────────
+
+    #[test]
+    fn revision_starts_at_one_after_create() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        assert_eq!(
+            client.get_talos_revision(&id),
+            Some(1u32),
+            "revision must be 1 immediately after create_talos"
+        );
+    }
+
+    #[test]
+    fn revision_returns_none_for_nonexistent_talos() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let protocol_wallet = Address::generate(&env);
+        client.initialize(&protocol_wallet);
+
+        assert_eq!(
+            client.get_talos_revision(&99u32),
+            None,
+            "revision must be None for a talos_id that was never created"
+        );
+    }
+
+    #[test]
+    fn revision_increments_on_patron_update() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+        assert_eq!(client.get_talos_revision(&id), Some(1u32));
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_patron",
+                    args: (id, patron(&env, &creator)).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_patron(&id, &patron(&env, &creator));
+
+        assert_eq!(
+            client.get_talos_revision(&id),
+            Some(2u32),
+            "revision must be 2 after one patron update"
+        );
+    }
+
+    #[test]
+    fn revision_increments_on_kernel_update() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_kernel",
+                    args: (id, kernel()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_kernel(&id, &kernel());
+
+        assert_eq!(
+            client.get_talos_revision(&id),
+            Some(2u32),
+            "revision must be 2 after one kernel update"
+        );
+    }
+
+    #[test]
+    fn revision_increments_on_pulse_update() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_pulse",
+                    args: (id, pulse(&env)).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_pulse(&id, &pulse(&env));
+
+        assert_eq!(
+            client.get_talos_revision(&id),
+            Some(2u32),
+            "revision must be 2 after one pulse update"
+        );
+    }
+
+    #[test]
+    fn meta_rev_event_emitted_with_correct_revisions() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        // Clear events accumulated during setup.
+        let _ = env.events().all();
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "update_patron",
+                    args: (id, patron(&env, &creator)).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .update_patron(&id, &patron(&env, &creator));
+
+        let all_events = env.events().all();
+        let meta_rev = all_events.iter().find(|(_, topics, _)| {
+            if let Ok(sym) = Symbol::try_from_val(&env, &topics.get(0).unwrap()) {
+                sym == Symbol::new(&env, "meta_rev")
+            } else {
+                false
+            }
+        });
+        assert!(meta_rev.is_some(), "meta_rev event must be emitted on update_patron");
+
+        let (_, _, data) = meta_rev.unwrap();
+        let (prev, next) = <(u32, u32)>::try_from_val(&env, &data)
+            .expect("meta_rev data must decode as (u32, u32)");
+        assert_eq!(prev, 1u32, "prev_revision in meta_rev must be 1 (set at create)");
+        assert_eq!(next, 2u32, "new_revision in meta_rev must be 2 after first update");
+    }
+
+    #[test]
+    fn revision_accumulates_across_multiple_updates() {
+        let (env, contract_id) = setup();
+        let client = TalosRegistryClient::new(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+
+        let id = create_talos_with_auth(&env, &client, &contract_id, &creator, &protocol_wallet);
+
+        for expected in 2u32..=4u32 {
+            client
+                .mock_auths(&[MockAuth {
+                    address: &creator,
+                    invoke: &MockAuthInvoke {
+                        contract: &contract_id,
+                        fn_name: "update_kernel",
+                        args: (id, kernel()).into_val(&env),
+                        sub_invokes: &[],
+                    },
+                }])
+                .update_kernel(&id, &kernel());
+            assert_eq!(client.get_talos_revision(&id), Some(expected));
+        }
     }
 }
