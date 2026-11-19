@@ -16,13 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 from typing import TYPE_CHECKING
 
 import structlog
 from rich.console import Console
 
-from talos_agent import metrics
 from talos_agent.circuit_breaker import cb_registry
 from talos_agent.observability import log
 from talos_agent.scheduler.backoff import DurableBackoff
@@ -36,6 +34,21 @@ if TYPE_CHECKING:
 
 console = Console()
 logger = logging.getLogger(__name__)
+
+
+def _reserve_execution(db, task_name: str) -> dict | None:
+    """Reserve durable identity before a task performs external work."""
+    execution = db.reserve_task_execution(task_name)
+    if execution is None:
+        logger.warning(
+            "scheduler_execution_uncertain",
+            extra={"task_name": task_name},
+        )
+    return execution
+
+
+def _finish_execution(db, execution: dict, status: str) -> None:
+    db.finish_task_execution(execution["execution_id"], status)
 
 
 # ── Shared span helper ─────────────────────────────────────────────────────────
@@ -82,13 +95,15 @@ async def agent_cycle_task(
     """Run agent loop every ``settings.agent_cycle_interval`` seconds."""
     from talos_agent.agent.context import AgentContext
     from talos_agent.agent.loop import agent_loop
-    from talos_agent.agent.prompt import build_learning_prompt
 
     while not shutdown_event.is_set():
         async with agent_lock:
             if shutdown_event.is_set():
                 break
-            cycle_id = str(uuid.uuid4())
+            execution = _reserve_execution(db, "agent_cycle")
+            if execution is None:
+                return
+            cycle_id = execution["execution_id"]
             structlog.contextvars.bind_contextvars(cycle_id=cycle_id)
             api.set_request_id(cycle_id)
             try:
@@ -142,6 +157,7 @@ async def agent_cycle_task(
                     )
 
                     db.update_schedule("agent_cycle")
+                    _finish_execution(db, execution, "succeeded")
 
                     # ── Record completion ────────────────────────────────
                     if replay_recorder is not None:
@@ -152,7 +168,11 @@ async def agent_cycle_task(
                         db.finish_replay_session(cycle_id, status="completed")
 
                     log.info("agent_cycle_complete", cycle_id=cycle_id)
+            except asyncio.CancelledError:
+                _finish_execution(db, execution, "uncertain")
+                raise
             except Exception as e:
+                _finish_execution(db, execution, "uncertain")
                 console.print(f"[red]Agent cycle error: {e}[/red]")
                 log.error("agent_cycle_error", error=str(e), cycle_id=cycle_id)
 
@@ -504,15 +524,32 @@ async def dividend_distribution_task(
                         pass
                     continue
 
-            with _traced_task_run("dividend_distribution", talos_config):
-                result = await run_dividend_distribution(
-                    talos_id=settings.talos_id,
-                    talos_config=talos_config,
-                    settings=settings,
-                    stellar=stellar,
-                    api=api,
-                    db=db,
-                )
+            execution = _reserve_execution(db, "dividend_distribution")
+            if execution is None:
+                result = "uncertain"
+            else:
+                try:
+                    with _traced_task_run("dividend_distribution", talos_config):
+                        result = await run_dividend_distribution(
+                            talos_id=settings.talos_id,
+                            talos_config=talos_config,
+                            settings=settings,
+                            stellar=stellar,
+                            api=api,
+                            db=db,
+                            execution_id=execution["execution_id"],
+                        )
+                    _finish_execution(
+                        db,
+                        execution,
+                        "succeeded" if result == "success" else "retryable",
+                    )
+                except asyncio.CancelledError:
+                    _finish_execution(db, execution, "uncertain")
+                    raise
+                except Exception:
+                    _finish_execution(db, execution, "uncertain")
+                    raise
 
             _RESULT_MESSAGES = {
                 "no_wallet": ("[dim yellow]", "No wallet public key configured — skipping dividend distribution"),
@@ -565,19 +602,27 @@ async def loan_repayment_task(
         async with agent_lock:
             if shutdown_event.is_set():
                 break
-            try:
-                with _traced_task_run("loan_repayment", talos_config):
-                    result = await run_loan_repayment(
-                        settings=settings,
-                        stellar_kit=stellar_kit,
-                        api=api,
-                        db=db,
+            execution = _reserve_execution(db, "loan_repayment")
+            if execution is not None:
+                try:
+                    with _traced_task_run("loan_repayment", talos_config):
+                        result = await run_loan_repayment(
+                            settings=settings,
+                            stellar_kit=stellar_kit,
+                            api=api,
+                            db=db,
+                            execution_id=execution["execution_id"],
+                        )
+                    _finish_execution(db, execution, "succeeded")
+                    console.print(
+                        f"[bold cyan]Loan repayment cycle complete: {result}[/bold cyan]"
                     )
-                console.print(
-                    f"[bold cyan]Loan repayment cycle complete: {result}[/bold cyan]"
-                )
-            except Exception as e:
-                console.print(f"[red]Loan repayment cycle error: {e}[/red]")
+                except asyncio.CancelledError:
+                    _finish_execution(db, execution, "uncertain")
+                    raise
+                except Exception as e:
+                    _finish_execution(db, execution, "uncertain")
+                    console.print(f"[red]Loan repayment cycle error: {e}[/red]")
         try:
             await asyncio.wait_for(shutdown_event.wait(), timeout=repayment_interval)
             break

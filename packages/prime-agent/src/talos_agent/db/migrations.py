@@ -532,6 +532,24 @@ CREATE INDEX IF NOT EXISTS idx_cycle_summaries_talos_id
     ON cycle_summaries(talos_id, created_at DESC);
         """,
     ),
+    (
+        14,
+        """
+CREATE TABLE IF NOT EXISTS task_executions (
+    execution_id TEXT PRIMARY KEY,
+    task_name    TEXT NOT NULL,
+    status       TEXT NOT NULL CHECK (
+        status IN ('reserved', 'succeeded', 'retryable', 'uncertain')
+    ),
+    owner_id     TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_executions_task_status
+    ON task_executions(task_name, status, created_at DESC);
+        """,
+    ),
 ]
 
 
