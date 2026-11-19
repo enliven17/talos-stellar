@@ -908,6 +908,27 @@ export const tlsJobs = pgTable(
   ],
 );
 
+export const tlsJobAttempts = pgTable(
+  "tls_job_attempts",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    jobId: text("jobId").notNull().references(() => tlsJobs.id, { onDelete: "cascade" }),
+    attemptNumber: integer("attemptNumber").notNull(),
+    workerId: text("workerId"),
+    leaseId: text("leaseId"),
+    startedAt: timestamp("startedAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    completedAt: timestamp("completedAt", { mode: "date", precision: 3 }),
+    durationMs: integer("durationMs"),
+    terminalReason: text("terminalReason").notNull(),
+    error: text("error"),
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tls_job_attempts_jobId_idx").on(t.jobId),
+    index("tls_job_attempts_job_attempt_idx").on(t.jobId, t.attemptNumber),
+  ],
+);
+
 // ─── Transactional Outbox (Domain Events) ──────────────────────────
 //
 // Written atomically (same db.transaction) alongside the domain mutation
