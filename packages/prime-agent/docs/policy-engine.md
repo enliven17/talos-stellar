@@ -179,13 +179,17 @@ The engine exposes counters via `engine.metrics`:
 
 Every evaluation result includes a SHA-256 `result_digest` for audit trails.
 
+## Multi-agent mode
+
+In multi-agent mode (`run_multi`) each agent gets its own policy engine and its
+own tool registry, so one agent's policy never governs another's. See
+[multi-agent-isolation.md](multi-agent-isolation.md).
+
 ## Known limitations
 
 - Conditions compare a parameter value against a **static** threshold in the
   policy definition.  Dynamic comparisons (e.g. "amount > context.approval_threshold")
   are not yet supported at the condition level — use the inline tool checks for
   those cases, or set explicit values in the policy.
-- Multi-agent mode (`run_multi`) creates a separate engine per agent but the
-  tool registry's `_middleware` is set once at build time.
 - Policy evaluation is synchronous and runs in the tool execution path —
   keep conditions simple and avoid regex on large payloads.

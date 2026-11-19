@@ -144,6 +144,35 @@ const sampleQuote = sdk.constructSellerQuote({
 assert.equal(sampleQuote.amount, "1.000000");
 console.log("  + constructSellerQuote helper OK");
 
+// Typed contract event decoding
+assert.equal(typeof sdk.decodeContractEvent, "function");
+assert.equal(typeof sdk.decodeContractEvents, "function");
+assert.equal(typeof sdk.isContractEvent, "function");
+assert.equal(typeof sdk.isContractEventFamily, "function");
+assert.equal(typeof sdk.compareEventCursors, "function");
+assert.equal(typeof sdk.ContractEventError, "function");
+assert.equal(typeof sdk.UnknownContractEventError, "function");
+assert.equal(typeof sdk.MalformedContractEventError, "function");
+assert.equal(typeof sdk.UnsupportedContractVersionError, "function");
+assert.ok(sdk.BUILTIN_EVENT_CATALOG);
+assert.equal(typeof sdk.CATALOG_SPEC_VERSION, "string");
+const sampleDecoded = sdk.decodeContractEvent({
+  contract: "talos_registry",
+  topics: [
+    { type: "symbol", value: "tls_crt" },
+    { type: "address", value: "GDC2TFRPZ3SJJYE2GDOIVHVGU3J7RZ7WCDIGKNZC4OY4CCIY7JK5JGYZ" },
+  ],
+  data: [
+    { type: "u32", value: 1 },
+    { type: "string", value: "Genesis" },
+    { type: "string", value: "Marketing" },
+  ],
+  ledger_sequence: 100000,
+});
+assert.equal(sampleDecoded.event, "tls_crt");
+assert.equal(sampleDecoded.family, "creation");
+console.log("  + decodeContractEvent check OK");
+
 const signingVectors = JSON.parse(fs.readFileSync(path.join(SDK_ROOT, "tests", "fixtures", "request-signing-vectors.json"), "utf8"));
 Promise.all(signingVectors.vectors.map(async (vector) => {
   const bytes = await sdk.canonicalizeRequest(vector.request);

@@ -1,21 +1,23 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsApiKeys } from "@/db/schema";
 import { eq } from "drizzle-orm";
-import { verifyAgentApiKey, generateApiKey } from "@/lib/auth";
+import { generateApiKey } from "@/lib/auth";
+import { authorizeApiKeyManagement } from "@/lib/api-key-owner-auth";
 import { parseBody } from "@/lib/schemas";
 import { createApiKeySchema } from "@/lib/schemas";
 
 // GET /api/talos/:id/api-keys — List all keys (metadata only, no hashes)
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   try {
-    const auth = await verifyAgentApiKey(request, id, ["admin"]);
-    if (!auth.ok) return auth.response;
+    const authorizationError = await authorizeApiKeyManagement(request, id);
+    if (authorizationError) return authorizationError;
 
     const keys = await db
       .select({
@@ -39,15 +41,15 @@ export async function GET(
 
 // POST /api/talos/:id/api-keys — Create a new scoped key
 // Returns the raw key ONCE. It cannot be retrieved again.
-export async function POST(
+async function _POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   try {
-    const auth = await verifyAgentApiKey(request, id, ["admin"]);
-    if (!auth.ok) return auth.response;
+    const authorizationError = await authorizeApiKeyManagement(request, id);
+    if (authorizationError) return authorizationError;
 
     const parsed = await parseBody(request, createApiKeySchema);
     if (parsed.error) return parsed.error;
@@ -82,3 +84,6 @@ export async function POST(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withRequestId(_GET);
+export const POST = withRequestId(_POST);

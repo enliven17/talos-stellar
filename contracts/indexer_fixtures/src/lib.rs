@@ -521,6 +521,50 @@ pub fn ttl_batch_fixture(total: u32, touched: u32, skipped: u32) -> TtlBatchEven
     TtlBatchEvent { total, touched, skipped }
 }
 
+// ── Budget gate typed event (#610) ──────────────────────────────────
+//
+// `bgt_gate` — emitted (test-only, never in production WASM) when a budget
+// regression gate fires, recording which entry-point was measured and the
+// two resource dimensions that were captured.
+//
+// | Symbol     | Topics                          | Data                                         |
+// |------------|---------------------------------|----------------------------------------------|
+// | `bgt_gate` | `(symbol, contract: String)`    | `(entry_point: String, cpu: u64, mem: u64)`  |
+//
+// The struct is `#[contracttype]` so it can round-trip through the Soroban
+// XDR codec in the same way as every other event struct in this crate.
+// It is intentionally NOT emitted by the production contract code — budget
+// gates live exclusively in `#[cfg(test)]` modules.  The struct lives here so
+// off-chain test tooling (indexer CI, property tests) has a single typed
+// representation to decode if it ever wants to parse gate failures from
+// diagnostic-event streams.
+
+/// `bgt_gate` — records one budget gate measurement.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BudgetGateEvent {
+    /// Short name of the entry-point that was measured (e.g. `"create_talos"`).
+    pub entry_point: String,
+    /// CPU instruction cost reported by `env.budget().cpu_instruction_cost()`.
+    pub cpu_cost: u64,
+    /// Memory byte cost reported by `env.budget().memory_bytes_cost()`.
+    pub mem_cost: u64,
+}
+
+/// Construct a canonical `BudgetGateEvent` fixture for test assertions.
+pub fn budget_gate_fixture(
+    env: &Env,
+    entry_point: &str,
+    cpu_cost: u64,
+    mem_cost: u64,
+) -> BudgetGateEvent {
+    BudgetGateEvent {
+        entry_point: String::from_str(env, entry_point),
+        cpu_cost,
+        mem_cost,
+    }
+}
+
 // ── Round-trip tests ────────────────────────────────────────────────
 //
 // These tests exercise the full emit → capture → decode pipeline.
@@ -1611,5 +1655,52 @@ mod tests {
         let addr = Address::generate(&env);
         let f = proposal_created_fixture(1, 0, addr);
         assert_eq!(f.talos_id, 0);
+    }
+
+    // ── BudgetGateEvent fixture tests (#610) ─────────────────────────────
+
+    /// `budget_gate_fixture` produces a struct with the correct fields.
+    #[test]
+    fn fixture_budget_gate_basic_fields() {
+        let env = Env::default();
+        let f = budget_gate_fixture(&env, "create_talos", 512_000, 98_304);
+        assert_eq!(f.cpu_cost, 512_000);
+        assert_eq!(f.mem_cost, 98_304);
+        assert_eq!(f.entry_point, soroban_sdk::String::from_str(&env, "create_talos"));
+    }
+
+    /// Two fixtures with different entry-points must not be equal.
+    #[test]
+    fn fixture_budget_gate_different_entry_points_not_equal() {
+        let env = Env::default();
+        let a = budget_gate_fixture(&env, "create_talos",   500_000, 90_000);
+        let b = budget_gate_fixture(&env, "register_name",  500_000, 90_000);
+        assert_ne!(a, b);
+    }
+
+    /// Boundary: zero costs are valid (no-op / initialization paths).
+    #[test]
+    fn fixture_budget_gate_zero_costs_boundary() {
+        let env = Env::default();
+        let f = budget_gate_fixture(&env, "version", 0, 0);
+        assert_eq!(f.cpu_cost, 0);
+        assert_eq!(f.mem_cost, 0);
+    }
+
+    /// Boundary: u64::MAX costs must not cause overflow in the struct.
+    #[test]
+    fn fixture_budget_gate_max_costs_boundary() {
+        let env = Env::default();
+        let f = budget_gate_fixture(&env, "worst_case", u64::MAX, u64::MAX);
+        assert_eq!(f.cpu_cost, u64::MAX);
+        assert_eq!(f.mem_cost, u64::MAX);
+    }
+
+    /// Fixture equality is symmetric and reflexive.
+    #[test]
+    fn fixture_budget_gate_equality_is_reflexive() {
+        let env = Env::default();
+        let f = budget_gate_fixture(&env, "commit_epoch", 600_000, 100_000);
+        assert_eq!(f.clone(), f);
     }
 }
