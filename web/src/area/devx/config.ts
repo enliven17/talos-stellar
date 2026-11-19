@@ -10,9 +10,20 @@ const DEFAULTS: BenchmarkConfig = {
   varianceThreshold: 0.15,
   memoryThresholdMb: 512,
   cpuThresholdPercent: 80,
+  performanceBudgetMs: 5_000,
+  p99ThresholdMs: 10_000,
   artifactDir: process.env.BENCHMARK_ARTIFACT_DIR ?? ".benchmarks",
   trendWindow: 10,
 };
+
+function parsePositiveFiniteNumber(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw === "") {
+    return fallback;
+  }
+
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
 
 export function loadConfig(overrides?: Partial<BenchmarkConfig>): BenchmarkConfig {
   const env: Partial<BenchmarkConfig> = {};
@@ -25,6 +36,12 @@ export function loadConfig(overrides?: Partial<BenchmarkConfig>): BenchmarkConfi
   if (process.env.BENCHMARK_VARIANCE_THRESHOLD) env.varianceThreshold = Number(process.env.BENCHMARK_VARIANCE_THRESHOLD);
   if (process.env.BENCHMARK_MEMORY_THRESHOLD_MB) env.memoryThresholdMb = Number(process.env.BENCHMARK_MEMORY_THRESHOLD_MB);
   if (process.env.BENCHMARK_CPU_THRESHOLD_PCT) env.cpuThresholdPercent = Number(process.env.BENCHMARK_CPU_THRESHOLD_PCT);
+  if (process.env.BENCHMARK_PERFORMANCE_BUDGET_MS) {
+    env.performanceBudgetMs = parsePositiveFiniteNumber(process.env.BENCHMARK_PERFORMANCE_BUDGET_MS, DEFAULTS.performanceBudgetMs ?? 5_000);
+  }
+  if (process.env.BENCHMARK_P99_THRESHOLD_MS) {
+    env.p99ThresholdMs = parsePositiveFiniteNumber(process.env.BENCHMARK_P99_THRESHOLD_MS, DEFAULTS.p99ThresholdMs ?? 10_000);
+  }
   if (process.env.BENCHMARK_ARTIFACT_DIR) env.artifactDir = process.env.BENCHMARK_ARTIFACT_DIR;
   if (process.env.BENCHMARK_TREND_WINDOW) env.trendWindow = Number(process.env.BENCHMARK_TREND_WINDOW);
 

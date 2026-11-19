@@ -1,6 +1,7 @@
 "use client";
 
 import { useStellarWallet } from "./providers";
+import { useTranslation } from "@/lib/i18n";
 
 interface WalletGateProps {
   children: React.ReactNode;
@@ -10,17 +11,21 @@ interface WalletGateProps {
 
 export function WalletGate({
   children,
-  title = "Connect Wallet to Continue",
-  description = "This feature requires a connected Stellar wallet.",
+  title,
+  description,
 }: WalletGateProps) {
   const { isConnected, connect } = useStellarWallet();
+  const { t } = useTranslation();
+
+  const resolvedTitle = title ?? t("walletGate.defaultTitle");
+  const resolvedDescription = description ?? t("walletGate.defaultDescription");
 
   if (isConnected) return <>{children}</>;
 
   return (
     <div className="max-w-lg mx-auto px-6 py-32 text-center">
       <div className="bg-surface border border-border p-10">
-        <div className="text-muted text-xs mb-6 tracking-wider">[WALLET REQUIRED]</div>
+        <div className="text-muted text-xs mb-6 tracking-wider">{t("walletGate.badge")}</div>
         <div className="w-12 h-12 mx-auto mb-6 border border-border flex items-center justify-center">
           <svg
             width="24"
@@ -36,17 +41,17 @@ export function WalletGate({
             <path d="M18 12a2 2 0 0 0 0 4h4v-4h-4z" />
           </svg>
         </div>
-        <h2 className="text-lg font-bold text-accent mb-2">{title}</h2>
-        <p className="text-sm text-muted mb-8 leading-relaxed">{description}</p>
+        <h2 className="text-lg font-bold text-accent mb-2">{resolvedTitle}</h2>
+        <p className="text-sm text-muted mb-8 leading-relaxed">{resolvedDescription}</p>
         <button
           onClick={connect}
           data-testid="connect-wallet-button"
           className="bg-accent text-background px-8 py-2.5 text-sm font-medium hover:bg-foreground transition-colors"
         >
-          Connect Stellar Wallet
+          {t("walletGate.connectButton")}
         </button>
         <p className="text-xs text-muted mt-6">
-          Supports Freighter, Albedo, Hana, HOT, Klever, OneKey
+          {t("walletGate.supportedWallets")}
         </p>
       </div>
     </div>
@@ -54,13 +59,14 @@ export function WalletGate({
 }
 
 export function ConnectButton({
-  label = "Connect Wallet",
+  label,
   className = "",
 }: {
   label?: string;
   className?: string;
 }) {
   const { isConnected, connect } = useStellarWallet();
+  const { t } = useTranslation();
 
   if (isConnected) return null;
 
@@ -70,7 +76,7 @@ export function ConnectButton({
       data-testid="connect-wallet-button"
       className={`border border-border px-4 py-2 text-sm text-foreground hover:bg-surface-hover transition-colors ${className}`}
     >
-      {label}
+      {label ?? t("walletGate.defaultConnectLabel")}
     </button>
   );
 }

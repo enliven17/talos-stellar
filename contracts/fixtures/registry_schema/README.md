@@ -56,6 +56,9 @@ registry_schema/
     timelock_config_002.json
     name_forward_001.json
     governance_002.json
+  v3/                    // talos-registry v1.5.0 — metadata field on-chain, update_creator_metadata
+    talos_001_with_creator_metadata.json  // metadata: Some("ipfs://..."), name/category/desc updated
+    talos_002_no_metadata.json            // metadata key absent (None) — backwards compat check
   malformed/
     missing_required_field.json
     wrong_type_pulse_price.json
@@ -69,8 +72,8 @@ Each `supported` version parses against current `#[contracttype]` via `parse_*_f
 
 ## Acceptance criteria mapping
 
-- **Each supported version parses against current types:** `cargo test -p talos-registry registry_schema` iterates `v1/*.json` + `v2/*.json` and asserts `parse_talos_fixture(...).is_ok()` with field equality.
-- **Existing + additive fields covered:** `v1` has no `metadata`, `v2/talos_with_additive_metadata.json` has `"metadata":"ipfs://..."`. Parser maps missing → `None`, present → `Some`.
+- **Each supported version parses against current types:** `cargo test -p talos-registry registry_schema` iterates `v1/*.json` + `v2/*.json` + `v3/*.json` and asserts `parse_talos_fixture(...).is_ok()` with field equality.
+- **Existing + additive fields covered:** `v1` has no `metadata`, `v2/talos_with_additive_metadata.json` has `"metadata":"ipfs://..."`, `v3/talos_001_with_creator_metadata.json` has both updated fields and metadata set, `v3/talos_002_no_metadata.json` omits the key to test `None`. Parser maps missing → `None`, present → `Some`.
 - **Incompatible fixtures fail with actionable errors:** `malformed/*.json` tests assert `Err(FixtureError::MissingField(..) | TypeMismatch{field, expected})` with message containing file path + `regen: pnpm fixtures:regen`.
 - **Format + regeneration documented:** this README + `scripts/generate-registry-fixtures.mjs`.
 

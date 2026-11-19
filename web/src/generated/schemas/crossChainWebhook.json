@@ -1,3 +1,62 @@
 {
-  "type": "string"
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "jobId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "talosId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requesterTalosId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sourceChain": {
+      "type": "string",
+      "minLength": 1
+    },
+    "destinationChain": {
+      "default": "stellar",
+      "type": "string"
+    },
+    "paymentReference": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sourceTxHash": {
+      "type": "string",
+      "minLength": 1
+    },
+    "amount": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "currency": {
+      "default": "USDC",
+      "type": "string"
+    },
+    "simulatedVerified": {
+      "default": false,
+      "type": "boolean"
+    },
+    "payload": {
+      "default": {},
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {}
+    }
+  },
+  "required": [
+    "talosId",
+    "requesterTalosId",
+    "sourceChain",
+    "paymentReference",
+    "sourceTxHash",
+    "amount"
+  ]
 }
