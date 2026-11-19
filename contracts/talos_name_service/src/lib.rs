@@ -120,6 +120,7 @@ pub enum DataKey {
     NameFeeAmount,
     Guardians,
     PauseState(PauseDomain),
+    NameRevision(String), // name → revision counter (u32)
 }
 
 #[contracterror]
@@ -156,12 +157,17 @@ pub enum ContractError {
 //                                                  Payload of (maj, min, pat) only when
 //                                                  ids match but version is too old.
 
-fn emit_name_registered(env: &Env, talos_id: u32, name: String, owner: Address) {
+fn emit_name_registered(env: &Env, talos_id: u32, name: String, owner: Address, revision: u32) {
     let topics = (symbol_short!("name_reg"), talos_id);
     env.events().publish(topics, (name.clone(), owner.clone()));
 
     let topics2 = (symbol_short!("name_reg2"), talos_id);
-    env.events().publish(topics2, (1u32, name, owner));
+    env.events().publish(topics2, (1u32, name.clone(), owner.clone()));
+
+    // name_reg3: extends name_reg2 with the per-name revision counter so
+    // clients can detect a stale view without duplicating off-chain state.
+    let topics3 = (symbol_short!("name_reg3"), talos_id);
+    env.events().publish(topics3, (1u32, name, owner, revision));
 }
 
 fn emit_registry_updated(env: &Env, old_registry: Address, new_registry: Address) {
@@ -607,7 +613,18 @@ impl TalosNameService {
             .persistent()
             .set(&DataKey::TalosName(talos_id), &name);
 
-        emit_name_registered(&e, talos_id, name, owner);
+        // Increment the per-name revision counter.
+        let prev_rev: u32 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::NameRevision(name.clone()))
+            .unwrap_or(0);
+        let new_rev = prev_rev + 1;
+        e.storage()
+            .persistent()
+            .set(&DataKey::NameRevision(name.clone()), &new_rev);
+
+        emit_name_registered(&e, talos_id, name, owner, new_rev);
     }
 
     pub fn initialize(e: Env, registry_id: Address, admin: Address, name_fee: i128) {
@@ -1169,6 +1186,20 @@ impl TalosNameService {
             .persistent()
             .get::<_, String>(&DataKey::TalosName(talos_id))
             .is_some()
+    }
+
+    /// Return the current revision counter for a registered name.
+    ///
+    /// The revision starts at 1 on first registration and increments by 1
+    /// on each successful re-registration of that name. Clients can store
+    /// the revision alongside a cached name record and re-fetch only when
+    /// the counter has advanced, avoiding redundant reads.
+    ///
+    /// Returns `None` if the name has never been registered.
+    pub fn get_name_revision(e: Env, name: String) -> Option<u32> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::NameRevision(name))
     }
 
     // ── Storage TTL Management ───────────────────────────────────
@@ -4244,5 +4275,123 @@ mod tests {
         assert_eq!(client.name_of(&talos_id), Some(max_name.clone()));
         assert_eq!(client.resolve_name(&min_name), None);
         assert!(client.is_name_available(&min_name));
+    }
+
+    // ── get_name_revision() tests (#1379) ────────────────────────────
+
+    #[test]
+    fn revision_starts_at_one_after_first_registration() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name = s(&env, "alphabot");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name,
+        );
+
+        assert_eq!(
+            client.get_name_revision(&name),
+            Some(1u32),
+            "revision must start at 1 after first registration"
+        );
+    }
+
+    #[test]
+    fn revision_increments_when_talos_rerregisters_new_name() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name_a = s(&env, "first-name");
+        let name_b = s(&env, "second-name");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name_a,
+        );
+        assert_eq!(client.get_name_revision(&name_a), Some(1u32));
+
+        // Re-register with a new name; name_b gets revision 1 (fresh).
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name_b,
+        );
+        assert_eq!(
+            client.get_name_revision(&name_b),
+            Some(1u32),
+            "new name starts at revision 1"
+        );
+    }
+
+    #[test]
+    fn get_name_revision_returns_none_for_unregistered_name() {
+        let (_env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
+        let env = _env;
+        let unregistered = s(&env, "neverregistered");
+        assert_eq!(
+            client.get_name_revision(&unregistered),
+            None,
+            "revision must be None for a name that was never registered"
+        );
+    }
+
+    #[test]
+    fn name_reg3_event_contains_revision() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name = s(&env, "revtest");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+
+        env.mock_all_auths();
+        client.register_name(&owner, &talos_id, &name);
+
+        let all_events = env.events().all();
+        let name_reg3 = all_events.iter().find(|(_, topics, _)| {
+            if let Ok(sym) = Symbol::try_from_val(&env, &topics.get(0).unwrap()) {
+                sym == Symbol::new(&env, "name_reg3")
+            } else {
+                false
+            }
+        });
+        assert!(name_reg3.is_some(), "name_reg3 event must be emitted");
+
+        // Data tuple: (version: u32, name: String, owner: Address, revision: u32)
+        // The last element is the revision; it should be 1 for first registration.
+        let (_, _, data) = name_reg3.unwrap();
+        let (ver, _n, _o, rev) = <(u32, String, Address, u32)>::try_from_val(&env, &data)
+            .expect("name_reg3 data must decode as (u32, String, Address, u32)");
+        assert_eq!(ver, 1u32, "version field in name_reg3 must be 1");
+        assert_eq!(rev, 1u32, "revision in name_reg3 must be 1 for first registration");
+    }
+
+    #[test]
+    fn existing_resolve_name_behavior_unchanged() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let name = s(&env, "unchanged");
+
+        let talos_id = create_talos_with_auth(
+            &env, &registry_client, &registry_contract, &owner, &protocol_wallet,
+        );
+
+        register_name_with_auth(
+            &env, &client, &contract_id, &registry_contract, &owner, talos_id, &name,
+        );
+
+        // Revision feature must not affect existing resolution behavior.
+        assert_eq!(client.resolve_name(&name), Some(talos_id));
+        assert_eq!(client.name_of(&talos_id), Some(name.clone()));
+        assert!(!client.is_name_available(&name));
     }
 }
