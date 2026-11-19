@@ -472,6 +472,51 @@ impl TalosGovernance {
             panic!("Proposal is not approved");
         }
 
+        // Downstream action runs here (currently a no-op; future callers
+        // supply an action via execute_proposal_safe).  Only after all
+        // downstream work completes do we update status to Executed, so a
+        // panic at any earlier point leaves the proposal Approved and
+        // retryable.
+        proposal.status = ProposalStatus::Executed;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
+        emit_proposal_status_changed(&env, proposal_id, ProposalStatus::Executed);
+    }
+
+    /// Execute a governance proposal with an explicit success flag.
+    ///
+    /// This entry-point models the pattern where `execute_proposal` calls a
+    /// downstream contract action that may fail. The caller passes
+    /// `action_succeeded = true` to commit the transition, or
+    /// `action_succeeded = false` to signal that the downstream action did not
+    /// complete. When the action did not succeed the proposal status remains
+    /// `Approved`, keeping it retryable. No storage mutation occurs on failure.
+    ///
+    /// # Errors
+    /// - Panics `"Proposal not found"` when `proposal_id` does not exist.
+    /// - Panics `"Proposal is not approved"` when the proposal is not in
+    ///   `Approved` status.
+    /// - Panics `"Action did not execute; proposal remains retryable"` when
+    ///   `action_succeeded` is `false`. The proposal status is NOT changed.
+    pub fn execute_proposal_safe(env: Env, proposal_id: u32, action_succeeded: bool) {
+        let mut proposal: Proposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Proposal(proposal_id))
+            .expect("Proposal not found");
+
+        if proposal.status != ProposalStatus::Approved {
+            panic!("Proposal is not approved");
+        }
+
+        // Guard: reject before touching storage when the downstream action
+        // did not complete, so the proposal remains Approved and retryable.
+        if !action_succeeded {
+            panic!("Action did not execute; proposal remains retryable");
+        }
+
+        // Downstream action completed successfully: commit the terminal state.
         proposal.status = ProposalStatus::Executed;
         env.storage()
             .persistent()
@@ -2238,4 +2283,153 @@ mod tests {
             .try_initialize(&admin, &pulse, &100_i128, &5_000_i128, &20_u32);
         assert!(result.is_err(), "double initialization must be rejected");
     }
-}
+
+    // ── Execution rollback / retryability tests (#1376) ──────────────
+
+    /// Helper: bring a proposal to Approved state.
+    fn approve_proposal(
+        env: &Env,
+        contract_id: &Address,
+        client: &TalosGovernanceClient<'static>,
+        admin: &Address,
+    ) -> u32 {
+        let proposer = Address::generate(env);
+        let voter = Address::generate(env);
+        let proposal_id = create_proposal_with_auth(env, contract_id, client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        cache_balance_with_auth(env, contract_id, client, admin, proposal.snapshot_ledger, &voter, 200);
+        client
+            .mock_auths(&[MockAuth {
+                address: &voter,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "vote",
+                    args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .vote(&voter, &proposal_id, &VoteChoice::Approve);
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().status,
+            ProposalStatus::Approved,
+            "proposal must be Approved before execution test"
+        );
+        proposal_id
+    }
+
+    /// Positive: action_succeeded=true commits Executed status.
+    #[test]
+    fn execute_proposal_safe_success_transitions_to_executed() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposal_id = approve_proposal(&env, &contract_id, &client, &admin);
+
+        client.execute_proposal_safe(&proposal_id, &true);
+
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(
+            proposal.status,
+            ProposalStatus::Executed,
+            "successful execution must transition to Executed"
+        );
+    }
+
+    /// Negative: action_succeeded=false leaves proposal Approved (retryable).
+    #[test]
+    fn execute_proposal_safe_failure_preserves_approved_status() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposal_id = approve_proposal(&env, &contract_id, &client, &admin);
+
+        let result = client.try_execute_proposal_safe(&proposal_id, &false);
+        assert!(result.is_err(), "failed downstream action must be rejected");
+
+        // Proposal must still be Approved — retryable.
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(
+            proposal.status,
+            ProposalStatus::Approved,
+            "proposal must remain Approved after failed execution"
+        );
+    }
+
+    /// Boundary: calling execute_proposal_safe on an already-executed
+    /// proposal must be rejected.
+    #[test]
+    fn execute_proposal_safe_on_already_executed_is_rejected() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposal_id = approve_proposal(&env, &contract_id, &client, &admin);
+
+        // First execution succeeds.
+        client.execute_proposal_safe(&proposal_id, &true);
+
+        // Second attempt must fail: status is Executed, not Approved.
+        let result = client.try_execute_proposal_safe(&proposal_id, &true);
+        assert!(result.is_err(), "re-execution of already-executed proposal must fail");
+    }
+
+    /// Boundary: execute_proposal_safe on a non-approved (Active) proposal
+    /// must be rejected with no status change.
+    #[test]
+    fn execute_proposal_safe_on_active_proposal_is_rejected() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        let result = client.try_execute_proposal_safe(&proposal_id, &true);
+        assert!(result.is_err(), "execute on Active proposal must fail");
+
+        // Status must still be Active.
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Active);
+    }
+
+    /// Positive: execute_proposal_safe emits a typed prop_stat Executed event
+    /// on success.
+    #[test]
+    fn execute_proposal_safe_success_emits_executed_event() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposal_id = approve_proposal(&env, &contract_id, &client, &admin);
+
+        client.execute_proposal_safe(&proposal_id, &true);
+
+        let events = env.events().all();
+        let stat_events: std::vec::Vec<_> = events.iter().filter(|(cid, topics, _)| {
+            if *cid != contract_id { return false; }
+            if let Some(t0) = topics.get(0) {
+                let s: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &t0);
+                s == symbol_short!("prop_stat")
+            } else { false }
+        }).collect();
+        assert!(!stat_events.is_empty(), "prop_stat event must be emitted");
+
+        let (_, _, data) = stat_events.last().unwrap();
+        let payload: EventProposalStatusChanged = soroban_sdk::FromVal::from_val(&env, data);
+        assert_eq!(payload.status, ProposalStatus::Executed);
+    }
+
+    /// Negative: failed execution (action_succeeded=false) must NOT emit any
+    /// prop_stat Executed event.
+    #[test]
+    fn execute_proposal_safe_failure_does_not_emit_executed_event() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposal_id = approve_proposal(&env, &contract_id, &client, &admin);
+
+        let _ = client.try_execute_proposal_safe(&proposal_id, &false);
+
+        // Collect all prop_stat events and confirm none carry Executed status.
+        let events = env.events().all();
+        for (cid, topics, data) in events.iter() {
+            if cid != contract_id { continue; }
+            let t0_opt = topics.get(0);
+            let t0_sym = match t0_opt {
+                Some(t) => { let s: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &t); s }
+                None => continue,
+            };
+            if t0_sym != symbol_short!("prop_stat") { continue; }
+            let payload: EventProposalStatusChanged = soroban_sdk::FromVal::from_val(&env, &data);
+            assert_ne!(
+                payload.status,
+                ProposalStatus::Executed,
+                "no Executed event must be emitted on failed execution"
+            );
+        }
+    }
