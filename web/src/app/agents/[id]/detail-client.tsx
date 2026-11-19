@@ -7,6 +7,7 @@ import { AgentAvatar } from "@/components/agent-avatar";
 import { AgentAvailabilityBadge } from "@/components/agent-availability-badge";
 import { AgentEmptyState } from "@/components/agent-view-states";
 import { ScopedApiKeysPanel } from "@/components/scoped-api-keys-panel";
+import { AgentLifecycleChecklist } from "@/components/agent-lifecycle-checklist";
 import { AgentPurchasesSection } from "@/components/agent-purchases-section";
 import { CopyButton } from "@/components/copy-button";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER as STELLAR_USDC_ISSUER } from "@/lib/stellar-config";
@@ -1125,6 +1126,12 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       {/* ─── Agent Tab ──────────────────────────────────── */}
       {tab === "Agent" && (
         <div className="space-y-6">
+          {isAgentOwner && address && (
+            <AgentLifecycleChecklist
+              talosId={talos.id}
+              isOwner={true}
+            />
+          )}
           {isAgentOwner && address && (
             <ScopedApiKeysPanel
               talosId={talos.id}
