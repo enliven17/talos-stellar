@@ -5,6 +5,7 @@
  * fencing-token pattern as commerce jobs for stale-worker protection.
  */
 
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsWebhookDeliveries } from "@/db/schema";
@@ -26,7 +27,7 @@ async function resolveCallerTalos(request: NextRequest): Promise<string | null> 
   return talos?.id ?? null;
 }
 
-export async function POST(
+async function _POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -108,3 +109,5 @@ export async function POST(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);

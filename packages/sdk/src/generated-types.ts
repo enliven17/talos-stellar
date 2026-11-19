@@ -138,6 +138,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/talos/{id}/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Delete TALOS agent (privacy soft-delete)
+         * @description Soft deletes an agent record for privacy while preserving identity and historical links. Clears sensitive keys and wallet addresses. Requires an ED25519 signature over a message containing the TALOS ID from the creator or wallet public key. Repeated deletes return 409 Conflict.
+         */
+        post: operations["deleteTalos"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/talos/{id}/activity": {
         parameters: {
             query?: never;
@@ -1287,6 +1307,16 @@ export interface components {
             /** @description Must include the TALOS ID to prevent replay attacks */
             message: string;
         };
+        DeleteAgentRequest: {
+            /** @description Reason for privacy deletion */
+            reason: string;
+            /** @description Creator or wallet public key */
+            stellarPublicKey: string;
+            /** @description Base64-encoded ED25519 signature of `message` */
+            signature: string;
+            /** @description Must include the TALOS ID to prevent replay attacks */
+            message: string;
+        };
         SignPaymentRequest: {
             /** @description Stellar public key of the payment recipient */
             payee: string;
@@ -2105,6 +2135,59 @@ export interface operations {
             400: components["responses"]["ValidationError"];
             403: components["responses"]["ForbiddenError"];
             404: components["responses"]["NotFoundError"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    deleteTalos: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description TALOS ID (cuid2)
+                 * @example clx1abc123def456
+                 */
+                id: components["parameters"]["talosId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeleteAgentRequest"];
+            };
+        };
+        responses: {
+            /** @description Agent soft-deleted successfully */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        id?: string;
+                        agentName?: string | null;
+                        /** Format: date-time */
+                        deletedAt?: string;
+                        deletedReason?: string | null;
+                        message?: string;
+                    };
+                };
+            };
+            400: components["responses"]["ValidationError"];
+            403: components["responses"]["ForbiddenError"];
+            404: components["responses"]["NotFoundError"];
+            /** @description TALOS already deleted (conflict on repeated delete) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @example TALOS already deleted */
+                        error?: string;
+                    };
+                };
+            };
             500: components["responses"]["InternalError"];
         };
     };

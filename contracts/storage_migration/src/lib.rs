@@ -39,6 +39,9 @@ pub enum MigrationError {
 
     /// Rollback is deeper than the allowed depth.
     RollbackTooDeep = 5,
+
+    /// Target version exceeds the maximum supported schema version.
+    TargetExceedsMax = 6,
 }
 
 // ── Storage ─────────────────────────────────────────────────────────
@@ -121,6 +124,7 @@ impl MigrationError {
             3 => Some(MigrationError::MigrationInProgress),
             4 => Some(MigrationError::RollbackNotAllowed),
             5 => Some(MigrationError::RollbackTooDeep),
+            6 => Some(MigrationError::TargetExceedsMax),
             _ => None,
         }
     }
@@ -133,36 +137,21 @@ impl MigrationError {
 
 // ── Events ──────────────────────────────────────────────────────────
 
-fn emit_schema_migrated(
-    env: &Env,
-    from_version: u32,
-    to_version: u32,
-) {
+fn emit_schema_migrated(env: &Env, from_version: u32, to_version: u32) {
     let topics = (symbol_short!("sch_mig"),);
 
-    env.events()
-        .publish(topics, (from_version, to_version));
+    env.events().publish(topics, (from_version, to_version));
 }
 
-fn emit_schema_rolled_back(
-    env: &Env,
-    from_version: u32,
-    to_version: u32,
-) {
+fn emit_schema_rolled_back(env: &Env, from_version: u32, to_version: u32) {
     let topics = (symbol_short!("sch_rbk"),);
 
-    env.events()
-        .publish(topics, (from_version, to_version));
+    env.events().publish(topics, (from_version, to_version));
 }
 
 // ── Internal helpers ────────────────────────────────────────────────
 
-fn append_history(
-    env: &Env,
-    from_version: u32,
-    to_version: u32,
-    rolled_back: bool,
-) {
+fn append_history(env: &Env, from_version: u32, to_version: u32, rolled_back: bool) {
     let len: u32 = env
         .storage()
         .persistent()
@@ -199,11 +188,7 @@ fn is_locked(env: &Env) -> bool {
 /// The migration must:
 /// 1. Increase the version.
 /// 2. Start exactly at the contract's current version.
-pub fn validate_forward_step(
-    current: u32,
-    from: u32,
-    to: u32,
-) -> Result<(), MigrationError> {
+pub fn validate_forward_step(current: u32, from: u32, to: u32) -> Result<(), MigrationError> {
     if to <= from {
         return Err(MigrationError::NotForward);
     }
@@ -219,11 +204,7 @@ pub fn validate_forward_step(
 ///
 /// The target must be strictly below the current version and within
 /// the caller-supplied maximum rollback depth.
-pub fn validate_rollback(
-    current: u32,
-    target: u32,
-    max_depth: u32,
-) -> Result<(), MigrationError> {
+pub fn validate_rollback(current: u32, target: u32, max_depth: u32) -> Result<(), MigrationError> {
     if target >= current {
         return Err(MigrationError::RollbackNotAllowed);
     }
@@ -233,6 +214,38 @@ pub fn validate_rollback(
     }
 
     Ok(())
+}
+
+/// Validate an explicit forward migration target version against the contract's
+/// current schema version and maximum supported schema version.
+///
+/// The target version must be:
+/// 1. Greater than or equal to current (`target < current` returns `NotForward`).
+/// 2. Less than or equal to `max_supported` (`target > max_supported` returns `TargetExceedsMax`).
+///
+/// An up-to-date target (`target == current`) succeeds with `Ok(())`.
+pub fn validate_migration_target(
+    current: u32,
+    target: u32,
+    max_supported: u32,
+) -> Result<(), MigrationError> {
+    if target < current {
+        return Err(MigrationError::NotForward);
+    }
+
+    if target > max_supported {
+        return Err(MigrationError::TargetExceedsMax);
+    }
+
+    Ok(())
+}
+
+/// Check whether a migration step to `step_to` should execute when gating migrations
+/// by an explicit `target_version`.
+///
+/// Returns `true` if `step_to <= target_version`.
+pub fn is_step_within_target(step_to: u32, target_version: u32) -> bool {
+    step_to <= target_version
 }
 
 /// Simulate a forward migration without mutating any state.
@@ -247,14 +260,23 @@ pub fn validate_rollback(
 /// including while another migration is in progress. It reports the same
 /// rejection [`begin_migration`] would produce, so callers can pre-flight an
 /// upgrade before committing to it.
-pub fn dry_run(
-    e: &Env,
-    current: u32,
-    from: u32,
-    to: u32,
-) -> MigrationDryRun {
+pub fn dry_run(e: &Env, current: u32, from: u32, to: u32) -> MigrationDryRun {
     let stored_current = schema_version(e).unwrap_or(current);
     let locked = is_locked(e);
+
+    // Stored version is authoritative: if the caller's view does not match
+    // storage, reject with OutOfOrder immediately.
+    if stored_current != current {
+        return MigrationDryRun {
+            current_version: stored_current,
+            target_version: to,
+            steps: 0,
+            up_to_date: false,
+            locked,
+            applicable: false,
+            error_code: Some(MigrationError::OutOfOrder.code()),
+        };
+    }
 
     // Already at the target: the plan is a no-op, not a failure. Report it as
     // applicable with zero steps so callers can treat "up to date" as success
@@ -275,17 +297,13 @@ pub fn dry_run(
 
     // Mirror `begin_migration`'s checks in the same order so the dry-run
     // predicts the real outcome rather than a stricter or looser one.
-    let error = if stored_current != current {
-        Some(MigrationError::OutOfOrder)
-    } else {
-        match validate_forward_step(stored_current, from, to) {
-            Err(err) => Some(err),
-            Ok(()) => {
-                if locked {
-                    Some(MigrationError::MigrationInProgress)
-                } else {
-                    None
-                }
+    let error = match validate_forward_step(stored_current, from, to) {
+        Err(err) => Some(err),
+        Ok(()) => {
+            if locked {
+                Some(MigrationError::MigrationInProgress)
+            } else {
+                None
             }
         }
     };
@@ -301,15 +319,72 @@ pub fn dry_run(
     }
 }
 
+/// Simulate a forward migration to an explicit target version without mutating state.
+///
+/// Validates the target against current storage and `max_supported`, and reports whether
+/// the plan is applicable, up-to-date, locked, or rejected.
+pub fn dry_run_to(e: &Env, current: u32, target: u32, max_supported: u32) -> MigrationDryRun {
+    let stored_current = schema_version(e).unwrap_or(current);
+    let locked = is_locked(e);
+
+    if stored_current != current {
+        return MigrationDryRun {
+            current_version: stored_current,
+            target_version: target,
+            steps: 0,
+            up_to_date: false,
+            locked,
+            applicable: false,
+            error_code: Some(MigrationError::OutOfOrder.code()),
+        };
+    }
+
+    let up_to_date = stored_current == target;
+    if up_to_date {
+        return MigrationDryRun {
+            current_version: stored_current,
+            target_version: target,
+            steps: 0,
+            up_to_date: true,
+            locked,
+            applicable: true,
+            error_code: None,
+        };
+    }
+
+    let error = match validate_migration_target(stored_current, target, max_supported) {
+        Err(err) => Some(err),
+        Ok(()) => {
+            if locked {
+                Some(MigrationError::MigrationInProgress)
+            } else {
+                None
+            }
+        }
+    };
+
+    MigrationDryRun {
+        current_version: stored_current,
+        target_version: target,
+        steps: if error.is_none() {
+            target.saturating_sub(stored_current)
+        } else {
+            0
+        },
+        up_to_date: false,
+        locked,
+        applicable: error.is_none(),
+        error_code: error.map(MigrationError::code),
+    }
+}
+
 // ── Public API ──────────────────────────────────────────────────────
 
 /// Read the currently stored schema version.
 ///
 /// Returns `None` when the migration framework has not yet been initialized.
 pub fn schema_version(e: &Env) -> Option<u32> {
-    e.storage()
-        .persistent()
-        .get(&MigrationKey::SchemaVersion)
+    e.storage().persistent().get(&MigrationKey::SchemaVersion)
 }
 
 /// Initialize the schema version.
@@ -331,12 +406,7 @@ pub fn initialize_schema(e: &Env, genesis: u32) {
 /// `current` is retained in the API for compatibility with existing
 /// callers, but the stored schema version is authoritative once the
 /// migration framework has been initialized.
-pub fn begin_migration(
-    e: &Env,
-    current: u32,
-    from: u32,
-    to: u32,
-) -> Result<(), MigrationError> {
+pub fn begin_migration(e: &Env, current: u32, from: u32, to: u32) -> Result<(), MigrationError> {
     // The stored value is authoritative.
     //
     // For an uninitialized contract, the caller-provided `current`
@@ -366,11 +436,7 @@ pub fn begin_migration(
 ///
 /// The schema version is advanced, the migration lock is released,
 /// history is appended, and the migration event is emitted.
-pub fn complete_migration(
-    e: &Env,
-    from_version: u32,
-    to_version: u32,
-) {
+pub fn complete_migration(e: &Env, from_version: u32, to_version: u32) {
     // Do not silently commit an invalid migration.
     //
     // `complete_migration` has historically returned `()`, so a failed
@@ -398,18 +464,9 @@ pub fn complete_migration(
         .persistent()
         .set(&MigrationKey::MigrationLock, &false);
 
-    append_history(
-        e,
-        from_version,
-        to_version,
-        false,
-    );
+    append_history(e, from_version, to_version, false);
 
-    emit_schema_migrated(
-        e,
-        from_version,
-        to_version,
-    );
+    emit_schema_migrated(e, from_version, to_version);
 }
 
 /// Abort the currently running migration.
@@ -425,12 +482,7 @@ pub fn abort_migration(e: &Env) {
 ///
 /// This changes only the schema-version pointer. It does not reverse
 /// storage/data changes made by the forward migration.
-pub fn rollback(
-    e: &Env,
-    current: u32,
-    target: u32,
-    max_depth: u32,
-) -> Result<(), MigrationError> {
+pub fn rollback(e: &Env, current: u32, target: u32, max_depth: u32) -> Result<(), MigrationError> {
     // Stored schema version is authoritative.
     let stored_current = schema_version(e).unwrap_or(current);
 
@@ -438,11 +490,7 @@ pub fn rollback(
         return Err(MigrationError::OutOfOrder);
     }
 
-    validate_rollback(
-        stored_current,
-        target,
-        max_depth,
-    )?;
+    validate_rollback(stored_current, target, max_depth)?;
 
     if is_locked(e) {
         return Err(MigrationError::MigrationInProgress);
@@ -450,23 +498,11 @@ pub fn rollback(
 
     e.storage()
         .persistent()
-        .set(
-            &MigrationKey::SchemaVersion,
-            &target,
-        );
+        .set(&MigrationKey::SchemaVersion, &target);
 
-    append_history(
-        e,
-        stored_current,
-        target,
-        true,
-    );
+    append_history(e, stored_current, target, true);
 
-    emit_schema_rolled_back(
-        e,
-        stored_current,
-        target,
-    );
+    emit_schema_rolled_back(e, stored_current, target);
 
     Ok(())
 }
@@ -482,13 +518,8 @@ pub fn migration_history_len(e: &Env) -> u32 {
 /// Fetch a history record by index.
 ///
 /// Index `0` is the oldest record.
-pub fn migration_record_at(
-    e: &Env,
-    index: u32,
-) -> Option<MigrationRecord> {
-    e.storage()
-        .persistent()
-        .get(&MigrationKey::History(index))
+pub fn migration_record_at(e: &Env, index: u32) -> Option<MigrationRecord> {
+    e.storage().persistent().get(&MigrationKey::History(index))
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -497,23 +528,16 @@ pub fn migration_record_at(
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
 
     #[test]
     fn forward_step_accepts_matching_sequential_version() {
-        assert_eq!(
-            validate_forward_step(1, 1, 2),
-            Ok(())
-        );
+        assert_eq!(validate_forward_step(1, 1, 2), Ok(()));
     }
 
     #[test]
     fn forward_step_accepts_larger_target_version() {
-        assert_eq!(
-            validate_forward_step(1, 1, 5),
-            Ok(())
-        );
+        assert_eq!(validate_forward_step(1, 1, 5), Ok(()));
     }
 
     #[test]
@@ -544,15 +568,9 @@ mod tests {
 
     #[test]
     fn rollback_accepts_target_within_depth() {
-        assert_eq!(
-            validate_rollback(3, 2, 1),
-            Ok(())
-        );
+        assert_eq!(validate_rollback(3, 2, 1), Ok(()));
 
-        assert_eq!(
-            validate_rollback(3, 1, 2),
-            Ok(())
-        );
+        assert_eq!(validate_rollback(3, 1, 2), Ok(()));
     }
 
     #[test]
@@ -576,39 +594,71 @@ mod tests {
         );
     }
 
+    #[soroban_sdk::contract]
+    struct MockMigrationContract;
+
+    fn register_test_contract(env: &Env) -> soroban_sdk::Address {
+        env.register_contract(None, MockMigrationContract)
+    }
+
+    #[test]
+    fn migration_target_accepts_in_range_target() {
+        assert_eq!(validate_migration_target(1, 2, 3), Ok(()));
+    }
+
+    #[test]
+    fn migration_target_accepts_current_version_as_noop() {
+        assert_eq!(validate_migration_target(2, 2, 3), Ok(()));
+    }
+
+    #[test]
+    fn migration_target_accepts_max_supported_version() {
+        assert_eq!(validate_migration_target(1, 5, 5), Ok(()));
+    }
+
+    #[test]
+    fn migration_target_rejects_target_below_current() {
+        assert_eq!(
+            validate_migration_target(2, 1, 3),
+            Err(MigrationError::NotForward)
+        );
+    }
+
+    #[test]
+    fn migration_target_rejects_target_above_max() {
+        assert_eq!(
+            validate_migration_target(1, 4, 3),
+            Err(MigrationError::TargetExceedsMax)
+        );
+    }
+
+    #[test]
+    fn step_within_target_gates_correctly() {
+        assert!(is_step_within_target(2, 2));
+        assert!(is_step_within_target(2, 3));
+        assert!(!is_step_within_target(3, 2));
+    }
+
     #[test]
     fn initialize_schema_is_idempotent() {
         let env = Env::default();
 
-        let contract_id =
-            soroban_sdk::Address::generate(&env);
+        let contract_id = register_test_contract(&env);
 
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 1);
 
-            assert_eq!(
-                schema_version(&env),
-                Some(1)
-            );
+            assert_eq!(schema_version(&env), Some(1));
 
-            assert_eq!(
-                migration_history_len(&env),
-                1
-            );
+            assert_eq!(migration_history_len(&env), 1);
 
             // Second initialization must not overwrite
             // the existing schema version.
             initialize_schema(&env, 99);
 
-            assert_eq!(
-                schema_version(&env),
-                Some(1)
-            );
+            assert_eq!(schema_version(&env), Some(1));
 
-            assert_eq!(
-                migration_history_len(&env),
-                1
-            );
+            assert_eq!(migration_history_len(&env), 1);
         });
     }
 
@@ -616,60 +666,30 @@ mod tests {
     fn full_lifecycle_begin_complete_advances_version_and_history() {
         let env = Env::default();
 
-        let contract_id =
-            soroban_sdk::Address::generate(&env);
+        let contract_id = register_test_contract(&env);
 
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 1);
 
-            assert_eq!(
-                schema_version(&env),
-                Some(1)
-            );
+            assert_eq!(schema_version(&env), Some(1));
 
-            assert_eq!(
-                migration_history_len(&env),
-                1
-            );
+            assert_eq!(migration_history_len(&env), 1);
 
-            begin_migration(
-                &env,
-                1,
-                1,
-                2,
-            )
-            .unwrap();
+            begin_migration(&env, 1, 1, 2).unwrap();
 
-            complete_migration(
-                &env,
-                1,
-                2,
-            );
+            complete_migration(&env, 1, 2);
 
-            assert_eq!(
-                schema_version(&env),
-                Some(2)
-            );
+            assert_eq!(schema_version(&env), Some(2));
 
-            assert_eq!(
-                migration_history_len(&env),
-                2
-            );
+            assert_eq!(migration_history_len(&env), 2);
 
             assert!(!is_locked(&env));
 
-            let record =
-                migration_record_at(&env, 1).unwrap();
+            let record = migration_record_at(&env, 1).unwrap();
 
-            assert_eq!(
-                record.from_version,
-                1
-            );
+            assert_eq!(record.from_version, 1);
 
-            assert_eq!(
-                record.to_version,
-                2
-            );
+            assert_eq!(record.to_version, 2);
 
             assert!(!record.rolled_back);
         });
@@ -679,26 +699,17 @@ mod tests {
     fn begin_rejects_stale_caller_version() {
         let env = Env::default();
 
-        let contract_id =
-            soroban_sdk::Address::generate(&env);
+        let contract_id = register_test_contract(&env);
 
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 2);
 
             assert_eq!(
-                begin_migration(
-                    &env,
-                    1,
-                    1,
-                    2,
-                ),
+                begin_migration(&env, 1, 1, 2,),
                 Err(MigrationError::OutOfOrder)
             );
 
-            assert_eq!(
-                schema_version(&env),
-                Some(2)
-            );
+            assert_eq!(schema_version(&env), Some(2));
         });
     }
 
@@ -706,55 +717,27 @@ mod tests {
     fn concurrent_begin_is_rejected_until_completed_or_aborted() {
         let env = Env::default();
 
-        let contract_id =
-            soroban_sdk::Address::generate(&env);
+        let contract_id = register_test_contract(&env);
 
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 1);
 
-            begin_migration(
-                &env,
-                1,
-                1,
-                2,
-            )
-            .unwrap();
+            begin_migration(&env, 1, 1, 2).unwrap();
 
             assert_eq!(
-                begin_migration(
-                    &env,
-                    1,
-                    1,
-                    2,
-                ),
+                begin_migration(&env, 1, 1, 2,),
                 Err(MigrationError::MigrationInProgress)
             );
 
             abort_migration(&env);
 
-            assert_eq!(
-                schema_version(&env),
-                Some(1)
-            );
+            assert_eq!(schema_version(&env), Some(1));
 
-            begin_migration(
-                &env,
-                1,
-                1,
-                2,
-            )
-            .unwrap();
+            begin_migration(&env, 1, 1, 2).unwrap();
 
-            complete_migration(
-                &env,
-                1,
-                2,
-            );
+            complete_migration(&env, 1, 2);
 
-            assert_eq!(
-                schema_version(&env),
-                Some(2)
-            );
+            assert_eq!(schema_version(&env), Some(2));
         });
     }
 
@@ -762,62 +745,26 @@ mod tests {
     fn rollback_then_reapply_round_trips() {
         let env = Env::default();
 
-        let contract_id =
-            soroban_sdk::Address::generate(&env);
+        let contract_id = register_test_contract(&env);
 
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 1);
 
-            begin_migration(
-                &env,
-                1,
-                1,
-                2,
-            )
-            .unwrap();
+            begin_migration(&env, 1, 1, 2).unwrap();
 
-            complete_migration(
-                &env,
-                1,
-                2,
-            );
+            complete_migration(&env, 1, 2);
 
-            rollback(
-                &env,
-                2,
-                1,
-                1,
-            )
-            .unwrap();
+            rollback(&env, 2, 1, 1).unwrap();
 
-            assert_eq!(
-                schema_version(&env),
-                Some(1)
-            );
+            assert_eq!(schema_version(&env), Some(1));
 
-            begin_migration(
-                &env,
-                1,
-                1,
-                2,
-            )
-            .unwrap();
+            begin_migration(&env, 1, 1, 2).unwrap();
 
-            complete_migration(
-                &env,
-                1,
-                2,
-            );
+            complete_migration(&env, 1, 2);
 
-            assert_eq!(
-                schema_version(&env),
-                Some(2)
-            );
+            assert_eq!(schema_version(&env), Some(2));
 
-            assert_eq!(
-                migration_history_len(&env),
-                4
-            );
+            assert_eq!(migration_history_len(&env), 4);
         });
     }
 
@@ -825,26 +772,14 @@ mod tests {
     fn rollback_rejects_stale_caller_version() {
         let env = Env::default();
 
-        let contract_id =
-            soroban_sdk::Address::generate(&env);
+        let contract_id = register_test_contract(&env);
 
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 3);
 
-            assert_eq!(
-                rollback(
-                    &env,
-                    2,
-                    1,
-                    1,
-                ),
-                Err(MigrationError::OutOfOrder)
-            );
+            assert_eq!(rollback(&env, 2, 1, 1,), Err(MigrationError::OutOfOrder));
 
-            assert_eq!(
-                schema_version(&env),
-                Some(3)
-            );
+            assert_eq!(schema_version(&env), Some(3));
         });
     }
 
@@ -853,7 +788,7 @@ mod tests {
     #[test]
     fn dry_run_reports_applicable_plan_without_mutating_state() {
         let env = Env::default();
-        let contract_id = soroban_sdk::Address::generate(&env);
+        let contract_id = register_test_contract(&env);
 
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 1);
@@ -878,7 +813,7 @@ mod tests {
     #[test]
     fn dry_run_reports_up_to_date_when_already_at_target() {
         let env = Env::default();
-        let contract_id = soroban_sdk::Address::generate(&env);
+        let contract_id = register_test_contract(&env);
 
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 2);
@@ -897,7 +832,7 @@ mod tests {
     #[test]
     fn dry_run_up_to_date_is_a_noop_even_while_locked() {
         let env = Env::default();
-        let contract_id = soroban_sdk::Address::generate(&env);
+        let contract_id = register_test_contract(&env);
 
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 2);
@@ -922,7 +857,7 @@ mod tests {
     #[test]
     fn dry_run_rejects_non_forward_target() {
         let env = Env::default();
-        let contract_id = soroban_sdk::Address::generate(&env);
+        let contract_id = register_test_contract(&env);
 
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 2);
@@ -938,7 +873,7 @@ mod tests {
     #[test]
     fn dry_run_rejects_out_of_order_current() {
         let env = Env::default();
-        let contract_id = soroban_sdk::Address::generate(&env);
+        let contract_id = register_test_contract(&env);
 
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 2);
@@ -955,7 +890,7 @@ mod tests {
     #[test]
     fn dry_run_reports_locked_without_clearing_the_lock() {
         let env = Env::default();
-        let contract_id = soroban_sdk::Address::generate(&env);
+        let contract_id = register_test_contract(&env);
 
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 1);
@@ -976,7 +911,7 @@ mod tests {
     #[test]
     fn dry_run_uses_caller_baseline_for_uninitialized_contract() {
         let env = Env::default();
-        let contract_id = soroban_sdk::Address::generate(&env);
+        let contract_id = register_test_contract(&env);
 
         env.as_contract(&contract_id, || {
             let plan = dry_run(&env, 1, 1, 2);
@@ -994,7 +929,7 @@ mod tests {
     #[test]
     fn dry_run_matches_begin_migration_outcome() {
         let env = Env::default();
-        let contract_id = soroban_sdk::Address::generate(&env);
+        let contract_id = register_test_contract(&env);
 
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 1);
@@ -1013,7 +948,7 @@ mod tests {
     #[test]
     fn dry_run_error_code_round_trips_to_typed_error() {
         let env = Env::default();
-        let contract_id = soroban_sdk::Address::generate(&env);
+        let contract_id = register_test_contract(&env);
 
         env.as_contract(&contract_id, || {
             initialize_schema(&env, 2);
@@ -1035,6 +970,7 @@ mod tests {
             MigrationError::MigrationInProgress,
             MigrationError::RollbackNotAllowed,
             MigrationError::RollbackTooDeep,
+            MigrationError::TargetExceedsMax,
         ] {
             assert_eq!(MigrationError::from_code(err.code()), Some(err));
         }
@@ -1042,5 +978,354 @@ mod tests {
         // Unknown codes decode to `None` instead of panicking.
         assert_eq!(MigrationError::from_code(0), None);
         assert_eq!(MigrationError::from_code(99), None);
+    }
+
+    #[test]
+    fn dry_run_to_reports_applicable_plan_with_steps() {
+        let env = Env::default();
+        let contract_id = register_test_contract(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 1);
+
+            let plan = dry_run_to(&env, 1, 3, 3);
+            assert_eq!(plan.current_version, 1);
+            assert_eq!(plan.target_version, 3);
+            assert_eq!(plan.steps, 2);
+            assert!(!plan.up_to_date);
+            assert!(!plan.locked);
+            assert!(plan.applicable);
+            assert_eq!(plan.error(), None);
+
+            // Read-only
+            assert_eq!(schema_version(&env), Some(1));
+            assert_eq!(migration_history_len(&env), 1);
+        });
+    }
+
+    #[test]
+    fn dry_run_to_reports_up_to_date_when_already_at_target() {
+        let env = Env::default();
+        let contract_id = register_test_contract(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 2);
+
+            let plan = dry_run_to(&env, 2, 2, 3);
+            assert!(plan.up_to_date);
+            assert_eq!(plan.steps, 0);
+            assert!(plan.applicable);
+            assert_eq!(plan.error(), None);
+        });
+    }
+
+    #[test]
+    fn dry_run_to_rejects_target_below_current() {
+        let env = Env::default();
+        let contract_id = register_test_contract(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 2);
+
+            let plan = dry_run_to(&env, 2, 1, 3);
+            assert!(!plan.applicable);
+            assert_eq!(plan.error(), Some(MigrationError::NotForward));
+        });
+    }
+
+    #[test]
+    fn dry_run_to_rejects_target_above_max() {
+        let env = Env::default();
+        let contract_id = register_test_contract(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 1);
+
+            let plan = dry_run_to(&env, 1, 4, 3);
+            assert!(!plan.applicable);
+            assert_eq!(plan.error(), Some(MigrationError::TargetExceedsMax));
+        });
+    }
+
+    #[test]
+    fn dry_run_to_reports_locked_without_mutating() {
+        let env = Env::default();
+        let contract_id = register_test_contract(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 1);
+            begin_migration(&env, 1, 1, 2).expect("begin");
+
+            let plan = dry_run_to(&env, 1, 2, 3);
+            assert!(plan.locked);
+            assert!(!plan.applicable);
+            assert_eq!(plan.error(), Some(MigrationError::MigrationInProgress));
+            assert!(is_locked(&env));
+        });
+    }
+
+    #[test]
+    fn dry_run_to_rejects_out_of_order_caller_baseline() {
+        let env = Env::default();
+        let contract_id = register_test_contract(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 2);
+
+            let plan = dry_run_to(&env, 1, 2, 3);
+            assert!(!plan.applicable);
+            assert_eq!(plan.error(), Some(MigrationError::OutOfOrder));
+        });
+    }
+
+    // ── Budget regression gates (#610) ───────────────────────────────────────
+    //
+    // storage_migration is a library crate (no contract struct), so calls run
+    // through `env.as_contract(&contract_id, || { … })`.  Budget tracking is
+    // still active in this mode and measures real host resource consumption.
+    // Ceilings are loose regression sentinels; WASM costs will be higher.
+
+    const BUDGET_CPU_INITIALIZE_SCHEMA: u64 = 300_000;
+    const BUDGET_MEM_INITIALIZE_SCHEMA: u64 = 60_000;
+
+    const BUDGET_CPU_BEGIN_MIGRATION: u64 = 300_000;
+    const BUDGET_MEM_BEGIN_MIGRATION: u64 = 60_000;
+
+    const BUDGET_CPU_COMPLETE_MIGRATION: u64 = 400_000;
+    const BUDGET_MEM_COMPLETE_MIGRATION: u64 = 80_000;
+
+    const BUDGET_CPU_DRY_RUN: u64 = 200_000;
+    const BUDGET_MEM_DRY_RUN: u64 = 40_000;
+
+    #[test]
+    fn budget_initialize_schema_within_limits() {
+        let env = Env::default();
+        let contract_id = register_test_contract(&env);
+
+        env.as_contract(&contract_id, || {
+            env.budget().reset_default();
+            initialize_schema(&env, 1);
+        });
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_INITIALIZE_SCHEMA,
+            "initialize_schema CPU {} exceeded ceiling {}",
+            cpu,
+            BUDGET_CPU_INITIALIZE_SCHEMA,
+        );
+        assert!(
+            mem < BUDGET_MEM_INITIALIZE_SCHEMA,
+            "initialize_schema memory {} exceeded ceiling {}",
+            mem,
+            BUDGET_MEM_INITIALIZE_SCHEMA,
+        );
+    }
+
+    #[test]
+    fn budget_begin_migration_within_limits() {
+        let env = Env::default();
+        let contract_id = register_test_contract(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 1);
+
+            env.budget().reset_default();
+            let result = begin_migration(&env, 1, 1, 2);
+            assert_eq!(result, Ok(()));
+        });
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_BEGIN_MIGRATION,
+            "begin_migration CPU {} exceeded ceiling {}",
+            cpu,
+            BUDGET_CPU_BEGIN_MIGRATION,
+        );
+        assert!(
+            mem < BUDGET_MEM_BEGIN_MIGRATION,
+            "begin_migration memory {} exceeded ceiling {}",
+            mem,
+            BUDGET_MEM_BEGIN_MIGRATION,
+        );
+    }
+
+    #[test]
+    fn budget_complete_migration_within_limits() {
+        let env = Env::default();
+        let contract_id = register_test_contract(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 1);
+            assert_eq!(begin_migration(&env, 1, 1, 2), Ok(()));
+
+            env.budget().reset_default();
+            complete_migration(&env, 1, 2);
+        });
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_COMPLETE_MIGRATION,
+            "complete_migration CPU {} exceeded ceiling {}",
+            cpu,
+            BUDGET_CPU_COMPLETE_MIGRATION,
+        );
+        assert!(
+            mem < BUDGET_MEM_COMPLETE_MIGRATION,
+            "complete_migration memory {} exceeded ceiling {}",
+            mem,
+            BUDGET_MEM_COMPLETE_MIGRATION,
+        );
+    }
+
+    #[test]
+    fn budget_dry_run_within_limits() {
+        let env = Env::default();
+        let contract_id = register_test_contract(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 1);
+
+            env.budget().reset_default();
+            let plan = dry_run(&env, 1, 1, 2);
+            assert!(plan.applicable);
+        });
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_DRY_RUN,
+            "dry_run CPU {} exceeded ceiling {}",
+            cpu,
+            BUDGET_CPU_DRY_RUN,
+        );
+        assert!(
+            mem < BUDGET_MEM_DRY_RUN,
+            "dry_run memory {} exceeded ceiling {}",
+            mem,
+            BUDGET_MEM_DRY_RUN,
+        );
+    }
+
+    /// Boundary: dry_run on an already-up-to-date schema reports a no-op
+    /// and must be just as cheap as a regular dry_run.
+    #[test]
+    fn budget_dry_run_up_to_date_within_limits() {
+        let env = Env::default();
+        let contract_id = register_test_contract(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 2);
+
+            env.budget().reset_default();
+            let plan = dry_run(&env, 2, 2, 2);
+            assert!(plan.up_to_date);
+            assert!(plan.applicable);
+        });
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_DRY_RUN,
+            "dry_run (up-to-date) CPU {} exceeded ceiling {}",
+            cpu,
+            BUDGET_CPU_DRY_RUN,
+        );
+        assert!(
+            mem < BUDGET_MEM_DRY_RUN,
+            "dry_run (up-to-date) memory {} exceeded ceiling {}",
+            mem,
+            BUDGET_MEM_DRY_RUN,
+        );
+    }
+
+    /// Negative: begin_migration with a mismatched `from` version must be
+    /// rejected cheaply — the early-exit path costs less than a full migration.
+    #[test]
+    fn budget_begin_migration_out_of_order_rejected_cheaply() {
+        let env = Env::default();
+        let contract_id = register_test_contract(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 1);
+
+            env.budget().reset_default();
+            let result = begin_migration(&env, 1, 3, 4); // from=3 but stored=1
+            assert_eq!(result, Err(MigrationError::OutOfOrder));
+        });
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_BEGIN_MIGRATION,
+            "rejected begin_migration CPU {} exceeded ceiling {}",
+            cpu,
+            BUDGET_CPU_BEGIN_MIGRATION,
+        );
+        assert!(
+            mem < BUDGET_MEM_BEGIN_MIGRATION,
+            "rejected begin_migration memory {} exceeded ceiling {}",
+            mem,
+            BUDGET_MEM_BEGIN_MIGRATION,
+        );
+    }
+
+    #[test]
+    fn budget_dry_run_to_within_limits() {
+        let env = Env::default();
+        let contract_id = register_test_contract(&env);
+
+        env.as_contract(&contract_id, || {
+            initialize_schema(&env, 1);
+
+            env.budget().reset_default();
+            let plan = dry_run_to(&env, 1, 2, 3);
+            assert!(plan.applicable);
+        });
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_DRY_RUN,
+            "dry_run_to CPU {} exceeded ceiling {}",
+            cpu,
+            BUDGET_CPU_DRY_RUN,
+        );
+        assert!(
+            mem < BUDGET_MEM_DRY_RUN,
+            "dry_run_to memory {} exceeded ceiling {}",
+            mem,
+            BUDGET_MEM_DRY_RUN,
+        );
+    }
+
+    #[test]
+    fn budget_validate_migration_target_within_limits() {
+        let env = Env::default();
+        let contract_id = register_test_contract(&env);
+
+        env.as_contract(&contract_id, || {
+            env.budget().reset_default();
+            let result = validate_migration_target(1, 2, 3);
+            assert_eq!(result, Ok(()));
+        });
+
+        let cpu = env.budget().cpu_instruction_cost();
+        let mem = env.budget().memory_bytes_cost();
+        assert!(
+            cpu < BUDGET_CPU_DRY_RUN,
+            "validate_migration_target CPU {} exceeded ceiling {}",
+            cpu,
+            BUDGET_CPU_DRY_RUN,
+        );
+        assert!(
+            mem < BUDGET_MEM_DRY_RUN,
+            "validate_migration_target memory {} exceeded ceiling {}",
+            mem,
+            BUDGET_MEM_DRY_RUN,
+        );
     }
 }

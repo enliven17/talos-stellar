@@ -79,9 +79,11 @@ function makeRequest(
 ): NextRequest {
   const h = new Headers(headers);
   h.set("x-ops-token", "testsecret");
-  const init: RequestInit = { method, headers: h };
-  if (body) init.body = JSON.stringify(body);
-  return new NextRequest(`http://localhost${path}`, init);
+  return new NextRequest(`http://localhost${path}`, {
+    method,
+    headers: h,
+    body: body ? JSON.stringify(body) : undefined,
+  });
 }
 
 function allowedResult() {

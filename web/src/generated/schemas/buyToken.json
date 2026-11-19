@@ -1,3 +1,18 @@
 {
-  "type": "string"
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "buyerPublicKey": {
+      "type": "string",
+      "minLength": 1
+    },
+    "amount": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  },
+  "required": [
+    "buyerPublicKey",
+    "amount"
+  ]
 }

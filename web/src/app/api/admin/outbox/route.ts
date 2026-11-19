@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { verifyAdminKey } from "@/lib/admin-auth";
 import { listEvents } from "@/lib/outbox";
@@ -8,7 +9,7 @@ const VALID_STATUSES: OutboxStatus[] = ["pending", "leased", "dispatched", "dead
 // GET /api/admin/outbox — list/inspect outbox events. Filter by status
 // and/or eventType, cursor-paginated by createdAt descending (same
 // convention as the rest of the API — see OBSERVABILITY.md § Pagination).
-export async function GET(request: NextRequest) {
+async function _GET(request: NextRequest) {
   const auth = verifyAdminKey(request);
   if (!auth.ok) return auth.response;
 
@@ -35,3 +36,5 @@ export async function GET(request: NextRequest) {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withRequestId(_GET);
