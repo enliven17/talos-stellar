@@ -2422,6 +2422,17 @@
         },
         "description": "Sort direction (`asc` or `desc`). Defaults to `desc`."
       },
+      "talosAddressParam": {
+        "name": "address",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "description": "Exact-case Stellar address. Matches the agent wallet, creator, investor, or treasury address."
+      },
       "minScoreParam": {
         "name": "minScore",
         "in": "query",
@@ -2623,6 +2634,9 @@
           },
           {
             "$ref": "#/components/parameters/limitParam"
+          },
+          {
+            "$ref": "#/components/parameters/talosAddressParam"
           },
           {
             "$ref": "#/components/parameters/minScoreParam"
