@@ -14,6 +14,7 @@
  *   ordering; routes reject a cursor combined with any other sort via
  *   `isDefaultMarketplaceSort`.
  */
+import { createHash } from "node:crypto";
 import type { SQL, SQLWrapper } from "drizzle-orm";
 import { asc, desc } from "drizzle-orm";
 
@@ -124,4 +125,99 @@ export function buildMarketplaceOrderBy<TField extends string>(
 ): SQL[] {
   const order = sort.direction === "asc" ? asc : desc;
   return [order(columns[sort.field]), desc(idColumn)];
+}
+
+// ─── Ranked cursor (sort + filter-bound) ─────────────────────────────────────
+
+/**
+ * Encode a cursor that binds sort + filter identity.
+ *
+ * The cursor carries: sort field, sort direction, filterHash, createdAt, and
+ * id.  Any change in sort or filters invalidates the cursor so stale pages
+ * never silently skip or duplicate rows.
+ */
+export interface RankedMarketplaceCursor {
+  sortField: string;
+  sortDirection: MarketplaceSortDirection;
+  /** SHA-256 hex of the canonical filter string. */
+  filterHash: string;
+  /** ISO timestamp of the last item on the previous page (for createdAt). */
+  createdAt: string;
+  /** id of the last item on the previous page (tiebreaker). */
+  id: string;
+}
+
+/** base64url-encode a RankedMarketplaceCursor. */
+export function encodeRankedCursor(cursor: RankedMarketplaceCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+/**
+ * Decode a base64url cursor string.
+ * Returns null for any input that is not a structurally valid
+ * RankedMarketplaceCursor (parse errors, missing fields, bad date).
+ */
+export function decodeRankedCursor(raw: string): RankedMarketplaceCursor | null {
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(raw, "base64url").toString("utf8"),
+    ) as Partial<RankedMarketplaceCursor>;
+
+    if (
+      typeof parsed.sortField !== "string" ||
+      parsed.sortField.length === 0 ||
+      typeof parsed.sortDirection !== "string" ||
+      !MARKETPLACE_SORT_DIRECTIONS.includes(
+        parsed.sortDirection as MarketplaceSortDirection,
+      ) ||
+      typeof parsed.filterHash !== "string" ||
+      parsed.filterHash.length === 0 ||
+      typeof parsed.createdAt !== "string" ||
+      Number.isNaN(new Date(parsed.createdAt).getTime()) ||
+      typeof parsed.id !== "string" ||
+      parsed.id.length === 0
+    ) {
+      return null;
+    }
+
+    return {
+      sortField: parsed.sortField,
+      sortDirection: parsed.sortDirection as MarketplaceSortDirection,
+      filterHash: parsed.filterHash,
+      createdAt: new Date(parsed.createdAt).toISOString(),
+      id: parsed.id,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Canonical filter hash — SHA-256 hex of a stable JSON string of the filters.
+ * Keys are sorted so the hash is order-independent.
+ */
+export function hashFilters(filters: Record<string, string | null>): string {
+  const sorted = Object.keys(filters)
+    .sort()
+    .reduce<Record<string, string | null>>((acc, key) => {
+      acc[key] = filters[key];
+      return acc;
+    }, {});
+  return createHash("sha256").update(JSON.stringify(sorted)).digest("hex");
+}
+
+/**
+ * Returns true when the cursor's encoded sort and filter hash match the
+ * current request parameters exactly.
+ */
+export function isCursorCompatible(
+  cursor: RankedMarketplaceCursor,
+  sort: MarketplaceSort<string>,
+  filterHash: string,
+): boolean {
+  return (
+    cursor.sortField === sort.field &&
+    cursor.sortDirection === sort.direction &&
+    cursor.filterHash === filterHash
+  );
 }
