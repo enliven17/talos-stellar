@@ -25,9 +25,13 @@ from talos_agent.adapters.health import (
 )
 from talos_agent.adapters.mastodon import MastodonAdapter, MastodonAdapterConfig
 from talos_agent.adapters.registry import (
+    AdapterRecoveryQueue,
     AdapterRegistry,
     AdapterReloadPreview,
     CapabilityChange,
+    DispositionResult,
+    OperatorDisposition,
+    UncertainPublication,
 )
 from talos_agent.adapters.snapshots import (
     AdapterHealthSnapshot,
@@ -57,6 +61,10 @@ __all__ = [
     "AdapterRegistry",
     "AdapterReloadPreview",
     "CapabilityChange",
+    "AdapterRecoveryQueue",
+    "OperatorDisposition",
+    "UncertainPublication",
+    "DispositionResult",
     "AdapterCapabilityManifest",
     "AdapterResourceLimits",
     "AdapterSandbox",

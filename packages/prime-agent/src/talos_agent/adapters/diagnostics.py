@@ -20,7 +20,7 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _SAFE_LABEL = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]*$")
 _SENSITIVE_KEY = re.compile(r"(?:token|authorization|secret|api[_-]?key|password|cookie|signature|credential|private[_-]?key|webhook)", re.I)
 _INLINE_SECRET = re.compile(r"(Bearer\s+)[^\s,;]+", re.I)
-_VALID_OPERATIONS = frozenset({"post", "reply", "get_mentions", "search", "get_post_performance", "get_profile_stats", "network", "browser", "reload_preview"})
+_VALID_OPERATIONS = frozenset({"post", "reply", "get_mentions", "search", "get_post_performance", "get_profile_stats", "network", "browser", "reload_preview", "recovery_disposition"})
 _VALID_STATUSES = frozenset({"succeeded", "failed", "timed_out", "denied"})
 _VALID_CAPABILITIES = frozenset({"secret", "network", "browser", "browser_host", "filesystem_read", "filesystem_write", "tool", "manifest", "operation"})
 _VALID_RESOURCES = frozenset({"input", "output", "request", "network_requests", "network_response", "browser_actions"})
@@ -102,4 +102,12 @@ def safe_adapter_diagnostic_fields(**fields: Any) -> dict[str, Any]:
         result["modified_channels"] = [_label(c, MAX_PROVIDER_LENGTH) for c in fields["modified_channels"]][:32]
     if "affected_scheduled_tasks" in fields and isinstance(fields["affected_scheduled_tasks"], (list, tuple, set, frozenset)):
         result["affected_scheduled_tasks"] = [_label(t, MAX_OPERATION_LENGTH) for t in fields["affected_scheduled_tasks"]][:32]
+    if "disposition" in fields:
+        result["disposition"] = _label(fields["disposition"], MAX_STATUS_LENGTH)
+    if "action" in fields:
+        result["action"] = _label(fields["action"], MAX_OPERATION_LENGTH)
+    if "safe_actions" in fields and isinstance(fields["safe_actions"], (list, tuple, set, frozenset)):
+        result["safe_actions"] = [_label(a, MAX_OPERATION_LENGTH) for a in fields["safe_actions"]][:32]
+    if "uncertain_count" in fields and isinstance(fields["uncertain_count"], int) and not isinstance(fields["uncertain_count"], bool):
+        result["uncertain_count"] = max(0, min(fields["uncertain_count"], 1_000_000))
     return result

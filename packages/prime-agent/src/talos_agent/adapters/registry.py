@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
 import logging
+import sqlite3
 from typing import TYPE_CHECKING, Any
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities
@@ -12,6 +15,311 @@ if TYPE_CHECKING:
     from talos_agent.adapters.capability import AdapterSandbox
 
 logger = logging.getLogger(__name__)
+
+
+class OperatorDisposition(str, Enum):
+    """Explicit operator disposition for uncertain / indeterminate adapter publications."""
+
+    RESOLVE_SUCCEEDED = "resolve_succeeded"
+    RESOLVE_FAILED = "resolve_failed"
+    ABANDON = "abandon"
+    RETRY = "retry"
+
+
+@dataclass(frozen=True)
+class UncertainPublication:
+    """An adapter invocation record in an uncertain/indeterminate state requiring disposition."""
+
+    operation_id: str
+    adapter_name: str
+    operation: str
+    input_digest: str
+    state: str
+    owner_id: str
+    attempt_count: int
+    lease_expires_at: str
+    created_at: str
+    updated_at: str
+    safe_actions: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "operation_id": self.operation_id,
+            "adapter_name": self.adapter_name,
+            "operation": self.operation,
+            "input_digest": self.input_digest,
+            "state": self.state,
+            "owner_id": self.owner_id,
+            "attempt_count": self.attempt_count,
+            "lease_expires_at": self.lease_expires_at,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "safe_actions": list(self.safe_actions),
+        }
+
+
+@dataclass(frozen=True)
+class DispositionResult:
+    """Outcome of applying an operator disposition to an uncertain publication."""
+
+    operation_id: str
+    disposition: str
+    previous_state: str
+    resulting_state: str
+    action_taken: str
+    applied_at: str
+    operator: str | None = None
+    reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "operation_id": self.operation_id,
+            "disposition": self.disposition,
+            "previous_state": self.previous_state,
+            "resulting_state": self.resulting_state,
+            "action_taken": self.action_taken,
+            "applied_at": self.applied_at,
+            "operator": self.operator,
+            "reason": self.reason,
+        }
+
+
+class AdapterRecoveryQueue:
+    """Operator queue for inspecting and resolving uncertain adapter publications.
+
+    Guarantees:
+    - Never silently retries an action that may already have succeeded.
+    - Explicit disposition required for indeterminate operations.
+    - Safe actions are listed per uncertain publication based on state and lease.
+    """
+
+    SAFE_ACTIONS: list[str] = [
+        OperatorDisposition.RESOLVE_SUCCEEDED.value,
+        OperatorDisposition.RESOLVE_FAILED.value,
+        OperatorDisposition.ABANDON.value,
+        OperatorDisposition.RETRY.value,
+    ]
+
+    def __init__(self, db: Any) -> None:
+        self._conn: sqlite3.Connection = getattr(db, "_conn", db)
+
+    def list_uncertain(self, *, limit: int = 50) -> list[UncertainPublication]:
+        """List publications in indeterminate or expired running states requiring operator disposition."""
+        try:
+            self._ensure_table()
+            rows = self._conn.execute(
+                """
+                SELECT operation_id, adapter_name, operation, input_digest, state,
+                       owner_id, lease_expires_at, attempt_count, created_at, updated_at
+                FROM adapter_invocations
+                WHERE state = 'indeterminate'
+                   OR (state = 'running' AND datetime(lease_expires_at) < datetime('now'))
+                ORDER BY created_at ASC, operation_id ASC
+                LIMIT ?
+                """,
+                (max(1, min(limit, 200)),),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+
+        results: list[UncertainPublication] = []
+        for r in rows:
+            safe_actions = self._compute_safe_actions(r["state"], r["lease_expires_at"])
+            results.append(
+                UncertainPublication(
+                    operation_id=r["operation_id"],
+                    adapter_name=r["adapter_name"],
+                    operation=r["operation"],
+                    input_digest=r["input_digest"],
+                    state=r["state"],
+                    owner_id=r["owner_id"],
+                    attempt_count=r["attempt_count"],
+                    lease_expires_at=r["lease_expires_at"],
+                    created_at=r["created_at"],
+                    updated_at=r["updated_at"],
+                    safe_actions=safe_actions,
+                )
+            )
+        return results
+
+    def get_uncertain(self, operation_id: str) -> UncertainPublication | None:
+        """Fetch a specific publication if it is in an uncertain state."""
+        try:
+            self._ensure_table()
+            row = self._conn.execute(
+                """
+                SELECT operation_id, adapter_name, operation, input_digest, state,
+                       owner_id, lease_expires_at, attempt_count, created_at, updated_at
+                FROM adapter_invocations
+                WHERE operation_id = ?
+                """,
+                (operation_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+
+        if not row:
+            return None
+
+        state = row["state"]
+        lease_expires_at = row["lease_expires_at"]
+        is_uncertain = state == "indeterminate" or (
+            state == "running" and self._is_expired(lease_expires_at)
+        )
+        if not is_uncertain:
+            return None
+
+        return UncertainPublication(
+            operation_id=row["operation_id"],
+            adapter_name=row["adapter_name"],
+            operation=row["operation"],
+            input_digest=row["input_digest"],
+            state=state,
+            owner_id=row["owner_id"],
+            attempt_count=row["attempt_count"],
+            lease_expires_at=lease_expires_at,
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            safe_actions=self._compute_safe_actions(state, lease_expires_at),
+        )
+
+    def apply_disposition(
+        self,
+        operation_id: str,
+        disposition: str | OperatorDisposition,
+        *,
+        operator: str | None = None,
+        reason: str | None = None,
+    ) -> DispositionResult:
+        """Apply an explicit operator disposition to an uncertain publication.
+
+        Raises:
+        - ValueError: If disposition is invalid, operation is unknown, or already terminal.
+        - RuntimeError: If attempting silent retry or invalid state transition.
+        """
+        disp_value = (
+            disposition.value if isinstance(disposition, OperatorDisposition) else str(disposition).lower().strip()
+        )
+        valid_dispositions = {d.value for d in OperatorDisposition}
+        if disp_value not in valid_dispositions:
+            raise ValueError(
+                f"Invalid disposition {disposition!r}. Must be one of {sorted(valid_dispositions)}"
+            )
+
+        self._ensure_table()
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                "SELECT * FROM adapter_invocations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+
+            if row is None:
+                raise ValueError(f"Operation ID {operation_id!r} not found in adapter invocations")
+
+            current_state = row["state"]
+            lease_expires_at = row["lease_expires_at"]
+            is_expired_running = current_state == "running" and self._is_expired(lease_expires_at)
+
+            if current_state not in ("indeterminate", "running"):
+                raise ValueError(
+                    f"Cannot apply disposition to publication in terminal state {current_state!r}"
+                )
+            if current_state == "running" and not is_expired_running:
+                raise ValueError(
+                    f"Cannot apply disposition to actively running publication (lease expires {lease_expires_at})"
+                )
+
+            # Determine resulting state based on operator disposition
+            if disp_value == OperatorDisposition.RESOLVE_SUCCEEDED.value:
+                target_state = "succeeded"
+                action_taken = "Marked succeeded by operator confirmation"
+            elif disp_value in (OperatorDisposition.RESOLVE_FAILED.value, OperatorDisposition.ABANDON.value):
+                target_state = "failed"
+                action_taken = (
+                    "Marked failed by operator disposition"
+                    if disp_value == OperatorDisposition.RESOLVE_FAILED.value
+                    else "Abandoned by operator disposition"
+                )
+            elif disp_value == OperatorDisposition.RETRY.value:
+                # Explicit operator retry: transitions to 'failed' so it can be re-admitted,
+                # ensuring it is NEVER silently retried by automatic background systems.
+                target_state = "failed"
+                action_taken = "Reset to failed for operator-authorized retry"
+            else:
+                raise ValueError(f"Unhandled disposition {disp_value!r}")
+
+            self._conn.execute(
+                """
+                UPDATE adapter_invocations
+                SET state = ?, updated_at = ?
+                WHERE operation_id = ?
+                """,
+                (target_state, now_iso, operation_id),
+            )
+            self._conn.commit()
+
+            return DispositionResult(
+                operation_id=operation_id,
+                disposition=disp_value,
+                previous_state=current_state,
+                resulting_state=target_state,
+                action_taken=action_taken,
+                applied_at=now_iso,
+                operator=operator,
+                reason=reason,
+            )
+        except Exception:
+            if self._conn.in_transaction:
+                self._conn.rollback()
+            raise
+
+    def _ensure_table(self) -> None:
+        """Ensure adapter_invocations table exists before querying."""
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS adapter_invocations (
+                operation_id       TEXT PRIMARY KEY,
+                adapter_name       TEXT NOT NULL,
+                operation          TEXT NOT NULL,
+                input_digest       TEXT NOT NULL,
+                state              TEXT NOT NULL CHECK (
+                    state IN ('running', 'succeeded', 'failed', 'indeterminate')
+                ),
+                owner_id           TEXT NOT NULL,
+                lease_expires_at   TEXT NOT NULL,
+                attempt_count      INTEGER NOT NULL DEFAULT 1,
+                created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            """
+        )
+
+    def _is_expired(self, lease_expires_at: str) -> bool:
+        try:
+            val = lease_expires_at.replace("Z", "+00:00") if lease_expires_at.endswith("Z") else lease_expires_at
+            exp = datetime.fromisoformat(val)
+            now = datetime.now(timezone.utc)
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            return exp < now
+        except Exception:
+            return True
+
+    def _compute_safe_actions(self, state: str, lease_expires_at: str) -> list[str]:
+        # Explicit actions allowed for operator intervention:
+        # 1. resolve_succeeded: if verified out-of-band to have posted
+        # 2. resolve_failed: if verified out-of-band to have failed or not posted
+        # 3. abandon: drop without reattempting
+        # 4. retry: explicitly reset for retry only under operator direction
+        return [
+            OperatorDisposition.RESOLVE_SUCCEEDED.value,
+            OperatorDisposition.RESOLVE_FAILED.value,
+            OperatorDisposition.ABANDON.value,
+            OperatorDisposition.RETRY.value,
+        ]
 
 
 @dataclass(frozen=True)
@@ -86,6 +394,7 @@ class AdapterRegistry:
         sandbox: AdapterSandbox | None = None,
         *,
         on_duplicate: str = "raise",
+        recovery_queue: AdapterRecoveryQueue | None = None,
     ) -> None:
         if on_duplicate not in self._VALID_ON_DUPLICATE:
             raise ValueError(
@@ -95,6 +404,16 @@ class AdapterRegistry:
         self._adapters: dict[str, BaseSocialAdapter] = {}
         self._sandbox = sandbox
         self._on_duplicate = on_duplicate
+        self._recovery_queue = recovery_queue
+
+    @property
+    def recovery_queue(self) -> AdapterRecoveryQueue | None:
+        """Access the adapter recovery queue if configured, or from sandbox store."""
+        if self._recovery_queue is not None:
+            return self._recovery_queue
+        if self._sandbox is not None and getattr(self._sandbox, "_store", None) is not None:
+            return AdapterRecoveryQueue(self._sandbox._store)
+        return None
 
     # ── Registration ─────────────────────────────────────────────────
 

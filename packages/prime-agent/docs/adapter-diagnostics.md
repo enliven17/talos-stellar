@@ -56,3 +56,54 @@ When adapter channels or capabilities change, the preview flags affected schedul
 - `telemetry_log`: impacted whenever any channel adapter is added, removed, or changed.
 - `telegram_queue`: impacted whenever the Telegram adapter is added, removed, or modified.
 
+## Adapter recovery queue and operator disposition
+
+When external network or provider operations time out or experience ambiguous transport
+disruptions after transmission begins, publications transition to an `indeterminate` state.
+To preserve at-most-once delivery and prevent duplicate public posts, the system **never
+silently retries an action that may already have succeeded**.
+
+Instead, indeterminate and lease-expired publications enter the `AdapterRecoveryQueue`
+awaiting explicit operator disposition.
+
+### Inspecting uncertain publications
+
+Use `AdapterRecoveryQueue(db).list_uncertain()` or `registry.recovery_queue.list_uncertain()`:
+
+```python
+queue = registry.recovery_queue
+uncertain_items = queue.list_uncertain(limit=50)
+for item in uncertain_items:
+    print(item.operation_id, item.adapter_name, item.safe_actions)
+```
+
+Each `UncertainPublication` reports:
+- `operation_id`: Unique idempotency key.
+- `adapter_name`: Channel adapter identifier.
+- `operation`: Adapter action (e.g., `post`, `reply`).
+- `input_digest`: SHA-256 hash of outbound payload.
+- `state`: Current state (`indeterminate` or expired `running`).
+- `attempt_count`: Total transmission attempts made.
+- `lease_expires_at`: ISO timestamp when invocation lease expired.
+- `safe_actions`: Explicit allowed dispositions:
+  - `resolve_succeeded`: Confirm external publication succeeded out-of-band.
+  - `resolve_failed`: Confirm external publication failed without publishing.
+  - `abandon`: Discard without further retry.
+  - `retry`: Explicitly re-authorize retry; transitions record to `failed` so it may be re-admitted without silent background retries.
+
+### Applying operator disposition
+
+```python
+result = queue.apply_disposition(
+    operation_id="post-abc-123",
+    disposition="resolve_succeeded",  # or OperatorDisposition.RESOLVE_SUCCEEDED
+    operator="ops-admin",
+    reason="Confirmed live post visible on platform feed",
+)
+```
+
+Attempting to apply a disposition to an actively running or already terminal operation
+raises a `ValueError`. Automatic background loops are strictly forbidden from silently
+re-executing indeterminate publications.
+
+
