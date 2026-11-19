@@ -155,6 +155,13 @@
       "when": 1754161200000,
       "tag": "0022_add_buyback_requests",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1754247600000,
+      "tag": "0023_add_outbox_deliveries",
+      "breakpoints": true
     }
   ]
 }
