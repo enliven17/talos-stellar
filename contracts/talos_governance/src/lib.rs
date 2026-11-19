@@ -2238,4 +2238,184 @@ mod tests {
             .try_initialize(&admin, &pulse, &100_i128, &5_000_i128, &20_u32);
         assert!(result.is_err(), "double initialization must be rejected");
     }
+
+    // ── Canonical governance event fixture bundle (#1377) ────────────
+    //
+    // These tests verify event struct decoding without a live deployed
+    // contract. Each test constructs a synthetic event payload and
+    // round-trips it through the contracttype serialisation, matching the
+    // JSON fixture vectors in contracts/fixtures/event_fixtures.json.
+
+    #[test]
+    fn fixture_prop_crt_round_trips_typed_struct() {
+        let env = Env::default();
+        let proposer = Address::generate(&env);
+        let payload = EventProposalCreated {
+            proposal_id: 7,
+            talos_id: 1,
+            proposer: proposer.clone(),
+            snapshot_ledger: 100090,
+            end_ledger: 100120,
+        };
+        // Serialise through contracttype encoding and deserialise back.
+        let val: soroban_sdk::Val = payload.clone().into_val(&env);
+        let decoded: EventProposalCreated = soroban_sdk::FromVal::from_val(&env, &val);
+        assert_eq!(decoded.proposal_id, 7);
+        assert_eq!(decoded.talos_id, 1);
+        assert_eq!(decoded.proposer, proposer);
+        assert_eq!(decoded.snapshot_ledger, 100090);
+        assert_eq!(decoded.end_ledger, 100120);
+    }
+
+    #[test]
+    fn fixture_vote_approve_round_trips_typed_struct() {
+        let env = Env::default();
+        let voter = Address::generate(&env);
+        let payload = EventVoteCast {
+            proposal_id: 7,
+            voter: voter.clone(),
+            choice: VoteChoice::Approve,
+            weight: 150,
+        };
+        let val: soroban_sdk::Val = payload.clone().into_val(&env);
+        let decoded: EventVoteCast = soroban_sdk::FromVal::from_val(&env, &val);
+        assert_eq!(decoded.proposal_id, 7);
+        assert_eq!(decoded.voter, voter);
+        assert_eq!(decoded.choice, VoteChoice::Approve);
+        assert_eq!(decoded.weight, 150);
+    }
+
+    #[test]
+    fn fixture_vote_reject_round_trips_typed_struct() {
+        let env = Env::default();
+        let voter = Address::generate(&env);
+        let payload = EventVoteCast {
+            proposal_id: 7,
+            voter: voter.clone(),
+            choice: VoteChoice::Reject,
+            weight: 50,
+        };
+        let val: soroban_sdk::Val = payload.clone().into_val(&env);
+        let decoded: EventVoteCast = soroban_sdk::FromVal::from_val(&env, &val);
+        assert_eq!(decoded.choice, VoteChoice::Reject);
+        assert_eq!(decoded.weight, 50);
+    }
+
+    #[test]
+    fn fixture_prop_stat_approved_round_trips_typed_struct() {
+        let env = Env::default();
+        let payload = EventProposalStatusChanged {
+            proposal_id: 7,
+            status: ProposalStatus::Approved,
+        };
+        let val: soroban_sdk::Val = payload.clone().into_val(&env);
+        let decoded: EventProposalStatusChanged = soroban_sdk::FromVal::from_val(&env, &val);
+        assert_eq!(decoded.proposal_id, 7);
+        assert_eq!(decoded.status, ProposalStatus::Approved);
+    }
+
+    #[test]
+    fn fixture_prop_stat_executed_round_trips_typed_struct() {
+        let env = Env::default();
+        let payload = EventProposalStatusChanged {
+            proposal_id: 7,
+            status: ProposalStatus::Executed,
+        };
+        let val: soroban_sdk::Val = payload.clone().into_val(&env);
+        let decoded: EventProposalStatusChanged = soroban_sdk::FromVal::from_val(&env, &val);
+        assert_eq!(decoded.status, ProposalStatus::Executed);
+    }
+
+    #[test]
+    fn fixture_prop_stat_rejected_round_trips_typed_struct() {
+        let env = Env::default();
+        let payload = EventProposalStatusChanged {
+            proposal_id: 8,
+            status: ProposalStatus::Rejected,
+        };
+        let val: soroban_sdk::Val = payload.clone().into_val(&env);
+        let decoded: EventProposalStatusChanged = soroban_sdk::FromVal::from_val(&env, &val);
+        assert_eq!(decoded.proposal_id, 8);
+        assert_eq!(decoded.status, ProposalStatus::Rejected);
+    }
+
+    /// Full lifecycle: create → approve-vote → execute emits the correct
+    /// typed event sequence.  Matches the vector sequence in
+    /// governance.prop_crt.normal → governance.vote.approve →
+    /// governance.prop_stat.approved → governance.prop_stat.executed.
+    #[test]
+    fn fixture_full_lifecycle_emits_typed_event_sequence() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+
+        cache_balance_with_auth(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            proposal.snapshot_ledger,
+            &voter,
+            200,
+        );
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &voter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "vote",
+                    args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .vote(&voter, &proposal_id, &VoteChoice::Approve);
+
+        client.execute_proposal(&proposal_id);
+
+        let events = env.events().all();
+
+        // Verify prop_crt was emitted with typed struct.
+        let crt_ev = events.iter().find(|(cid, topics, _)| {
+            if *cid != contract_id { return false; }
+            if let Some(t0) = topics.get(0) {
+                let s: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &t0);
+                s == symbol_short!("prop_crt")
+            } else { false }
+        });
+        assert!(crt_ev.is_some(), "prop_crt must be emitted");
+        let (_, _, crt_data) = crt_ev.unwrap();
+        let crt_payload: EventProposalCreated = soroban_sdk::FromVal::from_val(&env, &crt_data);
+        assert_eq!(crt_payload.proposal_id, proposal_id);
+
+        // Verify vote was emitted with typed struct.
+        let vote_ev = events.iter().find(|(cid, topics, _)| {
+            if *cid != contract_id { return false; }
+            if let Some(t0) = topics.get(0) {
+                let s: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &t0);
+                s == symbol_short!("vote")
+            } else { false }
+        });
+        assert!(vote_ev.is_some(), "vote must be emitted");
+        let (_, _, vote_data) = vote_ev.unwrap();
+        let vote_payload: EventVoteCast = soroban_sdk::FromVal::from_val(&env, &vote_data);
+        assert_eq!(vote_payload.choice, VoteChoice::Approve);
+
+        // Verify the final prop_stat is Executed.
+        let stat_events: std::vec::Vec<_> = events.iter().filter(|(cid, topics, _)| {
+            if *cid != contract_id { return false; }
+            if let Some(t0) = topics.get(0) {
+                let s: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &t0);
+                s == symbol_short!("prop_stat")
+            } else { false }
+        }).collect();
+        assert!(!stat_events.is_empty(), "prop_stat must be emitted");
+        let (_, _, last_stat_data) = stat_events.last().unwrap();
+        let stat_payload: EventProposalStatusChanged =
+            soroban_sdk::FromVal::from_val(&env, last_stat_data);
+        assert_eq!(stat_payload.status, ProposalStatus::Executed);
+    }
 }
