@@ -20,7 +20,7 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _SAFE_LABEL = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]*$")
 _SENSITIVE_KEY = re.compile(r"(?:token|authorization|secret|api[_-]?key|password|cookie|signature|credential|private[_-]?key|webhook)", re.I)
 _INLINE_SECRET = re.compile(r"(Bearer\s+)[^\s,;]+", re.I)
-_VALID_OPERATIONS = frozenset({"post", "reply", "get_mentions", "search", "get_post_performance", "get_profile_stats", "network", "browser"})
+_VALID_OPERATIONS = frozenset({"post", "reply", "get_mentions", "search", "get_post_performance", "get_profile_stats", "network", "browser", "reload_preview"})
 _VALID_STATUSES = frozenset({"succeeded", "failed", "timed_out", "denied"})
 _VALID_CAPABILITIES = frozenset({"secret", "network", "browser", "browser_host", "filesystem_read", "filesystem_write", "tool", "manifest", "operation"})
 _VALID_RESOURCES = frozenset({"input", "output", "request", "network_requests", "network_response", "browser_actions"})
@@ -90,4 +90,16 @@ def safe_adapter_diagnostic_fields(**fields: Any) -> dict[str, Any]:
     duration = fields.get("duration_ms")
     if isinstance(duration, (int, float)) and not isinstance(duration, bool):
         result["duration_ms"] = max(0, min(round(duration, 2), 3_600_000))
+    if "valid" in fields and isinstance(fields["valid"], bool):
+        result["valid"] = fields["valid"]
+    if "has_changes" in fields and isinstance(fields["has_changes"], bool):
+        result["has_changes"] = fields["has_changes"]
+    if "added_channels" in fields and isinstance(fields["added_channels"], (list, tuple, set, frozenset)):
+        result["added_channels"] = [_label(c, MAX_PROVIDER_LENGTH) for c in fields["added_channels"]][:32]
+    if "removed_channels" in fields and isinstance(fields["removed_channels"], (list, tuple, set, frozenset)):
+        result["removed_channels"] = [_label(c, MAX_PROVIDER_LENGTH) for c in fields["removed_channels"]][:32]
+    if "modified_channels" in fields and isinstance(fields["modified_channels"], (list, tuple, set, frozenset)):
+        result["modified_channels"] = [_label(c, MAX_PROVIDER_LENGTH) for c in fields["modified_channels"]][:32]
+    if "affected_scheduled_tasks" in fields and isinstance(fields["affected_scheduled_tasks"], (list, tuple, set, frozenset)):
+        result["affected_scheduled_tasks"] = [_label(t, MAX_OPERATION_LENGTH) for t in fields["affected_scheduled_tasks"]][:32]
     return result
