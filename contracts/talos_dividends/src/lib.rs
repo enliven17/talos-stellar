@@ -63,7 +63,7 @@
 //!
 //! ## Version
 //!
-//! `CONTRACT_VERSION = (1, 2, 0)`
+//! `CONTRACT_VERSION = (1, 3, 0)`
 
 #![no_std]
 
@@ -176,6 +176,28 @@ pub struct EpochRecord {
     pub status: EpochStatus,
 }
 
+/// Result of a dry-run distribution calculation returned by
+/// [`TalosDividends::estimate_distribution`].
+///
+/// All amounts are in the same atomic unit as `EpochRecord::total_amount`.
+/// `rounding_remainder` is the integer truncation dust that would not be
+/// distributed to any role; it equals
+/// `total_amount - creator_amount - investor_amount - treasury_amount`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DistributionEstimate {
+    /// Input total used for the calculation.
+    pub total_amount: i128,
+    /// Creator's allocation (`total_amount * creator_share / 100`).
+    pub creator_amount: i128,
+    /// Investor's allocation (`total_amount * investor_share / 100`).
+    pub investor_amount: i128,
+    /// Treasury's allocation (`total_amount * treasury_share / 100`).
+    pub treasury_amount: i128,
+    /// Integer remainder not distributed to any role.
+    pub rounding_remainder: i128,
+}
+
 /// Persistent storage key enumeration.
 #[contracttype]
 #[derive(Clone)]
@@ -216,7 +238,7 @@ const MIN_EPOCH_AMOUNT: i128 = 1;
 /// - **major** — incompatible ABI change
 /// - **minor** — backwards-compatible new entry-point or field
 /// - **patch** — bug-fix with no observable ABI change
-pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 2, 0);
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 3, 0);
 
 /// Expected `INTERFACE_ID` of the configured `RegistryContract`, mirroring
 /// the bytes published by `talos_registry::INTERFACE_ID` (namespace
@@ -240,7 +262,7 @@ pub const INTERFACE_ID: [u8; 32] = [
     0x54, 0x61, 0x6C, 0x6F, 0x73, 0x44, 0x69, 0x76, // "TalosDiv"
     0x69, 0x64, 0x65, 0x6E, 0x64, 0x73, 0x00, 0x00, // "idends" + zero pad
     0x00, 0x00, 0x00, 0x01, // major = 1
-    0x00, 0x00, 0x00, 0x02, // minor = 2
+    0x00, 0x00, 0x00, 0x03, // minor = 3
     0x00, 0x00, 0x00, 0x00, // patch = 0
     0x00, 0x00, 0x00, 0x00, // reserved
 ];
@@ -252,6 +274,7 @@ pub fn features_list() -> &'static [&'static str] {
         "expiry_recovery",
         "rounding_dust",
         "interface_query",
+        "dry_run_estimator",
     ]
 }
 
@@ -828,6 +851,64 @@ impl TalosDividends {
         env.storage()
             .persistent()
             .get(&DataKey::RoundingDust(talos_id, epoch_id))
+    }
+
+    /// Perform a dry-run distribution calculation using synthetic inputs.
+    ///
+    /// Computes per-role allocations and the integer rounding remainder for
+    /// the supplied `total_amount` and patron share percentages.  No ledger
+    /// state is read or written, no signing key is required, and no live
+    /// contract invocation is performed.  The arithmetic is identical to the
+    /// logic inside `claim_dividend`, so estimates are bit-exact with live
+    /// claims.
+    ///
+    /// # Arguments
+    /// * `total_amount`    — gross amount to distribute; must be ≥ [`MIN_EPOCH_AMOUNT`].
+    /// * `creator_share`   — creator's percentage (0–100).
+    /// * `investor_share`  — investor's percentage (0–100).
+    /// * `treasury_share`  — treasury's percentage (0–100).
+    ///
+    /// All three share values must sum to exactly 100.
+    ///
+    /// # Panics / Errors
+    /// - [`ContractError::InvalidPatronShares`] — shares do not sum to 100.
+    /// - [`ContractError::InvalidEpochParams`]  — `total_amount < MIN_EPOCH_AMOUNT`.
+    /// - [`ContractError::ZeroAllocation`]      — a share rounds to zero.
+    /// - [`ContractError::Overflow`]            — intermediate multiplication overflows.
+    pub fn estimate_distribution(
+        env: Env,
+        total_amount: i128,
+        creator_share: u32,
+        investor_share: u32,
+        treasury_share: u32,
+    ) -> Result<DistributionEstimate, ContractError> {
+        let _ = env;
+
+        if total_amount < MIN_EPOCH_AMOUNT {
+            return Err(ContractError::InvalidEpochParams);
+        }
+
+        let share_sum = creator_share
+            .checked_add(investor_share)
+            .and_then(|s| s.checked_add(treasury_share))
+            .ok_or(ContractError::Overflow)?;
+        if share_sum != 100 {
+            return Err(ContractError::InvalidPatronShares);
+        }
+
+        let creator_amount = compute_allocation(total_amount, creator_share)?;
+        let investor_amount = compute_allocation(total_amount, investor_share)?;
+        let treasury_amount = compute_allocation(total_amount, treasury_share)?;
+        let rounding_remainder =
+            compute_rounding_dust(total_amount, creator_share, investor_share, treasury_share)?;
+
+        Ok(DistributionEstimate {
+            total_amount,
+            creator_amount,
+            investor_amount,
+            treasury_amount,
+            rounding_remainder,
+        })
     }
 
     /// Return the next epoch ID that would be assigned for `talos_id`.
@@ -1422,7 +1503,7 @@ mod tests {
     #[test]
     fn version_returns_compile_time_constant() {
         let (env, contract_id, _, _, client) = setup();
-        assert_eq!(client.version(), (1u32, 2u32, 0u32));
+        assert_eq!(client.version(), (1u32, 3u32, 0u32));
         let _ = (env, contract_id);
     }
 
@@ -4199,6 +4280,135 @@ mod tests {
         // The contract will fail when trying to invoke the interface_id method
         // on a non-existent contract, which results in an error
         assert!(res.is_err());
+    }
+
+    // ── estimate_distribution() ──────────────────────────────────────────────
+
+    #[test]
+    fn estimate_distribution_happy_path_60_25_15() {
+        let (env, _, _, _, client) = setup();
+        let est = client
+            .estimate_distribution(&10_000_i128, &60u32, &25u32, &15u32)
+            .unwrap();
+        assert_eq!(est.total_amount, 10_000);
+        assert_eq!(est.creator_amount, 6_000);
+        assert_eq!(est.investor_amount, 2_500);
+        assert_eq!(est.treasury_amount, 1_500);
+        assert_eq!(est.rounding_remainder, 0);
+        let _ = env;
+    }
+
+    #[test]
+    fn estimate_distribution_with_rounding() {
+        let (env, _, _, _, client) = setup();
+        // 101 * 60/100 = 60, 101 * 25/100 = 25, 101 * 15/100 = 15 → sum=100, remainder=1
+        let est = client
+            .estimate_distribution(&101_i128, &60u32, &25u32, &15u32)
+            .unwrap();
+        assert_eq!(est.total_amount, 101);
+        assert_eq!(est.creator_amount + est.investor_amount + est.treasury_amount + est.rounding_remainder, 101);
+        assert!(est.rounding_remainder > 0);
+        let _ = env;
+    }
+
+    #[test]
+    fn estimate_distribution_invalid_shares_not_100() {
+        let (env, _, _, _, client) = setup();
+        let res = client.try_estimate_distribution(&10_000_i128, &60u32, &25u32, &14u32);
+        assert_eq!(res, Err(Ok(ContractError::InvalidPatronShares)));
+        let _ = env;
+    }
+
+    #[test]
+    fn estimate_distribution_invalid_total_amount_zero() {
+        let (env, _, _, _, client) = setup();
+        let res = client.try_estimate_distribution(&0_i128, &60u32, &25u32, &15u32);
+        assert_eq!(res, Err(Ok(ContractError::InvalidEpochParams)));
+        let _ = env;
+    }
+
+    #[test]
+    fn estimate_distribution_sums_to_total_plus_remainder() {
+        let (env, _, _, _, client) = setup();
+        for total in [100_i128, 999, 10_000, 1_000_003] {
+            let est = client
+                .estimate_distribution(&total, &60u32, &25u32, &15u32)
+                .unwrap();
+            assert_eq!(
+                est.creator_amount + est.investor_amount + est.treasury_amount + est.rounding_remainder,
+                total
+            );
+        }
+        let _ = env;
+    }
+
+    #[test]
+    fn estimate_distribution_does_not_modify_state() {
+        let (env, _, _, _, client) = setup();
+        // Call twice; no state to observe. Verify both return identical results.
+        let est1 = client
+            .estimate_distribution(&10_000_i128, &60u32, &25u32, &15u32)
+            .unwrap();
+        let est2 = client
+            .estimate_distribution(&10_000_i128, &60u32, &25u32, &15u32)
+            .unwrap();
+        assert_eq!(est1, est2);
+        let _ = env;
+    }
+
+    #[test]
+    fn estimate_distribution_min_amount() {
+        let (env, _, _, _, client) = setup();
+        // total=100, shares 60/25/15 → exact distribution, remainder=0
+        let est = client
+            .estimate_distribution(&100_i128, &60u32, &25u32, &15u32)
+            .unwrap();
+        assert_eq!(est.creator_amount, 60);
+        assert_eq!(est.investor_amount, 25);
+        assert_eq!(est.treasury_amount, 15);
+        assert_eq!(est.rounding_remainder, 0);
+        let _ = env;
+    }
+
+    #[test]
+    fn estimate_distribution_large_amount() {
+        let (env, _, _, _, client) = setup();
+        // Use a large but safe value: i128::MAX / 100 avoids overflow in * 60
+        let large = i128::MAX / 100;
+        let est = client
+            .estimate_distribution(&large, &60u32, &25u32, &15u32)
+            .unwrap();
+        assert_eq!(
+            est.creator_amount + est.investor_amount + est.treasury_amount + est.rounding_remainder,
+            large
+        );
+        let _ = env;
+    }
+
+    #[test]
+    fn interface_features_includes_dry_run_estimator() {
+        let (env, _, _, _, client) = setup();
+        let features = client.interface_features();
+        let target = soroban_sdk::Symbol::new(&env, "dry_run_estimator");
+        let mut found = false;
+        for i in 0..features.len() {
+            if features.get(i).unwrap() == target {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "expected 'dry_run_estimator' in interface_features");
+    }
+
+    #[test]
+    fn estimate_distribution_no_signing_required() {
+        let (env, _, _, _, client) = setup();
+        // No mock_auths — read-only, no auth needed.
+        let est = client
+            .estimate_distribution(&10_000_i128, &60u32, &25u32, &15u32)
+            .unwrap();
+        assert_eq!(est.creator_amount, 6_000);
+        let _ = env;
     }
 }
 
