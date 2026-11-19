@@ -1,12 +1,55 @@
 import * as store from "./store";
 import { getConsumers } from "./registry";
-import { outboxConfig } from "./config";
-import type { DispatchSummary } from "./types";
+import { DEFAULT_OUTBOX_PAYLOAD_VERSION, DEFAULT_SUPPORTED_PAYLOAD_VERSIONS, outboxConfig } from "./config";
+import type { DispatchSummary, OutboxEvent } from "./types";
+
+export class UnsupportedPayloadVersionError extends Error {
+  readonly version: unknown;
+  readonly supportedVersions: number[];
+
+  constructor(version: unknown, supportedVersions: number[] = DEFAULT_SUPPORTED_PAYLOAD_VERSIONS) {
+    const supportedList = Array.isArray(supportedVersions) ? supportedVersions : DEFAULT_SUPPORTED_PAYLOAD_VERSIONS;
+    super(
+      `Unsupported outbox event payload version: ${String(version)}. Supported versions: [${supportedList.join(", ")}]`,
+    );
+    this.name = "UnsupportedPayloadVersionError";
+    this.version = version;
+    this.supportedVersions = supportedList;
+  }
+}
+
+/**
+ * Extracts and validates the payload version from an outbox event.
+ * If the payload is unversioned (no version field), it defaults to DEFAULT_OUTBOX_PAYLOAD_VERSION (1).
+ * If the version is not among the supported versions, throws UnsupportedPayloadVersionError.
+ */
+export function extractAndValidatePayloadVersion(
+  event: OutboxEvent,
+  supportedVersions: number[] = outboxConfig.supportedPayloadVersions ?? DEFAULT_SUPPORTED_PAYLOAD_VERSIONS,
+): number {
+  const allowed = Array.isArray(supportedVersions) && supportedVersions.length > 0
+    ? supportedVersions
+    : DEFAULT_SUPPORTED_PAYLOAD_VERSIONS;
+
+  const payload = event.payload;
+  let version: unknown = DEFAULT_OUTBOX_PAYLOAD_VERSION;
+
+  if (payload && typeof payload === "object" && !Array.isArray(payload) && "version" in payload) {
+    version = (payload as Record<string, unknown>).version;
+  }
+
+  if (typeof version !== "number" || !Number.isInteger(version) || !allowed.includes(version)) {
+    throw new UnsupportedPayloadVersionError(version, allowed);
+  }
+
+  return version;
+}
 
 export interface DispatchOnceOptions {
   batchSize?: number;
   workerId?: string;
   leaseDurationMs?: number;
+  supportedPayloadVersions?: number[];
 }
 
 /**
@@ -31,9 +74,20 @@ export async function dispatchOnce(opts: DispatchOnceOptions = {}): Promise<Disp
   const batch = await store.leaseBatch(opts.batchSize ?? outboxConfig.batchSize, opts.workerId, opts.leaseDurationMs);
   summary.leased = batch.length;
 
+  const supportedVersions = opts.supportedPayloadVersions ?? outboxConfig.supportedPayloadVersions ?? DEFAULT_SUPPORTED_PAYLOAD_VERSIONS;
+
   await Promise.all(
     batch.map(async (event) => {
       const leaseId = event.leaseId!; // guaranteed by leaseBatch()
+
+      try {
+        extractAndValidatePayloadVersion(event, supportedVersions);
+      } catch (err) {
+        await store.fail(event.id, leaseId, err, { fatal: true });
+        summary.deadLettered += 1;
+        return;
+      }
+
       const handlers = getConsumers(event.eventType);
 
       if (handlers.length === 0) {

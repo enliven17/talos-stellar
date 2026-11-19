@@ -37,9 +37,13 @@ await db.transaction(async (tx) => {
 ## Dispatch
 
 `dispatchOnce()` (`src/lib/outbox/dispatcher.ts`) leases a bounded batch,
-runs every consumer registered for each event's `eventType`
-(`registerConsumer`, `src/lib/outbox/registry.ts`), and acks or retries the
-event as a whole. **All consumers for an event type re-run on retry** — an
+validates that each event's payload version is supported, runs every consumer
+registered for each event's `eventType` (`registerConsumer`,
+`src/lib/outbox/registry.ts`), and acks or retries the event as a whole.
+Events whose payload versions are unsupported (or unparseable/invalid) are
+immediately routed to `dead_letter` without consumer invocation or retries.
+Unversioned payloads default to version `1` for backward compatibility.
+**All consumers for an event type re-run on retry** — an
 event type has no per-consumer cursor, so consumers must be idempotent. An
 event type with zero registered consumers dead-letters immediately.
 
@@ -89,6 +93,7 @@ logical mutation (e.g. a route already guarded by its own idempotency key).
 | `OUTBOX_DEFAULT_MAX_ATTEMPTS` | `8` | Default retry ceiling. |
 | `OUTBOX_POLL_INTERVAL_MS` | `2000` | Worker poll interval when idle. |
 | `OUTBOX_RETENTION_DAYS` | `7` | How long dispatched rows are kept. |
+| `OUTBOX_SUPPORTED_PAYLOAD_VERSIONS` | `1` | Comma-separated list of supported event payload versions. |
 
 ## Admin inspection
 

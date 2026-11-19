@@ -3,7 +3,7 @@ import { db } from "@/db";
 import { tlsOutboxEvents } from "@/db/schema";
 import type { OutboxEvent, OutboxStatus, WriteEventInput } from "./types";
 import { decideRetry } from "./retry";
-import { outboxConfig } from "./config";
+import { DEFAULT_OUTBOX_PAYLOAD_VERSION, outboxConfig } from "./config";
 import { logOutboxEvent, truncateError } from "./metrics";
 
 /** Same shape as `db`, scoped to one transaction — see db.transaction()'s callback param. */
@@ -42,13 +42,23 @@ export async function writeOutboxEvent<TPayload = unknown>(
     if (existing) return toEvent(existing) as OutboxEvent<TPayload>;
   }
 
+  const rawPayload = (input.payload ?? {}) as Record<string, unknown>;
+  const payloadToStore =
+    typeof rawPayload === "object" && rawPayload !== null && !Array.isArray(rawPayload)
+      ? {
+          version: input.payloadVersion ?? (typeof rawPayload.version === "number" ? rawPayload.version : DEFAULT_OUTBOX_PAYLOAD_VERSION),
+          ...rawPayload,
+          ...(input.payloadVersion !== undefined ? { version: input.payloadVersion } : {}),
+        }
+      : rawPayload;
+
   const [row] = await tx
     .insert(tlsOutboxEvents)
     .values({
       aggregateType: input.aggregateType,
       aggregateId: input.aggregateId,
       eventType: input.eventType,
-      payload: (input.payload ?? {}) as Record<string, unknown>,
+      payload: payloadToStore,
       maxAttempts: input.maxAttempts ?? outboxConfig.defaultMaxAttempts,
       dedupeKey: input.dedupeKey ?? null,
     })
@@ -111,7 +121,12 @@ export async function ack(eventId: string, leaseId: string): Promise<OutboxEvent
 }
 
 /** Records a consumer failure and either reschedules (pending) or dead-letters. No-ops if the lease was lost. */
-export async function fail(eventId: string, leaseId: string, error: unknown): Promise<OutboxEvent | null> {
+export async function fail(
+  eventId: string,
+  leaseId: string,
+  error: unknown,
+  opts?: { fatal?: boolean },
+): Promise<OutboxEvent | null> {
   const current = await db
     .select()
     .from(tlsOutboxEvents)
@@ -121,7 +136,9 @@ export async function fail(eventId: string, leaseId: string, error: unknown): Pr
   if (!current) return null;
 
   const lastError = truncateError(error);
-  const decision = decideRetry({ attempts: current.attempts, maxAttempts: current.maxAttempts });
+  const decision = opts?.fatal
+    ? ({ action: "dead_letter" } as const)
+    : decideRetry({ attempts: current.attempts, maxAttempts: current.maxAttempts });
 
   if (decision.action === "dead_letter") {
     const [row] = await db
