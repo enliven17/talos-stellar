@@ -557,6 +557,23 @@ CREATE INDEX IF NOT EXISTS idx_cycle_summaries_talos_id
     ON cycle_summaries(talos_id, created_at DESC);
         """,
     ),
+    (
+        14,
+        """
+CREATE TABLE IF NOT EXISTS task_failure_history (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    talos_id         TEXT NOT NULL DEFAULT '',
+    task_name        TEXT NOT NULL,
+    attempt_number   INTEGER NOT NULL,
+    error_code       TEXT NOT NULL,
+    next_eligible_at TEXT NOT NULL,
+    recorded_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_failure_history_lookup
+    ON task_failure_history(talos_id, task_name, recorded_at DESC);
+        """,
+    ),
 ]
 
 
@@ -1256,6 +1273,120 @@ class LocalDB:
             (task_name,),
         )
         self._conn.commit()
+
+    # ── Task Failure History ───────────────────────────────
+
+    def record_task_failure(
+        self,
+        *,
+        talos_id: str = "",
+        task_name: str,
+        attempt_number: int,
+        error_code: object,
+        next_eligible_at: datetime | str,
+        max_history: int = 100,
+    ) -> int:
+        from talos_agent.db.repos.retry import normalize_error_code
+
+        stable_code = normalize_error_code(error_code)
+        eligible_str = (
+            next_eligible_at.isoformat()
+            if isinstance(next_eligible_at, datetime)
+            else str(next_eligible_at)
+        )
+
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """INSERT INTO task_failure_history (talos_id, task_name, attempt_number, error_code, next_eligible_at, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                talos_id or "",
+                task_name,
+                int(attempt_number),
+                stable_code,
+                eligible_str,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        record_id = cursor.lastrowid or 0
+
+        if max_history > 0:
+            self.prune_task_failure_history(
+                talos_id=talos_id,
+                task_name=task_name,
+                keep_last=max_history,
+            )
+
+        self._conn.commit()
+        return record_id
+
+    def get_task_failure_history(
+        self,
+        talos_id: str | None = None,
+        task_name: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        clauses = []
+        params: list[object] = []
+
+        if talos_id is not None:
+            clauses.append("talos_id = ?")
+            params.append(talos_id)
+        if task_name is not None:
+            clauses.append("task_name = ?")
+            params.append(task_name)
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        query = f"""
+            SELECT id, talos_id, task_name, attempt_number, error_code, next_eligible_at, recorded_at
+            FROM task_failure_history
+            {where}
+            ORDER BY recorded_at DESC, id DESC
+            LIMIT ?
+        """
+        params.append(limit)
+        rows = self._conn.execute(query, params).fetchall()
+
+        return [
+            {
+                "id": row["id"],
+                "talos_id": row["talos_id"],
+                "task_name": row["task_name"],
+                "attempt_number": int(row["attempt_number"]),
+                "error_code": row["error_code"],
+                "next_eligible_at": datetime.fromisoformat(row["next_eligible_at"]),
+                "recorded_at": row["recorded_at"],
+            }
+            for row in rows
+        ]
+
+    def prune_task_failure_history(
+        self,
+        talos_id: str | None = None,
+        task_name: str | None = None,
+        keep_last: int = 100,
+    ) -> int:
+        clauses = []
+        params: list[object] = []
+        if talos_id is not None:
+            clauses.append("talos_id = ?")
+            params.append(talos_id)
+        if task_name is not None:
+            clauses.append("task_name = ?")
+            params.append(task_name)
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        query = f"SELECT id FROM task_failure_history {where} ORDER BY recorded_at DESC, id DESC"
+        rows = self._conn.execute(query, params).fetchall()
+
+        if len(rows) <= keep_last:
+            return 0
+
+        stale_ids = [row["id"] for row in rows[keep_last:]]
+        cursor = self._conn.cursor()
+        cursor.executemany("DELETE FROM task_failure_history WHERE id = ?", [(i,) for i in stale_ids])
+        self._conn.commit()
+        return len(stale_ids)
 
     # ── Claimed Jobs (fencing-token persistence) ───────────
 

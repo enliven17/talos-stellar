@@ -328,6 +328,51 @@ class LocalDB:
     def clear_retry_state(self, task_name: str) -> None:
         self._retry.clear_retry_state(task_name)
 
+    # ── Task Failure History ──────────────────────────────────────────────
+
+    def record_task_failure(
+        self,
+        *,
+        talos_id: str = "",
+        task_name: str,
+        attempt_number: int,
+        error_code: object,
+        next_eligible_at: datetime | str,
+        max_history: int = 100,
+    ) -> int:
+        return self._retry.record_task_failure(
+            talos_id=talos_id,
+            task_name=task_name,
+            attempt_number=attempt_number,
+            error_code=error_code,
+            next_eligible_at=next_eligible_at,
+            max_history=max_history,
+        )
+
+    def get_task_failure_history(
+        self,
+        talos_id: str | None = None,
+        task_name: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        return self._retry.get_task_failure_history(
+            talos_id=talos_id,
+            task_name=task_name,
+            limit=limit,
+        )
+
+    def prune_task_failure_history(
+        self,
+        talos_id: str | None = None,
+        task_name: str | None = None,
+        keep_last: int = 100,
+    ) -> int:
+        return self._retry.prune_task_failure_history(
+            talos_id=talos_id,
+            task_name=task_name,
+            keep_last=keep_last,
+        )
+
     # ── Claimed Jobs ──────────────────────────────────────────────────────
 
     def upsert_claimed_job(

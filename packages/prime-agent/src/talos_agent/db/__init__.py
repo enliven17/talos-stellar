@@ -28,6 +28,7 @@ from talos_agent.db.repos import (
     RetryRepo,
     SpendingRepo,
 )
+from talos_agent.db.repos.retry import normalize_error_code
 
 __all__ = [
     # Façade
@@ -37,6 +38,7 @@ __all__ = [
     "_MIGRATIONS",
     "get_db_path",
     "normalize_playbook_name",
+    "normalize_error_code",
     "run_migrations",
     # Repositories
     "ActivityRepo",

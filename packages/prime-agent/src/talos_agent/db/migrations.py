@@ -532,6 +532,23 @@ CREATE INDEX IF NOT EXISTS idx_cycle_summaries_talos_id
     ON cycle_summaries(talos_id, created_at DESC);
         """,
     ),
+    (
+        14,
+        """
+CREATE TABLE IF NOT EXISTS task_failure_history (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    talos_id         TEXT NOT NULL DEFAULT '',
+    task_name        TEXT NOT NULL,
+    attempt_number   INTEGER NOT NULL,
+    error_code       TEXT NOT NULL,
+    next_eligible_at TEXT NOT NULL,
+    recorded_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_failure_history_lookup
+    ON task_failure_history(talos_id, task_name, recorded_at DESC);
+        """,
+    ),
 ]
 
 
