@@ -329,7 +329,19 @@ def build_backup(
             encrypted = encrypt_with_password(plaintext.decode("utf8"), password)
 
             # Stream ciphertext to disk in chunks (same envelope; verify/restore unchanged).
-            stream_encrypted_artifact(encrypted, out_path)
+            # #1452: a failure here leaves <out>.incomplete on disk (see
+            # stream_encrypted_artifact) and surfaces a bounded code so the
+            # caller can distinguish a partial write from an auth/verify error.
+            try:
+                stream_encrypted_artifact(encrypted, out_path)
+            except BackupError:
+                raise
+            except Exception as exc:
+                raise BackupError(
+                    f"Backup write failed; partial artifact preserved at "
+                    f"{out_path.with_suffix(out_path.suffix + '.incomplete')}: {exc}",
+                    code="INCOMPLETE_WRITE",
+                ) from exc
 
             log.info(
                 "prime_agent_backup_completed",
@@ -498,18 +510,37 @@ def stream_encrypted_artifact(
             os.chmod(out_path, stat.S_IRUSR | stat.S_IWUSR)
         except OSError:
             pass
-    finally:
+    except BaseException:
+        # #1452: a failed write must leave a recoverable artifact, not a
+        # deleted one. Rename the partial to an explicit `.incomplete` suffix
+        # so an operator can inspect it, and so verify_backup / prune never
+        # mistake it for a verified backup.
         if tmp.exists():
             try:
-                tmp.unlink()
+                os.replace(tmp, out_path.with_suffix(out_path.suffix + ".incomplete"))
             except OSError:
-                pass
+                # If even the rename fails, try to unlink so we do not leave
+                # a `.partial` that looks like a resumable artifact.
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+        raise
     return written
 
 
 
 def verify_backup(*, artifact_path: Path, password: str) -> BackupRun:
-    """Read + decrypt + sanity-check without writing."""
+    """Read + decrypt + sanity-check without writing.
+
+    #1452: refuses a `.incomplete` artifact up front. A partial write is never
+    a verified backup, so this path never presents one as such.
+    """
+    if artifact_path.name.endswith(".incomplete"):
+        raise BackupError(
+            f"Refusing to verify an incomplete backup artifact: {artifact_path}",
+            code="INCOMPLETE_WRITE",
+        )
     if not artifact_path.exists():
         raise BackupError(f"Artifact not found: {artifact_path}", code="BAD_INPUT")
     blob = artifact_path.read_text(encoding="utf8")
