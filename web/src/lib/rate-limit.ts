@@ -14,7 +14,11 @@
  *   if (!result.ok) return rateLimitResponse(result);
  */
 
-import { getRateLimitStore } from "@/lib/rate-limit-store";
+import {
+  getRateLimitStore,
+  type OperationClass,
+  type RateLimitStoreIncrementOptions,
+} from "@/lib/rate-limit-store";
 import { logger } from "@/lib/logger";
 
 export interface RateLimitOptions {
@@ -22,6 +26,10 @@ export interface RateLimitOptions {
   limit: number;
   /** Window duration in milliseconds */
   windowMs: number;
+  /** Operation class determining fail-open vs fail-closed policy during store outage */
+  operationClass?: OperationClass;
+  /** Custom bounded grace period override in milliseconds */
+  graceTtlMs?: number;
 }
 
 export interface RateLimitResult {
@@ -46,7 +54,7 @@ export interface RateLimitResult {
  */
 export async function rateLimit(
   key: string,
-  { limit, windowMs }: RateLimitOptions,
+  { limit, windowMs, operationClass, graceTtlMs }: RateLimitOptions,
 ): Promise<RateLimitResult> {
   const store = getRateLimitStore();
 
@@ -54,10 +62,22 @@ export async function rateLimit(
   let resetAt: number;
 
   try {
-    ({ count, resetAt } = await store.increment(key, windowMs));
+    ({ count, resetAt } = await store.increment(key, windowMs, {
+      operationClass,
+      graceTtlMs,
+    }));
   } catch (err) {
-    // Last-resort safety valve: if the store itself throws unexpectedly,
-    // log the error and allow the request through (fail-open).
+    // Fail closed for payment and privileged operations even if the store itself throws
+    if (operationClass === "payment" || operationClass === "privileged") {
+      logger.error(
+        { err, key, operationClass },
+        "rate-limit: store.increment threw unexpectedly, denying request (fail-closed)",
+      );
+      const now = Date.now();
+      return { ok: false, limit, remaining: 0, resetAt: now + windowMs };
+    }
+
+    // Safety valve for standard/read: log and allow the request through (fail-open).
     logger.error({ err, key }, "rate-limit: store.increment threw unexpectedly, allowing request");
     const now = Date.now();
     return { ok: true, limit, remaining: 1, resetAt: now + windowMs };

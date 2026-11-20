@@ -19,6 +19,16 @@
 import { createConnection } from "net";
 import { logger } from "@/lib/logger";
 
+// ─── Operation Classes & Grace Policy ──────────────────────────────
+export type OperationClass = "standard" | "payment" | "privileged" | "read";
+
+export interface RateLimitStoreIncrementOptions {
+  operationClass?: OperationClass;
+  graceTtlMs?: number;
+}
+
+export const DEFAULT_RATE_LIMIT_GRACE_TTL_MS = 60_000;
+
 // ─── Interfaces ───────────────────────────────────────────────────
 
 export interface RateLimitStore {
@@ -27,7 +37,11 @@ export interface RateLimitStore {
    * along with the window expiry (Unix ms). Creates the key if absent with a
    * TTL of `windowMs`.
    */
-  increment(key: string, windowMs: number): Promise<{ count: number; resetAt: number }>;
+  increment(
+    key: string,
+    windowMs: number,
+    options?: RateLimitStoreIncrementOptions,
+  ): Promise<{ count: number; resetAt: number }>;
 }
 
 // ─── In-memory store (process-local) ─────────────────────────────
@@ -50,7 +64,11 @@ const pruneInterval = setInterval(() => {
 if (pruneInterval.unref) pruneInterval.unref();
 
 export class MemoryRateLimitStore implements RateLimitStore {
-  async increment(key: string, windowMs: number): Promise<{ count: number; resetAt: number }> {
+  async increment(
+    key: string,
+    windowMs: number,
+    _options?: RateLimitStoreIncrementOptions,
+  ): Promise<{ count: number; resetAt: number }> {
     const now = Date.now();
     let win = memStore.get(key);
     if (!win || win.resetAt < now) {
@@ -233,19 +251,56 @@ export class RedisRateLimitStore implements RateLimitStore {
   private readonly client: MinRedisClient;
   private readonly fallback: MemoryRateLimitStore;
   private readonly failClosed: boolean;
+  private readonly defaultGraceTtlMs: number;
+  private outageStartTime: number | null = null;
+  private consecutiveFailures = 0;
 
-  constructor(redisUrl: string, failClosed = false) {
+  constructor(
+    redisUrl: string,
+    failClosed = false,
+    defaultGraceTtlMs = DEFAULT_RATE_LIMIT_GRACE_TTL_MS,
+  ) {
     this.client = new MinRedisClient(redisUrl);
     this.fallback = new MemoryRateLimitStore();
     this.failClosed = failClosed;
+    this.defaultGraceTtlMs = defaultGraceTtlMs;
   }
 
-  async increment(key: string, windowMs: number): Promise<{ count: number; resetAt: number }> {
+  /** Read current outage status for telemetry / diagnostics. */
+  getOutageStatus(): { isOutage: boolean; outageDurationMs: number; consecutiveFailures: number } {
+    const isOutage = this.consecutiveFailures > 0;
+    const outageDurationMs = this.outageStartTime ? Date.now() - this.outageStartTime : 0;
+    return { isOutage, outageDurationMs, consecutiveFailures: this.consecutiveFailures };
+  }
+
+  /** Reset outage tracking state (e.g. for testing). */
+  resetOutage(): void {
+    this.outageStartTime = null;
+    this.consecutiveFailures = 0;
+  }
+
+  async increment(
+    key: string,
+    windowMs: number,
+    options?: RateLimitStoreIncrementOptions,
+  ): Promise<{ count: number; resetAt: number }> {
     const now = Date.now();
     const resetAt = now + windowMs;
+    const opClass: OperationClass = options?.operationClass ?? "standard";
+    const graceTtlMs = options?.graceTtlMs ?? this.defaultGraceTtlMs;
 
     try {
       const count = await this.client.incrWithExpire(key, resetAt);
+
+      // On healthy response, clear any active outage tracking
+      if (this.outageStartTime !== null || this.consecutiveFailures > 0) {
+        logger.info(
+          { key, previousFailures: this.consecutiveFailures },
+          "rate-limit: Redis connection recovered from outage",
+        );
+        this.outageStartTime = null;
+        this.consecutiveFailures = 0;
+      }
 
       // On the first increment the key is brand-new; the PEXPIREAT sets TTL.
       // On subsequent increments the TTL is already set; we need to read the
@@ -266,14 +321,48 @@ export class RedisRateLimitStore implements RateLimitStore {
       const derivedResetAt = ttlMs > 0 ? Date.now() + ttlMs : resetAt;
       return { count, resetAt: derivedResetAt };
     } catch (err) {
-      logger.warn({ err, key }, "rate-limit: Redis unavailable, falling back to memory store");
+      if (this.outageStartTime === null) {
+        this.outageStartTime = Date.now();
+      }
+      this.consecutiveFailures += 1;
+      const outageDurationMs = Date.now() - this.outageStartTime;
 
-      if (this.failClosed) {
-        // Deny all traffic when Redis is down (strict mode).
+      logger.warn(
+        {
+          err,
+          key,
+          opClass,
+          outageDurationMs,
+          consecutiveFailures: this.consecutiveFailures,
+        },
+        "rate-limit: Redis unavailable, evaluating bounded grace outage policy",
+      );
+
+      // Payment and privileged paths MUST fail closed during verified outages
+      if (opClass === "payment" || opClass === "privileged") {
+        logger.error(
+          { key, opClass, outageDurationMs },
+          "rate-limit: fail-closed enforced for payment/privileged operation during store outage",
+        );
         return { count: Number.MAX_SAFE_INTEGER, resetAt };
       }
 
-      return this.fallback.increment(key, windowMs);
+      // If global strict failClosed is configured, fail closed for all paths
+      if (this.failClosed) {
+        return { count: Number.MAX_SAFE_INTEGER, resetAt };
+      }
+
+      // Bounded grace window check: if outage duration exceeds graceTtlMs, fail closed
+      if (outageDurationMs > graceTtlMs) {
+        logger.error(
+          { key, opClass, outageDurationMs, graceTtlMs },
+          "rate-limit: outage exceeded bounded grace period, failing closed",
+        );
+        return { count: Number.MAX_SAFE_INTEGER, resetAt };
+      }
+
+      // Within bounded grace period: fallback to memory store for standard / read operations
+      return this.fallback.increment(key, windowMs, options);
     }
   }
 }
@@ -287,10 +376,13 @@ export function getRateLimitStore(): RateLimitStore {
 
   const redisUrl = process.env.REDIS_URL;
   const failClosed = process.env.RATE_LIMIT_FAIL_CLOSED === "true";
+  const graceTtlMs = process.env.RATE_LIMIT_GRACE_TTL_MS
+    ? parseInt(process.env.RATE_LIMIT_GRACE_TTL_MS, 10) || DEFAULT_RATE_LIMIT_GRACE_TTL_MS
+    : DEFAULT_RATE_LIMIT_GRACE_TTL_MS;
 
   if (redisUrl) {
     logger.info("rate-limit: using Redis distributed store");
-    _store = new RedisRateLimitStore(redisUrl, failClosed);
+    _store = new RedisRateLimitStore(redisUrl, failClosed, graceTtlMs);
   } else {
     logger.info("rate-limit: REDIS_URL not set — using in-process memory store");
     _store = new MemoryRateLimitStore();

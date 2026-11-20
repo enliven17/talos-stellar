@@ -41,6 +41,8 @@
 import { and, eq, isNull, or, sql } from "drizzle-orm";
 import { tlsQuotaConfigs, tlsQuotaUsage } from "@/db/schema";
 import type { db as appDb } from "@/db";
+import { logger } from "@/lib/logger";
+import type { OperationClass } from "@/lib/rate-limit-store";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -53,6 +55,14 @@ export type QuotaResource =
 
 /** Window granularity options. */
 export type WindowSize = "hourly" | "daily" | "monthly";
+
+/** Options for checkAndIncrementQuota, including operationClass and grace overrides. */
+export interface CheckQuotaOptions {
+  operationClass?: OperationClass;
+  graceTtlMs?: number;
+}
+
+export const DEFAULT_QUOTA_STORE_GRACE_TTL_MS = 60_000;
 
 /** The effective quota configuration for a (talosId, resource) pair. */
 export interface QuotaConfig {
@@ -192,6 +202,113 @@ export async function resolveQuotaConfig(
   };
 }
 
+// ─── Outage state tracking for quota store ───────────────────────────────────
+
+let _quotaStoreOutageStartTime: number | null = null;
+let _quotaStoreConsecutiveFailures = 0;
+
+/** Read current quota store outage status. */
+export function getQuotaStoreOutageStatus(): {
+  isOutage: boolean;
+  outageDurationMs: number;
+  consecutiveFailures: number;
+} {
+  const isOutage = _quotaStoreConsecutiveFailures > 0;
+  const outageDurationMs = _quotaStoreOutageStartTime ? Date.now() - _quotaStoreOutageStartTime : 0;
+  return { isOutage, outageDurationMs, consecutiveFailures: _quotaStoreConsecutiveFailures };
+}
+
+/** Reset quota store outage tracking (used in tests). */
+export function _resetQuotaStoreOutage(): void {
+  _quotaStoreOutageStartTime = null;
+  _quotaStoreConsecutiveFailures = 0;
+}
+
+function recordQuotaStoreSuccess(): void {
+  if (_quotaStoreOutageStartTime !== null || _quotaStoreConsecutiveFailures > 0) {
+    logger.info(
+      { previousFailures: _quotaStoreConsecutiveFailures },
+      "quota: store connection recovered from outage",
+    );
+    _quotaStoreOutageStartTime = null;
+    _quotaStoreConsecutiveFailures = 0;
+  }
+}
+
+function handleQuotaStoreFailure(
+  err: unknown,
+  talosId: string,
+  resource: QuotaResource,
+  opClass: OperationClass,
+  graceTtlMs: number,
+  fallbackLimit: number,
+  fallbackWindowSize: WindowSize,
+): QuotaResult {
+  if (_quotaStoreOutageStartTime === null) {
+    _quotaStoreOutageStartTime = Date.now();
+  }
+  _quotaStoreConsecutiveFailures += 1;
+  const outageDurationMs = Date.now() - _quotaStoreOutageStartTime;
+
+  logger.warn(
+    {
+      err,
+      talosId,
+      resource,
+      opClass,
+      outageDurationMs,
+      consecutiveFailures: _quotaStoreConsecutiveFailures,
+    },
+    "quota: store unavailable, evaluating bounded grace outage policy",
+  );
+
+  const now = new Date();
+  const windowStart = floorToWindow(now, fallbackWindowSize);
+  const resetAt = nextWindowStart(windowStart, fallbackWindowSize).getTime();
+
+  // Payment and privileged paths are strictly fail-closed during verified outages
+  if (opClass === "payment" || opClass === "privileged" || resource === "job_writes" || resource === "revenue_writes") {
+    logger.error(
+      { talosId, resource, opClass, outageDurationMs },
+      "quota: fail-closed enforced for payment/privileged path during store outage",
+    );
+    return {
+      ok: false,
+      limit: fallbackLimit,
+      remaining: 0,
+      used: fallbackLimit,
+      resetAt,
+      resource,
+    };
+  }
+
+  // Bounded grace window check
+  if (outageDurationMs > graceTtlMs) {
+    logger.error(
+      { talosId, resource, opClass, outageDurationMs, graceTtlMs },
+      "quota: outage exceeded bounded grace period, failing closed",
+    );
+    return {
+      ok: false,
+      limit: fallbackLimit,
+      remaining: 0,
+      used: fallbackLimit,
+      resetAt,
+      resource,
+    };
+  }
+
+  // Within bounded grace period for standard/read/SSE operations: fail open
+  return {
+    ok: true,
+    limit: fallbackLimit,
+    remaining: 1,
+    used: 0,
+    resetAt,
+    resource,
+  };
+}
+
 // ─── Core check + increment ──────────────────────────────────────────────────
 
 /**
@@ -210,14 +327,43 @@ export async function checkAndIncrementQuota(
   db: Db,
   talosId: string,
   resource: QuotaResource,
+  options?: CheckQuotaOptions,
 ): Promise<QuotaResult> {
-  const config = await resolveQuotaConfig(db, talosId, resource);
+  // Infer operation class: explicit option takes precedence, otherwise job_writes/revenue_writes default to payment
+  const opClass: OperationClass =
+    options?.operationClass ??
+    (resource === "job_writes" || resource === "revenue_writes"
+      ? "payment"
+      : resource === "sse_connections"
+      ? "read"
+      : "standard");
+
+  const envGrace = process.env.QUOTA_STORE_GRACE_TTL_MS
+    ? parseInt(process.env.QUOTA_STORE_GRACE_TTL_MS, 10) || DEFAULT_QUOTA_STORE_GRACE_TTL_MS
+    : DEFAULT_QUOTA_STORE_GRACE_TTL_MS;
+  const graceTtlMs = options?.graceTtlMs ?? envGrace;
+
+  let config: QuotaConfig;
+  try {
+    config = await resolveQuotaConfig(db, talosId, resource);
+  } catch (err) {
+    return handleQuotaStoreFailure(
+      err,
+      talosId,
+      resource,
+      opClass,
+      graceTtlMs,
+      10_000,
+      "daily",
+    );
+  }
 
   const now = new Date();
   const windowStart = floorToWindow(now, config.windowSize);
   const resetAt = nextWindowStart(windowStart, config.windowSize).getTime();
 
   if (!config.enabled) {
+    recordQuotaStoreSuccess();
     return {
       ok: true,
       limit: config.maxCount,
@@ -228,30 +374,44 @@ export async function checkAndIncrementQuota(
     };
   }
 
-  // Atomic upsert: increment counter, create row on first use within window
-  const [row] = await db
-    .insert(tlsQuotaUsage)
-    .values({
+  try {
+    // Atomic upsert: increment counter, create row on first use within window
+    const [row] = await db
+      .insert(tlsQuotaUsage)
+      .values({
+        talosId,
+        resource,
+        windowStart,
+        count: 1,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [tlsQuotaUsage.talosId, tlsQuotaUsage.resource, tlsQuotaUsage.windowStart],
+        set: {
+          count: sql`${tlsQuotaUsage.count} + 1`,
+          updatedAt: sql`now()`,
+        },
+      })
+      .returning({ count: tlsQuotaUsage.count });
+
+    recordQuotaStoreSuccess();
+
+    const used = row?.count ?? 1;
+    const remaining = Math.max(0, config.maxCount - used);
+    const ok = used <= config.maxCount;
+
+    return { ok, limit: config.maxCount, remaining, used, resetAt, resource };
+  } catch (err) {
+    return handleQuotaStoreFailure(
+      err,
       talosId,
       resource,
-      windowStart,
-      count: 1,
-      updatedAt: now,
-    })
-    .onConflictDoUpdate({
-      target: [tlsQuotaUsage.talosId, tlsQuotaUsage.resource, tlsQuotaUsage.windowStart],
-      set: {
-        count: sql`${tlsQuotaUsage.count} + 1`,
-        updatedAt: sql`now()`,
-      },
-    })
-    .returning({ count: tlsQuotaUsage.count });
-
-  const used = row?.count ?? 1;
-  const remaining = Math.max(0, config.maxCount - used);
-  const ok = used <= config.maxCount;
-
-  return { ok, limit: config.maxCount, remaining, used, resetAt, resource };
+      opClass,
+      graceTtlMs,
+      config.maxCount,
+      config.windowSize,
+    );
+  }
 }
 
 /**
