@@ -6,6 +6,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from talos_agent.adapters.base import BaseSocialAdapter
+from talos_agent.adapters.diagnostics import CapabilityReport, CapabilityReporter
 
 if TYPE_CHECKING:
     from talos_agent.adapters.capability import AdapterSandbox
@@ -118,6 +119,18 @@ class AdapterRegistry:
             a.channel_name: a.get_capabilities().__dict__
             for a in self._adapters.values()
         }
+
+    # ── Capability negotiation ────────────────────────────────────────────────
+
+    def capability_report(self) -> CapabilityReport:
+        """Return the full capability negotiation report for all adapters.
+
+        The report separates adapters into ``available`` (fully configured and
+        safe for autonomous tool selection) and ``unavailable`` (missing
+        required configuration).  Callers should consult ``report.available``
+        before passing adapter capabilities to the agent's tool chooser.
+        """
+        return CapabilityReporter(self).report()
 
     def __len__(self) -> int:
         return len(self._adapters)
