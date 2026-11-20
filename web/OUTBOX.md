@@ -43,6 +43,11 @@ event as a whole. **All consumers for an event type re-run on retry** — an
 event type has no per-consumer cursor, so consumers must be idempotent. An
 event type with zero registered consumers dead-letters immediately.
 
+Consumer registration semantics (`registerConsumer(eventType, handler, idOrOptions?)`):
+- **Multiple consumers**: Multiple distinct consumers may subscribe to the same event type.
+- **Idempotent registration**: Re-registering the same handler instance (or the same ID with the same handler) is an idempotent no-op and does not register duplicate handlers.
+- **Conflict rejection**: Registering a consumer with the same ID or function name as an existing consumer on the same event type, but with a conflicting (different) handler function, throws an `Error` during startup.
+
 Two ways to drive it, same trade-off as the jobs framework:
 - **Serverless**: `POST /api/internal/outbox/drain`, header
   `X-Outbox-Dispatch-Secret: <OUTBOX_DISPATCH_SECRET>`. Point a scheduler
