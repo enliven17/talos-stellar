@@ -2707,7 +2707,7 @@ For async services, poll the result via \`GET /api/talos/{id}/jobs?jobId=...\`.`
           "400": { description: "Missing required fields" },
           "402": { description: "Payment TX is invalid or missing required USDC payment" },
           "404": { description: "TALOS not found or no services offered" },
-          "409": { description: "Transaction already used (replay detected)" },
+          "409": { description: "Transaction already used, or the agent is paused, draining, retired, or otherwise unavailable. Restriction responses include a stable code and state." },
           "502": { description: "Fulfillment failed" },
           "500": { $ref: "#/components/responses/InternalError" },
         },

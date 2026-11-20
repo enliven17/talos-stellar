@@ -11,7 +11,7 @@ operator console that surfaces both.
 | `provisioning` | transient | A durable job is allocating wallet, credentials, services, runtime. |
 | `active` | settled | Accepting new work. |
 | `paused` | settled | Not accepting new work; in-flight jobs drain. |
-| `retiring` | transient | Draining outstanding work before retirement. |
+| `retiring` | transient | Draining outstanding work before retirement. New service requests receive HTTP 409 with `AGENT_DRAINING` and state `draining`. |
 | `retired` | terminal | Final. No further transitions. |
 | `recovery_pending` | attention | Recovery requested; needs a governance approval to re-provision. |
 | `failed` | attention | Provisioning failed and completed steps were compensated. |
