@@ -532,6 +532,14 @@ CREATE INDEX IF NOT EXISTS idx_cycle_summaries_talos_id
     ON cycle_summaries(talos_id, created_at DESC);
         """,
     ),
+    (
+        14,
+        """
+ALTER TABLE commerce_queue ADD COLUMN payload_retained_until TEXT;
+CREATE INDEX IF NOT EXISTS idx_commerce_queue_retention
+    ON commerce_queue(status, payload_retained_until);
+        """,
+    ),
 ]
 
 

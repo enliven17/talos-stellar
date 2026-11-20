@@ -24,6 +24,25 @@ class CommerceRepo:
         )
         self._conn.commit()
 
+    def prune_completed_payloads(self, retention_days: int = 30) -> int:
+        """Remove private fulfillment payloads while retaining financial/job metadata.
+
+        ``spending_log`` remains untouched, so reconciliation records survive
+        independently of the private purchased output. The operation is
+        idempotent and only clears payloads from completed jobs older than the
+        configured window.
+        """
+        if isinstance(retention_days, bool) or retention_days < 0:
+            raise ValueError("retention_days must be a non-negative integer")
+        cursor = self._conn.execute(
+            "UPDATE commerce_queue SET payload = NULL, updated_at = datetime('now') "
+            "WHERE status = 'completed' AND payload IS NOT NULL "
+            "AND datetime(updated_at) <= datetime('now', ?)",
+            (f"-{int(retention_days)} days",),
+        )
+        self._conn.commit()
+        return cursor.rowcount
+
     def count_pending_commerce_jobs(self) -> int:
         row = self._conn.execute(
             "SELECT COUNT(*) as cnt FROM commerce_queue WHERE status = 'pending'"

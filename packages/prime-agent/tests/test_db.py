@@ -90,6 +90,32 @@ class TestCommerceLifecycle:
 
         assert mock_db.count_pending_commerce_jobs() == 1
 
+    def test_prune_completed_payloads_keeps_financial_record(self, mock_db: LocalDB):
+        mock_db.add_commerce_job("job-old", "seller", "research", {"private": "output"})
+        mock_db.update_commerce_status("job-old", "completed")
+        mock_db._conn.execute("UPDATE commerce_queue SET updated_at = datetime('now', '-31 days')")
+        mock_db.record_spending(2.5, "x402_purchase", "job-old")
+        assert mock_db.prune_completed_commerce_payloads(30) == 1
+        row = mock_db._conn.execute(
+            "SELECT job_id, status, payload FROM commerce_queue WHERE job_id = 'job-old'"
+        ).fetchone()
+        assert row["job_id"] == "job-old"
+        assert row["status"] == "completed"
+        assert row["payload"] is None
+        assert mock_db.get_spending_period(30) == 2.5
+
+    def test_prune_completed_payloads_is_idempotent_and_preserves_pending(self, mock_db: LocalDB):
+        mock_db.add_commerce_job("job-done", "seller", "research", {"private": "output"})
+        mock_db.update_commerce_status("job-done", "completed")
+        mock_db._conn.execute("UPDATE commerce_queue SET updated_at = datetime('now', '-31 days')")
+        mock_db.add_commerce_job("job-pending", "seller", "research", {"private": "output"})
+        assert mock_db.prune_completed_commerce_payloads(30) == 1
+        assert mock_db.prune_completed_commerce_payloads(30) == 0
+        pending = mock_db._conn.execute(
+            "SELECT payload FROM commerce_queue WHERE job_id = 'job-pending'"
+        ).fetchone()
+        assert pending["payload"] is not None
+
 
 class TestPlaybookLookup:
     def test_find_playbook_by_name_returns_exact_match(self, mock_db: LocalDB):
