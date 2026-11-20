@@ -58,7 +58,10 @@ class LearningsRepo:
             "WHERE expires_at IS NOT NULL AND expires_at <= ?",
             (cutoff,),
         ).fetchall()
-        ids = [int(r["id"] if isinstance(r, dict) or hasattr(r, "keys") else r[0]) for r in rows]
+        ids = [
+            int(r["id"] if isinstance(r, dict) or hasattr(r, "keys") else r[0])
+            for r in rows
+        ]
         if ids:
             self._conn.execute(
                 f"DELETE FROM strategy_learnings WHERE id IN ({','.join('?' for _ in ids)})",
@@ -84,7 +87,12 @@ class LearningsRepo:
             "engagement_score = excluded.engagement_score, "
             "keywords = excluded.keywords, "
             "updated_at = datetime('now')",
-            (segment, description, engagement_score, json.dumps(keywords) if keywords else None),
+            (
+                segment,
+                description,
+                engagement_score,
+                json.dumps(keywords) if keywords else None,
+            ),
         )
         self._conn.commit()
 

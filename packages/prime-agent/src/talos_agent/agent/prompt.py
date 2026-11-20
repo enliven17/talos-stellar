@@ -3,11 +3,42 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+import re
 
 from talos_agent.agent.context import AgentContext
 
 if TYPE_CHECKING:
     from talos_agent.config import Settings
+
+_FIELD_MAX_LEN = 2000
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _sanitise_field(value: str) -> str:
+    """Strip C0/C1 control characters and cap length to _FIELD_MAX_LEN."""
+    cleaned = _CONTROL_CHAR_RE.sub("", str(value))
+    return cleaned[:_FIELD_MAX_LEN]
+
+
+def _delimit_field(field_name: str, value: str) -> str:
+    """Wrap a sanitised value in <<<DATA:field>>>…<<<END:field>>> fences.
+
+    Escapes any occurrence of the end delimiter inside the value so the block
+    cannot be broken out of.
+    """
+    end_tag = f"<<<END:{field_name}>>>"
+    escaped = value.replace(end_tag, f"<<<ESCAPED_END:{field_name}>>>")
+    return f"<<<DATA:{field_name}>>>\n{escaped}\n{end_tag}"
+
+
+def _safe_field(config: dict, key: str, default: str = "") -> str:
+    """Extract, sanitise and delimit an operator-supplied field."""
+    raw = config.get(key)
+    if raw is None or not str(raw).strip():
+        val = default
+    else:
+        val = str(raw)
+    return _delimit_field(key, _sanitise_field(val))
 
 
 def build_learning_prompt(talos_config: dict, context: AgentContext) -> str:
@@ -63,9 +94,13 @@ def build_system_prompt(
             reproduce the original demo guidance.
     """
     name = talos_config.get("name", "Unknown Talos")
-    persona = talos_config.get("persona", "a professional marketing agent")
-    target = talos_config.get("targetAudience", "general audience")
-    tone = talos_config.get("toneVoice", "professional and engaging")
+    name_block = _safe_field(talos_config, "name", "Unknown Talos")
+    persona_block = _safe_field(
+        talos_config, "persona", "a professional marketing agent"
+    )
+    target_block = _safe_field(talos_config, "targetAudience", "general audience")
+    tone_block = _safe_field(talos_config, "toneVoice", "professional and engaging")
+    description_block = _safe_field(talos_config, "description", "")
     channels = talos_config.get("channels", ["X"])
     threshold = talos_config.get("approvalThreshold", 10)
     gtm_budget = talos_config.get("gtmBudget", 200)
@@ -81,11 +116,11 @@ def build_system_prompt(
         network_leverage_step = (
             "2. **Leverage the Network**: EVERY cycle, call discover_services to find useful"
             " services from Other Taloses. Actively purchase services to enhance your output:\n"
-            "   - Before writing content → discover and purchase \"Content Templates\" or"
-            " \"Market Research\" services\n"
-            "   - Before posting → discover \"Image Generation\" or \"Translation\" services"
+            '   - Before writing content → discover and purchase "Content Templates" or'
+            ' "Market Research" services\n'
+            '   - Before posting → discover "Image Generation" or "Translation" services'
             " to enrich your post\n"
-            "   - After posting → discover \"Analytics\" or \"Engagement\" services to boost"
+            '   - After posting → discover "Analytics" or "Engagement" services to boost'
             " performance\n"
             "   - If a useful service exists under $5, buy it immediately — the network grows"
             " when agents trade"
@@ -94,11 +129,11 @@ def build_system_prompt(
         network_leverage_step = (
             "2. **Leverage the Network**: Each cycle, call discover_services to find useful"
             " services from other Taloses. Evaluate purchases against your GTM budget:\n"
-            "   - Before writing content → consider \"Content Templates\" or"
-            " \"Market Research\" services\n"
-            "   - Before posting → consider \"Image Generation\" or \"Translation\" services"
+            '   - Before writing content → consider "Content Templates" or'
+            ' "Market Research" services\n'
+            '   - Before posting → consider "Image Generation" or "Translation" services'
             " to enrich your post\n"
-            "   - After posting → consider \"Analytics\" or \"Engagement\" services to boost"
+            '   - After posting → consider "Analytics" or "Engagement" services to boost'
             " performance\n"
             "   - Evaluate cost vs. expected benefit before purchasing any service"
         )

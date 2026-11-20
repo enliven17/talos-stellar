@@ -50,12 +50,17 @@ CHROME_ARGS = [
 def _quiet_sea_server():
     try:
         import subprocess as _sp
+
         _orig_popen = _sp.Popen
 
         class _QuietPopen(_orig_popen):
             def __init__(self, *args, **kwargs):
                 cmd = args[0] if args else kwargs.get("args", [])
-                if isinstance(cmd, list) and len(cmd) == 1 and "stagehand" in str(cmd[0]).lower():
+                if (
+                    isinstance(cmd, list)
+                    and len(cmd) == 1
+                    and "stagehand" in str(cmd[0]).lower()
+                ):
                     kwargs["stdout"] = subprocess.DEVNULL
                     kwargs["stderr"] = subprocess.DEVNULL
                 super().__init__(*args, **kwargs)
@@ -63,6 +68,7 @@ def _quiet_sea_server():
         _sp.Popen = _QuietPopen
     except Exception:
         pass
+
 
 _quiet_sea_server()
 
@@ -97,11 +103,14 @@ class BrowserSession:
             )
             session = client.sessions.start(
                 model_name="gpt-4o",
-                browser={"type": "local", "launchOptions": {
-                    "headless": headless,
-                    "userDataDir": CHROME_PROFILE_DIR,
-                    "args": CHROME_ARGS,
-                }},
+                browser={
+                    "type": "local",
+                    "launchOptions": {
+                        "headless": headless,
+                        "userDataDir": CHROME_PROFILE_DIR,
+                        "args": CHROME_ARGS,
+                    },
+                },
             )
             session_id = session.id if hasattr(session, "id") else str(session)
             return client, session_id
@@ -125,6 +134,7 @@ class BrowserSession:
 
         for attempt in range(1, MAX_RECONNECT_ATTEMPTS + 1):
             try:
+
                 def _reconnect():
                     client = Stagehand(
                         server="local",
@@ -132,11 +142,14 @@ class BrowserSession:
                     )
                     session = client.sessions.start(
                         model_name="gpt-4o",
-                        browser={"type": "local", "launchOptions": {
-                            "headless": headless,
-                            "userDataDir": CHROME_PROFILE_DIR,
-                            "args": CHROME_ARGS,
-                        }},
+                        browser={
+                            "type": "local",
+                            "launchOptions": {
+                                "headless": headless,
+                                "userDataDir": CHROME_PROFILE_DIR,
+                                "args": CHROME_ARGS,
+                            },
+                        },
                     )
                     session_id = session.id if hasattr(session, "id") else str(session)
                     return client, session_id
@@ -145,7 +158,9 @@ class BrowserSession:
                 self._client = client
                 self._session_id = session_id
                 self._closed = False
-                console.print(f"[green]Browser reconnected (attempt {attempt}).[/green]")
+                console.print(
+                    f"[green]Browser reconnected (attempt {attempt}).[/green]"
+                )
                 return
             except Exception as e:
                 console.print(f"[red]Reconnect attempt {attempt} failed: {e}[/red]")
@@ -167,18 +182,25 @@ class BrowserSession:
         """Get the CDP websocket URL from the Stagehand SEA server."""
         try:
             import httpx
+
             sea = self._client._sea_server
             if sea and sea.base_url:
                 r = httpx.get(f"{sea.base_url}/v1/sessions/{self._session_id}")
                 if r.status_code == 200:
                     data = r.json()
-                    return data.get("cdpUrl") or data.get("wsUrl") or data.get("debuggerUrl")
+                    return (
+                        data.get("cdpUrl")
+                        or data.get("wsUrl")
+                        or data.get("debuggerUrl")
+                    )
         except Exception:
             pass
         return None
 
     async def goto(self, url: str) -> None:
-        await asyncio.to_thread(self._client.sessions.navigate, self._session_id, url=url)
+        await asyncio.to_thread(
+            self._client.sessions.navigate, self._session_id, url=url
+        )
 
     async def act(self, instruction: str) -> str:
         result = await asyncio.to_thread(
@@ -186,7 +208,9 @@ class BrowserSession:
         )
         return str(result)
 
-    async def extract(self, instruction: str, schema: dict | None = None) -> dict | list:
+    async def extract(
+        self, instruction: str, schema: dict | None = None
+    ) -> dict | list:
         kwargs: dict = {"instruction": instruction}
         if schema:
             kwargs["schema"] = schema
@@ -201,8 +225,10 @@ class BrowserSession:
 
     async def keyboard_type(self, text: str) -> None:
         """Type text using Playwright keyboard (bypasses Stagehand LLM)."""
+
         def _type():
             from playwright.sync_api import sync_playwright
+
             cdp_url = self._get_cdp_url()
             if cdp_url:
                 pw = sync_playwright().start()
@@ -211,12 +237,15 @@ class BrowserSession:
                 page.keyboard.type(text, delay=30)
                 browser.close()
                 pw.stop()
+
         await asyncio.to_thread(_type)
 
     async def keyboard_press(self, key: str) -> None:
         """Press a key combo using Playwright keyboard (bypasses Stagehand LLM)."""
+
         def _press():
             from playwright.sync_api import sync_playwright
+
             cdp_url = self._get_cdp_url()
             if cdp_url:
                 pw = sync_playwright().start()
@@ -225,6 +254,7 @@ class BrowserSession:
                 page.keyboard.press(key)
                 browser.close()
                 pw.stop()
+
         await asyncio.to_thread(_press)
 
     async def url(self) -> str:

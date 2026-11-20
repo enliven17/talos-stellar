@@ -136,19 +136,19 @@ class ProviderNormalized:
     # Pricing
     price_usdc: float
     currency: str
-    price_valid: bool          # within (MIN_PRICE_USDC, MAX_PRICE_USDC]
+    price_valid: bool  # within (MIN_PRICE_USDC, MAX_PRICE_USDC]
 
     # Chain support
     chains: list[str]
-    chain_supported: bool      # at least one chain in SUPPORTED_CHAINS
+    chain_supported: bool  # at least one chain in SUPPORTED_CHAINS
 
     # Schema completeness
-    schema_complete: bool      # all REQUIRED_SERVICE_KEYS present + non-empty
+    schema_complete: bool  # all REQUIRED_SERVICE_KEYS present + non-empty
 
     # Candidate flags (set by CandidateMarker)
-    is_stale: bool = False           # price out of bounds or data looks stale
-    is_incomplete: bool = False      # missing required fields
-    is_unverified: bool = False      # talos_id format suspicious / identity unconfirmed
+    is_stale: bool = False  # price out of bounds or data looks stale
+    is_incomplete: bool = False  # missing required fields
+    is_unverified: bool = False  # talos_id format suspicious / identity unconfirmed
     is_policy_ineligible: bool = False  # violates agent spend policy
 
     # Evidence bag: human-readable reasons for each flag
@@ -182,7 +182,7 @@ class DryRunPlan:
 
     # Planning metadata
     assumptions: list[str]
-    confidence: float          # 0.0–1.0
+    confidence: float  # 0.0–1.0
     estimated_cost_usdc: float
 
     # Budget context (read from DB, never mutated)
@@ -191,10 +191,10 @@ class DryRunPlan:
     budget_headroom_usdc: float
 
     # Digest for plan identity / caching
-    plan_digest: str           # sha256 hex of canonical JSON
+    plan_digest: str  # sha256 hex of canonical JSON
 
     # Timestamp
-    planned_at: str            # ISO-8601 UTC
+    planned_at: str  # ISO-8601 UTC
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -258,8 +258,7 @@ class ProviderNormalizer:
 
         # Schema completeness: all required keys must be present + truthy
         schema_complete = all(
-            raw.get(k) not in (None, "", 0, [])
-            for k in REQUIRED_SERVICE_KEYS
+            raw.get(k) not in (None, "", 0, []) for k in REQUIRED_SERVICE_KEYS
         )
 
         return ProviderNormalized(
@@ -340,7 +339,9 @@ class CandidateMarker:
         """Flag providers with missing or empty required fields."""
         if not p.schema_complete:
             p.is_incomplete = True
-            p.evidence.append("schema_incomplete: one or more required fields are missing or empty")
+            p.evidence.append(
+                "schema_incomplete: one or more required fields are missing or empty"
+            )
         if not p.talos_id:
             p.is_incomplete = True
             p.evidence.append("missing_talos_id")
@@ -634,7 +635,9 @@ def _read_budget_context() -> tuple[float, float, float]:
 async def _fetch_services(category: str, target: str) -> list[dict[str, Any]]:
     """Fetch services from the API.  Uses only the read-only discover_services endpoint."""
     # Explicitly assert no forbidden method is called
-    _assert_read_only("discover_services")  # will NOT raise — discover_services is allowed
+    _assert_read_only(
+        "discover_services"
+    )  # will NOT raise — discover_services is allowed
     # The check above is a no-op for allowed methods; the real guard is below
     # ensuring we never call any mutating method inside this module.
     if _deps().api is None:

@@ -43,37 +43,37 @@ class DataScope(str, enum.Enum):
     """What persistent data a tool may reach."""
 
     NONE = "data.none"
-    READ_LOCAL = "data.read_local"        # local agent DB (history, notes)
+    READ_LOCAL = "data.read_local"  # local agent DB (history, notes)
     WRITE_LOCAL = "data.write_local"
-    READ_REMOTE = "data.read_remote"      # Talos Web API, owned records
+    READ_REMOTE = "data.read_remote"  # Talos Web API, owned records
     WRITE_REMOTE = "data.write_remote"
-    READ_SECRETS = "data.read_secrets"    # credentials, keys — always privileged
+    READ_SECRETS = "data.read_secrets"  # credentials, keys — always privileged
 
 
 class NetworkScope(str, enum.Enum):
     """How a tool may reach the network."""
 
     NONE = "network.none"
-    HTTP = "network.http"                 # server-to-server HTTP(S)
-    BROWSER = "network.browser"           # full headless browser session
+    HTTP = "network.http"  # server-to-server HTTP(S)
+    BROWSER = "network.browser"  # full headless browser session
 
 
 class WalletScope(str, enum.Enum):
     """What a tool may do with agent funds."""
 
     NONE = "wallet.none"
-    READ = "wallet.read"                  # balances, account info
-    TRANSFER = "wallet.transfer"          # move value out
-    TOKEN_ISSUE = "wallet.token_issue"    # mint / airdrop
+    READ = "wallet.read"  # balances, account info
+    TRANSFER = "wallet.transfer"  # move value out
+    TOKEN_ISSUE = "wallet.token_issue"  # mint / airdrop
 
 
 class SideEffect(str, enum.Enum):
     """Externally visible consequences."""
 
     NONE = "side_effect.none"
-    PUBLISH = "side_effect.publish"       # posts to a public channel
-    COMMERCE = "side_effect.commerce"     # creates paid obligations
-    STATE_CHANGE = "side_effect.state"    # mutates protocol/registry state
+    PUBLISH = "side_effect.publish"  # posts to a public channel
+    COMMERCE = "side_effect.commerce"  # creates paid obligations
+    STATE_CHANGE = "side_effect.state"  # mutates protocol/registry state
 
 
 #: Capabilities that can never be granted implicitly — an operator must opt in.
@@ -95,7 +95,9 @@ class ManifestValidationError(ValueError):
 class PermissionDenied(PermissionError):
     """Runtime check refused a tool call. Carries a stable ``code``."""
 
-    def __init__(self, code: str, message: str, tool: str, capability: str | None = None):
+    def __init__(
+        self, code: str, message: str, tool: str, capability: str | None = None
+    ):
         super().__init__(message)
         self.code = code
         self.tool = tool
@@ -167,8 +169,10 @@ class ToolPermissions:
             DataScope.WRITE_REMOTE.value,
         }
         caps = self.capabilities()
-        return not (caps & writes) and not (caps & PRIVILEGED) and not any(
-            e is not SideEffect.NONE for e in self.side_effects
+        return (
+            not (caps & writes)
+            and not (caps & PRIVILEGED)
+            and not any(e is not SideEffect.NONE for e in self.side_effects)
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -178,7 +182,9 @@ class ToolPermissions:
             "hosts": list(self.hosts),
             "wallet": [w.value for w in self.wallet],
             "side_effects": [s.value for s in self.side_effects],
-            "max_spend_usd": str(self.max_spend_usd) if self.max_spend_usd is not None else None,
+            "max_spend_usd": str(self.max_spend_usd)
+            if self.max_spend_usd is not None
+            else None,
             "requires_approval": self.requires_approval,
         }
 
@@ -186,7 +192,12 @@ class ToolPermissions:
 
     def validate(self, tool_name: str) -> None:
         """Reject a manifest that cannot be enforced. Called at registration."""
-        if not self.data or not self.network or not self.wallet or not self.side_effects:
+        if (
+            not self.data
+            or not self.network
+            or not self.wallet
+            or not self.side_effects
+        ):
             raise ManifestValidationError(
                 f"{tool_name}: every manifest axis must declare at least one value "
                 "(use the explicit .NONE member rather than an empty tuple)"
@@ -215,7 +226,9 @@ class ToolPermissions:
                 f"{tool_name}: declares wallet.transfer and must set a positive max_spend_usd"
             )
         if self.max_spend_usd is not None and self.max_spend_usd < 0:
-            raise ManifestValidationError(f"{tool_name}: max_spend_usd must not be negative")
+            raise ManifestValidationError(
+                f"{tool_name}: max_spend_usd must not be negative"
+            )
 
         # A mixed NONE + concrete declaration is almost always a mistake and
         # would silently read as "no capability" in `capabilities()`.
@@ -373,7 +386,9 @@ class PermissionEnforcer:
 
     # ── Registration ─────────────────────────────────────────────────────
 
-    def register(self, tool_name: str, manifest: ToolPermissions | None) -> ToolPermissions:
+    def register(
+        self, tool_name: str, manifest: ToolPermissions | None
+    ) -> ToolPermissions:
         """Validate and record a tool's manifest.
 
         A tool with no manifest falls back to the legacy table when one exists
@@ -488,7 +503,9 @@ class PermissionEnforcer:
                     capability=WalletScope.TRANSFER.value,
                 )
 
-        needs_approval = manifest.requires_approval or bool(declared & self.grants.escalate)
+        needs_approval = manifest.requires_approval or bool(
+            declared & self.grants.escalate
+        )
         if needs_approval and not approved:
             return PermissionDecision(
                 False,

@@ -35,8 +35,8 @@ _EMBED_DESC_LIMIT = 4096
 
 # Embed accent colours
 _COLOR_DEFAULT = 0x5865F2  # Discord blurple
-_COLOR_GTM = 0x57F287      # Discord green — positive revenue / milestone
-_COLOR_WARN = 0xFEE75C     # Yellow — warnings / alerts
+_COLOR_GTM = 0x57F287  # Discord green — positive revenue / milestone
+_COLOR_WARN = 0xFEE75C  # Yellow — warnings / alerts
 
 
 @dataclass(frozen=True)
@@ -54,9 +54,13 @@ class DiscordAdapterConfig:
         if self.reconnect_max_attempts < 0:
             raise ValueError("reconnect_max_attempts must be non-negative")
         if self.reconnect_backoff_initial <= 0 or self.reconnect_backoff_max <= 0:
-            raise ValueError("reconnect_backoff_initial and reconnect_backoff_max must be positive")
+            raise ValueError(
+                "reconnect_backoff_initial and reconnect_backoff_max must be positive"
+            )
         if self.reconnect_backoff_initial > self.reconnect_backoff_max:
-            raise ValueError("reconnect_backoff_initial must not exceed reconnect_backoff_max")
+            raise ValueError(
+                "reconnect_backoff_initial must not exceed reconnect_backoff_max"
+            )
 
 
 class DiscordAdapter(BaseSocialAdapter):
@@ -157,9 +161,14 @@ class DiscordAdapter(BaseSocialAdapter):
         body = "\n".join(lines[1:]).strip() if len(lines) > 1 else ""
 
         lower = content.lower()
-        if any(kw in lower for kw in ("revenue", "earned", "sold", "profit", "milestone", "launched")):
+        if any(
+            kw in lower
+            for kw in ("revenue", "earned", "sold", "profit", "milestone", "launched")
+        ):
             color = _COLOR_GTM
-        elif any(kw in lower for kw in ("warn", "fail", "error", "issue", "alert", "blocked")):
+        elif any(
+            kw in lower for kw in ("warn", "fail", "error", "issue", "alert", "blocked")
+        ):
             color = _COLOR_WARN
         else:
             color = _COLOR_DEFAULT
@@ -198,7 +207,9 @@ class DiscordAdapter(BaseSocialAdapter):
     async def post(self, content: str, **kwargs) -> PublishResult:
         valid, error = self.validate_content(content)
         if not valid:
-            return PublishResult(status="failed", channel=self.channel_name, content=content, error=error)
+            return PublishResult(
+                status="failed", channel=self.channel_name, content=content, error=error
+            )
 
         embed = self._build_gtm_embed(content)
         # Include short plain-text fallback for non-embed clients
@@ -249,11 +260,15 @@ class DiscordAdapter(BaseSocialAdapter):
             error=f"Webhook POST failed: HTTP {resp.status_code} — {_redact_text(resp.text[:200])}",
         )
 
-    async def _webhook_post_with_reconnect(self, payload: dict, content: str) -> PublishResult:
+    async def _webhook_post_with_reconnect(
+        self, payload: dict, content: str
+    ) -> PublishResult:
         last_error: str | None = None
         for attempt in range(self._reconnect_max_attempts + 1):
             try:
-                resp = await self._http.post(f"{self._webhook_url}?wait=true", json=payload)
+                resp = await self._http.post(
+                    f"{self._webhook_url}?wait=true", json=payload
+                )
                 if resp.status_code in (200, 204):
                     data: dict = resp.json() if resp.content else {}
                     msg_id = str(data.get("id", ""))
@@ -269,17 +284,19 @@ class DiscordAdapter(BaseSocialAdapter):
                         url=f"https://discord.com/channels/{guild}/{channel}/{msg_id}",
                         metadata={"method": "webhook", "reconnect_attempts": attempt},
                     )
-                last_error = f"HTTP {resp.status_code} — {_redact_text(resp.text[:200])}"
+                last_error = (
+                    f"HTTP {resp.status_code} — {_redact_text(resp.text[:200])}"
+                )
             except Exception as e:  # noqa: BLE001 - catch all for reconnect policy
                 last_error = f"{type(e).__name__}: {_redact_text(str(e)[:200])}"
 
             if attempt < self._reconnect_max_attempts:
                 delay = min(
-                    self._reconnect_backoff_initial * (2 ** attempt),
+                    self._reconnect_backoff_initial * (2**attempt),
                     self._reconnect_backoff_max,
                 )
                 await asyncio.sleep(delay)
-        
+
         self._consecutive_failures += 1
         return PublishResult(
             status="failed",
@@ -311,11 +328,15 @@ class DiscordAdapter(BaseSocialAdapter):
             error=f"API POST failed: HTTP {resp.status_code} — {_redact_text(resp.text[:200])}",
         )
 
-    async def _api_post_with_reconnect(self, url: str, payload: dict, content: str) -> PublishResult:
+    async def _api_post_with_reconnect(
+        self, url: str, payload: dict, content: str
+    ) -> PublishResult:
         last_error: str | None = None
         for attempt in range(self._reconnect_max_attempts + 1):
             try:
-                resp = await self._http.post(url, headers=self._auth_headers, json=payload)
+                resp = await self._http.post(
+                    url, headers=self._auth_headers, json=payload
+                )
                 if resp.status_code == 200:
                     data = resp.json()
                     msg_id = data.get("id", "")
@@ -330,17 +351,19 @@ class DiscordAdapter(BaseSocialAdapter):
                         url=f"https://discord.com/channels/{guild}/{self._channel_id}/{msg_id}",
                         metadata={"method": "bot_api", "reconnect_attempts": attempt},
                     )
-                last_error = f"HTTP {resp.status_code} — {_redact_text(resp.text[:200])}"
+                last_error = (
+                    f"HTTP {resp.status_code} — {_redact_text(resp.text[:200])}"
+                )
             except Exception as e:  # noqa: BLE001 - catch all for reconnect policy
                 last_error = f"{type(e).__name__}: {_redact_text(str(e)[:200])}"
 
             if attempt < self._reconnect_max_attempts:
                 delay = min(
-                    self._reconnect_backoff_initial * (2 ** attempt),
+                    self._reconnect_backoff_initial * (2**attempt),
                     self._reconnect_backoff_max,
                 )
                 await asyncio.sleep(delay)
-        
+
         self._consecutive_failures += 1
         return PublishResult(
             status="failed",
@@ -391,7 +414,9 @@ class DiscordAdapter(BaseSocialAdapter):
     async def get_mentions(self, **kwargs) -> list[dict]:
         """Fetch recent messages that mention the bot in the configured channel."""
         if not (self._bot_token and self._channel_id):
-            console.print("[yellow]Discord get_mentions: requires BOT_TOKEN + CHANNEL_ID.[/yellow]")
+            console.print(
+                "[yellow]Discord get_mentions: requires BOT_TOKEN + CHANNEL_ID.[/yellow]"
+            )
             return []
 
         resp = await self._http.get(

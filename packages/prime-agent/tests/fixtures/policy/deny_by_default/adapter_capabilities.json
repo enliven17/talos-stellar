@@ -5,7 +5,7 @@
     {
       "id": "unknown-adapter-has-no-manifest",
       "description": "An adapter absent from both defaults and overrides cannot be sandboxed at all.",
-      "adapter": "mastodon",
+      "adapter": "unknown_adapter",
       "overrides": "",
       "checks": [
         {"kind": "manifest", "expect": "deny"}

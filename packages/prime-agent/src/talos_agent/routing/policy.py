@@ -309,7 +309,10 @@ class RoutingPolicy:
                 return False
             if required == "streaming" and not capabilities.streaming:
                 return False
-            if required == "parallel_tool_calls" and not capabilities.parallel_tool_calls:
+            if (
+                required == "parallel_tool_calls"
+                and not capabilities.parallel_tool_calls
+            ):
                 return False
         return True
 
@@ -323,10 +326,9 @@ class RoutingPolicy:
             return 0.5  # Neutral if no budget constraint
 
         # Estimate cost for a typical call (1000 input + 500 output tokens)
-        estimated = (
-            meta.cost_per_1k_input * Decimal("1")
-            + meta.cost_per_1k_output * Decimal("0.5")
-        )
+        estimated = meta.cost_per_1k_input * Decimal(
+            "1"
+        ) + meta.cost_per_1k_output * Decimal("0.5")
 
         if estimated <= Decimal("0"):
             return 1.0  # Free provider

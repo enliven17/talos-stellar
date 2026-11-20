@@ -45,8 +45,16 @@ def _deps():
 
 
 ALL_CATEGORIES = [
-    "Sales", "Marketing", "Analytics", "Development", "Research",
-    "Design", "Finance", "Operations", "Support", "Education",
+    "Sales",
+    "Marketing",
+    "Analytics",
+    "Development",
+    "Research",
+    "Design",
+    "Finance",
+    "Operations",
+    "Support",
+    "Education",
 ]
 
 
@@ -92,6 +100,7 @@ def _get_signer() -> X402Signer:
 )
 async def discover_services(target: str = "") -> dict:
     import random
+
     category = random.choice(ALL_CATEGORIES)
     services = await _deps().api.discover_services(
         category=category,
@@ -104,7 +113,9 @@ async def discover_services(target: str = "") -> dict:
     "purchase_service",
     "Purchase a service or Playbook from anOther Talos via x402 (USDC on Arc). Handles 402→sign→submit flow.",
 )
-async def purchase_service(talos_id: str, service_type: str = "", payload: str = "{}") -> dict:
+async def purchase_service(
+    talos_id: str, service_type: str = "", payload: str = "{}"
+) -> dict:
     try:
         payload_dict = json.loads(payload)
     except json.JSONDecodeError:
@@ -124,10 +135,15 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
         }
 
     # Step 1: GET service → expect 402
-    response = await _deps().api.get_service(talos_id, service_type=service_type or None)
+    response = await _deps().api.get_service(
+        talos_id, service_type=service_type or None
+    )
 
     if response.status_code != 402:
-        return {"error": f"Expected 402, got {response.status_code}", "body": response.text[:200]}
+        return {
+            "error": f"Expected 402, got {response.status_code}",
+            "body": response.text[:200],
+        }
 
     # Parse 402 response
     payment_details = response.json()
@@ -230,7 +246,10 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
 
     # Server returns error JSON if payment verification failed
     if "error" in submit_result:
-        return {"error": submit_result["error"], "details": submit_result.get("details", "")}
+        return {
+            "error": submit_result["error"],
+            "details": submit_result.get("details", ""),
+        }
 
     job_id = submit_result.get("jobId") or submit_result.get("id", "")
 
@@ -287,7 +306,9 @@ async def poll_service_result(job_id: str) -> dict:
         job_result = result.get("result", {})
         if isinstance(job_result, dict) and "templates" in job_result:
             name = job_result.get("name", f"Playbook from job {job_id}")
-            _deps().db.save_playbook(name, job_result, source_talos=result.get("talosId"))
+            _deps().db.save_playbook(
+                name, job_result, source_talos=result.get("talosId")
+            )
             return {
                 "status": "completed",
                 "type": "playbook",
@@ -378,6 +399,7 @@ async def set_claimed_job(
                 )
             except Exception as _exc:  # pragma: no cover  # noqa: BLE001
                 import logging as _logging
+
                 _logging.getLogger(__name__).warning(
                     "set_claimed_job: failed to persist fencing token for %s: %s",
                     job_id,
@@ -394,6 +416,7 @@ async def remove_claimed_job(job_id: str) -> None:
                 _deps().db.delete_claimed_job(job_id)
             except Exception as _exc:  # pragma: no cover  # noqa: BLE001
                 import logging as _logging
+
                 _logging.getLogger(__name__).warning(
                     "remove_claimed_job: failed to delete DB record for %s: %s",
                     job_id,
@@ -513,7 +536,9 @@ async def claim_job(job_id: str, ttl_seconds: int = 300) -> dict:
         await get_pending_jobs()
     result = await _deps().api.claim_job(job_id, ttl_seconds=ttl_seconds)
     if not result:
-        return {"error": f"Failed to claim job {job_id} — it may be leased by another worker"}
+        return {
+            "error": f"Failed to claim job {job_id} — it may be leased by another worker"
+        }
     fencing_token = result.get("fencingToken")
     if fencing_token is not None and _deps().job_effect_store is not None:
         _deps().job_effect_store.mark_claimed(
@@ -558,7 +583,10 @@ async def fulfill_job(job_id: str, result: str = "{}") -> dict:
     except json.JSONDecodeError:
         result_dict = {"text": result}
 
-    if _deps().job_effect_store is not None and _deps().job_effect_dispatcher is not None:
+    if (
+        _deps().job_effect_store is not None
+        and _deps().job_effect_dispatcher is not None
+    ):
         try:
             effect_id = _deps().job_effect_store.prepare_effect(job_id, result_dict)
             await _deps().job_effect_dispatcher.dispatch_once()
@@ -589,7 +617,9 @@ async def fulfill_job(job_id: str, result: str = "{}") -> dict:
         }
 
     fencing_token = _deps().claimed_jobs.get(job_id, 0)
-    response = await _deps().api.submit_job_result(job_id, result_dict, fencing_token=fencing_token)
+    response = await _deps().api.submit_job_result(
+        job_id, result_dict, fencing_token=fencing_token
+    )
     if response:
         await remove_claimed_job(job_id)
         _deps().db.add_activity("commerce", f"Fulfilled job {job_id}", "x402")
@@ -623,7 +653,9 @@ async def generate_playbook(
     # Build playbook content structure
     playbook_content = {
         "schedule": "Daily: 2-3 posts, 5-10 engagement replies. Weekly: 1 research thread.",
-        "templates": content_by_channel.get(channel, content_by_channel.get("X", []))[:10],
+        "templates": content_by_channel.get(channel, content_by_channel.get("X", []))[
+            :10
+        ],
         "hashtags": [],
         "tactics": [
             "Consistent daily posting with engagement-first approach",
@@ -752,7 +784,9 @@ async def evaluate_marketplace_bid(
         else:
             decision = "counter"
             counter_offer = round(
-                min_acceptable_price_usdc + (listed_price_usdc - min_acceptable_price_usdc) * 0.5, 6
+                min_acceptable_price_usdc
+                + (listed_price_usdc - min_acceptable_price_usdc) * 0.5,
+                6,
             )
             reason = (
                 f"Bid is above minimum but below listed price. "

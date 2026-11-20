@@ -113,8 +113,9 @@ async def replay_cycle(
             f"running={__version__!r}. "
             "Tool behaviour may differ."
         )
-        log.warning("replay_version_mismatch",
-                    recorded=recorded_version, running=__version__)
+        log.warning(
+            "replay_version_mismatch", recorded=recorded_version, running=__version__
+        )
 
     # ── 2. Load events ────────────────────────────────────────────────────
     events = store.get_events(cycle_id, limit=max_events)
@@ -135,9 +136,9 @@ async def replay_cycle(
 
     # ── 6. Build stub registry ─────────────────────────────────────────────
     stubs = StubRegistry.from_events(events)
-    log.info("replay_stubs_built",
-             cycle_id=cycle_id,
-             tool_count=len(stubs.registered_tools))
+    log.info(
+        "replay_stubs_built", cycle_id=cycle_id, tool_count=len(stubs.registered_tools)
+    )
 
     # ── 7. Re-execute LLM decision boundary ───────────────────────────────
     replay_messages: list[dict] = []
@@ -152,9 +153,11 @@ async def replay_cycle(
             events=events,
             shutdown_event=shutdown_event,
         )
-        log.info("replay_loop_complete",
-                 cycle_id=cycle_id,
-                 message_count=len(replay_messages))
+        log.info(
+            "replay_loop_complete",
+            cycle_id=cycle_id,
+            message_count=len(replay_messages),
+        )
     except Exception as exc:  # noqa: BLE001
         error = f"Replay loop error: {exc}"
         log.error("replay_loop_error", cycle_id=cycle_id, error=str(exc))
@@ -180,6 +183,7 @@ async def replay_cycle(
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _error_result(
     cycle_id: str,
@@ -217,11 +221,13 @@ def _reconstruct_messages(events: list[ReplayEvent]) -> list[dict]:
         elif ev.kind == "tool_result":
             tool_name = ev.payload.get("tool_name", "unknown")
             result = ev.payload.get("result", {})
-            messages.append({
-                "role": "tool",
-                "content": json.dumps(result, sort_keys=True, ensure_ascii=False),
-                "tool_name": tool_name,
-            })
+            messages.append(
+                {
+                    "role": "tool",
+                    "content": json.dumps(result, sort_keys=True, ensure_ascii=False),
+                    "tool_name": tool_name,
+                }
+            )
     return messages
 
 
@@ -237,11 +243,13 @@ def _build_replay_context(
     the DB is unavailable we fall back to a minimal context.
     """
     from talos_agent.agent.context import AgentContext
+
     try:
         return AgentContext.from_db(db, talos_config)
     except Exception:  # noqa: BLE001
         # Minimal fallback context for replay without a live DB
         from datetime import datetime, timezone
+
         return AgentContext(
             current_time=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             posts_today=0,

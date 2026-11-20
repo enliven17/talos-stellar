@@ -293,7 +293,11 @@ class JobEffectStore:
         if from_state is not None:
             _validate_text(from_state, "from_state", max_bytes=64)
         _validate_text(to_state, "to_state", max_bytes=64)
-        if not isinstance(attempt_count, int) or isinstance(attempt_count, bool) or attempt_count < 0:
+        if (
+            not isinstance(attempt_count, int)
+            or isinstance(attempt_count, bool)
+            or attempt_count < 0
+        ):
             raise JobValidationError("attempt_count must be a non-negative integer")
         self._conn.execute(
             """
@@ -353,7 +357,9 @@ class JobEffectStore:
                     or row["requester_talos_id"] != requester
                     or row["service_type"] != service_type
                 ):
-                    raise JobConflictError("job ID was reused with different immutable data")
+                    raise JobConflictError(
+                        "job ID was reused with different immutable data"
+                    )
                 self._conn.commit()
                 return InboxRecord(
                     job_id=job_id,
@@ -468,7 +474,9 @@ class JobEffectStore:
             job_id=job_id,
             state=InboxState.CLAIMED.value,
         )
-        return InboxRecord(job_id, InboxState.CLAIMED, row["payload_digest"], fencing_token)
+        return InboxRecord(
+            job_id, InboxState.CLAIMED, row["payload_digest"], fencing_token
+        )
 
     def prepare_effect(self, job_id: str, result: dict[str, Any]) -> str:
         job_id = _validate_identifier(job_id, "job ID")
@@ -506,10 +514,13 @@ class JobEffectStore:
             ).fetchone()
             if existing:
                 if existing["result_digest"] != result_digest:
-                    raise JobConflictError("job effect was reused with a different result")
-                if inbox["fencing_token"] > existing["fencing_token"] and existing[
-                    "state"
-                ] != EffectState.SUCCEEDED.value:
+                    raise JobConflictError(
+                        "job effect was reused with a different result"
+                    )
+                if (
+                    inbox["fencing_token"] > existing["fencing_token"]
+                    and existing["state"] != EffectState.SUCCEEDED.value
+                ):
                     self._conn.execute(
                         """
                         UPDATE job_effect_outbox
@@ -780,7 +791,9 @@ class JobEffectStore:
                 ),
             )
             if updated.rowcount != 1:
-                raise JobConflictError("dispatch lease was lost before failure handling")
+                raise JobConflictError(
+                    "dispatch lease was lost before failure handling"
+                )
             self._append_replay_audit(
                 effect_id=effect.effect_id,
                 job_id=effect.job_id,
@@ -827,7 +840,9 @@ class JobEffectStore:
                 ),
             )
             if updated.rowcount != 1:
-                raise JobConflictError("dispatch lease was lost before conflict handling")
+                raise JobConflictError(
+                    "dispatch lease was lost before conflict handling"
+                )
             self._conn.execute(
                 """
                 UPDATE job_inbox
@@ -1007,7 +1022,6 @@ class JobEffectStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
-
     def requeue(self, effect_id: str, *, expected_attempt: int) -> dict[str, Any]:
         effect_id = _validate_identifier(effect_id, "effect ID")
         if expected_attempt < 0:
@@ -1039,7 +1053,9 @@ class JobEffectStore:
                 EffectState.INDETERMINATE.value,
                 EffectState.DEAD.value,
             }:
-                raise JobStateError("only retryable, indeterminate, or dead effects can be requeued")
+                raise JobStateError(
+                    "only retryable, indeterminate, or dead effects can be requeued"
+                )
             prior_state = row["state"]
             self._conn.execute(
                 """
@@ -1209,9 +1225,7 @@ class JobEffectDispatcher:
         return self.store.mark_failure(
             effect,
             error_code=(
-                "remote_claim_refreshed"
-                if refreshed
-                else "remote_rejected_or_pending"
+                "remote_claim_refreshed" if refreshed else "remote_rejected_or_pending"
             ),
             indeterminate=False,
         )

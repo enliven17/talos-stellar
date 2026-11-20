@@ -22,29 +22,44 @@ PolicyDecision.APPROVE
 
 from __future__ import annotations
 
+from talos_agent.policy.approval import PolicyApprovalStore
 from talos_agent.policy.engine import PolicyEngine
 from talos_agent.policy.loader import PolicyLoader
 from talos_agent.policy.middleware import PolicyMiddleware
 from talos_agent.policy.schema import (
+    ActionDigestMismatchError,
     ActionSpec,
+    ApprovalBindingError,
+    ApprovalStatusError,
     ConditionTrace,
+    MatchCondition,
     Policy,
+    PolicyApproval,
     PolicyDecision,
     PolicyDecisionTrace,
+    PolicyDigestMismatchError,
     PolicyResult,
     PolicyRule,
     RuleTraceStep,
     Severity,
+    compute_action_digest,
     redact_trace_value,
 )
 from talos_agent.policy.simulator import PolicySimulator
 
 __all__ = [
+    "ActionDigestMismatchError",
     "ActionSpec",
+    "ApprovalBindingError",
+    "ApprovalStatusError",
     "ConditionTrace",
+    "MatchCondition",
     "Policy",
+    "PolicyApproval",
+    "PolicyApprovalStore",
     "PolicyDecision",
     "PolicyDecisionTrace",
+    "PolicyDigestMismatchError",
     "PolicyEngine",
     "PolicyLoader",
     "PolicyMiddleware",
@@ -53,5 +68,6 @@ __all__ = [
     "PolicySimulator",
     "RuleTraceStep",
     "Severity",
+    "compute_action_digest",
     "redact_trace_value",
 ]

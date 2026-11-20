@@ -31,6 +31,7 @@ The allowlists are intentionally conservative:
 To add a new known value: extend the relevant ``_ALLOWED_*`` frozenset and
 add a test in ``tests/test_telemetry_cardinality.py``.
 """
+
 from __future__ import annotations
 
 import os
@@ -230,16 +231,34 @@ _ALLOWED_OUTCOMES: frozenset[str] = frozenset({"success", "error", "other"})
 _ALLOWED_STATUS_CODES: frozenset[str] = frozenset(
     {
         # 1xx
-        "100", "101",
+        "100",
+        "101",
         # 2xx
-        "200", "201", "202", "204",
+        "200",
+        "201",
+        "202",
+        "204",
         # 3xx
-        "301", "302", "304",
+        "301",
+        "302",
+        "304",
         # 4xx
-        "400", "401", "402", "403", "404", "405", "408", "409", "410",
-        "422", "429",
+        "400",
+        "401",
+        "402",
+        "403",
+        "404",
+        "405",
+        "408",
+        "409",
+        "410",
+        "422",
+        "429",
         # 5xx
-        "500", "502", "503", "504",
+        "500",
+        "502",
+        "503",
+        "504",
         # sentinel (covers 0 / network errors / unknown)
         "other",
     }
@@ -335,7 +354,9 @@ def record_llm_call(model: str, outcome: str, duration_seconds: float) -> None:
     )
 
 
-def record_http_call(status_code: int, retry_count: int, duration_seconds: float) -> None:
+def record_http_call(
+    status_code: int, retry_count: int, duration_seconds: float
+) -> None:
     _record_histogram(
         "http_client_duration",
         duration_seconds,

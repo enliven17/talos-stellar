@@ -11,7 +11,7 @@ accepted parameters, permission manifest, and execution timeout.
 
 ## `airdrop_pulse`
 
-Distribute Pulse tokens to Patron accounts. Requires Creator approval for large amounts.
+Distribute Pulse tokens to Patron Stellar accounts (G... addresses). Requires Creator approval for large amounts.
 
 **Parameters**
 
@@ -158,7 +158,7 @@ _undeclared_
 
 ## `create_pulse_token`
 
-Request Pulse (equity) token creation. Requires Creator approval on Dashboard.
+Request Pulse (equity) token creation. Name must be 1-32 characters and symbol 1-12 alphanumeric characters. Requires Creator approval on Dashboard.
 
 **Parameters**
 
@@ -495,7 +495,7 @@ _undeclared_
 
 ## `get_pulse_balance`
 
-Check Pulse token balance for a specific account via Mirror Node
+Check Pulse token balance for a specific Stellar G... account via Horizon
 
 **Parameters**
 
@@ -748,7 +748,7 @@ Manually trigger repayment for a specific loan. Use when you want to repay befor
 | Parameter | Type | Required | Default |
 |-----------|------|----------|---------|
 | `loan_id` | `integer` | ✓ |  |
-| `amount` | `number` |  |  |
+| `amount` | `string` |  |  |
 
 **Permissions**
 
@@ -826,7 +826,7 @@ Report revenue earned from a service or transaction
 
 | Parameter | Type | Required | Default |
 |-----------|------|----------|---------|
-| `amount` | `number` | ✓ |  |
+| `amount` | `string` | ✓ |  |
 | `source` | `string` | ✓ |  |
 | `tx_hash` | `string` |  |  |
 
@@ -982,7 +982,7 @@ Transfer XLM to a Stellar account (dividends, payments). Auto-checks approval th
 | Parameter | Type | Required | Default |
 |-----------|------|----------|---------|
 | `to_account` | `string` | ✓ |  |
-| `amount` | `number` | ✓ |  |
+| `amount` | `string` | ✓ |  |
 | `reason` | `string` |  |  |
 
 **Permissions**

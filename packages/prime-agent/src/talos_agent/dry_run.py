@@ -67,8 +67,8 @@ class DryRunConflictError(RuntimeError):
 class SuppressedEffect:
     """One captured write operation that was blocked by dry-run mode."""
 
-    layer: str          # "api_client" | "social_adapter" | "stellar_kit"
-    method: str         # e.g. "request_transfer"
+    layer: str  # "api_client" | "social_adapter" | "stellar_kit"
+    method: str  # e.g. "request_transfer"
     redacted_args: dict = field(default_factory=dict)  # safe-to-log copy
 
     def to_dict(self) -> dict:
@@ -116,9 +116,7 @@ class DryRunRecorder:
         if not self._effects:
             log.info("dry-run: no side effects were suppressed this cycle")
             return
-        log.info(
-            "dry-run: %d effect(s) suppressed this cycle:", len(self._effects)
-        )
+        log.info("dry-run: %d effect(s) suppressed this cycle:", len(self._effects))
         for i, eff in enumerate(self._effects, 1):
             log.info("  [%d] %s.%s %s", i, eff.layer, eff.method, eff.redacted_args)
 
@@ -202,7 +200,9 @@ class _APIClientProxy:
 from talos_agent.adapters.base import BaseSocialAdapter, PublishResult  # noqa: E402
 
 
-def wrap_social_adapter(adapter: BaseSocialAdapter, recorder: DryRunRecorder) -> BaseSocialAdapter:
+def wrap_social_adapter(
+    adapter: BaseSocialAdapter, recorder: DryRunRecorder
+) -> BaseSocialAdapter:
     """Wrap a social adapter so that ``post`` and ``reply`` are suppressed."""
     return _SocialAdapterProxy(adapter, recorder)  # type: ignore[return-value]
 
@@ -222,7 +222,10 @@ class _SocialAdapterProxy:
         self._recorder.record(
             "social_adapter",
             f"{channel}.post",
-            {"content_len": len(content), **{k: v for k, v in kwargs.items() if k != "trace_context"}},
+            {
+                "content_len": len(content),
+                **{k: v for k, v in kwargs.items() if k != "trace_context"},
+            },
         )
         return PublishResult(
             status="dry_run",
@@ -231,7 +234,9 @@ class _SocialAdapterProxy:
             post_id="dry-run-post-id",
         )
 
-    async def reply(self, target_url: str, content: str, **kwargs: Any) -> PublishResult:
+    async def reply(
+        self, target_url: str, content: str, **kwargs: Any
+    ) -> PublishResult:
         channel = getattr(self._real, "channel_name", "unknown")
         self._recorder.record(
             "social_adapter",

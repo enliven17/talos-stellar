@@ -243,7 +243,7 @@ class TestAgentContextContentCap:
         # should stay well within a reasonable prompt budget.
         assert "Recent posts (avoid duplicates):" in block
         # Count content entries rendered.
-        lines = [l for l in block.splitlines() if l.startswith("  - ")]
+        lines = [line for line in block.splitlines() if line.startswith("  - ")]
         assert len(lines) == 50
         # Verify each content snippet is ≤ 80 chars (plus prefix overhead).
         for line in lines:

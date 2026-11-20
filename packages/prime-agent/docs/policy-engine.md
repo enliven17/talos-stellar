@@ -140,6 +140,42 @@ result = sim.simulate("transfer_xlm", {"amount": 500}, {"budget_remaining": 1000
 print(result.decision)  # "escalate"
 ```
 
+## Approved Action Binding & Exact Simulated Policy Digest
+
+To prevent parameter tampering or executing an action under a policy that changed after review, approved action executions are cryptographically bound to both:
+
+1. **Canonical Action Identity (`action_digest`)**: SHA-256 hash of the canonical JSON payload (`action`, `params`, and `context`).
+2. **Canonical Policy Identity (`policy_digest`)**: SHA-256 hash of the complete active policy ruleset and engine configuration at review time.
+
+### Workflow
+
+1. **Simulate & Create Approval Request**:
+   ```python
+   sim_result, approval = sim.create_approval(
+       action="transfer_xlm",
+       params={"amount": 500, "to": "GB123..."},
+       approval_id="app-456",
+   )
+   ```
+2. **Review & Approve**:
+   ```python
+   approval.approve(decided_by="operator_alice", reason="Approved budget transfer")
+   store.save(approval)  # Persisted to DB with exact digests
+   ```
+3. **Execution Verification**:
+   Before executing the approved action, verify that neither the action parameters nor the policy rules changed after review:
+   ```python
+   # Raises ActionDigestMismatchError or PolicyDigestMismatchError if tampered
+   engine.verify_approved_execution(approval, spec)
+
+   # Or evaluate via PolicyResult with detailed audit trace:
+   result = engine.evaluate_approved(approval, spec)
+   if result.decision == PolicyDecision.APPROVE:
+       await execute_action()
+   ```
+
+If either the action arguments or the active policy rules were modified after review, execution is rejected immediately.
+
 ## Rollback / disabling
 
 To disable the engine:
