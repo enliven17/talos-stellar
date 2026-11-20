@@ -68,6 +68,18 @@ Transitions are purely functional and validated (`validateTransition`) before an
 8. **Transient Horizon Errors**: Network errors, HTTP 429 (rate limit), and HTTP 5xx responses increment `pollCount` and set `lastError`, but leave the record in `PENDING` for the next tick.
 9. **Terminal Immutability**: Any attempt to transition out of a terminal state is rejected with an illegal transition error (`Illegal transition: cannot leave terminal state "<state>"`).
 
+### Payment Observation Age & Staleness
+
+The reconciler exposes the age and freshness of the last trusted payment observation:
+
+- **Trusted Observations**: A payment observation is trusted only when Horizon confirms or fails a transaction within a verified closed ledger (`isTrustedObservation`). 404 (`NOT_FOUND`) and network/server errors (`error`) do not constitute trusted observations.
+- **Distinguishing Zero Age from Unknown Age**:
+  - **Zero age (`0`)**: The payment was observed in the *current* ledger (`currentLedger === confirmedLedger`).
+  - **Unknown age (`null`)**: No trusted observation exists yet (e.g., transaction is `PENDING` before first on-chain detection, or current ledger is unavailable). `0` and `null` are strictly distinguished.
+- **Stale Observation Visibility without Mutating Terminal Records**:
+  - When the ledger gap between `currentLedger` and `confirmedLedger` exceeds `staleObservationThreshold`, `getPaymentObservation` reports `status: "stale"` and `isStale: true`.
+  - Terminal records (`CONFIRMED`, `FAILED`, `EXPIRED`, `NOT_FOUND`) remain immutable (`computeTransition` returns `null`). Stale observation status is visible for telemetry, monitoring, and operator review without regressing or altering settled terminal records.
+
 ---
 
 ## Configuration
@@ -84,6 +96,7 @@ All configuration is loaded from environment variables at startup in `src/lib/re
 | `STELLAR_HORIZON_URL` | `https://horizon-testnet.stellar.org` | Base URL of the Stellar Horizon server used to query transaction status and current ledger. |
 | `RECONCILER_CONFIRMATION_DEPTH` | `1` | Number of closed ledgers required after first-seen before transitioning from `CONFIRMING` to `CONFIRMED`. |
 | `RECONCILER_CONCURRENCY_LIMIT` | `5` | Maximum number of concurrent Horizon/DB operations allowed during tick queue draining. |
+| `RECONCILER_STALE_OBSERVATION_THRESHOLD` | `120` | Maximum ledger sequence difference before a payment observation is considered stale. |
 | `ADMIN_API_KEY` | — | Bearer token required for administrative endpoints (`/api/admin/reconciler/*`). |
 
 ---
@@ -320,6 +333,7 @@ curl -X GET http://localhost:3000/api/talos/talos_123/jobs/job_456/payment-statu
   "finalityStatus": "CONFIRMED",
   "confirmedLedger": 1234567,
   "lastLedgerChecked": 1234568,
+  "observationAge": 1,
   "pollCount": 2,
   "lastError": null,
   "repairApplied": true,

@@ -60,10 +60,30 @@ export interface TxRecord {
 
 /** Discriminated union returned by the Horizon polling layer. */
 export type HorizonPollResult =
-  | { outcome: "confirmed"; ledger: number; successful: true }
-  | { outcome: "failed";    ledger: number; successful: false; detail?: string }
+  | { outcome: "confirmed"; ledger: number; successful: true; observedAt?: Date }
+  | { outcome: "failed";    ledger: number; successful: false; detail?: string; observedAt?: Date }
   | { outcome: "not_found" }
   | { outcome: "error";     message: string; retryable: boolean };
+
+// ─── Observation Status ───────────────────────────────────────────────────────
+
+/** Status classification for payment observation freshness. */
+export type ObservationStatus = "fresh" | "stale" | "unknown";
+
+/** Structured descriptor of the last trusted payment observation. */
+export interface PaymentObservation {
+  /** Ledger sequence of the trusted observation, or null if unknown. */
+  ledger: number | null;
+  /**
+   * Age in closed ledgers (currentLedger - observationLedger).
+   * 0 for current ledger, null for unknown age.
+   */
+  age: number | null;
+  /** Freshness status: "fresh" (within threshold), "stale" (exceeded), or "unknown". */
+  status: ObservationStatus;
+  /** True when status is "stale". */
+  isStale: boolean;
+}
 
 // ─── State Transition ─────────────────────────────────────────────────────────
 
@@ -129,6 +149,12 @@ export interface ReconcilerConfig {
    * Default: 5.
    */
   concurrencyLimit?: number;
+
+  /**
+   * Maximum ledger sequence difference before an observation is considered stale.
+   * Default: 120 (matches maxLedgerGap).
+   */
+  staleObservationThreshold?: number;
 }
 
 // ─── Scheduler State (in-process singleton) ──────────────────────────────────

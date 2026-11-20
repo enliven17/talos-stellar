@@ -24,8 +24,10 @@ import type {
   TxRecordUpdate,
   HorizonPollResult,
   ReconcilerConfig,
+  PaymentObservation,
 } from "./types";
 import { TERMINAL_STATES } from "./types";
+import { isTrustedObservation } from "./horizon";
 
 // ─── Guard ───────────────────────────────────────────────────────────────────
 
@@ -268,4 +270,135 @@ export function validateTransition(
     return `Illegal transition: "${from}" → "${to}"`;
   }
   return null;
+}
+
+// ─── Observation Age and Staleness ────────────────────────────────────────────
+
+/**
+ * Compute the age of the last trusted payment observation in ledgers.
+ *
+ * Age is defined as (currentLedger - observedLedger).
+ *
+ * Key invariants:
+ * - Distinguishes unknown age (null) from zero age (0).
+ * - Zero age (0): the payment was observed in the current closed ledger.
+ * - Unknown age (null): no trusted observation exists (e.g. pending record before
+ *   Horizon inclusion, not_found, transient error, or missing current ledger).
+ * - Future/nonmonotonic anomaly (null): currentLedger < observedLedger is treated
+ *   as an untrusted anomaly and returns null rather than a negative age.
+ *
+ * @param recordOrPoll The TxRecord or HorizonPollResult to inspect.
+ * @param currentLedger Current closed ledger sequence number from Horizon.
+ */
+export function getObservationAge(
+  recordOrPoll: TxRecord | HorizonPollResult | null | undefined,
+  currentLedger?: number | null,
+): number | null {
+  if (recordOrPoll === null || recordOrPoll === undefined) {
+    return null;
+  }
+  if (currentLedger === null || currentLedger === undefined) {
+    return null;
+  }
+  if (!Number.isFinite(currentLedger) || currentLedger <= 0) {
+    return null;
+  }
+
+  let observedLedger: number | null = null;
+  if ("finalityStatus" in recordOrPoll) {
+    observedLedger = recordOrPoll.confirmedLedger ?? null;
+  } else if ("outcome" in recordOrPoll) {
+    if (isTrustedObservation(recordOrPoll)) {
+      observedLedger = recordOrPoll.ledger;
+    }
+  }
+
+  if (observedLedger === null || observedLedger === undefined) {
+    return null;
+  }
+  if (!Number.isFinite(observedLedger) || observedLedger <= 0) {
+    return null;
+  }
+
+  const age = currentLedger - observedLedger;
+  if (age < 0) {
+    return null;
+  }
+  return age;
+}
+
+/**
+ * Check whether the last trusted payment observation is stale.
+ *
+ * An observation is stale when its age is known and strictly exceeds the
+ * threshold. If age is unknown (null), returns false.
+ *
+ * @param recordOrPoll The TxRecord or HorizonPollResult to inspect.
+ * @param currentLedger Current closed ledger sequence number from Horizon.
+ * @param threshold Maximum age in ledgers before observation is stale.
+ */
+export function isObservationStale(
+  recordOrPoll: TxRecord | HorizonPollResult | null | undefined,
+  currentLedger: number | null | undefined,
+  threshold: number,
+): boolean {
+  if (!Number.isFinite(threshold) || threshold < 0) {
+    return false;
+  }
+  const age = getObservationAge(recordOrPoll, currentLedger);
+  if (age === null) {
+    return false;
+  }
+  return age > threshold;
+}
+
+/**
+ * Returns a complete descriptor of the payment observation, including its
+ * ledger, age, and staleness status.
+ *
+ * Invariant: keeps stale observation status visible (status: "stale", isStale: true)
+ * without altering or mutating terminal records.
+ *
+ * @param recordOrPoll The TxRecord or HorizonPollResult to inspect.
+ * @param currentLedger Current closed ledger sequence number from Horizon.
+ * @param threshold Maximum age in ledgers before observation is stale (default: 120).
+ */
+export function getPaymentObservation(
+  recordOrPoll: TxRecord | HorizonPollResult | null | undefined,
+  currentLedger: number | null | undefined,
+  threshold: number = 120,
+): PaymentObservation {
+  if (!recordOrPoll) {
+    return {
+      ledger: null,
+      age: null,
+      status: "unknown",
+      isStale: false,
+    };
+  }
+
+  const age = getObservationAge(recordOrPoll, currentLedger);
+  const ledger =
+    "finalityStatus" in recordOrPoll
+      ? recordOrPoll.confirmedLedger ?? null
+      : isTrustedObservation(recordOrPoll)
+      ? recordOrPoll.ledger
+      : null;
+
+  if (age === null) {
+    return {
+      ledger,
+      age: null,
+      status: "unknown",
+      isStale: false,
+    };
+  }
+
+  const isStale = age > threshold;
+  return {
+    ledger,
+    age,
+    status: isStale ? "stale" : "fresh",
+    isStale,
+  };
 }
