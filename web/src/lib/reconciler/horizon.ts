@@ -64,19 +64,19 @@ export async function pollTransaction(
         : parseInt(String(tx.ledger), 10);
 
     if (tx.successful) {
-      return { outcome: "confirmed", ledger, successful: true };
+      return { outcome: "confirmed", ledger, successful: true, source: "horizon" };
     } else {
       // Transaction was included in a ledger but the operation set failed
       // (e.g. insufficient balance, bad sequence number already applied).
       const detail = extractResultCode(tx);
-      return { outcome: "failed", ledger, successful: false, detail };
+      return { outcome: "failed", ledger, successful: false, detail, source: "horizon" };
     }
   } catch (err) {
     const httpStatus = extractHttpStatus(err);
 
     if (httpStatus === 404) {
       // Transaction not yet on chain (or was never submitted)
-      return { outcome: "not_found" };
+      return { outcome: "not_found", source: "horizon" };
     }
 
     // 429 rate-limit or 5xx transient: retryable
@@ -87,8 +87,19 @@ export async function pollTransaction(
       outcome: "error",
       message: extractErrorMessage(err),
       retryable,
+      source: "horizon",
     };
   }
+}
+
+/**
+ * Extract observation source from a Horizon poll result, defaulting to "horizon".
+ */
+export function extractObservationSource(pollResult?: HorizonPollResult | null): string {
+  if (pollResult && "source" in pollResult && typeof pollResult.source === "string" && pollResult.source) {
+    return pollResult.source;
+  }
+  return "horizon";
 }
 
 /**

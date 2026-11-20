@@ -35,6 +35,8 @@ export function loadReconcilerConfig(): ReconcilerConfig {
     confirmationDepth: parseIntEnv("RECONCILER_CONFIRMATION_DEPTH", 1),
 
     concurrencyLimit: parseIntEnv("RECONCILER_CONCURRENCY_LIMIT", 5),
+
+    maxEvidenceEntries: parseIntEnv("RECONCILER_MAX_EVIDENCE_ENTRIES", 500),
   };
 }
 
