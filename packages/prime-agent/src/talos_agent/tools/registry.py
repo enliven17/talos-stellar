@@ -12,7 +12,6 @@ from typing import Any, Callable, Mapping, get_type_hints
 
 from talos_agent import metrics
 from talos_agent.config import Settings, resolve_setting_secret
-from talos_agent.http import ToolTimeoutError
 from talos_agent.redact import redact_text
 from talos_agent.tracing import traced_span
 from talos_agent.tools import context as _context
@@ -325,7 +324,7 @@ class Tool:
     timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
-        self.timeout = _validate_tool_timeout(self.timeout)
+        self.timeout = validate_tool_timeout(self.timeout)
 
     def to_openai_schema(self) -> dict:
         return {
@@ -395,7 +394,7 @@ class ToolRegistry:
     ) -> None:
         # Raises ManifestValidationError for a declared-but-unenforceable
         # manifest, so the problem surfaces at import rather than first call.
-        timeout = _validate_tool_timeout(timeout)
+        timeout = validate_tool_timeout(timeout)
         self._enforcer.register(name, permissions)
 
         # Fallback to function signature schema if empty parameters provided
@@ -601,9 +600,9 @@ class ToolRegistry:
         except asyncio.CancelledError:
             outcome = "cancelled"
             raise
-        except (_ToolTimeoutError, asyncio.TimeoutError) as exc:
+        except ToolTimeoutError:
             outcome = "timeout"
-            raise ToolTimeoutError(name, tool.timeout) from exc
+            raise
         except Exception as e:
             outcome = "error"
             return {"error": f"{type(e).__name__}: {e}"}

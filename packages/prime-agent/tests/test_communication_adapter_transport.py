@@ -10,7 +10,6 @@ import pytest
 
 from talos_agent.adapters import AdapterHTTPClient, AdapterRegistry
 from talos_agent.adapters.discord import DiscordAdapter, DiscordAdapterConfig
-from talos_agent.tools import publishing
 
 
 class FakeAdapterHTTPClient:
@@ -57,16 +56,17 @@ def _ok_response() -> httpx.Response:
 
 
 @pytest.mark.asyncio
-async def test_registered_adapter_publishes_through_local_fake(monkeypatch):
+async def test_registered_adapter_publishes_through_local_fake():
     http = FakeAdapterHTTPClient(_ok_response())
     registry = AdapterRegistry()
     registry.register(_adapter(http))
-    monkeypatch.setattr(publishing, "_adapter_registry", registry)
 
-    result = await publishing.publish_content("Local fixture only", channel="Discord")
+    adapter = registry.get("Discord")
+    assert adapter is not None
+    result = await adapter.post("Local fixture only")
 
-    assert result["status"] == "posted"
-    assert result["post_id"] == "fake-message-id"
+    assert result.status == "posted"
+    assert result.post_id == "fake-message-id"
     assert len(http.calls) == 1
     assert http.calls[0]["method"] == "POST"
     assert http.calls[0]["url"].endswith("?wait=true")
@@ -114,7 +114,8 @@ async def test_cancellation_during_retry_does_not_issue_another_publish(monkeypa
     http = FakeAdapterHTTPClient(httpx.Response(503))
     registry = AdapterRegistry()
     registry.register(_adapter(http, max_attempts=3))
-    monkeypatch.setattr(publishing, "_adapter_registry", registry)
+    adapter = registry.get("Discord")
+    assert adapter is not None
     retry_started = asyncio.Event()
 
     async def wait_for_retry(_delay: float) -> None:
@@ -123,9 +124,7 @@ async def test_cancellation_during_retry_does_not_issue_another_publish(monkeypa
 
     monkeypatch.setattr("talos_agent.adapters.discord.asyncio.sleep", wait_for_retry)
 
-    task = asyncio.create_task(
-        publishing.publish_content("Cancel fixture", channel="Discord")
-    )
+    task = asyncio.create_task(adapter.post("Cancel fixture"))
     await asyncio.wait_for(retry_started.wait(), timeout=1)
     task.cancel()
 
