@@ -251,124 +251,298 @@ export interface TransitionRequest {
 }
 
 export interface TransitionDecision {
-  action: LifecycleAction;
-  from: AgentLifecycleState | null;
-  to: AgentLifecycleState;
-  durable: boolean;
-  actor: LifecycleActor;
+  allowed: boolean;
+  rule: TransitionRule | null;
+  error: LifecycleError | null;
 }
 
 /**
- * Validate a requested transition. Throws {@link LifecycleError} with a stable
- * code on rejection; returns the resolved target state on success.
- *
- * Checks run in a fixed order so a caller probing the API cannot use the error
- * code to distinguish "state I am not allowed to see" from "state that does not
- * permit this": ordering is validity first, then authorization.
+ * Pure evaluation of a requested transition. Never mutates state — callers are
+ * responsible for persisting the outcome once `allowed` is true.
  */
 export function evaluateTransition(request: TransitionRequest): TransitionDecision {
-  const { action, from, actor } = request;
+  const { action, from, actor, governanceApproved = false } = request;
 
   if (!isLifecycleAction(action)) {
-    throw new LifecycleError("LIFECYCLE_UNKNOWN_ACTION", `Unknown lifecycle action: ${action}`, {
-      allowed: [...LIFECYCLE_ACTIONS],
-    });
+    return {
+      allowed: false,
+      rule: null,
+      error: new LifecycleError("LIFECYCLE_UNKNOWN_ACTION", `Unknown lifecycle action: ${String(action)}`, {
+        action,
+      }),
+    };
   }
 
   if (from !== null && !isLifecycleState(from)) {
-    throw new LifecycleError("LIFECYCLE_UNKNOWN_STATE", `Unknown lifecycle state: ${from}`, {
-      allowed: [...AGENT_LIFECYCLE_STATES],
-    });
+    return {
+      allowed: false,
+      rule: null,
+      error: new LifecycleError("LIFECYCLE_UNKNOWN_STATE", `Unknown lifecycle state: ${String(from)}`, {
+        from,
+      }),
+    };
   }
 
   if (from !== null && TERMINAL_STATES.has(from)) {
-    throw new LifecycleError(
-      "LIFECYCLE_TERMINAL_STATE",
-      `Agent is ${from}; no further lifecycle transitions are possible`,
-      { from },
-    );
+    return {
+      allowed: false,
+      rule: null,
+      error: new LifecycleError(
+        "LIFECYCLE_TERMINAL_STATE",
+        `Agent is in terminal state "${from}" and cannot transition`,
+        { from, action },
+      ),
+    };
   }
 
   const rule = findRule(action, from);
   if (!rule) {
-    throw new LifecycleError(
-      "LIFECYCLE_INVALID_TRANSITION",
-      `Cannot ${action} an agent in state ${from ?? "none"}`,
-      {
-        from,
-        action,
-        validFrom: TRANSITION_RULES.filter((r) => r.action === action).flatMap((r) => r.from),
-      },
-    );
+    return {
+      allowed: false,
+      rule: null,
+      error: new LifecycleError(
+        "LIFECYCLE_INVALID_TRANSITION",
+        `Cannot ${action} from state ${from === null ? "<none>" : `"${from}"`}`,
+        { from, action },
+      ),
+    };
   }
 
   if (!rule.roles.some((role) => actor.roles.includes(role))) {
-    throw new LifecycleError(
-      "LIFECYCLE_UNAUTHORIZED",
-      `Action ${action} requires one of: ${rule.roles.join(", ")}`,
-      { action, requiredRoles: [...rule.roles] },
-    );
+    return {
+      allowed: false,
+      rule,
+      error: new LifecycleError(
+        "LIFECYCLE_UNAUTHORIZED",
+        `Actor is not permitted to ${action}`,
+        { action, requiredRoles: rule.roles },
+      ),
+    };
   }
 
-  if (rule.requiresGovernanceApproval && request.governanceApproved !== true) {
-    throw new LifecycleError(
-      "LIFECYCLE_APPROVAL_REQUIRED",
-      `Action ${action} requires an approved governance proposal`,
-      { action, from },
-    );
+  if (rule.requiresGovernanceApproval && !governanceApproved) {
+    return {
+      allowed: false,
+      rule,
+      error: new LifecycleError(
+        "LIFECYCLE_APPROVAL_REQUIRED",
+        `Action "${action}" requires an approved governance record`,
+        { action },
+      ),
+    };
   }
 
-  return { action, from, to: rule.to, durable: rule.durable, actor };
+  return { allowed: true, rule, error: null };
 }
 
-/** Resolve the failure edge for a state, or throw if the state cannot fail. */
-export function failureStateFor(from: AgentLifecycleState): AgentLifecycleState {
-  const to = FAILURE_TRANSITIONS.get(from);
-  if (!to) {
-    throw new LifecycleError(
-      "LIFECYCLE_INVALID_TRANSITION",
-      `State ${from} has no failure transition`,
-      { from },
-    );
+// ── Legacy status mapping ────────────────────────────────────────────
+
+export type LegacyTalosStatus = "Active" | "Paused" | "Retired";
+
+/** Map a legacy `tls_talos.status` value onto the richer lifecycle state. */
+export function toLifecycleState(status: LegacyTalosStatus): AgentLifecycleState {
+  switch (status) {
+    case "Active":
+      return "active";
+    case "Paused":
+      return "paused";
+    case "Retired":
+      return "retired";
   }
-  return to;
 }
 
-// ── Legacy status bridge ─────────────────────────────────────────────
+/** Map a lifecycle state back onto the legacy status column. */
+export function toLegacyStatus(state: AgentLifecycleState): LegacyTalosStatus {
+  switch (state) {
+    case "active":
+      return "Active";
+    case "paused":
+      return "Paused";
+    case "retired":
+      return "Retired";
+    // In-flight and failure states have no legacy equivalent; they surface as
+    // Paused so existing consumers never observe an unknown status value.
+    case "proposed":
+    case "provisioning":
+    case "retiring":
+    case "recovery_pending":
+    case "failed":
+      return "Paused";
+  }
+}
 
-const LEGACY_TO_LIFECYCLE: Record<string, AgentLifecycleState> = {
-  active: "active",
-  paused: "paused",
-  retired: "retired",
-  proposed: "proposed",
-  provisioning: "provisioning",
-  retiring: "retiring",
-  recovery_pending: "recovery_pending",
-  failed: "failed",
-};
+// ── Offline consistency report ───────────────────────────────────────
 
 /**
- * Map a persisted `tls_talos.status` value onto a lifecycle state.
- * Unrecognised legacy values fall back to "active" — the pre-existing default —
- * so rows written before this machine landed continue to serve traffic.
+ * A single lifecycle record as observed from the event log / talos row.
+ * `state` is the latest known lifecycle state for the agent.
  */
-export function toLifecycleState(dbStatus: string | null | undefined): AgentLifecycleState {
-  if (!dbStatus) return "active";
-  return LEGACY_TO_LIFECYCLE[dbStatus.trim().toLowerCase()] ?? "active";
+export interface LifecycleRecord {
+  agentId: string;
+  state: AgentLifecycleState;
+}
+
+/** A service currently bound to an agent. */
+export interface ActiveService {
+  agentId: string;
+  serviceId: string;
+}
+
+/** A job that has not yet reached a terminal outcome. */
+export interface UnresolvedJob {
+  agentId: string;
+  jobId: string;
 }
 
 /**
- * Map a lifecycle state back onto the legacy `status` column. Transient and
- * failure states collapse onto "Paused" so that every existing consumer that
- * only understands Active/Paused/Retired treats them as "not accepting work",
- * which is the safe reading.
+ * Stable, machine-readable contradiction codes emitted by the consistency
+ * report. These are part of the report contract — clients branch on them, so
+ * values must never be repurposed.
  */
-export function toLegacyStatus(state: AgentLifecycleState): "Active" | "Paused" | "Retired" {
-  if (state === "active") return "Active";
-  if (state === "retired") return "Retired";
-  return "Paused";
+export const LIFECYCLE_CONTRADICTION_CODES = [
+  "RETIRED_AGENT_WITH_ACTIVE_SERVICE",
+  "ACTIVE_SERVICE_WITHOUT_LIFECYCLE_RECORD",
+  "UNRESOLVED_JOB_ON_RETIRED_AGENT",
+  "UNRESOLVED_JOB_WITHOUT_LIFECYCLE_RECORD",
+  "DUPLICATE_LIFECYCLE_RECORD",
+] as const;
+
+export type LifecycleContradictionCode = (typeof LIFECYCLE_CONTRADICTION_CODES)[number];
+
+export interface LifecycleContradiction {
+  code: LifecycleContradictionCode;
+  agentId: string;
+  /** Human-readable explanation, safe to surface in a report. */
+  message: string;
+  /** Optional identifiers (serviceId / jobId) that triggered the contradiction. */
+  refs: Record<string, string>;
 }
 
-export function acceptsNewWork(state: AgentLifecycleState): boolean {
-  return OPERATIONAL_STATES.has(state);
+export interface LifecycleConsistencyInput {
+  lifecycleRecords: readonly LifecycleRecord[];
+  activeServices: readonly ActiveService[];
+  unresolvedJobs: readonly UnresolvedJob[];
+}
+
+export interface LifecycleConsistencyReport {
+  /** True when no contradictions were found. */
+  consistent: boolean;
+  contradictions: LifecycleContradiction[];
+  /** Per-agent summary of the observed state, for operator review. */
+  agents: Array<{
+    agentId: string;
+    state: AgentLifecycleState | null;
+    activeServiceIds: string[];
+    unresolvedJobIds: string[];
+  }>;
+}
+
+/**
+ * Build an offline, read-only consistency report comparing lifecycle records,
+ * active services and unresolved jobs.
+ *
+ * This function performs no I/O and never mutates funded state — it only reads
+ * the supplied snapshots and returns contradictions for operator review.
+ */
+export function buildLifecycleConsistencyReport(
+  input: LifecycleConsistencyInput,
+): LifecycleConsistencyReport {
+  const contradictions: LifecycleContradiction[] = [];
+
+  // Index lifecycle records by agent, flagging duplicates.
+  const stateByAgent = new Map<string, AgentLifecycleState>();
+  const duplicateAgents = new Set<string>();
+  for (const record of input.lifecycleRecords) {
+    if (stateByAgent.has(record.agentId)) {
+      duplicateAgents.add(record.agentId);
+    } else {
+      stateByAgent.set(record.agentId, record.state);
+    }
+  }
+
+  for (const agentId of duplicateAgents) {
+    contradictions.push({
+      code: "DUPLICATE_LIFECYCLE_RECORD",
+      agentId,
+      message: `Agent ${agentId} has more than one lifecycle record`,
+      refs: {},
+    });
+  }
+
+  // Group services and jobs by agent for the per-agent summary.
+  const servicesByAgent = new Map<string, string[]>();
+  for (const service of input.activeServices) {
+    const list = servicesByAgent.get(service.agentId) ?? [];
+    list.push(service.serviceId);
+    servicesByAgent.set(service.agentId, list);
+  }
+
+  const jobsByAgent = new Map<string, string[]>();
+  for (const job of input.unresolvedJobs) {
+    const list = jobsByAgent.get(job.agentId) ?? [];
+    list.push(job.jobId);
+    jobsByAgent.set(job.agentId, list);
+  }
+
+  // Active services must belong to a known, non-retired agent.
+  for (const service of input.activeServices) {
+    const state = stateByAgent.get(service.agentId);
+    if (state === undefined) {
+      contradictions.push({
+        code: "ACTIVE_SERVICE_WITHOUT_LIFECYCLE_RECORD",
+        agentId: service.agentId,
+        message: `Active service ${service.serviceId} has no lifecycle record for agent ${service.agentId}`,
+        refs: { serviceId: service.serviceId },
+      });
+    } else if (state === "retired") {
+      contradictions.push({
+        code: "RETIRED_AGENT_WITH_ACTIVE_SERVICE",
+        agentId: service.agentId,
+        message: `Retired agent ${service.agentId} still has active service ${service.serviceId}`,
+        refs: { serviceId: service.serviceId },
+      });
+    }
+  }
+
+  // Unresolved jobs must belong to a known, non-retired agent.
+  for (const job of input.unresolvedJobs) {
+    const state = stateByAgent.get(job.agentId);
+    if (state === undefined) {
+      contradictions.push({
+        code: "UNRESOLVED_JOB_WITHOUT_LIFECYCLE_RECORD",
+        agentId: job.agentId,
+        message: `Unresolved job ${job.jobId} has no lifecycle record for agent ${job.agentId}`,
+        refs: { jobId: job.jobId },
+      });
+    } else if (state === "retired") {
+      contradictions.push({
+        code: "UNRESOLVED_JOB_ON_RETIRED_AGENT",
+        agentId: job.agentId,
+        message: `Retired agent ${job.agentId} still has unresolved job ${job.jobId}`,
+        refs: { jobId: job.jobId },
+      });
+    }
+  }
+
+  // Per-agent summary across every agent referenced by any snapshot.
+  const agentIds = new Set<string>([
+    ...stateByAgent.keys(),
+    ...servicesByAgent.keys(),
+    ...jobsByAgent.keys(),
+  ]);
+
+  const agents = Array.from(agentIds)
+    .sort()
+    .map((agentId) => ({
+      agentId,
+      state: stateByAgent.get(agentId) ?? null,
+      activeServiceIds: [...(servicesByAgent.get(agentId) ?? [])].sort(),
+      unresolvedJobIds: [...(jobsByAgent.get(agentId) ?? [])].sort(),
+    }));
+
+  return {
+    consistent: contradictions.length === 0,
+    contradictions,
+    agents,
+  };
 }
