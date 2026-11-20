@@ -9,6 +9,7 @@ import { AgentEmptyState } from "@/components/agent-view-states";
 import { ScopedApiKeysPanel } from "@/components/scoped-api-keys-panel";
 import { AgentPurchasesSection } from "@/components/agent-purchases-section";
 import { CopyButton } from "@/components/copy-button";
+import { FinancialSnapshotBadge, FinancialMetricValue } from "@/components/financial-state";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER as STELLAR_USDC_ISSUER } from "@/lib/stellar-config";
 import {
   TabActivity,
@@ -82,6 +83,7 @@ interface TalosDetail {
   service: ServiceInfo | null;
   jobStats: JobStats;
   recentJobs: RecentJob[];
+  observedAt?: string | null;
 }
 
 const TABS = ["Overview", "Services", "Activity", "Patrons", "Revenue", "Purchases", "Governance", "Agent"] as const;
@@ -454,10 +456,24 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
   // ─── Revenue distribution ─────────────────────────────────────────────────
   const [distLoading, setDistLoading] = useState(false);
   const [distPreview, setDistPreview] = useState<DistPreview | null>(null);
+  const [distError, setDistError] = useState<string | null>(null);
 
   const loadDistPreview = useCallback(async () => {
-    const res = await fetch(`/api/talos/${talos.id}/revenue/distribute`);
-    if (res.ok) setDistPreview(await res.json());
+    setDistLoading(true);
+    setDistError(null);
+    try {
+      const res = await fetch(`/api/talos/${talos.id}/revenue/distribute`);
+      if (res.ok) {
+        setDistPreview(await res.json());
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        setDistError(errData.error || "Failed to load distribution preview");
+      }
+    } catch {
+      setDistError("Network error loading distribution preview");
+    } finally {
+      setDistLoading(false);
+    }
   }, [talos.id]);
 
   const handleDistribute = useCallback(async () => {
@@ -484,14 +500,28 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
   // ─── Buyback ──────────────────────────────────────────────────────────────
   const [buybackPreview, setBuybackPreview] = useState<BuybackPreview | null>(null);
   const [buybackLoading, setBuybackLoading] = useState(false);
+  const [buybackError, setBuybackError] = useState<string | null>(null);
   const [buybackForm, setBuybackForm] = useState({
     usdcAmount: "",
     mitosAmount: "",
   });
 
   const loadBuybackPreview = useCallback(async () => {
-    const res = await fetch(`/api/talos/${talos.id}/revenue/buyback`);
-    if (res.ok) setBuybackPreview(await res.json());
+    setBuybackLoading(true);
+    setBuybackError(null);
+    try {
+      const res = await fetch(`/api/talos/${talos.id}/revenue/buyback`);
+      if (res.ok) {
+        setBuybackPreview(await res.json());
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        setBuybackError(errData.error || "Failed to load buyback stats");
+      }
+    } catch {
+      setBuybackError("Network error loading buyback stats");
+    } finally {
+      setBuybackLoading(false);
+    }
   }, [talos.id]);
 
   const handleBuyback = useCallback(async () => {
@@ -630,6 +660,10 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       </div>
 
       {/* Key metrics */}
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-xs text-muted">[METRICS]</span>
+        <FinancialSnapshotBadge observedAt={talos.observedAt} />
+      </div>
       <div className="grid grid-cols-3 md:grid-cols-5 gap-px bg-border mb-8">
         {[
           { label: `${talos.tokenSymbol} Price`, value: talos.pulsePrice },
@@ -648,7 +682,12 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
             key={s.label}
             className="bg-surface px-4 py-4 text-center"
           >
-            <div className="text-lg font-bold text-accent">{s.value}</div>
+            <div className="text-lg font-bold text-accent">
+              <FinancialMetricValue
+                value={s.value}
+                state={s.value && s.value !== "—" ? "live" : s.value === "—" ? "unavailable" : "live"}
+              />
+            </div>
             <div className="text-xs text-muted">{s.label}</div>
           </div>
         ))}
@@ -1081,11 +1120,13 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
           buybackPreview={buybackPreview}
           buybackLoading={buybackLoading}
           buybackForm={buybackForm}
-          onBuybackFormChange={(field: string, value: string) =>
+          onBuybackFormChange={(field: "usdcAmount" | "mitosAmount", value: string) =>
             setBuybackForm((f) => ({ ...f, [field]: value }))
           }
           onLoadBuybackPreview={loadBuybackPreview}
           onBuyback={handleBuyback}
+          distError={distError}
+          buybackError={buybackError}
         />
       )}
 
