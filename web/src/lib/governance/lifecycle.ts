@@ -248,6 +248,8 @@ export interface TransitionRequest {
   actor: LifecycleActor;
   /** Set when an approved governance record backs this request. */
   governanceApproved?: boolean;
+  /** Optional compare-and-set guard supplied by the caller. */
+  expectedState?: AgentLifecycleState;
 }
 
 export interface TransitionDecision {
@@ -286,6 +288,20 @@ export function evaluateTransition(request: TransitionRequest): TransitionDecisi
       "LIFECYCLE_TERMINAL_STATE",
       `Agent is ${from}; no further lifecycle transitions are possible`,
       { from },
+    );
+  }
+
+  if (request.expectedState !== undefined && !isLifecycleState(request.expectedState)) {
+    throw new LifecycleError("LIFECYCLE_UNKNOWN_STATE", `Unknown lifecycle state: ${request.expectedState}`, {
+      allowed: [...AGENT_LIFECYCLE_STATES],
+    });
+  }
+
+  if (request.expectedState !== undefined && request.expectedState !== from) {
+    throw new LifecycleError(
+      "LIFECYCLE_CONFLICT",
+      `Lifecycle state changed: expected ${request.expectedState}, observed ${from ?? "none"}`,
+      { expectedState: request.expectedState, observedState: from },
     );
   }
 
