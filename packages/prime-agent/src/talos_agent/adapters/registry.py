@@ -6,6 +6,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from talos_agent.adapters.base import BaseSocialAdapter
+from talos_agent.adapters.diagnostics import AdapterPauseController, PauseReport
 
 if TYPE_CHECKING:
     from talos_agent.adapters.capability import AdapterSandbox
@@ -118,6 +119,33 @@ class AdapterRegistry:
             a.channel_name: a.get_capabilities().__dict__
             for a in self._adapters.values()
         }
+
+    # ── Pause helpers ─────────────────────────────────────────────────────────
+
+    def pause(self, channel: str) -> None:
+        """Stop new publications for *channel*.
+
+        The pause is adapter-specific: all other registered adapters continue
+        to operate normally.  Calling pause on an already-paused adapter is a
+        no-op.
+        """
+        self.pause_controller.pause(channel)
+
+    def resume(self, channel: str) -> None:
+        """Resume publications for *channel*."""
+        self.pause_controller.resume(channel)
+
+    def is_paused(self, channel: str) -> bool:
+        """Return ``True`` if *channel* is currently paused."""
+        return self.pause_controller.is_paused(channel)
+
+    def pause_report(self, channel: str) -> PauseReport:
+        """Return the in-flight outcome report for *channel*.
+
+        The report lists every send recorded while the adapter was pausing and
+        its resolved outcome (if known), plus the current pause state.
+        """
+        return self.pause_controller.in_flight_report(channel)
 
     def __len__(self) -> int:
         return len(self._adapters)
