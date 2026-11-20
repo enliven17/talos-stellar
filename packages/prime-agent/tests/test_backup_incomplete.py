@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,12 @@ from talos_agent.backup_service import (
 
 
 PASSWORD = "correct horse battery staple"
+
+
+def write_fake_sqlite_backup(_src: Path, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(dest) as conn:
+        conn.execute("CREATE TABLE fixture (id INTEGER)")
 
 
 def test_stream_failure_preserves_partial_as_incomplete(tmp_path: Path, monkeypatch):
@@ -45,7 +52,7 @@ def test_build_backup_wraps_failure_as_incomplete_write(tmp_path: Path, monkeypa
     (tmp_path / "talos-agent.db").write_bytes(b"")
     monkeypatch.setattr(bs, "collect_agent_files", lambda agent_id=None: [tmp_path / "talos-agent.db"])
     # Patch _sqlite_hot_backup to a no-op write so we get to stream_encrypted_artifact.
-    monkeypatch.setattr(bs, "_sqlite_hot_backup", lambda src, dest: dest.write_bytes(b"db bytes"))
+    monkeypatch.setattr(bs, "_sqlite_hot_backup", write_fake_sqlite_backup)
     # Force the write failure inside stream_encrypted_artifact.
     def broken_stream(ciphertext, out_path, **kw):
         raise OSError("simulated write failure")
@@ -72,7 +79,7 @@ def test_successful_backup_leaves_enc_and_no_incomplete(tmp_path: Path, monkeypa
     monkeypatch.setattr(bs, "APP_DIR", tmp_path)
     (tmp_path / "talos-agent.db").write_bytes(b"")
     monkeypatch.setattr(bs, "collect_agent_files", lambda agent_id=None: [tmp_path / "talos-agent.db"])
-    monkeypatch.setattr(bs, "_sqlite_hot_backup", lambda src, dest: dest.write_bytes(b"db bytes"))
+    monkeypatch.setattr(bs, "_sqlite_hot_backup", write_fake_sqlite_backup)
 
     out = tmp_path / "good.enc"
     build_backup(password=PASSWORD, out_path=out)
