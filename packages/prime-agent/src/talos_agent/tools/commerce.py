@@ -21,6 +21,7 @@ from talos_agent.commerce_quote import (
     enforce_commerce_quote_expiry,
     quote_expiry_iso,
 )
+from talos_agent.idempotency import generate_idempotency_key
 from talos_agent.tools import context as _context
 from talos_agent.tools.registry import tool
 
@@ -98,6 +99,25 @@ async def discover_services(target: str = "") -> dict:
         target=target or None,
     )
     return {"category_searched": category, "services": services, "count": len(services)}
+
+
+# #1446: a submit that times out AFTER the x402 payment is signed leaves the
+# server potentially settled while nothing local records it. The old code let
+# the httpx.TimeoutException propagate, so the next retry signed a new payment
+# under a new idempotency key and could pay twice. The two constants below are
+# the distinct outcome shapes; the gate further down returns them verbatim on
+# a repeat purchase for the same (talos_id, service_type, payload).
+PAYMENT_OUTCOME_UNKNOWN = "payment_outcome_unknown"
+PURCHASE_TIMEOUT = "PURCHASE_TIMEOUT"
+
+
+def _canonical_purchase_payload(payload_dict: dict, talos_id: str, service_type: str) -> str:
+    """Stable digest for unknown-record lookup, independent of key ordering."""
+    return json.dumps(
+        {"talos_id": talos_id, "service_type": service_type, "payload": payload_dict},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 @tool(
@@ -194,6 +214,25 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
             "talos_id": talos_id,
         }
 
+    # #1446: before signing, refuse to re-sign if a previous purchase for this
+    # exact (talos_id, service_type, payload) is already in the unknown-
+    # fulfillment state. Return the existing record instead of paying twice.
+    canonical = _canonical_purchase_payload(payload_dict, talos_id, service_type)
+    existing_unknown = _deps().db.find_unknown_commerce_job(canonical)
+    if existing_unknown is not None:
+        return {
+            "status": PAYMENT_OUTCOME_UNKNOWN,
+            "code": PURCHASE_TIMEOUT,
+            "job_id": existing_unknown.get("job_id"),
+            "talos_id": talos_id,
+            "service_type": service_type,
+            "idempotency_key": existing_unknown.get("idempotency_key"),
+            "message": (
+                "A previous purchase for this payload has an unknown "
+                "payment outcome; reconcile it before retrying."
+            ),
+        }
+
     # Step 2: Sign payment (EIP-3009)
     signer = _get_signer()
     await signer.initialize()
@@ -218,12 +257,55 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
     if "error" in sign_result:
         return sign_result
 
-    # Step 3: POST with X-PAYMENT header
-    submit_result = await _deps().api.submit_commerce(
-        talos_id,
-        payment_header=sign_result["payment_header"],
-        payload=payload_dict,
-    )
+    # #1446: generate the idempotency key BEFORE submit so it is known and
+    # storable on a timeout — the server may have settled under this key even
+    # though we never saw a response.
+    idempotency_key = generate_idempotency_key()
+
+    # Step 3: POST with X-PAYMENT header. Only timeout/transport errors around
+    # the submit are treated as "outcome unknown" — server-error JSON below
+    # is a definitive payment failure and stays unchanged.
+    try:
+        submit_result = await _deps().api.submit_commerce(
+            talos_id,
+            payment_header=sign_result["payment_header"],
+            payload=payload_dict,
+            idempotency_key=idempotency_key,
+        )
+    except Exception as exc:
+        import httpx
+        if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+            # Persist a recoverable unknown record; the same canonical digest
+            # blocks a second payment on the next call for this payload.
+            _deps().db.add_commerce_job(
+                job_id=f"unknown-{idempotency_key}",
+                talos_id=talos_id,
+                service_type=service_type,
+                payload={
+                    **payload_dict,
+                    "_canonical": canonical,
+                    "_idempotency_key": idempotency_key,
+                    "_status": "payment_outcome_unknown",
+                },
+            )
+            log.warning(
+                "prime_agent_commerce_payment_outcome_unknown",
+                talos_id=talos_id,
+                service_type=service_type,
+                idempotency_key=idempotency_key,
+            )
+            return {
+                "status": PAYMENT_OUTCOME_UNKNOWN,
+                "code": PURCHASE_TIMEOUT,
+                "talos_id": talos_id,
+                "service_type": service_type,
+                "idempotency_key": idempotency_key,
+                "message": (
+                    "Payment may have settled but no response was received; "
+                    "reconcile before retrying."
+                ),
+            }
+        raise
 
     if not submit_result:
         return {"error": "Commerce submission failed"}
