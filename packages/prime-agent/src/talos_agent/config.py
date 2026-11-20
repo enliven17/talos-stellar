@@ -12,21 +12,15 @@ from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from talos_agent.circuit_breaker import CircuitBreakerConfig
-from talos_agent.http import validate_tool_timeout
 
 APP_DIR = Path.home() / ".talos-agent"
 
-_CONFIG_SECRET_FIELDS = re.compile(
-    r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|secret|password|private[_-]?key|seed|mnemonic|signature|payment)"
-)
-_CONFIG_SECRET_VALUE = re.compile(r"(?i)(input_value\s*=\s*)(['\"])(.*?)(\2)")
+_CONFIG_INPUT_VALUE = re.compile(r"(input_value\s*=\s*)(['\"])(.*?)(\2)")
 
 
 def safe_config_error(error: BaseException) -> str:
-    """Return a useful configuration error without exposing secret values."""
-    text = str(error)
-    if _CONFIG_SECRET_FIELDS.search(text):
-        text = _CONFIG_SECRET_VALUE.sub(r"\1'[REDACTED]'", text)
+    """Return useful configuration context without echoing rejected inputs."""
+    text = _CONFIG_INPUT_VALUE.sub(r"\1'[REDACTED]'", str(error))
     return text or "configuration could not be loaded"
 
 
@@ -387,6 +381,13 @@ class Settings(BaseSettings):
         le=120,
         validation_alias="TALOS_TOOL_TIMEOUT_SECONDS",
         description="Maximum seconds for a single external tool call before it is cancelled.",
+    )
+    publish_timeout_seconds: float = Field(
+        default=90.0,
+        gt=0,
+        le=300,
+        validation_alias="TALOS_PUBLISH_TIMEOUT",
+        description="Maximum seconds for a publishing tool call before it is cancelled.",
     )
 
     # Content history and research note bounds (Issue #974)

@@ -154,6 +154,7 @@ The agent is configured via environment variables and/or `~/.talos-agent/config.
 | `browser_headless` | `BROWSER_HEADLESS` | `false` | No | Run browser in headless mode |
 | `auto_repay_loans` | `AUTO_REPAY_LOANS` | `false` | No | Enable automatic loan repayment from treasury |
 | `tool_timeout_seconds` | `TALOS_TOOL_TIMEOUT_SECONDS` | `30` | No | Maximum seconds for a single external tool call before it is cancelled. |
+| `publish_timeout_seconds` | `TALOS_PUBLISH_TIMEOUT` | `90` | No | Maximum seconds for a publishing tool call before it is cancelled (greater than 0, up to 300). |
 | `job_lease_ttl` | `JOB_LEASE_TTL` | `300` | No | Seconds for a claimed job lease TTL |
 | `job_heartbeat_interval` | `JOB_HEARTBEAT_INTERVAL` | `60` | No | Seconds between job lease heartbeats |
 | `talos_durable_job_effects_enabled` | `TALOS_DURABLE_JOB_EFFECTS_ENABLED` | `false` | No | Persist provider jobs and completion effects before external delivery |
@@ -185,6 +186,7 @@ Additional architectural, configuration, and operational guides:
 - **Package Documentation (`packages/prime-agent/docs/`)**:
   - [A2A Composition](./docs/a2a_composition.md) — Agent-to-Agent communication protocols and timeouts.
   - [Adapter Diagnostics](./docs/adapter-diagnostics.md) — Adapter health checks, status reporting, and troubleshooting.
+  - [Adapter HTTP Testing](./docs/adapter-http-testing.md) — Fake transport contract for isolated communication-adapter tests.
   - [Adapter Health Snapshots](./docs/adapter-health-snapshots.md) — Runtime health snapshot captures and telemetry.
   - [Discord Reconnect Policy](./docs/discord-reconnect-policy.md) — Connection lifecycle and reconnect backoff behavior for Discord.
   - [Logging Policy](./docs/LOGGING_POLICY.md) — Structured logging standards, redaction rules, and severity levels.

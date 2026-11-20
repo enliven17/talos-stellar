@@ -10,6 +10,7 @@ from rich.console import Console
 
 from talos_agent.tools import context as _context
 from talos_agent.tools.registry import tool
+from talos_agent.redact import LOG_TEXT_MAX_CHARS, redact_text
 
 if TYPE_CHECKING:
     from talos_agent.adapters.registry import AdapterRegistry
@@ -25,8 +26,22 @@ def _deps():
     return _context.resolve(globals())
 
 
-_TIMEOUT = 90  # seconds
+_DEFAULT_TIMEOUT = 90.0
+_TIMEOUT = _DEFAULT_TIMEOUT
+_publish_timeout = _DEFAULT_TIMEOUT
 _MAX_ERROR_CHARS = LOG_TEXT_MAX_CHARS
+
+
+def set_publish_timeout(timeout_seconds: float) -> None:
+    """Set the per-call timeout used by publishing tools."""
+    global _publish_timeout
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not 0 < timeout_seconds <= 300
+    ):
+        raise ValueError("publish timeout must be greater than 0 and at most 300 seconds")
+    _publish_timeout = float(timeout_seconds)
 
 
 def _publish_safe(fn: Callable) -> Callable:
@@ -37,6 +52,9 @@ def _publish_safe(fn: Callable) -> Callable:
         if _deps().adapter_registry is None:
             return {"error": "Adapter registry not initialized"}
         timeout = _publish_timeout
+        # Preserve callers that override the previous module-level timeout.
+        if _TIMEOUT != _DEFAULT_TIMEOUT:
+            timeout = _TIMEOUT
         try:
             return await asyncio.wait_for(fn(*args, **kwargs), timeout=timeout)
         except asyncio.TimeoutError:
