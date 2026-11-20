@@ -60,6 +60,7 @@ describe("Marketplace Search API & Service", () => {
   const mockCapability = {
     id: "cap-uuid-1",
     name: "Automated Trading",
+    version: 1,
     description: "Executes automated trades on Stellar DEX",
     category: "Finance",
     isActive: true,
@@ -113,6 +114,7 @@ describe("Marketplace Search API & Service", () => {
       expect(data.filters.capabilities[0]).toEqual({
         id: "cap-uuid-1",
         name: "Automated Trading",
+        version: 1,
         description: "Executes automated trades on Stellar DEX",
         category: "Finance",
         isActive: true,
@@ -220,6 +222,7 @@ describe("Marketplace Search API & Service", () => {
         {
           id: "cap-uuid-1",
           name: "Automated Trading",
+          version: 1,
           description: "Executes automated trades on Stellar DEX",
           category: "Finance",
           isActive: true,
