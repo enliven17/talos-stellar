@@ -1,6 +1,6 @@
 # Talos Contract Event Indexing Specification
 
-**Spec version:** 1.3.0
+**Spec version:** 1.4.0
 **Applies to:** talos_registry, talos_governance, talos_name_service, talos_dividends
 
 ## 1. Event envelope
@@ -70,11 +70,13 @@ is idempotent per cursor (see §4).
 | (`tl_cfg`,) | (old_min_delay: u64, new_min_delay: u64, grace_period: u64) | timelock config changed |
 
 ### talos_governance
+Governance action proposals store a domain-separated digest of their canonical action at creation. Execution recomputes and checks this digest before dispatch. Successful execution emits `act_rcpt`; existing proposal and action event shapes stay unchanged.
 | topics | data |
 |---|---|
 | (`prop_crt`, proposal_id: u32) | (talos_id: u32, proposer: Address) |
 | (`vote`, proposal_id: u32) | (voter: Address, choice: VoteChoice, weight: i128) |
 | (`prop_stat`, proposal_id: u32) | status: ProposalStatus |
+| (`act_rcpt`, proposal_id: u64) | (namespace: String, action_digest: BytesN<32>, executed_at: u64) | immutable action execution receipt |
 | (`qrm_rchd`, proposal_id: u32) | (proposal_id: u32, votes_cast: i128, quorum_threshold: i128, approval_bps: i128) |
 | (`cfg_upd`,) | (old_quorum_threshold: i128, new_quorum_threshold: i128, old_consensus_threshold: i128, new_consensus_threshold: i128, old_voting_period_ledgers: u32, new_voting_period_ledgers: u32, old_pulse_token_address: Address, new_pulse_token_address: Address) |
 | (`dlg_chg`, delegator: Address) | (delegatee: Option<Address>) |
