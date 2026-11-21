@@ -288,6 +288,7 @@ async function _GET(
       operatorMitosBalance,
       tokenSymbol: talos.tokenSymbol ?? "MITOS",
       circulatingSupply: talos.totalSupply - operatorMitosBalance,
+      observedAt: new Date().toISOString(),
     });
   } catch {
     return Response.json({ error: "Internal server error" }, { status: 500 });

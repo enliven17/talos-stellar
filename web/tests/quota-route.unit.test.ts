@@ -65,6 +65,7 @@ vi.mock("@/db/schema", () => ({
   tlsTalos: { id: "id", apiKey: "apiKey" },
   tlsQuotaConfigs: { talosId: "talosId", resource: "resource" },
   tlsQuotaUsage: { talosId: "talosId", resource: "resource", windowStart: "windowStart", count: "count" },
+  tlsQuotaAdjustments: { talosId: "talosId" },
   tlsApiAuditLogs: { talosId: "talosId", method: "method", path: "path", statusCode: "statusCode", ipAddress: "ipAddress" },
 }));
 
@@ -462,12 +463,94 @@ describe("PATCH /api/talos/[id]/quota", () => {
       expect(typeof body.usage.ok).toBe("boolean");
     });
 
-    it("performs exactly one db.insert (the upsert)", async () => {
+    it("performs two db.inserts (the upsert and the audit record)", async () => {
       await PATCH(
         makeRequest("PATCH", { resource: "sse_connections", maxCount: 20, windowSize: "hourly" }),
         makeParams(),
       );
-      expect(mocks.dbInsert).toHaveBeenCalledTimes(1);
+      expect(mocks.dbInsert).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("adjustment audit trail", () => {
+    function captureAuditValues() {
+      const captured: Record<string, unknown>[] = [];
+      mocks.dbInsert.mockImplementation(() => {
+        const chain = mocks.makeInsertChain([{ count: 1 }]);
+        chain.values = vi.fn((v: Record<string, unknown>) => {
+          captured.push(v);
+          return chain;
+        });
+        return chain;
+      });
+      return captured;
+    }
+
+    it("records actor, reason, prior policy and new policy", async () => {
+      const existingRow = makeConfigRow("job_writes", { maxCount: 200, enabled: true, notes: "old" });
+      mocks.dbSelect.mockImplementation(() => mocks.makeSelectChain([existingRow]));
+      const captured = captureAuditValues();
+
+      const res = await PATCH(
+        makeRequest("PATCH", { resource: "job_writes", maxCount: 400, reason: "Wave 7 load" }),
+        makeParams(),
+      );
+      expect(res.status).toBe(200);
+
+      const audit = captured[captured.length - 1];
+      expect(audit.actor).toBe(`agent:${TALOS_ID}`);
+      expect(audit.reason).toBe("Wave 7 load");
+      expect(audit.priorPolicy).toMatchObject({ maxCount: 200, windowSize: "daily", enabled: true });
+      expect(audit.newPolicy).toMatchObject({ maxCount: 400, windowSize: "daily", enabled: true });
+    });
+
+    it("never stores API credentials in reason or policy notes", async () => {
+      const existingRow = makeConfigRow("job_writes", { notes: `leaked ${API_KEY}` });
+      mocks.dbSelect.mockImplementation(() => mocks.makeSelectChain([existingRow]));
+      const captured = captureAuditValues();
+
+      await PATCH(
+        makeRequest("PATCH", {
+          resource: "job_writes",
+          maxCount: 10,
+          reason: `rotated using Bearer abc123SECRET and ${API_KEY}`,
+          notes: "api_key=supersecretvalue",
+        }),
+        makeParams(),
+      );
+
+      const serialized = JSON.stringify(captured[captured.length - 1]);
+      expect(serialized).not.toContain(API_KEY);
+      expect(serialized).not.toContain("abc123SECRET");
+      expect(serialized).not.toContain("supersecretvalue");
+      expect(serialized).toContain("[REDACTED]");
+    });
+
+    it("defaults the reason when none is supplied", async () => {
+      const captured = captureAuditValues();
+      await PATCH(makeRequest("PATCH", { resource: "job_writes", maxCount: 10 }), makeParams());
+      expect(captured[captured.length - 1].reason).toBe("unspecified");
+    });
+  });
+
+  describe("GET ?view=adjustments", () => {
+    it("returns history newest first without credentials fields", async () => {
+      const rows = [
+        { id: "a", talosId: TALOS_ID, resource: "job_writes", actor: "agent:x", reason: "r1",
+          priorPolicy: { maxCount: 1 }, newPolicy: { maxCount: 2 }, createdAt: new Date("2026-01-01T00:00:00Z") },
+        { id: "b", talosId: TALOS_ID, resource: "job_writes", actor: "agent:x", reason: "r2",
+          priorPolicy: { maxCount: 2 }, newPolicy: { maxCount: 3 }, createdAt: new Date("2026-02-01T00:00:00Z") },
+      ];
+      mocks.dbSelect.mockImplementation(() => mocks.makeSelectChain(rows));
+
+      const req = new NextRequest(`http://localhost/api/talos/${TALOS_ID}/quota?view=adjustments`, {
+        headers: { Authorization: `Bearer ${API_KEY}` },
+      });
+      const res = await GET(req, makeParams());
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.adjustments.map((a: { id: string }) => a.id)).toEqual(["b", "a"]);
+      expect(JSON.stringify(body)).not.toContain(API_KEY);
     });
   });
 });
