@@ -450,6 +450,34 @@ register_field("retry_state.updated_at", _r(
     StateCategory.PORTABLE, "low", "until_resolved", None, "full",
 ))
 
+# task_failure_history — bounded failure history per agent/task
+register_field("task_failure_history", _r(
+    StateCategory.PORTABLE, "low", "permanent",
+    "bounded history; no prompts, secrets or tool results", "full",
+    "Task failure history with attempt counts, stable error codes, and eligibility timestamps.",
+))
+register_field("task_failure_history.id", _r(
+    StateCategory.PORTABLE, "low", "permanent", None, "full",
+))
+register_field("task_failure_history.talos_id", _r(
+    StateCategory.PORTABLE, "low", "permanent", None, "full",
+))
+register_field("task_failure_history.task_name", _r(
+    StateCategory.PORTABLE, "low", "permanent", None, "full",
+))
+register_field("task_failure_history.attempt_number", _r(
+    StateCategory.PORTABLE, "low", "permanent", "positive int", "full",
+))
+register_field("task_failure_history.error_code", _r(
+    StateCategory.PORTABLE, "low", "permanent", "^[a-z][a-z0-9_]{0,63}$", "full",
+))
+register_field("task_failure_history.next_eligible_at", _r(
+    StateCategory.PORTABLE, "low", "permanent", "ISO-8601 UTC", "full",
+))
+register_field("task_failure_history.recorded_at", _r(
+    StateCategory.PORTABLE, "low", "permanent", "ISO-8601 UTC", "full",
+))
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # claimed_jobs — fencing-token persistence (portable, reverified on restore)

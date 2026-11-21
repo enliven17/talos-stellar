@@ -107,3 +107,62 @@ def check_should_run(
 
     # Fallback: always run.
     return True
+
+
+def check_task_eligibility(
+    now: datetime,
+    task_name: str,
+    db: object,
+    talos_id: str | None = None,
+) -> tuple[bool, datetime | None]:
+    """Check whether a task is eligible to run according to its retry / failure state.
+
+    Parameters
+    ----------
+    now:
+        Current time (timezone-aware).
+    task_name:
+        Name of the task being checked.
+    db:
+        Database instance providing ``get_task_failure_history`` or ``get_retry_state``.
+    talos_id:
+        Optional agent identifier for agent-specific failure history.
+
+    Returns
+    -------
+    tuple[bool, datetime | None]
+        ``(is_eligible, next_eligible_at)``
+        If currently backed off, returns ``(False, next_eligible_at)``.
+        If eligible or no failure/backoff state exists, returns ``(True, next_eligible_at)``.
+    """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    next_eligible_at: datetime | None = None
+
+    # Check failure history first if available
+    if hasattr(db, "get_task_failure_history"):
+        try:
+            history = db.get_task_failure_history(talos_id=talos_id, task_name=task_name, limit=1)
+            if history:
+                next_eligible_at = history[0]["next_eligible_at"]
+        except Exception:
+            pass
+
+    # Fall back to retry_state if failure history returned nothing or wasn't available
+    if next_eligible_at is None and hasattr(db, "get_retry_state"):
+        try:
+            state = db.get_retry_state(task_name)
+            if state:
+                next_eligible_at = state.get("next_attempt_at")
+        except Exception:
+            pass
+
+    if next_eligible_at is not None:
+        if next_eligible_at.tzinfo is None:
+            next_eligible_at = next_eligible_at.replace(tzinfo=timezone.utc)
+        if now < next_eligible_at:
+            return False, next_eligible_at
+
+    return True, next_eligible_at
+

@@ -202,6 +202,8 @@ async def polling_task(
         db=db,
         base_delay=settings.polling_interval,
         jitter_identity=settings.talos_id,
+        talos_id=settings.talos_id,
+        max_failure_history=settings.task_failure_max_history,
     )
     await _wait_for_restored_deadline(shutdown_event, backoff)
     while not shutdown_event.is_set():
@@ -242,7 +244,7 @@ async def polling_task(
             backoff.success()
         except Exception as e:
             console.print(f"[dim red]Polling error: {e}[/dim red]")
-            backoff.failure()
+            backoff.failure(e)
             if backoff.terminal:
                 logger.warning("polling_task: reached max_attempts — stopping task")
                 break
@@ -270,6 +272,8 @@ async def heartbeat_task(
         db=db,
         base_delay=settings.heartbeat_interval,
         jitter_identity=settings.talos_id,
+        talos_id=settings.talos_id,
+        max_failure_history=settings.task_failure_max_history,
     )
     await _wait_for_restored_deadline(shutdown_event, backoff)
     while not shutdown_event.is_set():
@@ -279,7 +283,7 @@ async def heartbeat_task(
             backoff.success()
         except Exception as e:
             logger.debug(f"Heartbeat error: {e}")
-            backoff.failure()
+            backoff.failure(e)
             if backoff.terminal:
                 logger.warning("heartbeat_task: reached max_attempts — stopping task")
                 break
@@ -310,6 +314,8 @@ async def job_heartbeat_task(
         db=db,
         base_delay=settings.job_heartbeat_interval,
         jitter_identity=settings.talos_id,
+        talos_id=settings.talos_id,
+        max_failure_history=settings.task_failure_max_history,
     )
     await _wait_for_restored_deadline(shutdown_event, backoff)
     while True:
@@ -326,7 +332,7 @@ async def job_heartbeat_task(
             backoff.success()
         except Exception as e:
             logger.debug("Job heartbeat error: %s", e)
-            backoff.failure()
+            backoff.failure(e)
 
         if shutdown_drain_complete.is_set():
             break
@@ -360,6 +366,8 @@ async def activity_flush_task(
         db=db,
         base_delay=30,
         jitter_identity=settings.talos_id,
+        talos_id=settings.talos_id,
+        max_failure_history=settings.task_failure_max_history,
     )
     await _wait_for_restored_deadline(shutdown_event, backoff)
     while not shutdown_event.is_set():
@@ -378,7 +386,7 @@ async def activity_flush_task(
             backoff.success()
         except Exception as e:
             logger.debug(f"Activity flush error: {e}")
-            backoff.failure()
+            backoff.failure(e)
             if backoff.terminal:
                 logger.warning("activity_flush_task: reached max_attempts — stopping task")
                 break
@@ -673,6 +681,8 @@ async def job_effect_dispatch_task(
         db=db,
         base_delay=settings.talos_job_effect_dispatch_interval,
         jitter_identity=settings.talos_id,
+        talos_id=settings.talos_id,
+        max_failure_history=settings.task_failure_max_history,
     )
     await _wait_for_restored_deadline(shutdown_event, backoff)
     while not shutdown_event.is_set():
@@ -689,9 +699,9 @@ async def job_effect_dispatch_task(
                     dead=result["dead"],
                 )
             backoff.success()
-        except Exception:
+        except Exception as e:
             log.error("job_effect_dispatch_batch_failed", error_code="batch_failure")
-            backoff.failure()
+            backoff.failure(e, error_code="batch_failure")
         try:
             await asyncio.wait_for(
                 shutdown_event.wait(), timeout=backoff.delay_until_next_attempt()

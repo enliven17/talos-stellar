@@ -47,6 +47,8 @@ This page documents errors exposed by the contract sources in this workspace. Nu
 | 16 | `InvalidPatronShares` | Supplied patron shares do not sum to 100%. |
 | 17 | `InconsistentShareData` | Rounding dust calculation conflicts with existing epoch claim data. |
 | 18 | `NoPendingAdmin` | No pending administrator nomination exists to accept or cancel. |
+| 19 | `IncompatibleRegistry` | The new registry contract does not expose the expected TalosRegistry interface. |
+| 20 | `IdempotencyConflict` | An idempotency key was reused with conflicting epoch parameters. |
 
 ### TalosGovernance (`GovernanceError`)
 
