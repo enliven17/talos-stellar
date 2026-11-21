@@ -607,13 +607,16 @@ stream.close();
 | `path`                 | `/api/events` | Stream endpoint path                                      |
 | `authHeader`           | —             | Sent as `Authorization` header. Never logged.             |
 | `maxReconnectAttempts` | `10`          | Total attempts before permanent close                     |
-| `baseReconnectDelayMs` | `1000`        | Base delay; doubles per attempt                           |
-| `maxReconnectDelayMs`  | `30000`       | Backoff ceiling                                           |
+| `baseReconnectDelayMs` | `1000`        | Base delay; doubles per attempt; valid server `retry:` hints are capped at the maximum delay |
+| `maxReconnectDelayMs`  | `30000`       | Backoff ceiling and server `retry:` hint cap          |
 | `jitter`               | `true`        | Full-jitter on reconnect delay                            |
 | `maxHeartbeatMisses`   | `3`           | Consecutive missed heartbeat ticks before stall reconnect |
 | `heartbeatIntervalMs`  | `30000`       | Heartbeat watchdog interval                               |
 | `seenStore`            | —             | `SeenStore` implementation for duplicate suppression      |
 | `signal`               | —             | External `AbortSignal` to close the stream                |
+
+Only `retry:` values containing ASCII digits are accepted; malformed retry
+directives and unknown SSE fields are ignored.
 
 ### Operational signals
 

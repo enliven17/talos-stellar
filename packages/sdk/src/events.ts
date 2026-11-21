@@ -4,7 +4,8 @@
  * Design properties:
  * - Uses the Fetch API to open a text/event-stream connection; works in browsers and Node ≥18.
  * - Sends `Last-Event-ID` on every reconnect so the server can resume from the last seen event.
- * - Exponential backoff with jitter and a configurable cap; respects `retry:` field from server.
+ * - Exponential backoff with jitter and a configurable cap; respects valid,
+ *   bounded `retry:` fields from the server.
  * - Heartbeat detection: treats N consecutive comment-only ticks as a stall and reconnects.
  * - Duplicate suppression: an optional SeenStore lets callers skip already-processed event IDs.
  * - Abort/close: the stream can be cancelled at any time via `close()` or an external AbortSignal.
@@ -296,7 +297,10 @@ export interface TalosEventStreamOptions {
   /** Reconnect budget — maximum number of reconnect attempts before giving up. @default 10 */
   maxReconnectAttempts?: number;
 
-  /** Base reconnect delay in milliseconds. @default 1000 */
+  /**
+   * Base reconnect delay in milliseconds. Valid server `retry:` hints may
+   * update this value, capped at `maxReconnectDelayMs`. @default 1000
+   */
   baseReconnectDelayMs?: number;
 
   /** Maximum reconnect delay in milliseconds. @default 30_000 */
@@ -858,10 +862,13 @@ export class TalosEventStream {
               }
               break;
             case "retry": {
-              const ms = parseInt(fieldValue, 10);
-              if (!Number.isNaN(ms)) {
-                // Server hint: update base reconnect delay
-                this.opts.baseReconnectDelayMs = ms;
+              if (/^[0-9]+$/.test(fieldValue)) {
+                // SSE retry values are ASCII digits; keep server hints within
+                // the configured reconnect-delay ceiling.
+                this.opts.baseReconnectDelayMs = Math.min(
+                  Number(fieldValue),
+                  this.opts.maxReconnectDelayMs,
+                );
               }
               break;
             }
