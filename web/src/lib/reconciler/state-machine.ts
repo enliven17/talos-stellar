@@ -15,7 +15,7 @@
  *   CONFIRMING → CONFIRMED   (currentLedger ≥ confirmedLedger + confirmationDepth)
  *   CONFIRMING → FAILED      (should not happen after first-seen, but defensively allowed)
  *   CONFIRMING → EXPIRED     (confirmation window elapsed without reaching depth)
- *   Any active → EXPIRED     (wall-clock expiresAt exceeded)
+ *   Any active → EXPIRED     (wall-clock expiresAt exceeded; invalid timestamps leave state unchanged)
  */
 
 import type {
@@ -38,11 +38,24 @@ export function isTerminal(record: TxRecord): boolean {
 
 /**
  * Returns true if the record should transition to EXPIRED based on wall-clock
- * time (expiresAt column) regardless of ledger position.
+ * time (expiresAt column) regardless of ledger position. Invalid dates are not
+ * considered expired; transitions reject them without updating the record.
  */
 export function isWallClockExpired(record: TxRecord, now: Date = new Date()): boolean {
   if (!record.expiresAt) return false;
+  if (!isValidDate(record.expiresAt) || !isValidDate(now)) return false;
   return now >= record.expiresAt;
+}
+
+function isValidDate(value: unknown): value is Date {
+  return value instanceof Date && Number.isFinite(value.getTime());
+}
+
+function hasValidExpiryTimestamps(record: TxRecord, now: Date): boolean {
+  return (
+    isValidDate(now) &&
+    (record.expiresAt == null || isValidDate(record.expiresAt))
+  );
 }
 
 /**
@@ -72,6 +85,7 @@ export function transitionFromPending(
   now: Date = new Date(),
 ): TxRecordUpdate | null {
   if (record.finalityStatus !== "PENDING") return null;
+  if (!hasValidExpiryTimestamps(record, now)) return null;
 
   // Wall-clock expiry takes precedence over all other checks
   if (isWallClockExpired(record, now)) {
@@ -159,6 +173,7 @@ export function transitionFromConfirming(
   now: Date = new Date(),
 ): TxRecordUpdate | null {
   if (record.finalityStatus !== "CONFIRMING") return null;
+  if (!hasValidExpiryTimestamps(record, now)) return null;
 
   // Wall-clock expiry
   if (isWallClockExpired(record, now)) {
