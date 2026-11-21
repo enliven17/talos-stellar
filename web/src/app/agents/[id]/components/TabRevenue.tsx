@@ -2,6 +2,7 @@
 
 import type { TalosDetail, DistPreview, BuybackPreview } from "./types";
 import { AgentEmptyState } from "@/components/agent-view-states";
+import { FinancialSnapshotBadge, FinancialMetricValue } from "@/components/financial-state";
 
 interface TabRevenueProps {
   talos: TalosDetail;
@@ -17,6 +18,8 @@ interface TabRevenueProps {
   onBuybackFormChange: (field: "usdcAmount" | "mitosAmount", value: string) => void;
   onLoadBuybackPreview: () => void;
   onBuyback: () => void;
+  distError?: string | null;
+  buybackError?: string | null;
 }
 
 export function TabRevenue({
@@ -33,6 +36,8 @@ export function TabRevenue({
   onBuybackFormChange,
   onLoadBuybackPreview,
   onBuyback,
+  distError,
+  buybackError,
 }: TabRevenueProps) {
   const REVENUE_HISTORY = talos.revenueHistory ?? [];
   const maxRevenue = Math.max(...REVENUE_HISTORY.map((r) => r.amount), 1);
@@ -40,64 +45,102 @@ export function TabRevenue({
   return (
     <div className="space-y-6">
       {/* Summary metrics */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-        {[
-          { label: "Total Revenue", value: talos.revenue },
-          {
-            label: "This Month",
-            value: `$${(REVENUE_HISTORY[REVENUE_HISTORY.length - 1]?.amount ?? 0).toLocaleString()}`,
-          },
-          {
-            label: "Avg Monthly",
-            value: `$${Math.round(
-              REVENUE_HISTORY.length > 0
-                ? REVENUE_HISTORY.reduce((s, r) => s + r.amount, 0) /
-                    REVENUE_HISTORY.length
-                : 0,
-            ).toLocaleString()}`,
-          },
-          {
-            label: "From Jobs",
-            value: `$${talos.jobStats.totalRevenue.toLocaleString()}`,
-          },
-        ].map((s) => (
-          <div
-            key={s.label}
-            className="bg-surface border border-border p-4 text-center"
-          >
-            <div className="text-xl font-bold text-accent">{s.value}</div>
-            <div className="text-xs text-muted">{s.label}</div>
-          </div>
-        ))}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs text-muted">[FINANCIAL OVERVIEW]</span>
+          <FinancialSnapshotBadge observedAt={talos.observedAt} />
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          {[
+            { label: "Total Revenue", value: talos.revenue },
+            {
+              label: "This Month",
+              value: `$${(REVENUE_HISTORY[REVENUE_HISTORY.length - 1]?.amount ?? 0).toLocaleString()}`,
+            },
+            {
+              label: "Avg Monthly",
+              value: `$${Math.round(
+                REVENUE_HISTORY.length > 0
+                  ? REVENUE_HISTORY.reduce((s, r) => s + r.amount, 0) /
+                      REVENUE_HISTORY.length
+                  : 0,
+              ).toLocaleString()}`,
+            },
+            {
+              label: "From Jobs",
+              value: `$${talos.jobStats.totalRevenue.toLocaleString()}`,
+            },
+          ].map((s) => (
+            <div
+              key={s.label}
+              className="bg-surface border border-border p-4 text-center"
+            >
+              <div className="text-xl font-bold text-accent">{s.value}</div>
+              <div className="text-xs text-muted">{s.label}</div>
+            </div>
+          ))}
+        </div>
       </div>
 
       {/* Distribution Panel */}
       <div className="bg-surface border border-border p-6">
         <div className="flex items-center justify-between mb-4">
-          <div className="text-xs text-accent">[REVENUE DISTRIBUTION]</div>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-accent">[REVENUE DISTRIBUTION]</span>
+            {distPreview && (
+              <FinancialSnapshotBadge
+                observedAt={distPreview.observedAt}
+                onRefresh={onLoadDistPreview}
+                refreshing={distLoading}
+              />
+            )}
+          </div>
           <button
             onClick={onLoadDistPreview}
-            className="text-xs text-muted hover:text-accent transition-colors"
+            disabled={distLoading}
+            className="text-xs text-muted hover:text-accent transition-colors disabled:opacity-50"
           >
-            Load preview &rarr;
+            {distLoading ? "Loading…" : "Load preview →"}
           </button>
         </div>
         <p className="text-xs text-muted mb-4">
           {talos.investorShare ?? 25}% of treasury revenue is distributable to{" "}
           {talos.tokenSymbol} holders proportionally to their holdings.
         </p>
-        {distPreview ? (
+        {distError ? (
+          <div className="p-4 border border-red-500/30 bg-red-500/10 text-xs text-red-400 flex items-center justify-between">
+            <span>{distError}</span>
+            <button
+              onClick={onLoadDistPreview}
+              className="text-xs underline hover:text-red-300 ml-4 font-mono"
+            >
+              Retry
+            </button>
+          </div>
+        ) : distLoading && !distPreview ? (
+          <div className="py-8 text-center text-xs text-muted animate-pulse">
+            Loading revenue distribution preview…
+          </div>
+        ) : distPreview ? (
           <div className="space-y-4">
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 text-xs">
               <div className="bg-background border border-border p-3 text-center">
                 <div className="text-accent font-bold text-sm">
-                  ${distPreview.totalRevenue.toFixed(2)}
+                  <FinancialMetricValue
+                    value={distPreview.totalRevenue.toFixed(2)}
+                    prefix="$"
+                    state={distPreview.totalRevenue != null ? "live" : "unavailable"}
+                  />
                 </div>
                 <div className="text-muted">Total Treasury</div>
               </div>
               <div className="bg-background border border-border p-3 text-center">
                 <div className="text-accent font-bold text-sm">
-                  ${distPreview.distributableAmount.toFixed(2)}
+                  <FinancialMetricValue
+                    value={distPreview.distributableAmount.toFixed(2)}
+                    prefix="$"
+                    state={distPreview.distributableAmount != null ? "live" : "unavailable"}
+                  />
                 </div>
                 <div className="text-muted">
                   To Distribute ({distPreview.investorSharePercent}%)
@@ -105,10 +148,13 @@ export function TabRevenue({
               </div>
               <div className="bg-background border border-border p-3 text-center">
                 <div className="text-foreground font-bold text-sm">
-                  $
-                  {(
-                    distPreview.totalRevenue - distPreview.distributableAmount
-                  ).toFixed(2)}
+                  <FinancialMetricValue
+                    value={(
+                      distPreview.totalRevenue - distPreview.distributableAmount
+                    ).toFixed(2)}
+                    prefix="$"
+                    state={distPreview.totalRevenue != null ? "live" : "unavailable"}
+                  />
                 </div>
                 <div className="text-muted">Treasury Retained</div>
               </div>
@@ -195,40 +241,69 @@ export function TabRevenue({
       {/* Buyback section */}
       <div className="bg-surface border border-border p-6">
         <div className="flex items-center justify-between mb-4">
-          <div className="text-xs text-accent">[TREASURY BUYBACK]</div>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-accent">[TREASURY BUYBACK]</span>
+            {buybackPreview && (
+              <FinancialSnapshotBadge
+                observedAt={buybackPreview.observedAt}
+                onRefresh={onLoadBuybackPreview}
+                refreshing={buybackLoading}
+              />
+            )}
+          </div>
           <button
             onClick={onLoadBuybackPreview}
-            className="text-xs text-muted hover:text-accent transition-colors"
+            disabled={buybackLoading}
+            className="text-xs text-muted hover:text-accent transition-colors disabled:opacity-50"
           >
-            Load stats &rarr;
+            {buybackLoading ? "Loading…" : "Load stats →"}
           </button>
         </div>
         <p className="text-xs text-muted mb-4">
           Burns {talos.tokenSymbol} tokens from treasury, reducing circulating
           supply.
         </p>
-        {buybackPreview ? (
+        {buybackError ? (
+          <div className="p-4 border border-red-500/30 bg-red-500/10 text-xs text-red-400 flex items-center justify-between">
+            <span>{buybackError}</span>
+            <button
+              onClick={onLoadBuybackPreview}
+              className="text-xs underline hover:text-red-300 ml-4 font-mono"
+            >
+              Retry
+            </button>
+          </div>
+        ) : buybackLoading && !buybackPreview ? (
+          <div className="py-8 text-center text-xs text-muted animate-pulse">
+            Loading treasury buyback statistics…
+          </div>
+        ) : buybackPreview ? (
           <div className="space-y-4">
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
               {[
                 {
                   label: "Treasury Balance",
-                  value: `$${buybackPreview.treasuryBalance.toFixed(2)}`,
+                  value: buybackPreview.treasuryBalance != null ? `$${buybackPreview.treasuryBalance.toFixed(2)}` : null,
                 },
                 {
                   label: "Total Burned",
-                  value: `$${buybackPreview.totalBuybackExecuted.toFixed(2)}`,
+                  value: buybackPreview.totalBuybackExecuted != null ? `$${buybackPreview.totalBuybackExecuted.toFixed(2)}` : null,
                 },
                 {
                   label: "Circulating Supply",
-                  value: buybackPreview.circulatingSupply.toLocaleString(),
+                  value: buybackPreview.circulatingSupply != null ? buybackPreview.circulatingSupply.toLocaleString() : null,
                 },
               ].map((s) => (
                 <div
                   key={s.label}
                   className="bg-background border border-border p-3 text-center"
                 >
-                  <div className="font-bold text-accent">{s.value}</div>
+                  <div className="font-bold text-accent">
+                    <FinancialMetricValue
+                      value={s.value}
+                      state={s.value != null ? "live" : "unavailable"}
+                    />
+                  </div>
                   <div className="text-muted mt-0.5">{s.label}</div>
                 </div>
               ))}

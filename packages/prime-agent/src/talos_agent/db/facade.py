@@ -35,6 +35,12 @@ class LocalDB:
     All domain logic is delegated to per-domain repositories; this class
     exists purely as a backwards-compatible façade so existing callers do
     not need to be updated.
+
+    Backup / restore / verify do NOT live here: they are in
+    ``talos_agent.backup_service``. In particular, ``verify_backup`` refuses
+    any ``*.incomplete`` artifact up front (issue #1452), so a partial write
+    can never be presented as a verified backup — the façade never proxies
+    a verification call through to it.
     """
 
     def __init__(self, path: Path = DB_PATH, *, timeout_ms: int = 5000):

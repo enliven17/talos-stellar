@@ -42,6 +42,9 @@ import type {
   RotateWebhookSecretParams,
   RotateWebhookSecretResult,
   FinalizeWebhookSecretRotationResult,
+  WebhookDelivery,
+  ListWebhookDeliveriesParams,
+  WebhookDeliveryPage,
 } from "./types.js";
 
 import {
@@ -75,6 +78,8 @@ import {
   validateIdempotencyKey,
   isPayloadConflict,
   IdempotencyConflictError,
+  validateIdempotencyKeyConflict,
+  readIdempotencyKeyHeader,
 } from "./idempotency.js";
 import type { ChaosInjector } from "./chaos.js";
 import { FaultType } from "./chaos.js";
@@ -107,7 +112,12 @@ import {
 
 // Legacy import path: `import { TalosAPIError } from "./client.js"`.
 export { TalosAPIError };
-export { generateIdempotencyKey, validateIdempotencyKey, IdempotencyConflictError };
+export {
+  generateIdempotencyKey,
+  validateIdempotencyKey,
+  validateIdempotencyKeyConflict,
+  IdempotencyConflictError,
+};
 export {
   JobTracker,
   trackJob,
@@ -161,6 +171,8 @@ export interface RetryPolicyOptions {
   jitter?: boolean;
   /** Injectable RNG for deterministic tests. Defaults to `Math.random`. */
   random?: () => number;
+  /** Observer invoked before each status-code retry. Must not throw. */
+  onRetry?: (event: RetryDecisionEvent) => void;
 }
 
 /** Bounded retry configuration based on typed error retryability. See {@link TalosClientOptions.retry}. */
@@ -178,7 +190,41 @@ export interface RetryOptions {
   /** Jitter factor in `[0, 1]`. Default 0.25. */
   jitter?: number;
   /** Observer invoked before each delayed retry. Must not throw. */
-  onRetry?: (event: { attempt: number; error: TalosAPIError; delayMs: number }) => void;
+  onRetry?: (event: RetryDecisionEvent) => void;
+}
+
+/** Why a retry decision was made. */
+export type RetryDecisionReason =
+  | "retry-after"
+  | "status-code"
+  | "exponential-backoff"
+  | "retryable-error"
+  | "transport"
+  | "timeout";
+
+/** Secret-free metadata delivered to retry observer hooks. */
+export interface RedactedRetryMetadata {
+  code: TalosAPIError["code"];
+  status: number;
+  isRetryable: boolean;
+  retryAfterMs?: number;
+}
+
+/**
+ * Structured retry decision delivered to `retryPolicy.onRetry` and
+ * `retry.onRetry`. `error` is a redacted `TalosAPIError` clone; it contains
+ * no response body, parsed data, headers, cause, authorization, or payment
+ * payload. `delayMs` is retained as a compatibility alias for
+ * `nextDelayMs`.
+ */
+export interface RetryDecisionEvent {
+  attempt: number;
+  reason: RetryDecisionReason;
+  nextDelayMs: number;
+  /** Deprecated compatibility alias for `nextDelayMs`. */
+  delayMs: number;
+  metadata: RedactedRetryMetadata;
+  error: TalosAPIError;
 }
 
 /** Frozen snapshot of the effective status-code retry policy. */
@@ -521,6 +567,9 @@ const DEFAULT_RETRY_POLICY: Required<RetryPolicyOptions> = {
   retryStatusCodes: [429, 500, 502, 503, 504],
   jitter: true,
   random: Math.random,
+  onRetry: () => {
+    /* default: no-op observer */
+  },
 };
 
 /** Hard upper bound on attempts for both retry policies. */
@@ -637,6 +686,10 @@ export function resolveRetryPolicy(
   if (typeof random !== "function") {
     throw new TypeError("retryPolicy.random must be a function");
   }
+  const onRetry = src.onRetry ?? DEFAULT_RETRY_POLICY.onRetry;
+  if (typeof onRetry !== "function") {
+    throw new TypeError("retryPolicy.onRetry must be a function");
+  }
 
   return Object.freeze({
     maxAttempts,
@@ -646,6 +699,7 @@ export function resolveRetryPolicy(
     retryStatusCodes: Object.freeze([...retryStatusCodes]) as number[],
     jitter,
     random,
+    onRetry,
   });
 }
 
@@ -712,6 +766,14 @@ export function resolveRetryOptions(
 function applyJitter(delay: number, jitter: number): number {
   const factor = 1 - jitter + jitter * Math.random();
   return Math.max(0, Math.round(delay * factor));
+}
+
+function redactedRetryError(err: TalosAPIError): TalosAPIError {
+  return new TalosAPIError(err.status, "", redactEventPath(err.path), {
+    code: err.code,
+    isRetryable: err.isRetryable,
+    retryAfterMs: err.retryAfterMs,
+  });
 }
 
 /**
@@ -990,13 +1052,22 @@ export class TalosClient {
    */
   private mergeHeaders(init?: HeadersInit, extra?: Record<string, string>): Record<string, string> {
     const headers: Record<string, string> = { ...this.headers };
+    for (const name of Object.keys(headers)) {
+      if (name.toLowerCase() === "idempotency-key") delete headers[name];
+    }
     if (init) {
       const provided = init instanceof Headers
         ? Object.fromEntries(init.entries())
         : Array.isArray(init)
           ? Object.fromEntries(init)
           : init;
-      Object.assign(headers, provided as Record<string, string>);
+      for (const [name, value] of Object.entries(provided as Record<string, string>)) {
+        if (name.toLowerCase() !== "idempotency-key") {
+          headers[name] = value;
+        }
+      }
+      const headerKey = readIdempotencyKeyHeader(init);
+      if (headerKey !== undefined) headers["Idempotency-Key"] = headerKey;
     }
     if (extra) Object.assign(headers, extra);
     return headers;
@@ -1185,15 +1256,28 @@ export class TalosClient {
    * at `maxRetryAfterMs`), otherwise exponential backoff capped at
    * `maxDelayMs`, with jitter.
    */
-  private computeBackoffDelay(err: TalosAPIError, attempt: number): number {
+  private computeBackoffDecision(
+    err: TalosAPIError,
+    attempt: number,
+  ): { delayMs: number; reason: RetryDecisionReason } {
     const retryAfterMs = err.retryAfterMs ?? parseRetryAfterHeader(err.headers["retry-after"]);
     if (retryAfterMs != null) {
       const capped = Math.min(retryAfterMs, this.retry.maxRetryAfterMs);
       const jittered = applyJitter(capped, this.retry.jitter);
-      return Math.min(jittered, this.retry.maxDelayMs);
+      return {
+        delayMs: Math.min(jittered, this.retry.maxDelayMs),
+        reason: "retry-after",
+      };
     }
     const exp = Math.min(this.retry.maxDelayMs, this.retry.baseDelayMs * Math.pow(2, attempt - 1));
-    return applyJitter(exp, this.retry.jitter);
+    return {
+      delayMs: applyJitter(exp, this.retry.jitter),
+      reason: err.code === "transport_error"
+        ? "transport"
+        : err.code === "timeout_error"
+          ? "timeout"
+          : "exponential-backoff",
+    };
   }
 
   /**
@@ -1211,20 +1295,29 @@ export class TalosClient {
       retryMethodsForCall?: string[];
       typedMaxAttempts: number;
     },
-  ): number | null {
+  ): { delayMs: number; reason: RetryDecisionReason; source: "status-code" | "typed" } | null {
     if (
       ctx.attempt < this.retryPolicy.maxAttempts &&
       err.status > 0 &&
       this.shouldRetry(ctx.method, err.status, ctx.retryMethodsForCall)
     ) {
-      return this.getRetryDelay(ctx.attempt, err.headers["retry-after"] ?? null);
+      const header = err.headers["retry-after"] ?? null;
+      const retryAfter = header ? parseRetryAfterHeader(header) : undefined;
+      return {
+        delayMs: this.getRetryDelay(ctx.attempt, header),
+        reason: retryAfter !== undefined ? "retry-after" : "status-code",
+        source: "status-code",
+      };
     }
     if (
       ctx.attempt < ctx.typedMaxAttempts &&
       err.isRetryable &&
       (ctx.idempotent || !this.retry.idempotentOnly)
     ) {
-      return this.computeBackoffDelay(err, ctx.attempt);
+      return {
+        ...this.computeBackoffDecision(err, ctx.attempt),
+        source: "typed",
+      };
     }
     return null;
   }
@@ -1304,6 +1397,7 @@ export class TalosClient {
 
     const extraHeaders: Record<string, string> = {};
     if (idempotencyKey !== undefined) {
+      validateIdempotencyKeyConflict(idempotencyKey, this.headers, requestInit.headers);
       extraHeaders["Idempotency-Key"] = validateIdempotencyKey(idempotencyKey);
     }
 
@@ -1392,16 +1486,37 @@ export class TalosClient {
       } catch (err) {
         if (!(err instanceof TalosAPIError)) throw err;
         lastError = err;
-        delayMs = this.nextRetryDelay(err, {
+        const decision = this.nextRetryDelay(err, {
           method,
           attempt,
           idempotent,
           retryMethodsForCall,
           typedMaxAttempts,
         });
-        if (delayMs === null) break;
+        if (decision === null) break;
+        delayMs = decision.delayMs;
+        const event: RetryDecisionEvent = {
+          attempt,
+          reason: decision.reason,
+          nextDelayMs: decision.delayMs,
+          delayMs: decision.delayMs,
+          metadata: {
+            code: err.code,
+            status: err.status,
+            isRetryable: err.isRetryable,
+            ...(err.retryAfterMs !== undefined ? { retryAfterMs: err.retryAfterMs } : {}),
+          },
+          error: redactedRetryError(err),
+        };
+        if (decision.source === "status-code") {
+          try {
+            this.retryPolicy.onRetry(event);
+          } catch {
+            // A misbehaving observer must not break the bounded retry loop.
+          }
+        }
         try {
-          this.retry.onRetry({ attempt, error: err, delayMs });
+          this.retry.onRetry(event);
         } catch {
           // A misbehaving observer must not break the bounded retry loop.
         }
@@ -2265,6 +2380,51 @@ export class TalosClient {
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
     });
+  }
+
+  // ── Webhook Deliveries ──────────────────────────────────────────
+
+  /**
+   * List webhook deliveries with cursor pagination.
+   *
+   * @param params - Query parameters (limit, cursor, status, subscriptionId, eventType) and request options.
+   * @returns Page of webhook deliveries with nextCursor.
+   */
+  async listWebhookDeliveries(
+    params?: ListWebhookDeliveriesParams,
+  ): Promise<WebhookDeliveryPage> {
+    const { signal, timeoutMs, ...query } = params ?? {};
+    return this.request("/api/webhooks/deliveries", {
+      params: query,
+      signal,
+      timeoutMs,
+    });
+  }
+
+  /**
+   * Async iterator for paginated webhook delivery history.
+   *
+   * Reuses typed pagination and cancellation. Stops at an explicit caller
+   * limit without fetching an unnecessary page.
+   *
+   * @param options - Pagination options (limit, maxPages, signal, timeoutMs) and delivery filters (status, subscriptionId, eventType).
+   * @returns Async iterable iterator yielding individual WebhookDelivery items.
+   *
+   * @example
+   * ```ts
+   * for await (const delivery of client.paginateWebhookDeliveries({ limit: 10, status: "failed" })) {
+   *   console.log(delivery.id, delivery.status, delivery.lastError);
+   * }
+   * ```
+   */
+  paginateWebhookDeliveries(
+    options?: AsyncPaginationIteratorOptions & ListWebhookDeliveriesParams,
+  ): AsyncPaginationIterator<WebhookDelivery> {
+    const { maxPages, signal, timeoutMs, limit, ...query } = options ?? {};
+    return createPaginationIterator<WebhookDelivery>(
+      (opts) => this.listWebhookDeliveries({ ...query, ...opts }),
+      { maxPages, signal, timeoutMs, limit },
+    );
   }
 }
 

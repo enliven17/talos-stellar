@@ -10,6 +10,8 @@ import { OPERATOR_PUBLIC_KEY, USDC_ISSUER } from "@/lib/stellar-config";
 import { ingestJobToLedger } from "@/lib/reputation-ledger";
 import { applyQuotaHeaders, checkAndIncrementQuota, quotaExceededResponse } from "@/lib/quota";
 import { registerTx } from "@/lib/reconciler";
+import { currentStateFromLog } from "@/lib/governance/events";
+import { toLifecycleState } from "@/lib/governance/lifecycle";
 
 const IDEMPOTENCY_KEY_MAX_BYTES = 128;
 
@@ -180,11 +182,21 @@ async function _POST(
 
     if (!talos) return Response.json({ error: "TALOS not found" }, { status: 404 });
     if (!service) return Response.json({ error: "This agent offers no services" }, { status: 404 });
-    if (talos.status === "Paused") {
-      return Response.json({ error: "This agent is paused and cannot accept new work" }, { status: 409 });
-    }
-    if (talos.status === "Retired") {
-      return Response.json({ error: "This agent is retired and cannot accept new work" }, { status: 409 });
+    const lifecycleTip = await currentStateFromLog(id);
+    const legacyState = toLifecycleState(talos.status);
+    const lifecycleState = legacyState === "retired" ||
+      (legacyState === "paused" && lifecycleTip?.state === "active")
+      ? legacyState
+      : lifecycleTip?.state ?? legacyState;
+    if (lifecycleState !== "active") {
+      const restriction = lifecycleState === "paused"
+        ? { code: "AGENT_PAUSED", state: "paused", error: "This agent is paused and cannot accept new work" }
+        : lifecycleState === "retiring"
+          ? { code: "AGENT_DRAINING", state: "draining", error: "This agent is draining and cannot accept new work" }
+          : lifecycleState === "retired"
+            ? { code: "AGENT_RETIRED", state: "retired", error: "This agent is retired and cannot accept new work" }
+            : { code: "AGENT_UNAVAILABLE", state: lifecycleState, error: "This agent is not available to accept new work" };
+      return Response.json(restriction, { status: 409 });
     }
 
     // ── Idempotency check ─────────────────────────────────────────────

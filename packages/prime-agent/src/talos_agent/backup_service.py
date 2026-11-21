@@ -304,6 +304,7 @@ def build_backup(
                 "encryption": run.encryption,
                 "scope": run.scope,
                 "timestamp": run.timestamp,
+                "agent_id": agent_id,
                 "database": run.database,
                 "filesMeta": run.files,
                 "body": ordered_files,
@@ -329,7 +330,19 @@ def build_backup(
             encrypted = encrypt_with_password(plaintext.decode("utf8"), password)
 
             # Stream ciphertext to disk in chunks (same envelope; verify/restore unchanged).
-            stream_encrypted_artifact(encrypted, out_path)
+            # #1452: a failure here leaves <out>.incomplete on disk (see
+            # stream_encrypted_artifact) and surfaces a bounded code so the
+            # caller can distinguish a partial write from an auth/verify error.
+            try:
+                stream_encrypted_artifact(encrypted, out_path)
+            except BackupError:
+                raise
+            except Exception as exc:
+                raise BackupError(
+                    f"Backup write failed; partial artifact preserved at "
+                    f"{out_path.with_suffix(out_path.suffix + '.incomplete')}: {exc}",
+                    code="INCOMPLETE_WRITE",
+                ) from exc
 
             log.info(
                 "prime_agent_backup_completed",
@@ -498,18 +511,37 @@ def stream_encrypted_artifact(
             os.chmod(out_path, stat.S_IRUSR | stat.S_IWUSR)
         except OSError:
             pass
-    finally:
+    except BaseException:
+        # #1452: a failed write must leave a recoverable artifact, not a
+        # deleted one. Rename the partial to an explicit `.incomplete` suffix
+        # so an operator can inspect it, and so verify_backup / prune never
+        # mistake it for a verified backup.
         if tmp.exists():
             try:
-                tmp.unlink()
+                os.replace(tmp, out_path.with_suffix(out_path.suffix + ".incomplete"))
             except OSError:
-                pass
+                # If even the rename fails, try to unlink so we do not leave
+                # a `.partial` that looks like a resumable artifact.
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+        raise
     return written
 
 
 
 def verify_backup(*, artifact_path: Path, password: str) -> BackupRun:
-    """Read + decrypt + sanity-check without writing."""
+    """Read + decrypt + sanity-check without writing.
+
+    #1452: refuses a `.incomplete` artifact up front. A partial write is never
+    a verified backup, so this path never presents one as such.
+    """
+    if artifact_path.name.endswith(".incomplete"):
+        raise BackupError(
+            f"Refusing to verify an incomplete backup artifact: {artifact_path}",
+            code="INCOMPLETE_WRITE",
+        )
     if not artifact_path.exists():
         raise BackupError(f"Artifact not found: {artifact_path}", code="BAD_INPUT")
     blob = artifact_path.read_text(encoding="utf8")
@@ -585,6 +617,7 @@ def restore_backup(
     confirm: bool,
     agent_id: str | None = None,
     restore_root: Path | None = None,
+    allow_agent_mismatch: bool = False,
 ) -> BackupRun:
     """Restore SQLite state from an artifact.
 
@@ -622,6 +655,35 @@ def restore_backup(
     payload = json.loads(plain.decode("utf8"))
     body: dict = payload.get("body") or {}
     files_meta: dict = payload.get("filesMeta") or verified.files
+
+    # ── Agent-identifier guard (issue #1454) ─────────────────────────────
+    # Compare the archive's recorded agent_id with the caller's selected
+    # agent_id before any state is written. Behaviour:
+    #   - Both present and equal   → proceed (same-agent restore)
+    #   - Both present and differ  → raise AGENT_ID_MISMATCH unless the
+    #                                caller explicitly opts into migration
+    #                                via allow_agent_mismatch=True
+    #   - Either side missing      → proceed (legacy archive, or caller did
+    #                                not specify a target agent)
+    # Never mixes state silently: mismatch fails closed.
+    archive_agent_id = payload.get("agent_id")
+    if (
+        agent_id
+        and archive_agent_id
+        and agent_id != archive_agent_id
+    ):
+        if not allow_agent_mismatch:
+            raise BackupError(
+                f"Archive agent_id {archive_agent_id!r} does not match "
+                f"selected agent {agent_id!r}. Refusing to mix state; "
+                f"pass allow_agent_mismatch=True to migrate explicitly.",
+                code="AGENT_ID_MISMATCH",
+            )
+        log.warning(
+            "prime_agent_restore_agent_mismatch_allowed",
+            archive_agent_id=archive_agent_id,
+            selected_agent_id=agent_id,
+        )
 
     with single_flight("agent_restore"):
         staging_root = APP_DIR / "restore-staging"
