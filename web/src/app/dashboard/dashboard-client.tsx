@@ -5,6 +5,8 @@ import { WalletGate, useWallet } from "@/components/wallet-gate";
 import { AgentAvatar } from "@/components/agent-avatar";
 import { LazyFinancialProjectionChart } from "@/components/lazy-financial-projection-chart";
 import { FinancialSnapshotBadge, FinancialMetricValue } from "@/components/financial-state";
+import { TransactionReviewSheet, type TransactionPayload } from "@/components/transaction-review-sheet";
+import { TransactionReviewSheet, type TransactionPayload } from "@/components/transaction-review-sheet";
 
 interface DashboardData {
   stats: {
@@ -239,6 +241,12 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
   const [approvalHistory, setApprovalHistory] = useState(initialHistory);
   const [approvalTab, setApprovalTab] = useState<"pending" | "history">("pending");
   const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [reviewOpen, setReviewOpen] = useState<
+    null | { id: string; talosId: string; decision: "approved" | "rejected"; payload: TransactionPayload }
+  >(null);
+  const [reviewOpen, setReviewOpen] = useState<
+    null | { id: string; talosId: string; decision: "approved" | "rejected"; payload: TransactionPayload }
+  >(null);
   const { address } = useWallet();
 
   async function handleDecision(id: string, talosId: string, status: "approved" | "rejected") {
@@ -283,7 +291,53 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
     { label: "Pending Approvals", value: stats.pendingCount.toString() },
   ];
 
-  return (
+      return (
+    <>
+      <TransactionReviewSheet
+        open={reviewOpen !== null}
+        title={
+          reviewOpen?.decision === "approved"
+            ? "Approve transaction"
+            : "Reject transaction"
+        }
+        payload={
+          reviewOpen?.payload ?? { amount: null, destination: null, network: null }
+        }
+        expectedNetwork={
+          (process.env.NEXT_PUBLIC_STELLAR_NETWORK === "mainnet" ? "mainnet" : "testnet") as
+            | "mainnet"
+            | "testnet"
+        }
+        onDismiss={() => setReviewOpen(null)}
+        onConfirm={async () => {
+          const pending = reviewOpen;
+          setReviewOpen(null);
+          if (pending) handleDecision(pending.id, pending.talosId, pending.decision);
+        }}
+      />
+    <>
+      <TransactionReviewSheet
+        open={reviewOpen !== null}
+        title={
+          reviewOpen?.decision === "approved"
+            ? "Approve transaction"
+            : "Reject transaction"
+        }
+        payload={
+          reviewOpen?.payload ?? { amount: null, destination: null, network: null }
+        }
+        expectedNetwork={
+          (process.env.NEXT_PUBLIC_STELLAR_NETWORK === "mainnet" ? "mainnet" : "testnet") as
+            | "mainnet"
+            | "testnet"
+        }
+        onDismiss={() => setReviewOpen(null)}
+        onConfirm={async () => {
+          const pending = reviewOpen;
+          setReviewOpen(null);
+          if (pending) handleDecision(pending.id, pending.talosId, pending.decision);
+        }}
+      />
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-10">
       <div className="mb-10">
         <h1 className="text-accent text-lg font-bold tracking-wider mb-1">DASHBOARD</h1>
@@ -688,5 +742,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
         </>
       )}
     </div>
+    </>
+    </>
   );
 }

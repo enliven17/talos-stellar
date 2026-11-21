@@ -10,6 +10,8 @@ import { ScopedApiKeysPanel } from "@/components/scoped-api-keys-panel";
 import { AgentPurchasesSection } from "@/components/agent-purchases-section";
 import { CopyButton } from "@/components/copy-button";
 import { FinancialSnapshotBadge, FinancialMetricValue } from "@/components/financial-state";
+import { TransactionReviewSheet, type TransactionPayload } from "@/components/transaction-review-sheet";
+import { TransactionReviewSheet, type TransactionPayload } from "@/components/transaction-review-sheet";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER as STELLAR_USDC_ISSUER } from "@/lib/stellar-config";
 import {
   TabActivity,
@@ -21,6 +23,8 @@ import {
   type DistPreview,
   type BuybackPreview,
 } from "./components";
+import { TransactionReviewSheet } from "@/components/agents/transaction-review-sheet";
+import { STELLAR_NETWORK } from "@/lib/stellar-config";
 
 
 interface ServiceInfo {
@@ -105,10 +109,25 @@ const JOB_STATUS_STYLES: Record<string, string> = {
 
 export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
   const [tab, setTab] = useState<Tab>("Overview");
+  const [reviewOpen, setReviewOpen] = useState<null | { kind: "buy" | "service"; payload: TransactionPayload }>(null);
+  const [reviewOpen, setReviewOpen] = useState<null | { kind: "buy" | "service"; payload: TransactionPayload }>(null);
   const [patronStatus, setPatronStatus] = useState<"none" | "loading" | "patron">("none");
   const { isConnected, connect, address, signTransaction, signMessage } = useWallet();
   const isAgentOwner = Boolean(
     address && (address === talos.creatorPublicKey || address === talos.walletPublicKey)
+  const { isConnected, connect, address, signTransaction } = useWallet();
+  // Review gate for agent-owner financial actions (issue #1470).
+  const [reviewState, setReviewState] = useState<{
+    title: string;
+    detail?: string;
+    action: { amount: string; destination: string; network: "testnet" | "mainnet" };
+    onConfirm: () => Promise<void> | void;
+  } | null>(null);
+
+  const minRequired = talos.minPatronPulse ?? Math.floor(talos.totalSupply * 0.001);
+
+  const isPatron = talos.patrons.some(
+    (p) => p.stellarPublicKey === address && p.status === "active"
   );
 
   const minRequired =
@@ -170,7 +189,35 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
   const buyQty = Math.max(0, parseInt(buyAmount, 10) || 0);
   const buyCost = Math.round(buyQty * priceNum * 100) / 100;
 
-  const handleBuyToken = useCallback(async () => {
+  const handleBuyToken = useCallback(() => {
+    setReviewOpen({
+      kind: "buy",
+      payload: {
+        amount:
+          buyAmount && !Number.isNaN(Number(buyAmount))
+            ? (Number(buyAmount) * talos.pulsePrice).toFixed(2)
+            : null,
+        destination: talos.walletPublicKey ?? talos.creatorPublicKey ?? null,
+        network: process.env.NEXT_PUBLIC_STELLAR_NETWORK === "mainnet" ? "mainnet" : "testnet",
+      },
+    });
+  }, [buyAmount, talos.pulsePrice, talos.walletPublicKey, talos.creatorPublicKey]);
+
+  const submitBuyToken = useCallback(() => {
+    setReviewOpen({
+      kind: "buy",
+      payload: {
+        amount:
+          buyAmount && !Number.isNaN(Number(buyAmount))
+            ? (Number(buyAmount) * talos.pulsePrice).toFixed(2)
+            : null,
+        destination: talos.walletPublicKey ?? talos.creatorPublicKey ?? null,
+        network: process.env.NEXT_PUBLIC_STELLAR_NETWORK === "mainnet" ? "mainnet" : "testnet",
+      },
+    });
+  }, [buyAmount, talos.pulsePrice, talos.walletPublicKey, talos.creatorPublicKey]);
+
+  const submitBuyToken = useCallback(async () => {
     if (!address || buyQty <= 0) return;
     setBuyStatus("buying");
     try {
@@ -276,14 +323,63 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
   const retryIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    return () => {
+        return (
+    <>
+      <TransactionReviewSheet
+        open={reviewOpen !== null}
+        title={
+          reviewOpen?.kind === "buy"
+            ? "Buy PULSE tokens"
+            : "Pay for agent service"
+        }
+        payload={
+          reviewOpen?.payload ?? { amount: null, destination: null, network: null }
+        }
+        expectedNetwork={
+          (process.env.NEXT_PUBLIC_STELLAR_NETWORK === "mainnet" ? "mainnet" : "testnet") as
+            | "mainnet"
+            | "testnet"
+        }
+        onDismiss={() => setReviewOpen(null)}
+        onConfirm={async () => {
+          const pending = reviewOpen;
+          setReviewOpen(null);
+          if (pending?.kind === "buy") return handleBuyToken();
+          if (pending?.kind === "service") return handleServicePayment();
+        }}
+      />
+    <>
+      <TransactionReviewSheet
+        open={reviewOpen !== null}
+        title={
+          reviewOpen?.kind === "buy"
+            ? "Buy PULSE tokens"
+            : "Pay for agent service"
+        }
+        payload={
+          reviewOpen?.payload ?? { amount: null, destination: null, network: null }
+        }
+        expectedNetwork={
+          (process.env.NEXT_PUBLIC_STELLAR_NETWORK === "mainnet" ? "mainnet" : "testnet") as
+            | "mainnet"
+            | "testnet"
+        }
+        onDismiss={() => setReviewOpen(null)}
+        onConfirm={async () => {
+          const pending = reviewOpen;
+          setReviewOpen(null);
+          if (pending?.kind === "buy") return handleBuyToken();
+          if (pending?.kind === "service") return handleServicePayment();
+        }}
+      />
+ => {
       if (retryIntervalRef.current !== null) {
         clearInterval(retryIntervalRef.current);
       }
     };
   }, []);
 
-  const handleRequestService = useCallback(async () => {
+  const handleRequestServiceInner = useCallback(async () => {
     if (!address || !talos.service) return;
     setServiceStatus("paying");
     setServiceError(null);
@@ -457,6 +553,46 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
   const [distLoading, setDistLoading] = useState(false);
   const [distPreview, setDistPreview] = useState<DistPreview | null>(null);
   const [distError, setDistError] = useState<string | null>(null);
+  const [distPreview, setDistPreview] = useState<{
+    totalRevenue: number;
+    distributableAmount: number;
+    investorSharePercent: number;
+    breakdown: { stellarPublicKey: string; pulseAmount: number; sharePercent: string; estimatedUsdc: string }[];
+  } | null>(null);
+
+  // ─── Buyback state ───────────────────────────────────
+  const [buybackPreview, setBuybackPreview] = useState<{
+    totalRevenue: number; treasuryBalance: number; treasurySharePercent: number;
+    totalBuybackExecuted: number; operatorMitosBalance: number; circulatingSupply: number;
+  } | null>(null);
+  const [buybackLoading, setBuybackLoading] = useState(false);
+  const [buybackForm, setBuybackForm] = useState({ usdcAmount: "", mitosAmount: "" });
+
+  const loadBuybackPreview = useCallback(async () => {
+    const res = await fetch(`/api/talos/${talos.id}/revenue/buyback`);
+    if (res.ok) setBuybackPreview(await res.json());
+  }, [talos.id]);
+
+  const handleBuybackInner = useCallback(async () => {
+    if (!address) return;
+    setBuybackLoading(true);
+    try {
+      const res = await fetch(`/api/talos/${talos.id}/revenue/buyback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requesterPublicKey: address,
+          usdcAmount: Number(buybackForm.usdcAmount),
+          mitosAmount: Number(buybackForm.mitosAmount),
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) { alert(data.message); loadBuybackPreview(); }
+      else alert(data.error || "Buyback failed");
+    } finally {
+      setBuybackLoading(false);
+    }
+  }, [address, talos.id, buybackForm, loadBuybackPreview]);
 
   const loadDistPreview = useCallback(async () => {
     setDistLoading(true);
@@ -476,7 +612,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
     }
   }, [talos.id]);
 
-  const handleDistribute = useCallback(async () => {
+  const handleDistributeInner = useCallback(async () => {
     if (!address) return;
     setDistLoading(true);
     try {
@@ -509,6 +645,82 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
   const loadBuybackPreview = useCallback(async () => {
     setBuybackLoading(true);
     setBuybackError(null);
+  // ─── Transaction review wrappers (issue #1470) ─────────────────
+  const handleBuyToken = useCallback(() => {
+    setReviewState({
+      title: "Buy Token",
+      detail: `${buyQty.toLocaleString()} ${talos.tokenSymbol} for $${buyCost.toFixed(2)}`,
+      action: {
+        amount: buyCost.toFixed(2),
+        destination:
+          talos.agentWalletAddress ?? OPERATOR_PUBLIC_KEY,
+        network: STELLAR_NETWORK,
+      },
+      onConfirm: () => {
+        setReviewState(null);
+        return handleBuyTokenInner();
+      },
+    });
+  }, [buyQty, buyCost, talos.agentWalletAddress, talos.tokenSymbol, handleBuyTokenInner]);
+
+  const handleRequestService = useCallback(() => {
+    if (!talos.service) return;
+    setReviewState({
+      title: "Request Service",
+      detail: talos.service.name,
+      action: {
+        amount: String(talos.service.price),
+        destination:
+          talos.service.stellarPublicKey || talos.agentWalletAddress || OPERATOR_PUBLIC_KEY,
+        network: STELLAR_NETWORK,
+      },
+      onConfirm: () => {
+        setReviewState(null);
+        return handleRequestServiceInner();
+      },
+    });
+  }, [talos.service, talos.agentWalletAddress, handleRequestServiceInner]);
+
+  const handleBuyback = useCallback(() => {
+    setReviewState({
+      title: "Treasury Buyback",
+      detail: `Burn ${buybackForm.mitosAmount || "0"} ${talos.tokenSymbol}`,
+      action: {
+        amount: Number(buybackForm.usdcAmount || "0").toFixed(2),
+        destination: talos.agentWalletAddress ?? OPERATOR_PUBLIC_KEY,
+        network: STELLAR_NETWORK,
+      },
+      onConfirm: () => {
+        setReviewState(null);
+        return handleBuybackInner();
+      },
+    });
+  }, [buybackForm, talos.agentWalletAddress, talos.tokenSymbol, handleBuybackInner]);
+
+  const handleDistribute = useCallback(() => {
+    const amount = distPreview?.distributableAmount ?? 0;
+    setReviewState({
+      title: "Revenue Distribution",
+      detail: `${distPreview?.breakdown.length ?? 0} holder(s)`,
+      action: {
+        amount: amount.toFixed(2),
+        destination: talos.agentWalletAddress ?? OPERATOR_PUBLIC_KEY,
+        network: STELLAR_NETWORK,
+      },
+      onConfirm: () => {
+        setReviewState(null);
+        return handleDistributeInner();
+      },
+    });
+  }, [distPreview, talos.agentWalletAddress, handleDistributeInner]);
+
+  const priceNum = parseFloat(talos.pulsePrice.replace("$", "")) || 0;
+  const buyQty = Math.max(0, parseInt(buyAmount, 10) || 0);
+  const buyCost = Math.round(buyQty * priceNum * 100) / 100;
+
+  const handleBuyTokenInner = useCallback(async () => {
+    if (!address || buyQty <= 0) return;
+    setBuyStatus("buying");
     try {
       const res = await fetch(`/api/talos/${talos.id}/revenue/buyback`);
       if (res.ok) {
@@ -548,6 +760,86 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
       setBuybackLoading(false);
     }
   }, [address, talos.id, buybackForm, loadBuybackPreview]);
+  }, [address, buyQty, buyCost, talos.id, talos.agentWalletAddress, talos.stellarAssetCode, signTransaction]);
+
+  // ─── Transaction review wrappers (issue #1470) ─────────────────
+  const handleBuyToken = useCallback(() => {
+    setReviewState({
+      title: "Buy Token",
+      detail: `${buyQty.toLocaleString()} ${talos.tokenSymbol} for $${buyCost.toFixed(2)}`,
+      action: {
+        amount: buyCost.toFixed(2),
+        destination:
+          talos.agentWalletAddress ?? OPERATOR_PUBLIC_KEY,
+        network: STELLAR_NETWORK,
+      },
+      onConfirm: () => {
+        setReviewState(null);
+        return handleBuyTokenInner();
+      },
+    });
+  }, [buyQty, buyCost, talos.agentWalletAddress, talos.tokenSymbol, handleBuyTokenInner]);
+
+  const handleRequestService = useCallback(() => {
+    if (!talos.service) return;
+    setReviewState({
+      title: "Request Service",
+      detail: talos.service.name,
+      action: {
+        amount: String(talos.service.price),
+        destination:
+          talos.service.stellarPublicKey || talos.agentWalletAddress || OPERATOR_PUBLIC_KEY,
+        network: STELLAR_NETWORK,
+      },
+      onConfirm: () => {
+        setReviewState(null);
+        return handleRequestServiceInner();
+      },
+    });
+  }, [talos.service, talos.agentWalletAddress, handleRequestServiceInner]);
+
+  const handleBuyback = useCallback(() => {
+    setReviewState({
+      title: "Treasury Buyback",
+      detail: `Burn ${buybackForm.mitosAmount || "0"} ${talos.tokenSymbol}`,
+      action: {
+        amount: Number(buybackForm.usdcAmount || "0").toFixed(2),
+        destination: talos.agentWalletAddress ?? OPERATOR_PUBLIC_KEY,
+        network: STELLAR_NETWORK,
+      },
+      onConfirm: () => {
+        setReviewState(null);
+        return handleBuybackInner();
+      },
+    });
+  }, [buybackForm, talos.agentWalletAddress, talos.tokenSymbol, handleBuybackInner]);
+
+  const handleDistribute = useCallback(() => {
+    const amount = distPreview?.distributableAmount ?? 0;
+    setReviewState({
+      title: "Revenue Distribution",
+      detail: `${distPreview?.breakdown.length ?? 0} holder(s)`,
+      action: {
+        amount: amount.toFixed(2),
+        destination: talos.agentWalletAddress ?? OPERATOR_PUBLIC_KEY,
+        network: STELLAR_NETWORK,
+      },
+      onConfirm: () => {
+        setReviewState(null);
+        return handleDistributeInner();
+      },
+    });
+  }, [distPreview, talos.agentWalletAddress, handleDistributeInner]);
+
+  const closeBuyModal = useCallback(() => {
+    setBuyOpen(false);
+    setBuyAmount("");
+    setBuyStatus("idle");
+    setBuyResult(null);
+  }, []);
+
+  const REVENUE_HISTORY = talos.revenueHistory ?? [];
+  const maxRevenue = Math.max(...REVENUE_HISTORY.map((r) => r.amount), 1);
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -1179,6 +1471,23 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
 
 
       {/* Buy Token Modal */}
+      {/* ─── Transaction Review Sheet (issue #1470) ────────── */}
+      {reviewState && (
+        <TransactionReviewSheet
+          key={`${reviewState.title}-${reviewState.action.amount}-${reviewState.action.destination}-${reviewState.action.network}`}
+          action={reviewState.action}
+          title={reviewState.title}
+          detail={reviewState.detail}
+          onConfirm={() => {
+            const cb = reviewState.onConfirm;
+            setReviewState(null);
+            void cb();
+          }}
+          onDismiss={() => setReviewState(null)}
+        />
+      )}
+
+      {/* ─── Buy Token Modal ──────────────────────────────── */}
       {buyOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/60" onClick={closeBuyModal} />
@@ -1431,5 +1740,7 @@ export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
         </div>
       )}
     </div>
+    </>
+    </>
   );
 }
