@@ -1,4 +1,4 @@
-export { listAuditLogs } from "./store";
+export { getAgentAuditReviewBundle, listAuditLogs } from "./store";
 export {
   parseAuditLogFilters,
   escapeIlikePattern,

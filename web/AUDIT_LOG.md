@@ -10,6 +10,17 @@ Operator-facing searchable view of `tls_api_audit_logs` (API key auth events).
 
 UI: `/admin/audit` (stores the admin key in `sessionStorage` only).
 
+The review bundle is agent-scoped and returns at most 200 audit references
+(default 50), a `nextCursor` when more references are available, and a
+checkpoint of the agent's current hash-chain root and entry count. Use
+`?limit=1..200` to select the page size and pass the returned `nextCursor`
+as `cursor` to continue. Invalid limits or cursors return `400`.
+References include only stored audit metadata and never API keys, request
+bodies, payment proofs, or records belonging to another agent.
+
+Endpoint: `GET /api/talos/:id/audit/review-bundle` (authenticated with that
+TALOS's API key).
+
 ## Query filters
 
 | Param | Meaning |
