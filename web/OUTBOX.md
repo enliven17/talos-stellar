@@ -43,6 +43,11 @@ event as a whole. **All consumers for an event type re-run on retry** — an
 event type has no per-consumer cursor, so consumers must be idempotent. An
 event type with zero registered consumers dead-letters immediately.
 
+Acknowledgements succeed only while the matching lease ID is still active
+and its deadline is in the future. A late consumer therefore cannot dispatch
+an expired lease or clear a newer worker's lease; its acknowledgement is
+ignored and the next dispatcher can recover or retry the event.
+
 Two ways to drive it, same trade-off as the jobs framework:
 - **Serverless**: `POST /api/internal/outbox/drain`, header
   `X-Outbox-Dispatch-Secret: <OUTBOX_DISPATCH_SECRET>`. Point a scheduler

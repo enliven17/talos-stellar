@@ -1,4 +1,4 @@
-import { and, count, desc, eq, isNotNull, lt, sql } from "drizzle-orm";
+import { and, count, desc, eq, gt, isNotNull, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { tlsOutboxEvents } from "@/db/schema";
 import type { OutboxEvent, OutboxStatus, WriteEventInput } from "./types";
@@ -98,12 +98,19 @@ export async function leaseBatch(
   return rows.map(toEvent);
 }
 
-/** Marks a leased event dispatched. No-ops (returns null) if the lease was lost. */
+/** Marks an unexpired lease dispatched. No-ops (returns null) if the lease was lost or expired. */
 export async function ack(eventId: string, leaseId: string): Promise<OutboxEvent | null> {
   const [row] = await db
     .update(tlsOutboxEvents)
     .set({ status: "dispatched", dispatchedAt: sql`now()`, leaseId: null, leaseOwner: null, leaseExpiresAt: null })
-    .where(and(eq(tlsOutboxEvents.id, eventId), eq(tlsOutboxEvents.leaseId, leaseId), eq(tlsOutboxEvents.status, "leased")))
+    .where(
+      and(
+        eq(tlsOutboxEvents.id, eventId),
+        eq(tlsOutboxEvents.leaseId, leaseId),
+        eq(tlsOutboxEvents.status, "leased"),
+        gt(tlsOutboxEvents.leaseExpiresAt, sql`now()`),
+      ),
+    )
     .returning();
   if (!row) return null;
   logOutboxEvent("outbox_event_dispatched", { eventId, eventType: row.eventType, attempts: row.attempts });
