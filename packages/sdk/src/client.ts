@@ -412,6 +412,14 @@ export interface WriteOptions {
    * payment headers, or private keys appear in the diagnostic object.
    */
   onProofDiagnostic?: import("./types.js").BuyerProofDiagnosticCallback;
+  /**
+   * Per-request required endpoint capabilities. After a 2xx response, the
+   * client reads a bounded capability snapshot (`x-talos-api-version` and
+   * `x-talos-features` headers) and throws {@link TalosCapabilityError} when a
+   * required API version or feature flag is not advertised. Omit to skip
+   * negotiation and preserve the prior accept-any-2xx behavior.
+   */
+  requireCapabilities?: RequiredCapabilities;
 }
 
 /**
@@ -429,6 +437,14 @@ export interface ReadOptions {
    * regardless of the client default. Surfaces as `TalosTimeoutError`.
    */
   timeoutMs?: number;
+  /**
+   * Per-request required endpoint capabilities. After a 2xx response, the
+   * client reads a bounded capability snapshot (`x-talos-api-version` and
+   * `x-talos-features` headers) and throws {@link TalosCapabilityError} when a
+   * required API version or feature flag is not advertised. Omit to skip
+   * negotiation and preserve the prior accept-any-2xx behavior.
+   */
+  requireCapabilities?: RequiredCapabilities;
 }
 
 /**
@@ -497,6 +513,8 @@ type RequestOptions = RequestInit & {
   idempotencyKey?: string;
   /** Per-call timeout override in ms. `0` disables; `undefined` falls back to client `timeoutMs`. */
   timeoutMs?: number;
+  /** Per-call required endpoint capabilities. Fails with TalosCapabilityError when unmet. */
+  requireCapabilities?: RequiredCapabilities;
 };
 
 /** Default typed-retry bounds. `maxAttempts: 1` = off. */
@@ -1289,7 +1307,7 @@ export class TalosClient {
    * synchronously so abort listeners attach before `abort()`.
    */
   private async request<T>(path: string, init?: RequestOptions): Promise<T> {
-    const { params, signal, idempotencyKey, timeoutMs: callTimeoutMs, ...requestInit } = init ?? {};
+    const { params, signal, idempotencyKey, timeoutMs: callTimeoutMs, requireCapabilities, ...requestInit } = init ?? {};
     const callerSignal = signal ?? undefined;
     const method = (requestInit.method ?? "GET").toUpperCase();
     const url = this.buildUrl(path, params);
@@ -1390,6 +1408,10 @@ export class TalosClient {
         }
         throw errorFromResponse(res.status, path, rawBody, res.headers);
       } catch (err) {
+        // Capability negotiation failures are deterministic client-side
+        // mismatches, not transient API errors: never retry, and never route
+        // to the onError observer (the endpoint returned a usable 2xx).
+        if (err instanceof TalosCapabilityError) throw err;
         if (!(err instanceof TalosAPIError)) throw err;
         lastError = err;
         delayMs = this.nextRetryDelay(err, {
@@ -1428,8 +1450,8 @@ export class TalosClient {
     path: string,
     options?: CursorRequestOptions,
   ): Promise<CursorPage<T>> {
-    const { signal, timeoutMs, ...params } = options ?? {};
-    return this.request(path, { params, signal, timeoutMs });
+    const { signal, timeoutMs, requireCapabilities, ...params } = options ?? {};
+    return this.request(path, { params, signal, timeoutMs, requireCapabilities });
   }
 
   // ── Talos CRUD ────────────────────────────────────────────
@@ -1457,11 +1479,11 @@ export class TalosClient {
   }
 
   async getTalos(id: string, options?: ReadOptions): Promise<TalosDetail> {
-    return this.request(`/api/talos/${id}`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
+    return this.request(`/api/talos/${id}`, { signal: options?.signal, timeoutMs: options?.timeoutMs, requireCapabilities: options?.requireCapabilities });
   }
 
   async getTalosMe(options?: ReadOptions): Promise<TalosDetail> {
-    return this.request("/api/talos/me", { signal: options?.signal, timeoutMs: options?.timeoutMs });
+    return this.request("/api/talos/me", { signal: options?.signal, timeoutMs: options?.timeoutMs, requireCapabilities: options?.requireCapabilities });
   }
 
   /**
@@ -1488,11 +1510,12 @@ export class TalosClient {
   // ── Activity ───────────────────────────────────────────────
 
   async listActivities(params?: ActivityPageOptions): Promise<ActivityPage> {
-    const { signal, timeoutMs, ...query } = params ?? {};
+    const { signal, timeoutMs, requireCapabilities, ...query } = params ?? {};
     return this.request<ActivityPage>("/api/activity", {
       params: query,
       signal,
       timeoutMs,
+      requireCapabilities,
     });
   }
 
@@ -1507,11 +1530,12 @@ export class TalosClient {
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
+      requireCapabilities: options?.requireCapabilities,
     });
   }
 
   async getTalosActivities(talosId: string, options?: ReadOptions): Promise<Activity[]> {
-    return this.request(`/api/talos/${talosId}/activity`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
+    return this.request(`/api/talos/${talosId}/activity`, { signal: options?.signal, timeoutMs: options?.timeoutMs, requireCapabilities: options?.requireCapabilities });
   }
 
   // ── Revenue ────────────────────────────────────────────────
@@ -1527,11 +1551,12 @@ export class TalosClient {
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
+      requireCapabilities: options?.requireCapabilities,
     });
   }
 
   async getTalosRevenues(talosId: string, options?: ReadOptions): Promise<Revenue[]> {
-    return this.request(`/api/talos/${talosId}/revenue`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
+    return this.request(`/api/talos/${talosId}/revenue`, { signal: options?.signal, timeoutMs: options?.timeoutMs, requireCapabilities: options?.requireCapabilities });
   }
 
   // ── Approvals ──────────────────────────────────────────────
@@ -1547,17 +1572,18 @@ export class TalosClient {
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
+      requireCapabilities: options?.requireCapabilities,
     });
   }
 
   async getApprovals(talosId: string, status?: string, options?: ReadOptions): Promise<Approval[]> {
     const params: Record<string, string> = {};
     if (status) params.status = status;
-    return this.request(`/api/talos/${talosId}/approvals`, { params, signal: options?.signal, timeoutMs: options?.timeoutMs });
+    return this.request(`/api/talos/${talosId}/approvals`, { params, signal: options?.signal, timeoutMs: options?.timeoutMs, requireCapabilities: options?.requireCapabilities });
   }
 
   async getApproval(talosId: string, approvalId: string, options?: ReadOptions): Promise<Approval> {
-    return this.request(`/api/talos/${talosId}/approvals/${approvalId}`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
+    return this.request(`/api/talos/${talosId}/approvals/${approvalId}`, { signal: options?.signal, timeoutMs: options?.timeoutMs, requireCapabilities: options?.requireCapabilities });
   }
 
   // ── Status ─────────────────────────────────────────────────
@@ -1584,8 +1610,8 @@ export class TalosClient {
   async discoverServices(
     params?: DiscoverServicesParams,
   ): Promise<CursorPage<CommerceService>> {
-    const { signal, timeoutMs, ...query } = params ?? {};
-    return this.requestPage("/api/services", { ...query, signal, timeoutMs });
+    const { signal, timeoutMs, requireCapabilities, ...query } = params ?? {};
+    return this.requestPage("/api/services", { ...query, signal, timeoutMs, requireCapabilities });
   }
 
   /**
@@ -1618,6 +1644,7 @@ export class TalosClient {
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
+      requireCapabilities: options?.requireCapabilities,
     });
   }
 
@@ -1811,13 +1838,27 @@ export class TalosClient {
       throw errorFromResponse(res.status, path, rawBody, res.headers);
     }
 
+    // Apply the same per-request capability negotiation as request() so a
+    // capability requirement is never silently ignored on a direct 2xx path
+    // (e.g. a service that returns 200 without an x402 challenge).
+    if (options?.requireCapabilities) {
+      const available = parseEndpointCapabilities(res.headers);
+      const mismatch = describeCapabilityMismatch(options.requireCapabilities, available);
+      if (mismatch !== null) {
+        throw new TalosCapabilityError(res.status, mismatch, path, options.requireCapabilities, available, {
+          message: mismatch,
+          headers: snapshotHeaders(res.headers),
+        });
+      }
+    }
+
     return (await res.json()) as CommerceJob;
   }
 
   // ── Wallet & Payments ──────────────────────────────────────
 
   async getWallet(talosId: string, options?: ReadOptions): Promise<Wallet> {
-    return this.request(`/api/talos/${talosId}/wallet`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
+    return this.request(`/api/talos/${talosId}/wallet`, { signal: options?.signal, timeoutMs: options?.timeoutMs, requireCapabilities: options?.requireCapabilities });
   }
 
   async signPayment(
@@ -1841,13 +1882,14 @@ export class TalosClient {
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
+      requireCapabilities: options?.requireCapabilities,
     });
   }
 
   // ── Jobs ───────────────────────────────────────────────────
 
   async getPendingJobs(options?: ReadOptions): Promise<CommerceJob[]> {
-    return this.request("/api/jobs/pending", { signal: options?.signal, timeoutMs: options?.timeoutMs });
+    return this.request("/api/jobs/pending", { signal: options?.signal, timeoutMs: options?.timeoutMs, requireCapabilities: options?.requireCapabilities });
   }
 
   /**
@@ -1868,11 +1910,12 @@ export class TalosClient {
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
+      requireCapabilities: options?.requireCapabilities,
     });
   }
 
   async getJobResult(jobId: string, options?: ReadOptions): Promise<CommerceJob> {
-    return this.request(`/api/jobs/${jobId}/result`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
+    return this.request(`/api/jobs/${jobId}/result`, { signal: options?.signal, timeoutMs: options?.timeoutMs, requireCapabilities: options?.requireCapabilities });
   }
 
   /**
@@ -2105,6 +2148,7 @@ export class TalosClient {
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
+      requireCapabilities: options?.requireCapabilities,
     });
   }
 

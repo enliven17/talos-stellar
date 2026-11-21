@@ -619,6 +619,7 @@ The table below catalogs all 28 exported error classes, when they occur, whether
 | 502/503/504 | `TalosServerRetryableError` | `server_error` | yes | — |
 | network | `TalosTransportError` | `transport_error` | yes | `cause?: unknown` |
 | abort/timeout | `TalosTimeoutError` | `timeout_error` | yes | — |
+| 2xx (negotiation) | `TalosCapabilityError` | `capability_error` | no | `required`, `available` |
 
 Every error also exposes:
 
