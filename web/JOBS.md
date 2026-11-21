@@ -92,6 +92,8 @@ All read from the environment at process start (see `.env.example`):
 | `JOBS_DEFAULT_MAX_ATTEMPTS` | `8` | Default ceiling for jobs that don't specify one. |
 | `JOBS_POLL_INTERVAL_MS` | `2000` | Continuous-worker poll interval when the queue is empty. |
 | `JOBS_SHUTDOWN_GRACE_MS` | `10000` | Grace period for in-flight jobs during graceful shutdown. |
+| `JOBS_MAX_RESULT_BYTES` | `65536` | Maximum UTF-8 JSON byte size of a persisted job `result` before replacement with a bounded diagnostic envelope. |
+| `JOBS_MAX_ERROR_BYTES` | `500` | Maximum UTF-8 byte size of a persisted `lastError` diagnostic message before truncation. |
 
 ## Running it
 
@@ -133,11 +135,13 @@ All under `Authorization: Bearer <ADMIN_API_KEY>`:
 Every state transition is a structured `pino` log line via `src/lib/jobs/metrics.ts`
 (`job_enqueued`, `job_leased`, `job_heartbeat`, `job_completed`,
 `job_retry_scheduled`, `job_dead_letter`, `job_cancelled`,
-`job_lease_reaped`) with `jobId`, `queue`, `attempts`, `durationMs`, etc.
-**Never** `payload`, `result`, or a raw error object — `lastError` on the
-row (and in logs) is `truncateError()`'d down to the error's `message`
-only, capped at 500 characters, no stack, no cause chain. If a job's
-payload might itself carry something sensitive, that's a property of the
+`job_lease_reaped`, `job_result_truncated`, `job_error_truncated`) with `jobId`, `queue`, `attempts`, `durationMs`, etc.
+**Never** `payload`, `result`, or a raw error object — `lastError` and `result` on the
+row are bounded independently before persistence so neither field can trigger unbounded database writes:
+- `lastError` is bounded via `boundError()` / `truncateError()` down to the error's `message` only (no stack, no cause chain), capped at `JOBS_MAX_ERROR_BYTES` UTF-8 bytes (default 500) without splitting multi-byte UTF-8 code points, emitting `job_error_truncated` (`actualBytes`, `maxBytes`) when truncated.
+- `result` is bounded via `boundResult()` / `truncateResult()` against `JOBS_MAX_RESULT_BYTES` (default 65536 UTF-8 bytes of serialized JSON). Oversized or unserializable handler results are replaced with a stable diagnostic envelope (`{ truncated: true, reason, maxBytes, actualBytes, diagnostic }`) and emit `job_result_truncated` without failing the completed job.
+
+If a job's payload might itself carry something sensitive, that's a property of the
 specific handler/queue, not the framework — keep secrets out of job
 payloads the same way you'd keep them out of any other DB row a
 Bearer-token-gated endpoint (`/api/admin/jobs/:id`) can return.
