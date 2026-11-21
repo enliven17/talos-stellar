@@ -111,3 +111,89 @@ def safe_adapter_diagnostic_fields(**fields: Any) -> dict[str, Any]:
     if "uncertain_count" in fields and isinstance(fields["uncertain_count"], int) and not isinstance(fields["uncertain_count"], bool):
         result["uncertain_count"] = max(0, min(fields["uncertain_count"], 1_000_000))
     return result
+
+
+# ── Publication intent reconciliation (#1458) ────────────────────────────────
+#
+# Runs at startup, before any new publish is attempted. Reads every ``pending``
+# intent from the store, asks the transport what it knows about each, and
+# writes the outcome back. The three possible outcomes mirror
+# ``PublicationIntentStatus``: ``confirmed`` (transport has it), ``rejected``
+# (transport refused it), ``unknown`` (no answer within the reconcile window —
+# HELD forever, never auto-resent).
+#
+# This is additive: ``safe_adapter_diagnostic_fields`` and its constants are
+# unchanged, and no existing diagnostic output shape is modified.
+
+def reconcile_pending_intents(
+    *,
+    intent_store: "PublicationIntentStore",
+    transport_lookup,  # Callable[[str], str | None]
+    now_iso: str | None = None,
+    max_age_seconds: int = 15 * 60,
+) -> dict[str, int]:
+    """Reconcile every ``pending`` publication intent against the transport.
+
+    Parameters
+    ----------
+    intent_store:
+        The :class:`PublicationIntentStore` to read from and write back to.
+    transport_lookup:
+        Called once per pending intent with its ``action_id``. Returns
+        ``"confirmed"`` / ``"rejected"`` if the transport has a definitive
+        answer, ``None`` if it does not (yet).
+    now_iso:
+        Current time as ISO string; defaults to UTC now. Provided so tests can
+        assert the ``resolved_at`` field deterministically.
+    max_age_seconds:
+        Pending intents older than this with no transport answer are marked
+        ``unknown``. Held forever, never auto-resent.
+
+    Returns
+    -------
+    dict[str, int]
+        Counts by final status — ``{"confirmed": N, "rejected": N, "unknown": N,
+        "still_pending": N}``. Does not include intents that were already
+        ``confirmed`` or ``rejected`` before this call.
+    """
+    from datetime import datetime, timezone
+
+    from talos_agent.adapters.publication_intent import PublicationIntentStatus
+
+    now_iso = now_iso or datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    now = datetime.fromisoformat(now_iso)
+    counts = {"confirmed": 0, "rejected": 0, "unknown": 0, "still_pending": 0}
+
+    for intent in intent_store.list_by_status(PublicationIntentStatus.PENDING):
+        answer = transport_lookup(intent.action_id)
+        if answer == "confirmed":
+            intent.status = PublicationIntentStatus.CONFIRMED
+            intent.resolved_at = now_iso
+            intent_store.write(intent)
+            counts["confirmed"] += 1
+            continue
+        if answer == "rejected":
+            intent.status = PublicationIntentStatus.REJECTED
+            intent.resolved_at = now_iso
+            intent.last_error = intent.last_error or "transport reported rejection"
+            intent_store.write(intent)
+            counts["rejected"] += 1
+            continue
+
+        # No definitive answer. Past the window → unknown (held); inside → leave
+        # pending so a later pass can reconcile again.
+        try:
+            created = datetime.fromisoformat(intent.created_at)
+        except ValueError:
+            created = now
+        age = (now - created).total_seconds()
+        if age >= max_age_seconds:
+            intent.status = PublicationIntentStatus.UNKNOWN
+            intent.resolved_at = now_iso
+            intent.last_error = "reconcile window elapsed with no transport answer"
+            intent_store.write(intent)
+            counts["unknown"] += 1
+        else:
+            counts["still_pending"] += 1
+
+    return counts

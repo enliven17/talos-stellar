@@ -13,6 +13,10 @@ from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities
 
 if TYPE_CHECKING:
     from talos_agent.adapters.capability import AdapterSandbox
+    from talos_agent.adapters.publication_intent import (
+        PublicationIntent,
+        PublicationIntentStore,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -486,6 +490,60 @@ class AdapterRegistry:
             a.channel_name: a.get_capabilities().__dict__
             for a in self._adapters.values()
         }
+
+    async def publish(self, channel: str, content: str, **kwargs):
+        """Route a publish through *channel* with a durable intent record.
+
+        When the registry was constructed without an ``intent_store``, this is
+        exactly ``adapter.post(content, **kwargs)`` — no intent is written, and
+        the return value is the adapter's own ``PublishResult``.
+
+        With an ``intent_store``, the sequence is:
+
+        1. Look up the adapter; if none, return ``None`` (same as ``get``).
+        2. Write a ``pending`` :class:`PublicationIntent` before calling the
+           adapter, so a crash mid-publish leaves a recoverable record.
+        3. Call ``adapter.post`` and inspect ``PublishResult.status``:
+           * ``"success"``  → intent becomes ``confirmed``.
+           * anything else  → intent becomes ``rejected`` (with ``last_error``).
+           * raised exception → intent stays ``pending`` (reconcile on restart).
+        4. Return the ``PublishResult`` unchanged.
+
+        ``action_id`` is ``f"{channel}:{payload_hash}"`` so a re-submit of the
+        same content to the same channel produces the same identity, and the
+        reconcile pass can match it.
+        """
+        from talos_agent.adapters.publication_intent import (
+            PublicationIntent,
+            PublicationIntentStatus,
+            payload_hash,
+        )
+
+        adapter = self.get(channel)
+        if adapter is None:
+            return None
+        if self._intent_store is None:
+            return await adapter.post(content, **kwargs)
+
+        action_id = f"{adapter.channel_name.lower()}:{payload_hash(content)}"
+        intent = PublicationIntent(
+            action_id=action_id,
+            adapter=adapter.channel_name.lower(),
+            payload_hash=payload_hash(content),
+            status=PublicationIntentStatus.PENDING,
+        )
+        self._intent_store.write(intent)
+
+        result = await adapter.post(content, **kwargs)
+        status = getattr(result, "status", None)
+        intent.resolved_at = intent.resolved_at or _now_iso()
+        if status == "success":
+            intent.status = PublicationIntentStatus.CONFIRMED
+        else:
+            intent.status = PublicationIntentStatus.REJECTED
+            intent.last_error = getattr(result, "error", None) or status
+        self._intent_store.write(intent)
+        return result
 
     def __len__(self) -> int:
         return len(self._adapters)

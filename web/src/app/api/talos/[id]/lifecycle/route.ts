@@ -304,7 +304,7 @@ async function _POST(request: NextRequest, { params }: { params: Promise<{ id: s
 
       await db
         .update(tlsTalos)
-        .set({ status: toLegacyStatus(decision.to) })
+        .set({ status: decision.to === "retiring" ? "Draining" : toLegacyStatus(decision.to) })
         .where(eq(tlsTalos.id, id));
 
       return Response.json(
