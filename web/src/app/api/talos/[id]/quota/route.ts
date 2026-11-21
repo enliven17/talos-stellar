@@ -7,6 +7,7 @@ import { verifyAgentApiKey } from "@/lib/auth";
 import {
   readQuotaUsage,
   resolveQuotaConfig,
+  buildQuotaExplanation,
   ALL_QUOTA_RESOURCES,
   type QuotaResource,
 } from "@/lib/quota";
@@ -94,6 +95,8 @@ async function _GET(
         (r) => r.talosId === id && r.resource === resource,
       );
 
+      const explanation = buildQuotaExplanation(usage);
+
       return [
         resource,
         {
@@ -111,6 +114,7 @@ async function _GET(
             resetAt: new Date(usage.resetAt).toISOString(),
             ok: usage.ok,
           },
+          explanation,
         },
       ] as const;
     }),
@@ -232,6 +236,8 @@ async function _PATCH(
     readQuotaUsage(db, id, resource as QuotaResource),
   ]);
 
+  const explanation = buildQuotaExplanation(usage);
+
   return Response.json({
     talosId: id,
     resource,
@@ -249,6 +255,7 @@ async function _PATCH(
       resetAt: new Date(usage.resetAt).toISOString(),
       ok: usage.ok,
     },
+    explanation,
   });
 }
 
