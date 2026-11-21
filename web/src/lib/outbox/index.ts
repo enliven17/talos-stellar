@@ -19,6 +19,6 @@ export {
 } from "./dead-letter";
 export type { DeadLetterView, DeadLetterSummary, DeadLetterQuery } from "./dead-letter";
 export { registerConsumer } from "./registry";
-export { dispatchOnce } from "./dispatcher";
-export { outboxConfig, OUTBOX_ENABLED } from "./config";
+export { dispatchOnce, extractAndValidatePayloadVersion, UnsupportedPayloadVersionError } from "./dispatcher";
+export { outboxConfig, OUTBOX_ENABLED, DEFAULT_OUTBOX_PAYLOAD_VERSION, DEFAULT_SUPPORTED_PAYLOAD_VERSIONS } from "./config";
 export type { Consumer, DispatchSummary, OutboxEvent, OutboxStatus, WriteEventInput } from "./types";
