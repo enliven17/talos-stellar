@@ -4,6 +4,8 @@ export {
   TalosClient,
   resolveRetryPolicy,
   resolveRetryOptions,
+  ETAG_CACHE_VERSION,
+  BoundedETagStore,
 } from "./client.js";
 export type {
   TalosClientOptions,
@@ -15,6 +17,10 @@ export type {
   TalosResponseEvent,
   ReadOptions,
   WriteOptions,
+  ETagCacheEntry,
+  ETagStore,
+  ETagCacheOptions,
+  DedupeInFlightGetsOptions,
 } from "./client.js";
 
 // ── Pagination ─────────────────────────────────────────────────────
