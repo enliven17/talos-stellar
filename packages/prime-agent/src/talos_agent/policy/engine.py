@@ -288,6 +288,21 @@ class PolicyEngine:
         Policies are sorted by (priority descending, name ascending) and
         stored as an immutable tuple so readers see a consistent snapshot.
         """
+        seen_rule_ids: dict[str, str] = {}
+        for policy in policies:
+            for rule in policy.rules:
+                rule_id = rule.rule_id.strip()
+                if not rule_id:
+                    raise ValueError(
+                        f"Policy '{policy.name}' contains a rule with an empty rule identifier"
+                    )
+                if rule_id in seen_rule_ids:
+                    raise ValueError(
+                        f"Duplicate rule identifier '{rule_id}' in policies "
+                        f"'{seen_rule_ids[rule_id]}' and '{policy.name}'"
+                    )
+                seen_rule_ids[rule_id] = policy.name
+
         self._policies = tuple(
             sorted(
                 policies,
