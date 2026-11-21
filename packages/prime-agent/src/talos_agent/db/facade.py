@@ -133,6 +133,9 @@ class LocalDB:
     def count_pending_commerce_jobs(self) -> int:
         return self._commerce.count_pending_commerce_jobs()
 
+    def prune_completed_commerce_payloads(self, retention_days: int = 30) -> int:
+        return self._commerce.prune_completed_payloads(retention_days)
+
     # ── Approval Cache ────────────────────────────────────────────────────
 
     def cache_approval(self, approval_id: str, type_: str, title: str, description: str | None, amount: float | None) -> None:
