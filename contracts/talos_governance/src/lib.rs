@@ -226,6 +226,13 @@ pub const MAX_DESCRIPTION_LEN: u32 = 2048;
 /// Maximum page size for `get_dividend_snapshots_page`.
 pub const DIVIDEND_PAGE_LIMIT: u32 = 50;
 
+/// Maximum page size for `get_proposals_page`.
+///
+/// Callers requesting a larger `limit` receive at most this many summaries per
+/// call, bounding host-function and XDR serialisation cost regardless of how
+/// many proposals are stored.
+pub const PROPOSAL_PAGE_LIMIT: u32 = 50;
+
 /// A point-in-time record of per-token revenue distribution for a Talos.
 ///
 /// Each epoch represents one distribution cycle.  `total_usdc` is the gross
@@ -257,6 +264,45 @@ pub struct EventDividendSnapshotRecorded {
     pub total_usdc: i128,
     pub per_token_usdc: i128,
     pub snapshot_ledger: u32,
+}
+
+// ── Proposal Summaries (#1369) ───────────────────────────────────────
+
+/// A lightweight read-only snapshot of a governance proposal.
+///
+/// Returned by [`TalosGovernance::get_proposals_page`]. Includes the stable
+/// `id` and `status` needed to track lifecycle transitions, the vote tallies
+/// needed to display quorum progress, and temporal fields (`created_at`,
+/// `end_ledger`) needed for time-based filtering — but **excludes** the
+/// per-voter `Vote` records so the host-function cost is bounded regardless of
+/// how many voters have participated.
+///
+/// ## Why not expose the full `Proposal`?
+///
+/// `Proposal` stores `title`, `description`, `snapshot_ledger`, and an
+/// optional `ProposalAction`, each of which adds variable-length XDR. Clients
+/// that need those fields can call `get_proposal(id)` directly. The summary is
+/// optimised for list/index views that only require identity, status, and
+/// tallies.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalSummary {
+    /// Stable monotonic proposal identifier (1-based).
+    pub id: u32,
+    /// The Talos this proposal is linked to.
+    pub talos_id: u32,
+    /// Current lifecycle status.
+    pub status: ProposalStatus,
+    /// Cumulative approve-weight cast.
+    pub yes_votes: i128,
+    /// Cumulative reject-weight cast.
+    pub no_votes: i128,
+    /// Total number of distinct voters.
+    pub total_voters: u32,
+    /// Unix timestamp at which the proposal was created.
+    pub created_at: u64,
+    /// Ledger sequence number at which voting ends.
+    pub end_ledger: u32,
 }
 
 // ── Quorum State (#599) ──────────────────────────────────────────────
@@ -1289,6 +1335,98 @@ impl TalosGovernance {
     /// Return the immutable execution receipt, if the proposal has executed.
     pub fn get_execution_receipt(env: Env, proposal_id: u32) -> Option<ExecutionReceipt> {
         env.storage().persistent().get(&DataKey::ExecutionReceipt(proposal_id))
+    }
+
+    /// Return a bounded page of `ProposalSummary` records.
+    ///
+    /// `cursor` is the 0-based index into the proposal sequence, i.e. the
+    /// first returned summary has `id = cursor + 1`.  `limit` is capped at
+    /// [`PROPOSAL_PAGE_LIMIT`] (50) to bound host-function cost.
+    ///
+    /// # Errors (deterministic panics)
+    /// - `"cursor exceeds proposal count"` — `cursor` is at or beyond the last
+    ///   stored proposal id.  Callers must pass a `cursor` in the range
+    ///   `[0, proposal_count)`.  `cursor = 0` is always valid when at least
+    ///   one proposal exists.
+    /// - `"limit must be at least 1"` — `limit = 0` is not permitted; request
+    ///   at least one summary per page.
+    ///
+    /// # Returns
+    /// An empty `Vec` when `cursor` is valid but no further proposals exist
+    /// (i.e. the cursor lands exactly at the end of the last page).  Callers
+    /// should stop paginating when the returned `Vec` is shorter than `limit`.
+    ///
+    /// # Examples
+    /// ```text
+    /// // First page of up to 20 summaries
+    /// get_proposals_page(env, 0, 20)
+    /// // Next page
+    /// get_proposals_page(env, 20, 20)
+    /// ```
+    pub fn get_proposals_page(env: Env, cursor: u32, limit: u32) -> Vec<ProposalSummary> {
+        if limit == 0 {
+            panic!("limit must be at least 1");
+        }
+
+        let next_id: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(1);
+
+        // Total proposals stored is `next_id - 1` (ids are 1-based).
+        let count = next_id.saturating_sub(1);
+
+        // cursor is a 0-based index; valid range is [0, count).
+        // A cursor of exactly `count` (one past the last) is an error — the
+        // caller has gone too far.  An empty corpus (count = 0) rejects any
+        // cursor ≥ 0 i.e. every cursor, which is correct.
+        if cursor >= count {
+            panic!("cursor exceeds proposal count");
+        }
+
+        // Clamp the page size to the hard cap.
+        let effective_limit = limit.min(PROPOSAL_PAGE_LIMIT);
+
+        // Proposal ids are 1-based; cursor 0 → id 1.
+        let first_id = cursor.saturating_add(1);
+
+        let mut results: Vec<ProposalSummary> = Vec::new(&env);
+
+        let mut fetched = 0u32;
+        let mut id = first_id;
+        while fetched < effective_limit && id < next_id {
+            if let Some(p) = env
+                .storage()
+                .persistent()
+                .get::<_, Proposal>(&DataKey::Proposal(id))
+            {
+                results.push_back(ProposalSummary {
+                    id: p.id,
+                    talos_id: p.talos_id,
+                    status: p.status,
+                    yes_votes: p.yes_votes,
+                    no_votes: p.no_votes,
+                    total_voters: p.total_voters,
+                    created_at: p.created_at,
+                    end_ledger: p.end_ledger,
+                });
+                fetched += 1;
+            }
+            id += 1;
+        }
+
+        results
+    }
+
+    /// Return the total number of proposals created so far.
+    pub fn proposal_count(env: Env) -> u32 {
+        let next: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(1);
+        next.saturating_sub(1)
     }
 
     pub fn get_vote(env: Env, proposal_id: u32, voter: Address) -> Option<Vote> {
@@ -5215,5 +5353,176 @@ mod tests {
 
         let result = client.try_execute_proposal(&proposal_id);
         assert!(result.is_err(), "second execute must fail");
+    }
+
+    // ── Proposal Summaries (#1369) ───────────────────────────────────
+
+    /// get_proposals_page returns correct summaries for a single page.
+    #[test]
+    fn get_proposals_page_returns_summaries() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        let pid1 = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let pid2 = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        // Both proposals are stored; retrieve both in one page.
+        let page = client.get_proposals_page(&0, &10);
+        assert_eq!(page.len(), 2, "page must contain both proposals");
+
+        let s1 = page.get(0).unwrap();
+        assert_eq!(s1.id, pid1);
+        assert_eq!(s1.talos_id, 7);
+        assert_eq!(s1.status, ProposalStatus::Active);
+        assert_eq!(s1.yes_votes, 0);
+        assert_eq!(s1.no_votes, 0);
+        assert_eq!(s1.total_voters, 0);
+        // end_ledger = start(100) + voting_period(20) = 120
+        assert_eq!(s1.end_ledger, 120);
+
+        let s2 = page.get(1).unwrap();
+        assert_eq!(s2.id, pid2);
+    }
+
+    /// Pagination: cursor advances correctly to the second page.
+    #[test]
+    fn get_proposals_page_second_page() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        // Create 3 proposals.
+        create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        // Page 1: cursor=0, limit=2 → proposals 1 and 2.
+        let page1 = client.get_proposals_page(&0, &2);
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1.get(0).unwrap().id, 1);
+        assert_eq!(page1.get(1).unwrap().id, 2);
+
+        // Page 2: cursor=2, limit=2 → proposal 3 only (last).
+        let page2 = client.get_proposals_page(&2, &2);
+        assert_eq!(page2.len(), 1);
+        assert_eq!(page2.get(0).unwrap().id, 3);
+    }
+
+    /// Limit is capped at PROPOSAL_PAGE_LIMIT — requesting more returns at most the cap.
+    #[test]
+    fn get_proposals_page_clamps_limit_to_cap() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+
+        // Create just 2 proposals; pass limit above PROPOSAL_PAGE_LIMIT.
+        create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        // A limit larger than the cap must still succeed and return available rows.
+        let page = client.get_proposals_page(&0, &(PROPOSAL_PAGE_LIMIT + 100));
+        // Only 2 proposals exist, so we get 2 (which is ≤ PROPOSAL_PAGE_LIMIT).
+        assert_eq!(page.len(), 2);
+    }
+
+    /// summary status reflects the live proposal status after voting.
+    #[test]
+    fn get_proposals_page_summary_reflects_current_status() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+
+        let proposal_id = create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        // Cache enough weight to meet quorum and approve.
+        cache_balance_with_auth(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            proposal.snapshot_ledger,
+            &voter,
+            200,
+        );
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &voter,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "vote",
+                    args: (voter.clone(), proposal_id, VoteChoice::Approve).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .vote(&voter, &proposal_id, &VoteChoice::Approve);
+
+        let page = client.get_proposals_page(&0, &1);
+        let summary = page.get(0).unwrap();
+        assert_eq!(summary.status, ProposalStatus::Approved);
+        assert_eq!(summary.yes_votes, 200);
+        assert_eq!(summary.no_votes, 0);
+        assert_eq!(summary.total_voters, 1);
+    }
+
+    /// proposal_count returns 0 before any proposals and increments correctly.
+    #[test]
+    fn proposal_count_tracks_created_proposals() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        assert_eq!(client.proposal_count(), 0, "count must be 0 before any proposals");
+
+        let proposer = Address::generate(&env);
+        create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        assert_eq!(client.proposal_count(), 1);
+
+        create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        assert_eq!(client.proposal_count(), 2);
+    }
+
+    // ── Error boundary: cursor/limit validation (#1369) ───────────────
+
+    /// limit=0 is rejected with a deterministic error message.
+    #[test]
+    #[should_panic(expected = "limit must be at least 1")]
+    fn get_proposals_page_rejects_zero_limit() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        // limit=0 must panic with the deterministic message.
+        client.get_proposals_page(&0, &0);
+    }
+
+    /// cursor at or beyond proposal_count is rejected with a deterministic error.
+    #[test]
+    #[should_panic(expected = "cursor exceeds proposal count")]
+    fn get_proposals_page_rejects_cursor_at_count() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        // count=1; cursor=1 is out of range.
+        client.get_proposals_page(&1, &10);
+    }
+
+    /// cursor on an empty corpus is rejected.
+    #[test]
+    #[should_panic(expected = "cursor exceeds proposal count")]
+    fn get_proposals_page_rejects_any_cursor_on_empty_corpus() {
+        let (_env, _contract_id, _admin, _pulse, client) = setup();
+        // No proposals; cursor=0 is still out of range.
+        client.get_proposals_page(&0, &10);
+    }
+
+    /// cursor strictly inside the valid range succeeds even when it lands
+    /// at the last proposal (the result vec may be shorter than limit).
+    #[test]
+    fn get_proposals_page_cursor_at_last_proposal_returns_one() {
+        let (env, contract_id, _admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+        create_proposal_with_auth(&env, &contract_id, &client, &proposer);
+
+        // cursor=1 is within [0, count=2); the page starts at id=2.
+        let page = client.get_proposals_page(&1, &10);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page.get(0).unwrap().id, 2);
     }
 }

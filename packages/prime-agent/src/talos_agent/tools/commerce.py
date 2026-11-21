@@ -19,6 +19,7 @@ from talos_agent.payments.x402_signer import X402Signer
 from talos_agent.commerce_quote import (
     DEFAULT_X402_CLOCK_SKEW_POLICY,
     enforce_commerce_quote_expiry,
+    quote_clock_policy_diagnostics,
     quote_expiry_iso,
 )
 from talos_agent.tools import context as _context
@@ -266,6 +267,78 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
         "price": price,
         "talos_id": talos_id,
         "service_type": service_type,
+    }
+
+
+@tool(
+    "preview_purchase",
+    "Preview a purchase WITHOUT signing or submitting. Returns the applied "
+    "quote clock-policy diagnostics (safety margin, remaining validity, verdict) "
+    "alongside the same budget / approval shapes as purchase_service.",
+)
+async def preview_purchase(talos_id: str, service_type: str = "", payload: str = "{}") -> dict:
+    """Non-signing preview of the purchase path (#1440).
+
+    Runs the same pre-signing steps as :func:`purchase_service` — budget,
+    GET service, 402 parse, quote expiry — and returns the applied clock-policy
+    diagnostics under ``clock_policy``. Signs nothing, submits nothing, and
+    returns no payment header, signature, or proof.
+    """
+    try:
+        json.loads(payload)
+    except json.JSONDecodeError:
+        return {"error": "Invalid payload JSON", "code": "BAD_INPUT"}
+
+    talos_config = _deps().db.get_talos_config()
+    gtm_budget = float((talos_config or {}).get("gtmBudget", 200))
+    spent_month = _deps().db.get_spending_period(30)
+    if spent_month >= gtm_budget:
+        return {
+            "error": "GTM budget exhausted for this month",
+            "budget": gtm_budget,
+            "spent": spent_month,
+        }
+
+    response = await _deps().api.get_service(talos_id, service_type=service_type or None)
+    if response.status_code != 402:
+        return {"error": f"Expected 402, got {response.status_code}", "body": response.text[:200]}
+
+    payment_details = response.json()
+    if not isinstance(payment_details, dict):
+        return {"error": "Malformed 402 payment details", "code": "INVALID_QUOTE"}
+
+    clock_policy = quote_clock_policy_diagnostics(
+        payment_details,
+        policy=DEFAULT_X402_CLOCK_SKEW_POLICY,
+    )
+
+    quote_obj = payment_details.get("quote")
+    expiry_error = enforce_commerce_quote_expiry(
+        payment_details,
+        require_expiry=isinstance(quote_obj, dict),
+        policy=DEFAULT_X402_CLOCK_SKEW_POLICY,
+    )
+    if expiry_error is not None:
+        return {**expiry_error, "clock_policy": clock_policy}
+
+    price = payment_details.get("price", 0)
+    if isinstance(quote_obj, dict) and quote_obj.get("amount") is not None:
+        try:
+            price = float(quote_obj["amount"])
+        except (TypeError, ValueError):
+            return {
+                "error": "Commerce quote amount is malformed",
+                "code": "INVALID_QUOTE",
+                "clock_policy": clock_policy,
+            }
+
+    return {
+        "status": "preview",
+        "talos_id": talos_id,
+        "service_type": service_type,
+        "price": price,
+        "budget_remaining": gtm_budget - spent_month,
+        "clock_policy": clock_policy,
     }
 
 
