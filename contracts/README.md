@@ -151,6 +151,8 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
   - **Single claim guarantee**: `Claimed(epoch_id, claimant)` storage key prevents double-claims.
   - **Proportional role allocation**: Calculates payouts from on-chain patron shares (`creator_share`, `investor_share`, `treasury_share`), enforcing `creator_share + investor_share + treasury_share == 100`.
   - **Rounding dust tracking**: Computes and stores rounding remainder (`RoundingDust`) on first claim, ensuring exact conservation of funds. Emits `div_dst`.
+  - **Auditable round manifests**: `commit_epoch_manifest` binds the funded amount to a canonical recipient-entitlement digest; manifest claims retain claimed amount and rounding dust for reconciliation.
+    The digest is the Soroban XDR/SHA-256 commitment of `(talos_id, epoch_id, funded_amount, creator, investor, treasury, creator_share, investor_share, treasury_share)`. Reconciliation is `funded_amount = claimed_amount + rounding_dust + recoverable_amount`.
   - **Accounting invariant enforcement**: Tracks `claimed_amount <= total_amount` on every claim; prevents over-distribution (`AccountingOverflow`).
   - **Idempotent epoch commits**: `commit_epoch` prevents duplicate epoch creation with identical `(talos_id, epoch_id)` (`EpochAlreadyExists`).
   - **Expiry & unclaimed fund recovery**: Unclaimed allocations after epoch expiry can be swept back by the admin via `recover_expired`.
@@ -165,11 +167,13 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
 - **Entry Points**:
   - `initialize(admin, registry_contract) -> Result<(), ContractError>`: Initialize contract admin and registry contract address.
   - `commit_epoch(admin, talos_id, total_amount, expiry_secs) -> Result<u64, ContractError>`: Commit a new dividend epoch with total funds and expiry window (admin auth).
+  - `commit_epoch_manifest(admin, talos_id, funded_amount, entitlement_digest, expiry_secs) -> Result<u64, ContractError>`: Commit a round with an immutable funding amount and recipient entitlement digest.
   - `claim_dividend(claimant, talos_id, epoch_id, patron_creator, patron_investor, patron_treasury, creator_share, investor_share, treasury_share) -> Result<i128, ContractError>`: Claim dividend allocation for a patron role (claimant auth).
   - `recover_expired(admin, talos_id, epoch_id) -> Result<i128, ContractError>`: Sweep unclaimed funds after epoch expiration (admin auth).
   - `get_epoch(talos_id, epoch_id) -> Option<EpochRecord>`: Query epoch metadata, amounts, and lifecycle status (`Active`, `Expired`, `Recovered`).
   - `has_claimed(epoch_id, claimant) -> bool`: Query whether a claimant has claimed an epoch.
   - `get_rounding_dust(talos_id, epoch_id) -> Option<i128>`: Query recorded rounding dust for an epoch.
+  - `get_round_manifest(talos_id, epoch_id) -> Option<DistributionRoundManifest>`: Query the funding, entitlement digest, claimed amount, and rounding dust audit record.
   - `next_epoch_id(talos_id) -> u64`: Query next sequential epoch ID for a Talos.
   - `get_admin() -> Option<Address>`: Query contract admin address.
   - `get_registry() -> Option<Address>`: Query configured registry contract address.

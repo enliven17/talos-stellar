@@ -24,6 +24,11 @@
 //!    write time.
 //! 5. **Idempotent operations** — `commit_epoch` is a no-op if the epoch already
 //!    exists (same talos_id + epoch_id); duplicate calls are safe.
+//! 6. **Auditable round manifests** — manifest-backed epochs commit the funded
+//!    amount and a canonical digest of the recipient entitlement set before
+//!    any claim is accepted.  The manifest also records claimed amount and
+//!    rounding dust, so an indexer can audit `funded = claimed + dust +
+//!    recoverable` without reconstructing claimant input.
 //!
 //! ## Storage layout
 //!
@@ -35,6 +40,7 @@
 //! | `Epoch(talos_id, epoch_id)` | `EpochRecord`    | persistent  |
 //! | `Claimed(epoch_id, patron)` | `bool`           | persistent  |
 //! | `RoundingDust(talos_id, epoch_id)` | `i128`     | persistent  |
+//! | `RoundManifest(talos_id, epoch_id)` | `DistributionRoundManifest` | persistent |
 //! | `NextEpochId(talos_id)`     | `u64`            | persistent  |
 //! | `PendingAdmin`              | `Address`        | persistent  |
 //!
@@ -63,7 +69,7 @@
 //!
 //! ## Version
 //!
-//! `CONTRACT_VERSION = (1, 2, 0)`
+//! `CONTRACT_VERSION = (1, 3, 0)`
 
 #![no_std]
 
@@ -71,8 +77,8 @@
 extern crate std;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
-    Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, xdr::ToXdr, Address, BytesN,
+    Env, Symbol, Vec,
 };
 
 // ── Error types ─────────────────────────────────────────────────────────────
@@ -122,6 +128,10 @@ pub enum ContractError {
     NoPendingAdmin = 18,
     /// The new registry contract does not expose the expected TalosRegistry interface.
     IncompatibleRegistry = 19,
+    /// A manifest-backed claim did not match its committed entitlement digest.
+    InvalidEntitlementDigest = 20,
+    /// A manifest and epoch record disagree about the funded amount.
+    FundingMismatch = 21,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
@@ -176,6 +186,25 @@ pub struct EpochRecord {
     pub status: EpochStatus,
 }
 
+/// Immutable funding and entitlement commitment for an auditable distribution
+/// round, plus the running accounting fields needed to reconcile claims.
+///
+/// `entitlement_digest` is the SHA-256 digest of the canonical tuple
+/// `(talos_id, epoch_id, funded_amount, creator, investor, treasury,
+/// creator_share, investor_share, treasury_share)`.  The contract recomputes
+/// it on every manifest-backed claim, so recipient and share substitutions are
+/// rejected even though claims remain pull-based.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DistributionRoundManifest {
+    pub talos_id: u32,
+    pub epoch_id: u64,
+    pub funded_amount: i128,
+    pub entitlement_digest: BytesN<32>,
+    pub claimed_amount: i128,
+    pub rounding_dust: i128,
+}
+
 /// Persistent storage key enumeration.
 #[contracttype]
 #[derive(Clone)]
@@ -193,6 +222,8 @@ pub enum DataKey {
     /// Rounding remainder derived from the epoch's validated patron split.
     /// Appended to preserve existing key discriminants.
     RoundingDust(u32, u64),
+    /// Auditable funding and recipient-entitlement commitment.
+    RoundManifest(u32, u64),
     /// Pending admin address nominated for transfer.
     PendingAdmin,
     /// Ledger sequence when an epoch's persistent records were last refreshed: `(talos_id: u32, epoch_id: u64)`.
@@ -216,7 +247,7 @@ const MIN_EPOCH_AMOUNT: i128 = 1;
 /// - **major** — incompatible ABI change
 /// - **minor** — backwards-compatible new entry-point or field
 /// - **patch** — bug-fix with no observable ABI change
-pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 2, 0);
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 3, 0);
 
 /// Expected `INTERFACE_ID` of the configured `RegistryContract`, mirroring
 /// the bytes published by `talos_registry::INTERFACE_ID` (namespace
@@ -240,7 +271,7 @@ pub const INTERFACE_ID: [u8; 32] = [
     0x54, 0x61, 0x6C, 0x6F, 0x73, 0x44, 0x69, 0x76, // "TalosDiv"
     0x69, 0x64, 0x65, 0x6E, 0x64, 0x73, 0x00, 0x00, // "idends" + zero pad
     0x00, 0x00, 0x00, 0x01, // major = 1
-    0x00, 0x00, 0x00, 0x02, // minor = 2
+    0x00, 0x00, 0x00, 0x03, // minor = 3
     0x00, 0x00, 0x00, 0x00, // patch = 0
     0x00, 0x00, 0x00, 0x00, // reserved
 ];
@@ -251,6 +282,7 @@ pub fn features_list() -> &'static [&'static str] {
         "pull_claims",
         "expiry_recovery",
         "rounding_dust",
+        "round_manifest",
         "interface_query",
     ]
 }
@@ -389,6 +421,37 @@ fn compute_rounding_dust(
         .ok_or(ContractError::Overflow)
 }
 
+/// Hash the exact recipient entitlement tuple used by manifest-backed claims.
+/// `ToXdr` gives the tuple a deterministic Soroban XDR encoding,
+/// avoiding ad-hoc string concatenation and delimiter ambiguities.
+#[allow(clippy::too_many_arguments)]
+fn compute_entitlement_digest(
+    env: &Env,
+    talos_id: u32,
+    epoch_id: u64,
+    funded_amount: i128,
+    patron_creator: &Address,
+    patron_investor: &Address,
+    patron_treasury: &Address,
+    creator_share: u32,
+    investor_share: u32,
+    treasury_share: u32,
+) -> BytesN<32> {
+    let payload = (
+        talos_id,
+        epoch_id,
+        funded_amount,
+        patron_creator.clone(),
+        patron_investor.clone(),
+        patron_treasury.clone(),
+        creator_share,
+        investor_share,
+        treasury_share,
+    )
+        .to_xdr(env);
+    env.crypto().sha256(&payload).to_bytes()
+}
+
 /// Compatibility helper: returns true if `actual` semver satisfies `required`.
 ///
 /// Mirrors `TalosRegistry::version_supports` so callers in both modules
@@ -399,7 +462,7 @@ fn compute_rounding_dust(
 /// - `actual.minor == required.minor` and `actual.patch >= required.patch`
 ///                                          → supported.
 /// - `actual.minor < required.minor`        → not supported.
-fn version_supports(actual: (u32, u32, u32), required: (u32, u32, u32)) -> bool {
+fn registry_version_supports(actual: (u32, u32, u32), required: (u32, u32, u32)) -> bool {
     if actual.0 != required.0 {
         return false;
     }
@@ -439,7 +502,7 @@ fn check_registry_compatible(
     );
 
     // Require the registry at major=1, minor >= 1.
-    if !version_supports(version, (1, 1, 0)) {
+    if !registry_version_supports(version, (1, 1, 0)) {
         return Err(ContractError::IncompatibleRegistry);
     }
 
@@ -511,21 +574,54 @@ impl TalosDividends {
         expiry_secs: u64,
     ) -> Result<u64, ContractError> {
         require_admin(&env, &admin)?;
+        Self::create_epoch(&env, talos_id, total_amount, expiry_secs)
+    }
 
-        if total_amount < MIN_EPOCH_AMOUNT {
+    /// Commit a distribution epoch together with its funding and entitlement
+    /// manifest.  The supplied `funded_amount` becomes the epoch's immutable
+    /// total; later claims must reproduce `entitlement_digest` using the
+    /// recipient addresses and percentage shares they submit.
+    pub fn commit_epoch_manifest(
+        env: Env,
+        admin: Address,
+        talos_id: u32,
+        funded_amount: i128,
+        entitlement_digest: BytesN<32>,
+        expiry_secs: u64,
+    ) -> Result<u64, ContractError> {
+        require_admin(&env, &admin)?;
+        let epoch_id = Self::create_epoch(&env, talos_id, funded_amount, expiry_secs)?;
+        let manifest = DistributionRoundManifest {
+            talos_id,
+            epoch_id,
+            funded_amount,
+            entitlement_digest,
+            claimed_amount: 0,
+            rounding_dust: 0,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::RoundManifest(talos_id, epoch_id), &manifest);
+        Ok(epoch_id)
+    }
+
+    fn create_epoch(
+        env: &Env,
+        talos_id: u32,
+        total_amount: i128,
+        expiry_secs: u64,
+    ) -> Result<u64, ContractError> {
+        if total_amount < MIN_EPOCH_AMOUNT
+            || expiry_secs < MIN_EXPIRY_SECS
+            || expiry_secs > MAX_EXPIRY_SECS
+        {
             return Err(ContractError::InvalidEpochParams);
         }
-        if expiry_secs < MIN_EXPIRY_SECS || expiry_secs > MAX_EXPIRY_SECS {
-            return Err(ContractError::InvalidEpochParams);
-        }
-
         let epoch_id: u64 = env
             .storage()
             .persistent()
             .get(&DataKey::NextEpochId(talos_id))
             .unwrap_or(1u64);
-
-        // Idempotency guard: if the epoch already exists, return early.
         if env
             .storage()
             .persistent()
@@ -533,7 +629,6 @@ impl TalosDividends {
         {
             return Err(ContractError::EpochAlreadyExists);
         }
-
         let record = EpochRecord {
             epoch_id,
             talos_id,
@@ -543,7 +638,6 @@ impl TalosDividends {
             expiry_secs,
             status: EpochStatus::Active,
         };
-
         let current_ledger = env.ledger().sequence();
         env.storage()
             .persistent()
@@ -554,9 +648,7 @@ impl TalosDividends {
         env.storage()
             .persistent()
             .set(&DataKey::LastTouched(talos_id, epoch_id), &current_ledger);
-
-        emit_epoch_committed(&env, talos_id, epoch_id, total_amount, expiry_secs);
-
+        emit_epoch_committed(env, talos_id, epoch_id, total_amount, expiry_secs);
         Ok(epoch_id)
     }
 
@@ -640,6 +732,32 @@ impl TalosDividends {
             return Err(ContractError::InvalidPatronShares);
         }
 
+        let manifest_key = DataKey::RoundManifest(talos_id, epoch_id);
+        let mut manifest: Option<DistributionRoundManifest> = env
+            .storage()
+            .persistent()
+            .get(&manifest_key);
+        if let Some(ref committed) = manifest {
+            if committed.funded_amount != record.total_amount {
+                return Err(ContractError::FundingMismatch);
+            }
+            let digest = compute_entitlement_digest(
+                &env,
+                talos_id,
+                epoch_id,
+                committed.funded_amount,
+                &patron_creator,
+                &patron_investor,
+                &patron_treasury,
+                creator_share,
+                investor_share,
+                treasury_share,
+            );
+            if digest != committed.entitlement_digest {
+                return Err(ContractError::InvalidEntitlementDigest);
+            }
+        }
+
         // Resolve claimant role from supplied patron addresses.
         let (role, share_pct) = if claimant == patron_creator {
             (PatronRole::Creator, creator_share)
@@ -695,6 +813,13 @@ impl TalosDividends {
         env.storage()
             .persistent()
             .set(&DataKey::Epoch(talos_id, epoch_id), &record);
+        if let Some(ref mut committed) = manifest {
+            committed.claimed_amount = new_claimed;
+            committed.rounding_dust = dust;
+            env.storage()
+                .persistent()
+                .set(&manifest_key, committed);
+        }
         env.storage()
             .persistent()
             .set(&DataKey::LastTouched(talos_id, epoch_id), &current_ledger);
@@ -828,6 +953,17 @@ impl TalosDividends {
         env.storage()
             .persistent()
             .get(&DataKey::RoundingDust(talos_id, epoch_id))
+    }
+
+    /// Return the committed funding and entitlement audit record for a round.
+    pub fn get_round_manifest(
+        env: Env,
+        talos_id: u32,
+        epoch_id: u64,
+    ) -> Option<DistributionRoundManifest> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RoundManifest(talos_id, epoch_id))
     }
 
     /// Return the next epoch ID that would be assigned for `talos_id`.
@@ -1300,7 +1436,7 @@ mod tests {
         treasury: &Address,
     ) -> Result<Result<i128, soroban_sdk::Error>, Result<ContractError, soroban_sdk::InvokeError>>
     {
-        try_do_claim_with_shares(
+        try_do_claim_with_explicit_shares(
             env,
             contract_id,
             client,
@@ -1317,7 +1453,7 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn try_do_claim_with_shares(
+    fn try_do_claim_with_explicit_shares(
         env: &Env,
         contract_id: &Address,
         client: &TalosDividendsClient<'static>,
@@ -1357,6 +1493,23 @@ mod tests {
                 claimant, &talos_id, &epoch_id, creator, investor, treasury, &creator_share,
                 &investor_share, &treasury_share,
             )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_do_claim(
+        env: &Env,
+        contract_id: &Address,
+        client: &TalosDividendsClient<'static>,
+        claimant: &Address,
+        talos_id: u32,
+        epoch_id: u64,
+        creator: &Address,
+        investor: &Address,
+        treasury: &Address,
+    ) -> Result<Result<i128, soroban_sdk::Error>, Result<ContractError, soroban_sdk::InvokeError>> {
+        try_do_claim_with_shares(
+            env, contract_id, client, claimant, talos_id, epoch_id, creator, investor, treasury,
+        )
     }
 
     fn mock_propose(
@@ -1422,7 +1575,7 @@ mod tests {
     #[test]
     fn version_returns_compile_time_constant() {
         let (env, contract_id, _, _, client) = setup();
-        assert_eq!(client.version(), (1u32, 2u32, 0u32));
+        assert_eq!(client.version(), (1u32, 3u32, 0u32));
         let _ = (env, contract_id);
     }
 
@@ -1438,7 +1591,7 @@ mod tests {
         let (_, _, _, _, client) = setup();
         let expected = [
             0x54, 0x61, 0x6C, 0x6F, 0x73, 0x44, 0x69, 0x76, 0x69, 0x64, 0x65, 0x6E, 0x64, 0x73,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00,
         ];
         assert_eq!(INTERFACE_NAMESPACE, "TalosDividends");
@@ -1735,7 +1888,7 @@ mod tests {
         let epoch_id = commit_epoch(&env, &contract_id, &client, &admin, talos_id, 101, 7_200);
 
         do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
-        let result = try_do_claim_with_shares(
+        let result = try_do_claim_with_explicit_shares(
             &env, &contract_id, &client, &investor, talos_id, epoch_id, &creator, &investor,
             &treasury, 61, 24, 15,
         );
