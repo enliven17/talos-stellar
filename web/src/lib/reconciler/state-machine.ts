@@ -218,6 +218,15 @@ export function computeTransition(
 ): TxRecordUpdate | null {
   if (isTerminal(record)) return null;
 
+  // Ledger regression check: reject observations from older ledgers than
+  // previously seen to prevent re-processing stale Horizon data.
+  if (record.lastLedgerChecked !== null && currentLedger < record.lastLedgerChecked) {
+    return {
+      lastError: `Ledger regression detected: current=${currentLedger} < last=${record.lastLedgerChecked}`,
+      updatedAt: now,
+    };
+  }
+
   switch (record.finalityStatus) {
     case "PENDING":
       if (!pollResult) return null;
