@@ -43,9 +43,18 @@ describe("toDeadLetterView", () => {
       attempts: 8,
       maxAttempts: 8,
       lastError: "consumer exploded",
+      originalEventId: null,
       createdAt: "2026-09-01T00:00:00.000Z",
       deadLetteredAt: "2026-09-01T00:05:00.000Z",
     });
+  });
+
+  it("distinguishes a retry from a newly created business event via originalEventId", () => {
+    const freshEvent = event({ originalEventId: null });
+    const requeuedEvent = event({ id: "evt_retry_1", originalEventId: "evt_failed_original" });
+
+    expect(toDeadLetterView(freshEvent).originalEventId).toBeNull();
+    expect(toDeadLetterView(requeuedEvent).originalEventId).toBe("evt_failed_original");
   });
 
   it("never exposes payload, dedupeKey or lease fields (privacy)", () => {

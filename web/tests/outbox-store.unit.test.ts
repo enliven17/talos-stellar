@@ -107,10 +107,22 @@ describe("outbox/store — fail", () => {
 });
 
 describe("outbox/store — requeue", () => {
-  it("resets a dead_letter event to pending", async () => {
-    mockDb.update.mockReturnValue(chainable([{ id: "evt_1", status: "pending", attempts: 0 }]));
+  it("resets a dead_letter event to pending and preserves failure identity", async () => {
+    mockDb.update.mockReturnValue(
+      chainable([{ id: "evt_1", status: "pending", attempts: 0, originalEventId: "evt_1" }]),
+    );
     const result = await store.requeue("evt_1");
     expect(result?.status).toBe("pending");
+    expect(result?.originalEventId).toBe("evt_1");
+  });
+
+  it("preserves an existing originalEventId across repeated requeues", async () => {
+    mockDb.update.mockReturnValue(
+      chainable([{ id: "evt_1", status: "pending", attempts: 0, originalEventId: "evt_original_ancestor" }]),
+    );
+    const result = await store.requeue("evt_1");
+    expect(result?.status).toBe("pending");
+    expect(result?.originalEventId).toBe("evt_original_ancestor");
   });
 
   it("returns null for a non-dead_letter event", async () => {
