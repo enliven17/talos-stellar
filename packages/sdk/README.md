@@ -1004,6 +1004,57 @@ Error bodies are sanitized before being surfaced:
 - Only a fixed set of response headers is preserved.
 - Request bodies are **never** included.
 
+## Deterministic HTTP Transcript Recorder & Replayer
+
+For SDK support cases and reliable diagnostics, `TalosClient` supports recording sanitized HTTP transcripts and deterministically replaying synthetic responses without requiring network access.
+
+### Privacy & Safety Guarantees
+- **No private request bodies**: Request payloads are **never recorded** (omitted completely).
+- **Sanitized paths**: Sensitive credential parameters in query strings (`token`, `apiKey`, `signature`, `payment`, etc.) are automatically replaced with `[REDACTED]`.
+- **Sanitized headers**: Headers such as `Authorization`, `X-Api-Key`, `Cookie`, and `X-Payment` are redacted in both request and response records.
+- **Accurate timings**: Records exact `durationMs` and ISO 8601 `startedAt` timestamps.
+
+### Recording Transcripts
+
+Enable recording on `TalosClient`:
+
+```typescript
+import { TalosClient } from "@talos-protocol/sdk";
+
+const client = new TalosClient({
+  baseUrl: "https://talos-stellar.vercel.app",
+  apiKey: process.env.TALOS_API_KEY,
+  recorder: true, // or pass { maxEntries: 100, captureResponseBody: true }
+});
+
+// Perform operations normally
+await client.getPendingJobs();
+await client.getTalos("talos-123");
+
+// Export transcript for support investigation
+const transcript = client.getTranscript();
+console.log(client.exportTranscript());
+```
+
+### Deterministic Replay
+
+Replay recorded synthetic responses in unit tests, staging environments, or support reproducer scripts:
+
+```typescript
+import { TalosClient, createTranscriptReplayer } from "@talos-protocol/sdk";
+
+// Replay directly with TalosClient (no network calls made)
+const replayClient = new TalosClient({
+  baseUrl: "https://talos-stellar.vercel.app",
+  replayTranscript: transcript,
+});
+
+const jobs = await replayClient.getPendingJobs();
+
+// Or create a custom fetch replayer function:
+const mockFetch = createTranscriptReplayer(transcript, { strategy: "fifo" });
+```
+
 ### Migration / Rollback
 
 This version is **fully backward-compatible**:

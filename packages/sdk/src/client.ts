@@ -74,6 +74,14 @@ import {
   type RateLimitInfo,
 } from "./errors.js";
 import {
+  TranscriptRecorder,
+  TranscriptReplayer,
+  type HttpTranscript,
+  type TranscriptEntry,
+  type TranscriptRecorderOptions,
+  type TranscriptReplayOptions,
+} from "./transcript.js";
+import {
   generateIdempotencyKey,
   validateIdempotencyKey,
   isPayloadConflict,
@@ -385,6 +393,22 @@ export interface TalosClientOptions {
   dedupeInFlightGets?: boolean | DedupeInFlightGetsOptions;
   /** Opt-in ETag conditional-GET caching. */
   etagCache?: boolean | ETagCacheOptions;
+  /**
+   * Enable deterministic HTTP transcript recording for support cases.
+   * - `true`: Records requests with default options.
+   * - `TranscriptRecorder`: Uses an existing recorder instance.
+   * - `TranscriptRecorderOptions`: Configures a new recorder.
+   */
+  recorder?: boolean | TranscriptRecorder | TranscriptRecorderOptions;
+  /**
+   * Replay synthetic responses from a recorded HTTP transcript without
+   * making real network calls. Request bodies are never required or recorded.
+   */
+  replayTranscript?: HttpTranscript | readonly TranscriptEntry[] | TranscriptReplayer;
+  /**
+   * Optional listener invoked whenever an entry is recorded to the transcript.
+   */
+  onTranscriptEntry?: (entry: TranscriptEntry) => void;
 }
 
 
@@ -749,6 +773,9 @@ export class TalosClient {
   private signer?: SigningController;
   private readonly etagStore: ETagStore | null = null;
   private readonly onCacheHit?: (event: { url: string; etag: string }) => void;
+  private readonly recorder?: TranscriptRecorder;
+  private readonly replayer?: TranscriptReplayer;
+  private readonly onTranscriptEntry?: (entry: TranscriptEntry) => void;
 
   // ── In-flight GET deduplication ────────────────────────────
   /**
@@ -826,6 +853,22 @@ export class TalosClient {
     } else {
       this.etagStore = null;
     }
+
+    if (options.replayTranscript) {
+      this.replayer =
+        options.replayTranscript instanceof TranscriptReplayer
+          ? options.replayTranscript
+          : new TranscriptReplayer(options.replayTranscript, { baseUrl: this.baseUrl });
+    }
+
+    if (options.recorder === true) {
+      this.recorder = new TranscriptRecorder();
+    } else if (options.recorder instanceof TranscriptRecorder) {
+      this.recorder = options.recorder;
+    } else if (typeof options.recorder === "object" && options.recorder !== null) {
+      this.recorder = new TranscriptRecorder(options.recorder);
+    }
+    this.onTranscriptEntry = options.onTranscriptEntry;
   }
 
   /**
@@ -946,9 +989,13 @@ export class TalosClient {
     return this.toJSON();
   }
 
-  /** Resolve the fetch implementation per request. Prefer override; fall back to global. */
+  /** Resolve the fetch implementation per request. Prefer override; fall back to replayer; fall back to global. */
   private resolveFetch(): typeof fetch {
-    const fetchFn = this.fetchOverride ?? globalThis.fetch;
+    const fetchFn =
+      this.fetchOverride ??
+      (this.replayer
+        ? (input: RequestInfo | URL, init?: RequestInit) => this.replayer!.fetch(input, init)
+        : globalThis.fetch);
     if (typeof fetchFn !== "function") {
       throw new TalosTransportError(0, "Fetch implementation is unavailable", "", {
         message: "Fetch implementation is unavailable",
@@ -1354,12 +1401,55 @@ export class TalosClient {
             ...(effectiveSignal ? { signal: effectiveSignal } : {}),
           });
         } catch (cause) {
+          if (this.recorder) {
+            const entry = this.recorder.record({
+              method,
+              path: url,
+              status: 0,
+              statusText: "Transport Failure",
+              durationMs: Date.now() - attemptStartedAt,
+              startedAt: new Date(attemptStartedAt).toISOString(),
+              attempt,
+              requestHeaders: headers,
+            });
+            this.onTranscriptEntry?.(entry);
+          }
           throw classifyTransportError(cause, path);
         }
 
         // Surface rate-limit counters for every response, including the
         // attempts that are about to fail and be retried.
         this.observeResponse(path, method, res.status, attempt, Date.now() - attemptStartedAt, res.headers);
+
+        if (this.recorder) {
+          let responsePayload: unknown;
+          try {
+            const clone = res.clone();
+            const text = await clone.text().catch(() => "");
+            if (text) {
+              try {
+                responsePayload = JSON.parse(text);
+              } catch {
+                responsePayload = text;
+              }
+            }
+          } catch {
+            // body stream already locked or not cloneable
+          }
+          const entry = this.recorder.record({
+            method,
+            path: url,
+            status: res.status,
+            statusText: res.statusText,
+            durationMs: Date.now() - attemptStartedAt,
+            startedAt: new Date(attemptStartedAt).toISOString(),
+            attempt,
+            requestHeaders: headers,
+            responseHeaders: res.headers,
+            responseBody: responsePayload,
+          });
+          this.onTranscriptEntry?.(entry);
+        }
 
         if (res.status === 304 && cachedEntry) {
           this.onCacheHit?.({ url, etag: cachedEntry.etag });
@@ -1702,7 +1792,49 @@ export class TalosClient {
         Date.now() - challengeAttemptStartedAt,
         res.headers,
       );
+      if (this.recorder) {
+        let responsePayload: unknown;
+        try {
+          const clone = res.clone();
+          const text = await clone.text().catch(() => "");
+          if (text) {
+            try {
+              responsePayload = JSON.parse(text);
+            } catch {
+              responsePayload = text;
+            }
+          }
+        } catch {
+          // ignore clone error
+        }
+        const entry = this.recorder.record({
+          method: "POST",
+          path: url,
+          status: res.status,
+          statusText: res.statusText,
+          durationMs: Date.now() - challengeAttemptStartedAt,
+          startedAt: new Date(challengeAttemptStartedAt).toISOString(),
+          attempt: 1,
+          requestHeaders: initialHeaders,
+          responseHeaders: res.headers,
+          responseBody: responsePayload,
+        });
+        this.onTranscriptEntry?.(entry);
+      }
     } catch (cause) {
+      if (this.recorder) {
+        const entry = this.recorder.record({
+          method: "POST",
+          path: url,
+          status: 0,
+          statusText: "Transport Failure",
+          durationMs: Date.now() - challengeAttemptStartedAt,
+          startedAt: new Date(challengeAttemptStartedAt).toISOString(),
+          attempt: 1,
+          requestHeaders: initialHeaders,
+        });
+        this.onTranscriptEntry?.(entry);
+      }
       throw classifyTransportError(cause, path);
     } finally {
       timeout?.dispose();
@@ -2270,49 +2402,34 @@ export class TalosClient {
     });
   }
 
-  // ── Webhook Deliveries ──────────────────────────────────────────
+  // ── HTTP Transcript ─────────────────────────────────────────────
 
   /**
-   * List webhook deliveries with cursor pagination.
-   *
-   * @param params - Query parameters (limit, cursor, status, subscriptionId, eventType) and request options.
-   * @returns Page of webhook deliveries with nextCursor.
+   * Return the recorded HTTP transcript, or undefined if recording is disabled.
    */
-  async listWebhookDeliveries(
-    params?: ListWebhookDeliveriesParams,
-  ): Promise<WebhookDeliveryPage> {
-    const { signal, timeoutMs, ...query } = params ?? {};
-    return this.request("/api/webhooks/deliveries", {
-      params: query,
-      signal,
-      timeoutMs,
-    });
+  getTranscript(): HttpTranscript | undefined {
+    return this.recorder?.getTranscript();
   }
 
   /**
-   * Async iterator for paginated webhook delivery history.
-   *
-   * Reuses typed pagination and cancellation. Stops at an explicit caller
-   * limit without fetching an unnecessary page.
-   *
-   * @param options - Pagination options (limit, maxPages, signal, timeoutMs) and delivery filters (status, subscriptionId, eventType).
-   * @returns Async iterable iterator yielding individual WebhookDelivery items.
-   *
-   * @example
-   * ```ts
-   * for await (const delivery of client.paginateWebhookDeliveries({ limit: 10, status: "failed" })) {
-   *   console.log(delivery.id, delivery.status, delivery.lastError);
-   * }
-   * ```
+   * Return the configured TranscriptRecorder instance, or undefined if recording is disabled.
    */
-  paginateWebhookDeliveries(
-    options?: AsyncPaginationIteratorOptions & ListWebhookDeliveriesParams,
-  ): AsyncPaginationIterator<WebhookDelivery> {
-    const { maxPages, signal, timeoutMs, limit, ...query } = options ?? {};
-    return createPaginationIterator<WebhookDelivery>(
-      (opts) => this.listWebhookDeliveries({ ...query, ...opts }),
-      { maxPages, signal, timeoutMs, limit },
-    );
+  getTranscriptRecorder(): TranscriptRecorder | undefined {
+    return this.recorder;
+  }
+
+  /**
+   * Export the recorded HTTP transcript as a JSON string, or undefined if recording is disabled.
+   */
+  exportTranscript(indent = 2): string | undefined {
+    return this.recorder?.export(indent);
+  }
+
+  /**
+   * Return the configured TranscriptReplayer instance, or undefined if replay is disabled.
+   */
+  getTranscriptReplayer(): TranscriptReplayer | undefined {
+    return this.replayer;
   }
 }
 
