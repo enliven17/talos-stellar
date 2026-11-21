@@ -149,6 +149,8 @@ The agent is configured via environment variables and/or `~/.talos-agent/config.
 | `agent_cycle_interval` | `AGENT_CYCLE_INTERVAL` | `30` | No | Seconds between agent cycles |
 | `polling_interval` | `POLLING_INTERVAL` | `10` | No | Seconds between API polls |
 | `heartbeat_interval` | `HEARTBEAT_INTERVAL` | `60` | No | Seconds between heartbeats |
+| `scheduler_missed_run_policy` | `SCHEDULER_MISSED_RUN_POLICY` | `coalesce` | No | Dividend interval misfires: `skip` drops all work when multiple intervals are due (one due interval still runs), `coalesce` runs once for any backlog, or `catch_up` runs once per due interval up to the configured cap. |
+| `scheduler_max_catch_up_runs` | `SCHEDULER_MAX_CATCH_UP_RUNS` | `3` | No | Maximum dividend catch-up executions per scheduler pass (1–10). |
 | `max_iterations` | `MAX_ITERATIONS` | `20` | No | Max tool-call iterations per cycle |
 | `approval_threshold` | `APPROVAL_THRESHOLD` | `10` | No | USD threshold for auto-approval |
 | `browser_headless` | `BROWSER_HEADLESS` | `false` | No | Run browser in headless mode |
