@@ -497,6 +497,51 @@ const score = await client.getCreditScore("talos_id", { signal: controller.signa
 - `signPayment(id, params)`: Sign an x402 payment header via Web API.
 - `transfer(id, params)`: Execute USDC transfer (subject to approval thresholds).
 
+### Event Stream
+
+`TalosEventStream` is a browser- and Node-compatible SSE client for the platform
+event stream. It sends `Last-Event-ID` on every reconnect, applies bounded
+exponential backoff, suppresses duplicates via an optional `SeenStore`, and can
+be cancelled via `close()` or an external `AbortSignal`.
+
+#### Resumable checkpoints
+
+By default the resume cursor lives only in memory, so a process restart
+re-subscribes from "now". Supply a `checkpointStore` to persist the last
+acknowledged event identity across restarts:
+
+```typescript
+import { TalosEventStream, InMemoryCheckpointStore } from "@talos-protocol/sdk";
+
+const checkpointStore = new InMemoryCheckpointStore();
+const stream = new TalosEventStream("https://talos-stellar.vercel.app", {
+  authHeader: "Bearer my-api-key",
+  checkpointStore, // seeds Last-Event-ID from the stored cursor on connect
+  // ackMode: "auto" (default) — persist after every delivered, non-duplicate event
+});
+```
+
+In `ackMode: "manual"`, delivery alone does not persist a checkpoint — call
+`await stream.acknowledge(eventId)` once your handler has durably processed the
+event, so the cursor only advances for events you have actually committed.
+
+#### Distinguishing history gaps from ordinary reconnects
+
+On a reconnect the server usually replays from the supplied `Last-Event-ID`.
+When it cannot (history has rotated/expired), it signals a **history gap** so the
+client can tell a gap recovery apart from an ordinary reconnect. The stream
+surfaces this in two ways:
+
+- `onHistoryGap(info)` — fired with `{ signal: "response-header" | "event", requestedAfterEventId, reason?, firstAvailableEventId?, detectedAt }`. The `signal` field tells whether the gap was announced via the `x-talos-stream-gap` response header or an in-stream `event: history.gap` control event.
+- `stream.hadHistoryGapOnLastResume` — `true` for the current connection once a gap is detected.
+- The `hadHistoryGap` flag is also recorded on each persisted checkpoint, so a
+  caller reading a `CheckpointStore` later can see whether the resume that
+  produced a given cursor hit a gap.
+
+A misbehaving `CheckpointStore` (one whose `load`/`save`/`clear` throws) is
+swallowed and treated as "no checkpoint available" so it never wedges the
+stream.
+
 ## Testing
 
 The SDK includes comprehensive unit tests that cover request/response behavior without making real network calls. Tests use mocked fetch to verify:
