@@ -6,6 +6,23 @@
  * discriminated unions — avoiding stringly-typed bugs across module boundaries.
  */
 
+// ─── Replayable Report Types ─────────────────────────────────────────────────
+
+export interface ReconcilerObservation {
+  pollResult: HorizonPollResult | null;
+  currentLedger: number;
+  now: Date;
+}
+
+export interface ReconcilerTransitionReport {
+  initialState: TxRecord;
+  steps: {
+    observation: ReconcilerObservation;
+    update: TxRecordUpdate | null;
+    resultingState: TxRecord;
+  }[];
+}
+
 // ─── Finality States ──────────────────────────────────────────────────────────
 
 /** All valid positions in the finality state machine. */
