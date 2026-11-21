@@ -16,7 +16,7 @@ import { and, or, eq, desc, lt } from "drizzle-orm";
 import { logger } from "@/lib/logger";
 import { z } from "zod/v4";
 import { parseBody } from "@/lib/schemas";
-import { encryptSecret } from "@/lib/webhooks/signing";
+import { deriveSigningKeyId, encryptSecret } from "@/lib/webhooks/signing";
 import { validateUrl } from "@/lib/security/ssrf";
 
 // ─── Auth helper (same pattern as jobs routes) ───────────────────
@@ -108,6 +108,8 @@ async function _POST(request: NextRequest) {
         description: subscription.description,
         active: subscription.active,
         signatureVersion: subscription.signatureVersion,
+        activeKeyId: deriveSigningKeyId(data.secret),
+        rotationActive: false,
         createdAt: subscription.createdAt,
         updatedAt: subscription.updatedAt,
       },
@@ -168,6 +170,8 @@ async function _GET(request: NextRequest) {
         description: tlsWebhookSubscriptions.description,
         active: tlsWebhookSubscriptions.active,
         signatureVersion: tlsWebhookSubscriptions.signatureVersion,
+        secretRotatedAt: tlsWebhookSubscriptions.secretRotatedAt,
+        previousSecretExpiresAt: tlsWebhookSubscriptions.previousSecretExpiresAt,
         createdAt: tlsWebhookSubscriptions.createdAt,
         updatedAt: tlsWebhookSubscriptions.updatedAt,
       })
@@ -177,7 +181,13 @@ async function _GET(request: NextRequest) {
       .limit(limit + 1);
 
     const hasMore = subscriptions.length > limit;
-    const page = hasMore ? subscriptions.slice(0, limit) : subscriptions;
+    const nowMs = Date.now();
+    const page = (hasMore ? subscriptions.slice(0, limit) : subscriptions).map((sub) => ({
+      ...sub,
+      rotationActive: Boolean(
+        sub.previousSecretExpiresAt && sub.previousSecretExpiresAt.getTime() > nowMs,
+      ),
+    }));
     const lastItem = page[page.length - 1];
     const nextCursor = hasMore && lastItem
       ? `${lastItem.createdAt.toISOString()}|${lastItem.id}`

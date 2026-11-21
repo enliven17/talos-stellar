@@ -21,7 +21,7 @@ import {
   tlsWebhookSubscriptions,
   tlsWebhookDeliveries,
 } from "@/db/schema";
-import { signPayload } from "./signing";
+import { signPayloadWithKeyIds } from "./signing";
 import { resolveSigningSecrets } from "./rotation";
 import {
   BACKOFF_BASE_MS,
@@ -30,6 +30,8 @@ import {
   DEFAULT_MAX_ATTEMPTS,
   DELIVERY_TIMEOUT_MS,
   MAX_PAYLOAD_BYTES,
+  WEBHOOK_KEY_ID_HEADER,
+  WEBHOOK_SIGNATURE_HEADER,
 } from "./config";
 import { isWebhookDeliveryEnabled } from "./config";
 import { safeFetch } from "@/lib/security/ssrf";
@@ -216,11 +218,14 @@ export async function attemptDelivery(
   // If the prefix doesn't yield valid JSON, we return a minimal event stub.
   const payloadJson = reconstructPayload(claimed.payloadHash);
 
-  // Decrypt current (+ previous if rotation grace is active) and dual-sign
+  // Decrypt current (+ previous if rotation grace is active) and dual-sign with key IDs
   let signature: string;
+  let keyIdHeader: string;
   try {
-    const { secrets, signatureVersion } = resolveSigningSecrets(subscription);
-    signature = signPayload(payloadJson, secrets, signatureVersion);
+    const { keys, signatureVersion } = resolveSigningSecrets(subscription);
+    const signed = signPayloadWithKeyIds(payloadJson, keys, signatureVersion);
+    signature = signed.signature;
+    keyIdHeader = signed.keyIdHeader;
   } catch (err) {
     logger.error(
       { deliveryId, subscriptionId: subscription.id, err },
@@ -244,7 +249,8 @@ export async function attemptDelivery(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Webhook-Signature": signature,
+        [WEBHOOK_SIGNATURE_HEADER]: signature,
+        [WEBHOOK_KEY_ID_HEADER]: keyIdHeader,
         "X-Webhook-Event": claimed.payloadHash.slice(0, 16), // event type hint
         "User-Agent": "Talos-Webhook/1.0",
       },

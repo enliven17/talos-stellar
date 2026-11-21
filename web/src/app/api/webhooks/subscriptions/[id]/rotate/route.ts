@@ -22,6 +22,10 @@ import {
   finalizeWebhookSecretRotation,
   rotateWebhookSecret,
 } from "@/lib/webhooks/rotation";
+import {
+  MAX_SECRET_ROTATION_GRACE_SECONDS,
+  MIN_SECRET_ROTATION_GRACE_SECONDS,
+} from "@/lib/webhooks/config";
 
 async function resolveCallerTalos(request: NextRequest): Promise<string | null> {
   const authHeader = request.headers.get("authorization");
@@ -40,7 +44,18 @@ const rotateSchema = z
   .object({
     secret: z.string().min(16).max(256).optional(),
     generate: z.boolean().optional(),
-    graceSeconds: z.number().int().optional(),
+    graceSeconds: z
+      .number()
+      .int()
+      .min(MIN_SECRET_ROTATION_GRACE_SECONDS)
+      .max(MAX_SECRET_ROTATION_GRACE_SECONDS)
+      .optional(),
+    overlapSeconds: z
+      .number()
+      .int()
+      .min(MIN_SECRET_ROTATION_GRACE_SECONDS)
+      .max(MAX_SECRET_ROTATION_GRACE_SECONDS)
+      .optional(),
     finalize: z.boolean().optional(),
   })
   .refine(
@@ -87,6 +102,7 @@ async function _POST(
       newSecret: data.secret,
       generate: data.generate,
       graceSeconds: data.graceSeconds,
+      overlapSeconds: data.overlapSeconds,
     });
 
     if ("error" in result) {
