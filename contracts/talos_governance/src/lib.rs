@@ -19,6 +19,7 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 use ttl_manager;
+use admin_controls::{canonical_action_digest, emit_execution_receipt, ExecutionReceipt};
 use pause_control;
 
 // ── ProposalAction (#913) ────────────────────────────────────────────
@@ -218,6 +219,10 @@ pub enum DataKey {
     RegistryContract,
     /// Pending admin proposed for a two-step transfer (#948).
     PendingAdmin,
+    /// Canonical digest of the action approved with a proposal.
+    ProposalActionDigest(u32),
+    /// Immutable receipt written after successful proposal execution.
+    ProposalExecutionReceipt(u32),
     /// Execution receipt keyed by the canonical SHA-256 digest of a
     /// `ProposalAction`.  Written once when a proposal with that action is
     /// successfully executed; presence signals that the action has already
@@ -225,6 +230,7 @@ pub enum DataKey {
     /// action a second time (#1374).
     ///
     /// Value: the `proposal_id` of the first execution (for auditability).
+    /// Global duplicate-action guard keyed by canonical action digest.
     ExecutionReceipt(BytesN<32>),
 }
 
@@ -558,6 +564,7 @@ fn emit_admin_cancelled(env: &Env, cancelled: Address) {
     env.events().publish(topics, (cancelled,));
 }
 
+// ── Stable interface (v1.2.0) ───────────────────────────────────────
 /// Emitted when the configured registry contract address is updated.
 ///
 /// Topics: `(symbol,)`
@@ -567,56 +574,18 @@ fn emit_registry_updated(env: &Env, old_registry: Option<Address>, new_registry:
     env.events().publish(topics, (old_registry, new_registry));
 }
 
-/// Compute the canonical SHA-256 digest of a `ProposalAction`.
-///
-/// The digest is used as the key for `DataKey::ExecutionReceipt` to detect
-/// and reject duplicate or conflicting execution history across proposals
-/// (#1374).  The encoding is deterministic: each variant encodes a 1-byte
-/// discriminant followed by its fields in a fixed order.
-///
-/// | Variant        | Discriminant | Fields (in order)             |
-/// |----------------|:------------:|-------------------------------|
-/// | `PauseTalos`   | `0x00`       | registry bytes, talos_id u32  |
-/// | `ResumeTalos`  | `0x01`       | registry bytes, talos_id u32  |
-/// | `UpdateConfig` | `0x02`       | quorum i128, consensus i128, voting_period u32 |
-fn compute_action_digest(env: &Env, action: &ProposalAction) -> BytesN<32> {
-    let mut payload = soroban_sdk::Bytes::new(env);
-    match action {
-        ProposalAction::PauseTalos(a) => {
-            payload.extend_from_slice(&[0x00u8]);
-            // Use the canonical strkey representation as a stable address encoding.
-            let addr_bytes = a.registry.to_string().to_bytes();
-            payload.append(&addr_bytes);
-            payload.extend_from_slice(&a.talos_id.to_be_bytes());
-        }
-        ProposalAction::ResumeTalos(a) => {
-            payload.extend_from_slice(&[0x01u8]);
-            let addr_bytes = a.registry.to_string().to_bytes();
-            payload.append(&addr_bytes);
-            payload.extend_from_slice(&a.talos_id.to_be_bytes());
-        }
-        ProposalAction::UpdateConfig(a) => {
-            payload.extend_from_slice(&[0x02u8]);
-            payload.extend_from_slice(&a.quorum_threshold.to_be_bytes());
-            payload.extend_from_slice(&a.consensus_threshold.to_be_bytes());
-            payload.extend_from_slice(&a.voting_period_ledgers.to_be_bytes());
-        }
-    }
-    env.crypto().sha256(&payload).to_bytes()
-}
-
 // ── Stable interface (v1.1.0) ───────────────────────────────────────
 //
-// v1.1.0 adds:
+// v1.1.0 added:
 //   - `ProposalQuorumState` struct and `get_proposal_quorum_state` query
 //   - `EventQuorumReached` typed event emitted once per proposal
 //   - `DataKey::QuorumReached(u32)` idempotency sentinel
 //   - `quorum_state` capability in `interface_features()`
 //
-// All changes are purely additive.  Existing callers (v1.0.0) remain
-// fully compatible; no storage keys or existing entry-point signatures
-// have been modified.
-pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 1, 0);
+// v1.2.0 adds immutable proposal action digests and execution receipts.
+// Existing v1.0.0 and v1.1.0 callers remain compatible; prior proposal
+// records derive their digest from the stored action on first execution.
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 2, 0);
 
 pub const INTERFACE_NAMESPACE: &str = "TalosGovernance";
 
@@ -625,7 +594,7 @@ pub const INTERFACE_ID: [u8; 32] = [
     0x65, 0x72, 0x6E, 0x61, 0x6E, 0x63, 0x65, 0x00, // "ernance" + zero pad
     // (major, minor, patch) big-endian u32s
     0x00, 0x00, 0x00, 0x01, // major = 1
-    0x00, 0x00, 0x00, 0x01, // minor = 1
+    0x00, 0x00, 0x00, 0x02, // minor = 2
     0x00, 0x00, 0x00, 0x00, // patch = 0
     // reserved
     0x00, 0x00, 0x00, 0x00,
@@ -641,6 +610,7 @@ pub fn features_list() -> &'static [&'static str] {
         "config_admin",       // update_config / cache_token_balance requires admin
         "interface_query",    // version / interface_id / supports_version
         "quorum_state",       // get_proposal_quorum_state / EventQuorumReached
+        "execution_receipts", // immutable action digests and execution receipts
     ]
 }
 
@@ -858,6 +828,10 @@ impl TalosGovernance {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        let action_digest = canonical_action_digest(&env, "TalosGovernance", &proposal.action);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ProposalActionDigest(proposal_id), &action_digest);
         env.storage()
             .persistent()
             .set(&DataKey::NextProposalId, &(proposal_id + 1));
@@ -976,6 +950,23 @@ impl TalosGovernance {
             panic!("Proposal is not approved");
         }
 
+        let action_digest = canonical_action_digest(&env, "TalosGovernance", &proposal.action);
+        let stored_digest: Option<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ProposalActionDigest(proposal_id));
+        let approved_digest = stored_digest.clone().unwrap_or_else(|| action_digest.clone());
+        if approved_digest != action_digest {
+            panic!("Proposal action digest mismatch");
+        }
+        if stored_digest.is_none() {
+            env.storage()
+                .persistent()
+                .set(&DataKey::ProposalActionDigest(proposal_id), &approved_digest);
+        }
+
+        // Dispatch only after confirming the current payload matches the
+        // immutable digest approved when the proposal was created.
         // ── Receipt guard (#1374) ─────────────────────────────────────────
         // For proposals that carry a typed action, compute the canonical
         // action digest and check whether a receipt for that digest already
@@ -984,7 +975,7 @@ impl TalosGovernance {
         // from — is rejected to prevent duplicate or conflicting execution
         // history.
         if let Some(action) = &proposal.action {
-            let digest = compute_action_digest(&env, action);
+            let digest = approved_digest.clone();
             if env
                 .storage()
                 .persistent()
@@ -1002,6 +993,14 @@ impl TalosGovernance {
                 .set(&DataKey::ExecutionReceipt(digest), &proposal_id);
         }
 
+        let receipt = ExecutionReceipt {
+            action_digest: approved_digest.clone(),
+            executed_at: env.ledger().timestamp(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::ProposalExecutionReceipt(proposal_id), &receipt);
+        emit_execution_receipt(&env, "TalosGovernance", proposal_id as u64, &receipt);
         proposal.status = ProposalStatus::Executed;
         env.storage()
             .persistent()
@@ -1157,6 +1156,10 @@ impl TalosGovernance {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        let action_digest = canonical_action_digest(&env, "TalosGovernance", &proposal.action);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ProposalActionDigest(proposal_id), &action_digest);
         env.storage()
             .persistent()
             .set(&DataKey::NextProposalId, &(proposal_id + 1));
@@ -1378,6 +1381,16 @@ impl TalosGovernance {
         env.storage()
             .persistent()
             .get(&DataKey::Proposal(proposal_id))
+    }
+
+    /// Return the immutable digest approved for a proposal action.
+    pub fn get_proposal_action_digest(env: Env, proposal_id: u32) -> Option<BytesN<32>> {
+        env.storage().persistent().get(&DataKey::ProposalActionDigest(proposal_id))
+    }
+
+    /// Return the immutable execution receipt, if the proposal has executed.
+    pub fn get_execution_receipt(env: Env, proposal_id: u32) -> Option<ExecutionReceipt> {
+        env.storage().persistent().get(&DataKey::ProposalExecutionReceipt(proposal_id))
     }
 
     /// Return a bounded page of `ProposalSummary` records.
@@ -1686,7 +1699,7 @@ impl TalosGovernance {
         }
 
         payload.extend_from_slice(&1u32.to_be_bytes());
-        payload.extend_from_slice(&0u32.to_be_bytes());
+        payload.extend_from_slice(&1u32.to_be_bytes());
 
         e.crypto().sha256(&payload).to_bytes()
     }
@@ -1737,6 +1750,12 @@ impl TalosGovernance {
             e.storage()
                 .persistent()
                 .set(&DataKey::LastTouched(proposal_id), &current_ledger);
+            if let Some(digest) = e.storage().persistent().get::<_, BytesN<32>>(&DataKey::ProposalActionDigest(proposal_id)) {
+                e.storage().persistent().set(&DataKey::ProposalActionDigest(proposal_id), &digest);
+            }
+            if let Some(receipt) = e.storage().persistent().get::<_, ExecutionReceipt>(&DataKey::ProposalExecutionReceipt(proposal_id)) {
+                e.storage().persistent().set(&DataKey::ProposalExecutionReceipt(proposal_id), &receipt);
+            }
             ttl_manager::emit_ttl_touched(&e, "proposal", 1);
             true
         } else {
@@ -1866,6 +1885,12 @@ impl TalosGovernance {
                 e.storage()
                     .persistent()
                     .set(&DataKey::LastTouched(pid), &current_ledger);
+                if let Some(digest) = e.storage().persistent().get::<_, BytesN<32>>(&DataKey::ProposalActionDigest(pid)) {
+                    e.storage().persistent().set(&DataKey::ProposalActionDigest(pid), &digest);
+                }
+                if let Some(receipt) = e.storage().persistent().get::<_, ExecutionReceipt>(&DataKey::ProposalExecutionReceipt(pid)) {
+                    e.storage().persistent().set(&DataKey::ProposalExecutionReceipt(pid), &receipt);
+                }
                 sweep.record(ttl_manager::EntryOutcome::Touched);
             } else {
                 sweep.record(ttl_manager::EntryOutcome::Skipped);
@@ -2747,7 +2772,7 @@ mod tests {
             payload.extend_from_slice(bytes);
         }
         payload.extend_from_slice(&1u32.to_be_bytes());
-        payload.extend_from_slice(&0u32.to_be_bytes());
+        payload.extend_from_slice(&1u32.to_be_bytes());
 
         let expected = env.crypto().sha256(&payload).to_bytes();
         assert_eq!(digest, expected);
@@ -3833,21 +3858,21 @@ mod tests {
         assert!(result.is_none(), "nonexistent proposal must return None");
     }
 
-    /// version() returns (1, 1, 0) after the bump.
+    /// version() returns (1, 2, 0) after the bump.
     #[test]
-    fn version_returns_1_1_0() {
+    fn version_returns_1_2_0() {
         let (env, _contract_id, _admin, _pulse, client) = setup();
         let ver = client.version();
-        assert_eq!(ver, (1u32, 1u32, 0u32));
+        assert_eq!(ver, (1u32, 2u32, 0u32));
     }
 
-    /// supports_version(1, 1, 0) is true; (1, 2, 0) is false.
+    /// supports_version(1, 2, 0) is true; (1, 3, 0) is false.
     #[test]
     fn supports_version_compatibility_checks() {
         let (env, _contract_id, _admin, _pulse, client) = setup();
         assert!(client.supports_version(&1, &0, &0), "must support v1.0.0 (backward compat)");
-        assert!(client.supports_version(&1, &1, &0), "must support v1.1.0 (exact)");
-        assert!(!client.supports_version(&1, &2, &0), "must not support v1.2.0 (not yet deployed)");
+        assert!(client.supports_version(&1, &2, &0), "must support v1.2.0 (exact)");
+        assert!(!client.supports_version(&1, &3, &0), "must not support v1.3.0 (not yet deployed)");
         assert!(!client.supports_version(&2, &0, &0), "must not support v2.0.0 (major mismatch)");
     }
 
@@ -3858,11 +3883,13 @@ mod tests {
         let features = client.interface_features();
         let quorum_sym = soroban_sdk::Symbol::new(&env, "quorum_state");
         assert!(features.contains(&quorum_sym), "interface_features must include quorum_state");
+        let receipt_sym = soroban_sdk::Symbol::new(&env, "execution_receipts");
+        assert!(features.contains(&receipt_sym), "interface_features must include execution_receipts");
     }
 
-    /// interface_id golden vector — minor byte is now 0x01.
+    /// interface_id golden vector — minor byte is now 0x02.
     #[test]
-    fn interface_id_golden_vector_v1_1_0() {
+    fn interface_id_golden_vector_v1_2_0() {
         let (env, _contract_id, _admin, _pulse, client) = setup();
         let id = client.interface_id();
         let bytes = id.to_array();
@@ -3870,8 +3897,8 @@ mod tests {
         assert_eq!(&bytes[0..8], &[0x54, 0x61, 0x6C, 0x6F, 0x73, 0x47, 0x6F, 0x76]);
         // Bytes 16-19: major = 1
         assert_eq!(&bytes[16..20], &[0x00, 0x00, 0x00, 0x01]);
-        // Bytes 20-23: minor = 1
-        assert_eq!(&bytes[20..24], &[0x00, 0x00, 0x00, 0x01]);
+        // Bytes 20-23: minor = 2
+        assert_eq!(&bytes[20..24], &[0x00, 0x00, 0x00, 0x02]);
         // Bytes 24-27: patch = 0
         assert_eq!(&bytes[24..28], &[0x00, 0x00, 0x00, 0x00]);
     }
@@ -4929,6 +4956,51 @@ mod tests {
     }
 
     /// A proposal can only be executed once; the second call sees Executed status.
+    #[test]
+    fn execute_proposal_records_receipt_and_rejects_substituted_action() {
+        let (env, contract_id, admin, _pulse, client) = setup();
+        let proposer = Address::generate(&env);
+        let action = Some(ProposalAction::UpdateConfig {
+            quorum_threshold: 200,
+            consensus_threshold: 6_000,
+            voting_period_ledgers: 40,
+        });
+        let proposal_id = create_and_approve_action_proposal(
+            &env, &contract_id, &client, &admin, &proposer, action,
+        );
+
+        let approved_digest = client.get_proposal_action_digest(&proposal_id).unwrap();
+        env.as_contract(&contract_id, || {
+            let key = DataKey::Proposal(proposal_id);
+            let mut proposal: Proposal = env.storage().persistent().get(&key).unwrap();
+            proposal.action = Some(ProposalAction::UpdateConfig {
+                quorum_threshold: 201,
+                consensus_threshold: 6_000,
+                voting_period_ledgers: 40,
+            });
+            env.storage().persistent().set(&key, &proposal);
+        });
+
+        assert!(client.try_execute_proposal(&proposal_id).is_err());
+        assert_eq!(client.get_proposal(&proposal_id).unwrap().status, ProposalStatus::Approved);
+        assert!(client.get_execution_receipt(&proposal_id).is_none());
+
+        env.as_contract(&contract_id, || {
+            let key = DataKey::Proposal(proposal_id);
+            let mut proposal: Proposal = env.storage().persistent().get(&key).unwrap();
+            proposal.action = Some(ProposalAction::UpdateConfig {
+                quorum_threshold: 200,
+                consensus_threshold: 6_000,
+                voting_period_ledgers: 40,
+            });
+            env.storage().persistent().set(&key, &proposal);
+        });
+        client.execute_proposal(&proposal_id);
+
+        let receipt = client.get_execution_receipt(&proposal_id).unwrap();
+        assert_eq!(receipt.action_digest, approved_digest);
+        assert_eq!(client.get_proposal_action_digest(&proposal_id).unwrap(), approved_digest);
+    }
     #[test]
     fn execute_proposal_only_once() {
         let (env, contract_id, admin, _pulse, client) = setup();
