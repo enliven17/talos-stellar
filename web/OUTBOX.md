@@ -65,6 +65,15 @@ One retry class: full-jitter exponential backoff, 1s base, 5 min cap
 (`src/lib/outbox/retry.ts`), up to `maxAttempts` (default
 `OUTBOX_DEFAULT_MAX_ATTEMPTS`, 8), then `dead_letter`.
 
+Retry delays are clamped to a bounded non-negative duration (`[0, 5 min]`) and
+scheduled in Postgres as a relative interval (`now() + interval`) rather than
+from the application host's wall clock (`Date.now()`). `dispatchOnce()` also
+tracks an in-process monotonic cooldown (`performance.now()`, overridable via
+`DispatchOnceOptions.monotonicNowMs` in tests) so that if the system clock
+moves backward and a backed-off event is leased early, it is deferred via
+`deferRetry()` without consuming an attempt or immediately retrying the failed
+backlog.
+
 `dedupeKey` (scoped per `eventType`, partial unique index) makes
 `writeOutboxEvent` a no-op on a repeat call with the same key — use it
 whenever the surrounding code path can run more than once for the same

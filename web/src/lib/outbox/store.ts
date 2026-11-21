@@ -2,7 +2,7 @@ import { and, count, desc, eq, isNotNull, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { tlsOutboxEvents } from "@/db/schema";
 import type { OutboxEvent, OutboxStatus, WriteEventInput } from "./types";
-import { decideRetry } from "./retry";
+import { boundRetryDelayMs, decideRetry } from "./retry";
 import { outboxConfig } from "./config";
 import { logOutboxEvent, truncateError } from "./metrics";
 
@@ -134,14 +134,42 @@ export async function fail(eventId: string, leaseId: string, error: unknown): Pr
     return toEvent(row);
   }
 
-  const runAt = new Date(Date.now() + decision.delayMs);
+  const delayMs = boundRetryDelayMs(decision.delayMs);
+  const runAt = sql`now() + (${delayMs}::text || ' milliseconds')::interval`;
   const [row] = await db
     .update(tlsOutboxEvents)
-    .set({ status: "pending", runAt, lastError, leaseId: null, leaseOwner: null, leaseExpiresAt: null })
+    .set({ status: "pending", runAt, lastError, leaseId: null, leaseOwner: null, leaseExpiresAt: null, updatedAt: sql`now()` })
     .where(and(eq(tlsOutboxEvents.id, eventId), eq(tlsOutboxEvents.leaseId, leaseId), eq(tlsOutboxEvents.status, "leased")))
     .returning();
   if (!row) return null;
-  logOutboxEvent("outbox_event_retry_scheduled", { eventId, eventType: row.eventType, attempts: row.attempts, delayMs: decision.delayMs });
+  logOutboxEvent("outbox_event_retry_scheduled", { eventId, eventType: row.eventType, attempts: row.attempts, delayMs });
+  return toEvent(row);
+}
+
+/**
+ * Releases a prematurely-leased event back to pending for a bounded relative
+ * duration without consuming an attempt. Used when the dispatcher's monotonic
+ * retry guard detects that a backward system-clock jump made a backed-off
+ * event appear due early. No-ops (returns null) if the lease was lost.
+ */
+export async function deferRetry(eventId: string, leaseId: string, delayMs: number): Promise<OutboxEvent | null> {
+  const boundedDelayMs = boundRetryDelayMs(delayMs);
+  const runAt = sql`now() + (${boundedDelayMs}::text || ' milliseconds')::interval`;
+  const [row] = await db
+    .update(tlsOutboxEvents)
+    .set({
+      status: "pending",
+      runAt,
+      attempts: sql`GREATEST(${tlsOutboxEvents.attempts} - 1, 0)`,
+      leaseId: null,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      updatedAt: sql`now()`,
+    })
+    .where(and(eq(tlsOutboxEvents.id, eventId), eq(tlsOutboxEvents.leaseId, leaseId), eq(tlsOutboxEvents.status, "leased")))
+    .returning();
+  if (!row) return null;
+  logOutboxEvent("outbox_event_retry_scheduled", { eventId, eventType: row.eventType, attempts: row.attempts, delayMs: boundedDelayMs });
   return toEvent(row);
 }
 
