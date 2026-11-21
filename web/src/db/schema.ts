@@ -529,6 +529,7 @@ export const tlsWebhookSubscriptions = pgTable(
     eventTypes: text("event_types").array().notNull().default([]),
     description: text("description"),
     active: boolean("active").notNull().default(true),
+    paused: boolean("paused").notNull().default(false),
 
     createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),

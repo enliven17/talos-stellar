@@ -92,6 +92,7 @@ export async function emitWebhookEvent(event: WebhookEvent): Promise<void> {
         and(
           eq(tlsWebhookSubscriptions.talosId, event.talosId),
           eq(tlsWebhookSubscriptions.active, true),
+          eq(tlsWebhookSubscriptions.paused, false),
           sql`${event.type} = ANY(${tlsWebhookSubscriptions.eventTypes})`,
         ),
       );
@@ -207,6 +208,11 @@ export async function attemptDelivery(
 
   if (!subscription.active) {
     await markDeliveryFailed(deliveryId, "subscription_inactive", claimed.fencingToken);
+    return null;
+  }
+
+  if (subscription.paused) {
+    await markDeliveryFailed(deliveryId, "subscription_paused", claimed.fencingToken);
     return null;
   }
 
