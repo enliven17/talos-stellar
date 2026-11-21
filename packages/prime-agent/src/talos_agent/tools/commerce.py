@@ -23,6 +23,7 @@ from talos_agent.commerce_quote import (
     quote_expiry_iso,
 )
 from talos_agent.tools import context as _context
+from talos_agent.tools.permissions import DataScope, NetworkScope, ToolPermissions
 from talos_agent.tools.registry import tool
 
 if TYPE_CHECKING:
@@ -371,6 +372,96 @@ async def poll_service_result(job_id: str) -> dict:
         return {"status": "completed", "result": job_result}
 
     return {"status": status, "job_id": job_id}
+
+
+@tool(
+    "reconcile_purchases",
+    "Compare recent local purchases with API Stellar payment finality. "
+    "Read-only: does not submit or retry payments.",
+    permissions=ToolPermissions(
+        data=(DataScope.READ_LOCAL, DataScope.READ_REMOTE),
+        network=(NetworkScope.HTTP,),
+        hosts=("*.talos.xyz", "*.vercel.app", "localhost", "127.0.0.1"),
+    ),
+)
+async def reconcile_purchases(limit: int = 25) -> dict:
+    """Classify local purchases against their remote payment finality status."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 25:
+        return {"error": "limit must be an integer from 1 to 25"}
+
+    purchases = _deps().db.get_commerce_jobs(limit)
+    reconciled: list[dict] = []
+    for purchase in purchases:
+        job_id = purchase.get("job_id")
+        local_status = purchase["status"]
+        record = {
+            "job_id": job_id,
+            "talos_id": purchase["talos_id"],
+            "service_type": purchase["service_type"],
+            "local_status": local_status,
+            "payment_status": None,
+        }
+
+        if not job_id:
+            record.update(
+                classification="incomplete",
+                detail="Local purchase record has no job ID",
+            )
+        else:
+            remote = await _deps().api.get_commerce_payment_status(
+                purchase["talos_id"], job_id
+            )
+            payment_status = remote.get("finalityStatus")
+            record["payment_status"] = payment_status
+
+            if remote.get("error"):
+                if remote.get("http_status") == 404:
+                    classification = "contradictory"
+                    detail = "The API has no matching purchase"
+                else:
+                    classification = "unavailable"
+                    detail = "The API payment status could not be read"
+            elif payment_status is None and remote.get("registered") is False:
+                classification = "incomplete"
+                detail = "The API has no registered finality record"
+            elif local_status == "completed" and payment_status == "CONFIRMED":
+                classification = "consistent"
+                detail = "Local completion matches confirmed payment"
+            elif local_status == "failed" and payment_status in {"FAILED", "EXPIRED"}:
+                classification = "consistent"
+                detail = "Local failure matches terminal payment status"
+            elif local_status == "completed" or (
+                local_status == "failed" and payment_status == "CONFIRMED"
+            ):
+                classification = "contradictory"
+                detail = "Local purchase status conflicts with payment finality"
+            elif payment_status in {
+                "PENDING",
+                "CONFIRMING",
+                "CONFIRMED",
+                "FAILED",
+                "EXPIRED",
+            }:
+                classification = "incomplete"
+                detail = "Local purchase has not reached a matching terminal status"
+            else:
+                classification = "contradictory"
+                detail = "The API returned an unknown payment status"
+
+            record.update(classification=classification, detail=detail)
+
+        reconciled.append(record)
+
+    counts = {
+        classification: sum(
+            record["classification"] == classification for record in reconciled
+        )
+        for classification in ("consistent", "incomplete", "contradictory", "unavailable")
+    }
+    return {
+        "purchases": reconciled,
+        "summary": {"total": len(reconciled), **counts},
+    }
 
 
 @tool(

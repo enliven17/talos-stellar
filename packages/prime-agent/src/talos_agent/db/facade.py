@@ -133,6 +133,9 @@ class LocalDB:
     def count_pending_commerce_jobs(self) -> int:
         return self._commerce.count_pending_commerce_jobs()
 
+    def get_commerce_jobs(self, limit: int = 25) -> list[dict]:
+        return self._commerce.get_commerce_jobs(limit)
+
     # ── Approval Cache ────────────────────────────────────────────────────
 
     def cache_approval(self, approval_id: str, type_: str, title: str, description: str | None, amount: float | None) -> None:

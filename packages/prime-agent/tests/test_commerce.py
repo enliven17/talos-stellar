@@ -11,6 +11,7 @@ from talos_agent.tools.commerce import (
     discover_services,
     price_to_usdc_units,
     purchase_service,
+    reconcile_purchases,
 )
 
 
@@ -99,6 +100,88 @@ async def test_discover_services_handles_category(category, mock_api_client):
             category=category,
             target=None
         )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_purchases_classifies_without_submitting_payment():
+    purchases = [
+        {
+            "job_id": "confirmed",
+            "talos_id": "seller-a",
+            "service_type": "research",
+            "status": "completed",
+        },
+        {
+            "job_id": "still-pending",
+            "talos_id": "seller-b",
+            "service_type": "analysis",
+            "status": "pending",
+        },
+        {
+            "job_id": "contradiction",
+            "talos_id": "seller-c",
+            "service_type": "design",
+            "status": "completed",
+        },
+        {
+            "job_id": "unavailable",
+            "talos_id": "seller-d",
+            "service_type": "support",
+            "status": "pending",
+        },
+    ]
+    mock_db = MagicMock()
+    mock_db.get_commerce_jobs.return_value = purchases
+    mock_api = MagicMock()
+    mock_api.get_commerce_payment_status = AsyncMock(
+        side_effect=[
+            {"finalityStatus": "CONFIRMED"},
+            {"finalityStatus": "CONFIRMED"},
+            {"finalityStatus": "FAILED"},
+            {"error": "Payment status query failed", "http_status": 503},
+        ]
+    )
+    mock_api.submit_commerce = AsyncMock()
+
+    with patch("talos_agent.tools.commerce._api", mock_api), patch(
+        "talos_agent.tools.commerce._db", mock_db
+    ):
+        result = await reconcile_purchases()
+
+    assert [purchase["classification"] for purchase in result["purchases"]] == [
+        "consistent",
+        "incomplete",
+        "contradictory",
+        "unavailable",
+    ]
+    assert result["summary"] == {
+        "total": 4,
+        "consistent": 1,
+        "incomplete": 1,
+        "contradictory": 1,
+        "unavailable": 1,
+    }
+    mock_db.get_commerce_jobs.assert_called_once_with(25)
+    assert mock_api.get_commerce_payment_status.await_count == 4
+    assert mock_api.get_commerce_payment_status.await_args_list[0].args == (
+        "seller-a",
+        "confirmed",
+    )
+    mock_api.submit_commerce.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_purchases_rejects_out_of_range_limit():
+    mock_db = MagicMock()
+    mock_api = MagicMock()
+
+    with patch("talos_agent.tools.commerce._api", mock_api), patch(
+        "talos_agent.tools.commerce._db", mock_db
+    ):
+        result = await reconcile_purchases(26)
+
+    assert result == {"error": "limit must be an integer from 1 to 25"}
+    mock_db.get_commerce_jobs.assert_not_called()
 
 
 class TestPurchaseServiceSignPayment:

@@ -29,3 +29,13 @@ class CommerceRepo:
             "SELECT COUNT(*) as cnt FROM commerce_queue WHERE status = 'pending'"
         ).fetchone()
         return row["cnt"] if row else 0
+
+    def get_commerce_jobs(self, limit: int = 25) -> list[dict]:
+        rows = self._conn.execute(
+            """SELECT job_id, talos_id, service_type, status, created_at
+               FROM commerce_queue
+               ORDER BY id DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
