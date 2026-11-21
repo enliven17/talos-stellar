@@ -13,6 +13,8 @@ from talos_agent.scheduler.backoff import Backoff, DurableBackoff, _validate_jit
 from talos_agent.scheduler.policy import (
     IntervalRunDecision,
     MissedRunPolicy,
+    SchedulerConsistencyReport,
+    build_consistency_report,
     check_should_run,
     plan_interval_runs,
 )
@@ -41,6 +43,8 @@ __all__ = [
     "check_should_run",
     "IntervalRunDecision",
     "MissedRunPolicy",
+    "SchedulerConsistencyReport",
+    "build_consistency_report",
     "plan_interval_runs",
     # helpers
     "_is_stellar_public_key",

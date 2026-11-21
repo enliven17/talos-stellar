@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, time, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,9 @@ from talos_agent.scheduler import (
     run_dividend_distribution,
     run_loan_repayment,
 )
+from talos_agent.scheduler import runner as scheduler_runner
+from talos_agent.scheduler import tasks as scheduler_tasks
+from talos_agent.scheduler.tasks import _task_slot
 
 
 class FixedClock:
@@ -298,6 +302,180 @@ async def test_shutdown_stops_multiple_tasks():
     shutdown.set()
     await asyncio.gather(*tasks)
     assert sorted(stopped) == ["A", "B", "C"]
+
+
+@pytest.mark.asyncio
+async def test_task_slots_bound_concurrent_work():
+    slots = asyncio.BoundedSemaphore(2)
+    shutdown = asyncio.Event()
+    release = asyncio.Event()
+    both_started = asyncio.Event()
+    active = 0
+    peak_active = 0
+
+    async def worker():
+        nonlocal active, peak_active
+        async with _task_slot(slots, shutdown) as acquired:
+            assert acquired
+            active += 1
+            peak_active = max(peak_active, active)
+            if active == 2:
+                both_started.set()
+            await release.wait()
+            active -= 1
+
+    workers = [asyncio.create_task(worker()) for _ in range(5)]
+    await asyncio.wait_for(both_started.wait(), timeout=1)
+    assert active == 2
+    release.set()
+    await asyncio.gather(*workers)
+
+    assert peak_active == 2
+    assert active == 0
+
+
+@pytest.mark.asyncio
+async def test_task_slot_shutdown_and_cancellation_release_capacity():
+    slots = asyncio.BoundedSemaphore(1)
+    holder_entered = asyncio.Event()
+    holder_shutdown = asyncio.Event()
+    waiting_shutdown = asyncio.Event()
+
+    async def hold_slot():
+        async with _task_slot(slots, holder_shutdown) as acquired:
+            assert acquired
+            holder_entered.set()
+            await asyncio.Event().wait()
+
+    async def wait_for_slot():
+        async with _task_slot(slots, waiting_shutdown) as acquired:
+            return acquired
+
+    holder = asyncio.create_task(hold_slot())
+    await holder_entered.wait()
+    waiter = asyncio.create_task(wait_for_slot())
+    await asyncio.sleep(0)
+    waiting_shutdown.set()
+    assert await asyncio.wait_for(waiter, timeout=1) is False
+
+    holder.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await holder
+
+    async with _task_slot(slots, asyncio.Event()) as acquired:
+        assert acquired
+
+
+@pytest.mark.asyncio
+async def test_polling_wait_does_not_hold_task_slot(monkeypatch):
+    class NoWaitBackoff:
+        def __init__(self, **kwargs):
+            pass
+
+        def wait_remaining(self):
+            return 0
+
+        def success(self):
+            pass
+
+        def delay_until_next_attempt(self):
+            return 3600
+
+    monkeypatch.setattr(scheduler_tasks, "DurableBackoff", NoWaitBackoff)
+    shutdown = asyncio.Event()
+    slots = asyncio.BoundedSemaphore(1)
+    poll_completed = asyncio.Event()
+    api = MagicMock()
+    api.get_approvals = AsyncMock(return_value=[])
+
+    async def get_pending_jobs():
+        poll_completed.set()
+        return []
+
+    api.get_pending_jobs = AsyncMock(side_effect=get_pending_jobs)
+    settings = MagicMock(polling_interval=1, talos_id="agent-1")
+
+    polling = asyncio.create_task(
+        scheduler_tasks.polling_task(
+            shutdown_event=shutdown,
+            settings=settings,
+            api=api,
+            db=MagicMock(),
+            talos_config={},
+            job_effect_store=None,
+            task_slots=slots,
+        )
+    )
+    await asyncio.wait_for(poll_completed.wait(), timeout=1)
+
+    assert await asyncio.wait_for(slots.acquire(), timeout=1)
+    slots.release()
+    shutdown.set()
+    await asyncio.wait_for(polling, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_task_list_gets_a_distinct_limiter_per_agent(monkeypatch):
+    observed_slots = []
+    task_names = (
+        "activity_flush_task",
+        "agent_cycle_task",
+        "dividend_distribution_task",
+        "heartbeat_task",
+        "job_heartbeat_task",
+        "learning_cycle_task",
+        "loan_repayment_task",
+        "polling_task",
+        "telemetry_log_task",
+    )
+
+    for task_name in task_names:
+        async def capture(**kwargs):
+            observed_slots.append(
+                (kwargs["settings"].talos_id, kwargs.get("task_slots"))
+            )
+
+        monkeypatch.setattr(scheduler_tasks, task_name, capture)
+
+    def build_tasks(agent_id):
+        return scheduler_runner._build_task_list(
+            shutdown_event=asyncio.Event(),
+            shutdown_drain_complete=asyncio.Event(),
+            settings=SimpleNamespace(
+                scheduler_max_concurrent_tasks=2,
+                talos_id=agent_id,
+            ),
+            api=object(),
+            db=object(),
+            talos_config={},
+            agent_lock=asyncio.Lock(),
+            tools=object(),
+            stellar=object(),
+            policy_engine=object(),
+            policy_middleware=object(),
+            ensure_browser_healthy=object(),
+            effective_clock=object(),
+            job_effect_store=None,
+            job_effect_dispatcher=None,
+            telegram_queue_worker=None,
+            adapter_health_reporter=object(),
+        )
+
+    first_agent_tasks = build_tasks("agent-1")
+    await asyncio.gather(*first_agent_tasks)
+    second_agent_tasks = build_tasks("agent-2")
+    await asyncio.gather(*second_agent_tasks)
+
+    first_agent_slots = [slots for agent, slots in observed_slots if agent == "agent-1"]
+    second_agent_slots = [slots for agent, slots in observed_slots if agent == "agent-2"]
+    first_limiter_ids = {id(slots) for slots in first_agent_slots if slots is not None}
+    second_limiter_ids = {id(slots) for slots in second_agent_slots if slots is not None}
+
+    assert len(first_limiter_ids) == 1
+    assert len(second_limiter_ids) == 1
+    assert first_limiter_ids.isdisjoint(second_limiter_ids)
+    assert first_agent_slots.count(None) == 2
+    assert second_agent_slots.count(None) == 2
 
 
 # ── Dividend distribution helper tests ────────────────────────────────────────

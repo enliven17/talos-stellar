@@ -183,6 +183,22 @@ Traces include per-rule and per-condition steps.  Secret-shaped fields
 `[redacted]` and never logged or returned in cleartext.  BLOCKER
 short-circuits still emit the full trace up to the denying rule.
 
+### Dry-run policy coverage
+
+Simulation traces can be aggregated without exposing action parameters:
+
+```python
+report = sim.coverage_report(simulate_batch_results)
+print(report.to_dict())
+```
+
+Coverage is based only on rule steps present in the redacted traces. Each
+observed rule reports its `matched` and `not_matched` branches as exercised or
+unexercised. A rule omitted from every trace, including a rule after a blocker
+short-circuit, is listed under `unobserved_rules` and is not counted as tested.
+This prevents a partial dry-run cycle from falsely claiming coverage for
+rules it never reached.
+
 ## Observability
 
 The engine exposes counters via `engine.metrics`:

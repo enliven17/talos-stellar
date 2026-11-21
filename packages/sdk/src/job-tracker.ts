@@ -328,6 +328,7 @@ function computeEventFingerprint(
  *   and concludes with the final result event.
  * - On `const { value, done } = await tracker.next()`: when `done: true`, `value` is the final `CommerceJob`.
  * - Property `tracker.result`: a Promise resolving to the final `CommerceJob`.
+ * Terminal states stop the event stream and polling timers before final result lookup.
  */
 export class JobTracker implements AsyncIterableIterator<TrackJobEvent, CommerceJob> {
   public readonly jobId: string;
@@ -356,6 +357,7 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
   // Lifecycle flags
   private isTerminal = false;
   private isClosed = false;
+  private isCleanedUp = false;
   private isPolling = false;
   private isFallbackEngaged = false;
   private trackerState: JobTrackerState = "connecting";
@@ -455,17 +457,19 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
   }
 
   async return(value?: CommerceJob | PromiseLike<CommerceJob>): Promise<IteratorResult<TrackJobEvent, CommerceJob>> {
+    this.isClosed = true;
     this.cleanup();
     const resolved = await Promise.resolve(value as CommerceJob);
     return { done: true, value: resolved };
   }
 
   async throw(e?: unknown): Promise<IteratorResult<TrackJobEvent, CommerceJob>> {
+    this.isClosed = true;
     this.cleanup();
     throw e;
   }
 
-  /** Manually abort tracking. Cleans up streams, polling, and timers. */
+  /** Manually abort tracking. Cleans up streams, polling, and timers; safe to repeat. */
   abort(reason?: unknown): void {
     const err = reason instanceof Error ? reason : new JobTrackAbortedError(this.jobId);
     this.handleAbort(err);
@@ -800,20 +804,27 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
     message?: string | null;
   }): Promise<void> {
     if (this.isTerminal) return;
+    this.isTerminal = true;
+    this.cleanup();
 
     let finalJob: CommerceJob;
-    try {
-      if (
-        details.job &&
-        details.job.id === this.jobId &&
-        details.job.status === "completed" &&
-        details.job.talosId !== undefined &&
-        details.job.requesterTalosId !== undefined &&
-        details.job.serviceName !== undefined &&
-        details.job.amount !== undefined &&
-        details.job.createdAt !== undefined &&
-        details.job.updatedAt !== undefined
-      ) {
+    if (details.job && details.job.id && details.result !== undefined) {
+      finalJob = {
+        talosId: details.job.talosId ?? "",
+        requesterTalosId: details.job.requesterTalosId ?? "",
+        serviceName: details.job.serviceName ?? "",
+        amount: details.job.amount ?? "0",
+        createdAt: details.job.createdAt ?? new Date().toISOString(),
+        updatedAt: details.job.updatedAt ?? new Date().toISOString(),
+        ...details.job,
+        id: this.jobId,
+        status: details.status,
+        result: details.result ?? details.job.result,
+      };
+    } else {
+      try {
+        finalJob = await this.client.getJobResult(this.jobId);
+      } catch {
         finalJob = {
           ...details.job,
           id: this.jobId,
@@ -855,7 +866,6 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
     this.enqueue({ kind: "value", value: resultEvent });
     this.enqueue({ kind: "return", value: finalJob });
     this.resolveResult(finalJob);
-    this.cleanup();
   }
 
   private async failJob(status: string, job?: any): Promise<void> {
@@ -954,6 +964,8 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
   }
 
   private cleanup(): void {
+    if (this.isCleanedUp) return;
+    this.isCleanedUp = true;
     if (this.stream) {
       try {
         this.stream.close();

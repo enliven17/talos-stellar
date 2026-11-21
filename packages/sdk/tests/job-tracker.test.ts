@@ -511,6 +511,35 @@ describe("TalosClient.trackJob (#1017)", () => {
   // ── 5. Abort and cleanup ────────────────────────────────────────────────────
 
   describe("Abort and resource cleanup", () => {
+    it("does not restart polling after repeated iterator stops", async () => {
+      let notifyStreamFetch!: () => void;
+      const streamFetchStarted = new Promise<void>((resolve) => {
+        notifyStreamFetch = resolve;
+      });
+      const sseBody = new ReadableStream({ start() {} });
+      const mockFetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/progress")) {
+          notifyStreamFetch();
+          return Promise.resolve(sseResponse(sseBody));
+        }
+        return Promise.resolve(jsonResponse(makeJob("pending")));
+      });
+      const client = new TalosClient({
+        baseUrl: "https://api.example.com",
+        fetch: mockFetch,
+      });
+      const tracker = client.trackJob("job-1017");
+
+      await streamFetchStarted;
+      await Promise.resolve();
+      await tracker.return();
+      await tracker.return();
+      await vi.runAllTimersAsync();
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
     it("cleans up streams and timers when caller signal aborts", async () => {
       // A fetch that keeps returning pending indefinitely
       const mockFetch = vi.fn().mockImplementation((url: string) => {
@@ -630,6 +659,72 @@ describe("TalosClient.trackJob (#1017)", () => {
   // ── 7. Typed terminal outcomes and errors ───────────────────────────────────
 
   describe("Typed terminal outcomes and errors", () => {
+    it("releases stream readers and timers before resolving a terminal result", async () => {
+      const encoder = new TextEncoder();
+      let readerCancelCount = 0;
+      const sseBody = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode('event: done\ndata: {"status":"completed"}\n\n'),
+          );
+        },
+        cancel() {
+          readerCancelCount += 1;
+        },
+      });
+
+      let resolveFinalResponse!: (response: Response) => void;
+      const finalResponse = new Promise<Response>((resolve) => {
+        resolveFinalResponse = resolve;
+      });
+      let notifyFinalFetchStarted!: () => void;
+      const finalFetchStarted = new Promise<void>((resolve) => {
+        notifyFinalFetchStarted = resolve;
+      });
+      let resultFetchCount = 0;
+      const mockFetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/progress")) {
+          return Promise.resolve(sseResponse(sseBody));
+        }
+        if (url.includes("/result")) {
+          resultFetchCount += 1;
+          notifyFinalFetchStarted();
+          return finalResponse;
+        }
+        return Promise.reject(new Error(`Unexpected url: ${url}`));
+      });
+      const client = new TalosClient({
+        baseUrl: "https://api.example.com",
+        fetch: mockFetch,
+      });
+      const tracker = client.trackJob("job-1017", { timeoutMs: 10_000 });
+      const events: TrackJobEvent[] = [];
+      const iteration = (async () => {
+        for await (const event of tracker) {
+          events.push(event);
+        }
+      })();
+
+      await finalFetchStarted;
+      for (let i = 0; sseBody.locked && i < 10; i += 1) {
+        await Promise.resolve();
+      }
+      const resourcesReleasedBeforeLookupFinished =
+        readerCancelCount === 1 &&
+        !sseBody.locked &&
+        vi.getTimerCount() === 0;
+
+      resolveFinalResponse(
+        jsonResponse(makeJob("completed", null, { answer: 42 })),
+      );
+      await vi.runAllTimersAsync();
+      await iteration;
+
+      expect(resourcesReleasedBeforeLookupFinished).toBe(true);
+      expect(resultFetchCount).toBe(1);
+      expect(events.at(-1)?.type).toBe("result");
+    });
+
     it("throws JobFailedError when job reaches failed status", async () => {
       const sseBody = sseStream(
         'event: done\ndata: {"id":"job-1017","status":"failed"}\n\n',
