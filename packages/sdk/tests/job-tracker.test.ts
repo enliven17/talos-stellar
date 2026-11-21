@@ -279,6 +279,171 @@ describe("TalosClient.trackJob (#1017)", () => {
     });
   });
 
+  describe("Observable state transitions", () => {
+    it("emits connecting, streaming, polling, and terminal during fallback", async () => {
+      const streamBody = sseStream(
+        'event: snapshot\ndata: {"id":"job-1017","status":"pending","progress":{"percent":30,"stage":"working","updatedAt":"2026-01-01T00:00:01Z"}}\n\n',
+      );
+      let pollCount = 0;
+      const mockFetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/progress")) {
+          return Promise.resolve(sseResponse(streamBody));
+        }
+        pollCount += 1;
+        return Promise.resolve(
+          jsonResponse(
+            pollCount === 1
+              ? makeJob("pending", { percent: 30, stage: "working", updatedAt: "2026-01-01T00:00:01Z" })
+              : makeJob("completed", { percent: 100, stage: "completed" }, { answer: 42 }),
+          ),
+        );
+      });
+      const client = new TalosClient({
+        baseUrl: "https://api.example.com",
+        fetch: mockFetch,
+      });
+      const states: string[] = [];
+      const tracker = client.trackJob("job-1017", {
+        intervalMs: 50,
+        maxIntervalMs: 50,
+        staleAfterMs: 0,
+        onStateChange: ({ state }) => states.push(state),
+      });
+
+      await vi.runAllTimersAsync();
+      const finalJob = await tracker.result;
+
+      expect(states).toEqual(["connecting", "streaming", "polling", "terminal"]);
+      expect(finalJob.status).toBe("completed");
+      expect(finalJob.result).toEqual({ answer: 42 });
+    });
+
+    it("reports stale at the configured inactivity boundary and recovers on fresh progress", async () => {
+      let pollCount = 0;
+      const mockFetch = vi.fn().mockImplementation(() => {
+        pollCount += 1;
+        if (pollCount === 1) {
+          return Promise.resolve(jsonResponse(
+            makeJob("pending", { percent: 10, stage: "working", updatedAt: "2026-01-01T00:00:01Z" }),
+          ));
+        }
+        if (pollCount === 2) {
+          return Promise.resolve(jsonResponse(
+            makeJob("pending", { percent: 50, stage: "working", updatedAt: "2026-01-01T00:00:02Z" }),
+          ));
+        }
+        return Promise.resolve(jsonResponse(
+          makeJob("completed", { percent: 100, stage: "completed" }, { answer: 42 }),
+        ));
+      });
+      const client = new TalosClient({
+        baseUrl: "https://api.example.com",
+        fetch: mockFetch,
+      });
+      const states: string[] = [];
+      const tracker = client.trackJob("job-1017", {
+        preferSse: false,
+        intervalMs: 100,
+        maxIntervalMs: 100,
+        backoffMultiplier: 1,
+        staleAfterMs: 50,
+        onStateChange: ({ state }) => states.push(state),
+      });
+
+      await vi.runAllTimersAsync();
+      await tracker.result;
+
+      expect(states).toEqual([
+        "polling",
+        "stale",
+        "polling",
+        "stale",
+        "terminal",
+      ]);
+    });
+
+    it("returns the same final job through SSE and polling", async () => {
+      const finalJob = makeJob(
+        "completed",
+        { percent: 100, stage: "completed" },
+        { answer: 42 },
+      );
+      const streamClient = new TalosClient({
+        baseUrl: "https://api.example.com",
+        fetch: vi.fn().mockResolvedValue(
+          sseResponse(sseStream(`event: done\ndata: ${JSON.stringify(finalJob)}\n\n`)),
+        ),
+      });
+      const pollClient = new TalosClient({
+        baseUrl: "https://api.example.com",
+        fetch: vi.fn().mockResolvedValue(jsonResponse(finalJob)),
+      });
+      const streamedTracker = streamClient.trackJob("job-1017", { staleAfterMs: 0 });
+      const polledTracker = pollClient.trackJob("job-1017", {
+        preferSse: false,
+        staleAfterMs: 0,
+      });
+
+      await vi.runAllTimersAsync();
+      const streamedResult = await streamedTracker.result;
+      const polledResult = await polledTracker.result;
+
+      expect(streamedResult).toEqual(finalJob);
+      expect(polledResult).toEqual(finalJob);
+      expect(streamedResult).toEqual(polledResult);
+    });
+
+    it("logs state callback errors without interrupting tracking", async () => {
+      const finalJob = makeJob("completed");
+      const logger = {
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      };
+      const client = new TalosClient({
+        baseUrl: "https://api.example.com",
+        fetch: vi.fn().mockResolvedValue(jsonResponse(finalJob)),
+      });
+      const tracker = client.trackJob("job-1017", {
+        preferSse: false,
+        staleAfterMs: 0,
+        logger,
+        onStateChange: () => {
+          throw new Error("observer failed");
+        },
+      });
+
+      await vi.runAllTimersAsync();
+
+      await expect(tracker.result).resolves.toEqual(finalJob);
+      expect(logger.error).toHaveBeenCalledWith(
+        "track_job:state_handler_error",
+        expect.objectContaining({ state: "polling" }),
+      );
+    });
+
+    it("rejects a failed final read instead of returning a fabricated job", async () => {
+      const streamResponse = sseResponse(
+        sseStream('event: done\ndata: {"id":"job-1017","status":"completed","result":{"answer":42}}\n\n'),
+      );
+      const finalReadError = new Error("final job read failed");
+      const client = new TalosClient({
+        baseUrl: "https://api.example.com",
+        fetch: vi.fn().mockImplementation((url: string) =>
+          url.includes("/progress")
+            ? Promise.resolve(streamResponse)
+            : Promise.reject(finalReadError),
+        ),
+      });
+      const tracker = client.trackJob("job-1017", { staleAfterMs: 0 });
+
+      await vi.runAllTimersAsync();
+
+      await expect(tracker.result).rejects.toThrow("final job read failed");
+      expect(tracker.state).toBe("terminal");
+    });
+  });
+
   // ── 4. Mid-stream disconnect and seamless polling recovery ──────────────────
 
   describe("Mid-stream disconnect with deduplication", () => {

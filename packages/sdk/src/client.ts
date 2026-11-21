@@ -101,6 +101,8 @@ import {
   type TrackJobOptions,
   type TrackJobEvent,
   type TrackJobEventType,
+  type JobTrackerState,
+  type JobTrackerStateChange,
   type JobTerminalStatus,
   type JobTerminalOutcome,
   JobTerminalError,
@@ -131,6 +133,8 @@ export type {
   TrackJobOptions,
   TrackJobEvent,
   TrackJobEventType,
+  JobTrackerState,
+  JobTrackerStateChange,
   JobTerminalStatus,
   JobTerminalOutcome,
 };
@@ -2449,5 +2453,4 @@ export class TalosClient {
     );
   }
 }
-
 

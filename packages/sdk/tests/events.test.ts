@@ -69,6 +69,23 @@ afterEach(() => {
 // ── Happy path ─────────────────────────────────────────────────────────────────
 
 describe("TalosEventStream — happy path", () => {
+  it("emits connection state transitions", async () => {
+    const body = sseStream("data: ready\n\n");
+    const stream = new TalosEventStream("http://localhost", {
+      fetch: vi.fn().mockResolvedValue(sseResponse(body)),
+      heartbeatIntervalMs: 0,
+      maxReconnectAttempts: 0,
+    });
+    const states: string[] = [];
+    stream.on("state", (state) => states.push(state));
+
+    stream.connect();
+    await vi.runAllTimersAsync();
+
+    expect(states).toEqual(["connecting", "open", "closed"]);
+    expect(stream.connectionState).toBe("closed");
+  });
+
   it("receives a single typed event and delivers it to handlers", async () => {
     const body = sseStream(
       'id: evt-1\nevent: activity.created\ndata: {"foo":1}\n\n',

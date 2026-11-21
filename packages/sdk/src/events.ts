@@ -224,6 +224,17 @@ export type TalosStreamErrorHandler = (error: unknown, attempt: number) => void;
 /** Callback invoked when the stream closes permanently (abort or budget exhausted). */
 export type TalosStreamCloseHandler = () => void;
 
+/** Connection lifecycle states exposed by the event stream. */
+export type TalosStreamState =
+  | "idle"
+  | "connecting"
+  | "open"
+  | "reconnecting"
+  | "closed";
+
+/** Callback invoked when the event stream changes connection state. */
+export type TalosStreamStateHandler = (state: TalosStreamState) => void;
+
 // ── Duplicate suppression ──────────────────────────────────────────────────────
 
 /**
@@ -353,7 +364,7 @@ export interface TalosEventStreamOptions {
 
 // ── Internal state ─────────────────────────────────────────────────────────────
 
-type StreamState = "idle" | "connecting" | "open" | "reconnecting" | "closed";
+type StreamState = TalosStreamState;
 const StreamState = {
   Idle: "idle" as StreamState,
   Connecting: "connecting" as StreamState,
@@ -416,6 +427,7 @@ export class TalosEventStream {
   private readonly eventHandlers = new Set<TalosEventHandler>();
   private readonly errorHandlers = new Set<TalosStreamErrorHandler>();
   private readonly closeHandlers = new Set<TalosStreamCloseHandler>();
+  private readonly stateHandlers = new Set<TalosStreamStateHandler>();
 
   // schema version negotiation result from the most recent connection
   private _schemaVersionInfo: SchemaVersionNegotiationResult | undefined;
@@ -455,12 +467,15 @@ export class TalosEventStream {
   on(event: "event", handler: TalosEventHandler): this;
   on(event: "error", handler: TalosStreamErrorHandler): this;
   on(event: "close", handler: TalosStreamCloseHandler): this;
+  on(event: "state", handler: TalosStreamStateHandler): this;
   on(event: string, handler: unknown): this {
     if (event === "event") this.eventHandlers.add(handler as TalosEventHandler);
     else if (event === "error")
       this.errorHandlers.add(handler as TalosStreamErrorHandler);
     else if (event === "close")
       this.closeHandlers.add(handler as TalosStreamCloseHandler);
+    else if (event === "state")
+      this.stateHandlers.add(handler as TalosStreamStateHandler);
     return this;
   }
 
@@ -468,6 +483,7 @@ export class TalosEventStream {
   off(event: "event", handler: TalosEventHandler): this;
   off(event: "error", handler: TalosStreamErrorHandler): this;
   off(event: "close", handler: TalosStreamCloseHandler): this;
+  off(event: "state", handler: TalosStreamStateHandler): this;
   off(event: string, handler: unknown): this {
     if (event === "event")
       this.eventHandlers.delete(handler as TalosEventHandler);
@@ -475,6 +491,8 @@ export class TalosEventStream {
       this.errorHandlers.delete(handler as TalosStreamErrorHandler);
     else if (event === "close")
       this.closeHandlers.delete(handler as TalosStreamCloseHandler);
+    else if (event === "state")
+      this.stateHandlers.delete(handler as TalosStreamStateHandler);
     return this;
   }
 
@@ -501,7 +519,7 @@ export class TalosEventStream {
   }
 
   /** Current connection state, primarily for testing and observability. */
-  get connectionState(): string {
+  get connectionState(): TalosStreamState {
     return this.state;
   }
 
@@ -965,7 +983,18 @@ export class TalosEventStream {
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   private _setState(s: StreamState): void {
+    if (this.state === s) return;
     this.state = s;
+    for (const handler of this.stateHandlers) {
+      try {
+        handler(s);
+      } catch (error) {
+        this.opts.logger?.error("sse:state_handler_error", {
+          state: s,
+          errorType: error instanceof Error ? error.constructor.name : typeof error,
+        });
+      }
+    }
   }
 
   private _emitError(err: unknown, attempt: number): void {
