@@ -190,7 +190,8 @@ class TestDecisionTraceBoundary:
         result = engine.evaluate(ActionSpec("", {}))
         assert result.trace is not None
         assert result.trace.action == ""
-        assert result.decision == PolicyDecision.APPROVE
+        assert result.decision == PolicyDecision.DENY
+        assert "Unknown policy action category" in result.evidence[0]
 
     def test_empty_policies_trace(self):
         engine = PolicyEngine()

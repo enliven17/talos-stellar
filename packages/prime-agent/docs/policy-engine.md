@@ -46,6 +46,14 @@ ActionSpec  ──→  PolicyEngine.evaluate()  ──→  PolicyResult
 - **ESCALATE**: Action requires human approval via `request_approval`.
 - **DENY**: Action is blocked; the engine returns an error.
 
+Action names must be registered with the policy engine. Gated and read-only
+bypass actions retain their current categories, and existing registered tools
+without an explicit policy category retain their current behavior. Any name
+outside the registered action catalog is denied with an
+`Unknown policy action category` reason before rule evaluation. Known actions
+continue to be approved when the engine is disabled. New tools must be added
+to the action catalog before they can execute through a policy-enabled registry.
+
 ## Severities
 
 - **BLOCKER**: Hard stop. First match short-circuits with DENY.
@@ -148,8 +156,9 @@ export POLICY_ENGINE_ENABLED=false
 # or remove/comment the config key
 ```
 
-The engine is backwards-compatible: when disabled, all actions proceed as
-before.  Inline checks in individual tools continue to operate independently.
+When disabled, known actions retain their prior behavior and proceed without
+policy evaluation. Unsupported action names remain denied. Inline checks in
+individual tools continue to operate independently.
 
 
 ## Decision traces
