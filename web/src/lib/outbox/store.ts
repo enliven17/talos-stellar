@@ -204,6 +204,22 @@ export async function pruneDispatched(retentionDays: number = outboxConfig.reten
   return rows.length;
 }
 
+/** Admin preview: reports candidate counts and oldest retained timestamp for pruning. */
+export async function previewPruneDispatched(retentionDays: number = outboxConfig.retentionDays): Promise<{ count: number; oldestRetainedTimestamp: Date | null }> {
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+
+  const result = await db
+    .select({ count: count(), oldest: sql`min(${tlsOutboxEvents.dispatchedAt})` })
+    .from(tlsOutboxEvents)
+    .where(and(eq(tlsOutboxEvents.status, "dispatched"), lt(tlsOutboxEvents.dispatchedAt, cutoff)));
+
+  const row = result[0];
+  return {
+    count: Number(row.count),
+    oldestRetainedTimestamp: row.oldest ? new Date(row.oldest) : null,
+  };
+}
+
 // ─── Admin inspection ──────────────────────────────────────────────
 
 export interface ListEventsFilter {

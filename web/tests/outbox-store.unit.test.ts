@@ -137,6 +137,20 @@ describe("outbox/store — pruneDispatched", () => {
   });
 });
 
+describe("outbox/store — previewPruneDispatched", () => {
+  it("returns counts and oldest timestamp for dispatched events past retention", async () => {
+    mockDb.select.mockReturnValue(chainable([{ count: "2", oldest: "2026-01-01T00:00:00Z" }]));
+    const result = await store.previewPruneDispatched(7);
+    expect(result).toEqual({ count: 2, oldestRetainedTimestamp: new Date("2026-01-01T00:00:00Z") });
+  });
+
+  it("returns null for oldestRetainedTimestamp when no rows found", async () => {
+    mockDb.select.mockReturnValue(chainable([{ count: "0", oldest: null }]));
+    const result = await store.previewPruneDispatched(7);
+    expect(result).toEqual({ count: 0, oldestRetainedTimestamp: null });
+  });
+});
+
 describe("outbox/store — listEvents / getEvent", () => {
   it("computes nextCursor when there's an extra row", async () => {
     const rows = Array.from({ length: 51 }, (_, i) => ({ id: `evt_${i}`, createdAt: new Date(Date.now() - i * 1000) }));
