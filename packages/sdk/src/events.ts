@@ -408,6 +408,7 @@ export class TalosEventStream {
   // heartbeat watchdog
   private heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
   private heartbeatMisses = 0;
+  private reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 
   // internal abort for this stream instance
   private readonly controller = new AbortController();
@@ -491,12 +492,19 @@ export class TalosEventStream {
     void this.run();
   }
 
-  /** Permanently close the stream. No reconnects will be attempted after this. */
+  /**
+   * Permanently close the stream. No reconnects will be attempted after this.
+   * Safe to call repeatedly; the active reader and timers are cancelled.
+   */
   close(): void {
     if (this.state === StreamState.Closed) return;
     this._setState(StreamState.Closed);
     this.controller.abort();
     this._clearHeartbeatTimer();
+    const reader = this.reader;
+    if (reader) {
+      void reader.cancel().catch(() => undefined);
+    }
     this._emitClose();
   }
 
@@ -613,6 +621,8 @@ export class TalosEventStream {
       signal: this.controller.signal,
     });
 
+    if (this.state === StreamState.Closed) return;
+
     if (!res.ok) {
       const body = await res.text().catch(() => "(unreadable)");
       throw new TalosStreamError(res.status, body, url);
@@ -655,6 +665,7 @@ export class TalosEventStream {
 
   private async _readStream(body: ReadableStream<Uint8Array>): Promise<void> {
     const reader = body.getReader();
+    this.reader = reader;
     const decoder = new TextDecoder();
     let buffer = "";
     let firstChunk = true;
@@ -669,7 +680,6 @@ export class TalosEventStream {
     try {
       while (true) {
         if (this.state === StreamState.Closed) {
-          reader.cancel().catch(() => undefined);
           return;
         }
 
@@ -872,6 +882,9 @@ export class TalosEventStream {
         }
       }
     } finally {
+      if (this.reader === reader) {
+        this.reader = undefined;
+      }
       reader.releaseLock();
     }
   }
@@ -953,11 +966,16 @@ export class TalosEventStream {
       return Promise.reject(new Error("Stream closed during sleep"));
     }
     return new Promise((resolve, reject) => {
-      const t = setTimeout(resolve, ms);
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const onAbort = () => {
-        clearTimeout(t);
+        if (timer !== undefined) clearTimeout(timer);
+        this.controller.signal.removeEventListener("abort", onAbort);
         reject(new Error("Stream closed during sleep"));
       };
+      timer = setTimeout(() => {
+        this.controller.signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
       this.controller.signal.addEventListener("abort", onAbort, { once: true });
     });
   }
