@@ -63,7 +63,7 @@
 //!
 //! ## Version
 //!
-//! `CONTRACT_VERSION = (1, 2, 0)`
+//! `CONTRACT_VERSION = (1, 3, 0)`
 
 #![no_std]
 
@@ -176,6 +176,34 @@ pub struct EpochRecord {
     pub status: EpochStatus,
 }
 
+/// Per-epoch unclaimed liability snapshot returned by
+/// [`TalosDividends::get_epoch_liability`].
+///
+/// All amount fields use the same unit as `EpochRecord::total_amount`
+/// (stroops or equivalent atomic units).  The `exists` field lets
+/// callers distinguish a missing epoch from an epoch with zero claims,
+/// without a separate round-trip.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EpochLiability {
+    /// Total amount committed for this epoch (0 if epoch does not exist).
+    pub total_amount: i128,
+    /// Amount already claimed by patrons (0 if epoch does not exist).
+    pub claimed_amount: i128,
+    /// Remaining unclaimed amount: `total_amount - claimed_amount`.
+    pub unclaimed_amount: i128,
+    /// `true` when the epoch exists in storage.
+    pub exists: bool,
+    /// `true` when the epoch exists and no patron has claimed yet
+    /// (`claimed_amount == 0`).
+    pub is_empty_round: bool,
+    /// `true` when every distributable unit has been claimed
+    /// (`claimed_amount == total_amount`).
+    pub is_fully_claimed: bool,
+    /// Current lifecycle status of the epoch.
+    pub status: EpochStatus,
+}
+
 /// Persistent storage key enumeration.
 #[contracttype]
 #[derive(Clone)]
@@ -216,7 +244,7 @@ const MIN_EPOCH_AMOUNT: i128 = 1;
 /// - **major** — incompatible ABI change
 /// - **minor** — backwards-compatible new entry-point or field
 /// - **patch** — bug-fix with no observable ABI change
-pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 2, 0);
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 3, 0);
 
 /// Expected `INTERFACE_ID` of the configured `RegistryContract`, mirroring
 /// the bytes published by `talos_registry::INTERFACE_ID` (namespace
@@ -240,7 +268,7 @@ pub const INTERFACE_ID: [u8; 32] = [
     0x54, 0x61, 0x6C, 0x6F, 0x73, 0x44, 0x69, 0x76, // "TalosDiv"
     0x69, 0x64, 0x65, 0x6E, 0x64, 0x73, 0x00, 0x00, // "idends" + zero pad
     0x00, 0x00, 0x00, 0x01, // major = 1
-    0x00, 0x00, 0x00, 0x02, // minor = 2
+    0x00, 0x00, 0x00, 0x03, // minor = 3
     0x00, 0x00, 0x00, 0x00, // patch = 0
     0x00, 0x00, 0x00, 0x00, // reserved
 ];
@@ -252,6 +280,7 @@ pub fn features_list() -> &'static [&'static str] {
         "expiry_recovery",
         "rounding_dust",
         "interface_query",
+        "unclaimed_liabilities",
     ]
 }
 
@@ -828,6 +857,75 @@ impl TalosDividends {
         env.storage()
             .persistent()
             .get(&DataKey::RoundingDust(talos_id, epoch_id))
+    }
+
+    /// Return the unclaimed liability snapshot for a single epoch.
+    ///
+    /// This is an O(1) read independent of the number of recipients.
+    /// If the epoch does not exist, `exists` is `false` and all amounts
+    /// are zero.  When `is_empty_round` is `true` the epoch is live but
+    /// no patron has claimed yet; when `is_fully_claimed` is `true` every
+    /// distributable unit has been claimed.
+    pub fn get_epoch_liability(env: Env, talos_id: u32, epoch_id: u64) -> EpochLiability {
+        match env
+            .storage()
+            .persistent()
+            .get::<_, EpochRecord>(&DataKey::Epoch(talos_id, epoch_id))
+        {
+            None => EpochLiability {
+                total_amount: 0,
+                claimed_amount: 0,
+                unclaimed_amount: 0,
+                exists: false,
+                is_empty_round: false,
+                is_fully_claimed: false,
+                status: EpochStatus::Active,
+            },
+            Some(record) => {
+                let unclaimed = record.total_amount - record.claimed_amount;
+                EpochLiability {
+                    total_amount: record.total_amount,
+                    claimed_amount: record.claimed_amount,
+                    unclaimed_amount: unclaimed,
+                    exists: true,
+                    is_empty_round: record.claimed_amount == 0,
+                    is_fully_claimed: record.claimed_amount == record.total_amount,
+                    status: record.status,
+                }
+            }
+        }
+    }
+
+    /// Return the total unclaimed liability across all active epochs for
+    /// `talos_id`.
+    ///
+    /// Iterates from epoch 1 to `next_epoch_id - 1`, summing the unclaimed
+    /// amounts of epochs whose status is [`EpochStatus::Active`].
+    /// Recovered epochs are excluded because their unclaimed funds have
+    /// already been swept back to the admin.  The iteration is bounded by
+    /// the sequential epoch counter stored on-chain.
+    pub fn get_total_unclaimed(env: Env, talos_id: u32) -> i128 {
+        let next_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextEpochId(talos_id))
+            .unwrap_or(1u64);
+
+        let mut total: i128 = 0;
+        let mut eid: u64 = 1;
+        while eid < next_id {
+            if let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<_, EpochRecord>(&DataKey::Epoch(talos_id, eid))
+            {
+                if record.status == EpochStatus::Active {
+                    total += record.total_amount - record.claimed_amount;
+                }
+            }
+            eid += 1;
+        }
+        total
     }
 
     /// Return the next epoch ID that would be assigned for `talos_id`.
@@ -1422,7 +1520,7 @@ mod tests {
     #[test]
     fn version_returns_compile_time_constant() {
         let (env, contract_id, _, _, client) = setup();
-        assert_eq!(client.version(), (1u32, 2u32, 0u32));
+        assert_eq!(client.version(), (1u32, 3u32, 0u32));
         let _ = (env, contract_id);
     }
 
@@ -4199,6 +4297,186 @@ mod tests {
         // The contract will fail when trying to invoke the interface_id method
         // on a non-existent contract, which results in an error
         assert!(res.is_err());
+    }
+
+    // ── get_epoch_liability() ────────────────────────────────────────────────
+
+    #[test]
+    fn get_epoch_liability_returns_not_exists_for_missing_epoch() {
+        let (env, _, _, _, client) = setup();
+        let liability = client.get_epoch_liability(&99u32, &999u64);
+        assert!(!liability.exists);
+        assert_eq!(liability.total_amount, 0);
+        assert_eq!(liability.claimed_amount, 0);
+        assert_eq!(liability.unclaimed_amount, 0);
+        assert!(!liability.is_empty_round);
+        assert!(!liability.is_fully_claimed);
+        let _ = env;
+    }
+
+    #[test]
+    fn get_epoch_liability_returns_full_unclaimed_before_any_claim() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        let liability = client.get_epoch_liability(&talos_id, &epoch_id);
+        assert!(liability.exists);
+        assert_eq!(liability.total_amount, 10_000);
+        assert_eq!(liability.claimed_amount, 0);
+        assert_eq!(liability.unclaimed_amount, 10_000);
+        assert!(liability.is_empty_round);
+        assert!(!liability.is_fully_claimed);
+        assert_eq!(liability.status, EpochStatus::Active);
+    }
+
+    #[test]
+    fn get_epoch_liability_returns_partial_unclaimed_after_one_claim() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
+
+        let liability = client.get_epoch_liability(&talos_id, &epoch_id);
+        assert!(liability.exists);
+        assert_eq!(liability.total_amount, 10_000);
+        assert_eq!(liability.claimed_amount, 6_000); // creator: 60%
+        assert_eq!(liability.unclaimed_amount, 4_000);
+        assert!(!liability.is_empty_round);
+        assert!(!liability.is_fully_claimed);
+    }
+
+    #[test]
+    fn get_epoch_liability_is_fully_claimed_after_all_three_claim() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
+        do_claim(&env, &contract_id, &client, &investor, talos_id, epoch_id, &creator, &investor, &treasury);
+        do_claim(&env, &contract_id, &client, &treasury, talos_id, epoch_id, &creator, &investor, &treasury);
+
+        let liability = client.get_epoch_liability(&talos_id, &epoch_id);
+        assert!(liability.exists);
+        assert_eq!(liability.unclaimed_amount, 0);
+        assert!(!liability.is_empty_round);
+        assert!(liability.is_fully_claimed);
+    }
+
+    #[test]
+    fn get_epoch_liability_distinguishes_empty_round_from_fully_claimed() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        // Before any claim: empty round.
+        let before = client.get_epoch_liability(&talos_id, &epoch_id);
+        assert!(before.is_empty_round);
+        assert!(!before.is_fully_claimed);
+
+        // After all claims: fully claimed, not empty.
+        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
+        do_claim(&env, &contract_id, &client, &investor, talos_id, epoch_id, &creator, &investor, &treasury);
+        do_claim(&env, &contract_id, &client, &treasury, talos_id, epoch_id, &creator, &investor, &treasury);
+
+        let after = client.get_epoch_liability(&talos_id, &epoch_id);
+        assert!(!after.is_empty_round);
+        assert!(after.is_fully_claimed);
+    }
+
+    #[test]
+    fn get_epoch_liability_recovered_epoch_has_recovered_status() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        env.ledger().with_mut(|li| li.timestamp = 9_000);
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "recover_expired",
+                    args: (admin.clone(), talos_id, epoch_id).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .recover_expired(&admin, &talos_id, &epoch_id);
+
+        let liability = client.get_epoch_liability(&talos_id, &epoch_id);
+        assert!(liability.exists);
+        assert_eq!(liability.status, EpochStatus::Recovered);
+    }
+
+    // ── get_total_unclaimed() ────────────────────────────────────────────────
+
+    #[test]
+    fn get_total_unclaimed_returns_zero_before_any_epochs() {
+        let (env, _, _, _, client) = setup();
+        assert_eq!(client.get_total_unclaimed(&1u32), 0);
+        let _ = env;
+    }
+
+    #[test]
+    fn get_total_unclaimed_sums_across_multiple_epochs() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        // Commit two epochs.
+        commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+        commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        // No claims yet: total unclaimed = 10_000 + 10_000 = 20_000.
+        assert_eq!(client.get_total_unclaimed(&talos_id), 20_000);
+    }
+
+    #[test]
+    fn get_total_unclaimed_excludes_recovered_epochs() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+        commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        // Recover first epoch.
+        env.ledger().with_mut(|li| li.timestamp = 9_000);
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "recover_expired",
+                    args: (admin.clone(), talos_id, epoch_id).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .recover_expired(&admin, &talos_id, &epoch_id);
+
+        // Only the second active epoch counts.
+        assert_eq!(client.get_total_unclaimed(&talos_id), 10_000);
+    }
+
+    #[test]
+    fn interface_features_includes_unclaimed_liabilities() {
+        let (env, _, _, _, client) = setup();
+        let features = client.interface_features();
+        let target = soroban_sdk::Symbol::new(&env, "unclaimed_liabilities");
+        let mut found = false;
+        for i in 0..features.len() {
+            if features.get(i).unwrap() == target {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "expected 'unclaimed_liabilities' in interface_features");
     }
 }
 
