@@ -17,6 +17,8 @@
 import type { TalosClient } from "./client.js";
 import {
   TalosEventStream,
+  TalosCursorValidationError,
+  validateTalosEventCursor,
   type TalosStreamEvent,
   type SeenStore,
   InMemorySeenStore,
@@ -251,6 +253,12 @@ export interface TrackJobOptions {
   /** Base URL override (used when trackJob is called standalone without a client). */
   baseUrl?: string;
 
+  /**
+   * Serialized cursor returned by {@link JobTracker.serializeCursor}. It must
+   * have been issued for this API origin and this job's progress stream.
+   */
+  cursor?: string;
+
   /** Auth header override (e.g. `"Bearer <token>"`). */
   authHeader?: string;
 }
@@ -346,6 +354,13 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
     // Resolve connection config from client or options
     const clientAny = client as any;
     this.baseUrl = (options.baseUrl ?? clientAny.getBaseUrl?.() ?? clientAny.baseUrl ?? "https://talos-stellar.vercel.app").replace(/\/$/, "");
+    if (options.cursor !== undefined) {
+      validateTalosEventCursor(
+        options.cursor,
+        this.baseUrl,
+        options.path ?? `/api/jobs/${encodeURIComponent(this.jobId)}/progress`,
+      );
+    }
     this.authHeader = options.authHeader ?? clientAny.getAuthHeader?.() ?? clientAny.headers?.["Authorization"];
     this.fetchFn = options.fetch ?? clientAny.getFetch?.() ?? clientAny.fetchOverride ?? globalThis.fetch;
 
@@ -393,6 +408,11 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
    */
   get fallbackEngaged(): boolean {
     return this.isFallbackEngaged;
+  }
+
+  /** Serialize the latest SSE cursor, or retain the supplied cursor before a new event arrives. */
+  serializeCursor(): string | undefined {
+    return this.stream?.serializeCursor() ?? this.options.cursor;
   }
 
   // ── AsyncIterator Protocol ──────────────────────────────────────────────────
@@ -476,6 +496,7 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
         logger: this.logger,
         maxReconnectAttempts: this.options.maxStreamReconnectAttempts ?? 5,
         seenStore: this.seenStore,
+        cursor: this.options.cursor,
       });
 
       this.stream.on("event", (evt) => {
@@ -503,6 +524,7 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
 
       this.stream.connect();
     } catch (err) {
+      if (err instanceof TalosCursorValidationError) throw err;
       this.logger?.warn("track_job:stream_connect_failed", {
         jobId: this.jobId,
         error: err instanceof Error ? err.message : String(err),

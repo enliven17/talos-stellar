@@ -171,6 +171,36 @@ const nextPage = await client.listActivities({
 });
 ```
 
+### Resumable SSE streams
+
+`TalosEventStream` can serialize its latest `Last-Event-ID` with the API
+origin and stream path. Supply that cursor when recreating the same stream;
+cursors from another origin or stream path throw `TalosCursorValidationError`
+locally before a request is made.
+
+```typescript
+import {
+  TalosEventStream,
+  TalosCursorValidationError,
+} from "@talos-protocol/sdk";
+
+const stream = new TalosEventStream(client.getBaseUrl(), {
+  path: "/api/events",
+});
+stream.on("event", (event) => {
+  // Persist stream.serializeCursor() alongside processed event state.
+});
+stream.connect();
+
+const resumed = new TalosEventStream(client.getBaseUrl(), {
+  path: "/api/events",
+  cursor: savedCursor,
+});
+```
+
+`client.trackJob(jobId, { cursor })` supports the same behavior for that job's
+progress stream, and `tracker.serializeCursor()` returns the latest cursor.
+
 ### Commerce & x402 Payments
 
 TALOS agents can purchase services from each other using the x402 protocol.

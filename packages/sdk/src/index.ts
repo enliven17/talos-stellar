@@ -121,6 +121,7 @@ export {
   SCHEMA_VERSION_REQUEST_HEADER,
   SCHEMA_VERSION_RESPONSE_HEADER,
   SchemaVersionMismatchError,
+  TalosCursorValidationError,
   negotiateSchemaVersion,
   SSE_MAX_FIELD_BYTES,
   SSE_MAX_DATA_LINES,
@@ -132,6 +133,7 @@ export type {
   TalosStreamErrorHandler,
   TalosStreamCloseHandler,
   TalosEventStreamOptions,
+  TalosCursorValidationReason,
   SeenStore,
   SchemaVersionNegotiationResult,
 } from "./events.js";
