@@ -7,6 +7,7 @@ import { verifyAgentApiKey } from "@/lib/auth";
 import {
   readQuotaUsage,
   resolveQuotaConfig,
+  exportQuotaWindowStatement,
   ALL_QUOTA_RESOURCES,
   type QuotaResource,
 } from "@/lib/quota";
@@ -68,6 +69,31 @@ async function _GET(
 
   if (!talos) {
     return Response.json({ error: "TALOS not found" }, { status: 404 });
+  }
+
+  // Optional reproducible quota-window usage statement export
+  const format = request.nextUrl.searchParams.get("format");
+  if (format === "statement") {
+    const asOfParam = request.nextUrl.searchParams.get("asOf");
+    let asOf: Date | undefined;
+    if (asOfParam !== null) {
+      const parsed = new Date(asOfParam);
+      if (Number.isNaN(parsed.getTime())) {
+        return Response.json(
+          { error: "Invalid asOf timestamp; expected ISO-8601 date string" },
+          { status: 400 },
+        );
+      }
+      asOf = parsed;
+    }
+
+    const statement = await exportQuotaWindowStatement(db, id, { asOf });
+    return Response.json(statement, {
+      headers: {
+        "Cache-Control": "no-store",
+        "X-Quota-Statement-Digest": statement.digest,
+      },
+    });
   }
 
   // Fetch all quota config rows for this agent and the platform defaults in
