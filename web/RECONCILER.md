@@ -383,6 +383,22 @@ Indexes:
 
 ---
 
+## Dry-Run Payment Repair Plan
+
+Before applying reconciliation repairs, operators can inspect a read-only dry-run plan that lists every candidate transaction record, its proposed state transition, proposed downstream repair, and supporting Horizon/ledger observations (`src/lib/reconciler/plan.ts`).
+
+### Endpoints
+
+Both endpoints require `Authorization: Bearer <ADMIN_API_KEY>`:
+
+- **`GET /api/admin/reconciler/plan`**: Polls Horizon for active records and builds a `PaymentRepairPlan` with `planId`, `planHash`, `currentLedger`, and `items` (each containing `currentState`, `proposedState`, `proposedRepair`, `observations`, and `recordFingerprint`). Performs **zero** database writes. Returns `503` if Horizon is unreachable.
+- **`POST /api/admin/reconciler/plan`**: Executes **only** an explicitly selected, unchanged plan.
+  - Request body: `{ plan, planHash, selectedRecordIds }`
+  - Rejects with `400` (`INVALID_SELECTION`) if `selectedRecordIds` is empty or contains IDs outside the plan.
+  - Rejects with `409` (`PLAN_MODIFIED` or `RECORD_CHANGED`) if the plan payload was altered or any selected record changed in the database since dry-run generation, leaving all records untouched.
+
+---
+
 ## Local Verification
 
 Run the reconciler unit and route test suites:
@@ -390,6 +406,7 @@ Run the reconciler unit and route test suites:
 ```bash
 cd web
 pnpm vitest run tests/reconciler-state-machine.unit.test.ts
+pnpm vitest run tests/reconciler-repair-plan.unit.test.ts
 pnpm vitest run tests/reconciler-scheduler.unit.test.ts
 pnpm vitest run tests/reconciler-api-routes.unit.test.ts
 pnpm vitest run tests/reconciler-route-wiring.unit.test.ts

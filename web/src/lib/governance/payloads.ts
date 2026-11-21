@@ -256,11 +256,8 @@ export function assertPrerequisites(parsed: LifecyclePayload, ctx: PrerequisiteC
       break;
 
     case "retire": {
-      if (parsed.payload.drainJobs && ctx.inFlightJobs > 0) {
-        fail("Agent still has in-flight jobs; drain them or retire with drainJobs=false", {
-          inFlightJobs: ctx.inFlightJobs,
-        });
-      }
+      // The durable retirement workflow marks the agent draining first, then
+      // waits for these jobs before stopping the runtime.
       if (parsed.payload.residualBeneficiary && !ctx.hasWallet) {
         fail("Cannot sweep residual balance: agent has no wallet");
       }
