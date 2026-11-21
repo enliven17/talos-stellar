@@ -37,11 +37,19 @@ await db.transaction(async (tx) => {
 ## Dispatch
 
 `dispatchOnce()` (`src/lib/outbox/dispatcher.ts`) leases a bounded batch,
-runs every consumer registered for each event's `eventType`
-(`registerConsumer`, `src/lib/outbox/registry.ts`), and acks or retries the
-event as a whole. **All consumers for an event type re-run on retry** — an
-event type has no per-consumer cursor, so consumers must be idempotent. An
-event type with zero registered consumers dead-letters immediately.
+runs each unacknowledged consumer registered for the event's `eventType`
+(`registerConsumer`, `src/lib/outbox/registry.ts`), and persists per-consumer
+acknowledgement and retry state in `tls_outbox_deliveries` keyed by
+`(eventId, consumerId)`. When one consumer succeeds and another fails, the
+successful consumer is marked `acked` and skipped on subsequent retries —
+only the failing consumer is retried according to its own backoff schedule.
+The event transitions to `dispatched` once all registered consumers are
+`acked`, or to `dead_letter` once no pending consumers remain and at least
+one consumer exhausted its retry budget. Pass an explicit stable consumer ID
+when registering (`registerConsumer(eventType, "my-consumer", handler)` or
+`registerConsumer(eventType, handler, { id: "my-consumer" })`); unnamed
+registrations remain supported with a deterministic fallback ID. An event
+type with zero registered consumers dead-letters immediately.
 
 Two ways to drive it, same trade-off as the jobs framework:
 - **Serverless**: `POST /api/internal/outbox/drain`, header
@@ -135,19 +143,20 @@ page through, and **Retry** a row via `POST /api/admin/outbox/:id/retry`).
 
 Structured `pino` logs per transition (`outbox_event_written`,
 `_leased`, `_dispatched`, `_retry_scheduled`, `_dead_letter`,
-`outbox_lease_reaped`, `outbox_events_pruned`) — identifiers and counters
+`outbox_consumer_acked`, `outbox_consumer_retry_scheduled`,
+`outbox_consumer_dead_letter`, `outbox_lease_reaped`,
+`outbox_events_pruned`) — identifiers and counters
 only, never `payload` or a raw error (see `src/lib/outbox/metrics.ts`;
 same rationale as `web/JOBS.md`).
 
 ## Rollout / migration / rollback
 
-- **Migration**: `drizzle/0012_add_outbox_events.sql` — additive only, one new table, no existing-table changes. Safe to apply live.
+- **Migration**: `drizzle/0012_add_outbox_events.sql` and `drizzle/0023_add_outbox_deliveries.sql` — additive only, new tables, no existing-table changes. Safe to apply live.
 - **Default**: `OUTBOX_ENABLED=false`. The one integrated call site (`POST /api/jobs/:id/result`, `src/app/api/jobs/[id]/result/route.ts`) writes nothing extra when disabled — zero behavior change.
 - **Rollback**: flip `OUTBOX_ENABLED` back to `false`. `tls_outbox_events` can stay in place (inert, nothing references it via FK) or be dropped independently.
 
 ## Known limitations
 
-- No per-consumer delivery tracking — an event type's consumers all re-run together on retry.
 - No priority/ordering guarantee across different aggregates; within one lease batch, order is `runAt` only.
 - The serverless drain endpoint needs an external scheduler wired up per-deployment (no Vercel Cron config checked in yet).
 
