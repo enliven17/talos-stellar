@@ -20,7 +20,8 @@ export type JobEvent =
   | "job_retry_scheduled"
   | "job_dead_letter"
   | "job_cancelled"
-  | "job_lease_reaped";
+  | "job_lease_reaped"
+  | "job_lease_fenced";
 
 export interface JobLogFields {
   jobId: string;
@@ -31,6 +32,7 @@ export interface JobLogFields {
   durationMs?: number;
   delayMs?: number;
   workerId?: string;
+  leaseGeneration?: number;
 }
 
 export function logJobEvent(event: JobEvent, fields: JobLogFields): void {

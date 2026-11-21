@@ -8,7 +8,17 @@
  *
  * See web/JOBS.md for configuration, operational signals, and rollback.
  */
-export { enqueue, getJob, listJobs, release, requestCancel, requeue } from "./store";
+export {
+  enqueue,
+  getJob,
+  listJobs,
+  release,
+  requestCancel,
+  requeue,
+  StaleLeaseError,
+  verifyLease,
+  withLeaseFence,
+} from "./store";
 export { registerHandler } from "./registry";
 export { runOnce } from "./runner";
 export { jobsConfig, JOBS_ENABLED } from "./config";
@@ -18,6 +28,7 @@ export type {
   JobHandler,
   JobRecord,
   JobStatus,
+  LeaseFence,
   RetryClass,
   RunOnceSummary,
 } from "./types";
