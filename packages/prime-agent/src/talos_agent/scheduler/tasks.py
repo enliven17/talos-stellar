@@ -27,6 +27,12 @@ from talos_agent.circuit_breaker import cb_registry
 from talos_agent.observability import log
 from talos_agent.scheduler.backoff import DurableBackoff
 from talos_agent.scheduler.helpers import run_dividend_distribution, run_loan_repayment
+from talos_agent.scheduler.intervals import (
+    ACTIVITY_FLUSH_INTERVAL_SECONDS,
+    LEARNING_CYCLE_INTERVAL_SECONDS,
+    LOAN_REPAYMENT_INTERVAL_SECONDS,
+    TELEMETRY_INTERVAL_SECONDS,
+)
 from talos_agent.scheduler.policy import plan_interval_runs
 from talos_agent.tracing import traced_span
 
@@ -358,7 +364,7 @@ async def activity_flush_task(
     backoff = DurableBackoff(
         task_name="activity_flush",
         db=db,
-        base_delay=30,
+        base_delay=ACTIVITY_FLUSH_INTERVAL_SECONDS,
         jitter_identity=settings.talos_id,
     )
     await _wait_for_restored_deadline(shutdown_event, backoff)
@@ -408,7 +414,7 @@ async def learning_cycle_task(
     from talos_agent.agent.loop import agent_loop
     from talos_agent.agent.prompt import build_learning_prompt
 
-    learning_interval = 6 * 3600  # 6 hours
+    learning_interval = LEARNING_CYCLE_INTERVAL_SECONDS
 
     try:
         await asyncio.wait_for(shutdown_event.wait(), timeout=learning_interval)
@@ -576,7 +582,7 @@ async def loan_repayment_task(
     """Monitor and auto-repay loan interests. Runs every 24 hours."""
     from talos_agent.payments.stellar_kit import StellarKit
 
-    repayment_interval = 24 * 3600
+    repayment_interval = LOAN_REPAYMENT_INTERVAL_SECONDS
 
     try:
         await asyncio.wait_for(shutdown_event.wait(), timeout=repayment_interval)
@@ -626,7 +632,7 @@ async def telemetry_log_task(
     """
     from talos_agent.telemetry import TelemetryCollector
 
-    telemetry_interval = 30 * 60  # 30 minutes
+    telemetry_interval = TELEMETRY_INTERVAL_SECONDS
 
     try:
         await asyncio.wait_for(shutdown_event.wait(), timeout=telemetry_interval)

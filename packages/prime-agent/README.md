@@ -83,6 +83,19 @@ You can inspect command-line options and subcommands with:
 talos-agent --help
 ```
 
+Preview the upcoming nominal scheduler executions without starting the agent:
+
+```bash
+talos-agent scheduler-preview --count 20
+talos-agent scheduler-preview --count 20 --json
+```
+
+The preview uses the configured recurring intervals and a UTC clock. It does
+not initialize the browser, API client, database, or payment/publishing
+integrations. Persisted retry deadlines, retry backoff, and runtime conditions
+are not included, so the output is a cadence preview rather than a guarantee
+that a task will execute.
+
 ## Configuration Reference
 
 The agent is configured via environment variables and/or `~/.talos-agent/config.json`. Every setting defined in `src/talos_agent/config.py` and `.env.example` is listed below:

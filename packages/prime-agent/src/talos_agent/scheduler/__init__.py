@@ -16,6 +16,7 @@ from talos_agent.scheduler.policy import (
     check_should_run,
     plan_interval_runs,
 )
+from talos_agent.scheduler.preview import SchedulePreviewEntry, preview_schedule
 
 # Extracted task helpers (tested in test_scheduler.py)
 from talos_agent.scheduler.helpers import (
@@ -42,6 +43,8 @@ __all__ = [
     "IntervalRunDecision",
     "MissedRunPolicy",
     "plan_interval_runs",
+    "SchedulePreviewEntry",
+    "preview_schedule",
     # helpers
     "_is_stellar_public_key",
     "run_dividend_distribution",
