@@ -173,7 +173,7 @@ The agent is configured via environment variables and/or `~/.talos-agent/config.
 | `a2a_write_timeout` | `A2A_WRITE_TIMEOUT` | `10.0` | No | Seconds to wait to send A2A request body |
 | `a2a_pool_timeout` | `A2A_POOL_TIMEOUT` | `5.0` | No | Seconds to wait for A2A connection from pool |
 | `shutdown_deadline` | `SHUTDOWN_DEADLINE` | `30.0` | No | Seconds to wait for in-flight tasks to finish after shutdown is requested before they are forcibly cancelled. Set to 0 to cancel immediately. |
-| `dividend_distribution_interval` | `DIVIDEND_DISTRIBUTION_INTERVAL` | `3600` | No | Seconds between dividend distribution checks |
+| `dividend_distribution_interval` | `DIVIDEND_DISTRIBUTION_INTERVAL` | `3600` | No | Seconds between dividend distribution checks (minimum 1 second) |
 | `dividend_usdc_threshold` | `DIVIDEND_USDC_THRESHOLD` | `100` | No | USDC threshold to trigger dividend distribution |
 | `replay_enabled` | `REPLAY_ENABLED` | `false` | No | Enable execution replay recording for incident analysis |
 | `replay_redact_payloads` | `REPLAY_REDACT_PAYLOADS` | `true` | No | Redact sensitive values in replay event payloads |

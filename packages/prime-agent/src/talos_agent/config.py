@@ -469,7 +469,11 @@ class Settings(BaseSettings):
     )
 
     # Dividend distribution
-    dividend_distribution_interval: int = Field(default=3600, description="Seconds between dividend distribution checks")
+    dividend_distribution_interval: int = Field(
+        default=3600,
+        ge=1,
+        description="Seconds between dividend distribution checks (minimum 1)",
+    )
     dividend_usdc_threshold: Decimal = Field(default=Decimal(100), description="USDC threshold to trigger dividend distribution")
 
     # Deterministic replay (disabled by default for safe rollout)
