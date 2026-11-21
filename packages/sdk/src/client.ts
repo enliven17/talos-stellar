@@ -75,6 +75,8 @@ import {
   validateIdempotencyKey,
   isPayloadConflict,
   IdempotencyConflictError,
+  validateIdempotencyKeyConflict,
+  readIdempotencyKeyHeader,
 } from "./idempotency.js";
 import type { ChaosInjector } from "./chaos.js";
 import { FaultType } from "./chaos.js";
@@ -107,7 +109,12 @@ import {
 
 // Legacy import path: `import { TalosAPIError } from "./client.js"`.
 export { TalosAPIError };
-export { generateIdempotencyKey, validateIdempotencyKey, IdempotencyConflictError };
+export {
+  generateIdempotencyKey,
+  validateIdempotencyKey,
+  validateIdempotencyKeyConflict,
+  IdempotencyConflictError,
+};
 export {
   JobTracker,
   trackJob,
@@ -990,13 +997,22 @@ export class TalosClient {
    */
   private mergeHeaders(init?: HeadersInit, extra?: Record<string, string>): Record<string, string> {
     const headers: Record<string, string> = { ...this.headers };
+    for (const name of Object.keys(headers)) {
+      if (name.toLowerCase() === "idempotency-key") delete headers[name];
+    }
     if (init) {
       const provided = init instanceof Headers
         ? Object.fromEntries(init.entries())
         : Array.isArray(init)
           ? Object.fromEntries(init)
           : init;
-      Object.assign(headers, provided as Record<string, string>);
+      for (const [name, value] of Object.entries(provided as Record<string, string>)) {
+        if (name.toLowerCase() !== "idempotency-key") {
+          headers[name] = value;
+        }
+      }
+      const headerKey = readIdempotencyKeyHeader(init);
+      if (headerKey !== undefined) headers["Idempotency-Key"] = headerKey;
     }
     if (extra) Object.assign(headers, extra);
     return headers;
@@ -1304,6 +1320,7 @@ export class TalosClient {
 
     const extraHeaders: Record<string, string> = {};
     if (idempotencyKey !== undefined) {
+      validateIdempotencyKeyConflict(idempotencyKey, this.headers, requestInit.headers);
       extraHeaders["Idempotency-Key"] = validateIdempotencyKey(idempotencyKey);
     }
 
