@@ -468,6 +468,36 @@ export const buyTokenSchema = z.object({
   amount: z.number().positive(),
 });
 
+// --- Revenue Buyback ---
+
+/** Stellar amounts carry at most 7 decimal places (stroop precision). */
+export const STELLAR_MAX_DECIMALS = 7;
+
+/**
+ * Positive, finite JSON number with at most 7 decimal places.
+ * Strings, NaN, Infinity, zero and negatives are all rejected.
+ */
+const buybackAmountSchema = z
+  .number({ error: "must be a number" })
+  .refine(Number.isFinite, "must be a finite number")
+  .positive("must be greater than 0")
+  .refine(
+    (n) => Number(n.toFixed(STELLAR_MAX_DECIMALS)) === n,
+    `must have at most ${STELLAR_MAX_DECIMALS} decimal places`,
+  );
+
+export const buybackSchema = z.object({
+  usdcAmount: buybackAmountSchema,
+  mitosAmount: buybackAmountSchema,
+});
+
+/** Optional `Idempotency-Key` header for POST .../revenue/buyback. */
+export const idempotencyKeySchema = z
+  .string()
+  .trim()
+  .min(1, "Idempotency-Key must not be empty")
+  .max(255, "Idempotency-Key must be at most 255 characters");
+
 // --- Playbooks ---
 
 export const createPlaybookSchema = z.object({
@@ -726,3 +756,192 @@ export async function parseBody<T extends z.ZodType>(
 
   return { data: result.data };
 }
+
+// ── Launch Form (client-side form state) ─────────────────────────────────────
+
+export const LAUNCH_CATEGORIES = [
+  "marketing",
+  "development",
+  "research",
+  "design",
+  "finance",
+  "analytics",
+  "operations",
+  "sales",
+  "support",
+  "education",
+] as const;
+
+export const LAUNCH_TONES = [
+  "professional",
+  "casual",
+  "witty",
+  "technical",
+] as const;
+
+export const LAUNCH_CHANNELS = [
+  "X (Twitter)",
+  "LinkedIn",
+  "Reddit",
+  "Product Hunt",
+] as const;
+
+/**
+ * Typed form state for the TALOS launch wizard.
+ * All numeric fields are kept as strings during editing so inputs stay
+ * controlled; conversion to numbers happens in buildCreateTalosPayload.
+ */
+export const launchFormSchema = z.object({
+  productName: z.string().max(100),
+  productDesc: z.string().max(2000),
+  category: z.enum(LAUNCH_CATEGORIES),
+  tokenName: z.string().max(100),
+  tokenSymbol: z.string().max(8),
+  totalSupply: z.string(),
+  initialPrice: z.string(),
+  approvalThreshold: z.string(),
+  gtmBudget: z.string(),
+  persona: z.string().max(2000),
+  targetAudience: z.string().max(2000),
+  tone: z.enum(LAUNCH_TONES),
+  creatorWallet: z.string(),
+  channels: z.array(z.string()),
+  agentName: z.string().max(100),
+  serviceName: z.string().max(200),
+  serviceDescription: z.string().max(2000),
+  servicePrice: z.string(),
+  serviceCurrency: z.literal("USDC"),
+});
+
+export type LaunchFormState = z.infer<typeof launchFormSchema>;
+
+export const LAUNCH_FORM_DEFAULTS: LaunchFormState = {
+  productName: "",
+  productDesc: "",
+  category: "marketing",
+  tokenName: "",
+  tokenSymbol: "",
+  totalSupply: "1000000",
+  initialPrice: "0.01",
+  approvalThreshold: "10",
+  gtmBudget: "100",
+  persona: "",
+  targetAudience: "",
+  tone: "professional",
+  creatorWallet: "",
+  channels: ["X (Twitter)"],
+  agentName: "",
+  serviceName: "",
+  serviceDescription: "",
+  servicePrice: "",
+  serviceCurrency: "USDC",
+};
+
+/**
+ * Build the POST /api/talos request body from validated form state.
+ * The returned object is byte-for-byte compatible with createTalosSchema.
+ * Callers must also attach `signature` and `message` before submitting.
+ */
+export function buildCreateTalosPayload(
+  form: LaunchFormState,
+  address: string,
+  onChainId: number | null,
+): Record<string, unknown> {
+  const creatorAddr = form.creatorWallet || address;
+  const categoryCapitalized =
+    form.category.charAt(0).toUpperCase() + form.category.slice(1);
+
+  const payload: Record<string, unknown> = {
+    name: form.productName,
+    category: categoryCapitalized,
+    description: form.productDesc,
+    totalSupply: Number(form.totalSupply),
+    persona: form.persona,
+    targetAudience: form.targetAudience,
+    channels: form.channels,
+    toneVoice: form.tone,
+    approvalThreshold: Number(form.approvalThreshold),
+    gtmBudget: Number(form.gtmBudget),
+    initialPrice: Number(form.initialPrice),
+    minPatronPulse: Math.floor(Number(form.totalSupply) / 1000),
+    creatorPublicKey: creatorAddr,
+    walletPublicKey: address,
+    onChainId: onChainId ?? undefined,
+    agentName: form.agentName,
+    stellarAssetCode: form.tokenSymbol.toUpperCase() || undefined,
+    tokenSymbol: form.tokenSymbol,
+  };
+
+  if (form.serviceName && form.servicePrice) {
+    payload.serviceName = form.serviceName;
+    if (form.serviceDescription) {
+      payload.serviceDescription = form.serviceDescription;
+    }
+    payload.servicePrice = Number(form.servicePrice);
+  }
+
+  return payload;
+}
+
+/**
+ * Step-level validation guards for the launch wizard.
+ * Returns true when the current step is complete enough to advance.
+ */
+export function canNextForStep(
+  step: number,
+  form: LaunchFormState,
+  nameAvailable: boolean | null,
+): boolean {
+  switch (step) {
+    case 0:
+      return Boolean(form.productName && form.productDesc);
+    case 1:
+      return true;
+    case 2: {
+      const sym = form.tokenSymbol.trim();
+      const supply = Number(form.totalSupply);
+      const price = Number(form.initialPrice);
+      return (
+        form.tokenName.trim().length > 0 &&
+        sym.length >= 2 &&
+        sym.length <= 8 &&
+        /^[A-Za-z][A-Za-z0-9]*$/.test(sym) &&
+        supply > 0 &&
+        supply <= 100_000_000 &&
+        price > 0 &&
+        price <= 1_000_000
+      );
+    }
+    case 3:
+      return Boolean(form.approvalThreshold && form.gtmBudget);
+    case 4:
+      return (
+        Boolean(form.persona && form.targetAudience && form.channels.length > 0) &&
+        form.agentName.length >= 3 &&
+        nameAvailable === true
+      );
+    default:
+      return true;
+  }
+}
+
+// --- Revenue Buyback ---
+
+const buybackAmountSchema = z
+  .number()
+  .positive("amount must be greater than zero")
+  .refine(Number.isFinite, "amount must be finite")
+  .refine(
+    (n) => Number(n.toFixed(7)) === n,
+    "amount must have at most 7 decimal places",
+  );
+
+export const buybackSchema = z
+  .object({
+    usdcAmount: buybackAmountSchema.optional(),
+    mitosAmount: buybackAmountSchema.optional(),
+  })
+  .refine(
+    (d) => d.usdcAmount !== undefined || d.mitosAmount !== undefined,
+    { message: "usdcAmount or mitosAmount is required" },
+  );

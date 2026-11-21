@@ -11,7 +11,8 @@
  *   3. The SDK can optionally bundle them for client-side pre-flight validation.
  *
  * Run:
- *   pnpm schemas:generate
+ *   pnpm schemas:generate              — write schemas to src/generated/schemas/
+ *   pnpm schemas:generate --check      — compare without writing (CI check)
  *
  * Re-run whenever web/src/lib/schemas.ts changes.  CI will fail the
  * openapi-snapshot test if the generated files diverge.
@@ -21,7 +22,7 @@
  *   src/generated/schemas/index.json          — manifest listing all schemas
  */
 
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod/v4";
@@ -50,6 +51,7 @@ import {
   regenerateKeySchema,
   signPaymentSchema,
   buyTokenSchema,
+  buybackSchema,
   createPlaybookSchema,
 } from "../src/lib/schemas.js";
 
@@ -165,6 +167,11 @@ const schemas = [
     routes: ["POST /api/talos/:id/buy-token"],
   },
   {
+    name: "buyback",
+    schema: buybackSchema,
+    routes: ["POST /api/talos/:id/revenue/buyback"],
+  },
+  {
     name: "createPlaybook",
     schema: createPlaybookSchema,
     routes: ["POST /api/playbooks"],
@@ -175,11 +182,19 @@ const schemas = [
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = join(__dirname, "../src/generated/schemas");
-mkdirSync(OUT_DIR, { recursive: true });
+
+// ── Parse CLI flags ───────────────────────────────────────────────────────────
+
+const CHECK_MODE = process.argv.includes("--check");
+
+if (!CHECK_MODE) {
+  mkdirSync(OUT_DIR, { recursive: true });
+}
 
 // ── Generate ──────────────────────────────────────────────────────────────────
 
 const manifest: Array<{ name: string; file: string; routes: readonly string[] }> = [];
+const diffs: string[] = [];
 
 for (const entry of schemas) {
   const extracted = z.toJSONSchema(entry.schema, {
@@ -190,18 +205,51 @@ for (const entry of schemas) {
 
   const fileName = `${entry.name}.json`;
   const filePath = join(OUT_DIR, fileName);
+  const newContent = JSON.stringify(extracted, null, 2) + "\n";
 
-  writeFileSync(filePath, JSON.stringify(extracted, null, 2) + "\n", "utf8");
+  if (CHECK_MODE) {
+    if (!existsSync(filePath)) {
+      diffs.push(`  ${fileName}: file missing`);
+    } else {
+      const existingContent = readFileSync(filePath, "utf8");
+      if (existingContent !== newContent) {
+        diffs.push(`  ${fileName}: content differs`);
+      }
+    }
+  } else {
+    writeFileSync(filePath, newContent, "utf8");
+    console.log(`  ✓ ${fileName}`);
+  }
+
   manifest.push({ name: entry.name, file: fileName, routes: entry.routes });
-
-  console.log(`  ✓ ${fileName}`);
 }
 
-// Write manifest
-writeFileSync(
-  join(OUT_DIR, "index.json"),
-  JSON.stringify({ generated: new Date().toISOString(), schemas: manifest }, null, 2) + "\n",
-  "utf8",
-);
+// Generate manifest
+const manifestContent = JSON.stringify({ generated: new Date().toISOString(), schemas: manifest }, null, 2) + "\n";
+const manifestPath = join(OUT_DIR, "index.json");
 
-console.log(`\nGenerated ${schemas.length} schemas to ${OUT_DIR}`);
+if (CHECK_MODE) {
+  if (!existsSync(manifestPath)) {
+    diffs.push(`  index.json: file missing`);
+  } else {
+    const existingManifest = readFileSync(manifestPath, "utf8");
+    // Compare only the schemas array, ignore the generated timestamp
+    const existingParsed = JSON.parse(existingManifest);
+    const newParsed = JSON.parse(manifestContent);
+    if (JSON.stringify(existingParsed.schemas) !== JSON.stringify(newParsed.schemas)) {
+      diffs.push(`  index.json: content differs`);
+    }
+  }
+
+  if (diffs.length > 0) {
+    console.error("\n❌ Generated schemas are stale. Run 'pnpm --dir web schemas:generate' to update.\n");
+    console.error("Differences:");
+    diffs.forEach((d) => console.error(d));
+    process.exit(1);
+  } else {
+    console.log("\n✓ All generated schemas are up to date.");
+  }
+} else {
+  writeFileSync(manifestPath, manifestContent, "utf8");
+  console.log(`\nGenerated ${schemas.length} schemas to ${OUT_DIR}`);
+}

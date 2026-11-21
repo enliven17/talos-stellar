@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { 
   tlsTalos, 
@@ -104,7 +104,7 @@ interface EcosystemMetrics {
   };
 }
 
-async function _GET(req: NextRequest) {
+async function _GET(req: Request | NextRequest) {
   // For now, this is a public endpoint for ecosystem-wide metrics.
   // If authorization is needed, uncomment the following:
   // const wallet = req.nextUrl.searchParams.get("wallet");

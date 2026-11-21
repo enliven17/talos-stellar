@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsCommerceServices } from "@/db/schema";
-import { and, arrayContains, eq, gte, ilike, lt, lte, ne, or, type SQL, type SQLWrapper } from "drizzle-orm";
+import { and, arrayContains, eq, gte, ilike, isNull, lt, lte, ne, or, type SQL, type SQLWrapper } from "drizzle-orm";
 import { parseLimit } from "@/lib/parse-limit";
 import {
   buildMarketplaceOrderBy,
@@ -25,6 +25,7 @@ type ServiceRow = {
   talosId: string;
   talosName: string;
   talosCategory: string;
+  talosStatus: string;
   serviceName: string;
   description: string | null;
   price: string | number;
@@ -245,7 +246,7 @@ function buildConditions(
   maxPrice: number | undefined,
   network: string | null,
 ) {
-  const conditions = [eq(tlsTalos.status, "Active")];
+  const conditions = [or(eq(tlsTalos.status, "Active"), eq(tlsTalos.status, "Draining"))!, isNull(tlsTalos.deletedAt)];
 
   if (selfId) {
     conditions.push(ne(tlsCommerceServices.talosId, selfId));
@@ -293,6 +294,7 @@ function fetchServicesBatch(
       talosId: tlsCommerceServices.talosId,
       talosName: tlsTalos.name,
       talosCategory: tlsTalos.category,
+      talosStatus: tlsTalos.status,
       serviceName: tlsCommerceServices.serviceName,
       description: tlsCommerceServices.description,
       price: tlsCommerceServices.price,
@@ -353,6 +355,8 @@ function toServiceResult(service: ServiceRow): ServiceResult {
     talosId: service.talosId,
     talosName: service.talosName,
     talosCategory: service.talosCategory,
+    availability: service.talosStatus === "Draining" ? "draining" : "available",
+    acceptsNewWork: service.talosStatus === "Active",
     serviceName: service.serviceName,
     description: service.description,
     price: Number(service.price),

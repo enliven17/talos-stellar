@@ -681,12 +681,27 @@ class LocalDB:
 
     # ── Content History ────────────────────────────────────
 
-    def add_content(self, content: str, channel: str) -> None:
-        self._conn.execute(
+    def add_content(self, content: str, channel: str) -> int:
+        cursor = self._conn.execute(
             "INSERT INTO content_history (content, channel) VALUES (?, ?)",
             (content, channel),
         )
         self._conn.commit()
+        return int(cursor.lastrowid)
+
+    def get_content(self, content_id: int) -> dict | None:
+        row = self._conn.execute(
+            "SELECT id, content, channel, posted_at FROM content_history WHERE id = ?",
+            (content_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def content_exists(self, content_id: int) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM content_history WHERE id = ?",
+            (content_id,),
+        ).fetchone()
+        return row is not None
 
     def get_recent_content(self, limit: int = 20) -> list[dict]:
         rows = self._conn.execute(

@@ -122,7 +122,7 @@ async def get_active_loans() -> dict:
     "repay_loan",
     "Manually trigger repayment for a specific loan. Use when you want to repay before the scheduled auto-repayment.",
 )
-async def repay_loan(loan_id: int, amount: float | None = None) -> dict:
+async def repay_loan(loan_id: int, amount: float | str | None = None) -> dict:
     """Repay a loan, either partially or in full.
     
     Args:
@@ -139,28 +139,35 @@ async def repay_loan(loan_id: int, amount: float | None = None) -> dict:
     if loan["status"] != "active":
         return {"error": f"Loan {loan_id} is not active (status: {loan['status']})"}
     
+    outstanding_dec = to_stellar_amount(loan["outstanding_amount"])
+
     # If amount not specified, repay full outstanding
     if amount is None:
-        amount = loan["outstanding_amount"]
+        amount_dec = outstanding_dec
+    else:
+        amount_dec = to_stellar_amount(amount)
     
-    if amount > loan["outstanding_amount"]:
-        return {"error": f"Repayment amount {amount} exceeds outstanding {loan['outstanding_amount']}"}
+    if amount_dec > outstanding_dec:
+        return {"error": f"Repayment amount {amount_dec} exceeds outstanding {outstanding_dec}"}
     
+    formatted_amount = format_stellar_amount(amount_dec)
+    amount_float = float(formatted_amount)
+
     # Check approval threshold for repayment
     threshold = float(_deps().settings.approval_threshold)
     if amount > threshold:
         result = await _deps().api.create_approval(
             _deps().settings.talos_id,
             type_="transaction",
-            title=f"Loan repayment: {amount} {loan['loan_asset']} to {loan['platform']}",
+            title=f"Loan repayment: {formatted_amount} {loan['loan_asset']} to {loan['platform']}",
             description=f"Repaying loan {loan_id}. Outstanding before: {loan['outstanding_amount']}",
-            amount=amount,
+            amount=amount_float,
         )
         return {
             "status": "approval_requested",
             "approval_id": result.get("id") if result else None,
             "loan_id": loan_id,
-            "amount": amount,
+            "amount": formatted_amount,
         }
     
     # Process repayment
@@ -169,6 +176,7 @@ async def repay_loan(loan_id: int, amount: float | None = None) -> dict:
     return {
         "status": "repayment_recorded",
         "loan_id": loan_id,
-        "amount": amount,
-        "remaining": loan["outstanding_amount"] - amount,
+        "amount": formatted_amount,
+        "remaining": formatted_remaining,
+        "remaining_amount": float(formatted_remaining),
     }

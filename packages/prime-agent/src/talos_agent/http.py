@@ -43,8 +43,6 @@ from talos_agent.circuit_breaker import (
     cb_registry,
 )
 from talos_agent.redact import (
-    REDACT_FIELD_NAMES as SECRET_FIELD_NAMES,
-    redact_json_value as _sanitize_json_value,
     redact_text as _sanitize_response_text,
     redact_value as _strip_control_chars,
 )

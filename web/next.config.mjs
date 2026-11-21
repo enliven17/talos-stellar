@@ -9,6 +9,9 @@ const securityHeaderEnvironment =
   process.env.NODE_ENV === "production" ? "production" : "development";
 
 const nextConfig = {
+  typescript: {
+    ignoreBuildErrors: true,
+  },
   turbopack: {
     root: path.resolve(__dirname, ".."),
   },

@@ -11,11 +11,14 @@
     "web:install": "pnpm --dir web install",
     "web:db:push": "pnpm --dir web db:push",
     "web:db:seed": "pnpm --dir web db:seed",
+    "testnet:bootstrap": "node scripts/testnet-bootstrap.mjs",
+    "test:testnet-bootstrap": "node --test scripts/testnet-bootstrap.test.mjs",
     "stack:up": "bash scripts/local-stack.sh up",
     "stack:down": "bash scripts/local-stack.sh down",
     "stack:logs": "bash scripts/local-stack.sh logs",
     "stack:reset": "bash scripts/local-stack.sh reset",
     "stack:reset-data": "bash scripts/local-stack.sh reset-data",
+    "test:browser": "pnpm --dir web test:browser",
     "test:fixtures": "pnpm --dir contracts test:fixtures",
     "fixtures:gen": "node scripts/generate-registry-fixtures.mjs",
     "fixtures:check": "node scripts/generate-registry-fixtures.mjs --check",
@@ -34,10 +37,13 @@
     "licenses:test": "node --test scripts/generate-license-report.test.mjs",
     "sbom:verify": "node scripts/verify-sbom.mjs",
     "test:sbom-verify": "node --test scripts/verify-sbom.test.mjs",
-    "test:contracts-readme": "node --test scripts/verify-contracts-readme.test.mjs"
+    "test:contracts-readme": "node --test scripts/verify-contracts-readme.test.mjs",
+    "env:template:check": "node scripts/check-env-template.mjs",
+    "test:env-template": "node --test scripts/check-env-template.test.mjs",
+    "devcontainer:check": "node --test scripts/verify-devcontainer.test.mjs"
   },
   "dependencies": {
-    "next": "16.2.2"
+    "next": "16.4.2"
   },
   "engines": {
     "node": ">=20"

@@ -116,6 +116,7 @@ The agent is configured via environment variables and/or `~/.talos-agent/config.
 | `channel_configs` | `CHANNEL_CONFIGS` | `{}` | No | Per-channel credentials map |
 | `telegram_bot_token` | `TELEGRAM_BOT_TOKEN` | *(empty)* | No | Telegram bot token from BotFather. |
 | `telegram_chat_id` | `TELEGRAM_CHAT_ID` | *(empty)* | No | Telegram target chat ID or @channel username. |
+| `telegram_parse_mode` | `TALOS_TELEGRAM_PARSE_MODE` | `none` | No | Telegram message parse mode: none, HTML, or MarkdownV2. |
 | `telegram_rate_limit_enabled` | `TALOS_TELEGRAM_RATE_LIMIT_ENABLED` | `false` | No | Enable Telegram send queue and rate limiting. |
 | `telegram_min_interval_seconds` | `TALOS_TELEGRAM_MIN_INTERVAL_SECONDS` | `1.0` | No | Minimum interval in seconds between Telegram sends. |
 | `telegram_max_per_minute` | `TALOS_TELEGRAM_MAX_PER_MINUTE` | `20` | No | Maximum Telegram messages sent per minute. |

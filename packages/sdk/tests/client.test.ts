@@ -25,6 +25,8 @@ import {
   resolveNetworkConfig,
   normalizeNetworkId,
   NETWORK_PASSPHRASES,
+  PROPOSAL_STATUSES,
+  isValidProposalStatus,
 } from "../src/index.js";
 
 describe("TalosClient - Request/Response Behavior", () => {
@@ -193,6 +195,269 @@ describe("TalosClient - Request/Response Behavior", () => {
       expect(fetch).toHaveBeenCalledWith(
         "http://localhost:3000/api/talos/id-with/slash",
         expect.any(Object)
+      );
+    });
+  });
+
+  describe("Governance Proposals (listProposals)", () => {
+    it("should list all proposals with no params", async () => {
+      const mockProposals = [
+        {
+          id: "prop-1",
+          talosId: "talos-1",
+          talosName: "Alpha",
+          type: "policy",
+          title: "Update policy",
+          description: "Policy update description",
+          amount: "100.5",
+          status: "pending",
+          decidedBy: null,
+          decidedAt: null,
+          txHash: null,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      ];
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => mockProposals,
+      } as Response);
+
+      const result = await client.listProposals();
+
+      expect(fetch).toHaveBeenCalledWith("http://localhost:3000/api/proposals", expect.any(Object));
+      expect(result).toEqual(mockProposals);
+    });
+
+    it("should list proposals with empty params object", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => [],
+      } as Response);
+
+      await client.listProposals({});
+
+      expect(fetch).toHaveBeenCalledWith("http://localhost:3000/api/proposals", expect.any(Object));
+    });
+
+    it("should build correct query string for status=pending", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => [],
+      } as Response);
+
+      await client.listProposals({ status: "pending" });
+
+      expect(fetch).toHaveBeenCalledWith("http://localhost:3000/api/proposals?status=pending", expect.any(Object));
+    });
+
+    it("should build correct query string for status=approved", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => [],
+      } as Response);
+
+      await client.listProposals({ status: "approved" });
+
+      expect(fetch).toHaveBeenCalledWith("http://localhost:3000/api/proposals?status=approved", expect.any(Object));
+    });
+
+    it("should build correct query string for status=rejected", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => [],
+      } as Response);
+
+      await client.listProposals({ status: "rejected" });
+
+      expect(fetch).toHaveBeenCalledWith("http://localhost:3000/api/proposals?status=rejected", expect.any(Object));
+    });
+
+    it("should build correct query string for limit only", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => [],
+      } as Response);
+
+      await client.listProposals({ limit: 20 });
+
+      expect(fetch).toHaveBeenCalledWith("http://localhost:3000/api/proposals?limit=20", expect.any(Object));
+    });
+
+    it("should build correct query string for both status and limit", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => [],
+      } as Response);
+
+      await client.listProposals({ status: "pending", limit: 25 });
+
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/proposals?status=pending&limit=25",
+        expect.any(Object),
+      );
+    });
+
+    it("should throw RangeError before sending a request when status is invalid", async () => {
+      await expect(client.listProposals({ status: "invalid_status" as any })).rejects.toThrow(RangeError);
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("should throw RangeError for case mismatch without sending a request", async () => {
+      await expect(client.listProposals({ status: "PENDING" as any })).rejects.toThrow(RangeError);
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("should throw RangeError for empty string status without sending a request", async () => {
+      await expect(client.listProposals({ status: "" as any })).rejects.toThrow(RangeError);
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("should throw RangeError for non-string status values without sending a request", async () => {
+      await expect(client.listProposals({ status: 123 as any })).rejects.toThrow(RangeError);
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("should validate all documented values via isValidProposalStatus", () => {
+      expect(PROPOSAL_STATUSES).toEqual(["pending", "approved", "rejected"]);
+      expect(isValidProposalStatus("pending")).toBe(true);
+      expect(isValidProposalStatus("approved")).toBe(true);
+      expect(isValidProposalStatus("rejected")).toBe(true);
+      expect(isValidProposalStatus("other")).toBe(false);
+      expect(isValidProposalStatus("")).toBe(false);
+      expect(isValidProposalStatus(null)).toBe(false);
+      expect(isValidProposalStatus(undefined)).toBe(false);
+    });
+  });
+
+  describe("Marketplace Search (searchMarketplace)", () => {
+    it("should build correct query string with q parameter", async () => {
+      const mockResponse = {
+        results: [
+          {
+            id: "item-1",
+            title: "Data Analyzer",
+            description: "Analyzes on-chain data",
+            capabilities: ["analysis", "stellar"],
+            price: 50,
+            currency: "USDC",
+            provider: "talos-1",
+            rating: 4.8,
+            createdAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        total: 1,
+        page: 1,
+        limit: 20,
+        filters: {
+          capabilities: [
+            { id: "analysis", name: "Analysis", description: "Data", category: "analytics", isActive: true },
+          ],
+        },
+      };
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => mockResponse,
+      } as Response);
+
+      const result = await client.searchMarketplace({ q: "analyzer" });
+
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/marketplace/search?q=analyzer",
+        expect.any(Object),
+      );
+      expect(result).toEqual(mockResponse);
+    });
+
+    it("should build correct query string with q and limit", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({ results: [], total: 0, page: 1, limit: 10, filters: { capabilities: [] } }),
+      } as Response);
+
+      await client.searchMarketplace({ q: "trading", limit: 10 });
+
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/marketplace/search?q=trading&limit=10",
+        expect.any(Object),
+      );
+    });
+
+    it("should encode capabilities as JSON in query string", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({ results: [], total: 0, page: 1, limit: 20, filters: { capabilities: [] } }),
+      } as Response);
+
+      await client.searchMarketplace({ q: "bot", capabilities: ["trading", "arbitrage"] });
+
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/marketplace/search?q=bot&capabilities=%5B%22trading%22%2C%22arbitrage%22%5D",
+        expect.any(Object),
+      );
+
+      // Verify server decodes it back to original array
+      const requestedUrl = new URL(vi.mocked(fetch).mock.calls[0][0] as string);
+      expect(JSON.parse(requestedUrl.searchParams.get("capabilities")!)).toEqual(["trading", "arbitrage"]);
+    });
+
+    it("should handle empty capabilities array", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({ results: [], total: 0, page: 1, limit: 20, filters: { capabilities: [] } }),
+      } as Response);
+
+      await client.searchMarketplace({ q: "bot", capabilities: [] });
+
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/marketplace/search?q=bot&capabilities=%5B%5D",
+        expect.any(Object),
+      );
+    });
+
+    it("should encode special characters and spaces in q parameter", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({ results: [], total: 0, page: 1, limit: 20, filters: { capabilities: [] } }),
+      } as Response);
+
+      await client.searchMarketplace({ q: "ai & ml services" });
+
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringContaining("q=ai+%26+ml+services"),
+        expect.any(Object),
+      );
+    });
+
+    it("should build query string with all options: q, capabilities, limit, page", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({ results: [], total: 0, page: 2, limit: 15, filters: { capabilities: [] } }),
+      } as Response);
+
+      await client.searchMarketplace({
+        q: "defi",
+        capabilities: ["swap"],
+        limit: 15,
+        page: 2,
+      });
+
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/marketplace/search?q=defi&capabilities=%5B%22swap%22%5D&limit=15&page=2",
+        expect.any(Object),
+      );
+    });
+
+    it("should handle searchMarketplace without q when omitted", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({ results: [], total: 0, page: 1, limit: 20, filters: { capabilities: [] } }),
+      } as Response);
+
+      await client.searchMarketplace({ capabilities: ["swap"] });
+
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/marketplace/search?capabilities=%5B%22swap%22%5D",
+        expect.any(Object),
       );
     });
   });

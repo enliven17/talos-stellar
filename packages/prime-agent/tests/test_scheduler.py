@@ -3,14 +3,77 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, time, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from talos_agent.scheduler import run_dividend_distribution, run_loan_repayment
+from talos_agent.scheduler import (
+    check_should_run,
+    run_dividend_distribution,
+    run_loan_repayment,
+)
+
+
+class FixedClock:
+    def __init__(self, now: datetime):
+        self._now = now
+
+    def now_utc(self) -> datetime:
+        return self._now
 
 
 # ── Scheduler core tests ───────────────────────────────────────────────────────
+
+def test_check_should_run_uses_clock_and_utc_boundaries():
+    clock = FixedClock(datetime(2024, 1, 2, 6, 0, 0, tzinfo=timezone.utc))
+
+    assert check_should_run(
+        now=clock.now_utc(),
+        last_run=datetime(2024, 1, 1, 5, 59, 59, tzinfo=timezone.utc),
+        interval_seconds=3600,
+        clock=clock,
+    ) is True
+
+    assert check_should_run(
+        now=clock.now_utc(),
+        last_run=datetime(2024, 1, 2, 5, 59, 59, tzinfo=timezone.utc),
+        interval_seconds=3600,
+        clock=clock,
+    ) is False
+
+
+def test_check_should_run_respects_configured_timezone_boundary():
+    clock = FixedClock(datetime(2024, 1, 2, 17, 0, 0, tzinfo=timezone.utc))
+
+    assert check_should_run(
+        now=clock.now_utc(),
+        last_run=datetime(2024, 1, 1, 8, 59, 0, tzinfo=timezone.utc),
+        schedule_time=time(9, 0),
+        timezone_name="America/Los_Angeles",
+        clock=clock,
+    ) is True
+
+
+def test_check_should_run_handles_dst_gap_and_overlap():
+    gap_now = datetime(2024, 3, 10, 3, 30, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
+    overlap_now = datetime(2024, 11, 3, 1, 30, 0, tzinfo=ZoneInfo("America/New_York"))
+
+    assert check_should_run(
+        now=gap_now,
+        last_run=gap_now - timedelta(hours=1),
+        schedule_time=time(2, 30),
+        timezone_name="America/Los_Angeles",
+    ) is True
+
+    assert check_should_run(
+        now=overlap_now,
+        last_run=overlap_now - timedelta(hours=1),
+        schedule_time=time(1, 30),
+        timezone_name="America/New_York",
+    ) is True
+
 
 @pytest.mark.asyncio
 async def test_agent_lock_prevents_concurrent_execution():

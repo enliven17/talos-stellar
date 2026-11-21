@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from decimal import Decimal
 from pathlib import Path
@@ -11,6 +12,7 @@ from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from talos_agent.circuit_breaker import CircuitBreakerConfig
+from talos_agent.http import validate_tool_timeout
 
 APP_DIR = Path.home() / ".talos-agent"
 
@@ -90,6 +92,16 @@ class Settings(BaseSettings):
     @property
     def llm_base_url(self) -> str | None:
         return "https://api.groq.com/openai/v1" if self.secret_value("groq_api_key") else None
+
+    @property
+    def stellar_usdc_issuer(self) -> str:
+        env_val = os.getenv("STELLAR_USDC_ISSUER") or os.getenv("NEXT_PUBLIC_STELLAR_USDC_ISSUER")
+        return env_val.strip() if env_val else ""
+
+    @property
+    def stellar_network(self) -> str:
+        env_val = os.getenv("STELLAR_NETWORK") or os.getenv("NEXT_PUBLIC_STELLAR_NETWORK")
+        return env_val.strip().lower() if env_val else "testnet"
 
     # Model routing (Issue #233) — disabled by default, backward compatible
     model_routing_enabled: bool = Field(
@@ -315,6 +327,19 @@ class Settings(BaseSettings):
     # Policy engine (disabled by default — backward compatible)
     policy_engine_enabled: bool = Field(default=False, description="Enable the declarative policy engine for autonomous actions")
 
+    # Demo commerce mode (Issue #879) — disabled by default.
+    # When enabled, the system prompt includes aggressive purchasing instructions
+    # ("buy immediately", demo-environment notices, BE AGGRESSIVE).
+    # Production deployments must leave this off.
+    demo_commerce_mode: bool = Field(
+        default=False,
+        description=(
+            "Emit aggressive demo-purchasing guidance in the system prompt "
+            "(buy-immediately instructions, demo-environment notice, BE AGGRESSIVE). "
+            "Off by default — safe for production. Enable only for live demos."
+        ),
+    )
+
     # Tool permission manifests (audit-only by default — backward compatible).
     # "off" disables the check entirely, "audit" evaluates and logs without
     # blocking, "enforce" denies calls that exceed their manifest or grants.
@@ -324,12 +349,36 @@ class Settings(BaseSettings):
     # Empty means "use the legacy grant set", which matches pre-manifest behaviour.
     tool_permission_grants: dict = Field(default_factory=dict, description="Operator-approved capability grants for tools")
 
+    # Dry-run mode (Issue #976) — off by default, safe for production.
+    # When enabled, all outbound write requests (API writes, transfers, social
+    # adapter posts/replies) are suppressed and recorded instead.  Read-only
+    # calls (balance queries, status checks) are not affected.
+    dry_run: bool = Field(
+        default=False,
+        validation_alias="TALOS_DRY_RUN",
+        description=(
+            "Block all external side effects and record suppressed calls. "
+            "Safe for testing full agent cycles without touching production. "
+            "Incompatible with production API keys (tls_…) unless "
+            "TALOS_DRY_RUN_ALLOW_PRODUCTION_KEYS=1 is also set."
+        ),
+    )
+    dry_run_allow_production_keys: bool = Field(
+        default=False,
+        validation_alias="TALOS_DRY_RUN_ALLOW_PRODUCTION_KEYS",
+        description=(
+            "Bypass the dry-run vs. production-key conflict guard. "
+            "Only set this if you deliberately want dry-run with a real API key "
+            "(e.g. read-only audits). Never set in normal CI."
+        ),
+    )
+
     # Agent behaviour
     agent_cycle_interval: int = Field(default=30, description="Seconds between agent cycles")
     polling_interval: int = Field(default=10, description="Seconds between API polls")
     heartbeat_interval: int = Field(default=60, description="Seconds between heartbeats")
     max_iterations: int = Field(default=20, description="Max tool-call iterations per cycle")
-    approval_threshold: Decimal = Field(default=Decimal("10"), description="USD threshold for auto-approval")
+    approval_threshold: Decimal = Field(default=Decimal(10), description="USD threshold for auto-approval")
     browser_headless: bool = Field(default=False, description="Run browser in headless mode")
     auto_repay_loans: bool = Field(default=False, description="Enable automatic loan repayment from treasury")
     tool_timeout_seconds: int = Field(
@@ -338,6 +387,31 @@ class Settings(BaseSettings):
         le=120,
         validation_alias="TALOS_TOOL_TIMEOUT_SECONDS",
         description="Maximum seconds for a single external tool call before it is cancelled.",
+    )
+
+    # Content history and research note bounds (Issue #974)
+    content_history_max_limit: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        validation_alias="TALOS_CONTENT_HISTORY_MAX_LIMIT",
+        description=(
+            "Hard cap on the limit passed to get_content_history. "
+            "LLM-provided values above this are clamped down to it, "
+            "preventing unbounded rows from entering the prompt context."
+        ),
+    )
+    research_notes_max_bytes: int = Field(
+        default=4096,
+        ge=64,
+        le=131072,
+        validation_alias="TALOS_RESEARCH_NOTES_MAX_BYTES",
+        description=(
+            "Maximum byte length of a research note stored via "
+            "save_research_notes. Longer notes are truncated and a "
+            "truncation marker is appended so downstream consumers "
+            "and the audit trail can tell the difference."
+        ),
     )
 
     # Job leasing
@@ -396,7 +470,25 @@ class Settings(BaseSettings):
 
     # Dividend distribution
     dividend_distribution_interval: int = Field(default=3600, description="Seconds between dividend distribution checks")
-    dividend_usdc_threshold: Decimal = Field(default=Decimal("100"), description="USDC threshold to trigger dividend distribution")
+    dividend_usdc_threshold: Decimal = Field(default=Decimal(100), description="USDC threshold to trigger dividend distribution")
+
+    # Deterministic replay (disabled by default for safe rollout)
+    replay_enabled: bool = Field(
+        default=False,
+        description="Enable recording of agent cycle events for deterministic replay.",
+    )
+    replay_max_events: int = Field(
+        default=500,
+        description="Maximum events to capture per cycle (excess silently dropped).",
+    )
+    replay_max_payload_bytes: int = Field(
+        default=65536,
+        description="Maximum bytes per event payload; oversized payloads are truncated.",
+    )
+    replay_keep_sessions: int = Field(
+        default=100,
+        description="Number of replay sessions to keep; oldest are pruned automatically.",
+    )
 
     # Execution replay (Issue #235) — disabled by default
     replay_enabled: bool = Field(default=False, description="Enable execution replay recording for incident analysis")

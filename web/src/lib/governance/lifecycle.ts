@@ -7,7 +7,7 @@
  * and tests without a database.
  *
  * Legacy compatibility: `tls_talos.status` predates this machine and only ever
- * held "Active" | "Paused" | "Retired". `toLifecycleState` / `toLegacyStatus`
+ * held "Active" | "Paused" | "Retired" (plus the explicit "Draining" marketplace state). `toLifecycleState` / `toLegacyStatus`
  * map between the two so existing rows and API consumers keep working while the
  * richer state is tracked in the lifecycle event log.
  */
@@ -343,6 +343,7 @@ const LEGACY_TO_LIFECYCLE: Record<string, AgentLifecycleState> = {
   proposed: "proposed",
   provisioning: "provisioning",
   retiring: "retiring",
+  draining: "retiring",
   recovery_pending: "recovery_pending",
   failed: "failed",
 };

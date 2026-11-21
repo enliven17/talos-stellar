@@ -16,6 +16,7 @@ Critical invariants checked:
 from __future__ import annotations
 
 import base64
+import os
 import stat
 from pathlib import Path
 
@@ -109,7 +110,8 @@ def test_build_and_verify_roundtrip(tmp_path: Path, monkeypatch):
     run = build_backup(password=pw, out_path=out, scope="agent")
 
     assert out.exists()
-    assert stat.S_IMODE(out.stat().st_mode) == stat.S_IRUSR | stat.S_IWUSR
+    if os.name != "nt":
+        assert stat.S_IMODE(out.stat().st_mode) == stat.S_IRUSR | stat.S_IWUSR
     assert run.version == BACKUP_FORMAT_VERSION
     assert run.encryption == BACKUP_ENCRYPTION_LABEL
 
@@ -228,6 +230,8 @@ def test_restore_is_idempotent_after_existing(tmp_path: Path, monkeypatch):
 
 def test_concurrent_backup_busy(tmp_path: Path, monkeypatch):
     """Two concurrent builds on the same scope must raise BackupBusyError."""
+    if os.name == "nt":
+        pytest.skip("fcntl flock not supported on Windows")
     from talos_agent import backup_service as bs
     monkeypatch.setattr(bs, "APP_DIR", tmp_path)
     monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)

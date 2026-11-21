@@ -9,6 +9,7 @@ import {
 } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AgentAvatar } from "@/components/agent-avatar";
+import { useTranslation, type MessageKey } from "@/lib/i18n";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -43,11 +44,17 @@ export const SERVICE_CATEGORIES = [
   "Education",
 ] as const;
 
-export const SORT_OPTIONS = [
-  { value: "", label: "Newest first" },
-  { value: "price:asc", label: "Price: Low → High" },
-  { value: "price:desc", label: "Price: High → Low" },
-  { value: "createdAt:asc", label: "Oldest first" },
+export interface SortOptionItem {
+  value: string;
+  label: string;
+  labelKey: MessageKey;
+}
+
+export const SORT_OPTIONS: readonly SortOptionItem[] = [
+  { value: "", label: "Newest first", labelKey: "marketplace.sortOptions.newest" },
+  { value: "price:asc", label: "Price: Low → High", labelKey: "marketplace.sortOptions.priceAsc" },
+  { value: "price:desc", label: "Price: High → Low", labelKey: "marketplace.sortOptions.priceDesc" },
+  { value: "createdAt:asc", label: "Oldest first", labelKey: "marketplace.sortOptions.oldest" },
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -99,6 +106,7 @@ export function buildPageUrl(params: {
 export function MarketplaceClient() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { t } = useTranslation();
 
   // ── Derive filter state from URL ─────────────────────────────────────────
   const urlCategory = searchParams.get("category") ?? "All";
@@ -145,7 +153,7 @@ export function MarketplaceClient() {
         const res = await fetch(url, { signal: controller.signal });
         if (!res.ok) {
           const body = (await res.json()) as { error?: string };
-          setFetchError(body.error ?? "Failed to load services.");
+          setFetchError(body.error ?? t("marketplace.failedToLoad"));
           return;
         }
         const json = (await res.json()) as {
@@ -156,13 +164,13 @@ export function MarketplaceClient() {
         setNextCursor(json.nextCursor);
       } catch (err) {
         if ((err as { name?: string }).name !== "AbortError") {
-          setFetchError("Failed to load services.");
+          setFetchError(t("marketplace.failedToLoad"));
         }
       } finally {
         setLoading(false);
       }
     },
-    [],
+    [t],
   );
 
   const fetchNextPage = useCallback(async () => {
@@ -220,15 +228,15 @@ export function MarketplaceClient() {
     // Validate locally before touching the URL so bad input gets instant
     // feedback without a round-trip.
     if (min !== "" && Number.isNaN(Number(min))) {
-      setPriceError("Min price must be a number.");
+      setPriceError(t("marketplace.errors.minNumber"));
       return;
     }
     if (max !== "" && Number.isNaN(Number(max))) {
-      setPriceError("Max price must be a number.");
+      setPriceError(t("marketplace.errors.maxNumber"));
       return;
     }
     if (min !== "" && max !== "" && Number(min) > Number(max)) {
-      setPriceError("Min price cannot exceed max price.");
+      setPriceError(t("marketplace.errors.range"));
       return;
     }
     setPriceError(null);
@@ -251,18 +259,20 @@ export function MarketplaceClient() {
       {/* ── Header ── */}
       <div className="flex items-start justify-between mb-8 gap-4">
         <div className="min-w-0">
-          <div className="text-xs text-muted mb-2">[SERVICE MARKETPLACE]</div>
+          <div className="text-xs text-muted mb-2">{t("marketplace.headerBadge")}</div>
           <h1 className="text-2xl font-bold text-accent tracking-tight">
-            Agent Service Marketplace
+            {t("marketplace.title")}
           </h1>
           <p className="text-sm text-muted mt-2">
-            Discover and purchase AI agent services — filtered by category and
-            price, settled on Stellar via x402.
+            {t("marketplace.description")}
           </p>
         </div>
         {!loading && (
           <div className="text-right text-xs text-muted shrink-0">
-            {services.length} service{services.length !== 1 ? "s" : ""} loaded
+            {t("marketplace.servicesLoaded", {
+              count: services.length,
+              plural: services.length !== 1 ? "s" : "",
+            })}
           </div>
         )}
       </div>
@@ -274,7 +284,7 @@ export function MarketplaceClient() {
       >
         {/* Category chips */}
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs text-muted shrink-0">Category:</span>
+          <span className="text-xs text-muted shrink-0">{t("marketplace.categoryLabel")}</span>
           {SERVICE_CATEGORIES.map((cat) => (
             <button
               key={cat}
@@ -296,19 +306,19 @@ export function MarketplaceClient() {
         <div className="flex flex-wrap items-start gap-4">
           {/* Price range */}
           <fieldset className="flex flex-col gap-1">
-            <legend className="text-xs text-muted mb-1">Price (USDC)</legend>
+            <legend className="text-xs text-muted mb-1">{t("marketplace.priceLabel")}</legend>
             <div className="flex items-center gap-2">
               <input
                 type="number"
                 min={0}
                 step="0.01"
-                placeholder="Min"
+                placeholder={t("marketplace.minPlaceholder")}
                 value={draftMin}
                 onChange={(e) => setDraftMin(e.target.value)}
                 onBlur={commitPriceRange}
                 onKeyDown={(e) => e.key === "Enter" && commitPriceRange()}
                 data-testid="marketplace-min-price"
-                aria-label="Minimum price"
+                aria-label={t("marketplace.minAriaLabel")}
                 className="w-24 bg-surface border border-border px-3 py-1.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent"
               />
               <span className="text-xs text-muted">–</span>
@@ -316,13 +326,13 @@ export function MarketplaceClient() {
                 type="number"
                 min={0}
                 step="0.01"
-                placeholder="Max"
+                placeholder={t("marketplace.maxPlaceholder")}
                 value={draftMax}
                 onChange={(e) => setDraftMax(e.target.value)}
                 onBlur={commitPriceRange}
                 onKeyDown={(e) => e.key === "Enter" && commitPriceRange()}
                 data-testid="marketplace-max-price"
-                aria-label="Maximum price"
+                aria-label={t("marketplace.maxAriaLabel")}
                 className="w-24 bg-surface border border-border px-3 py-1.5 text-sm text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent"
               />
             </div>
@@ -339,17 +349,17 @@ export function MarketplaceClient() {
 
           {/* Sort */}
           <div className="flex flex-col gap-1">
-            <span className="text-xs text-muted mb-1">Sort</span>
+            <span className="text-xs text-muted mb-1">{t("marketplace.sortLabel")}</span>
             <select
               value={urlSort}
               onChange={(e) => pushFilters({ sort: e.target.value })}
               data-testid="marketplace-sort-select"
-              aria-label="Sort services"
+              aria-label={t("marketplace.sortAriaLabel")}
               className="bg-surface border border-border px-3 py-1.5 text-sm text-foreground focus:outline-none focus:border-accent cursor-pointer"
             >
               {SORT_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>
-                  {opt.label}
+                  {t(opt.labelKey)}
                 </option>
               ))}
             </select>
@@ -363,7 +373,7 @@ export function MarketplaceClient() {
                 data-testid="marketplace-clear-filters"
                 className="text-xs text-muted hover:text-foreground border border-border px-3 py-1.5 transition-colors"
               >
-                Clear filters
+                {t("marketplace.clearFilters")}
               </button>
             </div>
           )}
@@ -377,14 +387,14 @@ export function MarketplaceClient() {
           >
             {urlCategory !== "All" && (
               <FilterPill
-                label={`Category: ${urlCategory}`}
+                label={t("marketplace.pills.category", { category: urlCategory })}
                 onRemove={() => pushFilters({ category: "All" })}
                 testId="marketplace-pill-category"
               />
             )}
             {urlMinPrice !== "" && (
               <FilterPill
-                label={`Min: $${urlMinPrice}`}
+                label={t("marketplace.pills.minPrice", { price: urlMinPrice })}
                 onRemove={() => {
                   setDraftMin("");
                   pushFilters({ minPrice: "" });
@@ -394,7 +404,7 @@ export function MarketplaceClient() {
             )}
             {urlMaxPrice !== "" && (
               <FilterPill
-                label={`Max: $${urlMaxPrice}`}
+                label={t("marketplace.pills.maxPrice", { price: urlMaxPrice })}
                 onRemove={() => {
                   setDraftMax("");
                   pushFilters({ maxPrice: "" });
@@ -404,7 +414,12 @@ export function MarketplaceClient() {
             )}
             {urlSort !== "" && (
               <FilterPill
-                label={`Sort: ${SORT_OPTIONS.find((o) => o.value === urlSort)?.label ?? urlSort}`}
+                label={t("marketplace.pills.sort", {
+                  sort: t(
+                    SORT_OPTIONS.find((o) => o.value === urlSort)?.labelKey ??
+                      "marketplace.sortOptions.newest",
+                  ),
+                })}
                 onRemove={() => pushFilters({ sort: "" })}
                 testId="marketplace-pill-sort"
               />
@@ -419,7 +434,7 @@ export function MarketplaceClient() {
           className="text-center py-20 text-muted text-sm"
           data-testid="marketplace-loading"
         >
-          Loading…
+          {t("marketplace.resultsLoading")}
         </div>
       ) : fetchError ? (
         <div
@@ -434,14 +449,14 @@ export function MarketplaceClient() {
           className="text-center py-20 text-muted text-sm"
           data-testid="marketplace-empty"
         >
-          <p>No services match your current filters.</p>
+          <p>{t("marketplace.empty.title")}</p>
           {hasActiveFilters && (
             <button
               onClick={clearAllFilters}
               data-testid="marketplace-empty-clear"
               className="mt-4 text-xs border border-accent text-accent px-4 py-2 hover:bg-accent hover:text-background transition-colors"
             >
-              Clear filters
+              {t("marketplace.empty.clear")}
             </button>
           )}
         </div>
@@ -465,7 +480,7 @@ export function MarketplaceClient() {
                 data-testid="marketplace-load-more"
                 className="border border-border text-muted hover:text-foreground px-6 py-2.5 text-sm transition-colors disabled:opacity-50"
               >
-                {loadingMore ? "Loading…" : "Load more"}
+                {loadingMore ? t("marketplace.resultsLoading") : t("marketplace.loadMore")}
               </button>
             </div>
           )}
@@ -480,6 +495,8 @@ export function MarketplaceClient() {
 // ---------------------------------------------------------------------------
 
 function ServiceCard({ service }: { service: Service }) {
+  const { t } = useTranslation();
+
   return (
     <div
       className="bg-surface border border-border p-5 flex flex-col justify-between"
@@ -513,7 +530,7 @@ function ServiceCard({ service }: { service: Service }) {
         )}
 
         <div className="flex items-center gap-1.5 text-xs text-muted mt-2">
-          <span>by</span>
+          <span>{t("marketplace.card.by")}</span>
           <AgentAvatar name={service.talosName} size={14} className="shrink-0" />
           <span className="text-foreground">{service.talosName}</span>
         </div>
@@ -526,7 +543,9 @@ function ServiceCard({ service }: { service: Service }) {
         >
           ${service.price.toFixed(2)}
         </span>
-        <span className="text-xs text-muted">{service.currency} via x402</span>
+        <span className="text-xs text-muted">
+          {t("marketplace.card.via", { currency: service.currency })}
+        </span>
       </div>
     </div>
   );
@@ -541,6 +560,8 @@ function FilterPill({
   onRemove: () => void;
   testId: string;
 }) {
+  const { t } = useTranslation();
+
   return (
     <span
       className="inline-flex items-center gap-1.5 text-xs border border-border px-2.5 py-1 text-muted"
@@ -549,7 +570,7 @@ function FilterPill({
       {label}
       <button
         onClick={onRemove}
-        aria-label={`Remove filter: ${label}`}
+        aria-label={t("marketplace.pills.remove", { label })}
         className="hover:text-foreground transition-colors leading-none"
       >
         ×

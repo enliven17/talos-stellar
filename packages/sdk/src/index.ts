@@ -12,9 +12,9 @@ export type {
   ResolvedRetryPolicy,
   ResolvedRetryOptions,
   TalosErrorEvent,
+  TalosResponseEvent,
   ReadOptions,
   WriteOptions,
-  ReadOptions,
 } from "./client.js";
 
 // ── Pagination ─────────────────────────────────────────────────────
@@ -72,25 +72,26 @@ export {
   sanitizeBody,
   redactSecrets,
   snapshotHeaders,
+  parseRateLimit,
   parseRetryAfter,
   parseX402Challenge,
+  redactEventPath,
+  diagnoseBuyerProof,
   MAX_BODY_BYTES,
 } from "./errors.js";
-
-// ── Feature Detection ─────────────────────────────────────────────
-//
-// Provides backwards-compatible feature detection for SDK capabilities.
-// This allows consumers to safely check for the presence of specific
-// features without breaking on older versions or environments.
-export {
-  detectFeature,
-  FeatureFlags,
-  FeatureStatus,
-} from "./features.js";
+export type { RateLimitInfo, HeaderSource } from "./errors.js";
 
 // ── Domain types ──────────────────────────────────────────────────
 
 export * from "./types.js";
+
+// ── Name validation ────────────────────────────────────────────────
+
+export {
+  validateName,
+  canonicalizeName,
+  validateAndCanonicalizeName,
+} from "./name-validation.js";
 
 // ── Stellar helpers ───────────────────────────────────────────────
 
@@ -134,6 +135,26 @@ export type {
   SeenStore,
   SchemaVersionNegotiationResult,
 } from "./events.js";
+
+// ── Job Tracker ───────────────────────────────────────────────────
+
+export {
+  JobTracker,
+  trackJob,
+  JobTerminalError,
+  JobFailedError,
+  JobCancelledError,
+  JobTrackAbortedError,
+  JobTrackTimeoutError,
+} from "./job-tracker.js";
+export type {
+  JobProgressDetails,
+  TrackJobEventType,
+  TrackJobEvent,
+  JobTerminalStatus,
+  JobTerminalOutcome,
+  TrackJobOptions,
+} from "./job-tracker.js";
 
 // ── Contract event decoding ───────────────────────────────────────────────────
 
@@ -205,6 +226,35 @@ export type {
   SerializedChaosScenario,
   ChaosFixtureBundle,
 } from "./chaos-fixtures.js";
+
+// ── Contract readers ──────────────────────────────────────────────────────
+
+export {
+  RegistryReader,
+  NameServiceReader,
+  TESTNET_RPC_URL,
+  TESTNET_REGISTRY_CONTRACT_ID,
+  TESTNET_NAME_SERVICE_CONTRACT_ID,
+  TESTNET_NETWORK_PASSPHRASE,
+} from "./contracts.js";
+export type {
+  OnChainTalos,
+  ContractPatron,
+  ContractKernel,
+  ContractPulse,
+  ContractVersion,
+  ContractReaderOptions,
+  RegistryReaderOptions,
+  NameServiceReaderOptions,
+} from "./contracts.js";
+
+// ── Contract reader errors ────────────────────────────────────────────────
+
+export {
+  TalosContractError,
+  TalosContractNotFoundError,
+  TalosContractSimulateError,
+} from "./errors.js";
 
 // ── Runtime compatibility matrix ──────────────────────────────────────────────
 

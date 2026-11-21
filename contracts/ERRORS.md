@@ -44,6 +44,34 @@ This page documents errors exposed by the contract sources in this workspace. Nu
 | 13 | `TalosNotFound` | Registry has no Talos for the supplied ID; verify ID and registry state. |
 | 14 | `AccountingOverflow` | Claim would make claimed amount exceed epoch total; resolve accounting state before retrying. |
 | 15 | `AlreadyRecovered` | Epoch has already been recovered. |
+| 16 | `InvalidPatronShares` | Supplied patron shares do not sum to 100%. |
+| 17 | `InconsistentShareData` | Rounding dust calculation conflicts with existing epoch claim data. |
+| 18 | `NoPendingAdmin` | No pending administrator nomination exists to accept or cancel. |
+
+### TalosGovernance (`GovernanceError`)
+
+| Code | Variant | Meaning / caller action |
+|---:|---|---|
+| 1 | `AlreadyInitialized` | `initialize` already completed; do not retry initialization. |
+| 2 | `NotInitialized` | Required state is absent; initialize before calling this method. |
+| 3 | `UnauthorizedAdmin` | Caller is not the configured administrator. |
+| 4 | `InvalidQuorum` | Quorum must be positive; submit a positive value. |
+| 5 | `InvalidConsensusThreshold` | Consensus threshold must be 1..10000 bps; submit an in-range value. |
+| 6 | `InvalidVotingPeriod` | Voting period must be positive; submit a positive value. |
+| 7 | `EmptyTitle` | Proposal title is empty; supply a non-empty title. |
+| 8 | `EmptyDescription` | Proposal description is empty; supply a non-empty description. |
+| 9 | `ProposalNotFound` | Requested proposal does not exist; verify the proposal ID. |
+| 10 | `ProposalNotActive` | Proposal is not active; check proposal state before retrying. |
+| 11 | `VotingPeriodEnded` | Voting period has ended; voting is no longer accepted. |
+| 12 | `VotingPeriodNotEnded` | Voting period has not ended; wait until it closes. |
+| 13 | `ProposalNotApproved` | Proposal is not approved; the operation requires an approved proposal. |
+| 14 | `AlreadyVoted` | This voter has already voted on this proposal. |
+| 15 | `NoVotingPower` | Voter has no eligible voting weight. |
+| 16 | `NegativeBalance` | Cached balance cannot be negative; review balance state. |
+| 17 | `DomainPaused` | Write operation is blocked by pause state; retry after unpause. |
+| 18 | `InvalidTtlBounds` | `extend_ttl_batch` bounds were rejected by the shared `ttl-manager` validator. |
+| 19 | `InvalidProposalThreshold` | Proposal threshold must be non-negative; submit a value >= 0. |
+| 20 | `InsufficientVotingPower` | Proposer's voting power at the snapshot ledger is below the configured `proposal_threshold`; acquire more voting power before proposing. |
 
 ### Storage migration helper (`MigrationError`)
 
@@ -82,12 +110,6 @@ These are returned by the `storage_migration` library used by the registry, not 
 | Registry | `Migration target must be greater than or equal to current version`; `Migration target exceeds supported schema version`; Migration/rollback rejection diagnostics | Explicit migration target is below current version, exceeds latest supported schema version, or migration helper rejected ordering/lock state. |
 | Registry, Governance, Name service | `Domain is paused` | The write path's pause domain is active (or was paused indefinitely). |
 | Registry, Governance, Name service | `ttl bounds: min_age exceeds max_age`; `ttl bounds: max_keys must be greater than zero`; `ttl bounds: max_keys exceeds MAX_BATCH_KEYS` | `extend_ttl_batch` bounds were rejected by the shared `ttl-manager` validator before any storage read or write. |
-| Governance | `Already initialized` | Initialization already completed. |
-| Governance | `Quorum must be positive`; `Consensus threshold must be 1..10000 bps`; `Voting period must be positive` | Initial or updated configuration is outside bounds. |
-| Governance | `Title cannot be empty`; `Description cannot be empty` | Proposal metadata is missing. |
-| Governance | `Proposal is not active`; `Voting period has ended`; `Voting period has not ended`; `Proposal is not approved` | Proposal state or timing disallows the operation. |
-| Governance | `Already voted on this proposal`; `No voting power` | Voter already voted or has no eligible weight. |
-| Governance | `Balance cannot be negative`; `Unauthorized admin` | Invalid cached balance or caller is not admin. |
 | Name service | `Invalid name...`; `Name already taken` | Name validation failed or name is registered already. |
 | Name service | `Name cannot be empty after canonicalization`; `Name exceeds maximum input length for canonicalization`; `Name exceeds maximum byte length after canonicalization` | `register_name` or `canonicalize` received a name that is empty after trimming, longer than 64 bytes, or longer than 32 bytes after trimming. `resolve_name` and `is_name_available` never fail for such input: they return `None` and `false`. |
 | Name service | `name_fee must be non-negative`; `Asset not in registry allowlist...` | Invalid fee configuration or payment asset. |

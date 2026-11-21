@@ -32,6 +32,8 @@ const source = readFileSync(BUNDLE_PATH, "utf8");
 // Emulate a minimal browser global: only the things the bundle should use.
 const windowLike = {
   crypto,
+  TextEncoder,
+  TextDecoder,
 };
 const globalThisLike = windowLike;
 windowLike.window = windowLike;
@@ -96,6 +98,8 @@ const context = {
   Request,
   Response,
   ReadableStream,
+  TextEncoder,
+  TextDecoder,
 };
 vm.createContext(context);
 

@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+
+from talos_agent.clock import ClockProtocol, SystemClock
 from talos_agent.db import LocalDB
 
 logger = logging.getLogger(__name__)
+
+# Bounds for the content history rendered into the prompt context (Issue #974).
+# The default preserves the historical hard-coded value; the max mirrors
+# ``Settings.content_history_max_limit``.
+DEFAULT_CONTEXT_CONTENT_LIMIT = 5
+MAX_CONTEXT_CONTENT_LIMIT = 50
 
 
 @dataclass
@@ -31,9 +38,29 @@ class AgentContext:
     unmeasured_count: int
 
     @classmethod
-    def from_db(cls, db: LocalDB, talos_config: dict) -> AgentContext:
+    def from_db(
+        cls,
+        db: LocalDB,
+        talos_config: dict,
+        *,
+        content_history_limit: int | None = None,
+        clock: ClockProtocol | None = None,
+    ) -> AgentContext:
+        # Injectable clock so tests and replays can pin the current time shown
+        # in the prompt; production falls back to the system clock.
+        clock = clock if clock is not None else SystemClock()
+
         last_run = db.get_last_run("agent_cycle")
         playbook = db.get_active_playbook()
+
+        # Clamp the content history rendered into the prompt context to the
+        # configured budget (Issue #974). Defaults to a small value so the
+        # system prompt stays bounded; callers may pass a higher value up to
+        # MAX_CONTEXT_CONTENT_LIMIT.
+        if content_history_limit is None:
+            content_history_limit = DEFAULT_CONTEXT_CONTENT_LIMIT
+        content_history_limit = max(content_history_limit, 1)
+        content_history_limit = min(content_history_limit, MAX_CONTEXT_CONTENT_LIMIT)
 
         # Count pending commerce jobs (as service provider)
         pending_jobs_count = 0
@@ -45,14 +72,14 @@ class AgentContext:
         gtm_budget = float(talos_config.get("gtmBudget", 200))
 
         return cls(
-            current_time=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            current_time=clock.now().strftime("%Y-%m-%d %H:%M UTC"),
             posts_today=db.count_today("post"),
             research_today=db.count_today("research"),
             replies_today=db.count_today("reply"),
             pending_approvals=len(db.get_pending_approvals()),
             pending_jobs=pending_jobs_count,
             last_agent_cycle=last_run.isoformat() if last_run else "never",
-            recent_content=db.get_recent_content(5),
+            recent_content=db.get_recent_content(content_history_limit),
             active_playbook=playbook,
             talos_config=talos_config,
             spending_today=db.get_spending_today(),
