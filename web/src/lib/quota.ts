@@ -39,7 +39,8 @@
  */
 
 import { and, eq, isNull, or, sql } from "drizzle-orm";
-import { tlsQuotaConfigs, tlsQuotaUsage } from "@/db/schema";
+import { tlsQuotaConfigs, tlsQuotaScopeUsage, tlsQuotaUsage } from "@/db/schema";
+import { VALID_SCOPES, type Scope } from "@/lib/api-scopes";
 import type { db as appDb } from "@/db";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -53,6 +54,24 @@ export type QuotaResource =
 
 /** Window granularity options. */
 export type WindowSize = "hourly" | "daily" | "monthly";
+
+/** API scopes that can appear in usage breakdowns. `admin` is an authorization
+ * grant, not a resource scope, so it is intentionally not a usage bucket. */
+export type QuotaScope = Exclude<Scope, "admin">;
+export const QUOTA_SCOPES: readonly QuotaScope[] = VALID_SCOPES.filter(
+  (scope): scope is QuotaScope => scope !== "admin",
+);
+
+const DEFAULT_SCOPE_BY_RESOURCE: Record<QuotaResource, QuotaScope> = {
+  activity_writes: "activity:write",
+  job_writes: "commerce:write",
+  revenue_writes: "revenue:write",
+  sse_connections: "commerce:read",
+};
+
+export function quotaScopeForResource(resource: QuotaResource): QuotaScope {
+  return DEFAULT_SCOPE_BY_RESOURCE[resource];
+}
 
 /** The effective quota configuration for a (talosId, resource) pair. */
 export interface QuotaConfig {
@@ -242,17 +261,23 @@ export async function resolveQuotaConfig(
  * @param db       Drizzle DB instance
  * @param talosId  Agent being checked
  * @param resource Resource being consumed
- * @param clock    Optional injected clock (Date or timestamp in ms)
+ * @param scopeOrClock Optional per-scope label, or an injected clock
+ * @param clock       Optional injected clock when a scope is provided
  * @returns        QuotaResult describing the outcome
  */
 export async function checkAndIncrementQuota(
   db: Db,
   talosId: string,
   resource: QuotaResource,
+  scopeOrClock: QuotaScope | Date | number = quotaScopeForResource(resource),
   clock?: Date | number,
 ): Promise<QuotaResult> {
   const config = await resolveQuotaConfig(db, talosId, resource);
-  const boundaries = computeQuotaWindow(clock ?? new Date(), config.windowSize);
+  const scope = typeof scopeOrClock === "string" ? scopeOrClock : quotaScopeForResource(resource);
+  const effectiveClock = typeof scopeOrClock === "string" ? clock : scopeOrClock;
+  const breakdownScope = QUOTA_SCOPES.includes(scope) ? scope : quotaScopeForResource(resource);
+  const boundaries = computeQuotaWindow(effectiveClock ?? new Date(), config.windowSize);
+  const now = typeof effectiveClock === "number" ? new Date(effectiveClock) : effectiveClock ?? new Date();
 
   if (!config.enabled) {
     return {
@@ -273,7 +298,7 @@ export async function checkAndIncrementQuota(
       resource,
       windowStart: boundaries.windowStart,
       count: 1,
-      updatedAt: typeof clock === "number" ? new Date(clock) : clock ?? new Date(),
+      updatedAt: now,
     })
     .onConflictDoUpdate({
       target: [tlsQuotaUsage.talosId, tlsQuotaUsage.resource, tlsQuotaUsage.windowStart],
@@ -285,10 +310,74 @@ export async function checkAndIncrementQuota(
     .returning({ count: tlsQuotaUsage.count });
 
   const used = row?.count ?? 1;
+
+  // The total row above remains authoritative for enforcement. A breakdown
+  // write must never turn a successful quota check into a failed request.
+  try {
+    await db
+      .insert(tlsQuotaScopeUsage)
+      .values({
+        talosId,
+        resource,
+        scope: breakdownScope,
+        windowStart: boundaries.windowStart,
+        count: 1,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [
+          tlsQuotaScopeUsage.talosId,
+          tlsQuotaScopeUsage.resource,
+          tlsQuotaScopeUsage.scope,
+          tlsQuotaScopeUsage.windowStart,
+        ],
+        set: {
+          count: sql`${tlsQuotaScopeUsage.count} + 1`,
+          updatedAt: sql`now()`,
+        },
+      });
+  } catch {
+    // Keep the established total quota policy fail-open for observability.
+  }
   const remaining = Math.max(0, config.maxCount - used);
   const ok = used <= config.maxCount;
 
   return { ok, limit: config.maxCount, remaining, used, resetAt: boundaries.resetAt, resource };
+}
+
+/** Read bounded per-scope usage for the current window without incrementing. */
+export async function readQuotaUsageBreakdown(
+  db: Db,
+  talosId: string,
+  resource: QuotaResource,
+): Promise<Record<QuotaScope, number>> {
+  const config = await resolveQuotaConfig(db, talosId, resource);
+  const windowStart = floorToWindow(new Date(), config.windowSize);
+  let rows: Array<{ scope: string; count: number }> = [];
+  try {
+    rows = await db
+      .select({ scope: tlsQuotaScopeUsage.scope, count: tlsQuotaScopeUsage.count })
+      .from(tlsQuotaScopeUsage)
+      .where(
+        and(
+          eq(tlsQuotaScopeUsage.talosId, talosId),
+          eq(tlsQuotaScopeUsage.resource, resource),
+          eq(tlsQuotaScopeUsage.windowStart, windowStart),
+        ),
+      );
+  } catch {
+    // The breakdown table may be added after the existing quota migration.
+  }
+
+  const breakdown = Object.fromEntries(
+    QUOTA_SCOPES.map((scope) => [scope, 0]),
+  ) as Record<QuotaScope, number>;
+  for (const row of rows) {
+    if (Object.prototype.hasOwnProperty.call(breakdown, row.scope)) {
+      breakdown[row.scope as QuotaScope] = row.count;
+    }
+  }
+  return breakdown;
 }
 
 /**
