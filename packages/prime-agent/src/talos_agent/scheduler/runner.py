@@ -21,6 +21,7 @@ from talos_agent.observability import log
 from talos_agent.observability import setup as setup_observability
 from talos_agent.tracing import force_flush as force_flush_tracing
 from talos_agent.tracing import shutdown_tracing
+from talos_agent.scheduler.policy import build_consistency_report
 
 if TYPE_CHECKING:
     from talos_agent.config import Settings
@@ -472,6 +473,19 @@ def _build_task_list(
     return task_list
 
 
+def scheduler_consistency_report(db, tasks):
+    """Return a read-only report comparing durable and live scheduler work."""
+    try:
+        durable_ids = db.list_durable_execution_ids()
+        active_ids = {task.get_name() for task in tasks if not task.done()}
+        return build_consistency_report(durable_ids, active_ids)
+    except Exception as exc:
+        logger.warning("scheduler_consistency_observation_failed: %s", type(exc).__name__)
+        return build_consistency_report(
+            (), (), durable_source_available=False, active_source_available=False
+        )
+
+
 async def _cleanup(api, browser_state, settings, db):
     """Final cleanup: go offline, close browser/API, flush metrics."""
     console.print("[yellow]Cleaning up...[/yellow]")
@@ -612,6 +626,14 @@ async def run(settings: "Settings", agent_slot: int = 0) -> None:
         job_effect_store=job_effect_store, job_effect_dispatcher=job_effect_dispatcher,
         telegram_queue_worker=telegram_queue_worker,
         adapter_health_reporter=adapter_health_reporter,
+    )
+    consistency = scheduler_consistency_report(db, async_tasks)
+    log.info(
+        "scheduler_consistency_report",
+        matched=list(consistency.matched),
+        orphaned_durable=list(consistency.orphaned_durable),
+        untracked_active=list(consistency.untracked_active),
+        uncertain=list(consistency.uncertain),
     )
 
     try:
