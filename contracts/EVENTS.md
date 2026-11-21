@@ -96,6 +96,9 @@ Governance action proposals store a domain-separated digest of their canonical a
 |---|---|
 | (`name_reg`, talos_id: u32) | (name: String, owner: Address) |
 | (`name_reg2`, talos_id: u32) | (version: u32, name: String, owner: Address) |
+| (`name_trf`, source_talos_id: u32) | (name: String, recipient_talos_id: u32, recipient: Address, expires_at: u64) |
+| (`name_acc`, source_talos_id: u32) | (name: String, recipient_talos_id: u32, recipient: Address) |
+| (`name_cnl`, source_talos_id: u32) | (name: String,) |
 | (`reg_upd`,) | (old_registry: Address, new_registry: Address) |
 | (`tl_sch`/`tl_exec`/`tl_cnl`/`tl_cfg`) | same shape as registry timelock events |
 | (`pause_on`, domain: PauseDomain) | (actor: Address, expires_at: u64) |
@@ -104,6 +107,11 @@ Governance action proposals store a domain-separated digest of their canonical a
 | (`guard_rem`,) | (guardian: Address,) |
 | (`name_fee`, talos_id: u32) | (payer: Address, asset: Address, fee: i128) |
 | (`dep_path`,) | (deprecated: String, replacement: String) |
+
+Name transfer proposals expire at `expires_at` (Unix timestamp), seven days
+after proposal. `name_trf` is emitted when a proposal is recorded, `name_acc`
+when the recipient accepts and the name mappings move, and `name_cnl` when
+the source creator cancels.
 
 **`pause_on` semantics:**
 - `domain` identifies the paused write path (`NameRegistration`).

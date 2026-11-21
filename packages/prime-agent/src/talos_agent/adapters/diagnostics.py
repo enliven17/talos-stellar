@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 MAX_PROVIDER_LENGTH = 64
+MAX_ACCOUNT_LENGTH = 64
 MAX_OPERATION_LENGTH = 64
 MAX_STATUS_LENGTH = 32
 MAX_ERROR_LENGTH = 256
@@ -19,7 +20,7 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _SAFE_LABEL = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]*$")
 _SENSITIVE_KEY = re.compile(r"(?:token|authorization|secret|api[_-]?key|password|cookie|signature|credential|private[_-]?key|webhook)", re.I)
 _INLINE_SECRET = re.compile(r"(Bearer\s+)[^\s,;]+", re.I)
-_VALID_OPERATIONS = frozenset({"post", "reply", "get_mentions", "search", "get_post_performance", "get_profile_stats", "network", "browser"})
+_VALID_OPERATIONS = frozenset({"post", "reply", "get_mentions", "search", "get_post_performance", "get_profile_stats", "network", "browser", "reload_preview", "recovery_disposition"})
 _VALID_STATUSES = frozenset({"succeeded", "failed", "timed_out", "denied"})
 _VALID_CAPABILITIES = frozenset({"secret", "network", "browser", "browser_host", "filesystem_read", "filesystem_write", "tool", "manifest", "operation"})
 _VALID_RESOURCES = frozenset({"input", "output", "request", "network_requests", "network_response", "browser_actions"})
@@ -63,7 +64,13 @@ def safe_adapter_diagnostic_fields(**fields: Any) -> dict[str, Any]:
     """
     result: dict[str, Any] = {}
     if "adapter" in fields or "provider" in fields:
-        result["adapter"] = _label(fields.get("adapter", fields.get("provider")), MAX_PROVIDER_LENGTH)
+        provider_val = fields.get("adapter") if fields.get("adapter") is not None else fields.get("provider")
+        result["adapter"] = _label(provider_val, MAX_PROVIDER_LENGTH)
+    account_val = fields.get("account") if fields.get("account") is not None else fields.get("remote_account")
+    if account_val is None:
+        account_val = fields.get("account_id")
+    if account_val is not None:
+        result["account"] = _label(account_val, MAX_ACCOUNT_LENGTH)
     if "operation" in fields:
         result["operation"] = _label(fields["operation"], MAX_OPERATION_LENGTH, _VALID_OPERATIONS)
     if fields.get("operation_id") is not None:
@@ -83,6 +90,26 @@ def safe_adapter_diagnostic_fields(**fields: Any) -> dict[str, Any]:
     duration = fields.get("duration_ms")
     if isinstance(duration, (int, float)) and not isinstance(duration, bool):
         result["duration_ms"] = max(0, min(round(duration, 2), 3_600_000))
+    if "valid" in fields and isinstance(fields["valid"], bool):
+        result["valid"] = fields["valid"]
+    if "has_changes" in fields and isinstance(fields["has_changes"], bool):
+        result["has_changes"] = fields["has_changes"]
+    if "added_channels" in fields and isinstance(fields["added_channels"], (list, tuple, set, frozenset)):
+        result["added_channels"] = [_label(c, MAX_PROVIDER_LENGTH) for c in fields["added_channels"]][:32]
+    if "removed_channels" in fields and isinstance(fields["removed_channels"], (list, tuple, set, frozenset)):
+        result["removed_channels"] = [_label(c, MAX_PROVIDER_LENGTH) for c in fields["removed_channels"]][:32]
+    if "modified_channels" in fields and isinstance(fields["modified_channels"], (list, tuple, set, frozenset)):
+        result["modified_channels"] = [_label(c, MAX_PROVIDER_LENGTH) for c in fields["modified_channels"]][:32]
+    if "affected_scheduled_tasks" in fields and isinstance(fields["affected_scheduled_tasks"], (list, tuple, set, frozenset)):
+        result["affected_scheduled_tasks"] = [_label(t, MAX_OPERATION_LENGTH) for t in fields["affected_scheduled_tasks"]][:32]
+    if "disposition" in fields:
+        result["disposition"] = _label(fields["disposition"], MAX_STATUS_LENGTH)
+    if "action" in fields:
+        result["action"] = _label(fields["action"], MAX_OPERATION_LENGTH)
+    if "safe_actions" in fields and isinstance(fields["safe_actions"], (list, tuple, set, frozenset)):
+        result["safe_actions"] = [_label(a, MAX_OPERATION_LENGTH) for a in fields["safe_actions"]][:32]
+    if "uncertain_count" in fields and isinstance(fields["uncertain_count"], int) and not isinstance(fields["uncertain_count"], bool):
+        result["uncertain_count"] = max(0, min(fields["uncertain_count"], 1_000_000))
     return result
 
 

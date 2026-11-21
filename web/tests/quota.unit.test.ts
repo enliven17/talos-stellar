@@ -5,6 +5,8 @@
  * instance.  The tests cover:
  *
  *   – floorToWindow / nextWindowStart helpers
+ *   – computeQuotaWindow canonical boundary calculations and injected clock
+ *   – month transitions, leap year (Feb 29), and non-leap year (Feb 28) boundary behavior
  *   – resolveQuotaConfig precedence (agent > platform > fallback)
  *   – checkAndIncrementQuota: disabled, under limit, at limit, over limit
  *   – readQuotaUsage: existing row, no row
@@ -74,6 +76,7 @@ vi.mock("drizzle-orm", () => ({
 import {
   floorToWindow,
   nextWindowStart,
+  computeQuotaWindow,
   resolveQuotaConfig,
   checkAndIncrementQuota,
   readQuotaUsage,
@@ -163,7 +166,7 @@ describe("nextWindowStart", () => {
     expect(next.toISOString()).toBe("2026-08-01T00:00:00.000Z");
   });
 
-  it("handles month-end correctly (July 31 → August 31)", () => {
+  it("handles month-end correctly (July 31 → August 01 for daily)", () => {
     const start = new Date("2026-07-31T00:00:00.000Z");
     const next = nextWindowStart(start, "daily");
     expect(next.toISOString()).toBe("2026-08-01T00:00:00.000Z");
@@ -173,6 +176,82 @@ describe("nextWindowStart", () => {
     const start = new Date("2026-07-01T00:00:00.000Z");
     nextWindowStart(start, "monthly");
     expect(start.toISOString()).toBe("2026-07-01T00:00:00.000Z");
+  });
+});
+
+// ─── computeQuotaWindow & Injected Clock ───────────────────────────────────────
+
+describe("computeQuotaWindow", () => {
+  it("returns synchronized window boundaries and consistent header/ISO representations", () => {
+    const clock = new Date("2026-07-24T14:37:45.123Z");
+    const boundaries = computeQuotaWindow(clock, "hourly");
+
+    expect(boundaries.windowStart.toISOString()).toBe("2026-07-24T14:00:00.000Z");
+    expect(boundaries.resetAt).toBe(new Date("2026-07-24T15:00:00.000Z").getTime());
+    expect(boundaries.resetAtIso).toBe("2026-07-24T15:00:00.000Z");
+    expect(boundaries.resetAtHeader).toBe(String(Math.ceil(boundaries.resetAt / 1000)));
+
+    // Verify consistency: header in seconds converted back to ms matches boundary
+    expect(Number(boundaries.resetAtHeader) * 1000).toBe(boundaries.resetAt);
+    expect(new Date(Number(boundaries.resetAtHeader) * 1000).toISOString()).toBe(boundaries.resetAtIso);
+  });
+
+  it("preserves exact window boundaries when clock is at exactly 00:00:00.000", () => {
+    const exactStart = new Date("2026-07-24T00:00:00.000Z");
+    const boundaries = computeQuotaWindow(exactStart, "daily");
+
+    expect(boundaries.windowStart.toISOString()).toBe("2026-07-24T00:00:00.000Z");
+    expect(boundaries.resetAtIso).toBe("2026-07-25T00:00:00.000Z");
+    expect(boundaries.resetAtHeader).toBe(String(boundaries.resetAt / 1000));
+  });
+
+  it("handles leap year February 29 properly for daily windows", () => {
+    // 2024 is a leap year; Feb 29 23:59:59 resets to March 1 00:00:00
+    const leapDay = new Date("2024-02-29T23:59:59.999Z");
+    const boundaries = computeQuotaWindow(leapDay, "daily");
+
+    expect(boundaries.windowStart.toISOString()).toBe("2024-02-29T00:00:00.000Z");
+    expect(boundaries.resetAtIso).toBe("2024-03-01T00:00:00.000Z");
+    expect(boundaries.resetAtHeader).toBe(String(new Date("2024-03-01T00:00:00.000Z").getTime() / 1000));
+  });
+
+  it("handles leap year February for monthly windows", () => {
+    // Starting in February of leap year 2024
+    const leapMonth = new Date("2024-02-15T10:00:00.000Z");
+    const boundaries = computeQuotaWindow(leapMonth, "monthly");
+
+    expect(boundaries.windowStart.toISOString()).toBe("2024-02-01T00:00:00.000Z");
+    expect(boundaries.resetAtIso).toBe("2024-03-01T00:00:00.000Z");
+    expect(boundaries.resetAtHeader).toBe(String(new Date("2024-03-01T00:00:00.000Z").getTime() / 1000));
+  });
+
+  it("handles non-leap year February 28 transition to March 1", () => {
+    // 2023 is not a leap year; Feb 28 daily resets to March 1
+    const nonLeapFeb = new Date("2023-02-28T12:00:00.000Z");
+    const boundaries = computeQuotaWindow(nonLeapFeb, "daily");
+
+    expect(boundaries.windowStart.toISOString()).toBe("2023-02-28T00:00:00.000Z");
+    expect(boundaries.resetAtIso).toBe("2023-03-01T00:00:00.000Z");
+  });
+
+  it("handles year transition month boundary (December 31 → January 1)", () => {
+    const yearEnd = new Date("2025-12-31T23:59:59.000Z");
+    const monthlyBoundaries = computeQuotaWindow(yearEnd, "monthly");
+
+    expect(monthlyBoundaries.windowStart.toISOString()).toBe("2025-12-01T00:00:00.000Z");
+    expect(monthlyBoundaries.resetAtIso).toBe("2026-01-01T00:00:00.000Z");
+
+    const dailyBoundaries = computeQuotaWindow(yearEnd, "daily");
+    expect(dailyBoundaries.windowStart.toISOString()).toBe("2025-12-31T00:00:00.000Z");
+    expect(dailyBoundaries.resetAtIso).toBe("2026-01-01T00:00:00.000Z");
+  });
+
+  it("accepts timestamp numbers as injected clock", () => {
+    const ms = new Date("2026-08-15T10:20:30.000Z").getTime();
+    const boundaries = computeQuotaWindow(ms, "daily");
+
+    expect(boundaries.windowStart.toISOString()).toBe("2026-08-15T00:00:00.000Z");
+    expect(boundaries.resetAtIso).toBe("2026-08-16T00:00:00.000Z");
   });
 });
 
@@ -297,15 +376,12 @@ describe("checkAndIncrementQuota", () => {
     expect(result.resource).toBe("job_writes");
   });
 
-  it("includes a resetAt timestamp in the future", async () => {
-    mocks.dbSelect.mockReturnValueOnce(mocks.makeSelectChain([])); // disabled
+  it("includes a resetAt timestamp matching injected clock across leap day", async () => {
+    const leapClock = new Date("2024-02-29T12:00:00.000Z");
+    mocks.dbSelect.mockReturnValueOnce(mocks.makeSelectChain([])); // disabled fallback (daily window)
 
-    const before = Date.now();
-    const result = await checkAndIncrementQuota(fakeDb, "agent-1", "revenue_writes");
-    const after = Date.now() + 24 * 60 * 60 * 1000; // upper bound: ~1 day ahead
-
-    expect(result.resetAt).toBeGreaterThanOrEqual(before);
-    expect(result.resetAt).toBeLessThanOrEqual(after);
+    const result = await checkAndIncrementQuota(fakeDb, "agent-1", "revenue_writes", leapClock);
+    expect(result.resetAt).toBe(new Date("2024-03-01T00:00:00.000Z").getTime());
   });
 
   it("performs an upsert when quota is enabled", async () => {
@@ -344,8 +420,8 @@ describe("readQuotaUsage", () => {
     expect(mocks.dbInsert).not.toHaveBeenCalled();
   });
 
-  it("returns the current count when a usage row exists", async () => {
-    const configRow = makeQuotaConfigRow({ talosId: "agent-1", maxCount: 100, enabled: true });
+  it("returns the current count when a usage row exists with injected clock", async () => {
+    const configRow = makeQuotaConfigRow({ talosId: "agent-1", maxCount: 100, enabled: true, windowSize: "monthly" });
     mocks.dbSelect.mockReturnValueOnce(mocks.makeSelectChain([configRow]));
 
     const usageChain = mocks.makeSelectChain([]);
@@ -357,11 +433,13 @@ describe("readQuotaUsage", () => {
     );
     mocks.dbSelect.mockReturnValueOnce(usageChain);
 
-    const result = await readQuotaUsage(fakeDb, "agent-1", "activity_writes");
+    const clock = new Date("2024-02-29T18:00:00.000Z");
+    const result = await readQuotaUsage(fakeDb, "agent-1", "activity_writes", clock);
 
     expect(result.used).toBe(42);
     expect(result.remaining).toBe(58);
     expect(result.ok).toBe(true);
+    expect(result.resetAt).toBe(new Date("2024-03-01T00:00:00.000Z").getTime());
   });
 
   it("reports ok:false when usage exceeds the limit", async () => {
@@ -402,13 +480,18 @@ describe("quotaExceededResponse", () => {
     expect(resp.status).toBe(429);
   });
 
-  it("includes X-Quota-* headers", () => {
+  it("includes X-Quota-* headers consistent with JSON body", async () => {
     const resp = quotaExceededResponse(exceeded);
     expect(resp.headers.get("X-Quota-Limit")).toBe("100");
     expect(resp.headers.get("X-Quota-Remaining")).toBe("0");
     expect(resp.headers.get("X-Quota-Used")).toBe("101");
     expect(resp.headers.get("X-Quota-Resource")).toBe("activity_writes");
-    expect(resp.headers.get("X-Quota-Reset")).toBeTruthy();
+    expect(resp.headers.get("X-Quota-Reset")).toBe(String(exceeded.resetAt / 1000));
+
+    const body = await resp.json();
+    // Headers and body reflect the identical exact window boundary
+    expect(body.resetAt).toBe(new Date(exceeded.resetAt).toISOString());
+    expect(new Date(Number(resp.headers.get("X-Quota-Reset")) * 1000).toISOString()).toBe(body.resetAt);
   });
 
   it("body contains error, resource, limit, and resetAt", async () => {
