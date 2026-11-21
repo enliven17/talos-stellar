@@ -29,6 +29,22 @@ pending|leased → cancelled   (cooperative — see Cancellation below)
 - **dead_letter** — terminal, failure. `lastError` holds the last (truncated) error message.
 - **cancelled** — terminal, cooperative cancellation.
 
+## Immutable Attempt History
+
+Execution attempts are tracked in a dedicated `tls_job_attempts` table, completely separated from the mutable current job record in `tls_jobs`. Each attempt records:
+- `attemptNumber`: 1-based attempt sequence number.
+- `workerId`: Identifier of the worker claiming the lease.
+- `leaseId`: Unique lease token for the attempt.
+- `startedAt` / `completedAt`: Timestamps bounding attempt execution.
+- `durationMs`: Total execution time in milliseconds.
+- `terminalReason`: Terminal status of the attempt (`completed`, `retry_scheduled`, `dead_letter`, or `cancelled`).
+- `error`: Truncated error message if the attempt failed.
+
+Administrators can inspect attempt history via:
+- `GET /api/admin/jobs/:id` (includes `attemptsHistory` array)
+- `GET /api/admin/jobs/:id/attempts` (returns `{ jobId, attempts }`)
+- The Admin Jobs UI drawer at `/admin/jobs`.
+
 ## Leasing, heartbeats, and crash recovery
 
 `leaseBatch()` (`src/lib/jobs/store.ts`) atomically claims up to
