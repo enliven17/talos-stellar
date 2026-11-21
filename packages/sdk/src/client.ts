@@ -844,6 +844,10 @@ export class TalosClient {
     this.baseUrl = (
       options.baseUrl ?? "https://talos-stellar.vercel.app"
     ).replace(/\/$/, "");
+    this.timeoutMs = options.timeoutMs;
+    this.fetchOverride = options.fetch;
+    this.onError = options.onError;
+    this.chaosInjector = options.chaosInjector;
     this.headers = { "Content-Type": "application/json" };
     if (options.apiKey) {
       this.headers["Authorization"] = `Bearer ${options.apiKey}`;
@@ -1173,6 +1177,18 @@ export class TalosClient {
       if (headerDelay !== undefined) {
         return Math.min(headerDelay, this.retryPolicy.maxDelayMs);
       }
+    }
+
+    if (this.typedRetryEnabled) {
+      const delay = Math.min(
+        this.retryOptions.baseDelayMs * Math.pow(2, attempt - 1),
+        this.retryOptions.maxDelayMs,
+      );
+      const jitter = this.retryOptions.jitter;
+      return Math.max(
+        0,
+        Math.round(delay * (1 - jitter + 2 * jitter * Math.random())),
+      );
     }
 
     const exponent = Math.pow(2, attempt - 1);
@@ -1593,10 +1609,16 @@ export class TalosClient {
     });
   }
 
-  async createTalos(params: CreateTalosParams): Promise<TalosCreated> {
+  async createTalos(
+    params: CreateTalosParams,
+    options?: WriteOptions,
+  ): Promise<TalosCreated> {
     return this.request("/api/talos", {
       method: "POST",
       body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 

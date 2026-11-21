@@ -72,6 +72,7 @@ export {
   TalosServerRetryableError,
   TalosTransportError,
   TalosTimeoutError,
+  TalosDeadlineExceededError,
   errorFromResponse,
   classifyTransportError,
   sanitizeBody,

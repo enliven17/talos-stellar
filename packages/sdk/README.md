@@ -651,6 +651,7 @@ The table below catalogs all 28 exported error classes, when they occur, whether
 | 502/503/504 | `TalosServerRetryableError` | `server_error` | yes | — |
 | network | `TalosTransportError` | `transport_error` | yes | `cause?: unknown` |
 | abort/timeout | `TalosTimeoutError` | `timeout_error` | yes | — |
+| retry cannot fit request deadline | `TalosDeadlineExceededError` | `deadline_exceeded` | no | `retryDelayMs`, `remainingMs`, and final response metadata |
 
 Every error also exposes:
 
@@ -1034,6 +1035,11 @@ client.getLastRateLimit(); // → { limit: 100, remaining: 99, resetAt: 1_700_00
 - `maxAttempts` is hard-capped at 8 regardless of user input.
 - Server-supplied `Retry-After` is honored (clamped to `maxRetryAfterMs`).
 - Exponential backoff `baseDelayMs * 2^(attempt-1)` capped at `maxDelayMs`.
+- `timeoutMs` is the total request budget, including retry waits. If a retry
+  delay is equal to or longer than the remaining budget, the SDK stops without
+  sleeping or issuing another request and throws `TalosDeadlineExceededError`.
+  The error carries the final response's status, body, sanitized headers,
+  request ID, retry hint, and parsed data.
 - Validation/auth/conflict/payment errors are **never** retried.
 
 ### Privacy
