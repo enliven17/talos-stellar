@@ -106,6 +106,322 @@ describe("jobs/store — heartbeat", () => {
     const result = await store.heartbeat("job_1", "stale_lease");
     expect(result).toEqual({ ok: false, cancelled: false });
   });
+
+  it("rejects non-positive, non-finite, or oversized heartbeat leaseDurationMs without updating the database", async () => {
+    for (const invalidDuration of [0, -5_000, Number.NaN, Number.POSITIVE_INFINITY, 3_600_001, 86_400_001]) {
+      const result = await store.heartbeat("job_1", "lease_1", invalidDuration);
+      expect(result).toEqual({ ok: false, cancelled: false });
+    }
+    expect(mockDb.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("jobs/store — extendLease", () => {
+  it("additively extends a live leased job within limits", async () => {
+    const now = new Date("2026-11-19T00:00:00.000Z");
+    const currentExpiry = new Date(now.getTime() + 30_000);
+    const expectedExpiry = new Date(currentExpiry.getTime() + 60_000);
+
+    mockDb.select.mockReturnValue(
+      chainable([
+        {
+          id: "job_1",
+          queue: "q",
+          status: "leased",
+          leaseId: "lease_1",
+          leaseExpiresAt: currentExpiry,
+          cancelRequested: false,
+        },
+      ]),
+    );
+    mockDb.update.mockReturnValue(
+      chainable([
+        {
+          leaseExpiresAt: expectedExpiry,
+          cancelRequested: false,
+          queue: "q",
+        },
+      ]),
+    );
+
+    const result = await store.extendLease("job_1", "lease_1", 60_000, { now });
+
+    expect(result).toEqual({
+      ok: true,
+      cancelled: false,
+      leaseExpiresAt: expectedExpiry,
+    });
+    expect(mockDb.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts the exact per-request ceiling and horizon boundary", async () => {
+    const now = new Date("2026-11-19T00:00:00.000Z");
+    const currentExpiry = new Date(now.getTime() + 82_800_000); // 23h from now
+    const expectedExpiry = new Date(currentExpiry.getTime() + 3_600_000); // exactly 24h (86,400,000ms) from now
+
+    mockDb.select.mockReturnValue(
+      chainable([
+        {
+          id: "job_1",
+          queue: "q",
+          status: "leased",
+          leaseId: "lease_1",
+          leaseExpiresAt: currentExpiry,
+          cancelRequested: false,
+        },
+      ]),
+    );
+    mockDb.update.mockReturnValue(
+      chainable([
+        {
+          leaseExpiresAt: expectedExpiry,
+          cancelRequested: false,
+          queue: "q",
+        },
+      ]),
+    );
+
+    const result = await store.extendLease("job_1", "lease_1", 3_600_000, { now });
+
+    expect(result).toEqual({
+      ok: true,
+      cancelled: false,
+      leaseExpiresAt: expectedExpiry,
+    });
+    expect(mockDb.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects zero, negative, or non-finite extension durations and preserves the lease", async () => {
+    for (const badMs of [0, -1, -30_000, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const result = await store.extendLease("job_1", "lease_1", badMs);
+      expect(result).toEqual({
+        ok: false,
+        cancelled: false,
+        leaseExpiresAt: null,
+        reason: "invalid_duration",
+      });
+    }
+    expect(mockDb.select).not.toHaveBeenCalled();
+    expect(mockDb.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects an extension exceeding maxExtensionMs before touching the database", async () => {
+    const result = await store.extendLease("job_1", "lease_1", 3_600_001);
+
+    expect(result).toEqual({
+      ok: false,
+      cancelled: false,
+      leaseExpiresAt: null,
+      reason: "exceeds_max_extension",
+    });
+    expect(mockDb.select).not.toHaveBeenCalled();
+    expect(mockDb.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects an extension that would push leaseExpiresAt past maxHorizonMs and preserves the held lease", async () => {
+    const now = new Date("2026-11-19T00:00:00.000Z");
+    const currentExpiry = new Date(now.getTime() + 85_000_000);
+
+    mockDb.select.mockReturnValue(
+      chainable([
+        {
+          id: "job_1",
+          queue: "q",
+          status: "leased",
+          leaseId: "lease_1",
+          leaseExpiresAt: currentExpiry,
+          cancelRequested: false,
+        },
+      ]),
+    );
+
+    const result = await store.extendLease("job_1", "lease_1", 2_000_000, { now });
+
+    expect(result).toEqual({
+      ok: false,
+      cancelled: false,
+      leaseExpiresAt: currentExpiry,
+      reason: "exceeds_max_horizon",
+    });
+    expect(mockDb.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects extension when job does not exist", async () => {
+    mockDb.select.mockReturnValue(chainable([]));
+
+    const result = await store.extendLease("missing_job", "lease_1", 30_000);
+
+    expect(result).toEqual({
+      ok: false,
+      cancelled: false,
+      leaseExpiresAt: null,
+      reason: "not_found",
+    });
+    expect(mockDb.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects extension when job state is not leased (pending, completed, dead_letter, cancelled)", async () => {
+    const now = new Date("2026-11-19T00:00:00.000Z");
+    for (const status of ["pending", "completed", "dead_letter", "cancelled"] as const) {
+      mockDb.select.mockReturnValueOnce(
+        chainable([
+          {
+            id: "job_1",
+            queue: "q",
+            status,
+            leaseId: "lease_1",
+            leaseExpiresAt: new Date(now.getTime() + 30_000),
+            cancelRequested: status === "cancelled",
+          },
+        ]),
+      );
+
+      const result = await store.extendLease("job_1", "lease_1", 30_000, { now });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toBe("invalid_job_state");
+    }
+    expect(mockDb.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects extension when cooperative cancellation has already been requested", async () => {
+    const now = new Date("2026-11-19T00:00:00.000Z");
+    const currentExpiry = new Date(now.getTime() + 30_000);
+
+    mockDb.select.mockReturnValue(
+      chainable([
+        {
+          id: "job_1",
+          queue: "q",
+          status: "leased",
+          leaseId: "lease_1",
+          leaseExpiresAt: currentExpiry,
+          cancelRequested: true,
+        },
+      ]),
+    );
+
+    const result = await store.extendLease("job_1", "lease_1", 30_000, { now });
+
+    expect(result).toEqual({
+      ok: false,
+      cancelled: true,
+      leaseExpiresAt: currentExpiry,
+      reason: "cancellation_requested",
+    });
+    expect(mockDb.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects extension when leaseId does not match the current lease holder", async () => {
+    const now = new Date("2026-11-19T00:00:00.000Z");
+    const currentExpiry = new Date(now.getTime() + 30_000);
+
+    mockDb.select.mockReturnValue(
+      chainable([
+        {
+          id: "job_1",
+          queue: "q",
+          status: "leased",
+          leaseId: "lease_other",
+          leaseExpiresAt: currentExpiry,
+          cancelRequested: false,
+        },
+      ]),
+    );
+
+    const result = await store.extendLease("job_1", "lease_1", 30_000, { now });
+
+    expect(result).toEqual({
+      ok: false,
+      cancelled: false,
+      leaseExpiresAt: currentExpiry,
+      reason: "lease_mismatch",
+    });
+    expect(mockDb.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects extension when the job has no active leaseExpiresAt", async () => {
+    const now = new Date("2026-11-19T00:00:00.000Z");
+
+    mockDb.select.mockReturnValue(
+      chainable([
+        {
+          id: "job_1",
+          queue: "q",
+          status: "leased",
+          leaseId: "lease_1",
+          leaseExpiresAt: null,
+          cancelRequested: false,
+        },
+      ]),
+    );
+
+    const result = await store.extendLease("job_1", "lease_1", 30_000, { now });
+
+    expect(result).toEqual({
+      ok: false,
+      cancelled: false,
+      leaseExpiresAt: null,
+      reason: "no_active_lease",
+    });
+    expect(mockDb.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses to resurrect an already-expired lease (including at exact expiry boundary)", async () => {
+    const now = new Date("2026-11-19T00:00:00.000Z");
+    for (const expiredAt of [now, new Date(now.getTime() - 1_000)]) {
+      mockDb.select.mockReturnValueOnce(
+        chainable([
+          {
+            id: "job_1",
+            queue: "q",
+            status: "leased",
+            leaseId: "lease_1",
+            leaseExpiresAt: expiredAt,
+            cancelRequested: false,
+          },
+        ]),
+      );
+
+      const result = await store.extendLease("job_1", "lease_1", 30_000, { now });
+
+      expect(result).toEqual({
+        ok: false,
+        cancelled: false,
+        leaseExpiresAt: expiredAt,
+        reason: "lease_expired",
+      });
+    }
+    expect(mockDb.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects with lease_mismatch if the lease is lost concurrently between select and update", async () => {
+    const now = new Date("2026-11-19T00:00:00.000Z");
+    const currentExpiry = new Date(now.getTime() + 30_000);
+
+    mockDb.select.mockReturnValue(
+      chainable([
+        {
+          id: "job_1",
+          queue: "q",
+          status: "leased",
+          leaseId: "lease_1",
+          leaseExpiresAt: currentExpiry,
+          cancelRequested: false,
+        },
+      ]),
+    );
+    mockDb.update.mockReturnValue(chainable([]));
+
+    const result = await store.extendLease("job_1", "lease_1", 30_000, { now });
+
+    expect(result).toEqual({
+      ok: false,
+      cancelled: false,
+      leaseExpiresAt: currentExpiry,
+      reason: "lease_mismatch",
+    });
+    expect(mockDb.update).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("jobs/store — complete", () => {

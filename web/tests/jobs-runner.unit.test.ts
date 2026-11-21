@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
     reapExpiredLeases: vi.fn(),
     leaseBatch: vi.fn(),
     heartbeat: vi.fn(),
+    extendLease: vi.fn(),
     complete: vi.fn(),
     fail: vi.fn(),
   },
@@ -85,6 +86,7 @@ describe("jobs/runner — runOnce", () => {
     expect(ctx.attempts).toBe(3);
     expect(ctx.maxAttempts).toBe(5);
     expect(typeof ctx.heartbeat).toBe("function");
+    expect(typeof ctx.extendLease).toBe("function");
     expect(ctx.signal).toBeInstanceOf(AbortSignal);
   });
 
@@ -184,5 +186,117 @@ describe("jobs/runner — runOnce", () => {
     expect(handler).toHaveBeenCalledTimes(3);
     expect(summary.leased).toBe(3);
     expect(summary.completed).toBe(3);
+  });
+
+  it("preserves the held lease and completes the job when an invalid extension request is rejected", async () => {
+    const currentExpiry = new Date(Date.now() + 30_000);
+    mocks.store.extendLease
+      .mockResolvedValueOnce({
+        ok: false,
+        cancelled: false,
+        leaseExpiresAt: null,
+        reason: "invalid_duration",
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        cancelled: false,
+        leaseExpiresAt: currentExpiry,
+        reason: "exceeds_max_horizon",
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        cancelled: false,
+        leaseExpiresAt: new Date(currentExpiry.getTime() + 60_000),
+      });
+
+    const handler = vi.fn().mockImplementation(async (ctx) => {
+      // 1. Contradictory negative extension -> rejected, lease preserved
+      const bad1 = await ctx.extendLease(-5_000);
+      expect(bad1.ok).toBe(false);
+      expect(bad1.reason).toBe("invalid_duration");
+      expect(ctx.signal.aborted).toBe(false);
+
+      // 2. Contradictory horizon overflow -> rejected, lease preserved
+      const bad2 = await ctx.extendLease(90_000_000);
+      expect(bad2.ok).toBe(false);
+      expect(bad2.reason).toBe("exceeds_max_horizon");
+      expect(ctx.signal.aborted).toBe(false);
+
+      // 3. Contradictory heartbeat override that would shorten the 30s lease (or out of bounds) -> rejected, lease preserved
+      const badHb1 = await ctx.heartbeat(-1_000);
+      expect(badHb1.ok).toBe(false);
+      const badHb2 = await ctx.heartbeat(5_000);
+      expect(badHb2.ok).toBe(false);
+      expect(mocks.store.heartbeat).not.toHaveBeenCalled();
+      expect(ctx.signal.aborted).toBe(false);
+
+      // 4. Valid extension succeeds and job completes with original lease
+      const valid = await ctx.extendLease(60_000);
+      expect(valid.ok).toBe(true);
+      expect(ctx.signal.aborted).toBe(false);
+
+      return { done: true };
+    });
+
+    registerHandler("test_queue", handler);
+    mocks.store.leaseBatch.mockResolvedValue([makeJob({ leaseExpiresAt: currentExpiry })]);
+    mocks.store.complete.mockResolvedValue(makeJob({ status: "completed" }));
+
+    const summary = await runOnce({ heartbeatIntervalMs: 60_000 });
+
+    expect(summary.completed).toBe(1);
+    expect(mocks.store.complete).toHaveBeenCalledWith("job_1", "lease_1", { done: true }, expect.any(Number));
+  });
+
+  it("aborts and suppresses complete() when extendLease reports a lost or expired lease", async () => {
+    mocks.store.extendLease.mockResolvedValue({
+      ok: false,
+      cancelled: false,
+      leaseExpiresAt: new Date(Date.now() - 1_000),
+      reason: "lease_expired",
+    });
+
+    const handler = vi.fn().mockImplementation(async (ctx) => {
+      const res = await ctx.extendLease(30_000);
+      expect(res.ok).toBe(false);
+      expect(res.reason).toBe("lease_expired");
+      expect(ctx.signal.aborted).toBe(true);
+      return { ok: true };
+    });
+
+    registerHandler("test_queue", handler);
+    mocks.store.leaseBatch.mockResolvedValue([makeJob()]);
+
+    const summary = await runOnce({ heartbeatIntervalMs: 60_000 });
+
+    expect(mocks.store.complete).not.toHaveBeenCalled();
+    expect(mocks.store.fail).not.toHaveBeenCalled();
+    expect(summary.completed).toBe(0);
+  });
+
+  it("aborts and counts cancellation when extendLease reports cooperative cancellation", async () => {
+    mocks.store.extendLease.mockResolvedValue({
+      ok: false,
+      cancelled: true,
+      leaseExpiresAt: new Date(Date.now() + 30_000),
+      reason: "cancellation_requested",
+    });
+
+    const handler = vi.fn().mockImplementation(async (ctx) => {
+      const res = await ctx.extendLease(30_000);
+      expect(res.ok).toBe(false);
+      expect(res.cancelled).toBe(true);
+      expect(ctx.signal.aborted).toBe(true);
+      return { ok: true };
+    });
+
+    registerHandler("test_queue", handler);
+    mocks.store.leaseBatch.mockResolvedValue([makeJob()]);
+
+    const summary = await runOnce({ heartbeatIntervalMs: 60_000 });
+
+    expect(mocks.store.complete).not.toHaveBeenCalled();
+    expect(mocks.store.fail).not.toHaveBeenCalled();
+    expect(summary.cancelled).toBe(1);
   });
 });

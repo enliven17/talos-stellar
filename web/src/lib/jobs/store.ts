@@ -1,7 +1,13 @@
-import { and, desc, eq, inArray, isNotNull, lt, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNotNull, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { tlsJobs } from "@/db/schema";
-import type { EnqueueOptions, JobRecord, JobStatus, RetryClass } from "./types";
+import type {
+  EnqueueOptions,
+  ExtendLeaseResult,
+  JobRecord,
+  JobStatus,
+  RetryClass,
+} from "./types";
 import { decideRetry } from "./retry";
 import { jobsConfig } from "./config";
 import { logJobEvent, truncateError } from "./metrics";
@@ -98,25 +104,261 @@ export async function leaseBatch(
 /**
  * Extends a held lease and reports cooperative-cancellation state. Returns
  * `ok: false` when the lease no longer belongs to this worker (already
- * completed, reaped and re-leased elsewhere, etc.) — the caller must stop
- * processing immediately to avoid duplicate side effects racing another
- * worker.
+ * completed, reaped and re-leased elsewhere, etc.) or when the requested
+ * extension is invalid/contradictory — the caller must stop processing
+ * immediately when the lease was lost to avoid duplicate side effects racing
+ * another worker.
+ *
+ * Validates extension limits (`0 < leaseDurationMs <= maxLeaseExtensionMs` and
+ * `<= maxLeaseHorizonMs`), preserves a longer existing `leaseExpiresAt` using
+ * `GREATEST("leaseExpiresAt", ...)` so a heartbeat never shortens a previously
+ * extended lease, and requires the lease to be currently unexpired.
  */
 export async function heartbeat(
   jobId: string,
   leaseId: string,
   leaseDurationMs: number = jobsConfig.leaseDurationMs,
 ): Promise<{ ok: boolean; cancelled: boolean }> {
-  const leaseExpiresAt = sql`now() + (${leaseDurationMs}::text || ' milliseconds')::interval`;
+  if (
+    !Number.isFinite(leaseDurationMs) ||
+    leaseDurationMs <= 0 ||
+    leaseDurationMs > jobsConfig.maxLeaseExtensionMs ||
+    leaseDurationMs > jobsConfig.maxLeaseHorizonMs
+  ) {
+    return { ok: false, cancelled: false };
+  }
+
+  const candidateExpiresAt = sql`now() + (${leaseDurationMs}::text || ' milliseconds')::interval`;
+  const leaseExpiresAt = sql`GREATEST(${tlsJobs.leaseExpiresAt}, ${candidateExpiresAt})`;
   const [row] = await db
     .update(tlsJobs)
     .set({ leaseExpiresAt, heartbeatAt: sql`now()` })
-    .where(and(eq(tlsJobs.id, jobId), eq(tlsJobs.leaseId, leaseId), eq(tlsJobs.status, "leased")))
+    .where(
+      and(
+        eq(tlsJobs.id, jobId),
+        eq(tlsJobs.leaseId, leaseId),
+        eq(tlsJobs.status, "leased"),
+        isNotNull(tlsJobs.leaseExpiresAt),
+        gt(tlsJobs.leaseExpiresAt, sql`now()`),
+      ),
+    )
     .returning({ cancelRequested: tlsJobs.cancelRequested, queue: tlsJobs.queue });
 
   if (!row) return { ok: false, cancelled: false };
   logJobEvent("job_heartbeat", { jobId, queue: row.queue });
   return { ok: true, cancelled: row.cancelRequested };
+}
+
+export interface ExtendLeaseOptions {
+  maxExtensionMs?: number;
+  maxHorizonMs?: number;
+  now?: Date;
+}
+
+/**
+ * Additively extends a held lease by `extensionMs` after validating the
+ * request against extension limits, current expiry, and job state.
+ *
+ * Rejects contradictory requests (non-positive or non-finite duration,
+ * exceeding per-request `maxExtensionMs` or absolute `maxHorizonMs` from now,
+ * non-leased job state, cooperative `cancelRequested`, missing or expired
+ * `leaseExpiresAt`, or mismatched `leaseId`) without modifying or dropping
+ * the held lease.
+ */
+export async function extendLease(
+  jobId: string,
+  leaseId: string,
+  extensionMs: number,
+  opts: ExtendLeaseOptions = {},
+): Promise<ExtendLeaseResult> {
+  const maxExtensionMs = opts.maxExtensionMs ?? jobsConfig.maxLeaseExtensionMs;
+  const maxHorizonMs = opts.maxHorizonMs ?? jobsConfig.maxLeaseHorizonMs;
+
+  if (!Number.isFinite(extensionMs) || extensionMs <= 0) {
+    return {
+      ok: false,
+      cancelled: false,
+      leaseExpiresAt: null,
+      reason: "invalid_duration",
+    };
+  }
+
+  if (extensionMs > maxExtensionMs) {
+    return {
+      ok: false,
+      cancelled: false,
+      leaseExpiresAt: null,
+      reason: "exceeds_max_extension",
+    };
+  }
+
+  const now = opts.now ?? new Date();
+  const current = await db
+    .select()
+    .from(tlsJobs)
+    .where(eq(tlsJobs.id, jobId))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+
+  if (!current) {
+    return {
+      ok: false,
+      cancelled: false,
+      leaseExpiresAt: null,
+      reason: "not_found",
+    };
+  }
+
+  const currentExpiry = current.leaseExpiresAt ? new Date(current.leaseExpiresAt) : null;
+
+  if (current.status !== "leased") {
+    logJobEvent("job_lease_extension_rejected", {
+      jobId,
+      queue: current.queue,
+      reason: "invalid_job_state",
+    });
+    return {
+      ok: false,
+      cancelled: Boolean(current.cancelRequested),
+      leaseExpiresAt: currentExpiry,
+      reason: "invalid_job_state",
+    };
+  }
+
+  if (!current.leaseId || current.leaseId !== leaseId) {
+    logJobEvent("job_lease_extension_rejected", {
+      jobId,
+      queue: current.queue,
+      reason: "lease_mismatch",
+    });
+    return {
+      ok: false,
+      cancelled: Boolean(current.cancelRequested),
+      leaseExpiresAt: currentExpiry,
+      reason: "lease_mismatch",
+    };
+  }
+
+  if (!currentExpiry || !Number.isFinite(currentExpiry.getTime())) {
+    logJobEvent("job_lease_extension_rejected", {
+      jobId,
+      queue: current.queue,
+      reason: "no_active_lease",
+    });
+    return {
+      ok: false,
+      cancelled: Boolean(current.cancelRequested),
+      leaseExpiresAt: null,
+      reason: "no_active_lease",
+    };
+  }
+
+  if (currentExpiry.getTime() <= now.getTime()) {
+    logJobEvent("job_lease_extension_rejected", {
+      jobId,
+      queue: current.queue,
+      reason: "lease_expired",
+    });
+    return {
+      ok: false,
+      cancelled: Boolean(current.cancelRequested),
+      leaseExpiresAt: currentExpiry,
+      reason: "lease_expired",
+    };
+  }
+
+  if (current.cancelRequested) {
+    logJobEvent("job_lease_extension_rejected", {
+      jobId,
+      queue: current.queue,
+      reason: "cancellation_requested",
+    });
+    return {
+      ok: false,
+      cancelled: true,
+      leaseExpiresAt: currentExpiry,
+      reason: "cancellation_requested",
+    };
+  }
+
+  const newExpiry = new Date(currentExpiry.getTime() + extensionMs);
+  if (newExpiry.getTime() <= currentExpiry.getTime()) {
+    logJobEvent("job_lease_extension_rejected", {
+      jobId,
+      queue: current.queue,
+      reason: "would_shorten_lease",
+    });
+    return {
+      ok: false,
+      cancelled: false,
+      leaseExpiresAt: currentExpiry,
+      reason: "would_shorten_lease",
+    };
+  }
+
+  const horizon = new Date(now.getTime() + maxHorizonMs);
+  if (newExpiry.getTime() > horizon.getTime()) {
+    logJobEvent("job_lease_extension_rejected", {
+      jobId,
+      queue: current.queue,
+      reason: "exceeds_max_horizon",
+    });
+    return {
+      ok: false,
+      cancelled: false,
+      leaseExpiresAt: currentExpiry,
+      reason: "exceeds_max_horizon",
+    };
+  }
+
+  const [updated] = await db
+    .update(tlsJobs)
+    .set({
+      leaseExpiresAt: newExpiry,
+      heartbeatAt: sql`now()`,
+      updatedAt: sql`now()`,
+    })
+    .where(
+      and(
+        eq(tlsJobs.id, jobId),
+        eq(tlsJobs.leaseId, leaseId),
+        eq(tlsJobs.status, "leased"),
+        eq(tlsJobs.cancelRequested, false),
+        isNotNull(tlsJobs.leaseExpiresAt),
+        gt(tlsJobs.leaseExpiresAt, now),
+        lt(tlsJobs.leaseExpiresAt, newExpiry),
+      ),
+    )
+    .returning({
+      leaseExpiresAt: tlsJobs.leaseExpiresAt,
+      cancelRequested: tlsJobs.cancelRequested,
+      queue: tlsJobs.queue,
+    });
+
+  if (!updated) {
+    logJobEvent("job_lease_extension_rejected", {
+      jobId,
+      queue: current.queue,
+      reason: "lease_mismatch",
+    });
+    return {
+      ok: false,
+      cancelled: false,
+      leaseExpiresAt: currentExpiry,
+      reason: "lease_mismatch",
+    };
+  }
+
+  logJobEvent("job_lease_extended", {
+    jobId,
+    queue: updated.queue,
+    durationMs: extensionMs,
+  });
+  return {
+    ok: true,
+    cancelled: Boolean(updated.cancelRequested),
+    leaseExpiresAt: updated.leaseExpiresAt ? new Date(updated.leaseExpiresAt) : newExpiry,
+  };
 }
 
 /** Marks a leased job completed. No-ops (returns null) if the lease was lost. */

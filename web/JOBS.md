@@ -34,8 +34,25 @@ pending|leased → cancelled   (cooperative — see Cancellation below)
 `leaseBatch()` (`src/lib/jobs/store.ts`) atomically claims up to
 `JOBS_BATCH_SIZE` due jobs with `UPDATE ... WHERE id IN (SELECT ... FOR
 UPDATE SKIP LOCKED)`. A lease has an expiry (`JOBS_LEASE_DURATION_MS`); a
-running handler extends it by calling `ctx.heartbeat()`, which also reports
-back whether cancellation was requested.
+running handler refreshes it by calling `ctx.heartbeat()` or additively
+extends it for long-running work via `ctx.extendLease(extensionMs)`, both of
+which also report back whether cancellation was requested.
+
+Lease extension requests are validated against extension limits, current
+expiry, and job state before writing:
+
+- Non-positive, non-finite, or oversized extensions (`> JOBS_MAX_LEASE_EXTENSION_MS`)
+  and extensions that would push `leaseExpiresAt` past the absolute future
+  horizon (`now + JOBS_MAX_LEASE_HORIZON_MS`) are rejected.
+- Extensions against non-leased jobs, mismatched `leaseId`, missing or
+  already-expired `leaseExpiresAt`, or jobs with `cancelRequested = true` are
+  rejected.
+- `heartbeat()` preserves any longer existing `leaseExpiresAt` (never
+  shrinking an already-extended lease) and rejects explicit duration overrides
+  that would shorten the held lease or exceed extension limits.
+- When an extension request is invalid (e.g. out-of-range duration or past the
+  horizon), the held lease is preserved unmodified so the in-flight worker can
+  continue or finish cleanly.
 
 If a worker process dies mid-job (crash, OOM, deploy), it simply stops
 heartbeating and the lease expires. There is no separate crash-recovery
@@ -87,6 +104,8 @@ All read from the environment at process start (see `.env.example`):
 | `ADMIN_API_KEY` | — | Bearer token for `/api/admin/jobs/*`. Required to use those routes. |
 | `INTERNAL_JOBS_SECRET` | — | Shared secret for `/api/internal/jobs/drain`. Required to use it. |
 | `JOBS_LEASE_DURATION_MS` | `30000` | How long a lease is held before it's reapable. |
+| `JOBS_MAX_LEASE_EXTENSION_MS` | `3600000` | Maximum duration a single lease extension request may add or set. |
+| `JOBS_MAX_LEASE_HORIZON_MS` | `86400000` | Maximum absolute future horizon a lease may be extended to from `now`. |
 | `JOBS_HEARTBEAT_INTERVAL_MS` | `10000` | How often a running handler heartbeats. |
 | `JOBS_BATCH_SIZE` | `10` | Jobs claimed per `runOnce()` call. |
 | `JOBS_DEFAULT_MAX_ATTEMPTS` | `8` | Default ceiling for jobs that don't specify one. |
@@ -131,9 +150,10 @@ All under `Authorization: Bearer <ADMIN_API_KEY>`:
 ## Observability
 
 Every state transition is a structured `pino` log line via `src/lib/jobs/metrics.ts`
-(`job_enqueued`, `job_leased`, `job_heartbeat`, `job_completed`,
-`job_retry_scheduled`, `job_dead_letter`, `job_cancelled`,
-`job_lease_reaped`) with `jobId`, `queue`, `attempts`, `durationMs`, etc.
+(`job_enqueued`, `job_leased`, `job_heartbeat`, `job_lease_extended`,
+`job_lease_extension_rejected`, `job_completed`, `job_retry_scheduled`,
+`job_dead_letter`, `job_cancelled`, `job_lease_reaped`) with `jobId`, `queue`,
+`attempts`, `durationMs`, `reason`, etc.
 **Never** `payload`, `result`, or a raw error object — `lastError` on the
 row (and in logs) is `truncateError()`'d down to the error's `message`
 only, capped at 500 characters, no stack, no cause chain. If a job's
