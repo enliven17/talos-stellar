@@ -30,6 +30,7 @@ import logging
 import re
 from typing import Any
 
+from talos_agent.policy.patterns import compile_glob
 from talos_agent.policy.schema import (
     ActionSpec,
     ConditionTrace,
@@ -100,12 +101,7 @@ def _evaluate_condition(condition: MatchCondition, spec: ActionSpec) -> bool:
         except re.error:
             return False
     elif op == "glob":
-        # Explicit wildcard matching using fnmatch-style logic
-        # This makes wildcard behavior predictable and explicit
-        try:
-            return _match_glob(str(expected), str(actual))
-        except Exception:
-            return False
+        return _match_glob(expected, str(actual))
 
     # Unknown operator — fail closed (condition does not match)
     logger.debug("Unknown condition operator: %s (rule will not match)", op)
@@ -113,57 +109,8 @@ def _evaluate_condition(condition: MatchCondition, spec: ActionSpec) -> bool:
 
 
 def _match_glob(pattern: str, text: str) -> bool:
-    """Match text against a glob pattern with explicit wildcard semantics.
-
-    Supports:
-    - ``*``: matches any sequence of characters (except path separators)
-    - ``?``: matches any single character
-    - ``[seq]``: matches any character in seq
-    - ``[!seq]``: matches any character not in seq
-
-    This implementation is explicit about wildcard behavior to ensure
-    predictability for contributors and operators.
-    """
-    # Convert glob pattern to regex
-    # Escape special regex characters first, then replace glob wildcards
-    regex_parts = []
-    i = 0
-    while i < len(pattern):
-        char = pattern[i]
-        if char == "*":
-            regex_parts.append("[^/]*")
-        elif char == "?":
-            regex_parts.append("[^/]")
-        elif char == "[":
-            # Handle character class
-            j = i + 1
-            if j < len(pattern) and pattern[j] == "!":
-                regex_parts.append("[^")
-                j += 1
-            else:
-                regex_parts.append("[")
-            # Find closing bracket
-            while j < len(pattern) and pattern[j] != "]":
-                regex_parts.append(pattern[j])
-                j += 1
-            if j < len(pattern):
-                regex_parts.append("]")
-                i = j
-            else:
-                # No closing bracket, treat as literal
-                regex_parts.append("[")
-        else:
-            # Escape regex special characters
-            if char in r"\.^$+{}()|":
-                regex_parts.append("\\")
-            regex_parts.append(char)
-        i += 1
-
-    regex = "^" + "".join(regex_parts) + "$"
-    try:
-        return bool(re.match(regex, text))
-    except re.error:
-        return False
+    """Match text against a validated policy glob pattern."""
+    return compile_glob(pattern).fullmatch(text) is not None
 
 
 def _trace_condition(condition: MatchCondition, spec: ActionSpec) -> ConditionTrace:
