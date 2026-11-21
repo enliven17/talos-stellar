@@ -515,3 +515,14 @@ See the
 [Stellar retry failure runbook](../../docs/prime-agent-stellar-retry-failures.md)
 for the input → class mapping, privacy guarantees, compatibility notes, and
 how to consume the classification.
+
+## Scheduler execution identities
+
+Financial scheduler cycles reserve a durable execution identity in the local
+SQLite state before checking balances or sending work to the Web API. The
+identity is reused as the API idempotency key for the resulting write. A
+cycle that is interrupted before its outcome is recorded is marked
+`uncertain` after restart and is not automatically retried; reconcile the
+external operation and resolve the execution before clearing that state.
+Explicit API failures are
+recorded as `retryable` and may run again on a later scheduler cycle.
