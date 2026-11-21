@@ -881,6 +881,10 @@ switch (error.code) {
    - Parses the `Retry-After` response header via `parseRetryAfter()` on **any** status carrying it (including `503` maintenance windows per RFC 9110 §10.2.3), clamping the delay to `maxRetryAfterMs`.
    - Applies exponential backoff `baseDelayMs * 2^(attempt - 1)` bounded by `maxDelayMs`, with full random jitter.
    - Fires `onRetry` and `onError` observer callbacks for telemetry, structured logging, and APM metrics.
+   - `onRetry` receives `{ attempt, reason, nextDelayMs, delayMs, metadata, error }`.
+     `metadata` is secret-free (`code`, `status`, `isRetryable`, and optional `retryAfterMs`);
+     the compatibility `error` and `delayMs` fields are redacted, and no Authorization
+     headers, request/response bodies, payment payloads, or cause values are exposed.
 
 ```typescript
 import {
@@ -915,6 +919,11 @@ const client = new TalosClient({
     maxDelayMs: 1_000,
     retryMethods: ["GET", "HEAD", "PUT", "DELETE", "OPTIONS"],
     retryStatusCodes: [429, 500, 502, 503, 504],
+    onRetry: ({ attempt, reason, nextDelayMs, metadata }) => {
+      console.warn(
+        `[Status Retry ${attempt}] ${reason} in ${nextDelayMs}ms (${metadata.status})`,
+      );
+    },
   },
 
   // Typed-error driven policy:
@@ -925,8 +934,10 @@ const client = new TalosClient({
     baseDelayMs: 500,         // exponential backoff base delay
     maxDelayMs: 8_000,        // maximum backoff delay
     jitter: 0.25,             // ±25% random jitter
-    onRetry: ({ attempt, error, delayMs }) => {
-      console.warn(`[Retry ${attempt}] in ${delayMs}ms due to ${error.code} (${error.status})`);
+    onRetry: ({ attempt, reason, nextDelayMs, metadata }) => {
+      console.warn(
+        `[Retry ${attempt}] ${reason} in ${nextDelayMs}ms due to ${metadata.code} (${metadata.status})`,
+      );
     },
   },
 
