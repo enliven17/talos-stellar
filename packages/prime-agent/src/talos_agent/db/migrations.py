@@ -21,9 +21,12 @@ def get_db_path(agent_id: str | None = None) -> Path:
     Resolved lazily so tests (and ops tooling) can monkeypatch ``APP_DIR``
     to redirect ``get_db_path()`` without rewriting module-level constants.
     """
+    import talos_agent.db as _db_pkg
+
+    base_dir = getattr(_db_pkg, "APP_DIR", APP_DIR)
     if agent_id:
-        return APP_DIR / f"agent-{agent_id}.db"
-    return APP_DIR / "talos-agent.db"
+        return base_dir / f"agent-{agent_id}.db"
+    return base_dir / "talos-agent.db"
 
 
 def normalize_playbook_name(name: str) -> str:

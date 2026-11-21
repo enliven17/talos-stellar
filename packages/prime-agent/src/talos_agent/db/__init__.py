@@ -6,6 +6,7 @@ re-exported here so existing code continues to work unchanged.
 
 from __future__ import annotations
 
+from talos_agent.config import APP_DIR
 from talos_agent.db.facade import LocalDB
 from talos_agent.db.migrations import (
     DB_PATH,
@@ -30,6 +31,8 @@ from talos_agent.db.repos import (
 )
 
 __all__ = [
+    # Config
+    "APP_DIR",
     # Façade
     "LocalDB",
     # Migrations
