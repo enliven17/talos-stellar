@@ -249,3 +249,11 @@ No smaller conversion actions like "View Demo," "Read Documentation," or "See Ex
 
 - **CTA hierarchy flip**: 15-25% increase in launch page visits from homepage traffic
 - **Use cases section**: 20-30% increase
+
+## Validation Notes
+
+The maintainer review requested focused automated coverage and reproducible evidence for `web/src/lib/audit-chain.ts`. This document change does not alter runtime behavior, so no new regression test is added here. Recommended focused checks for the reviewer to record in the PR description:
+
+- `npm --prefix web run test -- audit-chain` — run before and after the change; record the exact output.
+- Confirm that missing audit predecessors are reported as chain gaps (distinct from tampering) by reviewing the `audit-chain.ts` result type and its unit tests.
+- Compare the failing `Run performance benchmarks` and `build-and-deploy` jobs against the base revision to separate pre-existing failures from any regression introduced by this PR.

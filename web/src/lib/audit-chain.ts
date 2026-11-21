@@ -190,7 +190,8 @@ export function verifyChain(rows: ChainRow[]): ChainVerificationResult {
     }
 
     // A sequence number ahead of the expected one means predecessor(s) are
-    // absent: incomplete evidence, not a contradiction.
+    // absent: incomplete evidence, not a contradiction. Reported as a gap at
+    // the first missing sequence number, never as tampering.
     if (row.sequenceNumber > chainIndex) {
       return incomplete(chainIndex, row.sequenceNumber, row.chainVersion);
     }
