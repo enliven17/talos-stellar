@@ -427,6 +427,25 @@ class LocalDB:
     ) -> int:
         return self._cycles.prune_old_cycle_summaries(talos_id, keep_last)
 
+    # ── State Retention Preview ───────────────────────────────────────────
+
+    def preview_retention(
+        self,
+        *,
+        record_class: str | None = None,
+        cutoff_iso: str | None = None,
+    ):
+        """Report candidate record counts and date boundaries by record class (#1451).
+
+        Separates private content from financial and audit records.
+        """
+        from talos_agent.db.retention import preview_state_retention
+        return preview_state_retention(
+            self._conn,
+            record_class_filter=record_class,
+            cutoff_iso=cutoff_iso,
+        )
+
     # ── Cleanup ───────────────────────────────────────────────────────────
 
     def close(self) -> None:

@@ -497,6 +497,37 @@ def prune_backups(
 
     return deleted
 
+
+def preview_database_retention(
+    db_path: Path | None = None,
+    agent_id: str | None = None,
+    *,
+    record_class: str | None = None,
+    cutoff_iso: str | None = None,
+):
+    """Preview local SQLite database retention candidates grouped by record class (#1451).
+
+    Reads directly from the specified database (or default/per-agent DB) without modifying
+    or deleting any rows.
+    """
+    from talos_agent.db.facade import LocalDB
+    from talos_agent.db.retention import preview_state_retention
+
+    target = db_path or _get_active_db_path(agent_id)
+    if not target.exists():
+        raise BackupError(f"Database not found at {target}", code="BAD_INPUT")
+
+    db = LocalDB(path=target)
+    try:
+        return preview_state_retention(
+            db._conn,
+            record_class_filter=record_class,
+            cutoff_iso=cutoff_iso,
+        )
+    finally:
+        db.close()
+
+
 # ────────────────────────────────────────────────────────────────────
 # Verify
 # ────────────────────────────────────────────────────────────────────
@@ -844,4 +875,5 @@ __all__ = [
     "collect_agent_files",
     "default_backup_dir",
     "prune_backups",
+    "preview_database_retention",
 ]

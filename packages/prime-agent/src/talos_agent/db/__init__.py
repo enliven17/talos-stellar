@@ -29,6 +29,13 @@ from talos_agent.db.repos import (
     RetryRepo,
     SpendingRepo,
 )
+from talos_agent.db.retention import (
+    RecordClass,
+    StateRetentionPreviewReport,
+    TableRetentionPreview,
+    preview_state_retention,
+    preview_table_retention,
+)
 
 __all__ = [
     # Config
@@ -54,4 +61,10 @@ __all__ = [
     "ReplayRepo",
     "RetryRepo",
     "SpendingRepo",
+    # Retention Preview (#1451)
+    "RecordClass",
+    "StateRetentionPreviewReport",
+    "TableRetentionPreview",
+    "preview_state_retention",
+    "preview_table_retention",
 ]
