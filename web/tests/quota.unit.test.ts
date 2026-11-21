@@ -7,6 +7,7 @@
  *   – floorToWindow / nextWindowStart helpers
  *   – resolveQuotaConfig precedence (agent > platform > fallback)
  *   – checkAndIncrementQuota: disabled, under limit, at limit, over limit
+ *     (including whether each decision reported a consumed unit)
  *   – readQuotaUsage: existing row, no row
  *   – quotaExceededResponse: status code, headers, body
  *   – buildQuotaHeaders / applyQuotaHeaders: header values
@@ -246,6 +247,8 @@ describe("checkAndIncrementQuota", () => {
     expect(result.ok).toBe(true);
     expect(result.used).toBe(0);
     expect(result.resource).toBe("activity_writes");
+    // Disabled decisions report no consumed unit and never write.
+    expect(result.incremented).toBe(false);
     // No DB insert when quota is disabled
     expect(mocks.dbInsert).not.toHaveBeenCalled();
   });
@@ -262,6 +265,9 @@ describe("checkAndIncrementQuota", () => {
     expect(result.used).toBe(10);
     expect(result.remaining).toBe(90);
     expect(result.limit).toBe(100);
+    // Enabled decisions consume exactly one unit.
+    expect(result.incremented).toBe(true);
+    expect(mocks.dbInsert).toHaveBeenCalledTimes(1);
   });
 
   it("returns ok:true when usage equals the limit (last allowed slot)", async () => {
@@ -274,6 +280,7 @@ describe("checkAndIncrementQuota", () => {
     expect(result.ok).toBe(true);
     expect(result.used).toBe(5);
     expect(result.remaining).toBe(0);
+    expect(result.incremented).toBe(true);
   });
 
   it("returns ok:false when usage exceeds the limit", async () => {
@@ -287,6 +294,10 @@ describe("checkAndIncrementQuota", () => {
     expect(result.ok).toBe(false);
     expect(result.used).toBe(6);
     expect(result.remaining).toBe(0);
+    // Exhausted decisions still increment (increment-then-check) and must
+    // report the consumed unit alongside the rejection.
+    expect(result.incremented).toBe(true);
+    expect(mocks.dbInsert).toHaveBeenCalledTimes(1);
   });
 
   it("returns correct resource in result", async () => {
@@ -340,6 +351,8 @@ describe("readQuotaUsage", () => {
     expect(result.used).toBe(0);
     expect(result.remaining).toBe(100);
     expect(result.ok).toBe(true);
+    // readQuotaUsage is read-only and reports no consumed unit.
+    expect(result.incremented).toBe(false);
     // readQuotaUsage must NOT call db.insert
     expect(mocks.dbInsert).not.toHaveBeenCalled();
   });
@@ -382,6 +395,7 @@ describe("readQuotaUsage", () => {
     expect(result.used).toBe(15);
     expect(result.remaining).toBe(0);
     expect(result.ok).toBe(false);
+    expect(result.incremented).toBe(false);
   });
 });
 
@@ -395,6 +409,7 @@ describe("quotaExceededResponse", () => {
     used: 101,
     resetAt: new Date("2026-07-25T00:00:00.000Z").getTime(),
     resource: "activity_writes" as QuotaResource,
+    incremented: true,
   };
 
   it("returns HTTP 429", () => {
@@ -409,6 +424,7 @@ describe("quotaExceededResponse", () => {
     expect(resp.headers.get("X-Quota-Used")).toBe("101");
     expect(resp.headers.get("X-Quota-Resource")).toBe("activity_writes");
     expect(resp.headers.get("X-Quota-Reset")).toBeTruthy();
+    expect(resp.headers.get("X-Quota-Incremented")).toBe("true");
   });
 
   it("body contains error, resource, limit, and resetAt", async () => {
@@ -417,6 +433,7 @@ describe("quotaExceededResponse", () => {
     expect(body.error).toBe("Quota exceeded");
     expect(body.resource).toBe("activity_writes");
     expect(body.limit).toBe(100);
+    expect(body.incremented).toBe(true);
     expect(body.resetAt).toMatch(/^\d{4}-\d{2}-\d{2}T/); // ISO-8601
   });
 
@@ -436,15 +453,27 @@ describe("buildQuotaHeaders", () => {
     used: 10,
     resetAt: 1_753_401_600_000,
     resource: "job_writes" as QuotaResource,
+    incremented: true,
   };
 
-  it("returns all five quota header keys", () => {
+  it("returns all six quota header keys", () => {
     const headers = buildQuotaHeaders(result);
     expect(headers["X-Quota-Limit"]).toBe("500");
     expect(headers["X-Quota-Remaining"]).toBe("490");
     expect(headers["X-Quota-Used"]).toBe("10");
     expect(headers["X-Quota-Resource"]).toBe("job_writes");
     expect(headers["X-Quota-Reset"]).toBeDefined();
+    expect(headers["X-Quota-Incremented"]).toBe("true");
+  });
+
+  it("reports X-Quota-Incremented=false when no unit was consumed", () => {
+    const headers = buildQuotaHeaders({
+      ...result,
+      used: 0,
+      remaining: 500,
+      incremented: false,
+    });
+    expect(headers["X-Quota-Incremented"]).toBe("false");
   });
 
   it("X-Quota-Reset is in seconds (Unix epoch), not milliseconds", () => {
@@ -465,6 +494,7 @@ describe("applyQuotaHeaders", () => {
       used: 50,
       resetAt: Date.now() + 3600_000,
       resource: "revenue_writes" as QuotaResource,
+      incremented: true,
     };
 
     const resp = new Response(JSON.stringify({ id: "x" }), { status: 201 });
@@ -474,6 +504,7 @@ describe("applyQuotaHeaders", () => {
     expect(patched.headers.get("X-Quota-Remaining")).toBe("150");
     expect(patched.headers.get("X-Quota-Used")).toBe("50");
     expect(patched.headers.get("X-Quota-Resource")).toBe("revenue_writes");
+    expect(patched.headers.get("X-Quota-Incremented")).toBe("true");
   });
 
   it("preserves existing response status", () => {
@@ -484,6 +515,7 @@ describe("applyQuotaHeaders", () => {
       used: 1,
       resetAt: Date.now() + 3600_000,
       resource: "sse_connections" as QuotaResource,
+      incremented: true,
     };
 
     const resp = new Response(null, { status: 201 });

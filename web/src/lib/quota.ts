@@ -78,6 +78,17 @@ export interface QuotaResult {
   resetAt: number;
   /** The resource that was checked. */
   resource: QuotaResource;
+  /**
+   * Whether this call consumed a unit by incrementing tls_quota_usage.
+   *
+   *   – disabled quotas: false (the no-write path is preserved)
+   *   – enabled quotas, under or at the limit: true
+   *   – enabled quotas, exhausted (ok=false): true — the counter is
+   *     incremented before the limit check, so a rejected attempt is still
+   *     counted and surfaces as `used` on the decision
+   *   – readQuotaUsage: false (read-only)
+   */
+  incremented: boolean;
 }
 
 // ─── DB type alias (Drizzle's inferred type) ─────────────────────────────────
@@ -199,7 +210,9 @@ export async function resolveQuotaConfig(
  * current window, then check whether the new count exceeds the limit.
  *
  * If quota enforcement is disabled for this resource the function returns
- * `ok: true` immediately without touching tls_quota_usage (zero overhead).
+ * `ok: true` immediately without touching tls_quota_usage (zero overhead) and
+ * reports `incremented: false`.  Enabled quotas always increment exactly once,
+ * so `incremented` is true for admitted, at-limit, and exhausted decisions.
  *
  * @param db       Drizzle DB instance
  * @param talosId  Agent being checked
@@ -218,6 +231,7 @@ export async function checkAndIncrementQuota(
   const resetAt = nextWindowStart(windowStart, config.windowSize).getTime();
 
   if (!config.enabled) {
+    // No-write path: disabled quotas must not touch tls_quota_usage.
     return {
       ok: true,
       limit: config.maxCount,
@@ -225,6 +239,7 @@ export async function checkAndIncrementQuota(
       used: 0,
       resetAt,
       resource,
+      incremented: false,
     };
   }
 
@@ -251,7 +266,17 @@ export async function checkAndIncrementQuota(
   const remaining = Math.max(0, config.maxCount - used);
   const ok = used <= config.maxCount;
 
-  return { ok, limit: config.maxCount, remaining, used, resetAt, resource };
+  // The upsert above always runs for enabled quotas, including exhausted
+  // decisions, so the unit is reported as consumed in every case.
+  return {
+    ok,
+    limit: config.maxCount,
+    remaining,
+    used,
+    resetAt,
+    resource,
+    incremented: true,
+  };
 }
 
 /**
@@ -286,7 +311,16 @@ export async function readQuotaUsage(
   const remaining = Math.max(0, config.maxCount - used);
   const ok = used <= config.maxCount;
 
-  return { ok, limit: config.maxCount, remaining, used, resetAt, resource };
+  // Read-only: usage is never incremented by this helper.
+  return {
+    ok,
+    limit: config.maxCount,
+    remaining,
+    used,
+    resetAt,
+    resource,
+    incremented: false,
+  };
 }
 
 // ─── Response helpers ────────────────────────────────────────────────────────
@@ -301,6 +335,7 @@ export function quotaExceededResponse(result: QuotaResult): Response {
       resource: result.resource,
       limit: result.limit,
       resetAt: new Date(result.resetAt).toISOString(),
+      incremented: result.incremented,
     }),
     {
       status: 429,
@@ -315,6 +350,7 @@ export function quotaExceededResponse(result: QuotaResult): Response {
 /**
  * Return the X-Quota-* header set for a given QuotaResult.
  * Attach these to 200/201 responses so clients can monitor their usage.
+ * X-Quota-Incremented reports whether the paired decision consumed a unit.
  */
 export function buildQuotaHeaders(result: QuotaResult): Record<string, string> {
   return {
@@ -323,6 +359,7 @@ export function buildQuotaHeaders(result: QuotaResult): Record<string, string> {
     "X-Quota-Used": String(result.used),
     "X-Quota-Reset": String(Math.ceil(result.resetAt / 1000)),
     "X-Quota-Resource": result.resource,
+    "X-Quota-Incremented": String(result.incremented),
   };
 }
 
