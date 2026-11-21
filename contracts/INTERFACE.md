@@ -108,6 +108,7 @@ is a `major` bump.
 | `admin_transfer`    | `set_admin` for admin handover.                              |
 | `timelock_admin`    | `schedule_action` / `execute_action` / `cancel_action`.      |
 | `registry_pointer`  | `set_registry_contract` — points at the TalosRegistry.       |
+| `transfer_history`  | Bounded `nm_prp`/`nm_acc`/`nm_cnl`/`nm_exp` events + `transfer_history_len` / `transfer_record_at` + `expire_transfer`. |
 | `interface_query`   | `version` / `interface_id` / `supports_version`.             |
 | `cross_contract`    | `creator_of` invoke against the configured registry pointer. |
 
