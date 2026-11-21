@@ -2,8 +2,10 @@ import { and, desc, eq, gte, lte, lt, or, sql, type SQL } from "drizzle-orm";
 import { db } from "@/db";
 import { tlsApiAuditLogs } from "@/db/schema";
 import {
+  AuditLogFilterError,
   escapeIlikePattern,
   statusClassRange,
+  validateAuditLogFilters,
   type AuditLogFilters,
 } from "./filters";
 import type { AuditLogRecord } from "./types";
@@ -35,41 +37,47 @@ function toRecord(row: typeof tlsApiAuditLogs.$inferSelect): AuditLogRecord {
 export async function listAuditLogs(
   filter: AuditLogFilters,
 ): Promise<{ logs: AuditLogRecord[]; nextCursor: string | null }> {
-  const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
+  const validated = validateAuditLogFilters(filter);
+  if (!validated.ok) {
+    throw new AuditLogFilterError(validated.error);
+  }
+  const safeFilter = validated.filters;
+
+  const limit = Math.min(Math.max(safeFilter.limit ?? 50, 1), 200);
   const conditions: SQL[] = [];
 
-  if (filter.talosId) {
-    conditions.push(eq(tlsApiAuditLogs.talosId, filter.talosId));
+  if (safeFilter.talosId) {
+    conditions.push(eq(tlsApiAuditLogs.talosId, safeFilter.talosId));
   }
-  if (filter.method) {
-    conditions.push(eq(tlsApiAuditLogs.method, filter.method));
+  if (safeFilter.method) {
+    conditions.push(eq(tlsApiAuditLogs.method, safeFilter.method));
   }
-  if (filter.statusCode !== undefined) {
-    conditions.push(eq(tlsApiAuditLogs.statusCode, filter.statusCode));
+  if (safeFilter.statusCode !== undefined) {
+    conditions.push(eq(tlsApiAuditLogs.statusCode, safeFilter.statusCode));
   }
-  if (filter.statusClass) {
-    const { min, max } = statusClassRange(filter.statusClass);
+  if (safeFilter.statusClass) {
+    const { min, max } = statusClassRange(safeFilter.statusClass);
     conditions.push(gte(tlsApiAuditLogs.statusCode, min));
     conditions.push(lte(tlsApiAuditLogs.statusCode, max));
   }
-  if (filter.denialReason) {
-    conditions.push(eq(tlsApiAuditLogs.denialReason, filter.denialReason));
+  if (safeFilter.denialReason) {
+    conditions.push(eq(tlsApiAuditLogs.denialReason, safeFilter.denialReason));
   }
-  if (filter.q) {
-    const pattern = `%${escapeIlikePattern(filter.q)}%`;
+  if (safeFilter.q) {
+    const pattern = `%${escapeIlikePattern(safeFilter.q)}%`;
     // ESCAPE so literal %/_ in the query don't act as wildcards.
     const pathMatch = sql`${tlsApiAuditLogs.path} ILIKE ${pattern} ESCAPE '\\'`;
     const reasonMatch = sql`${tlsApiAuditLogs.denialReason} ILIKE ${pattern} ESCAPE '\\'`;
     conditions.push(or(pathMatch, reasonMatch)!);
   }
-  if (filter.from) {
-    conditions.push(gte(tlsApiAuditLogs.createdAt, new Date(filter.from)));
+  if (safeFilter.from) {
+    conditions.push(gte(tlsApiAuditLogs.createdAt, new Date(safeFilter.from)));
   }
-  if (filter.to) {
-    conditions.push(lte(tlsApiAuditLogs.createdAt, new Date(filter.to)));
+  if (safeFilter.to) {
+    conditions.push(lte(tlsApiAuditLogs.createdAt, new Date(safeFilter.to)));
   }
-  if (filter.cursor) {
-    conditions.push(lt(tlsApiAuditLogs.createdAt, new Date(filter.cursor)));
+  if (safeFilter.cursor) {
+    conditions.push(lt(tlsApiAuditLogs.createdAt, new Date(safeFilter.cursor)));
   }
 
   const rows = await db
