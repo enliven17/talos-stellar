@@ -33,6 +33,7 @@ const submitResultSchema = z.object({
   error: z.string().max(2000).nullable().optional(),
   responseBody: z.string().max(1024).nullable().optional(),
   fencingToken: z.number().int().nonnegative(),
+  attempt: z.number().int().nonnegative().optional(),
 });
 
 async function _POST(
@@ -54,7 +55,7 @@ async function _POST(
       return Response.json({ error: "Invalid request body" }, { status: 400 });
     }
 
-    const { statusCode, error, responseBody, fencingToken } = body;
+    const { statusCode, error, responseBody, fencingToken, attempt } = body;
 
     // Fetch the current delivery
     const delivery = await db
@@ -77,6 +78,20 @@ async function _POST(
     if (delivery.fencingToken !== fencingToken) {
       return Response.json(
         { error: "Fencing token mismatch", detail: "Lease may have been taken over by another worker" },
+        { status: 409 },
+      );
+    }
+
+    if (attempt !== undefined && attempt < delivery.attempts) {
+      logger.warn(
+        { deliveryId: id, attempt, currentAttempts: delivery.attempts },
+        "stale_attempt_acknowledgement_rejected",
+      );
+      return Response.json(
+        {
+          error: "Stale attempt acknowledgement",
+          detail: `Acknowledgement is for attempt ${attempt}, but delivery is currently at attempt ${delivery.attempts}`,
+        },
         { status: 409 },
       );
     }
