@@ -249,6 +249,36 @@ pub const MAX_TITLE_LEN: u32 = 128;
 /// Maximum allowed byte length for proposal descriptions.
 pub const MAX_DESCRIPTION_LEN: u32 = 2048;
 
+/// Typed errors for governance metadata validation.
+#[contracttype]
+/// Typed errors for governance metadata validation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GovernanceMetadataError {
+    /// Proposal title exceeds `MAX_TITLE_LEN` bytes.
+    TitleTooLong,
+    /// Proposal description exceeds `MAX_DESCRIPTION_LEN` bytes.
+    DescriptionTooLong,
+}
+
+/// Validates governance metadata byte limits before any persistent write.
+///
+/// Returns a typed error if the title or description is oversized. Callers must
+/// invoke this before writing any proposal state so that no partial proposal is
+/// ever persisted.
+pub fn validate_proposal_metadata(
+    title: &String,
+    description: &String,
+) -> Result<(), GovernanceMetadataError> {
+    if title.len() > MAX_TITLE_LEN {
+        return Err(GovernanceMetadataError::TitleTooLong);
+    }
+    if description.len() > MAX_DESCRIPTION_LEN {
+        return Err(GovernanceMetadataError::DescriptionTooLong);
+    }
+    Ok(())
+}
+
 // ── Dividend Snapshot (#598) ─────────────────────────────────────────
 
 /// Maximum page size for `get_dividend_snapshots_page`.
