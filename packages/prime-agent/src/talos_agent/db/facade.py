@@ -35,6 +35,12 @@ class LocalDB:
     All domain logic is delegated to per-domain repositories; this class
     exists purely as a backwards-compatible façade so existing callers do
     not need to be updated.
+
+    Backup / restore / verify do NOT live here: they are in
+    ``talos_agent.backup_service``. In particular, ``verify_backup`` refuses
+    any ``*.incomplete`` artifact up front (issue #1452), so a partial write
+    can never be presented as a verified backup — the façade never proxies
+    a verification call through to it.
     """
 
     def __init__(self, path: Path = DB_PATH, *, timeout_ms: int = 5000):
@@ -126,6 +132,9 @@ class LocalDB:
 
     def count_pending_commerce_jobs(self) -> int:
         return self._commerce.count_pending_commerce_jobs()
+
+    def prune_completed_commerce_payloads(self, retention_days: int = 30) -> int:
+        return self._commerce.prune_completed_payloads(retention_days)
 
     # ── Approval Cache ────────────────────────────────────────────────────
 
@@ -420,6 +429,25 @@ class LocalDB:
         keep_last: int = 200,
     ) -> int:
         return self._cycles.prune_old_cycle_summaries(talos_id, keep_last)
+
+    # ── State Retention Preview ───────────────────────────────────────────
+
+    def preview_retention(
+        self,
+        *,
+        record_class: str | None = None,
+        cutoff_iso: str | None = None,
+    ):
+        """Report candidate record counts and date boundaries by record class (#1451).
+
+        Separates private content from financial and audit records.
+        """
+        from talos_agent.db.retention import preview_state_retention
+        return preview_state_retention(
+            self._conn,
+            record_class_filter=record_class,
+            cutoff_iso=cutoff_iso,
+        )
 
     # ── Cleanup ───────────────────────────────────────────────────────────
 

@@ -163,6 +163,44 @@ def test_verify_rejects_wrong_password(tmp_path: Path, monkeypatch):
     assert getattr(exc_info.value, "code", "BAD_INPUT") == "AUTH_FAILED"
 
 
+def test_build_rejects_output_path_aliasing_live_db(tmp_path: Path, monkeypatch):
+    """The backup should refuse to write to a path that is the live DB file.
+    This protects the running agent from accidental DB overwrite.
+    """
+    db_path = tmp_path / "talos-agent.db"
+    _seed_agent_db(db_path)
+    from talos_agent import backup_service as bs
+    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
+    monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)
+
+    # Attempt to use the same path as the backup output.
+    with pytest.raises(BackupError) as exc_info:
+        build_backup(password="strongpass123", out_path=db_path)
+    assert getattr(exc_info.value, "code", None) == "ALIAS_REJECTED"
+    # Ensure the DB still exists after the failed attempt.
+    assert db_path.exists()
+
+
+def test_build_rejects_symlink_aliasing_live_db(tmp_path: Path, monkeypatch):
+    """The backup should also refuse if out_path is a symlink pointing to the DB."""
+    db_path = tmp_path / "talos-agent.db"
+    _seed_agent_db(db_path)
+    from talos_agent import backup_service as bs
+    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
+    monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)
+
+    symlink_path = tmp_path / "symlink_to_db.enc"
+    try:
+        symlink_path.symlink_to(db_path)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlinks not supported in this environment")
+
+    with pytest.raises(BackupError) as exc_info:
+        build_backup(password="strongpass123", out_path=symlink_path)
+    assert getattr(exc_info.value, "code", None) == "ALIAS_REJECTED"
+    assert db_path.exists()
+
+
 def test_build_password_must_be_at_least_8_chars(tmp_path: Path, monkeypatch):
     from talos_agent import backup_service as bs
     monkeypatch.setattr(bs, "APP_DIR", tmp_path)
@@ -439,6 +477,7 @@ def test_prune_skips_undeletable_file_without_raising(tmp_path: Path, monkeypatc
     assert (tmp_path / "talos-agent-0.enc").exists()
 
 
+
 # ── Decompressed restore bounds (prevents disk/memory exhaustion) ─────
 #
 # MAX_DECOMPRESSED_RESTORE_BYTES == MAX_PLAINTEXT_BYTES == 10 MB.
@@ -647,3 +686,153 @@ def test_restore_preserves_existing_behavior_for_normal_backups(tmp_path: Path, 
     import sqlite3
     conn = sqlite3.connect(str(restore_root / "talos-agent.db"))
     conn.close()
+
+
+class TestRestoreAgentIdentifierGuard:
+    """Issue #1454 — reject contradictory agent identifiers during restore.
+
+    These tests construct a minimal valid archive payload directly (bypassing
+    build_backup) so the guard is exercised in isolation without needing a
+    live .talos-agent directory. The archive is a real encrypted artifact —
+    encrypt/decrypt path is the production one.
+    """
+
+    def _make_archive(
+        self,
+        tmp_path,
+        *,
+        archive_agent_id: str | None,
+        password: str = "test-password-123",
+    ) -> "Path":
+        import json
+        from talos_agent.backup_service import (
+            BACKUP_ENCRYPTION_LABEL,
+            BACKUP_FORMAT_VERSION,
+            _sha256_bytes,
+            encrypt_with_password,
+            stream_encrypted_artifact,
+        )
+
+        # Minimal body: one tiny SQLite file so restore has something to place.
+        import sqlite3
+        db_bytes = tmp_path / "fake.db"
+        conn = sqlite3.connect(str(db_bytes))
+        conn.execute("CREATE TABLE t (x INTEGER)")
+        conn.commit()
+        conn.close()
+        raw = db_bytes.read_bytes()
+        import base64
+        b64 = base64.b64encode(raw).decode("ascii")
+
+        files_meta = {
+            "db/fake.db": {
+                "sha256": _sha256_bytes(raw),
+                "size_bytes": len(raw),
+            }
+        }
+        manifest_inner = {
+            "encryption": BACKUP_ENCRYPTION_LABEL,
+            "files": files_meta,
+            "rowCountsSqlite": {"fake.db:t": 0},
+            "scope": "agent",
+            "schemaVersion": 3,
+        }
+        manifest_sha = _sha256_bytes(
+            json.dumps(manifest_inner, sort_keys=True).encode("utf8")
+        )
+        payload = {
+            "version": BACKUP_FORMAT_VERSION,
+            "encryption": BACKUP_ENCRYPTION_LABEL,
+            "scope": "agent",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "database": {"signalVersion": "3.0.0", "rowCountsSqlite": {"fake.db:t": 0}},
+            "filesMeta": files_meta,
+            "body": {"db/fake.db": b64},
+            "manifest": {
+                "sha256": manifest_sha,
+                "rowCountTotal": 0,
+                "encryption": BACKUP_ENCRYPTION_LABEL,
+                "formatVersion": BACKUP_FORMAT_VERSION,
+            },
+        }
+        if archive_agent_id is not None:
+            payload["agent_id"] = archive_agent_id
+
+        plaintext = json.dumps(payload, sort_keys=True).encode("utf8")
+        ciphertext = encrypt_with_password(plaintext.decode("utf8"), password)
+        out_path = tmp_path / "archive.enc"
+        stream_encrypted_artifact(ciphertext, out_path)
+        return out_path
+
+    def test_matching_agent_id_restores(self, tmp_path, monkeypatch):
+        """Same agent_id on archive and restore call → proceeds."""
+        from talos_agent import backup_service
+
+        artifact = self._make_archive(tmp_path, archive_agent_id="talos-A")
+        restore_root = tmp_path / "restore"
+        monkeypatch.setattr(backup_service, "APP_DIR", tmp_path)
+        result = backup_service.restore_backup(
+            artifact_path=artifact,
+            password="test-password-123",
+            confirm=True,
+            agent_id="talos-A",
+            restore_root=restore_root,
+        )
+        assert result is not None
+        assert (restore_root / "fake.db").exists()
+
+    def test_mismatched_agent_id_rejected(self, tmp_path, monkeypatch):
+        """Different agent_id → AGENT_ID_MISMATCH, no files written."""
+        from talos_agent import backup_service
+        from talos_agent.backup_service import BackupError
+
+        artifact = self._make_archive(tmp_path, archive_agent_id="talos-A")
+        restore_root = tmp_path / "restore"
+        monkeypatch.setattr(backup_service, "APP_DIR", tmp_path)
+        with pytest.raises(BackupError) as excinfo:
+            backup_service.restore_backup(
+                artifact_path=artifact,
+                password="test-password-123",
+                confirm=True,
+                agent_id="talos-B",
+                restore_root=restore_root,
+            )
+        assert excinfo.value.code == "AGENT_ID_MISMATCH"
+        assert "does not match" in str(excinfo.value)
+        # No files should have been restored.
+        assert not (restore_root / "fake.db").exists()
+
+    def test_mismatched_agent_id_allowed_with_explicit_flag(self, tmp_path, monkeypatch):
+        """allow_agent_mismatch=True lets the caller migrate explicitly."""
+        from talos_agent import backup_service
+
+        artifact = self._make_archive(tmp_path, archive_agent_id="talos-A")
+        restore_root = tmp_path / "restore"
+        monkeypatch.setattr(backup_service, "APP_DIR", tmp_path)
+        result = backup_service.restore_backup(
+            artifact_path=artifact,
+            password="test-password-123",
+            confirm=True,
+            agent_id="talos-B",
+            restore_root=restore_root,
+            allow_agent_mismatch=True,
+        )
+        assert result is not None
+        assert (restore_root / "fake.db").exists()
+
+    def test_legacy_archive_without_agent_id_restores(self, tmp_path, monkeypatch):
+        """Legacy archive with no agent_id field restores unchanged."""
+        from talos_agent import backup_service
+
+        artifact = self._make_archive(tmp_path, archive_agent_id=None)
+        restore_root = tmp_path / "restore"
+        monkeypatch.setattr(backup_service, "APP_DIR", tmp_path)
+        result = backup_service.restore_backup(
+            artifact_path=artifact,
+            password="test-password-123",
+            confirm=True,
+            agent_id="talos-A",
+            restore_root=restore_root,
+        )
+        assert result is not None
+        assert (restore_root / "fake.db").exists()

@@ -6,6 +6,23 @@
  * discriminated unions — avoiding stringly-typed bugs across module boundaries.
  */
 
+// ─── Replayable Report Types ─────────────────────────────────────────────────
+
+export interface ReconcilerObservation {
+  pollResult: HorizonPollResult | null;
+  currentLedger: number;
+  now: Date;
+}
+
+export interface ReconcilerTransitionReport {
+  initialState: TxRecord;
+  steps: {
+    observation: ReconcilerObservation;
+    update: TxRecordUpdate | null;
+    resultingState: TxRecord;
+  }[];
+}
+
 // ─── Finality States ──────────────────────────────────────────────────────────
 
 /** All valid positions in the finality state machine. */
@@ -147,3 +164,114 @@ export interface ReconcilerStats {
   activeCount?: number;
   queueCount?: number;
 }
+
+// ─── Dry-Run Payment Repair Plan ─────────────────────────────────────────────
+
+/** Proposed downstream repair action for a transaction record. */
+export type ProposedRepairAction =
+  | "none"
+  | "mark_confirmed"
+  | "mark_failed"
+  | "mark_expired"
+  | "mark_not_found"
+  | "manual_review";
+
+/** Pure description of the downstream repair that would be applied. */
+export interface ProposedDownstreamRepair {
+  action: ProposedRepairAction;
+  targetTable: "tls_commerce_jobs" | "tls_token_purchases" | null;
+  targetStatus: string | null;
+  detail: string;
+}
+
+/** Supporting Horizon and ledger observations that justify a planned change. */
+export interface RepairPlanObservation {
+  currentLedger: number;
+  pollResult: HorizonPollResult | null;
+  ledgerGap: number | null;
+  confirmationDepthMet: boolean | null;
+  wallClockExpired: boolean;
+  ledgerExpired: boolean;
+  reason: string;
+}
+
+/** Snapshot of a record's state at the moment the dry-run plan was built. */
+export interface PlannedRecordSnapshot {
+  finalityStatus: FinalityStatus;
+  confirmedLedger: number | null;
+  pollCount: number;
+  repairApplied: boolean;
+  updatedAt: string;
+}
+
+/** Proposed state after applying the transition and/or repair. */
+export interface PlannedProposedState {
+  finalityStatus: FinalityStatus;
+  confirmedLedger: number | null;
+  pollCount: number;
+  lastError: string | null;
+  repairApplied: boolean;
+}
+
+/** Single item in a dry-run payment repair plan. */
+export interface PlannedPaymentRepairItem {
+  recordId: string;
+  txHash: string;
+  sourceType: TxSourceType;
+  sourceId: string | null;
+  currentState: PlannedRecordSnapshot;
+  proposedState: PlannedProposedState;
+  proposedRepair: ProposedDownstreamRepair;
+  observations: RepairPlanObservation;
+  requiresExecution: boolean;
+  recordFingerprint: string;
+}
+
+/** Dry-run payment repair plan produced before applying reconciliation repairs. */
+export interface PaymentRepairPlan {
+  planId: string;
+  planHash: string;
+  createdAt: string;
+  currentLedger: number;
+  horizonUrl: string;
+  items: PlannedPaymentRepairItem[];
+}
+
+/** Explicit operator selection required to execute an unchanged repair plan. */
+export interface RepairPlanSelection {
+  planHash: string;
+  selectedRecordIds: string[];
+}
+
+/** Error codes returned when a repair plan cannot be executed safely. */
+export type RepairPlanErrorCode =
+  | "PLAN_MODIFIED"
+  | "INVALID_SELECTION"
+  | "RECORD_CHANGED"
+  | "INVALID_TRANSITION";
+
+/** Result of validating or executing a dry-run payment repair plan. */
+export interface RepairPlanExecutionItemResult {
+  recordId: string;
+  txHash: string;
+  previousStatus: FinalityStatus;
+  newStatus: FinalityStatus;
+  repairApplied: boolean;
+  detail?: string;
+}
+
+export type RepairPlanExecutionResult =
+  | {
+      ok: true;
+      planId: string;
+      planHash: string;
+      executedCount: number;
+      skippedCount: number;
+      items: RepairPlanExecutionItemResult[];
+    }
+  | {
+      ok: false;
+      code: RepairPlanErrorCode;
+      error: string;
+      changedRecordIds?: string[];
+    };

@@ -105,7 +105,13 @@ async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnce
     }
 
     const completed = await store.complete(job.id, leaseId, result, Date.now() - startedAt);
-    if (completed) summary.completed += 1;
+    if (completed === "conflict_cancelled") {
+      // Cancellation raced with completion: the financial effect already ran,
+      // so report the conflict instead of claiming cancellation succeeded.
+      summary.completed += 1;
+    } else if (completed) {
+      summary.completed += 1;
+    }
   } catch (err) {
     if (lostLease || cancelled) {
       if (cancelled) summary.cancelled += 1;
