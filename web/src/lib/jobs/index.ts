@@ -8,11 +8,30 @@
  *
  * See web/JOBS.md for configuration, operational signals, and rollback.
  */
-export { enqueue, getJob, listJobs, release, requestCancel, requeue } from "./store";
+export {
+  enqueue,
+  executeBulkRetry,
+  getJob,
+  getJobRevision,
+  listJobs,
+  previewBulkRetry,
+  release,
+  requestCancel,
+  requeue,
+} from "./store";
 export { registerHandler } from "./registry";
 export { runOnce } from "./runner";
 export { jobsConfig, JOBS_ENABLED } from "./config";
 export type {
+  BulkRetryCandidate,
+  BulkRetryExcluded,
+  BulkRetryExecutionResult,
+  BulkRetryFilter,
+  BulkRetryPreview,
+  BulkRetryReason,
+  BulkRetrySelection,
+  BulkRetrySkipReason,
+  BulkRetrySkippedItem,
   EnqueueOptions,
   JobContext,
   JobHandler,

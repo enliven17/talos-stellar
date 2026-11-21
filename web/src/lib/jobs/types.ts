@@ -79,3 +79,83 @@ export interface RunOnceSummary {
   cancelled: number;
   reaped: number;
 }
+
+export type BulkRetryReason =
+  | "eligible"
+  | "not_found"
+  | "status_not_failed"
+  | "cancelled_excluded"
+  | "queue_mismatch"
+  | "retry_class_mismatch"
+  | "fatal_retry_class";
+
+export type BulkRetrySkipReason =
+  | Exclude<BulkRetryReason, "eligible">
+  | "revision_mismatch"
+  | "invalid_revision";
+
+export interface BulkRetryFilter {
+  /** Explicit job IDs to evaluate. When omitted, scans matching jobs up to `limit`. */
+  jobIds?: string[];
+  queue?: string;
+  retryClass?: RetryClass;
+  /** Include `cancelled` jobs in addition to `dead_letter`. Defaults to false. */
+  includeCancelled?: boolean;
+  /** Allow retrying `fatal` retryClass jobs. Defaults to false. */
+  allowFatal?: boolean;
+  /** Max jobs to scan when `jobIds` is not supplied (default 50, max 200). */
+  limit?: number;
+}
+
+export interface BulkRetryCandidate {
+  id: string;
+  queue: string;
+  status: JobStatus;
+  retryClass: RetryClass;
+  attempts: number;
+  maxAttempts: number;
+  lastError: string | null;
+  revision: string;
+  reason: "eligible";
+}
+
+export interface BulkRetryExcluded {
+  id: string;
+  queue: string | null;
+  status: JobStatus | null;
+  retryClass: RetryClass | null;
+  revision: string | null;
+  reason: Exclude<BulkRetryReason, "eligible">;
+}
+
+export interface BulkRetryPreview {
+  dryRun: true;
+  totalEvaluated: number;
+  eligibleCount: number;
+  ineligibleCount: number;
+  countsByReason: Partial<Record<BulkRetryReason, number>>;
+  eligible: BulkRetryCandidate[];
+  ineligible: BulkRetryExcluded[];
+}
+
+export interface BulkRetrySelection {
+  id: string;
+  /** Unchanged job revision token returned by `previewBulkRetry` (`updatedAt` ISO string). */
+  revision: string;
+}
+
+export interface BulkRetrySkippedItem {
+  id: string;
+  expectedRevision: string;
+  currentRevision: string | null;
+  reason: BulkRetrySkipReason;
+}
+
+export interface BulkRetryExecutionResult {
+  dryRun: false;
+  requestedCount: number;
+  requeuedCount: number;
+  skippedCount: number;
+  requeued: JobRecord[];
+  skipped: BulkRetrySkippedItem[];
+}
