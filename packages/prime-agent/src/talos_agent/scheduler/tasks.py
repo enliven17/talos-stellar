@@ -10,6 +10,9 @@ All tasks share:
 - ``api`` — for remote API calls.
 - ``settings`` — agent configuration.
 - A ``DurableBackoff`` instance for retry/restart resilience (where applicable).
+
+Attempts interrupted by intentional shutdown (``shutdown_event`` set or task
+cancellation) are not recorded as failures and never consume retry budget.
 """
 
 from __future__ import annotations
@@ -240,12 +243,18 @@ async def polling_task(
                     )
 
             backoff.success()
+        except asyncio.CancelledError:
+            # Cancellation is not a failed attempt — never consume retry budget.
+            raise
         except Exception as e:
             console.print(f"[dim red]Polling error: {e}[/dim red]")
-            backoff.failure()
-            if backoff.terminal:
-                logger.warning("polling_task: reached max_attempts — stopping task")
-                break
+            if shutdown_event.is_set():
+                log.info("polling_attempt_interrupted_by_shutdown")
+            else:
+                backoff.failure()
+                if backoff.terminal:
+                    logger.warning("polling_task: reached max_attempts — stopping task")
+                    break
 
         try:
             await asyncio.wait_for(
@@ -277,12 +286,18 @@ async def heartbeat_task(
             with _traced_task_run("heartbeat", talos_config):
                 await api.update_status(settings.talos_id, online=True)
             backoff.success()
+        except asyncio.CancelledError:
+            # Cancellation is not a failed attempt — never consume retry budget.
+            raise
         except Exception as e:
             logger.debug(f"Heartbeat error: {e}")
-            backoff.failure()
-            if backoff.terminal:
-                logger.warning("heartbeat_task: reached max_attempts — stopping task")
-                break
+            if shutdown_event.is_set():
+                log.info("heartbeat_attempt_interrupted_by_shutdown")
+            else:
+                backoff.failure()
+                if backoff.terminal:
+                    logger.warning("heartbeat_task: reached max_attempts — stopping task")
+                    break
 
         try:
             await asyncio.wait_for(
@@ -324,9 +339,15 @@ async def job_heartbeat_task(
                 if not result:
                     logger.warning("job_lease_heartbeat_failed")
             backoff.success()
+        except asyncio.CancelledError:
+            # Cancellation is not a failed attempt — never consume retry budget.
+            raise
         except Exception as e:
             logger.debug("Job heartbeat error: %s", e)
-            backoff.failure()
+            if shutdown_event.is_set():
+                log.info("job_heartbeat_attempt_interrupted_by_shutdown")
+            else:
+                backoff.failure()
 
         if shutdown_drain_complete.is_set():
             break
@@ -376,12 +397,18 @@ async def activity_flush_task(
                         )
                     db.mark_activities_sent([a["id"] for a in pending])
             backoff.success()
+        except asyncio.CancelledError:
+            # Cancellation is not a failed attempt — never consume retry budget.
+            raise
         except Exception as e:
             logger.debug(f"Activity flush error: {e}")
-            backoff.failure()
-            if backoff.terminal:
-                logger.warning("activity_flush_task: reached max_attempts — stopping task")
-                break
+            if shutdown_event.is_set():
+                log.info("activity_flush_attempt_interrupted_by_shutdown")
+            else:
+                backoff.failure()
+                if backoff.terminal:
+                    logger.warning("activity_flush_task: reached max_attempts — stopping task")
+                    break
 
         try:
             await asyncio.wait_for(
@@ -689,9 +716,15 @@ async def job_effect_dispatch_task(
                     dead=result["dead"],
                 )
             backoff.success()
+        except asyncio.CancelledError:
+            # Cancellation is not a failed attempt — never consume retry budget.
+            raise
         except Exception:
-            log.error("job_effect_dispatch_batch_failed", error_code="batch_failure")
-            backoff.failure()
+            if shutdown_event.is_set():
+                log.info("job_effect_dispatch_interrupted_by_shutdown")
+            else:
+                log.error("job_effect_dispatch_batch_failed", error_code="batch_failure")
+                backoff.failure()
         try:
             await asyncio.wait_for(
                 shutdown_event.wait(), timeout=backoff.delay_until_next_attempt()
