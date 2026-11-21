@@ -20,6 +20,11 @@ from talos_agent.payments.stellar_kit import (
     format_stellar_amount,
     to_stellar_amount,
 )
+from talos_agent.tools.commerce import (
+    USDC_DECIMALS,
+    USDC_UNIT_SCALE,
+    price_to_usdc_units,
+)
 from talos_agent.tools.defi import repay_loan
 from talos_agent.tools.stellar import transfer_xlm
 from talos_agent.tools.web_api import report_revenue
@@ -74,6 +79,33 @@ class TestDecimalParsingAndFormatting:
         """Boundary: exactly seven fractional digits is accepted unchanged."""
         assert to_stellar_amount("1.1234567") == Decimal("1.1234567")
         assert format_stellar_amount("1.1234567") == "1.1234567"
+
+
+class TestCommercePriceAtomicScale:
+    """Accepted price precision must agree with the signer's atomic USDC scale."""
+
+    def test_usdc_scale_constants_are_consistent(self):
+        """The atomic scale is derived from the shared decimal count."""
+        assert USDC_DECIMALS == 6
+        assert USDC_UNIT_SCALE == 10 ** USDC_DECIMALS == 1_000_000
+
+    def test_price_to_usdc_units_exact_atomic_values(self):
+        """Synthetic quotes convert to exact atomic units at the shared scale."""
+        assert price_to_usdc_units("1.2345") == 1_234_500
+        assert price_to_usdc_units("0.000001") == 1
+        assert price_to_usdc_units("2") == 2_000_000
+
+    def test_price_to_usdc_units_rejects_sub_atomic_precision(self):
+        """Digits beyond the atomic scale must not be silently truncated or altered."""
+        with pytest.raises(ValueError):
+            price_to_usdc_units("1.2345678")
+        with pytest.raises(ValueError):
+            price_to_usdc_units("0.0000001")
+
+    def test_price_to_usdc_units_rejects_seventh_digit_regression(self):
+        """Regression: a seventh fractional digit must not change the monetary value."""
+        with pytest.raises(ValueError):
+            price_to_usdc_units("1.2345678")
 
 
 class TestStellarKitDecimalPrecision:

@@ -53,7 +53,7 @@ ALL_CATEGORIES = [
 # Non-negative decimal with at most USDC_DECIMALS fractional digits, e.g.
 # "10", "1.05", "0.000001". Rejects signs, exponents, whitespace, empty input
 # and over-precise fractions rather than silently normalising them.
-MAX_PRICE_FRACTION_DIGITS = 7
+MAX_PRICE_FRACTION_DIGITS = USDC_DECIMALS
 _PRICE_PATTERN = re.compile(
     rf"\A\d+(?:\.\d{{1,{MAX_PRICE_FRACTION_DIGITS}}})?\Z"
 )
