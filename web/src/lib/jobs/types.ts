@@ -46,7 +46,7 @@ export interface EnqueueOptions {
 
 /** Result returned by heartbeat() calls inside a running handler. */
 export interface HeartbeatResult {
-  /** false when the lease was lost (reaped/re-leased elsewhere) or cancellation was requested. */
+  /** false when the lease was lost (reaped/re-leased elsewhere, or lease deadline elapsed) or cancellation was requested. */
   ok: boolean;
   cancelled: boolean;
 }
