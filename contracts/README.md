@@ -53,7 +53,18 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
   - Events: `proposal_created`, `vote_cast`, `proposal_status_changed`
   - **Scoped emergency pause controls** (`pause_domain` / `unpause_domain` / `is_domain_paused`) with domain-scoped pausing, auto-expiration, and event emission
 
-All three contracts include scoped emergency pause controls with domain-based pause/unpause, auto-expiration, and event emission.
+### 4. TalosDividends
+- **Purpose**: Pull-based dividend claims with on-chain epoch accounting
+- **Features**:
+  - Patron allocations are calculated from the committed epoch amount and patron shares
+  - `claim_eligibility` is a read-only query that returns `Eligible(allocation, role)`, `AlreadyClaimed`, `Expired`, or `ZeroAllocation`
+  - Missing epochs, invalid patron data, and arithmetic overflow return `ContractError`
+  - The eligibility query does not require claimant authorization, transfer value, write claim records, or emit events
+  - Claim eligibility uses the same rules as `claim_dividend`; claims remain valid at the exact epoch deadline and expire after it
+  - Interface version: `(1, 1, 0)`
+  - Events: `ep_cmt`, `div_clm`, `ep_rcv`
+
+The registry, name service, and governance contracts include scoped emergency pause controls with domain-based pause/unpause, auto-expiration, and event emission.
 
 ## Prerequisites
 

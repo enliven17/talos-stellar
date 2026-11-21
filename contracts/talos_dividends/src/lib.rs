@@ -52,7 +52,7 @@
 //!
 //! ## Version
 //!
-//! `CONTRACT_VERSION = (1, 0, 0)`
+//! `CONTRACT_VERSION = (1, 1, 0)`
 
 #![no_std]
 
@@ -115,6 +115,20 @@ pub enum PatronRole {
     Creator,
     Investor,
     Treasury,
+}
+
+/// Read-only outcome of evaluating whether a patron can claim an epoch.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClaimEligibility {
+    /// The claim is currently valid; includes the calculated amount and role.
+    Eligible(i128, PatronRole),
+    /// This patron has already claimed for the epoch.
+    AlreadyClaimed,
+    /// The epoch is no longer accepting claims.
+    Expired,
+    /// The patron's share rounds down to zero.
+    ZeroAllocation,
 }
 
 /// Lifecycle state of a distribution epoch.
@@ -187,7 +201,7 @@ const MIN_EPOCH_AMOUNT: i128 = 1;
 /// - **major** — incompatible ABI change
 /// - **minor** — backwards-compatible new entry-point or field
 /// - **patch** — bug-fix with no observable ABI change
-pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 0, 0);
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 1, 0);
 
 // ── Events ───────────────────────────────────────────────────────────────────
 //
@@ -256,6 +270,102 @@ fn compute_allocation(total_amount: i128, share_pct: u32) -> Result<i128, Contra
         return Err(ContractError::ZeroAllocation);
     }
     Ok(allocation)
+}
+
+struct ClaimAssessment {
+    record: EpochRecord,
+    eligibility: ClaimEligibility,
+}
+
+fn assess_claim(
+    env: &Env,
+    claimant: &Address,
+    talos_id: u32,
+    epoch_id: u64,
+    patron_creator: &Address,
+    patron_investor: &Address,
+    patron_treasury: &Address,
+    creator_share: u32,
+    investor_share: u32,
+    treasury_share: u32,
+) -> Result<ClaimAssessment, ContractError> {
+    let record: EpochRecord = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Epoch(talos_id, epoch_id))
+        .ok_or(ContractError::EpochNotFound)?;
+
+    if record.status != EpochStatus::Active {
+        return Ok(ClaimAssessment {
+            record,
+            eligibility: ClaimEligibility::Expired,
+        });
+    }
+
+    let now = env.ledger().timestamp();
+    let deadline = record
+        .created_at
+        .checked_add(record.expiry_secs)
+        .ok_or(ContractError::Overflow)?;
+    if now > deadline {
+        return Ok(ClaimAssessment {
+            record,
+            eligibility: ClaimEligibility::Expired,
+        });
+    }
+
+    let share_sum = creator_share
+        .checked_add(investor_share)
+        .and_then(|s| s.checked_add(treasury_share))
+        .ok_or(ContractError::Overflow)?;
+    if share_sum != 100 {
+        return Err(ContractError::NotAPatron);
+    }
+
+    let (role, share_pct) = if claimant == patron_creator {
+        (PatronRole::Creator, creator_share)
+    } else if claimant == patron_investor {
+        (PatronRole::Investor, investor_share)
+    } else if claimant == patron_treasury {
+        (PatronRole::Treasury, treasury_share)
+    } else {
+        return Err(ContractError::NotAPatron);
+    };
+
+    if env
+        .storage()
+        .persistent()
+        .has(&DataKey::Claimed(epoch_id, claimant.clone()))
+    {
+        return Ok(ClaimAssessment {
+            record,
+            eligibility: ClaimEligibility::AlreadyClaimed,
+        });
+    }
+
+    let allocation = match compute_allocation(record.total_amount, share_pct) {
+        Ok(allocation) => allocation,
+        Err(ContractError::ZeroAllocation) => {
+            return Ok(ClaimAssessment {
+                record,
+                eligibility: ClaimEligibility::ZeroAllocation,
+            });
+        }
+        Err(error) => return Err(error),
+    };
+
+    let new_claimed = record
+        .claimed_amount
+        .checked_add(allocation)
+        .ok_or(ContractError::Overflow)?;
+    if new_claimed > record.total_amount {
+        return Err(ContractError::AccountingOverflow);
+    }
+
+    Ok(ClaimAssessment {
+        record,
+        eligibility: ClaimEligibility::Eligible(allocation, role),
+    })
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -412,56 +522,27 @@ impl TalosDividends {
     ) -> Result<i128, ContractError> {
         claimant.require_auth();
 
-        // Load epoch record.
-        let mut record: EpochRecord = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Epoch(talos_id, epoch_id))
-            .ok_or(ContractError::EpochNotFound)?;
-
-        // Enforce epoch status.
-        if record.status != EpochStatus::Active {
-            return Err(ContractError::EpochExpired);
-        }
-
-        // Enforce claim window.
-        let now = env.ledger().timestamp();
-        let deadline = record
-            .created_at
-            .checked_add(record.expiry_secs)
-            .ok_or(ContractError::Overflow)?;
-        if now > deadline {
-            return Err(ContractError::EpochExpired);
-        }
-
-        // Verify shares sum to 100 (basic integrity check on supplied patron data).
-        let share_sum = creator_share
-            .checked_add(investor_share)
-            .and_then(|s| s.checked_add(treasury_share))
-            .ok_or(ContractError::Overflow)?;
-        if share_sum != 100 {
-            return Err(ContractError::NotAPatron);
-        }
-
-        // Resolve claimant role from supplied patron addresses.
-        let (role, share_pct) = if claimant == patron_creator {
-            (PatronRole::Creator, creator_share)
-        } else if claimant == patron_investor {
-            (PatronRole::Investor, investor_share)
-        } else if claimant == patron_treasury {
-            (PatronRole::Treasury, treasury_share)
-        } else {
-            return Err(ContractError::NotAPatron);
+        let ClaimAssessment {
+            mut record,
+            eligibility,
+        } = assess_claim(
+            &env,
+            &claimant,
+            talos_id,
+            epoch_id,
+            &patron_creator,
+            &patron_investor,
+            &patron_treasury,
+            creator_share,
+            investor_share,
+            treasury_share,
+        )?;
+        let (allocation, role) = match eligibility {
+            ClaimEligibility::Eligible(allocation, role) => (allocation, role),
+            ClaimEligibility::AlreadyClaimed => return Err(ContractError::AlreadyClaimed),
+            ClaimEligibility::Expired => return Err(ContractError::EpochExpired),
+            ClaimEligibility::ZeroAllocation => return Err(ContractError::ZeroAllocation),
         };
-
-        // Double-claim guard.
-        let claim_key = DataKey::Claimed(epoch_id, claimant.clone());
-        if env.storage().persistent().has(&claim_key) {
-            return Err(ContractError::AlreadyClaimed);
-        }
-
-        // Compute allocation.
-        let allocation = compute_allocation(record.total_amount, share_pct)?;
 
         // Accounting invariant: ensure we do not over-distribute.
         let new_claimed = record
@@ -473,6 +554,7 @@ impl TalosDividends {
         }
 
         // Persist claim and update running total atomically.
+        let claim_key = DataKey::Claimed(epoch_id, claimant.clone());
         env.storage().persistent().set(&claim_key, &true);
         record.claimed_amount = new_claimed;
         env.storage()
@@ -482,6 +564,39 @@ impl TalosDividends {
         emit_dividend_claimed(&env, epoch_id, claimant, talos_id, allocation, role);
 
         Ok(allocation)
+    }
+
+    /// Explain whether a patron can claim, without requiring authorization or
+    /// modifying storage or emitting events.
+    ///
+    /// Missing epochs, invalid patron data, and arithmetic overflow are returned
+    /// as `ContractError`. Claim-specific ineligibility is returned as a bounded
+    /// `ClaimEligibility` variant.
+    pub fn claim_eligibility(
+        env: Env,
+        claimant: Address,
+        talos_id: u32,
+        epoch_id: u64,
+        patron_creator: Address,
+        patron_investor: Address,
+        patron_treasury: Address,
+        creator_share: u32,
+        investor_share: u32,
+        treasury_share: u32,
+    ) -> Result<ClaimEligibility, ContractError> {
+        let assessment = assess_claim(
+            &env,
+            &claimant,
+            talos_id,
+            epoch_id,
+            &patron_creator,
+            &patron_investor,
+            &patron_treasury,
+            creator_share,
+            investor_share,
+            treasury_share,
+        )?;
+        Ok(assessment.eligibility)
     }
 
     // ── Recovery ─────────────────────────────────────────────────────────────
@@ -618,8 +733,7 @@ mod tests {
                     sub_invokes: &[],
                 },
             }])
-            .initialize(&admin, &registry)
-            .unwrap();
+            .initialize(&admin, &registry);
 
         (env, contract_id, admin, registry, client)
     }
@@ -643,7 +757,6 @@ mod tests {
                 },
             }])
             .commit_epoch(admin, &talos_id, &10_000_i128, &7_200_u64)
-            .unwrap()
     }
 
     /// Helper: perform a claim with provided patron addresses and shares.
@@ -659,7 +772,7 @@ mod tests {
         investor: &Address,
         treasury: &Address,
     ) -> Result<i128, ContractError> {
-        client
+        match client
             .mock_auths(&[MockAuth {
                 address: claimant,
                 invoke: &MockAuthInvoke {
@@ -680,10 +793,16 @@ mod tests {
                     sub_invokes: &[],
                 },
             }])
-            .claim_dividend(
+            .try_claim_dividend(
                 claimant, &talos_id, &epoch_id, creator, investor, treasury, &60_u32, &25_u32,
                 &15_u32,
             )
+        {
+            Ok(Ok(allocation)) => Ok(allocation),
+            Ok(Err(error)) => panic!("claim invocation failed: {:?}", error),
+            Err(Ok(error)) => Err(error),
+            Err(Err(error)) => panic!("claim invocation failed: {:?}", error),
+        }
     }
 
     // ── version() ────────────────────────────────────────────────────────────
@@ -691,7 +810,7 @@ mod tests {
     #[test]
     fn version_returns_compile_time_constant() {
         let (env, contract_id, _, _, client) = setup();
-        assert_eq!(client.version(), (1u32, 0u32, 0u32));
+        assert_eq!(client.version(), (1u32, 1u32, 0u32));
         let _ = (env, contract_id);
     }
 
@@ -985,6 +1104,152 @@ mod tests {
     }
 
     #[test]
+    fn claim_eligibility_reports_allocation_without_mutating_state() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+        let record_before = client.get_epoch(&talos_id, &epoch_id).unwrap();
+        let event_count = env.events().all().len();
+
+        assert_eq!(
+            client
+                .claim_eligibility(
+                    &creator,
+                    &talos_id,
+                    &epoch_id,
+                    &creator,
+                    &investor,
+                    &treasury,
+                    &60,
+                    &25,
+                    &15,
+                ),
+            ClaimEligibility::Eligible(6_000, PatronRole::Creator)
+        );
+        assert_eq!(client.get_epoch(&talos_id, &epoch_id), Some(record_before));
+        assert!(!client.has_claimed(&epoch_id, &creator));
+        assert_eq!(env.events().all().len(), event_count);
+    }
+
+    #[test]
+    fn claim_eligibility_reports_already_claimed_without_mutating_state() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+        do_claim(
+            &env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury,
+        )
+        .unwrap();
+        let record_before = client.get_epoch(&talos_id, &epoch_id).unwrap();
+        let event_count = env.events().all().len();
+
+        assert_eq!(
+            client
+                .claim_eligibility(
+                    &creator,
+                    &talos_id,
+                    &epoch_id,
+                    &creator,
+                    &investor,
+                    &treasury,
+                    &60,
+                    &25,
+                    &15,
+                ),
+            ClaimEligibility::AlreadyClaimed
+        );
+        assert_eq!(client.get_epoch(&talos_id, &epoch_id), Some(record_before));
+        assert!(client.has_claimed(&epoch_id, &creator));
+        assert_eq!(env.events().all().len(), event_count);
+    }
+
+    #[test]
+    fn claim_eligibility_reports_zero_allocation_without_mutating_state() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+        let record_before = client.get_epoch(&talos_id, &epoch_id).unwrap();
+        let event_count = env.events().all().len();
+
+        assert_eq!(
+            client
+                .claim_eligibility(
+                    &creator,
+                    &talos_id,
+                    &epoch_id,
+                    &creator,
+                    &investor,
+                    &treasury,
+                    &0,
+                    &100,
+                    &0,
+                ),
+            ClaimEligibility::ZeroAllocation
+        );
+        assert_eq!(client.get_epoch(&talos_id, &epoch_id), Some(record_before));
+        assert!(!client.has_claimed(&epoch_id, &creator));
+        assert_eq!(env.events().all().len(), event_count);
+    }
+
+    #[test]
+    fn claim_eligibility_keeps_claim_window_open_at_deadline() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+        env.ledger().with_mut(|li| li.timestamp = 8_200);
+
+        assert_eq!(
+            client
+                .claim_eligibility(
+                    &creator,
+                    &talos_id,
+                    &epoch_id,
+                    &creator,
+                    &investor,
+                    &treasury,
+                    &60,
+                    &25,
+                    &15,
+                ),
+            ClaimEligibility::Eligible(6_000, PatronRole::Creator)
+        );
+
+        env.ledger().with_mut(|li| li.timestamp = 8_201);
+        let record_before = client.get_epoch(&talos_id, &epoch_id).unwrap();
+        let event_count = env.events().all().len();
+        assert_eq!(
+            client
+                .claim_eligibility(
+                    &creator,
+                    &talos_id,
+                    &epoch_id,
+                    &creator,
+                    &investor,
+                    &treasury,
+                    &60,
+                    &25,
+                    &15,
+                ),
+            ClaimEligibility::Expired
+        );
+        assert_eq!(client.get_epoch(&talos_id, &epoch_id), Some(record_before));
+        assert!(!client.has_claimed(&epoch_id, &creator));
+        assert_eq!(env.events().all().len(), event_count);
+    }
+
+    #[test]
     fn claim_emits_div_clm_event() {
         let (env, contract_id, admin, _, client) = setup();
         let talos_id = 1u32;
@@ -1043,8 +1308,7 @@ mod tests {
                     sub_invokes: &[],
                 },
             }])
-            .recover_expired(&admin, &talos_id, &epoch_id)
-            .unwrap();
+            .recover_expired(&admin, &talos_id, &epoch_id);
 
         // No claims were made, so the full amount is recovered.
         assert_eq!(recovered, 10_000);
@@ -1080,8 +1344,7 @@ mod tests {
                     sub_invokes: &[],
                 },
             }])
-            .recover_expired(&admin, &talos_id, &epoch_id)
-            .unwrap();
+            .recover_expired(&admin, &talos_id, &epoch_id);
 
         // 10_000 - 6_000 (creator) = 4_000 unclaimed.
         assert_eq!(recovered, 4_000);
@@ -1128,8 +1391,7 @@ mod tests {
                     sub_invokes: &[],
                 },
             }])
-            .recover_expired(&admin, &talos_id, &epoch_id)
-            .unwrap();
+            .recover_expired(&admin, &talos_id, &epoch_id);
 
         let second = client
             .mock_auths(&[MockAuth {
@@ -1192,8 +1454,7 @@ mod tests {
                     sub_invokes: &[],
                 },
             }])
-            .recover_expired(&admin, &talos_id, &epoch_id)
-            .unwrap();
+            .recover_expired(&admin, &talos_id, &epoch_id);
 
         let events = env.events().all();
         let rcv_events: std::vec::Vec<_> = events
