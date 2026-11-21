@@ -130,6 +130,9 @@ class LocalDB:
     def update_commerce_status(self, job_id: str, status: str) -> None:
         self._commerce.update_commerce_status(job_id, status)
 
+    def find_unknown_commerce_job(self, canonical_payload: str) -> dict | None:
+        return self._commerce.find_unknown_commerce_job(canonical_payload)
+
     def count_pending_commerce_jobs(self) -> int:
         return self._commerce.count_pending_commerce_jobs()
 

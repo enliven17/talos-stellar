@@ -1,5 +1,10 @@
 """Commerce quote expiry enforcement and the x402 payment clock-skew policy.
 
+    (See tools/commerce.py for the #1446 unknown-payment-outcome gate: an
+    unknown x402 outcome is recorded by purchase_service and a repeat purchase
+    for the same payload returns the existing record instead of re-signing.)
+
+
 Mirrors the SDK ``verifyQuoteNotExpired`` contract for the Prime Agent so
 buyers never sign or submit payment against an expired (or malformed) quote.
 
