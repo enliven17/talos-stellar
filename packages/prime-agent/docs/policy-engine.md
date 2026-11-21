@@ -151,6 +151,25 @@ export POLICY_ENGINE_ENABLED=false
 The engine is backwards-compatible: when disabled, all actions proceed as
 before.  Inline checks in individual tools continue to operate independently.
 
+
+## Decision traces
+
+Every evaluation returns a privacy-safe `PolicyDecisionTrace` on
+`PolicyResult.trace`.  Use it to explain *why* an action was approved,
+escalated, or denied:
+
+```python
+result = engine.evaluate(spec)
+print(result.explain())          # multi-line human summary
+print(result.trace.summary)      # one-line operator summary
+print(result.trace.to_dict())    # structured audit payload
+```
+
+Traces include per-rule and per-condition steps.  Secret-shaped fields
+(`api_key`, `seed`, `token`, `payment_proof`, etc.) are redacted as
+`[redacted]` and never logged or returned in cleartext.  BLOCKER
+short-circuits still emit the full trace up to the denying rule.
+
 ## Observability
 
 The engine exposes counters via `engine.metrics`:
@@ -160,13 +179,17 @@ The engine exposes counters via `engine.metrics`:
 
 Every evaluation result includes a SHA-256 `result_digest` for audit trails.
 
+## Multi-agent mode
+
+In multi-agent mode (`run_multi`) each agent gets its own policy engine and its
+own tool registry, so one agent's policy never governs another's. See
+[multi-agent-isolation.md](multi-agent-isolation.md).
+
 ## Known limitations
 
 - Conditions compare a parameter value against a **static** threshold in the
   policy definition.  Dynamic comparisons (e.g. "amount > context.approval_threshold")
   are not yet supported at the condition level — use the inline tool checks for
   those cases, or set explicit values in the policy.
-- Multi-agent mode (`run_multi`) creates a separate engine per agent but the
-  tool registry's `_middleware` is set once at build time.
 - Policy evaluation is synchronous and runs in the tool execution path —
   keep conditions simple and avoid regex on large payloads.

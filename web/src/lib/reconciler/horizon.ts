@@ -121,7 +121,7 @@ export async function fetchCurrentLedger(horizonUrl: string): Promise<number | n
  *
  * We return only non-sensitive diagnostic info (transaction-level result code).
  */
-function extractResultCode(tx: { result_meta_xdr?: unknown; [key: string]: unknown }): string {
+function extractResultCode(tx: object): string {
   try {
     // Horizon includes `result_meta_xdr`; for result codes look at extras
     const extras = (tx as { extras?: { result_codes?: { transaction?: string } } }).extras;

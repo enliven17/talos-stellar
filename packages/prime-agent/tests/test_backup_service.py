@@ -16,6 +16,7 @@ Critical invariants checked:
 from __future__ import annotations
 
 import base64
+import os
 import stat
 from pathlib import Path
 
@@ -109,7 +110,8 @@ def test_build_and_verify_roundtrip(tmp_path: Path, monkeypatch):
     run = build_backup(password=pw, out_path=out, scope="agent")
 
     assert out.exists()
-    assert stat.S_IMODE(out.stat().st_mode) == stat.S_IRUSR | stat.S_IWUSR
+    if os.name != "nt":
+        assert stat.S_IMODE(out.stat().st_mode) == stat.S_IRUSR | stat.S_IWUSR
     assert run.version == BACKUP_FORMAT_VERSION
     assert run.encryption == BACKUP_ENCRYPTION_LABEL
 
@@ -228,6 +230,8 @@ def test_restore_is_idempotent_after_existing(tmp_path: Path, monkeypatch):
 
 def test_concurrent_backup_busy(tmp_path: Path, monkeypatch):
     """Two concurrent builds on the same scope must raise BackupBusyError."""
+    if os.name == "nt":
+        pytest.skip("fcntl flock not supported on Windows")
     from talos_agent import backup_service as bs
     monkeypatch.setattr(bs, "APP_DIR", tmp_path)
     monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)
@@ -261,3 +265,327 @@ def test_artifact_not_found_error_is_safe():
     assert "passphrase" not in msg.lower()
     assert "SXXXXXX" not in msg
     assert "ENC::" not in msg
+
+
+def test_stream_encrypted_artifact_roundtrip(tmp_path: Path):
+    from talos_agent.backup_service import stream_encrypted_artifact
+    from talos_agent.crypto import encrypt_with_password, decrypt_with_password
+
+    payload = "hello-stream-" + ("x" * 5000)
+    encrypted = encrypt_with_password(payload, "stream-pass-ok")
+    out = tmp_path / "streamed.enc"
+    written = stream_encrypted_artifact(encrypted, out, chunk_size=1024)
+    assert out.exists()
+    assert written == len(encrypted)
+    # decrypt_with_password returns bytes (see crypto.decrypt_with_password).
+    assert decrypt_with_password(out.read_text(encoding="utf8"), "stream-pass-ok").decode() == payload
+
+
+def test_stream_encrypted_artifact_rejects_tiny_chunk(tmp_path: Path):
+    from talos_agent.backup_service import stream_encrypted_artifact, BackupError
+    with pytest.raises(BackupError):
+        stream_encrypted_artifact("abc", tmp_path / "x.enc", chunk_size=8)
+
+        
+
+# ── Retention (Issue #543) ────────────────────────────────────────
+#
+# Positive:  count-only and age-only pruning keep the right files.
+# Negative:  invalid policy values raise BackupError; unrelated file
+#            extensions are never touched.
+# Boundary:  disabled policy (0/0) is a no-op; exact-count boundary keeps
+#            everything; both limits combined use OR semantics, so the
+#            stricter one wins per file.
+# Regression: a file that can't be deleted is skipped, not raised, so a
+#             single locked/racing file can never fail the surrounding
+#             `backup` command.
+
+
+def _touch_with_age(path: Path, age_days: float) -> None:
+    import os
+    import time
+
+    path.write_text("x")
+    mtime = time.time() - age_days * 86400
+    os.utime(path, (mtime, mtime))
+
+
+def test_prune_noop_when_both_limits_disabled(tmp_path: Path):
+    """Default policy (0/0, matches backup_retention_enabled=False) touches nothing."""
+    from talos_agent.backup_service import prune_backups
+
+    for i in range(5):
+        _touch_with_age(tmp_path / f"talos-agent-{i}.enc", age_days=i * 10)
+
+    deleted = prune_backups(directory=tmp_path, max_count=0, max_age_days=0)
+    assert deleted == []
+    assert len(list(tmp_path.glob("*.enc"))) == 5
+
+
+def test_prune_by_count_keeps_newest(tmp_path: Path):
+    from talos_agent.backup_service import prune_backups
+
+    for i in range(5):
+        _touch_with_age(tmp_path / f"talos-agent-{i}.enc", age_days=i)
+
+    deleted = prune_backups(directory=tmp_path, max_count=2, max_age_days=0)
+    remaining = sorted(p.name for p in tmp_path.glob("*.enc"))
+    assert len(deleted) == 3
+    assert remaining == ["talos-agent-0.enc", "talos-agent-1.enc"]
+
+
+def test_prune_by_age_deletes_older_than_cutoff(tmp_path: Path):
+    from talos_agent.backup_service import prune_backups
+
+    _touch_with_age(tmp_path / "recent.enc", age_days=5)
+    _touch_with_age(tmp_path / "borderline.enc", age_days=29)
+    _touch_with_age(tmp_path / "stale.enc", age_days=35)
+
+    deleted = prune_backups(directory=tmp_path, max_count=0, max_age_days=30)
+    remaining = sorted(p.name for p in tmp_path.glob("*.enc"))
+    assert [p.name for p in deleted] == ["stale.enc"]
+    assert remaining == ["borderline.enc", "recent.enc"]
+
+
+def test_prune_count_exact_boundary_keeps_all(tmp_path: Path):
+    """max_count equal to the number of files deletes nothing (off-by-one guard)."""
+    from talos_agent.backup_service import prune_backups
+
+    for i in range(3):
+        _touch_with_age(tmp_path / f"talos-agent-{i}.enc", age_days=i)
+
+    deleted = prune_backups(directory=tmp_path, max_count=3, max_age_days=0)
+    assert deleted == []
+    assert len(list(tmp_path.glob("*.enc"))) == 3
+
+
+def test_prune_or_semantics_age_beats_count(tmp_path: Path):
+    """Both limits set: a file outside EITHER limit is deleted (OR, not AND).
+
+    max_count=4 alone would keep the 35-day-old file; max_age_days=30
+    alone would keep it too many files. Combined, the age limit must
+    still remove it even though the count limit had room to spare.
+    """
+    from talos_agent.backup_service import prune_backups
+
+    for i, age in enumerate([0, 10, 20, 35]):
+        _touch_with_age(tmp_path / f"talos-agent-{i}.enc", age_days=age)
+
+    deleted = prune_backups(directory=tmp_path, max_count=4, max_age_days=30)
+    remaining = sorted(p.name for p in tmp_path.glob("*.enc"))
+    assert [p.name for p in deleted] == ["talos-agent-3.enc"]
+    assert remaining == ["talos-agent-0.enc", "talos-agent-1.enc", "talos-agent-2.enc"]
+
+
+def test_prune_ignores_non_artifact_files(tmp_path: Path):
+    """`.partial` staging files and `.pre-restore` restore backups are never candidates."""
+    from talos_agent.backup_service import prune_backups
+
+    for i in range(5):
+        _touch_with_age(tmp_path / f"talos-agent-{i}.enc", age_days=i)
+    _touch_with_age(tmp_path / "talos-agent-0.enc.partial", age_days=99)
+    _touch_with_age(tmp_path / "talos-agent.db.pre-restore", age_days=99)
+
+    prune_backups(directory=tmp_path, max_count=1, max_age_days=0)
+    assert (tmp_path / "talos-agent-0.enc.partial").exists()
+    assert (tmp_path / "talos-agent.db.pre-restore").exists()
+
+
+def test_prune_rejects_negative_max_count(tmp_path: Path):
+    from talos_agent.backup_service import BackupError, prune_backups
+
+    with pytest.raises(BackupError):
+        prune_backups(directory=tmp_path, max_count=-1, max_age_days=0)
+
+
+def test_prune_rejects_negative_max_age_days(tmp_path: Path):
+    from talos_agent.backup_service import BackupError, prune_backups
+
+    with pytest.raises(BackupError):
+        prune_backups(directory=tmp_path, max_count=0, max_age_days=-1)
+
+
+def test_prune_missing_directory_returns_empty(tmp_path: Path):
+    """A directory that doesn't exist yet (first-ever backup) is not an error."""
+    from talos_agent.backup_service import prune_backups
+
+    missing = tmp_path / "does-not-exist-yet"
+    assert prune_backups(directory=missing, max_count=1, max_age_days=1) == []
+
+
+def test_prune_skips_undeletable_file_without_raising(tmp_path: Path, monkeypatch):
+    """A file that fails to unlink (permission error, concurrent removal) is
+    skipped, never raised — pruning must not turn a successful backup into
+    a failed `backup` command."""
+    from pathlib import Path as _Path
+
+    from talos_agent.backup_service import prune_backups
+
+    for i in range(3):
+        _touch_with_age(tmp_path / f"talos-agent-{i}.enc", age_days=i)
+
+    real_unlink = _Path.unlink
+
+    def flaky_unlink(self, *args, **kwargs):
+        if self.name == "talos-agent-2.enc":
+            raise OSError("simulated permission error")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(_Path, "unlink", flaky_unlink)
+
+    deleted = prune_backups(directory=tmp_path, max_count=1, max_age_days=0)
+    assert [p.name for p in deleted] == ["talos-agent-1.enc"]
+    assert (tmp_path / "talos-agent-2.enc").exists()
+    assert (tmp_path / "talos-agent-0.enc").exists()
+
+
+
+class TestRestoreAgentIdentifierGuard:
+    """Issue #1454 — reject contradictory agent identifiers during restore.
+
+    These tests construct a minimal valid archive payload directly (bypassing
+    build_backup) so the guard is exercised in isolation without needing a
+    live .talos-agent directory. The archive is a real encrypted artifact —
+    encrypt/decrypt path is the production one.
+    """
+
+    def _make_archive(
+        self,
+        tmp_path,
+        *,
+        archive_agent_id: str | None,
+        password: str = "test-password-123",
+    ) -> "Path":
+        import json
+        from talos_agent.backup_service import (
+            BACKUP_ENCRYPTION_LABEL,
+            BACKUP_FORMAT_VERSION,
+            _sha256_bytes,
+            encrypt_with_password,
+            stream_encrypted_artifact,
+        )
+        from pathlib import Path
+
+        # Minimal body: one tiny SQLite file so restore has something to place.
+        import sqlite3
+        db_bytes = tmp_path / "fake.db"
+        conn = sqlite3.connect(str(db_bytes))
+        conn.execute("CREATE TABLE t (x INTEGER)")
+        conn.commit()
+        conn.close()
+        raw = db_bytes.read_bytes()
+        import base64
+        b64 = base64.b64encode(raw).decode("ascii")
+
+        files_meta = {
+            "db/fake.db": {
+                "sha256": _sha256_bytes(raw),
+                "size_bytes": len(raw),
+            }
+        }
+        manifest_inner = {
+            "encryption": BACKUP_ENCRYPTION_LABEL,
+            "files": files_meta,
+            "rowCountsSqlite": {"fake.db:t": 0},
+            "scope": "agent",
+            "schemaVersion": 3,
+        }
+        manifest_sha = _sha256_bytes(
+            json.dumps(manifest_inner, sort_keys=True).encode("utf8")
+        )
+        payload = {
+            "version": BACKUP_FORMAT_VERSION,
+            "encryption": BACKUP_ENCRYPTION_LABEL,
+            "scope": "agent",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "database": {"signalVersion": "3.0.0", "rowCountsSqlite": {"fake.db:t": 0}},
+            "filesMeta": files_meta,
+            "body": {"db/fake.db": b64},
+            "manifest": {
+                "sha256": manifest_sha,
+                "rowCountTotal": 0,
+                "encryption": BACKUP_ENCRYPTION_LABEL,
+                "formatVersion": BACKUP_FORMAT_VERSION,
+            },
+        }
+        if archive_agent_id is not None:
+            payload["agent_id"] = archive_agent_id
+
+        plaintext = json.dumps(payload, sort_keys=True).encode("utf8")
+        ciphertext = encrypt_with_password(plaintext.decode("utf8"), password)
+        out_path = tmp_path / "archive.enc"
+        stream_encrypted_artifact(ciphertext, out_path)
+        return out_path
+
+    def test_matching_agent_id_restores(self, tmp_path, monkeypatch):
+        """Same agent_id on archive and restore call → proceeds."""
+        from talos_agent import backup_service
+
+        artifact = self._make_archive(tmp_path, archive_agent_id="talos-A")
+        restore_root = tmp_path / "restore"
+        monkeypatch.setattr(backup_service, "APP_DIR", tmp_path)
+        result = backup_service.restore_backup(
+            artifact_path=artifact,
+            password="test-password-123",
+            confirm=True,
+            agent_id="talos-A",
+            restore_root=restore_root,
+        )
+        assert result is not None
+        assert (restore_root / "fake.db").exists()
+
+    def test_mismatched_agent_id_rejected(self, tmp_path, monkeypatch):
+        """Different agent_id → AGENT_ID_MISMATCH, no files written."""
+        from talos_agent import backup_service
+        from talos_agent.backup_service import BackupError
+
+        artifact = self._make_archive(tmp_path, archive_agent_id="talos-A")
+        restore_root = tmp_path / "restore"
+        monkeypatch.setattr(backup_service, "APP_DIR", tmp_path)
+        with pytest.raises(BackupError) as excinfo:
+            backup_service.restore_backup(
+                artifact_path=artifact,
+                password="test-password-123",
+                confirm=True,
+                agent_id="talos-B",
+                restore_root=restore_root,
+            )
+        assert excinfo.value.code == "AGENT_ID_MISMATCH"
+        assert "does not match" in str(excinfo.value)
+        # No files should have been restored.
+        assert not (restore_root / "fake.db").exists()
+
+    def test_mismatched_agent_id_allowed_with_explicit_flag(self, tmp_path, monkeypatch):
+        """allow_agent_mismatch=True lets the caller migrate explicitly."""
+        from talos_agent import backup_service
+
+        artifact = self._make_archive(tmp_path, archive_agent_id="talos-A")
+        restore_root = tmp_path / "restore"
+        monkeypatch.setattr(backup_service, "APP_DIR", tmp_path)
+        result = backup_service.restore_backup(
+            artifact_path=artifact,
+            password="test-password-123",
+            confirm=True,
+            agent_id="talos-B",
+            restore_root=restore_root,
+            allow_agent_mismatch=True,
+        )
+        assert result is not None
+        assert (restore_root / "fake.db").exists()
+
+    def test_legacy_archive_without_agent_id_restores(self, tmp_path, monkeypatch):
+        """Legacy archive with no agent_id field restores unchanged."""
+        from talos_agent import backup_service
+
+        artifact = self._make_archive(tmp_path, archive_agent_id=None)
+        restore_root = tmp_path / "restore"
+        monkeypatch.setattr(backup_service, "APP_DIR", tmp_path)
+        result = backup_service.restore_backup(
+            artifact_path=artifact,
+            password="test-password-123",
+            confirm=True,
+            agent_id="talos-A",
+            restore_root=restore_root,
+        )
+        assert result is not None
+        assert (restore_root / "fake.db").exists()

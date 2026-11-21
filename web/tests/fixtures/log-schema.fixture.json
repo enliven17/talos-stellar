@@ -1,0 +1,17 @@
+{
+  "bounds": {
+    "schemaVersion": 1,
+    "maxEventNameLength": 64,
+    "maxFieldKeyLength": 64,
+    "maxStringValueLength": 500,
+    "maxLogFields": 16
+  },
+  "expected": {
+    "event": "outbox_event_dispatched",
+    "schemaVersion": 1,
+    "eventId": "evt-123",
+    "eventType": "job.completed",
+    "attempts": 2,
+    "requestId": "req-abc"
+  }
+}

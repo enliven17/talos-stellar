@@ -2,11 +2,53 @@
 
 import { useEffect, useState } from "react";
 
+const SESSION_STORAGE_KEY = "talos_splash_shown";
+
+function shouldSkipSplash(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  try {
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      return true;
+    }
+  } catch {
+    // Gracefully handle environments where matchMedia throws
+  }
+
+  try {
+    if (window.sessionStorage && window.sessionStorage.getItem(SESSION_STORAGE_KEY)) {
+      return true;
+    }
+  } catch {
+    // Gracefully handle restricted sessionStorage access
+  }
+
+  return false;
+}
+
 export function SplashScreen() {
-  const [isVisible, setIsVisible] = useState(true);
+  const [isVisible, setIsVisible] = useState(() => {
+    if (typeof window !== "undefined") {
+      return !shouldSkipSplash();
+    }
+    return true;
+  });
   const [isExiting, setIsExiting] = useState(false);
 
   useEffect(() => {
+    if (shouldSkipSplash()) {
+      setIsVisible(false);
+      return;
+    }
+
+    try {
+      window.sessionStorage?.setItem(SESSION_STORAGE_KEY, "true");
+    } catch {
+      // Ignore quota or access errors in restricted contexts
+    }
+
     // Phase 1: Show splash for 1.5 seconds
     const exitTimer = setTimeout(() => {
       setIsExiting(true);
@@ -27,6 +69,8 @@ export function SplashScreen() {
 
   return (
     <div
+      aria-hidden="true"
+      data-testid="splash-screen"
       className={`fixed inset-0 z-[9999] flex items-center justify-center bg-background transition-opacity duration-500 ease-in-out ${
         isExiting ? "opacity-0 pointer-events-none" : "opacity-100"
       }`}

@@ -48,8 +48,8 @@ export async function validateUrl(inputUrl: string): Promise<URL> {
         throw new Error('Resolved to restricted IP address');
       }
     }
-  } catch (err: any) {
-    if (err.message === 'Resolved to restricted IP address') {
+  } catch (err) {
+    if (err instanceof Error && err.message === 'Resolved to restricted IP address') {
       throw err;
     }
     throw new Error('DNS resolution failed');
@@ -82,7 +82,7 @@ export async function safeFetch(url: string, options: RequestInit = {}): Promise
     signal: options.signal || AbortSignal.timeout(5000), 
   };
   
-  let response = await fetch(finalUrl.toString(), fetchOptions);
+  const response = await fetch(finalUrl.toString(), fetchOptions);
   
   if (response.status >= 300 && response.status < 400) {
     const location = response.headers.get('location');

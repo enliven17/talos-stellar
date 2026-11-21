@@ -22,6 +22,13 @@ from urllib.parse import unquote, urlsplit
 import httpx
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
+from talos_agent.adapters.diagnostics import safe_adapter_diagnostic_fields
+from talos_agent.adapters.snapshots import AdapterHealthSnapshot
+from talos_agent.circuit_breaker import (
+    CircuitBreakerConfig,
+    CircuitBreakerRegistry,
+    execute_with_retry,
+)
 from talos_agent.observability import log
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
@@ -87,6 +94,8 @@ class NetworkRule:
     def __post_init__(self) -> None:
         normalized_host = _normalize_host(self.host)
         object.__setattr__(self, "host", normalized_host)
+        if not isinstance(self.path_prefix, str):
+            raise ManifestValidationError("network path prefixes must be strings")
         decoded_prefix = _decode_path(self.path_prefix)
         if not self.path_prefix.startswith("/") or ".." in decoded_prefix.split("/"):
             raise ManifestValidationError("network path prefixes must be absolute and traversal-free")
@@ -98,8 +107,27 @@ class NetworkRule:
         if not normalized_methods or not normalized_methods <= _SAFE_METHODS:
             raise ManifestValidationError("network methods contain unsupported values")
         object.__setattr__(self, "methods", normalized_methods)
-        if self.port is not None and not 1 <= self.port <= 65535:
+        if self.port is not None and (
+            isinstance(self.port, bool)
+            or not isinstance(self.port, int)
+            or not 1 <= self.port <= 65535
+        ):
             raise ManifestValidationError("network rule port is out of range")
+
+    def matches(self, host: str, port: int, method: str, path: str) -> bool:
+        """Explicit wildcard matching for network rules.
+
+        A rule without an explicit port matches the HTTPS default (443);
+        a rule with a port only matches that exact port.
+        """
+        if not isinstance(host, str) or not isinstance(method, str) or not isinstance(path, str):
+            return False
+        if self.host != host:
+            return False
+        effective_rule_port = self.port if self.port is not None else 443
+        if effective_rule_port != port:
+            return False
+        return method.upper() in self.methods and path.startswith(self.path_prefix)
 
 
 @dataclass(frozen=True)
@@ -265,6 +293,18 @@ def default_manifests(limits: AdapterResourceLimits) -> dict[str, AdapterCapabil
             operations=frozenset({"post", "reply"}),
             secrets=frozenset({"telegram_bot_token"}),
             network=(NetworkRule("api.telegram.org", "/", frozenset({"POST"})),),
+            limits=limits,
+        ),
+        "mastodon": AdapterCapabilityManifest(
+            adapter_id="mastodon",
+            operations=frozenset({"post", "reply"}),
+            secrets=frozenset({"mastodon_access_token"}),
+            # The instance URL is operator-configured; network rules are
+            # validated at runtime in MastodonAdapter._build_url so the
+            # manifest purposefully leaves the host unset here.  A deployment
+            # that enables the sandbox should override this manifest via
+            # TALOS_ADAPTER_CAPABILITY_MANIFESTS with the concrete host.
+            network=(),
             limits=limits,
         ),
         "x": AdapterCapabilityManifest(
@@ -539,15 +579,9 @@ class SandboxedHTTPClient:
         if decoded_path.endswith("/") and not path.endswith("/"):
             path += "/"
         normalized_method = method.upper()
+        effective_port = port or 443
         for rule in self._manifest.network:
-            effective_port = port or 443
-            rule_port = rule.port or 443
-            if (
-                host == rule.host
-                and effective_port == rule_port
-                and normalized_method in rule.methods
-                and path.startswith(rule.path_prefix)
-            ):
+            if rule.matches(host, effective_port, normalized_method, path):
                 return
         _denied(self._manifest.adapter_id, "network", normalized_method.lower())
         raise CapabilityDeniedError("adapter network destination denied")
@@ -722,6 +756,10 @@ class AdapterInvocationStore:
                         lease.isoformat(),
                     ),
                 )
+                self._conn.execute(
+                    "UPDATE adapter_invocations SET attempt_count = 1 WHERE operation_id = ?",
+                    (operation_id,),
+                )
                 self._conn.commit()
                 return
             if (
@@ -746,6 +784,10 @@ class AdapterInvocationStore:
                     SET state = 'indeterminate', updated_at = datetime('now')
                     WHERE operation_id = ?
                     """,
+                    (operation_id,),
+                )
+                self._conn.execute(
+                    "UPDATE adapter_invocations SET attempt_count = attempt_count + 1 WHERE operation_id = ?",
                     (operation_id,),
                 )
                 self._conn.commit()
@@ -815,6 +857,7 @@ class AdapterSandbox:
         manifests: Mapping[str, AdapterCapabilityManifest],
         db: object,
         secret_resolver: Callable[[str], str],
+        retry_configs: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         self._manifests = dict(manifests)
         self._store = AdapterInvocationStore(db)
@@ -824,6 +867,8 @@ class AdapterSandbox:
             for name, manifest in self._manifests.items()
         }
         self._owner_id = str(uuid.uuid4())
+        self._retry_configs = dict(retry_configs or {})
+        self._breakers = CircuitBreakerRegistry()
 
     def manifest(self, adapter_id: str) -> AdapterCapabilityManifest:
         normalized = adapter_id.lower()
@@ -854,6 +899,10 @@ class AdapterSandbox:
             store=self._store,
             semaphore=self._semaphores[adapter_id],
             owner_id=self._owner_id,
+            breaker=self._breakers.get_or_create(
+                adapter_id,
+                CircuitBreakerConfig.from_mapping(self._retry_configs.get(adapter_id)),
+            ),
         )
 
 
@@ -868,18 +917,21 @@ class SandboxedAdapter(BaseSocialAdapter):
         store: AdapterInvocationStore,
         semaphore: asyncio.Semaphore,
         owner_id: str,
+        breaker: Any,
     ) -> None:
         self.__adapter = adapter
         self.__manifest = manifest
         self.__store = store
         self.__semaphore = semaphore
         self.__owner_id = owner_id
+        self.__breaker = breaker
         self.channel_name = adapter.channel_name
 
     def get_capabilities(self) -> ChannelCapabilities:
         return self.__adapter.get_capabilities()
 
-    def health_snapshot(self) -> dict[str, bool]:
+    def health_snapshot(self) -> AdapterHealthSnapshot | dict[str, bool]:
+        """Forward the wrapped adapter's own snapshot, typed or legacy, unchanged."""
         snapshot = getattr(self.__adapter, "health_snapshot", None)
         return snapshot() if callable(snapshot) else {}
 
@@ -919,8 +971,23 @@ class SandboxedAdapter(BaseSocialAdapter):
         operation_id = kwargs.pop("operation_id", None)
         if operation_id is not None and not isinstance(operation_id, str):
             raise InvocationConflictError("operation ID must be a string")
-        if write and operation_id is None:
-            operation_id = str(uuid.uuid4())
+        if write:
+            # Issue #1464: write operations must carry a caller-supplied
+            # stable idempotency identity. Fabricating a fresh UUID here would
+            # make every retry a distinct invocation, defeating
+            # AdapterInvocationStore.admit() dedup and allowing duplicate
+            # publication on transport retry.
+            if operation_id is None:
+                raise InvocationConflictError(
+                    "operation_id is required for write operations "
+                    "(stable idempotency identity)"
+                )
+            if not operation_id.strip():
+                raise InvocationConflictError(
+                    "operation_id must be a non-empty stable idempotency identity"
+                )
+            if not _OPERATION_ID_RE.fullmatch(operation_id):
+                raise InvocationConflictError("operation ID is invalid")
         payload = _safe_json_bytes(
             {"operation": operation, "args": args, "kwargs": kwargs}
         )
@@ -967,9 +1034,19 @@ class SandboxedAdapter(BaseSocialAdapter):
             )
             acquired = True
             method = getattr(self.__adapter, operation)
-            result = await asyncio.wait_for(
-                method(*args, **kwargs),
-                timeout=max(0.001, deadline - time.monotonic()),
+
+            async def invoke() -> Any:
+                return await asyncio.wait_for(
+                    method(*args, **kwargs),
+                    timeout=max(0.001, deadline - time.monotonic()),
+                )
+
+            result = await execute_with_retry(
+                invoke,
+                self.__breaker,
+                is_failure=lambda value: (
+                    isinstance(value, PublishResult) and value.status == "failed"
+                ),
             )
             output_bytes, output_items = _output_shape(
                 result.to_dict() if isinstance(result, PublishResult) else result
@@ -1059,10 +1136,9 @@ def _denied(adapter: str, capability: str, target: str) -> None:
     try:
         log.warning(
             "adapter_capability_denied",
-            adapter=adapter,
-            capability=capability,
-            target=target,
-            outcome="denied",
+            **safe_adapter_diagnostic_fields(
+                adapter=adapter, capability=capability, target=target, outcome="denied"
+            ),
         )
     except Exception:
         pass
@@ -1072,10 +1148,9 @@ def _resource(adapter: str, operation: str, resource: str) -> None:
     try:
         log.warning(
             "adapter_resource_limit",
-            adapter=adapter,
-            operation=operation,
-            resource=resource,
-            outcome="denied",
+            **safe_adapter_diagnostic_fields(
+                adapter=adapter, operation=operation, resource=resource, outcome="denied"
+            ),
         )
     except Exception:
         pass
@@ -1099,7 +1174,7 @@ def _invocation_log(
     if error_type is not None:
         fields["error_type"] = error_type.__name__
     try:
-        log.info("adapter_sandbox_invocation", **fields)
+        log.info("adapter_sandbox_invocation", **safe_adapter_diagnostic_fields(**fields))
     except Exception:
         pass
 

@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
 import pino from "pino";
-import { redactPayload } from "../src/lib/redact";
+import {
+  redactPayload,
+  redactSensitiveQueryFields,
+  isSensitiveKey,
+  REDACTED,
+} from "../src/lib/redact";
 
 describe("redactPayload", () => {
   it("redacts top-level sensitive keys", () => {
@@ -62,6 +67,85 @@ describe("redactPayload", () => {
     expect(result.safe).toBe("data");
     expect(result.self).toBe("[CIRCULAR]");
   });
+
+  it("scrubs sensitive query fields inside URL string values", () => {
+    const result = redactPayload({
+      url: "https://app.example/api?page=2&api_key=sk-live&filter=open",
+      path: "/activity?token=abc&cursor=c1",
+    });
+
+    expect(result.url).toBe(
+      "https://app.example/api?page=2&api_key=%5BREDACTED%5D&filter=open",
+    );
+    expect(result.path).toContain("cursor=c1");
+    expect(result.path).toContain(`token=${encodeURIComponent(REDACTED)}`);
+    expect(JSON.stringify(result)).not.toContain("sk-live");
+    expect(JSON.stringify(result)).not.toContain("token=abc");
+  });
+});
+
+describe("redactSensitiveQueryFields", () => {
+  it("redacts sensitive fields and keeps safe context (positive)", () => {
+    const out = redactSensitiveQueryFields(
+      "https://talos.example/api/activity?page=2&apiKey=sk-secret&filter=Service&payment_proof=PROOF",
+    );
+    expect(out).toContain("page=2");
+    expect(out).toContain("filter=Service");
+    expect(out).toContain(`apiKey=${encodeURIComponent(REDACTED)}`);
+    expect(out).toContain(`payment_proof=${encodeURIComponent(REDACTED)}`);
+    expect(out).not.toContain("sk-secret");
+    expect(out).not.toContain("PROOF");
+  });
+
+  it("is a no-op when the query string is missing", () => {
+    expect(redactSensitiveQueryFields("https://talos.example/health")).toBe(
+      "https://talos.example/health",
+    );
+  });
+
+  it("handles relative URLs and preserves the hash fragment", () => {
+    const out = redactSensitiveQueryFields(
+      "/callback?code=ok&seed=SSECRET&state=xyz#section",
+    );
+    expect(out.startsWith("/callback?")).toBe(true);
+    expect(out).toContain("code=ok");
+    expect(out).toContain("state=xyz");
+    expect(out).toContain(`seed=${encodeURIComponent(REDACTED)}`);
+    expect(out.endsWith("#section")).toBe(true);
+    expect(out).not.toContain("SSECRET");
+  });
+
+  it("redacts every duplicate sensitive key (boundary)", () => {
+    const out = redactSensitiveQueryFields(
+      "https://x.test/r?token=one&token=two&q=ok",
+    );
+    expect(out).not.toContain("one");
+    expect(out).not.toContain("two");
+    expect(out).toContain("q=ok");
+    expect(out.match(/\[REDACTED\]/g)?.length).toBe(2);
+  });
+
+  it("fails closed on malformed query suffixes (negative)", () => {
+    // Opaque string with a query-like suffix — secrets must not survive.
+    const out = redactSensitiveQueryFields("not a URL?token=hidden&ok=1");
+    expect(out).not.toContain("hidden");
+    expect(out).toContain("not a URL");
+  });
+
+  it("treats hyphenated and underscored aliases as sensitive", () => {
+    expect(isSensitiveKey("api-key")).toBe(true);
+    expect(isSensitiveKey("API_KEY")).toBe(true);
+    expect(isSensitiveKey("private-key")).toBe(true);
+    expect(isSensitiveKey("page")).toBe(false);
+
+    const out = redactSensitiveQueryFields(
+      "https://x.test/?api-key=a&private_key=b&mnemonic=c&media=d",
+    );
+    expect(out).not.toMatch(/=a\b/);
+    expect(out).not.toMatch(/=b\b/);
+    expect(out).not.toContain("mnemonic=c");
+    expect(out).not.toContain("media=d");
+  });
 });
 
 describe("logger output", () => {
@@ -93,7 +177,9 @@ describe("logger output", () => {
           paymentProof: "stellar-secret-key-123",
           signature: "hex-sig-456",
         }
-      }
+      },
+      publicUrl:
+        "https://app.example/share?token=leak-me&cursor=abc",
     });
 
     const logged = logs[0];
@@ -104,9 +190,11 @@ describe("logger output", () => {
     expect(logString).not.toContain("sk-live-12345");
     expect(logString).not.toContain("stellar-secret-key-123");
     expect(logString).not.toContain("hex-sig-456");
+    expect(logString).not.toContain("leak-me");
 
     // Assert that safe context is retained
     expect(logString).toContain("test");
     expect(logString).toContain("application/json");
+    expect(logString).toContain("cursor=abc");
   });
 });

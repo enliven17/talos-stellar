@@ -10,7 +10,7 @@
  * global state or real randomness.
  */
 
-import type { ResolvedDriftConfig } from "./types.js";
+import type { ResolvedDriftConfig } from "./types";
 
 /**
  * Returns true if this request should be validated, based on sampleRate.

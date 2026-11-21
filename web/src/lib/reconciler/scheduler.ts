@@ -62,6 +62,11 @@ import { ACTIVE_STATES } from "./types";
 const g = globalThis as typeof globalThis & {
   __reconcilerTimer?: ReturnType<typeof setInterval> | null;
   __reconcilerStats?: ReconcilerStats;
+  __reconcilerQueue?: TxRecord[];
+  __reconcilerActiveIds?: Set<string>;
+  __reconcilerQueuedIds?: Set<string>;
+  __reconcilerCallbacks?: Map<string, Array<() => void>>;
+  __reconcilerAbortController?: AbortController | null;
 };
 
 function getOrInitStats(): ReconcilerStats {
@@ -82,9 +87,45 @@ function getOrInitStats(): ReconcilerStats {
   return g.__reconcilerStats;
 }
 
+function getOrInitQueueState() {
+  if (!g.__reconcilerQueue) {
+    g.__reconcilerQueue = [];
+  }
+  if (!g.__reconcilerActiveIds) {
+    g.__reconcilerActiveIds = new Set<string>();
+  }
+  if (!g.__reconcilerQueuedIds) {
+    g.__reconcilerQueuedIds = new Set<string>();
+  }
+  return {
+    queue: g.__reconcilerQueue,
+    activeIds: g.__reconcilerActiveIds,
+    queuedIds: g.__reconcilerQueuedIds,
+  };
+}
+
+function getOrInitCallbacks() {
+  if (!g.__reconcilerCallbacks) {
+    g.__reconcilerCallbacks = new Map<string, Array<() => void>>();
+  }
+  return g.__reconcilerCallbacks;
+}
+
+export function getActiveCount(): number {
+  return getOrInitQueueState().activeIds.size;
+}
+
+export function getQueueCount(): number {
+  return getOrInitQueueState().queuedIds.size;
+}
+
 /** Returns a snapshot of the current reconciler stats (safe to serialise). */
 export function getStats(): ReconcilerStats {
-  return { ...getOrInitStats() };
+  return {
+    ...getOrInitStats(),
+    activeCount: getActiveCount(),
+    queueCount: getQueueCount(),
+  };
 }
 
 // ─── Start / stop ─────────────────────────────────────────────────────────────
@@ -104,6 +145,8 @@ export function startReconciler(config: ReconcilerConfig = reconcilerConfig): vo
     return;
   }
 
+  g.__reconcilerAbortController = new AbortController();
+
   const stats = getOrInitStats();
   stats.startedAt = new Date();
 
@@ -113,6 +156,7 @@ export function startReconciler(config: ReconcilerConfig = reconcilerConfig): vo
       maxLedgerGap: config.maxLedgerGap,
       batchSize: config.batchSize,
       confirmationDepth: config.confirmationDepth,
+      concurrencyLimit: config.concurrencyLimit,
     },
     "reconciler_started",
   );
@@ -136,8 +180,27 @@ export function stopReconciler(): void {
   if (g.__reconcilerTimer) {
     clearInterval(g.__reconcilerTimer);
     g.__reconcilerTimer = null;
-    logger.info("reconciler_stopped");
   }
+
+  if (g.__reconcilerAbortController) {
+    g.__reconcilerAbortController.abort();
+    g.__reconcilerAbortController = null;
+  }
+
+  const { queue, activeIds, queuedIds } = getOrInitQueueState();
+  queue.length = 0;
+  activeIds.clear();
+  queuedIds.clear();
+
+  const callbacks = getOrInitCallbacks();
+  for (const [_, list] of callbacks.entries()) {
+    for (const resolve of list) {
+      resolve();
+    }
+  }
+  callbacks.clear();
+
+  logger.info("reconciler_stopped");
 }
 
 /** Returns true if the reconciler timer is currently running. */
@@ -169,6 +232,11 @@ export async function runOneTick(
     currentLedger: null,
   };
 
+  const signal = g.__reconcilerAbortController?.signal;
+  if (signal?.aborted) {
+    return summary;
+  }
+
   try {
     // 1. Fetch current ledger (needed for expiry checks and depth calculations)
     const currentLedger = await fetchCurrentLedger(config.horizonUrl);
@@ -178,6 +246,10 @@ export async function runOneTick(
       logger.warn({ horizonUrl: config.horizonUrl }, "reconciler_tick_no_ledger");
       stats.totalErrors++;
       summary.errors++;
+      return summary;
+    }
+
+    if (signal?.aborted) {
       return summary;
     }
 
@@ -192,6 +264,7 @@ export async function runOneTick(
 
     if (records.length === 0) {
       logger.debug({ currentLedger }, "reconciler_tick_empty_batch");
+      return summary;
     } else {
       logger.info(
         { currentLedger, batchSize: records.length },
@@ -199,11 +272,33 @@ export async function runOneTick(
       );
     }
 
-    // 3. Process each record
-    for (const record of records) {
-      await processRecord(record, currentLedger, config, summary, stats);
-      summary.processed++;
+    const { queue, activeIds, queuedIds } = getOrInitQueueState();
+
+    // 3. Filter and queue work
+    const newRecords = records.filter(r => !activeIds.has(r.id) && !queuedIds.has(r.id));
+    for (const record of newRecords) {
+      queue.push(record);
+      queuedIds.add(record.id);
     }
+
+    const promises = records.map(record => {
+      if (activeIds.has(record.id) || queuedIds.has(record.id)) {
+        return new Promise<void>((resolve) => {
+          const callbacks = getOrInitCallbacks();
+          let list = callbacks.get(record.id);
+          if (!list) {
+            list = [];
+            callbacks.set(record.id, list);
+          }
+          list.push(resolve);
+        });
+      }
+      return Promise.resolve();
+    });
+
+    drainQueue(currentLedger, config, summary, stats);
+
+    await Promise.all(promises);
   } catch (err) {
     logger.error({ err }, "reconciler_tick_error");
     stats.totalErrors++;
@@ -234,6 +329,55 @@ export async function runOneTick(
   return summary;
 }
 
+function drainQueue(
+  currentLedger: number,
+  config: ReconcilerConfig,
+  summary: TickSummary,
+  stats: ReconcilerStats,
+) {
+  const { queue, activeIds, queuedIds } = getOrInitQueueState();
+  const limit = config.concurrencyLimit ?? 5;
+  const signal = g.__reconcilerAbortController?.signal;
+
+  while (activeIds.size < limit && queue.length > 0) {
+    if (signal?.aborted) {
+      queue.length = 0;
+      queuedIds.clear();
+      break;
+    }
+
+    const record = queue.shift()!;
+    queuedIds.delete(record.id);
+    activeIds.add(record.id);
+
+    void (async () => {
+      try {
+        if (!signal?.aborted) {
+          await processRecord(record, currentLedger, config, summary, stats, signal);
+          summary.processed++;
+        }
+      } catch (err) {
+        logger.error({ err, txHash: record.txHash }, "reconciler_record_unhandled_failure");
+        stats.totalErrors++;
+        summary.errors++;
+      } finally {
+        activeIds.delete(record.id);
+
+        const callbacks = getOrInitCallbacks();
+        const list = callbacks.get(record.id);
+        if (list) {
+          for (const resolve of list) {
+            resolve();
+          }
+          callbacks.delete(record.id);
+        }
+
+        drainQueue(currentLedger, config, summary, stats);
+      }
+    })();
+  }
+}
+
 // ─── Single-record processing ─────────────────────────────────────────────────
 
 async function processRecord(
@@ -242,8 +386,11 @@ async function processRecord(
   config: ReconcilerConfig,
   summary: TickSummary,
   stats: ReconcilerStats,
+  signal?: AbortSignal,
 ): Promise<void> {
   try {
+    if (signal?.aborted) return;
+
     // Poll Horizon only for PENDING records (CONFIRMING just needs ledger depth check)
     let pollResult = null;
     if (record.finalityStatus === "PENDING") {
@@ -260,6 +407,8 @@ async function processRecord(
         "reconciler_poll_result",
       );
     }
+
+    if (signal?.aborted) return;
 
     // Compute next state
     const now = new Date();
@@ -297,6 +446,8 @@ async function processRecord(
       );
     }
 
+    if (signal?.aborted) return;
+
     // Persist the update
     await db
       .update(tlsStellarTxRecords)
@@ -333,6 +484,8 @@ async function processRecord(
         break;
     }
 
+    if (signal?.aborted) return;
+
     // Apply downstream repair if needed
     const updatedRecord: TxRecord = {
       ...record,
@@ -342,6 +495,8 @@ async function processRecord(
 
     if (needsRepair(updatedRecord)) {
       const repairResult = await applyRepair(updatedRecord);
+
+      if (signal?.aborted) return;
 
       if (repairResult.ok) {
         if (repairResult.repaired) {

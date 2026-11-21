@@ -97,6 +97,40 @@ Under `Authorization: Bearer <ADMIN_API_KEY>`:
 - `GET /api/admin/outbox/:id` — full record.
 - `POST /api/admin/outbox/:id/retry` — requeue a `dead_letter` event. 409 otherwise.
 
+### Dead-letter view
+
+`GET /api/admin/outbox/dead-letter?eventType=&cursor=&limit=` (same bearer
+auth) is the triage view for failed deliveries, and `/admin/outbox` is the
+operator page built on it (enter `ADMIN_API_KEY`, filter by event type,
+page through, and **Retry** a row via `POST /api/admin/outbox/:id/retry`).
+
+```json
+{
+  "deadLetters": [{
+    "id": "…", "eventType": "commerce_job.completed",
+    "aggregateType": "commerce_job", "aggregateId": "…",
+    "attempts": 8, "maxAttempts": 8,
+    "lastError": "consumer failed: [redacted]",
+    "createdAt": "…", "deadLetteredAt": "…"
+  }],
+  "nextCursor": "2026-09-01T00:00:00.000Z",
+  "summary": { "total": 3, "byEventType": [{ "eventType": "commerce_job.completed", "count": 3 }] }
+}
+```
+
+- **Privacy**: never returns `payload`, `dedupeKey` or lease fields.
+  `lastError` is first-line only, ≤300 chars, with Stellar secrets, JWTs,
+  TALOS API keys, bearer tokens, long hex and base64 blobs replaced by
+  `[redacted]`. Use `GET /api/admin/outbox/:id` when the full record is
+  genuinely needed.
+- **Validation** (400, nothing queried): `limit` must be an integer 1–100
+  (default 25; not clamped), `cursor` must be a `nextCursor` value
+  (ISO-8601), `eventType` ≤128 chars of `[A-Za-z0-9_.:-]`.
+- **Dependency failure**: 503 `{ "error": "Failed to load dead-letter events" }`;
+  the log line carries a truncated message, never the raw driver error.
+- `deadLetteredAt` is the row's `updatedAt`, i.e. the last transition.
+  Ordering/cursor is `createdAt` descending, like the generic list.
+
 ## Observability
 
 Structured `pino` logs per transition (`outbox_event_written`,

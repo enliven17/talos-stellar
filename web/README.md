@@ -6,7 +6,14 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ```json
 {
-  "stats": { "totalTransactions": 0, "totalVolume": 0, "activeAgents": 0, "totalAgents": 0, "registeredServices": 0, "playbooksTraded": 0 },
+  "stats": {
+    "totalTransactions": 0,
+    "totalVolume": 0,
+    "activeAgents": 0,
+    "totalAgents": 0,
+    "registeredServices": 0,
+    "playbooksTraded": 0
+  },
   "transactions": [],
   "nextCursor": "opaque-base64url-cursor-or-null"
 }
@@ -14,6 +21,109 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 Pass `limit` (1-100) and the returned `nextCursor` to continue from the next transaction. Results are ordered by timestamp descending with deterministic source and id tie-breakers. Cursors are opaque and malformed cursors return `400`.
 
+## Payment route coverage
+
+Run the focused token-purchase and revenue-distribution route suites and enforce per-route V8 coverage thresholds locally:
+
+```bash
+pnpm test:payment-coverage
+```
+
+### Local pagination check
+
+```bash
+cd web && pnpm vitest run tests/activity.test.ts tests/activity-pagination.test.ts
+```
+
+### Security-header regression check
+
+```bash
+pnpm test:security-headers
+```
+
+## Browser Tests
+
+Playwright browser tests cover critical end-to-end user journeys against the local stack. These tests use a stubbed wallet provider and require no real keys or external network.
+
+### Prerequisites
+
+The local stack must be running before executing browser tests:
+
+1. Start the local stack (from repository root):
+```bash
+./scripts/local-stack.sh up
+```
+
+This starts:
+- Postgres on port 5432
+- Mock Stellar service on port 4010
+- Web server on port 3000
+
+2. Ensure the database is seeded (done automatically by local-stack.sh):
+```bash
+pnpm --dir web db:seed
+```
+
+### Running Browser Tests
+
+```bash
+pnpm --dir web test:browser
+```
+
+**Note:** If the local stack is not running, tests will fail with connection errors. The Playwright config does not auto-start the stack because it requires Docker Compose, which must be run separately.
+
+### Test Coverage
+
+The browser tests (`tests/browser/critical-journeys.spec.ts`) cover:
+
+1. **Browse agents** - Navigate to the agents page and verify seeded agents are displayed
+2. **Launch a Talos** - Complete the multi-step launch flow with demo data
+3. **Discover a service** - View an agent's available services
+4. **Purchase with mocked x402 settlement** - Request a service and trigger payment flow (wallet signing is mocked)
+5. **See job result** - View completed jobs in the activity feed
+6. **Full journey** - End-to-end flow combining all steps
+
+### Test Wallet Provider
+
+Tests inject a mock Stellar wallet provider (`tests/browser/helpers/test-wallet-provider.ts`) that:
+- Provides a deterministic test public key
+- Auto-signs all transactions with mock signatures
+- Requires no wallet extensions or private keys
+
+### Configuration
+
+Playwright configuration is in `playwright.config.ts`:
+- Base URL: `http://localhost:3000`
+- Browser: Chromium (Desktop)
+- Headless mode by default
+- Traces on first retry, screenshots on failure
+
+## Offline mock fulfillment mode
+
+By default the instant-fulfillment handlers (`web/src/lib/fulfillment/`) call
+**Tavily** for web search and **Groq / OpenAI** for analysis. Without those keys
+the commerce flow cannot be exercised locally.
+
+Set `FULFILLMENT_MODE=mock` to replace all network calls with deterministic,
+clearly-labelled fixture outputs:
+
+```bash
+# .env.local (or inline when starting the dev server)
+FULFILLMENT_MODE=mock
+```
+
+Every service type (`trend_research`, `competitor_analysis`, `find_leads`,
+`audience_insight`, `intent_signal`, `enrich_profile`, `product_review`) returns
+a valid JSON result with `"_mock": true` so you can tell fixture data apart from
+live results at a glance.
+
+> **Production guard** — the server will throw at startup if
+> `FULFILLMENT_MODE=mock` is set while `NODE_ENV=production`. Never use mock mode
+> with production credentials.
+
+To go back to live results, remove `FULFILLMENT_MODE` (or set it to any value
+other than `mock`) and supply real `TAVILY_API_KEY` and `GROQ_API_KEY` /
+`OPENAI_API_KEY` values.
 ## Getting Started
 
 First, run the development server:
@@ -52,13 +162,19 @@ pnpm db:migrate
 
 > **`db:push` is for local development only** — it compares the schema directly to the database and issues DDL without tracking history. Never use it against a shared or production database.
 
+### Local demo seed
+
+After migrations, run `pnpm db:seed` from `web/` (or `pnpm web:db:seed` from the repository root) to load the repeatable local Talos and marketplace dataset. It includes representative agents, services, activities, and one completed commerce job. The command only accepts localhost-style hosts or the local Docker `postgres` service and refuses `NODE_ENV=production`.
+
+For a clean database, run `pnpm stack:reset` from the repository root. This removes the Docker Postgres volume, reapplies migrations, and seeds it on startup. Set `ALLOW_UNSAFE_DB_SEED=true` only for an intentional, reviewed non-local test; do not use it with production credentials.
+
 ## API Versioning
 
 All public REST endpoints are available at both unversioned (`/api/...`) and versioned (`/api/v1/...`) URLs. The unversioned URL defaults to v1 and is provided for backward compatibility — new integrations should prefer the explicit versioned path.
 
 ### Version negotiation
 
-The `X-API-Version` response header indicates the effective API version serving the request. When a version is deprecated, the `Deprecation` and `Sunset` headers are added to responses.
+The `X-API-Version` response header indicates the effective API version serving the request. When a version is deprecated, the `Deprecation: true` header is added to every response for that version — including `429` rate-limit rejections, so a retried request still carries the signal. `Sunset` is optional metadata set alongside `Deprecation` only when a removal date has been decided; omitting it does not suppress `Deprecation`.
 
 ### Adding a new API version
 
@@ -70,9 +186,10 @@ The `X-API-Version` response header indicates the effective API version serving 
 ### Rollback
 
 If a versioned deployment causes issues:
+
 1. Revert the code changes to the route handlers while keeping the middleware and version config in place.
 2. Deploy the revert.
-3. If the middleware itself is the issue, remove `src/middleware.ts` and restore the original `src/proxy.ts` — unversioned routes continue to work without the middleware.
+3. If the proxy itself is the issue, revert `src/proxy.ts` and its related configuration. Unversioned routes continue to work without version negotiation.
 
 ## OpenAPI Contract
 
@@ -99,6 +216,10 @@ CI runs the same snapshot test and fails if `/api/docs/openapi.json` differs fro
 
 A durable, Postgres-backed outbox so a domain mutation and the event describing it can never diverge (atomic write, lease-based dispatch, retry/backoff, retention). Disabled by default (`OUTBOX_ENABLED=false`). See **[OUTBOX.md](./OUTBOX.md)**.
 
+## Stellar Payment Reconciler
+
+A background reconciler and finality state machine that verifies submitted Stellar payment transactions against Horizon, applies idempotent downstream repairs to commerce jobs and token purchases, and provides operator inspection endpoints. Disabled by default (`RECONCILER_ENABLED=false`). See **[RECONCILER.md](./RECONCILER.md)**.
+
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
 ## Learn More
@@ -116,12 +237,12 @@ Each TALOS agent has configurable usage limits on write-heavy resources to prote
 
 ### Resources
 
-| Resource | Tracked by | Default limit |
-|---|---|---|
-| `activity_writes` | `POST /api/talos/:id/activity` | 500 / day |
-| `job_writes` | `POST /api/talos/:id/jobs` | 200 / day |
-| `revenue_writes` | `POST /api/talos/:id/revenue` | 300 / day |
-| `sse_connections` | concurrent `GET /api/events` streams | 50 / hour |
+| Resource          | Tracked by                           | Default limit |
+| ----------------- | ------------------------------------ | ------------- |
+| `activity_writes` | `POST /api/talos/:id/activity`       | 500 / day     |
+| `job_writes`      | `POST /api/talos/:id/jobs`           | 200 / day     |
+| `revenue_writes`  | `POST /api/talos/:id/revenue`        | 300 / day     |
+| `sse_connections` | concurrent `GET /api/events` streams | 50 / hour     |
 
 ### How it works
 
@@ -138,13 +259,13 @@ The increment-then-check pattern costs one DB round-trip per request with no dis
 
 Every 2xx write response includes quota state headers:
 
-| Header | Value |
-|---|---|
-| `X-Quota-Limit` | Effective limit for this window |
-| `X-Quota-Remaining` | Remaining calls after this one |
-| `X-Quota-Used` | Total calls used in this window |
-| `X-Quota-Reset` | Unix timestamp (seconds) when the window resets |
-| `X-Quota-Resource` | Which resource was checked |
+| Header              | Value                                           |
+| ------------------- | ----------------------------------------------- |
+| `X-Quota-Limit`     | Effective limit for this window                 |
+| `X-Quota-Remaining` | Remaining calls after this one                  |
+| `X-Quota-Used`      | Total calls used in this window                 |
+| `X-Quota-Reset`     | Unix timestamp (seconds) when the window resets |
+| `X-Quota-Resource`  | Which resource was checked                      |
 
 When a limit is exceeded the API returns `429 Too Many Requests` with the same headers and a JSON body:
 
@@ -173,8 +294,20 @@ Response:
   "talosId": "...",
   "quotas": {
     "activity_writes": {
-      "config": { "maxCount": 500, "windowSize": "daily", "enabled": true, "isAgentOverride": false, "notes": null },
-      "usage":  { "used": 42, "remaining": 458, "limit": 500, "resetAt": "2026-07-25T00:00:00.000Z", "ok": true }
+      "config": {
+        "maxCount": 500,
+        "windowSize": "daily",
+        "enabled": true,
+        "isAgentOverride": false,
+        "notes": null
+      },
+      "usage": {
+        "used": 42,
+        "remaining": 458,
+        "limit": 500,
+        "resetAt": "2026-07-25T00:00:00.000Z",
+        "ok": true
+      }
     }
   }
 }
@@ -200,11 +333,15 @@ All fields except `resource` are optional and fall back to the current configure
 
 ### Reset windows
 
-| `windowSize` | Window start |
-|---|---|
-| `hourly` | UTC hour boundary (e.g. `14:00:00`) |
-| `daily` | UTC midnight (e.g. `2026-07-24T00:00:00Z`) |
-| `monthly` | First day of UTC month (e.g. `2026-07-01T00:00:00Z`) |
+| `windowSize` | Window start                                         |
+| ------------ | ---------------------------------------------------- |
+| `hourly`     | UTC hour boundary (e.g. `14:00:00`)                  |
+| `daily`      | UTC midnight (e.g. `2026-07-24T00:00:00Z`)           |
+| `monthly`    | First day of UTC month (e.g. `2026-07-01T00:00:00Z`) |
+
+Window boundaries and reset calculations (`computeQuotaWindow`) are canonical across responses:
+- `X-Quota-Reset` header in seconds (Unix epoch) and response body `resetAt` (ISO-8601) reflect identical window boundaries.
+- Boundary transitions across months, leap days (e.g. Feb 29 in leap years vs. Feb 28 in non-leap years), and year boundaries are normalized with an injectable clock parameter.
 
 ### Local verification
 
@@ -271,11 +408,11 @@ The cap is enforced per-process. On multi-container deployments each container m
 
 ### Deployment trade-offs
 
-| Deployment | Behaviour | Recommendation |
-|---|---|---|
-| **Vercel Hobby** | 60 s function timeout — stream is killed and the browser reconnects | Use short-poll (Option B) |
-| **Vercel Pro** | 300 s timeout — marginally better but still limits session length | Evaluate Fluid Compute (beta) or Option A |
-| **Railway / Fly.io** | No function timeout — connections live indefinitely | Recommended for production at scale |
+| Deployment           | Behaviour                                                           | Recommendation                            |
+| -------------------- | ------------------------------------------------------------------- | ----------------------------------------- |
+| **Vercel Hobby**     | 60 s function timeout — stream is killed and the browser reconnects | Use short-poll (Option B)                 |
+| **Vercel Pro**       | 300 s timeout — marginally better but still limits session length   | Evaluate Fluid Compute (beta) or Option A |
+| **Railway / Fly.io** | No function timeout — connections live indefinitely                 | Recommended for production at scale       |
 
 **Option A — persistent service (best real-time fidelity)**  
 Move only this endpoint to a long-running container on Railway or Fly.io (~$5–10/mo for 512 MB). The rest of the Next.js app stays on Vercel.
@@ -288,7 +425,10 @@ Replace with `GET /api/events/poll` that returns `304 Not Modified` when nothing
 `getSseMetrics()` (exported from `src/app/api/events/route.ts`) returns:
 
 ```ts
-{ activeConnections: number; totalDbQueries: number }
+{
+  activeConnections: number;
+  totalDbQueries: number;
+}
 ```
 
 Wire this into `/api/health` or a dedicated `/api/metrics` endpoint for monitoring.
@@ -306,20 +446,42 @@ Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/bui
 When deploying this application on Vercel, make sure the following Stellar environment variables are properly configured in your Vercel Project Settings:
 
 ### Server-Side Variables (Hidden from browser)
-* `STELLAR_OPERATOR_SECRET_KEY`: The operator treasury secret key (starts with `S`), used for signing transactions.
-* `STELLAR_OPERATOR_PUBLIC_KEY`: The operator treasury public key (starts with `G`), used for server-side auth validation.
-* `STELLAR_NETWORK`: Network to use (`testnet` or `mainnet`).
-* `STELLAR_HORIZON_URL`: URL of the Stellar Horizon server.
-* `STELLAR_RPC_URL`: URL of the Soroban RPC server.
-* `STELLAR_USDC_ISSUER`: USDC token issuer public key.
+
+- `STELLAR_OPERATOR_SECRET_KEY`: The operator treasury secret key (starts with `S`), used for signing transactions.
+- `STELLAR_OPERATOR_PUBLIC_KEY`: The operator treasury public key (starts with `G`), used for server-side auth validation.
+- `STELLAR_NETWORK`: Network to use (`testnet` or `mainnet`).
+- `STELLAR_HORIZON_URL`: URL of the Stellar Horizon server.
+- `STELLAR_RPC_URL`: URL of the Soroban RPC server.
+- `STELLAR_USDC_ISSUER`: USDC token issuer public key.
 
 ### Client-Side Variables (Prefix `NEXT_PUBLIC_`, exposed to browser)
-* `NEXT_PUBLIC_STELLAR_OPERATOR_PUBLIC_KEY`: The operator treasury public key (starts with `G`).
-* `NEXT_PUBLIC_STELLAR_NETWORK`: Network to use (`testnet` or `mainnet`).
-* `NEXT_PUBLIC_STELLAR_RPC_URL`: URL of the Soroban RPC server.
-* `NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT`: The registry Soroban contract ID.
-* `NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT`: The name service Soroban contract ID.
-* `NEXT_PUBLIC_STELLAR_WALLET_NETWORK`: Wallet network setting (e.g. `testnet`).
-* `NEXT_PUBLIC_TALOS_CREATION_XLM`: XLM required for Talos creation.
-* `NEXT_PUBLIC_STELLAR_USDC_ISSUER`: USDC token issuer public key.
 
+- `NEXT_PUBLIC_STELLAR_OPERATOR_PUBLIC_KEY`: The operator treasury public key (starts with `G`).
+- `NEXT_PUBLIC_STELLAR_NETWORK`: Network to use (`testnet` or `mainnet`).
+- `NEXT_PUBLIC_STELLAR_RPC_URL`: URL of the Soroban RPC server.
+- `NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT`: The registry Soroban contract ID.
+- `NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT`: The name service Soroban contract ID.
+- `NEXT_PUBLIC_STELLAR_WALLET_NETWORK`: Wallet network setting (e.g. `testnet`).
+- `NEXT_PUBLIC_TALOS_CREATION_XLM`: XLM required for Talos creation.
+- `NEXT_PUBLIC_STELLAR_USDC_ISSUER`: USDC token issuer public key.
+
+### Stellar asset config validation
+
+The network and USDC issuer are validated as a pair when the server boots
+(`src/instrumentation.ts`) and whenever `src/lib/stellar-config.ts` is loaded.
+Invalid configuration throws a `StellarConfigError` that names the offending
+variables (values are never printed in full), so a bad deploy fails fast
+instead of sending payments to the wrong asset.
+
+| Rule | Error code |
+| --- | --- |
+| `STELLAR_NETWORK` / `NEXT_PUBLIC_STELLAR_NETWORK` must be exactly `testnet` or `mainnet` | `invalid_network` |
+| Both network variables must match when both are set | `network_conflict` |
+| Issuer must be a valid Stellar account ID (`G…`, valid checksum) | `invalid_issuer` |
+| Both issuer variables must match when both are set | `issuer_conflict` |
+| Issuer must not be the canonical USDC issuer of the *other* network | `issuer_network_mismatch` |
+| On mainnet, a non-Circle issuer requires `STELLAR_ALLOW_CUSTOM_USDC_ISSUER=true` (or `NEXT_PUBLIC_STELLAR_ALLOW_CUSTOM_USDC_ISSUER=true`) | `unrecognized_mainnet_issuer` |
+
+Unset or empty values keep the previous defaults (`testnet` and Circle's
+issuer for the resolved network), so existing deployments with a consistent
+config need no changes. Custom issuers remain allowed on testnet.

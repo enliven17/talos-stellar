@@ -6,13 +6,19 @@
  *
  *   X-Webhook-Signature: v1=<hmac>,t=<unix_timestamp>
  *
+ * During secret rotation the header may carry multiple HMACs so consumers
+ * still verifying with the previous secret succeed without downtime:
+ *
+ *   X-Webhook-Signature: v1=<hmac_current>,v1=<hmac_previous>,t=<unix_timestamp>
+ *
  * The timestamp enables replay protection: consumers should reject signatures
  * older than a configured tolerance (e.g. 5 minutes).
  *
  * Secret management:
  *   - Secrets are encrypted at rest (AES-256-GCM) in the database.
  *   - They are decrypted only at delivery time for signing purposes.
- *   - Secrets are never logged or exposed via the API.
+ *   - Secrets are never logged or exposed via the API (except the one-time
+ *     plaintext returned when generate=true on rotate).
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
@@ -21,72 +27,93 @@ import { CURRENT_SIGNATURE_VERSION, SUPPORTED_SIGNATURE_VERSIONS } from "./confi
 /** Maximum tolerable age for an incoming signature (seconds). */
 const MAX_TIMESTAMP_AGE_SEC = 300; // 5 minutes
 
+function asSecretList(secret: string | string[]): string[] {
+  const list = Array.isArray(secret) ? secret : [secret];
+  return list.filter((s) => typeof s === "string" && s.length > 0);
+}
+
 /**
  * Build the signature header value for a webhook payload.
  *
- * Format: `v1=<hmac>,t=<unix_timestamp>`
+ * Pass multiple secrets (current + previous) to dual-sign during rotation.
+ * Format: `v1=<hmac>[,v1=<hmac>...],t=<unix_timestamp>`
  */
 export function signPayload(
   payload: string,
-  secret: string,
+  secret: string | string[],
   version: number = CURRENT_SIGNATURE_VERSION,
 ): string {
+  const secrets = asSecretList(secret);
+  if (secrets.length === 0) {
+    throw new Error("At least one signing secret is required");
+  }
+
   const timestamp = Math.floor(Date.now() / 1000);
   const dataToSign = `${version}.${timestamp}.${payload}`;
-  const hmac = createHmac("sha256", secret).update(dataToSign).digest("hex");
-  return `v${version}=${hmac},t=${timestamp}`;
+  const parts = secrets.map((s) => {
+    const hmac = createHmac("sha256", s).update(dataToSign).digest("hex");
+    return `v${version}=${hmac}`;
+  });
+  return `${parts.join(",")},t=${timestamp}`;
 }
 
 /**
  * Verify a webhook signature header against a payload.
  *
- * Returns `true` if the signature is valid, the version is supported,
- * and the timestamp is within the acceptable age window.
+ * Accepts a single secret or an array (consumer-side key rotation).
+ * Returns `true` if any provided HMAC matches any secret, the version is
+ * supported, and the timestamp is within the acceptable age window.
  */
 export function verifySignature(
   payload: string,
   signatureHeader: string | null,
-  secret: string,
+  secret: string | string[],
 ): boolean {
   if (!signatureHeader) return false;
+  const secrets = asSecretList(secret);
+  if (secrets.length === 0) return false;
 
   try {
-    // Parse the header: "v1=<hmac>,t=<timestamp>"
-    const parts = signatureHeader.split(",");
-    const sigPart = parts.find((p) => p.startsWith("v"));
+    const parts = signatureHeader.split(",").map((p) => p.trim());
     const tPart = parts.find((p) => p.startsWith("t="));
+    if (!tPart) return false;
 
-    if (!sigPart || !tPart) return false;
-
-    const versionMatch = sigPart.match(/^v(\d+)=(.+)$/);
-    if (!versionMatch) return false;
-
-    const version = Number(versionMatch[1]);
-    const providedHmac = versionMatch[2];
     const timestamp = Number(tPart.slice(2));
-
-    // Reject unsupported versions
-    if (!SUPPORTED_SIGNATURE_VERSIONS.includes(version)) return false;
+    if (!Number.isFinite(timestamp)) return false;
 
     // Reject expired timestamps (replay protection)
     const now = Math.floor(Date.now() / 1000);
     if (Math.abs(now - timestamp) > MAX_TIMESTAMP_AGE_SEC) return false;
 
-    // Recompute the HMAC
-    const dataToSign = `${version}.${timestamp}.${payload}`;
-    const expectedHmac = createHmac("sha256", secret)
-      .update(dataToSign)
-      .digest("hex");
+    const sigParts = parts.filter((p) => /^v\d+=/.test(p));
+    if (sigParts.length === 0) return false;
 
-    // Timing-safe comparison
-    const provided = Buffer.from(providedHmac, "hex");
-    const expected = Buffer.from(expectedHmac, "hex");
+    for (const sigPart of sigParts) {
+      const versionMatch = sigPart.match(/^v(\d+)=(.+)$/);
+      if (!versionMatch) continue;
 
-    if (provided.length === 0 || provided.length !== expected.length) {
-      return false;
+      const version = Number(versionMatch[1]);
+      const providedHmac = versionMatch[2];
+
+      if (!SUPPORTED_SIGNATURE_VERSIONS.includes(version)) continue;
+
+      const dataToSign = `${version}.${timestamp}.${payload}`;
+      const provided = Buffer.from(providedHmac, "hex");
+      if (provided.length === 0) continue;
+
+      for (const s of secrets) {
+        const expectedHmac = createHmac("sha256", s)
+          .update(dataToSign)
+          .digest("hex");
+        const expected = Buffer.from(expectedHmac, "hex");
+        if (provided.length !== expected.length) continue;
+        if (timingSafeEqual(provided, expected)) {
+          return true;
+        }
+      }
     }
 
-    return timingSafeEqual(provided, expected);
+    return false;
   } catch {
     return false;
   }

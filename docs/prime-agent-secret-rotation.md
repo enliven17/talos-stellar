@@ -15,9 +15,21 @@ agents. When operators put the database on shared storage, SQLite's locking
 semantics remain the source of truth; correctness never depends on a
 process-local cache.
 
+## Pluggable backends
+
+Persistence is pluggable via `TALOS_SECRET_STORE_BACKEND`:
+
+- `sqlite` (default) — durable LocalDB tables; production / shared-storage agents
+- `memory` — process-local store for tests and dependency-free fakes
+
+`SecretStore` keeps encryption, validation, and lifecycle orchestration. Backends
+only own durable rows. Existing `SecretStore(db, ...)` callers continue to work
+and implicitly select the sqlite backend.
+
 ## Data model and encryption
 
-Migration 7 adds:
+Migration 10 adds (secret tables were originally described as migration 7; checkpoint
+migrations later occupied 7-9):
 
 - `secret_versions`: immutable encrypted versions and their lifecycle state.
 - `secret_heads`: one atomic active/previous pointer and generation per secret.
@@ -87,7 +99,8 @@ plaintext, key IDs, authorization headers, or user payloads.
 
 Operational signal names:
 
-- `secret_rotation_transition`: `stage`, `activated`, `recovered`, or `revoke`
+- `secret_rotation_transition`: `stage`, `activated`, `recovered`, `revoke`,
+  `checkpoint_created`, `checkpoint_restored`, or `checkpoint_discarded`
   with `success`/`failure`.
 - `secret_resolution`: an active-version decrypt failed and the resolver moved
   to the previous or legacy source.
@@ -124,10 +137,25 @@ Backward-compatible rollout:
 
 ## Recovery and rollback
 
-For a bad active credential, run `talos-agent secrets recover NAME VERSION
---expected-version CURRENT`. Recovery is a CAS activation of a known,
-non-revoked version and is safe to retry. Confirm the `recovered` audit event,
-then revoke the rejected version if it will not be reused.
+Prefer named rollback checkpoints around rotations:
+
+1. `talos-agent secrets checkpoint create NAME` (or `rotate --with-checkpoint`)
+   snapshots the current head (`active_version`, `previous_version`, `generation`).
+2. If the new credential fails, restore with
+   `talos-agent secrets checkpoint rollback NAME CHECKPOINT_ID --expected-version CURRENT`.
+3. Discard unused checkpoints with `talos-agent secrets checkpoint discard`.
+
+Checkpoint restore is a CAS operation: a stale expected version raises an
+explicit conflict. Restored checkpoints are idempotent when the head still
+matches the snapshot; discarded checkpoints cannot be restored. Audit events
+`checkpoint_created`, `checkpoint_restored`, and `checkpoint_discarded` never
+include ciphertext, plaintext, or key IDs.
+
+For a bad active credential without a checkpoint, run
+`talos-agent secrets recover NAME VERSION --expected-version CURRENT`. Recovery
+is a CAS activation of a known, non-revoked version and is safe to retry.
+Confirm the `recovered` audit event, then revoke the rejected version if it will
+not be reused.
 
 For a code rollback, set `TALOS_SECRET_ROTATION_ENABLED=false` and restore the
 legacy environment value. This does not modify encrypted history. Do not delete

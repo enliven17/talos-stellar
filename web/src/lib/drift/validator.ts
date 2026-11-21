@@ -17,7 +17,7 @@ import type {
   DriftViolationKind,
   JsonSchemaObject,
   UnknownFieldPolicy,
-} from "./types.js";
+} from "./types";
 
 // ── $ref resolution ───────────────────────────────────────────────────────────
 

@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import {
@@ -9,6 +10,7 @@ import {
 } from "@/db/schema";
 import { and, eq, gte, sql, desc } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
+import { parseAnalyticsLimit } from "@/lib/analytics-limits";
 
 /**
  * Monetary Value Representation Standard:
@@ -47,7 +49,7 @@ export function toMonetaryValue(
 }
 
 // GET /api/talos/:id/financial-summary — Aggregated financial analytics
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -56,6 +58,11 @@ export async function GET(
   try {
     const auth = await verifyAgentApiKey(request, id, ["revenue:read"]);
     if (!auth.ok) return auth.response;
+
+    const { searchParams } = new URL(request.url);
+    const parsedLimit = parseAnalyticsLimit(searchParams.get("limit"), 20, 100);
+    if (!parsedLimit.ok) return parsedLimit.response;
+    const limit = parsedLimit.limit;
 
     // ── Verify the TALOS agent exists ─────────────────────────────
     const talos = await db
@@ -213,7 +220,7 @@ export async function GET(
         ),
       )
       .orderBy(desc(tlsApprovals.createdAt))
-      .limit(20);
+      .limit(limit);
 
     // ── Playbook sales metrics ───────────────────────────────────
     const playbookRows = await db
@@ -240,7 +247,8 @@ export async function GET(
         tlsPlaybooks.currency,
         tlsPlaybooks.category,
         tlsPlaybooks.status,
-      );
+      )
+      .limit(limit);
 
     // ── Compute derived monetary analytics ───────────────────────
     const totalRevenueNum = toMonetaryValue(revenueAllTime?.totalRevenue);
@@ -403,3 +411,5 @@ export async function GET(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withRequestId(_GET);

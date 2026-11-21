@@ -1,0 +1,40 @@
+{
+  "meta": {
+    "additive_fields": [],
+    "contract": "TalosRegistry",
+    "generator": "scripts/generate-registry-fixtures.mjs v1",
+    "kind": "Talos",
+    "schema_version": 1
+  },
+  "storage_key": {
+    "id": 2,
+    "type": "Talos"
+  },
+  "value": {
+    "active": false,
+    "category": "Analytics",
+    "created_at": "1710003600",
+    "creator": "GDBYLOLNZLP5FPXG3CXHHZ47I5AKETMOMV2JVQJ3UDHLIQORPKYERYJI",
+    "description": "Scout competitor",
+    "id": 2,
+    "kernel": {
+      "approval_threshold": "5",
+      "gtm_budget": "5000",
+      "min_patron_pulse": "250"
+    },
+    "name": "atlas",
+    "patron": {
+      "creator_addr": "GDBYLOLNZLP5FPXG3CXHHZ47I5AKETMOMV2JVQJ3UDHLIQORPKYERYJI",
+      "creator_share": 50,
+      "investor_addr": "GBP5QYANYQBGVDFS7K4H5GV4ZSFEOVQ7NXH2ZRKBI5MH36ENH25MQ3CD",
+      "investor_share": 30,
+      "treasury_addr": "GBIRUHZQUEQEXX57OKZHNX6FI4M52CSDBNYD3S7TVHSH6IPIVFGYDTIC",
+      "treasury_share": 20
+    },
+    "pulse": {
+      "price_usd_cents": "50",
+      "token_symbol": "ATLS",
+      "total_supply": "500000"
+    }
+  }
+}

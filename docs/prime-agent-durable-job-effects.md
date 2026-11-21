@@ -34,7 +34,7 @@ agent reconciles the already-completed result with `GET`.
 
 ## Data model and invariants
 
-Migration 7 adds:
+Migration 7 originally added (restored by migration 10 if missing):
 
 - `job_inbox`: one row per `(owner_talos_id, job_id)`, including a canonical,
   size-bounded request payload, its SHA-256 digest, processing state, fencing
@@ -150,6 +150,34 @@ uv run talos-agent jobs retry EFFECT_ID \
 
 The expected attempt makes duplicate operator delivery idempotent and rejects
 stale decisions.
+
+
+## Replay audit trail
+
+Migration 10 adds an append-only `job_effect_replay_audit` table. Every durable
+effect replay path records a privacy-safe metadata row:
+
+| Action | When |
+| --- | --- |
+| `effect_prepared` | Result is persisted to the outbox before network I/O |
+| `dispatch_claimed` | Dispatcher leases an effect for a replay/dispatch attempt |
+| `dispatch_succeeded` | POST completed successfully |
+| `dispatch_reconciled` | GET reconciliation marked the effect succeeded |
+| `dispatch_failed` | Attempt ended in `retryable`, `indeterminate`, or `dead` |
+| `dispatch_conflict` | Remote completed result disagreed with the local digest |
+| `operator_requeued` | Operator requeued via `talos-agent jobs retry` |
+
+Audit rows store only IDs, action, state transition, attempt count, stable error
+codes, and a bounded actor string (`dispatcher:<worker>` or
+`operator:requeue`). Payloads, results, digests, credentials, and exception
+messages are never written to the audit trail.
+
+Inspect the trail:
+
+```bash
+uv run talos-agent jobs audit --talos-id "$TALOS_ID" --effect-id EFFECT_ID --json
+uv run talos-agent jobs audit --talos-id "$TALOS_ID" --job-id JOB_ID
+```
 
 ## Rollout, compatibility, and rollback
 

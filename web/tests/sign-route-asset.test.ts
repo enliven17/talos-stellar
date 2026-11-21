@@ -11,6 +11,8 @@ const signMocks = vi.hoisted(() => ({
   verifyAgentApiKey: vi.fn(),
   select: vi.fn(),
   signX402Payment: vi.fn(),
+  insert: undefined as ((...args: unknown[]) => unknown) | undefined,
+  transaction: undefined as ((...args: unknown[]) => unknown) | undefined,
 }));
 
 vi.mock("@/lib/auth", () => ({

@@ -1,13 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
+import signingVectors from "./fixtures/request-signing-vectors.json" with { type: "json" };
 import {
+  REQUEST_SIGNATURE_VERSION,
   SigningController,
-  SigningError,
   canonicalizeRequest,
   detectSignerCapability,
   type RequestSigner,
   type SignatureResult,
   type SigningPayload,
-} from "../src/signing.js";
+} from "../src/index.js";
 import { TalosClient } from "../src/client.js";
 
 const signature: SignatureResult = {
@@ -30,30 +31,37 @@ function signer(
 }
 
 describe("request canonicalization", () => {
-  it("matches the stable empty-body test vector", async () => {
-    const bytes = await canonicalizeRequest({
-      method: "get",
-      url: "https://example.test/v1/jobs?z=2&a=1#ignored",
-      headers: {
-        "X-Zeta": "  one   two ",
-        Authorization: "Bearer must-not-be-signed",
-        Accept: "application/json",
-      },
-      timestamp: "2026-01-02T03:04:05.000Z",
-      nonce: "vector-1",
+  it("publishes vectors for the supported signature version", () => {
+    expect(signingVectors.format).toBe("talos-request-signing-vectors");
+    expect(signingVectors.version).toBe(REQUEST_SIGNATURE_VERSION);
+  });
+  for (const vector of signingVectors.vectors) {
+    it(`matches the published ${vector.name} byte vector`, async () => {
+      const bytes = await canonicalizeRequest(vector.request);
+      expect(Array.from(bytes)).toEqual(Array.from(new TextEncoder().encode(vector.canonical)));
     });
+  }
 
-    expect(new TextDecoder().decode(bytes)).toBe(
-      [
-        "talos-request-v1",
-        "GET",
-        "https://example.test/v1/jobs?a=1&z=2",
-        "accept:application/json\nx-zeta:one two",
-        "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU",
-        "2026-01-02T03:04:05.000Z",
-        "vector-1",
-      ].join("\n"),
-    );
+  it("rejects line breaks and credential-bearing request URLs", async () => {
+    const valid = { method: "GET", url: "https://example.test/", timestamp: "now", nonce: "n" };
+    await expect(canonicalizeRequest(undefined as never)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    const injectedNonce = { ...valid, nonce: ["n", "forged"].join("\n") };
+    const injectedTimestamp = { ...valid, timestamp: ["now", "forged"].join("\r\n") };
+    const credentialUrl = { ...valid, url: "https://user:pass@example.test/" };
+    await expect(canonicalizeRequest(injectedNonce)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(canonicalizeRequest(injectedTimestamp)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(canonicalizeRequest(credentialUrl)).rejects.toMatchObject({ code: "INVALID_INPUT" });
+  });
+
+  it("uses the browser Web API path without Node Buffer", async () => {
+    const vector = signingVectors.vectors[1];
+    vi.stubGlobal("Buffer", undefined);
+    try {
+      const bytes = await canonicalizeRequest(vector.request);
+      expect(Array.from(bytes)).toEqual(Array.from(new TextEncoder().encode(vector.canonical)));
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("rejects non-replayable bodies", async () => {

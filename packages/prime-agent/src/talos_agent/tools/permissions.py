@@ -351,6 +351,7 @@ CODE_UNDECLARED = "PERMISSION_MANIFEST_MISSING"
 CODE_NOT_GRANTED = "PERMISSION_NOT_GRANTED"
 CODE_HOST_DENIED = "PERMISSION_HOST_NOT_ALLOWED"
 CODE_SPEND_EXCEEDED = "PERMISSION_SPEND_LIMIT_EXCEEDED"
+CODE_SPEND_INVALID = "PERMISSION_SPEND_AMOUNT_INVALID"
 CODE_APPROVAL_REQUIRED = "PERMISSION_APPROVAL_REQUIRED"
 
 
@@ -462,7 +463,18 @@ class PermissionEnforcer:
 
         # Spend: the smaller of the manifest ceiling and the grant ceiling wins.
         if WalletScope.TRANSFER in manifest.wallet:
-            requested = _extract_amount(arguments)
+            try:
+                requested = _extract_amount(arguments)
+            except _InvalidAmount:
+                # A present-but-unreadable amount fails closed: guessing would
+                # let "NaN", "-5" or "1e999" slip past the ceiling.
+                return PermissionDecision(
+                    False,
+                    CODE_SPEND_INVALID,
+                    f"{tool_name} was called with an invalid spend amount",
+                    tool_name,
+                    capability=WalletScope.TRANSFER.value,
+                )
             ceiling = min(
                 manifest.max_spend_usd or Decimal("0"),
                 self.grants.max_spend_usd,
@@ -507,19 +519,30 @@ class PermissionEnforcer:
             logger.exception("permission audit sink failed for %s", tool_name)
 
 
+class _InvalidAmount(ValueError):
+    """A spend amount key is present but its value cannot be trusted."""
+
+
 def _extract_amount(arguments: Mapping[str, Any]) -> Decimal | None:
     """Best-effort read of a spend amount from tool arguments.
 
     Returns ``None`` when no amount is present, which leaves the spend check
     inert rather than guessing — the policy engine remains the authority on
-    amounts it can see.
+    amounts it can see. Raises :class:`_InvalidAmount` when an amount key is
+    present but is not a finite, non-negative number, so the caller can deny.
     """
     for key in ("amount", "amount_usd", "price", "value"):
         if key in arguments:
+            raw = arguments[key]
+            if isinstance(raw, bool):
+                raise _InvalidAmount(key)
             try:
-                return Decimal(str(arguments[key]))
+                amount = Decimal(str(raw))
             except (InvalidOperation, TypeError, ValueError):
-                return None
+                raise _InvalidAmount(key) from None
+            if not amount.is_finite() or amount < 0:
+                raise _InvalidAmount(key)
+            return amount
     return None
 
 

@@ -536,6 +536,44 @@ describe("GET /api/talos/:id/financial-summary", () => {
       const parsed = JSON.parse(jsonString);
       expect(parsed.cashFlow.totalRevenue).toBe(1000000000000000.123456);
     });
+
+    it("returns 400 when limit exceeds maximum allowed limit of 100", async () => {
+      mocks.mockVerifyAgentApiKey.mockResolvedValue({
+        ok: true,
+        talos: { id: "agent-1", apiKey: "valid-key" },
+      });
+
+      const request = new NextRequest(
+        "http://localhost/api/talos/agent-1/financial-summary?limit=150",
+        { headers: { Authorization: "Bearer valid-key" } },
+      );
+      const response = await GET(request, {
+        params: Promise.resolve({ id: "agent-1" }),
+      });
+
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error).toContain("exceeds maximum allowed limit of 100");
+    });
+
+    it.each(["0", "-1", "abc", "1.5", ""])("returns 400 for malformed limit=%s", async (val) => {
+      mocks.mockVerifyAgentApiKey.mockResolvedValue({
+        ok: true,
+        talos: { id: "agent-1", apiKey: "valid-key" },
+      });
+
+      const request = new NextRequest(
+        `http://localhost/api/talos/agent-1/financial-summary?limit=${val}`,
+        { headers: { Authorization: "Bearer valid-key" } },
+      );
+      const response = await GET(request, {
+        params: Promise.resolve({ id: "agent-1" }),
+      });
+
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.error).toBe("limit must be a positive integer");
+    });
   });
 
   describe("toMonetaryValue helper unit tests", () => {
