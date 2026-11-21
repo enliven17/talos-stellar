@@ -31,6 +31,8 @@ export type { AsyncPaginationIteratorOptions } from "./pagination.js";
 export {
   generateIdempotencyKey,
   validateIdempotencyKey,
+  validateIdempotencyKeyConflict,
+  readIdempotencyKeyHeader,
   IdempotencyConflictError,
   isUuidV4,
   isPayloadConflict,

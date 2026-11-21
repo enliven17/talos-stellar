@@ -258,6 +258,12 @@ await TalosWebhook.verify({
 
 #### Idempotency & Replay Protection
 
+Write options and explicit `Idempotency-Key` request headers must agree. If a
+call supplies both and the values differ, the SDK throws a privacy-safe
+`TypeError` before signing or network I/O. Matching values are accepted and
+the option remains the canonical value sent on every retry. Header names are
+matched case-insensitively.
+
 To prevent replay attacks, implement the `ReplayStore` interface:
 
 ```typescript
