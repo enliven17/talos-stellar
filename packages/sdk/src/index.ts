@@ -232,6 +232,21 @@ export type {
   ChaosFixtureBundle,
 } from "./chaos-fixtures.js";
 
+// ── Synthetic event-stream fault fixtures ─────────────────────────────────────
+
+export {
+  EVENT_STREAM_FAULT_FIXTURES,
+  getEventStreamFaultFixture,
+  encodeSyntheticSSEFrame,
+  createSyntheticEventStreamTransport,
+} from "./event-stream-fixtures.js";
+export type {
+  EventStreamFaultKind,
+  SyntheticSSEFrame,
+  EventStreamFaultFixture,
+  SyntheticEventStreamTransport,
+} from "./event-stream-fixtures.js";
+
 // ── Contract readers ──────────────────────────────────────────────────────
 
 export {

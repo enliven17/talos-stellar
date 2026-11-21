@@ -864,6 +864,34 @@ switch (error.code) {
 
 ---
 
+### Synthetic event-stream fault fixtures
+
+The SDK exports a deterministic, network-free fixture kit for exercising SSE
+and reconnect behavior:
+
+```typescript
+import {
+  getEventStreamFaultFixture,
+  createSyntheticEventStreamTransport,
+  TalosEventStream,
+} from "@talos-protocol/sdk";
+
+const fixture = getEventStreamFaultFixture("reconnect-race")!;
+const transport = createSyntheticEventStreamTransport(fixture);
+const stream = new TalosEventStream("http://synthetic.invalid", {
+  fetch: transport.fetch,
+  maxReconnectAttempts: 1,
+  jitter: false,
+});
+```
+
+The kit includes `truncated-frame`, `history-gap`, and `reconnect-race`
+fixtures. Fixtures are immutable, deterministic, and contain no secrets or
+network endpoints. History gaps expose missing numeric event IDs; reconnect
+fixtures replay synthetic frames and verify `Last-Event-ID` handling.
+
+---
+
 ### Retry policy resolution and mechanics
 
 `TalosClientOptions` supports two complementary retry systems, both validated and bounded at construction:
