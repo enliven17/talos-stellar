@@ -8,6 +8,7 @@
     "build:registry": "node init && cargo build --target wasm32-unknown-unknown --release -p talos-registry",
     "build:name-service": "node init && cargo build --target wasm32-unknown-unknown --release -p talos-name-service",
     "test": "cargo test",
+    "test:regression": "cargo test --lib -- --nocapture",
     "deploy:testnet": "soroban contract deploy --wasm target/wasm32-unknown-unknown/release/talos_registry.wasm --network testnet",
     "deploy:name-service:testnet": "soroban contract deploy --wasm target/wasm32-unknown-unknown/release/talos_name_service.wasm --network testnet",
     "invoke:registry": "soroban contract invoke --source-account alice --network testnet",

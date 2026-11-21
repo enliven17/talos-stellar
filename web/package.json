@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:payment-coverage": "vitest run --config vitest.payment-coverage.config.ts --coverage",
     "test:unit": "vitest run tests/health.test.ts tests/security-headers.test.ts tests/*.unit.test.ts tests/sse.test.ts",
+    "test:shared-get": "vitest run tests/shared-get-subscriber.test.ts",
     "test:security-headers": "vitest run tests/security-headers.test.ts",
     "test:e2e": "vitest run tests/api-e2e.test.ts tests/outbox-e2e.test.ts",
     "test:browser": "playwright test",

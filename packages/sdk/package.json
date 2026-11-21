@@ -46,6 +46,7 @@
     "fixtures:check": "node scripts/generate-chaos-fixtures.mjs --check",
     "dev": "node init && tsc --watch",
     "test": "vitest run",
+    "test:shared-get": "vitest run src/client.shared-get.test.ts",
     "generate:types": "openapi-typescript \"../../web/tests/fixtures/openapi.snapshot.json\" -o \"src/generated-types.ts\"",
     "compat:exports": "node scripts/smoke-export-map.mjs",
     "compat:edge": "node scripts/smoke-edge.mjs",
