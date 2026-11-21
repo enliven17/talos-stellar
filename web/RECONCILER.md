@@ -66,7 +66,8 @@ Transitions are purely functional and validated (`validateTransition`) before an
 6. **`CONFIRMING` → `FAILED`**: Defensively permitted if chain data indicates operation-level failure.
 7. **`CONFIRMING` → `EXPIRED`**: Exceeds ledger gap or wall-clock `expiresAt` while confirming.
 8. **Transient Horizon Errors**: Network errors, HTTP 429 (rate limit), and HTTP 5xx responses increment `pollCount` and set `lastError`, but leave the record in `PENDING` for the next tick.
-9. **Terminal Immutability**: Any attempt to transition out of a terminal state is rejected with an illegal transition error (`Illegal transition: cannot leave terminal state "<state>"`).
+9. **Network Identity Pinning & Rejection**: Transactions are pinned to a specific Stellar network identity (passphrase). Any Horizon observation whose network passphrase does not match the pinned network is rejected: the record remains active (in `PENDING` or `CONFIRMING`), `pollCount` is incremented, and `lastError` logs the rejection (`Rejected observation from foreign network...`) without altering financial settlement state or triggering downstream repair.
+10. **Terminal Immutability**: Any attempt to transition out of a terminal state is rejected with an illegal transition error (`Illegal transition: cannot leave terminal state "<state>"`).
 
 ---
 
@@ -82,6 +83,7 @@ All configuration is loaded from environment variables at startup in `src/lib/re
 | `RECONCILER_NOT_FOUND_THRESHOLD` | `10` | Number of consecutive 404 poll results from Horizon before transitioning a `PENDING` record to `NOT_FOUND`. |
 | `RECONCILER_BATCH_SIZE` | `50` | Maximum number of active records (`PENDING` or `CONFIRMING`) processed per tick. |
 | `STELLAR_HORIZON_URL` | `https://horizon-testnet.stellar.org` | Base URL of the Stellar Horizon server used to query transaction status and current ledger. |
+| `STELLAR_NETWORK_PASSPHRASE` | `Test SDF Network ; September 2015` | Pinned Stellar network identity (passphrase) to reconcile against. If unset, derives from `STELLAR_NETWORK` (`"mainnet"` vs `"testnet"`). |
 | `RECONCILER_CONFIRMATION_DEPTH` | `1` | Number of closed ledgers required after first-seen before transitioning from `CONFIRMING` to `CONFIRMED`. |
 | `RECONCILER_CONCURRENCY_LIMIT` | `5` | Maximum number of concurrent Horizon/DB operations allowed during tick queue draining. |
 | `ADMIN_API_KEY` | — | Bearer token required for administrative endpoints (`/api/admin/reconciler/*`). |
@@ -173,6 +175,7 @@ import { registerTx } from "@/lib/reconciler";
 
 await registerTx({
   txHash: "68b49e...",
+  networkPassphrase: "Test SDF Network ; September 2015", // optional, defaults to configured network
   sourceType: "commerce_job", // or "token_purchase", "other"
   sourceId: job.id,
   ledgerSubmitted: 123456,   // optional, enables ledger gap expiry
@@ -353,6 +356,7 @@ Tracked transaction records are persisted in `tls_stellar_tx_records`:
 |---|---|---|
 | `id` | `text` (Primary Key) | CUID2 record identifier. |
 | `tx_hash` | `text` (Unique) | 64-character hex Stellar transaction hash. |
+| `network_passphrase` | `text` | Pinned Stellar network identity (passphrase) against which this payment is reconciled. |
 | `source_type` | `text` | Subsystem type (`"commerce_job"`, `"token_purchase"`, `"other"`). |
 | `source_id` | `text` | Target entity identifier (`jobId` or purchase `txHash`). |
 | `finality_status` | `text` | Current state (`PENDING`, `CONFIRMING`, `CONFIRMED`, `FAILED`, `EXPIRED`, `NOT_FOUND`). |
