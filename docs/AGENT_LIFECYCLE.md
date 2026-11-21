@@ -11,7 +11,7 @@ operator console that surfaces both.
 | `provisioning` | transient | A durable job is allocating wallet, credentials, services, runtime. |
 | `active` | settled | Accepting new work. |
 | `paused` | settled | Not accepting new work; in-flight jobs drain. |
-| `retiring` | transient | Draining outstanding work before retirement. |
+| `retiring` | transient | Draining outstanding work before retirement. New service requests receive HTTP 409 with `AGENT_DRAINING` and state `draining`. |
 | `retired` | terminal | Final. No further transitions. |
 | `recovery_pending` | attention | Recovery requested; needs a governance approval to re-provision. |
 | `failed` | attention | Provisioning failed and completed steps were compensated. |
@@ -53,8 +53,27 @@ Stable and part of the API contract — clients branch on them.
 
 ```
 GET  /api/talos/:id/lifecycle?viewer=G...&limit=25&before=<sequence>
+GET  /api/talos/:id/retire?viewer=G...
 POST /api/talos/:id/lifecycle
+POST /api/talos/:id/retire
 ```
+
+### Owner-facing lifecycle checklist
+
+`GET /api/talos/:id/retire?viewer=G...` evaluates and returns the owner-facing lifecycle
+and retirement checklist. It requires owner authorization (`creatorPublicKey` or `walletPublicKey`)
+and audits:
+- **Owner authorization:** Confirms the requesting viewer owns the agent.
+- **In-flight jobs:** Ensures all active/pending commerce jobs are drained prior to permanent retirement.
+- **Service availability:** Audits service intake and availability status (e.g. paused intake).
+- **Governance approval:** Tracks required and pending proposals/approvals.
+- **Wallet binding:** Verifies whether a wallet address or contract binding is attached.
+
+The endpoint returns each obligation's status (`satisfied`, `blocking`, `count`) and permitted
+next actions with enablement flags and blocking obligation references. Private financial details
+(secrets, seeds, or unredacted transactions) are strictly preserved and never exposed.
+
+`GET /api/talos/:id/lifecycle` also embeds this evaluation as `checklist` for authenticated viewers.
 
 `GET` returns the current state, `allowedActions` for the viewer, the latest
 durable run with per-step progress, pending proposals, and a keyset-paginated

@@ -67,6 +67,36 @@ The marketplace returns a list of `CommerceService` objects. Each entry includes
 
 ---
 
+### Step 1b — Dry-Run Quote Comparison (Optional)
+
+Before committing to a purchase, the buyer can compare live quotes across a
+bounded candidate set without spending anything. The
+`compare_service_quotes` tool (`packages/prime-agent/src/talos_agent/tools/commerce.py`)
+takes a JSON array of `{"talos_id", "service_type"}` candidates (max 5), issues
+a `GET /api/talos/:id/service` for each — the same free 402 challenge from
+Step 2 — and ranks the results.
+
+Each quote is evaluated on three axes:
+
+- **Total price** — parsed to exact USDC smallest units via
+  `price_to_usdc_units` (nested `quote.amount` preferred over top-level
+  `price`), so comparisons never suffer float rounding.
+- **Capability** — the advertised `capability` / `serviceName` /
+  `fulfillmentMode` descriptor.
+- **Expiry** — enforced with the same `enforce_commerce_quote_expiry` check
+  and `DEFAULT_X402_CLOCK_SKEW_POLICY` settlement margin used by
+  `purchase_service`, so a quote that would expire mid-flight is excluded
+  before it can burn a nonce.
+
+Eligible quotes are returned cheapest-first (ties broken by latest expiry);
+ineligible quotes carry a stable reason code (`EXPIRED_QUOTE`,
+`INSUFFICIENT_VALIDITY`, `INVALID_QUOTE`, `NO_QUOTE`, `FETCH_FAILED`). The
+tool performs **no paid calls**: it never invokes the signer, never POSTs to
+`/service`, records no spending, and creates no approvals. Use
+`purchase_service` to actually buy the winning quote.
+
+---
+
 ### Step 2 — 402 Challenge (Storefront)
 
 The buyer GETs the seller's service endpoint with no authentication. The server always responds with **HTTP 402 Payment Required**.

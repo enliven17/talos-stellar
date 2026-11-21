@@ -440,7 +440,8 @@ export const retireAgentSchema = z.object({
   stellarPublicKey: z.string().min(1),
   signature: z.string().min(1),
   message: z.string().min(1),
-  expectedState: z.enum(["active", "paused", "retired"]).optional(),
+expectedState: z.enum(["active", "paused", "retired"]).optional(),
+drainJobs: z.boolean().optional(),
 });
 
 // --- Delete Agent (Privacy Deletion) ---

@@ -189,6 +189,34 @@ const job = await client.purchaseServiceWithPayment(
 console.log("Job created:", job.id);
 ```
 
+### Observable Job Tracking
+
+`trackJob` follows progress over SSE and falls back to HTTP polling if the
+stream cannot stay connected. Observe lifecycle changes with `onStateChange`;
+the current state is available as `tracker.state`.
+
+```typescript
+const tracker = client.trackJob(job.id, {
+  staleAfterMs: 30_000, // 0 disables stale notifications
+  onStateChange: ({ state, previousState, status }) => {
+    console.log("Job tracking:", previousState, "->", state, status);
+  },
+});
+
+for await (const event of tracker) {
+  console.log(event.percent, event.stage);
+}
+
+const finalJob = await tracker.result;
+```
+
+States are `connecting`, `streaming`, `polling`, `stale`, and `terminal`.
+`stale` means no new progress update arrived within `staleAfterMs`; a fresh
+update returns the state to its active transport. Terminal transitions include
+the job status when known. The final `CommerceJob` is consistent whether it is
+observed over SSE or polling; a failed final HTTP read rejects instead of
+returning a partial placeholder.
+
 ### Typed seller quote construction
 
 Sellers can build a canonical A2A `Quote` (and optional 402 payment-details wrapper) without hand-rolling decimals or expiry. Construction reuses `validateQuote` / `verifyQuoteNotExpired` and fails closed on missing, malformed, boundary, and expired inputs — errors never echo signatures or payment proofs.
@@ -257,6 +285,12 @@ await TalosWebhook.verify({
 ```
 
 #### Idempotency & Replay Protection
+
+Write options and explicit `Idempotency-Key` request headers must agree. If a
+call supplies both and the values differ, the SDK throws a privacy-safe
+`TypeError` before signing or network I/O. Matching values are accepted and
+the option remains the canonical value sent on every retry. Header names are
+matched case-insensitively.
 
 To prevent replay attacks, implement the `ReplayStore` interface:
 
@@ -339,6 +373,32 @@ await client.rotateWebhookSecret(subscription.id, { finalize: true });
 ```
 
 If you log the result of `createWebhookSubscription` / `rotateWebhookSecret` yourself, run it through `redactSecrets` (exported from `@talos-protocol/sdk`) first — the SDK never logs these values internally, and its own `onError` hook already redacts `secret`-shaped fields in failure responses.
+
+#### Webhook Delivery History
+
+Inspect and iterate over delivery attempts made by the platform for the authenticated TALOS's subscriptions.
+
+Use `client.listWebhookDeliveries(params?)` for single cursor-paginated page queries, or `client.paginateWebhookDeliveries(options?)` for an async iterator that fetches pages on-demand.
+
+When a caller limit is specified (`limit: N`), the async iterator stops immediately upon yielding `N` items without fetching an unnecessary subsequent page, even if `nextCursor` was present on the current page:
+
+```typescript
+// Query recent delivery attempts (cursor-paginated)
+const page = await client.listWebhookDeliveries({ status: "failed", limit: 25 });
+for (const delivery of page.data) {
+  console.log(delivery.id, delivery.eventType, delivery.attempts, delivery.lastError);
+}
+
+// Or traverse history with an async iterator:
+// Stops at limit: 10 without fetching any unnecessary subsequent page
+for await (const delivery of client.paginateWebhookDeliveries({
+  status: "failed",
+  limit: 10,
+  signal: abortController.signal,
+})) {
+  console.log(`[${delivery.status}] ${delivery.eventType} -> attempt ${delivery.attempts}/${delivery.maxAttempts}`);
+}
+```
 
 ### Reputation & Availability
 
@@ -619,6 +679,7 @@ The table below catalogs all 28 exported error classes, when they occur, whether
 | 502/503/504 | `TalosServerRetryableError` | `server_error` | yes | — |
 | network | `TalosTransportError` | `transport_error` | yes | `cause?: unknown` |
 | abort/timeout | `TalosTimeoutError` | `timeout_error` | yes | — |
+| retry cannot fit request deadline | `TalosDeadlineExceededError` | `deadline_exceeded` | no | `retryDelayMs`, `remainingMs`, and final response metadata |
 
 Every error also exposes:
 
@@ -832,6 +893,34 @@ switch (error.code) {
 
 ---
 
+### Synthetic event-stream fault fixtures
+
+The SDK exports a deterministic, network-free fixture kit for exercising SSE
+and reconnect behavior:
+
+```typescript
+import {
+  getEventStreamFaultFixture,
+  createSyntheticEventStreamTransport,
+  TalosEventStream,
+} from "@talos-protocol/sdk";
+
+const fixture = getEventStreamFaultFixture("reconnect-race")!;
+const transport = createSyntheticEventStreamTransport(fixture);
+const stream = new TalosEventStream("http://synthetic.invalid", {
+  fetch: transport.fetch,
+  maxReconnectAttempts: 1,
+  jitter: false,
+});
+```
+
+The kit includes `truncated-frame`, `history-gap`, and `reconnect-race`
+fixtures. Fixtures are immutable, deterministic, and contain no secrets or
+network endpoints. History gaps expose missing numeric event IDs; reconnect
+fixtures replay synthetic frames and verify `Last-Event-ID` handling.
+
+---
+
 ### Retry policy resolution and mechanics
 
 `TalosClientOptions` supports two complementary retry systems, both validated and bounded at construction:
@@ -849,6 +938,10 @@ switch (error.code) {
    - Parses the `Retry-After` response header via `parseRetryAfter()` on **any** status carrying it (including `503` maintenance windows per RFC 9110 §10.2.3), clamping the delay to `maxRetryAfterMs`.
    - Applies exponential backoff `baseDelayMs * 2^(attempt - 1)` bounded by `maxDelayMs`, with full random jitter.
    - Fires `onRetry` and `onError` observer callbacks for telemetry, structured logging, and APM metrics.
+   - `onRetry` receives `{ attempt, reason, nextDelayMs, delayMs, metadata, error }`.
+     `metadata` is secret-free (`code`, `status`, `isRetryable`, and optional `retryAfterMs`);
+     the compatibility `error` and `delayMs` fields are redacted, and no Authorization
+     headers, request/response bodies, payment payloads, or cause values are exposed.
 
 ```typescript
 import {
@@ -883,6 +976,11 @@ const client = new TalosClient({
     maxDelayMs: 1_000,
     retryMethods: ["GET", "HEAD", "PUT", "DELETE", "OPTIONS"],
     retryStatusCodes: [429, 500, 502, 503, 504],
+    onRetry: ({ attempt, reason, nextDelayMs, metadata }) => {
+      console.warn(
+        `[Status Retry ${attempt}] ${reason} in ${nextDelayMs}ms (${metadata.status})`,
+      );
+    },
   },
 
   // Typed-error driven policy:
@@ -893,8 +991,10 @@ const client = new TalosClient({
     baseDelayMs: 500,         // exponential backoff base delay
     maxDelayMs: 8_000,        // maximum backoff delay
     jitter: 0.25,             // ±25% random jitter
-    onRetry: ({ attempt, error, delayMs }) => {
-      console.warn(`[Retry ${attempt}] in ${delayMs}ms due to ${error.code} (${error.status})`);
+    onRetry: ({ attempt, reason, nextDelayMs, metadata }) => {
+      console.warn(
+        `[Retry ${attempt}] ${reason} in ${nextDelayMs}ms due to ${metadata.code} (${metadata.status})`,
+      );
     },
   },
 
@@ -963,6 +1063,11 @@ client.getLastRateLimit(); // → { limit: 100, remaining: 99, resetAt: 1_700_00
 - `maxAttempts` is hard-capped at 8 regardless of user input.
 - Server-supplied `Retry-After` is honored (clamped to `maxRetryAfterMs`).
 - Exponential backoff `baseDelayMs * 2^(attempt-1)` capped at `maxDelayMs`.
+- `timeoutMs` is the total request budget, including retry waits. If a retry
+  delay is equal to or longer than the remaining budget, the SDK stops without
+  sleeping or issuing another request and throws `TalosDeadlineExceededError`.
+  The error carries the final response's status, body, sanitized headers,
+  request ID, retry hint, and parsed data.
 - Validation/auth/conflict/payment errors are **never** retried.
 
 ### Privacy
