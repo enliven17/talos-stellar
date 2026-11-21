@@ -106,6 +106,25 @@ describe("outbox/store — fail", () => {
   });
 });
 
+describe("outbox/store — quarantine", () => {
+  const summary = { schemaVersion: 2, issueCount: 1, issues: [{ path: "amount", code: "invalid_type", message: "bad" }], truncated: false };
+
+  it("moves a leased event to quarantined with the summary and schema version", async () => {
+    const chain = chainable([{ id: "evt_1", eventType: "x", status: "quarantined" }]);
+    mockDb.update.mockReturnValue(chain);
+    const result = await store.quarantine("evt_1", "l1", summary);
+    expect(result?.status).toBe("quarantined");
+    expect(chain.set).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "quarantined", schemaVersion: 2, validationSummary: summary, leaseId: null }),
+    );
+  });
+
+  it("returns null when the lease was lost", async () => {
+    mockDb.update.mockReturnValue(chainable([]));
+    expect(await store.quarantine("evt_1", "stale", summary)).toBeNull();
+  });
+});
+
 describe("outbox/store — requeue", () => {
   it("resets a dead_letter event to pending", async () => {
     mockDb.update.mockReturnValue(chainable([{ id: "evt_1", status: "pending", attempts: 0 }]));
