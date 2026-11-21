@@ -24,6 +24,11 @@ vi.mock("@/db", () => ({
   db: mocks.mockDb,
 }));
 
+// Ledger writes are covered by reputation-ledger tests.
+vi.mock("@/lib/reputation-ledger", () => ({
+  ingestJobToLedger: vi.fn().mockResolvedValue(null),
+}));
+
 vi.mock("@/lib/auth", () => ({
   resolveTalosFromRequest: vi.fn(),
   verifyAgentApiKey: vi.fn(),
@@ -187,9 +192,10 @@ describe("Async Jobs Revenue Recording Unit Tests", () => {
     });
 
     it("records revenue on completing a previously pending job", async () => {
-      // resolveTalosFromRequest is mocked, so only the job fetch is needed
+      // resolveTalosFromRequest is mocked: job fetch, then caller TALOS status
       mockDb.select
-        .mockReturnValueOnce(mockSelectChain([mockJob]));
+        .mockReturnValueOnce(mockSelectChain([mockJob]))
+        .mockReturnValueOnce(mockSelectChain([{ id: "agent_1", status: "Active" }])); // caller TALOS status
 
       const mockTxUpdate = vi.fn().mockReturnValue({
         set: vi.fn().mockReturnValue({
@@ -255,7 +261,8 @@ describe("Async Jobs Revenue Recording Unit Tests", () => {
       };
 
       mockDb.select
-        .mockReturnValueOnce(mockSelectChain([mockAlreadyCompletedJob]));
+        .mockReturnValueOnce(mockSelectChain([mockAlreadyCompletedJob]))
+        .mockReturnValueOnce(mockSelectChain([{ id: "agent_1", status: "Active" }])); // caller TALOS status
 
       const mockTxUpdate = vi.fn().mockReturnValue({
         set: vi.fn().mockReturnValue({
@@ -299,8 +306,8 @@ describe("Async Jobs Revenue Recording Unit Tests", () => {
       // Both workers may read "pending" before either transaction commits.
       // The UPDATE includes status='pending', so the loser returns no row.
       mockDb.select
-        .mockReturnValueOnce(mockSelectChain([{ id: "agent_1" }]))
-        .mockReturnValueOnce(mockSelectChain([mockJob]));
+        .mockReturnValueOnce(mockSelectChain([mockJob]))
+        .mockReturnValueOnce(mockSelectChain([{ id: "agent_1", status: "Active" }])); // caller TALOS status
 
       const mockTxUpdate = vi.fn().mockReturnValue({
         set: vi.fn().mockReturnValue({

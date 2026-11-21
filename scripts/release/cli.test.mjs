@@ -1,3 +1,4 @@
+// To run this smoke test locally: node --test scripts/release/cli.test.mjs
 // Integration test: drives the real cli.mjs against a throwaway git repo
 // scaffolded to mirror the actual monorepo layout (web/, packages/sdk/,
 // packages/prime-agent/, contracts/*), exercising git + filesystem together
@@ -147,6 +148,100 @@ test("plan fails loudly when contracts crates have divergent versions", () => {
 
     const err = runCliExpectFailure(repo, ["plan"]);
     assert.match(err.stderr, /divergent versions/);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+
+test("rollback command explicitly fails closed on ambiguous or malformed inputs", () => {
+  const repo = scaffoldRepo();
+  try {
+    const err1 = runCliExpectFailure(repo, ["rollback"]);
+    assert.match(err1.stderr, /Ambiguous or malformed rollback input/);
+
+    const err2 = runCliExpectFailure(repo, ["rollback", "web-v0.1.0", "sdk-v0.1.0"]);
+    assert.match(err2.stderr, /Ambiguous or malformed rollback input/);
+
+    const err3 = runCliExpectFailure(repo, ["rollback", "--tag=web-v0.1.0"]);
+    assert.match(err3.stderr, /Ambiguous or malformed rollback input/);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("rollback command explicitly fails on missing tag", () => {
+  const repo = scaffoldRepo();
+  const remoteDir = mkdtempSync(path.join(tmpdir(), "release-cli-remote-"));
+  try {
+    sh(remoteDir, "git", ["init", "--bare", "-q"]);
+    sh(repo, "git", ["remote", "add", "origin", remoteDir]);
+    const err = runCliExpectFailure(repo, ["rollback", "nonexistent-v0.1.0"]);
+    assert.match(err.stderr, /Rollback failed/);
+    assert.match(err.stderr, /Please verify the tag exists/);
+    // Ensure no secrets or sensitive info is logged in the error
+    assert.doesNotMatch(err.stderr, /fatal: /i); // Ensure raw git output isn't dumped
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(remoteDir, { recursive: true, force: true });
+  }
+});
+
+test("rollback command positive test (successful rollback)", () => {
+  const repo = scaffoldRepo();
+  const remoteDir = mkdtempSync(path.join(tmpdir(), "release-cli-remote-"));
+  try {
+    sh(remoteDir, "git", ["init", "--bare", "-q"]);
+    sh(repo, "git", ["remote", "add", "origin", remoteDir]);
+
+    runCli(repo, ["plan"]);
+    sh(repo, "git", ["add", "-A"]);
+    sh(repo, "git", ["commit", "-q", "-m", "chore(release): cut baseline"]);
+    // Since it's a bare remote, we need to push a branch first before tags sometimes, but let's push master
+    sh(repo, "git", ["push", "origin", "HEAD:refs/heads/main"]);
+    runCli(repo, ["tag", "--create"]);
+    sh(repo, "git", ["push", "origin", "--tags"]);
+
+    // Tag should exist locally and remotely
+    const tagsBefore = sh(repo, "git", ["tag", "--list"]).trim().split("\n");
+    assert.ok(tagsBefore.includes("web-v0.1.0"));
+
+    // Run rollback
+    const out = runCli(repo, ["rollback", "web-v0.1.0"]);
+    assert.match(out, /Successfully rolled back tag: web-v0.1.0/);
+    assert.match(out, /delete the GitHub Release/i);
+    assert.match(out, /open a new PR to revert the manifest\/changelog commit/i);
+
+    // Tag should be deleted locally
+    const tagsAfter = sh(repo, "git", ["tag", "--list"]).trim();
+    assert.ok(!tagsAfter.includes("web-v0.1.0"));
+
+    // Tag should be deleted remotely
+    const remoteTagsAfter = sh(remoteDir, "git", ["tag", "--list"]).trim();
+    assert.ok(!remoteTagsAfter.includes("web-v0.1.0"));
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(remoteDir, { recursive: true, force: true });
+  }
+});
+
+test("rollback command fails if git dependency is missing", () => {
+  const repo = scaffoldRepo();
+  try {
+    // We can simulate missing dependency by pointing PATH to an empty dir
+    const emptyDir = mkdtempSync(path.join(tmpdir(), "empty-bin-"));
+    try {
+      execFileSync(process.execPath, [CLI, "rollback", "web-v0.1.0"], {
+        cwd: repo,
+        env: { ...process.env, PATH: emptyDir },
+        encoding: "utf8"
+      });
+      assert.fail("expected cli to exit with non-zero status");
+    } catch (err) {
+      assert.match(err.stderr, /Missing dependency. 'git' is required/);
+    } finally {
+      rmSync(emptyDir, { recursive: true, force: true });
+    }
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

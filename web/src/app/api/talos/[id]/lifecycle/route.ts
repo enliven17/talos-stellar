@@ -9,6 +9,7 @@
  * actions additionally require an explicit `confirmed: true` in the payload, so
  * a replayed or CSRF-shaped request cannot retire an agent by accident.
  */
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { and, desc, eq, inArray } from "drizzle-orm";
 
@@ -19,6 +20,7 @@ import { LIFECYCLE_EVENTS, emitLifecycleEvent, readLifecycleEvents } from "@/lib
 import {
   LifecycleError,
   allowedActions,
+  evaluateLifecycleChecklist,
   evaluateTransition,
   toLegacyStatus,
   toLifecycleState,
@@ -106,7 +108,7 @@ async function loadAgent(id: string) {
 
 // ── GET ──────────────────────────────────────────────────────────────
 
-export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+async function _GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
 
   try {
@@ -166,6 +168,17 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         .limit(100),
     ]);
 
+    const checklist = evaluateLifecycleChecklist({
+      talosId: id,
+      state,
+      actor: { id: viewer || "anonymous", roles: viewerRoles },
+      agentOnline: Boolean(agent.agentOnline),
+      inFlightJobs: inFlightJobs.length,
+      pendingProposalsCount: pendingProposals.length,
+      hasWallet: Boolean(agent.agentWalletId),
+      retiredAt: agent.status === "Retired" ? agent.updatedAt : null,
+    });
+
     return Response.json(
       {
         talosId: id,
@@ -183,6 +196,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         viewerRoles,
         inFlightJobs: inFlightJobs.length,
         pendingProposals,
+        checklist,
         run,
         events,
         nextCursor,
@@ -196,7 +210,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
 // ── POST ─────────────────────────────────────────────────────────────
 
-export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+async function _POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
 
   try {
@@ -303,7 +317,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
       await db
         .update(tlsTalos)
-        .set({ status: toLegacyStatus(decision.to) })
+        .set({ status: decision.to === "retiring" ? "Draining" : toLegacyStatus(decision.to) })
         .where(eq(tlsTalos.id, id));
 
       return Response.json(
@@ -384,3 +398,6 @@ async function hasApprovedProposal(
 
   return row.length > 0;
 }
+
+export const GET = withRequestId(_GET);
+export const POST = withRequestId(_POST);

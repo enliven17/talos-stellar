@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPatrons, tlsApprovals, tlsActivities } from "@/db/schema";
@@ -53,24 +54,56 @@ export { getSseMetrics } from "@/lib/sse-pool";
 const POLL_INTERVAL_MS = 8_000;
 const PING_INTERVAL_MS = 30_000;
 
+const DEFAULT_EVENT_LIMIT = 100;
+const MAX_EVENT_LIMIT = 500;
+
+function resolveLimit(value: string | null):
+  | { ok: true; limit: number }
+  | { ok: false; message: string } {
+  if (value === null) {
+    return { ok: true, limit: DEFAULT_EVENT_LIMIT };
+  }
+  if (!/^\d+$/.test(value)) {
+    return { ok: false, message: "limit must be a positive integer" };
+  }
+  const parsed = Number(value);
+  if (parsed === 0) {
+    return { ok: false, message: "limit must be a positive integer" };
+  }
+  if (parsed > MAX_EVENT_LIMIT) {
+    return { ok: false, message: `limit must not exceed ${MAX_EVENT_LIMIT}` };
+  }
+  return { ok: true, limit: parsed };
+}
+
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export async function GET(request: NextRequest) {
+async function _GET(request: NextRequest) {
   const wallet = request.nextUrl.searchParams.get("wallet");
   if (!wallet) {
     return new Response("wallet parameter required", { status: 400 });
   }
 
+  const limitParam = request.nextUrl.searchParams.get("limit");
+  const limitResult = resolveLimit(limitParam);
+  if (!limitResult.ok) {
+    return new Response(limitResult.message, { status: 400 });
+  }
+  const eventLimit = limitResult.limit;
+
+  const walletAddr = wallet;
+
   // Reject before allocating any resources when the pool is full.
-  if (!acquireConnection()) {
+  // The wallet is passed as the per-key so the pool can also enforce a
+  // per-client cap (SSE_MAX_CONNECTIONS_PER_KEY) on top of the global cap.
+  if (!acquireConnection(walletAddr)) {
     return new Response("Too many SSE connections — retry later", {
       status: 503,
       headers: { "Retry-After": "10", "Content-Type": "text/plain" },
     });
   }
 
-  const walletAddr = wallet;
 
   // Resolve TALOS IDs once per connection, not on every poll tick.
   //
@@ -84,7 +117,8 @@ export async function GET(request: NextRequest) {
       db
         .select({ talosId: tlsPatrons.talosId })
         .from(tlsPatrons)
-        .where(eq(tlsPatrons.stellarPublicKey, walletAddr)),
+        .where(eq(tlsPatrons.stellarPublicKey, walletAddr))
+        .limit(MAX_EVENT_LIMIT),
       db
         .select({ id: tlsTalos.id })
         .from(tlsTalos)
@@ -95,7 +129,8 @@ export async function GET(request: NextRequest) {
             eq(tlsTalos.investorPublicKey, walletAddr),
             eq(tlsTalos.treasuryPublicKey, walletAddr),
           ),
-        ),
+        )
+        .limit(MAX_EVENT_LIMIT),
     ]);
 
     return [
@@ -103,23 +138,26 @@ export async function GET(request: NextRequest) {
         ...patronRows.map((r) => r.talosId),
         ...ownerRows.map((r) => r.id),
       ]),
-    ];
+    ].slice(0, MAX_EVENT_LIMIT);
   }
 
   const stream = new ReadableStream({
     async start(controller) {
       let isClosed = false;
+      let eventsSent = 0;
       const pollTimer = setInterval(poll, POLL_INTERVAL_MS);
       const pingTimer = setInterval(() => {
         if (!send("ping", { ts: Date.now() })) cleanup();
       }, PING_INTERVAL_MS);
 
       function send(event: string, data: unknown): boolean {
-        if (isClosed) return false;
+        if (isClosed || eventsSent >= eventLimit) return false;
         try {
           controller.enqueue(
             `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`,
           );
+          eventsSent++;
+          if (eventsSent >= eventLimit) cleanup();
           return true;
         } catch {
           return false;
@@ -129,7 +167,7 @@ export async function GET(request: NextRequest) {
       function cleanup() {
         if (isClosed) return;
         isClosed = true;
-        releaseConnection();
+        releaseConnection(walletAddr);
         clearInterval(pollTimer);
         clearInterval(pingTimer);
         try {
@@ -146,6 +184,7 @@ export async function GET(request: NextRequest) {
       request.signal.addEventListener("abort", cleanup);
 
       send("ping", { ts: Date.now() });
+      if (isClosed) return;
 
       let talosIds: string[] = [];
       try {
@@ -250,3 +289,5 @@ export async function GET(request: NextRequest) {
     },
   });
 }
+
+export const GET = withRequestId(_GET);

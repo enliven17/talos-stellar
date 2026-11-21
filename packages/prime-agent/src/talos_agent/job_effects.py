@@ -113,6 +113,38 @@ class EffectRecord:
     lease_owner: str
 
 
+class ReplayAuditAction(str, Enum):
+    """Privacy-safe actions recorded for durable effect replay."""
+
+    EFFECT_PREPARED = "effect_prepared"
+    DISPATCH_CLAIMED = "dispatch_claimed"
+    DISPATCH_SUCCEEDED = "dispatch_succeeded"
+    DISPATCH_RECONCILED = "dispatch_reconciled"
+    DISPATCH_FAILED = "dispatch_failed"
+    DISPATCH_CONFLICT = "dispatch_conflict"
+    OPERATOR_REQUEUED = "operator_requeued"
+
+
+@dataclass(frozen=True)
+class ReplayAuditRecord:
+    """One append-only audit entry for durable effect replay."""
+
+    audit_id: str
+    effect_id: str
+    job_id: str
+    action: ReplayAuditAction
+    from_state: str | None
+    to_state: str
+    attempt_count: int
+    error_code: str | None
+    actor: str
+    created_at: str
+
+
+_AUDIT_ACTIONS = {action.value for action in ReplayAuditAction}
+_ACTOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -229,6 +261,61 @@ class JobEffectStore:
                 talos_id=self.owner_talos_id,
             )
             raise JobCapacityError(f"{table} reached its configured record limit")
+
+    def _validate_actor(self, actor: str) -> str:
+        if not isinstance(actor, str) or not _ACTOR_RE.fullmatch(actor):
+            raise JobValidationError("audit actor must be a valid bounded identifier")
+        return actor
+
+    def _append_replay_audit(
+        self,
+        *,
+        effect_id: str,
+        job_id: str,
+        action: ReplayAuditAction,
+        to_state: str,
+        attempt_count: int,
+        actor: str,
+        from_state: str | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        """Insert one audit row. Caller must already hold a write transaction.
+
+        Never persists payloads, results, digests, secrets, or exception text.
+        """
+        if action.value not in _AUDIT_ACTIONS:
+            raise JobValidationError("unknown replay audit action")
+        actor = self._validate_actor(actor)
+        if error_code is not None and not _ERROR_CODE_RE.fullmatch(error_code):
+            raise JobValidationError("error code is invalid")
+        effect_id = _validate_identifier(effect_id, "effect ID")
+        job_id = _validate_identifier(job_id, "job ID")
+        if from_state is not None:
+            _validate_text(from_state, "from_state", max_bytes=64)
+        _validate_text(to_state, "to_state", max_bytes=64)
+        if not isinstance(attempt_count, int) or isinstance(attempt_count, bool) or attempt_count < 0:
+            raise JobValidationError("attempt_count must be a non-negative integer")
+        self._conn.execute(
+            """
+            INSERT INTO job_effect_replay_audit (
+                audit_id, owner_talos_id, effect_id, job_id, action,
+                from_state, to_state, attempt_count, error_code, actor, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                self.owner_talos_id,
+                effect_id,
+                job_id,
+                action.value,
+                from_state,
+                to_state,
+                attempt_count,
+                error_code,
+                actor,
+                _iso(_utcnow()),
+            ),
+        )
 
     def ingest(self, job: dict[str, Any]) -> InboxRecord:
         job_id = _validate_identifier(job.get("id"), "job ID")
@@ -475,6 +562,15 @@ class JobEffectStore:
                     job_id,
                 ),
             )
+            self._append_replay_audit(
+                effect_id=effect_id,
+                job_id=job_id,
+                action=ReplayAuditAction.EFFECT_PREPARED,
+                from_state=None,
+                to_state=EffectState.PENDING.value,
+                attempt_count=0,
+                actor="system:prepare",
+            )
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -546,18 +642,26 @@ class JobEffectStore:
                     ),
                 ).fetchone()
                 if updated:
-                    claimed.append(
-                        EffectRecord(
-                            effect_id=updated["effect_id"],
-                            job_id=updated["job_id"],
-                            state=EffectState(updated["state"]),
-                            result=_decode_object(updated["result_json"], "job result"),
-                            result_digest=updated["result_digest"],
-                            fencing_token=updated["fencing_token"],
-                            attempt_count=updated["attempt_count"],
-                            lease_owner=updated["lease_owner"],
-                        )
+                    record = EffectRecord(
+                        effect_id=updated["effect_id"],
+                        job_id=updated["job_id"],
+                        state=EffectState(updated["state"]),
+                        result=_decode_object(updated["result_json"], "job result"),
+                        result_digest=updated["result_digest"],
+                        fencing_token=updated["fencing_token"],
+                        attempt_count=updated["attempt_count"],
+                        lease_owner=updated["lease_owner"],
                     )
+                    self._append_replay_audit(
+                        effect_id=record.effect_id,
+                        job_id=record.job_id,
+                        action=ReplayAuditAction.DISPATCH_CLAIMED,
+                        from_state=None,
+                        to_state=EffectState.DISPATCHING.value,
+                        attempt_count=record.attempt_count,
+                        actor=f"dispatcher:{worker_id}",
+                    )
+                    claimed.append(record)
             self._conn.commit()
             return claimed
         except Exception:
@@ -607,6 +711,19 @@ class JobEffectStore:
                 VALUES ('commerce', ?, 'x402')
                 """,
                 (f"Fulfilled job {effect.job_id}",),
+            )
+            self._append_replay_audit(
+                effect_id=effect.effect_id,
+                job_id=effect.job_id,
+                action=(
+                    ReplayAuditAction.DISPATCH_RECONCILED
+                    if reconciled
+                    else ReplayAuditAction.DISPATCH_SUCCEEDED
+                ),
+                from_state=EffectState.DISPATCHING.value,
+                to_state=EffectState.SUCCEEDED.value,
+                attempt_count=effect.attempt_count,
+                actor=f"dispatcher:{effect.lease_owner}",
             )
             self._conn.commit()
         except Exception:
@@ -664,6 +781,16 @@ class JobEffectStore:
             )
             if updated.rowcount != 1:
                 raise JobConflictError("dispatch lease was lost before failure handling")
+            self._append_replay_audit(
+                effect_id=effect.effect_id,
+                job_id=effect.job_id,
+                action=ReplayAuditAction.DISPATCH_FAILED,
+                from_state=EffectState.DISPATCHING.value,
+                to_state=state.value,
+                attempt_count=effect.attempt_count,
+                error_code=error_code,
+                actor=f"dispatcher:{effect.lease_owner}",
+            )
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -713,6 +840,16 @@ class JobEffectStore:
                     self.owner_talos_id,
                     effect.job_id,
                 ),
+            )
+            self._append_replay_audit(
+                effect_id=effect.effect_id,
+                job_id=effect.job_id,
+                action=ReplayAuditAction.DISPATCH_CONFLICT,
+                from_state=EffectState.DISPATCHING.value,
+                to_state=EffectState.CONFLICT.value,
+                attempt_count=effect.attempt_count,
+                error_code="remote_result_conflict",
+                actor=f"dispatcher:{effect.lease_owner}",
             )
             self._conn.commit()
         except Exception:
@@ -834,6 +971,43 @@ class JobEffectStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def audit_trail(
+        self,
+        *,
+        effect_id: str | None = None,
+        job_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return privacy-safe replay audit metadata (no payloads or results)."""
+        if limit < 1 or limit > 200:
+            raise JobValidationError("audit trail limit must be between 1 and 200")
+        if effect_id is None and job_id is None:
+            raise JobValidationError("effect_id or job_id is required for audit trail")
+        params: list[object] = [self.owner_talos_id]
+        where = "owner_talos_id = ?"
+        if effect_id is not None:
+            effect_id = _validate_identifier(effect_id, "effect ID")
+            where += " AND effect_id = ?"
+            params.append(effect_id)
+        if job_id is not None:
+            job_id = _validate_identifier(job_id, "job ID")
+            where += " AND job_id = ?"
+            params.append(job_id)
+        params.append(limit)
+        rows = self._conn.execute(
+            f"""
+            SELECT audit_id, effect_id, job_id, action, from_state, to_state,
+                   attempt_count, error_code, actor, created_at
+            FROM job_effect_replay_audit
+            WHERE {where}
+            ORDER BY created_at ASC, audit_id ASC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
     def requeue(self, effect_id: str, *, expected_attempt: int) -> dict[str, Any]:
         effect_id = _validate_identifier(effect_id, "effect ID")
         if expected_attempt < 0:
@@ -866,6 +1040,7 @@ class JobEffectStore:
                 EffectState.DEAD.value,
             }:
                 raise JobStateError("only retryable, indeterminate, or dead effects can be requeued")
+            prior_state = row["state"]
             self._conn.execute(
                 """
                 UPDATE job_effect_outbox
@@ -882,6 +1057,15 @@ class JobEffectStore:
                     self.owner_talos_id,
                     expected_attempt,
                 ),
+            )
+            self._append_replay_audit(
+                effect_id=effect_id,
+                job_id=row["job_id"],
+                action=ReplayAuditAction.OPERATOR_REQUEUED,
+                from_state=prior_state,
+                to_state=EffectState.PENDING.value,
+                attempt_count=expected_attempt,
+                actor="operator:requeue",
             )
             self._conn.commit()
         except Exception:

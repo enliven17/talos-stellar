@@ -1,0 +1,19 @@
+[package]
+name = "admin-controls"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Shared timelock and guardian helpers for Talos Protocol contracts"
+
+[lib]
+crate-type = ["rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+soroban-sdk = { workspace = true, features = ["alloc"] }

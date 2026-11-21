@@ -21,12 +21,12 @@ breaker that stops cascading failures when a provider is degraded.
 
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
-import re
-import unicodedata
+import math
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
+from urllib.parse import urlsplit
 
 import httpx
 from tenacity import (
@@ -42,6 +42,10 @@ from talos_agent.circuit_breaker import (
     ProviderCircuitBreaker,
     cb_registry,
 )
+from talos_agent.redact import (
+    redact_text as _sanitize_response_text,
+    redact_value as _strip_control_chars,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,20 +54,9 @@ MAX_ATTEMPTS = 3
 WAIT_INITIAL = 1.0
 WAIT_MAX = 10.0
 LOG_RESPONSE_SUMMARY_MAX_CHARS = 1024
-SECRET_FIELD_NAMES = {
-    "access_token",
-    "refresh_token",
-    "api_key",
-    "apikey",
-    "apiKey",
-    "authorization",
-    "auth",
-    "token",
-    "secret",
-    "password",
-    "private_key",
-    "privateKey",
-}
+
+DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
+MAX_TOOL_TIMEOUT_SECONDS = 300.0
 
 T = TypeVar("T")
 
@@ -81,46 +74,48 @@ class RetryableHTTPError(Exception):
         super().__init__(f"HTTP {response.status_code} from {url}")
 
 
-def _sanitize_json_value(value: object) -> object:
-    if isinstance(value, dict):
-        return {
-            key: ("[REDACTED]" if key.lower() in SECRET_FIELD_NAMES else _sanitize_json_value(val))
-            for key, val in value.items()
+class ToolTimeoutError(Exception):
+    """Raised when a tool call exceeds its execution deadline."""
+
+    def __init__(self, tool_name: str, timeout: float):
+        self.tool_name = tool_name
+        self.timeout = timeout
+        self.timed_out = True
+        self.result = {
+            "status": "timeout",
+            "tool_name": tool_name,
+            "timeout_seconds": timeout,
         }
-    if isinstance(value, list):
-        return [_sanitize_json_value(item) for item in value]
-    return value
-
-_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+        super().__init__(f"Tool {tool_name!r} timed out after {timeout:g}s")
 
 
-def _strip_control_chars(text: str) -> str:
-    """Neutralize CR/LF and other control chars to prevent log injection."""
-    return _CONTROL_CHAR_RE.sub(" ", text)
+class ResponseTooLargeError(Exception):
+    """Raised when an API response body exceeds the configured size cap.
 
-def _sanitize_response_text(text: str) -> str:
-    normalized = _strip_control_chars(unicodedata.normalize("NFC", text))
-    try:
-        payload = json.loads(normalized)
-    except Exception:
-        sanitized = normalized
-    else:
-        sanitized = json.dumps(_sanitize_json_value(payload), ensure_ascii=False)
+    Privacy contract: this error never includes the response body, headers,
+    or any content from the response.  Only the sanitised URL path, the
+    measured byte count, and the configured limit are recorded, so secrets,
+    seeds, payment proofs, and sensitive media cannot leak via error logs.
+    """
 
-    sanitized = re.sub(
-        r"(?i)(Bearer|Token)\s+[A-Za-z0-9\-\._~\+/]+=*",
-        "[REDACTED]",
-        sanitized,
-    )
-    sanitized = re.sub(r"S[A-Z2-7]{55}", "[REDACTED]", sanitized)
-    sanitized = re.sub(
-        r"""(?i)(?:api[_-]?key|token|secret|authorization|password|private[_-]?key)["'`]?\s*[:=]\s*["'`]([^"'`\s]+)["'`]?""",
-        lambda m: f"{m.group(0).split(m.group(1))[0]}[REDACTED]",
-        sanitized,
-    )
-    if len(sanitized) > LOG_RESPONSE_SUMMARY_MAX_CHARS:
-        return sanitized[: LOG_RESPONSE_SUMMARY_MAX_CHARS - 1] + "…"
-    return sanitized
+    def __init__(self, url: str, actual_bytes: int, limit_bytes: int) -> None:
+        # Store only the path component — host/credentials are stripped.
+        try:
+            parts = urlsplit(url)
+            self.url_path: str = parts.path or url
+        except ValueError:
+            self.url_path = "<unknown>"
+        self.actual_bytes: int = actual_bytes
+        self.limit_bytes: int = limit_bytes
+        super().__init__(
+            f"Response body too large: {actual_bytes} bytes exceeds limit of "
+            f"{limit_bytes} bytes (path={self.url_path!r})"
+        )
+
+
+# _sanitize_json_value, _strip_control_chars, and _sanitize_response_text are
+# imported from talos_agent.redact above and remain available for callers that
+# reference them via this module (backward-compatible aliases).
 
 
 def _extract_safe_response_summary(response: httpx.Response) -> str | None:
@@ -194,9 +189,55 @@ def _retry_policy() -> AsyncRetrying:
     )
 
 
+def validate_tool_timeout(timeout: float | None) -> float:
+    """Validate a tool timeout against safe bounds."""
+    if timeout is None:
+        return DEFAULT_TOOL_TIMEOUT_SECONDS
+    try:
+        parsed = float(timeout)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("tool timeout must be a number") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ValueError("tool timeout must be a positive finite number")
+    if parsed > MAX_TOOL_TIMEOUT_SECONDS:
+        raise ValueError(
+            f"tool timeout cannot exceed {MAX_TOOL_TIMEOUT_SECONDS:g} seconds"
+        )
+    return parsed
+
+
+def _record_tool_timeout_metric(tool_name: str, timeout: float) -> None:
+    # Keep metrics free of operation args/response bodies.
+    logger.warning(
+        "Tool execution timeout; tool_name=%s timeout_seconds=%.3f",
+        _strip_control_chars(str(tool_name)),
+        timeout,
+    )
+
+
+async def call_with_tool_timeout(
+    operation: Callable[[], Awaitable[T]],
+    *,
+    tool_name: str,
+    timeout: float | None = None,
+) -> T:
+    """Run an external tool call under a bounded execution deadline.
+
+    Shared by legacy and routed agent loops; ``asyncio.wait_for`` cancels the
+    underlying operation when the deadline elapses and on caller cancellation.
+    """
+    deadline = validate_tool_timeout(timeout)
+    try:
+        return await asyncio.wait_for(operation(), timeout=deadline)
+    except asyncio.TimeoutError:
+        _record_tool_timeout_metric(tool_name, deadline)
+        raise ToolTimeoutError(tool_name, deadline) from None
+
+
 async def request_with_retry(
     send: Callable[[], Awaitable[httpx.Response]],
     provider: str | None = None,
+    timeout: float | None = None,
 ) -> httpx.Response:
     """Execute an httpx call with bounded retries on transient failures.
 
@@ -226,6 +267,7 @@ async def request_with_retry(
     Non-retryable responses (including other 4xx/5xx) are returned
     so callers can inspect status_code as before.
     """
+    timeout = validate_tool_timeout(timeout)
     breaker: ProviderCircuitBreaker | None = None
     if provider:
         breaker = cb_registry.get(provider)
@@ -236,7 +278,11 @@ async def request_with_retry(
     async for attempt in _retry_policy():
         with attempt:
             try:
-                response = await send()
+                response = await call_with_tool_timeout(
+                    send,
+                    tool_name=provider or "http_request",
+                    timeout=timeout,
+                )
                 if response.status_code in RETRYABLE_STATUSES:
                     raise RetryableHTTPError(response)
             except Exception:
@@ -255,6 +301,7 @@ async def request_with_retry(
 async def call_with_retry(
     operation: Callable[[], Awaitable[T]],
     provider: str | None = None,
+    timeout: float | None = None,
 ) -> T:
     """Retry an arbitrary awaitable on transient external failures.
 
@@ -275,6 +322,7 @@ async def call_with_retry(
     CircuitBreakerOpen
         If the circuit is OPEN and *provider* was given.
     """
+    timeout = validate_tool_timeout(timeout)
     breaker: ProviderCircuitBreaker | None = None
     if provider:
         breaker = cb_registry.get(provider)
@@ -285,7 +333,11 @@ async def call_with_retry(
     async for attempt in _retry_policy():
         with attempt:
             try:
-                return await operation()
+                return await call_with_tool_timeout(
+                    operation,
+                    tool_name=provider or "llm_call",
+                    timeout=timeout,
+                )
             except Exception:
                 if breaker:
                     await breaker.record_failure()

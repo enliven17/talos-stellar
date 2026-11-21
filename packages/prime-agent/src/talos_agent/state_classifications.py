@@ -786,6 +786,31 @@ register_field("adapters.storage.VerifiedCheckpointStorage.retention_count", _r(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Stellar retry failure classification (derived — never checkpointed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+register_field("payments.stellar_retry.StellarFailure", _r(
+    StateCategory.DERIVED, "low", "runtime only",
+    None, "rebuilt",
+    "Per-call Stellar retry classification; recomputed from the failure,"
+    " never checkpointed.",
+))
+register_field("payments.stellar_retry.StellarFailure.classification", _r(
+    StateCategory.DERIVED, "low", "runtime only",
+    "retryable|rate_limited|indeterminate|permanent|unknown", "rebuilt",
+))
+register_field("payments.stellar_retry.StellarFailure.code", _r(
+    StateCategory.DERIVED, "low", "runtime only",
+    "bounded code matching [a-z][a-z0-9_]{0,63}", "rebuilt",
+))
+register_field("payments.stellar_retry.StellarFailure.message", _r(
+    StateCategory.DERIVED, "none", "runtime only",
+    "constant per class; never interpolates upstream text", "rebuilt",
+    "Privacy-safe message table; contains no seeds, proofs, or secrets.",
+))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # FORBIDDEN fields — must never appear in checkpoints, logs, or exports
 # ─────────────────────────────────────────────────────────────────────────────
 

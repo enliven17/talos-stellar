@@ -3,13 +3,32 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field, PrivateAttr
+from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from talos_agent.circuit_breaker import CircuitBreakerConfig
+from talos_agent.http import validate_tool_timeout
+
 APP_DIR = Path.home() / ".talos-agent"
+
+_CONFIG_SECRET_FIELDS = re.compile(
+    r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|secret|password|private[_-]?key|seed|mnemonic|signature|payment)"
+)
+_CONFIG_SECRET_VALUE = re.compile(r"(?i)(input_value\s*=\s*)(['\"])(.*?)(\2)")
+
+
+def safe_config_error(error: BaseException) -> str:
+    """Return a useful configuration error without exposing secret values."""
+    text = str(error)
+    if _CONFIG_SECRET_FIELDS.search(text):
+        text = _CONFIG_SECRET_VALUE.sub(r"\1'[REDACTED]'", text)
+    return text or "configuration could not be loaded"
 
 
 def _json_config_source() -> dict:
@@ -56,8 +75,16 @@ class Settings(BaseSettings):
 
     @property
     def llm_api_key(self) -> str:
+        override = self.__dict__.get("_llm_api_key_override")
+        if override is not None:
+            return override
         groq_key = self.secret_value("groq_api_key")
         return groq_key or self.secret_value("openai_api_key")
+
+    @llm_api_key.setter
+    def llm_api_key(self, value: str) -> None:
+        """Allow runtime credential revocation (lifecycle pause/shutdown)."""
+        self.__dict__["_llm_api_key_override"] = value
 
     @property
     def llm_model(self) -> str:
@@ -66,6 +93,16 @@ class Settings(BaseSettings):
     @property
     def llm_base_url(self) -> str | None:
         return "https://api.groq.com/openai/v1" if self.secret_value("groq_api_key") else None
+
+    @property
+    def stellar_usdc_issuer(self) -> str:
+        env_val = os.getenv("STELLAR_USDC_ISSUER") or os.getenv("NEXT_PUBLIC_STELLAR_USDC_ISSUER")
+        return env_val.strip() if env_val else ""
+
+    @property
+    def stellar_network(self) -> str:
+        env_val = os.getenv("STELLAR_NETWORK") or os.getenv("NEXT_PUBLIC_STELLAR_NETWORK")
+        return env_val.strip().lower() if env_val else "testnet"
 
     # Model routing (Issue #233) — disabled by default, backward compatible
     model_routing_enabled: bool = Field(
@@ -100,6 +137,46 @@ class Settings(BaseSettings):
         "checks budgets before allowing further calls.",
     )
 
+        # Backup retention policy (Issue #543) — disabled by default, backward compatible
+    backup_retention_enabled: bool = Field(
+        default=False,
+        description="Prune old local backup artifacts after each successful backup, "
+        "according to backup_retention_max_count / backup_retention_max_age_days. "
+        "When disabled (default), backups accumulate forever (legacy behavior).",
+    )
+    backup_retention_max_count: int = Field(
+        default=10,
+        ge=0,
+        le=100000,
+        description="Maximum number of backup artifacts to keep per agent scope. "
+        "0 means unlimited (age-based pruning only, if enabled).",
+    )
+    backup_retention_max_age_days: int = Field(
+        default=30,
+        ge=0,
+        le=36500,
+        description="Maximum age in days of a backup artifact before it is eligible "
+        "for pruning. 0 means unlimited (count-based pruning only, if enabled).",
+    )
+
+
+    # API client response size cap (Issue #561)
+    # Hard upper bound on response bodies read from the Talos Web API.  Defaults
+    # to 1 MiB — large enough for any legitimate JSON payload and small enough to
+    # prevent memory exhaustion from oversized or malicious responses.
+    api_client_response_max_bytes: int = Field(
+        default=1_048_576,
+        ge=1_024,
+        le=104_857_600,
+        validation_alias="TALOS_API_CLIENT_RESPONSE_MAX_BYTES",
+        description=(
+            "Maximum bytes allowed in a Talos Web API response body. "
+            "Responses that exceed this limit are rejected with "
+            "ResponseTooLargeError before the body is decoded. "
+            "Default 1 MiB. Min 1 KiB, max 100 MiB."
+        ),
+    )
+
     # X (Twitter)
     x_username: str = ""
     x_password: str = ""
@@ -118,6 +195,35 @@ class Settings(BaseSettings):
     channel_configs: dict = Field(default_factory=dict, description="Per-channel credentials map")
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    telegram_parse_mode: str = Field(
+        default="none",
+        description="Telegram message parse mode: none, HTML, or MarkdownV2.",
+        validation_alias="TALOS_TELEGRAM_PARSE_MODE",
+    )
+
+    # Telegram send queue (opt-in; when disabled the adapter sends directly, as before).
+    # Defaults follow Telegram's documented limits: ~1 msg/s per chat, 20 msgs/min per group.
+    telegram_rate_limit_enabled: bool = Field(
+        default=False, validation_alias="TALOS_TELEGRAM_RATE_LIMIT_ENABLED"
+    )
+    telegram_min_interval_seconds: float = Field(
+        default=1.0, ge=0, le=60, validation_alias="TALOS_TELEGRAM_MIN_INTERVAL_SECONDS"
+    )
+    telegram_max_per_minute: int = Field(
+        default=20, ge=1, le=1000, validation_alias="TALOS_TELEGRAM_MAX_PER_MINUTE"
+    )
+    telegram_queue_max_size: int = Field(
+        default=1000, ge=1, le=100000, validation_alias="TALOS_TELEGRAM_QUEUE_MAX_SIZE"
+    )
+    telegram_queue_max_attempts: int = Field(
+        default=5, ge=1, le=50, validation_alias="TALOS_TELEGRAM_QUEUE_MAX_ATTEMPTS"
+    )
+    telegram_queue_max_age_seconds: float = Field(
+        default=3600.0, ge=1, le=604800, validation_alias="TALOS_TELEGRAM_QUEUE_MAX_AGE_SECONDS"
+    )
+    telegram_queue_drain_interval_seconds: float = Field(
+        default=1.0, ge=0.1, le=60, validation_alias="TALOS_TELEGRAM_QUEUE_DRAIN_INTERVAL_SECONDS"
+    )
 
     # Versioned encrypted secret rotation (opt-in for backward compatibility).
     secret_rotation_enabled: bool = Field(
@@ -145,6 +251,11 @@ class Settings(BaseSettings):
         ge=1,
         le=60000,
         validation_alias="TALOS_SECRET_DB_TIMEOUT_MS",
+    )
+    secret_store_backend: str = Field(
+        default="sqlite",
+        validation_alias="TALOS_SECRET_STORE_BACKEND",
+        description="Pluggable secret-store backend: sqlite (default) or memory",
     )
 
     # Third-party adapter capability sandbox (opt-in rollout).
@@ -196,9 +307,39 @@ class Settings(BaseSettings):
         le=1000000,
         validation_alias="TALOS_ADAPTER_MAX_INVOCATION_RECORDS",
     )
+    adapter_retry_configs: dict[str, dict] = Field(
+        default_factory=dict,
+        validation_alias="TALOS_ADAPTER_RETRY_CONFIGS",
+        description="Per-adapter retry and circuit breaker settings as JSON",
+    )
+
+    @field_validator("adapter_retry_configs")
+    @classmethod
+    def validate_adapter_retry_configs(cls, value: dict[str, dict]) -> dict[str, dict]:
+        for adapter, config in value.items():
+            if not isinstance(adapter, str) or not adapter or not isinstance(config, dict):
+                raise ValueError("adapter retry configs must map adapter names to objects")
+            try:
+                CircuitBreakerConfig.from_mapping(config)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid retry config for adapter '{adapter}'") from exc
+        return {adapter.lower(): config for adapter, config in value.items()}
 
     # Policy engine (disabled by default — backward compatible)
     policy_engine_enabled: bool = Field(default=False, description="Enable the declarative policy engine for autonomous actions")
+
+    # Demo commerce mode (Issue #879) — disabled by default.
+    # When enabled, the system prompt includes aggressive purchasing instructions
+    # ("buy immediately", demo-environment notices, BE AGGRESSIVE).
+    # Production deployments must leave this off.
+    demo_commerce_mode: bool = Field(
+        default=False,
+        description=(
+            "Emit aggressive demo-purchasing guidance in the system prompt "
+            "(buy-immediately instructions, demo-environment notice, BE AGGRESSIVE). "
+            "Off by default — safe for production. Enable only for live demos."
+        ),
+    )
 
     # Tool permission manifests (audit-only by default — backward compatible).
     # "off" disables the check entirely, "audit" evaluates and logs without
@@ -209,14 +350,80 @@ class Settings(BaseSettings):
     # Empty means "use the legacy grant set", which matches pre-manifest behaviour.
     tool_permission_grants: dict = Field(default_factory=dict, description="Operator-approved capability grants for tools")
 
+    # Dry-run mode (Issue #976) — off by default, safe for production.
+    # When enabled, all outbound write requests (API writes, transfers, social
+    # adapter posts/replies) are suppressed and recorded instead.  Read-only
+    # calls (balance queries, status checks) are not affected.
+    dry_run: bool = Field(
+        default=False,
+        validation_alias="TALOS_DRY_RUN",
+        description=(
+            "Block all external side effects and record suppressed calls. "
+            "Safe for testing full agent cycles without touching production. "
+            "Incompatible with production API keys (tls_…) unless "
+            "TALOS_DRY_RUN_ALLOW_PRODUCTION_KEYS=1 is also set."
+        ),
+    )
+    dry_run_allow_production_keys: bool = Field(
+        default=False,
+        validation_alias="TALOS_DRY_RUN_ALLOW_PRODUCTION_KEYS",
+        description=(
+            "Bypass the dry-run vs. production-key conflict guard. "
+            "Only set this if you deliberately want dry-run with a real API key "
+            "(e.g. read-only audits). Never set in normal CI."
+        ),
+    )
+
     # Agent behaviour
     agent_cycle_interval: int = Field(default=30, description="Seconds between agent cycles")
     polling_interval: int = Field(default=10, description="Seconds between API polls")
     heartbeat_interval: int = Field(default=60, description="Seconds between heartbeats")
+    scheduler_missed_run_policy: Literal["skip", "coalesce", "catch_up"] = Field(
+        default="coalesce",
+        description="How dividend scheduling handles missed intervals.",
+    )
+    scheduler_max_catch_up_runs: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Maximum dividend catch-up runs after an outage.",
+    )
     max_iterations: int = Field(default=20, description="Max tool-call iterations per cycle")
-    approval_threshold: Decimal = Field(default=Decimal("10"), description="USD threshold for auto-approval")
+    approval_threshold: Decimal = Field(default=Decimal(10), description="USD threshold for auto-approval")
     browser_headless: bool = Field(default=False, description="Run browser in headless mode")
     auto_repay_loans: bool = Field(default=False, description="Enable automatic loan repayment from treasury")
+    tool_timeout_seconds: int = Field(
+        default=30,
+        ge=1,
+        le=120,
+        validation_alias="TALOS_TOOL_TIMEOUT_SECONDS",
+        description="Maximum seconds for a single external tool call before it is cancelled.",
+    )
+
+    # Content history and research note bounds (Issue #974)
+    content_history_max_limit: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        validation_alias="TALOS_CONTENT_HISTORY_MAX_LIMIT",
+        description=(
+            "Hard cap on the limit passed to get_content_history. "
+            "LLM-provided values above this are clamped down to it, "
+            "preventing unbounded rows from entering the prompt context."
+        ),
+    )
+    research_notes_max_bytes: int = Field(
+        default=4096,
+        ge=64,
+        le=131072,
+        validation_alias="TALOS_RESEARCH_NOTES_MAX_BYTES",
+        description=(
+            "Maximum byte length of a research note stored via "
+            "save_research_notes. Longer notes are truncated and a "
+            "truncation marker is appended so downstream consumers "
+            "and the audit trail can tell the difference."
+        ),
+    )
 
     # Job leasing
     job_lease_ttl: int = Field(
@@ -257,6 +464,12 @@ class Settings(BaseSettings):
     talos_job_effect_dispatch_timeout_seconds: int = Field(default=20, ge=1, le=120)
     talos_job_effect_db_timeout_ms: int = Field(default=5_000, ge=1, le=30_000)
 
+    # A2A (Agent-to-Agent) composition timeouts
+    a2a_connect_timeout: float = Field(default=10.0, description="Seconds to wait for A2A TCP connect")
+    a2a_read_timeout: float = Field(default=30.0, description="Seconds to wait for A2A response body")
+    a2a_write_timeout: float = Field(default=10.0, description="Seconds to wait to send A2A request body")
+    a2a_pool_timeout: float = Field(default=5.0, description="Seconds to wait for A2A connection from pool")
+
     # Graceful shutdown (#182)
     shutdown_deadline: float = Field(
         default=30.0,
@@ -268,7 +481,25 @@ class Settings(BaseSettings):
 
     # Dividend distribution
     dividend_distribution_interval: int = Field(default=3600, description="Seconds between dividend distribution checks")
-    dividend_usdc_threshold: Decimal = Field(default=Decimal("100"), description="USDC threshold to trigger dividend distribution")
+    dividend_usdc_threshold: Decimal = Field(default=Decimal(100), description="USDC threshold to trigger dividend distribution")
+
+    # Deterministic replay (disabled by default for safe rollout)
+    replay_enabled: bool = Field(
+        default=False,
+        description="Enable recording of agent cycle events for deterministic replay.",
+    )
+    replay_max_events: int = Field(
+        default=500,
+        description="Maximum events to capture per cycle (excess silently dropped).",
+    )
+    replay_max_payload_bytes: int = Field(
+        default=65536,
+        description="Maximum bytes per event payload; oversized payloads are truncated.",
+    )
+    replay_keep_sessions: int = Field(
+        default=100,
+        description="Number of replay sessions to keep; oldest are pruned automatically.",
+    )
 
     # Execution replay (Issue #235) — disabled by default
     replay_enabled: bool = Field(default=False, description="Enable execution replay recording for incident analysis")

@@ -1,0 +1,40 @@
+{
+  "meta": {
+    "contract": "TalosRegistry",
+    "generator": "scripts/generate-registry-fixtures.mjs v1",
+    "kind": "Talos",
+    "note": "patron shares sum to 110, not 100 – semantic validation must fail",
+    "schema_version": 1
+  },
+  "storage_key": {
+    "id": 1,
+    "type": "Talos"
+  },
+  "value": {
+    "active": true,
+    "category": "Marketing",
+    "created_at": "1710000000",
+    "creator": "GDN5AZ5KL6ZUN4W7SLRUXA3ZXCF4V6POZPV2QKDVDHM7QAN6R54IB3BV",
+    "description": "bad shares",
+    "id": 1,
+    "kernel": {
+      "approval_threshold": "10",
+      "gtm_budget": "1000",
+      "min_patron_pulse": "100"
+    },
+    "name": "vega",
+    "patron": {
+      "creator_addr": "GDN5AZ5KL6ZUN4W7SLRUXA3ZXCF4V6POZPV2QKDVDHM7QAN6R54IB3BV",
+      "creator_share": 50,
+      "investor_addr": "GDBYLOLNZLP5FPXG3CXHHZ47I5AKETMOMV2JVQJ3UDHLIQORPKYERYJI",
+      "investor_share": 30,
+      "treasury_addr": "GATSGV2VGSVIWSMOLRMFFVTAAANHPFINBC3EPLDCJ5A753UTM5WH7V5R",
+      "treasury_share": 30
+    },
+    "pulse": {
+      "price_usd_cents": "100",
+      "token_symbol": "VEGA",
+      "total_supply": "1000000"
+    }
+  }
+}

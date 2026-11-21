@@ -23,6 +23,13 @@ export function isVersionedPath(pathname: string): boolean {
 }
 
 export function getVersionConfig(version: string): ApiVersionConfig | undefined {
+  // `version` may originate from an untrusted client header (Accept-Version).
+  // A plain object lookup would resolve inherited keys like "constructor" or
+  // "toString" to a truthy, non-ApiVersionConfig value — guard with an own-
+  // property check so only explicitly registered versions ever match.
+  if (!Object.prototype.hasOwnProperty.call(SUPPORTED_VERSIONS, version)) {
+    return undefined;
+  }
   return SUPPORTED_VERSIONS[version];
 }
 
@@ -54,8 +61,13 @@ export function addVersionHeaders(
   versionInfo: { version: string; config: ApiVersionConfig },
 ): void {
   headers.set("X-API-Version", versionInfo.version);
-  if (versionInfo.config.deprecated && versionInfo.config.sunset) {
+  // `sunset` is optional metadata on top of `deprecated` — a version marked
+  // deprecated without a sunset date must still surface as deprecated so
+  // operators can't silently misconfigure this into a no-op.
+  if (versionInfo.config.deprecated) {
     headers.set("Deprecation", "true");
-    headers.set("Sunset", versionInfo.config.sunset);
+    if (versionInfo.config.sunset) {
+      headers.set("Sunset", versionInfo.config.sunset);
+    }
   }
 }

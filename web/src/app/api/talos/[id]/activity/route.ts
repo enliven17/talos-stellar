@@ -5,6 +5,9 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
 import { parseLimit } from "@/lib/parse-limit";
 import { withTraceContext } from "@/lib/tracing";
+import { withRequestId } from "@/lib/with-request-id";
+import { checkAndIncrementQuota, quotaExceededResponse } from "@/lib/quota";
+import { emitWebhookEvent } from "@/lib/webhooks/delivery";
 
 // ─── Cursor helpers ───────────────────────────────────────────────────────────
 //
@@ -51,7 +54,7 @@ export function encodeAgentActivityCursor(cursor: AgentActivityCursor): string {
 }
 
 // ─── GET /api/talos/:id/activity ─────────────────────────────────────────────
-export async function GET(
+async function _GET(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -126,6 +129,8 @@ export async function GET(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withRequestId(_GET);
 
 // POST /api/talos/:id/activity — Report activity (from Local Agent)
 async function handlePost(

@@ -76,4 +76,60 @@ describe("GET /api/talos/:id/exposure/alerts", () => {
     expect(body.alerts.some((alert: { type: string }) => alert.type === "repeated-denial")).toBe(true);
     expect(body.alerts.some((alert: { type: string }) => alert.type === "reconciliation-drift")).toBe(true);
   });
+
+  it("returns 400 when limit exceeds maximum allowed limit of 100", async () => {
+    mocks.verifyAgentApiKey.mockResolvedValue({ ok: true, talos: { id: "agent-1", apiKey: "valid" } });
+
+    const response = await GET(new NextRequest("http://localhost/api/talos/agent-1/exposure/alerts?limit=150"), {
+      params: Promise.resolve({ id: "agent-1" }),
+    });
+
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toContain("exceeds maximum allowed limit of 100");
+  });
+
+  it.each(["0", "-1", "abc", "1.5", ""])("returns 400 for malformed limit=%s", async (val) => {
+    mocks.verifyAgentApiKey.mockResolvedValue({ ok: true, talos: { id: "agent-1", apiKey: "valid" } });
+
+    const response = await GET(new NextRequest(`http://localhost/api/talos/agent-1/exposure/alerts?limit=${val}`), {
+      params: Promise.resolve({ id: "agent-1" }),
+    });
+
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toBe("limit must be a positive integer");
+  });
+
+  it("bounds returned alerts array to requested limit", async () => {
+    mocks.verifyAgentApiKey.mockResolvedValue({ ok: true, talos: { id: "agent-1", apiKey: "valid" } });
+    mocks.select
+      .mockReturnValueOnce(chain([{ id: "agent-1" }]))
+      .mockReturnValueOnce(chain([
+        {
+          counterpartyId: "counterparty-1",
+          asset: "USDC",
+          reservedAmount: "1200",
+          settledAmount: "100",
+          deniedCount: 3,
+          lastObservedAt: new Date("2026-07-25T00:00:00.000Z"),
+        },
+        {
+          counterpartyId: "counterparty-2",
+          asset: "USDC",
+          reservedAmount: "2000",
+          settledAmount: "100",
+          deniedCount: 5,
+          lastObservedAt: new Date("2026-07-25T00:00:00.000Z"),
+        },
+      ]));
+
+    const response = await GET(new NextRequest("http://localhost/api/talos/agent-1/exposure/alerts?limit=2"), {
+      params: Promise.resolve({ id: "agent-1" }),
+    });
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.alerts.length).toBeLessThanOrEqual(2);
+  });
 });

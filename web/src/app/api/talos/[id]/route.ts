@@ -1,8 +1,11 @@
+import { revalidateTag } from "next/cache";
+import { agentMutationTags } from "@/lib/cache-tags";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { internalError, notFound } from "@/lib/api-response";
+import { withTraceContext } from "@/lib/tracing";
 
 function maskApiKey(key: string | null): string | null {
   if (!key || key.length < 12) return null;
@@ -10,8 +13,8 @@ function maskApiKey(key: string | null): string | null {
 }
 
 // GET /api/talos/:id — TALOS detail + configuration
-export async function GET(
-  request: Request,
+async function handleGet(
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
@@ -33,6 +36,7 @@ export async function GET(
     }
 
     const { apiKey, ...safeTalos } = talos;
+    for (const tag of agentMutationTags(id)) (revalidateTag as any)(tag);
     return Response.json({ ...safeTalos, apiKeyMasked: maskApiKey(apiKey) });
   } catch {
     return internalError(request);

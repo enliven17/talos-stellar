@@ -4,13 +4,31 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 from talos_agent.db import normalize_playbook_name
 from talos_agent.observability import log
-from talos_agent.payments import USDC_TESTNET_ISSUER
+from talos_agent.payments import (
+    USDC_DECIMALS,
+    USDC_TESTNET_ISSUER,
+    USDC_UNIT_SCALE,
+)
 from talos_agent.payments.x402_signer import X402Signer
+from talos_agent.commerce_quote import (
+    DEFAULT_X402_CLOCK_SKEW_POLICY,
+    enforce_commerce_quote_expiry,
+    parse_iso8601_timestamp,
+    quote_clock_policy_diagnostics,
+    quote_expiry_iso,
+)
+from talos_agent.tools import context as _context
+from talos_agent.tools.permissions import (
+    DataScope,
+    NetworkScope,
+    ToolPermissions,
+)
 from talos_agent.tools.registry import tool
 
 if TYPE_CHECKING:
@@ -27,30 +45,51 @@ _signer: X402Signer | None = None
 _job_effect_store: JobEffectStore | None = None
 _job_effect_dispatcher: JobEffectDispatcher | None = None
 
+
+def _deps():
+    """This agent's dependencies: the bound ToolContext, else this module's globals."""
+    return _context.resolve(globals())
+
+
 ALL_CATEGORIES = [
     "Sales", "Marketing", "Analytics", "Development", "Research",
     "Design", "Finance", "Operations", "Support", "Education",
 ]
 
 
+# Non-negative decimal with at most USDC_DECIMALS fractional digits, e.g.
+# "10", "1.05", "0.000001". Rejects signs, exponents, whitespace, empty input
+# and over-precise fractions rather than silently normalising them.
+_PRICE_PATTERN = re.compile(rf"\A\d+(?:\.\d{{1,{USDC_DECIMALS}}})?\Z")
+
+
 def price_to_usdc_units(price_str: str) -> int:
-    """Convert a decimal price string to USDC smallest units (6 decimals).
+    """Convert a decimal price string to USDC smallest units (USDC_DECIMALS decimals).
 
     Uses string-based arithmetic to avoid IEEE 754 floating-point rounding
     errors (e.g. ``1.05 * 1_000_000`` → ``1049999`` in float math).
+
+    Raises:
+        ValueError: if the price is not a non-negative decimal with at most
+            ``USDC_DECIMALS`` fractional digits. Truncating or mis-parsing a
+            quote would sign a payment for the wrong amount, so malformed
+            input fails loudly instead.
     """
-    parts = str(price_str).split(".")
-    whole = parts[0]
-    frac = parts[1] if len(parts) > 1 else ""
-    frac = frac[:6].ljust(6, "0")  # Pad/truncate to exactly 6 decimal places
-    return int(whole + frac)
+    price = str(price_str)
+    if not _PRICE_PATTERN.match(price):
+        raise ValueError(
+            f"Invalid price {price!r}: expected a non-negative decimal with at "
+            f"most {USDC_DECIMALS} fractional digits"
+        )
+    whole, _, frac = price.partition(".")
+    return int(whole) * USDC_UNIT_SCALE + int(frac.ljust(USDC_DECIMALS, "0"))
 
 
 def _get_signer() -> X402Signer:
-    global _signer
-    if _signer is None or _signer._api is not _api:
-        _signer = X402Signer(_api)
-    return _signer
+    deps = _deps()
+    if deps.signer is None or deps.signer._api is not deps.api:
+        deps.signer = X402Signer(deps.api)
+    return deps.signer
 
 
 @tool(
@@ -61,7 +100,7 @@ def _get_signer() -> X402Signer:
 async def discover_services(target: str = "") -> dict:
     import random
     category = random.choice(ALL_CATEGORIES)
-    services = await _api.discover_services(
+    services = await _deps().api.discover_services(
         category=category,
         target=target or None,
     )
@@ -79,9 +118,9 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
         payload_dict = {}
 
     # Budget check — refuse if monthly spending would exceed GTM budget
-    talos_config = _db.get_talos_config()
+    talos_config = _deps().db.get_talos_config()
     gtm_budget = float((talos_config or {}).get("gtmBudget", 200))
-    spent_month = _db.get_spending_period(30)
+    spent_month = _deps().db.get_spending_period(30)
     # We'll check against actual price after 402, but pre-check with budget headroom
     if spent_month >= gtm_budget:
         return {
@@ -92,15 +131,48 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
         }
 
     # Step 1: GET service → expect 402
-    response = await _api.get_service(talos_id, service_type=service_type or None)
+    response = await _deps().api.get_service(talos_id, service_type=service_type or None)
 
     if response.status_code != 402:
         return {"error": f"Expected 402, got {response.status_code}", "body": response.text[:200]}
 
     # Parse 402 response
     payment_details = response.json()
+    if not isinstance(payment_details, dict):
+        return {
+            "error": "Malformed 402 payment details",
+            "code": "INVALID_QUOTE",
+        }
+
+    # Fail closed on expired / malformed commerce quotes before any signing.
+    # Nested quote.expiresAt (A2A) is preferred; top-level expiresAt accepted.
+    # Legacy price/payee-only 402s without expiry remain allowed (require_expiry=False)
+    # unless a quote object is present — then expiry is mandatory.
+    #
+    # expiresAt is stamped by the issuer's clock while this check runs on ours,
+    # so the comparison carries the bounded x402 clock-skew policy: the
+    # settlement margin stops us spending a nonce on a quote that would expire
+    # between signing and settlement.
+    quote_obj = payment_details.get("quote")
+    expiry_error = enforce_commerce_quote_expiry(
+        payment_details,
+        require_expiry=isinstance(quote_obj, dict),
+        policy=DEFAULT_X402_CLOCK_SKEW_POLICY,
+    )
+    if expiry_error is not None:
+        return expiry_error
+
     price = payment_details.get("price", 0)
     payee = payment_details.get("payee", "")
+    # Prefer quote.amount when present (canonical A2A decimal) for display/budget.
+    if isinstance(quote_obj, dict) and quote_obj.get("amount") is not None:
+        try:
+            price = float(quote_obj["amount"])
+        except (TypeError, ValueError):
+            return {
+                "error": "Commerce quote amount is malformed",
+                "code": "INVALID_QUOTE",
+            }
     # Check if purchase would exceed GTM budget
     if spent_month + float(price) > gtm_budget:
         return {
@@ -113,10 +185,10 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
         }
 
     # Check approval threshold
-    threshold = float(_settings.approval_threshold)
-    if price > threshold:
-        result = await _api.create_approval(
-            _settings.talos_id,
+    threshold = float(_deps().settings.approval_threshold)
+    if float(price) > threshold:
+        result = await _deps().api.create_approval(
+            _deps().settings.talos_id,
             type_="transaction",
             title=f"x402 purchase from Talos {talos_id}: ${price}",
             description=f"Service: {service_type}, Payload: {payload}",
@@ -133,8 +205,15 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
     signer = _get_signer()
     await signer.initialize()
 
-    # Convert price to USDC smallest unit (6 decimals) — string-based to avoid float rounding
-    amount_units = price_to_usdc_units(str(price))
+    # Convert price to USDC smallest unit (6 decimals) — string-based to avoid float rounding.
+    # A malformed quote fails here rather than being signed at a silently truncated amount.
+    try:
+        amount_units = price_to_usdc_units(str(price))
+    except ValueError:
+        return {
+            "error": f"Commerce quote price is malformed: {price}",
+            "code": "INVALID_QUOTE",
+        }
 
     sign_result = await signer.sign_payment(
         payee=payee,
@@ -147,7 +226,7 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
         return sign_result
 
     # Step 3: POST with X-PAYMENT header
-    submit_result = await _api.submit_commerce(
+    submit_result = await _deps().api.submit_commerce(
         talos_id,
         payment_header=sign_result["payment_header"],
         payload=payload_dict,
@@ -162,11 +241,15 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
 
     job_id = submit_result.get("jobId") or submit_result.get("id", "")
 
-    # Track in local DB
-    _db.add_commerce_job(job_id, talos_id, service_type, payload_dict)
+    # Track in local DB (persist quote expiry in payload for durable audit / restart safety)
+    tracked_payload = dict(payload_dict) if isinstance(payload_dict, dict) else {}
+    expiry_iso = quote_expiry_iso(payment_details)
+    if expiry_iso:
+        tracked_payload.setdefault("_quote_expires_at", expiry_iso)
+    _deps().db.add_commerce_job(job_id, talos_id, service_type, tracked_payload)
 
     # Record spending against GTM budget
-    _db.record_spending(
+    _deps().db.record_spending(
         amount=float(price),
         category="x402_purchase",
         description=f"Service from Talos {talos_id}: {service_type}",
@@ -174,7 +257,7 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
 
     # Instant fulfillment: result is already in the response
     if submit_result.get("status") == "completed" and submit_result.get("result"):
-        _db.update_commerce_status(job_id, "completed")
+        _deps().db.update_commerce_status(job_id, "completed")
         return {
             "status": "completed",
             "job_id": job_id,
@@ -193,25 +276,366 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
     }
 
 
+# ── Dry-run quote comparison ────────────────────────────────────────
+
+#: Hard bound on how many service quotes one comparison may fetch. Keeps the
+#: dry-run cheap and prevents an agent (or a malformed tool call) from turning
+#: a read-only check into an unbounded scan of the marketplace.
+MAX_QUOTE_COMPARISON_CANDIDATES = 5
+
+#: Hosts the comparison may contact — the same Talos Web API surface the
+#: other commerce tools use.
+_COMPARISON_HOSTS = ("*.talos.xyz", "localhost", "127.0.0.1")
+
+
+def _quote_price_units(payment_details: dict) -> tuple[int, float] | None:
+    """Return ``(price_usdc_units, price_float)`` for a 402 quote, or None.
+
+    Mirrors the purchase path: a nested ``quote.amount`` (canonical A2A
+    decimal) wins over the legacy top-level ``price``. The amount is parsed
+    with :func:`price_to_usdc_units` so comparisons use exact USDC smallest
+    units rather than IEEE 754 floats; malformed prices return None instead
+    of raising so one bad quote cannot sink the whole comparison.
+    """
+    quote_obj = payment_details.get("quote")
+    raw_price = payment_details.get("price", 0)
+    if isinstance(quote_obj, dict) and quote_obj.get("amount") is not None:
+        raw_price = quote_obj["amount"]
+    try:
+        units = price_to_usdc_units(str(raw_price))
+        display = float(raw_price)
+    except (ValueError, TypeError):
+        return None
+    return units, display
+
+
+def _quote_capability(payment_details: dict) -> str:
+    """Best-effort capability descriptor for a 402 quote.
+
+    Prefers an explicit ``capability`` field (A2A quote shape), then the
+    advertised service name, then the fulfillment mode. Returns "" when the
+    payload carries none of them.
+    """
+    quote_obj = payment_details.get("quote")
+    for source in (payment_details, quote_obj if isinstance(quote_obj, dict) else {}):
+        capability = source.get("capability")
+        if isinstance(capability, str) and capability.strip():
+            return capability.strip()
+    for key in ("serviceName", "service_name", "fulfillmentMode"):
+        value = payment_details.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+async def _fetch_quote_candidate(
+    talos_id: str,
+    service_type: str,
+) -> dict:
+    """Fetch and evaluate one service quote. Read-only: GET only, never signs."""
+    row: dict = {
+        "talos_id": talos_id,
+        "service_type": service_type,
+        "eligible": False,
+        "price": None,
+        "price_usdc": None,
+        "currency": "USDC",
+        "capability": "",
+        "service_name": "",
+        "fulfillment_mode": "",
+        "expires_at": None,
+        "reason": None,
+        "code": None,
+    }
+    try:
+        response = await _deps().api.get_service(
+            talos_id, service_type=service_type or None
+        )
+    except Exception as exc:  # noqa: BLE001 - comparison must survive one bad fetch
+        row["reason"] = "Failed to fetch service quote"
+        row["code"] = "FETCH_FAILED"
+        row["error_type"] = type(exc).__name__
+        return row
+
+    if response is None or getattr(response, "status_code", None) != 402:
+        status = getattr(response, "status_code", None) if response is not None else None
+        row["reason"] = "No 402 quote returned for this service"
+        row["code"] = "NO_QUOTE"
+        row["status_code"] = status
+        return row
+
+    try:
+        details = response.json()
+    except Exception:  # noqa: BLE001 - malformed body is an ineligible quote
+        details = None
+    if not isinstance(details, dict):
+        row["reason"] = "Malformed 402 payment details"
+        row["code"] = "INVALID_QUOTE"
+        return row
+
+    quote_obj = details.get("quote")
+    expiry_error = enforce_commerce_quote_expiry(
+        details,
+        require_expiry=isinstance(quote_obj, dict),
+        policy=DEFAULT_X402_CLOCK_SKEW_POLICY,
+    )
+    if expiry_error is not None:
+        row["reason"] = expiry_error["error"]
+        row["code"] = expiry_error["code"]
+        row["expires_at"] = expiry_error.get("expires_at")
+        row["capability"] = _quote_capability(details)
+        return row
+
+    price = _quote_price_units(details)
+    if price is None:
+        row["reason"] = "Commerce quote price is malformed"
+        row["code"] = "INVALID_QUOTE"
+        row["expires_at"] = quote_expiry_iso(details)
+        row["capability"] = _quote_capability(details)
+        return row
+
+    units, display = price
+    currency = details.get("currency")
+    row.update(
+        {
+            "eligible": True,
+            "price": display,
+            "price_usdc": units,
+            "currency": str(currency).upper() if currency else "USDC",
+            "capability": _quote_capability(details),
+            "service_name": str(details.get("serviceName") or ""),
+            "fulfillment_mode": str(details.get("fulfillmentMode") or ""),
+            "expires_at": quote_expiry_iso(details),
+        }
+    )
+    return row
+
+
+@tool(
+    "compare_service_quotes",
+    "Dry-run comparison of eligible x402 service quotes across a bounded set of "
+    "candidate services. For each candidate it fetches the seller's 402 quote "
+    "(GET only) and compares total price in exact USDC units, capability and "
+    "quote expiry, ranking eligible quotes cheapest-first. Quotes that are "
+    "expired, expire too soon to settle, or carry malformed prices are listed "
+    "as ineligible with a reason code. This tool NEVER signs a payment, "
+    "submits commerce, records spending, or creates approvals — no paid calls "
+    "are made during comparison.",
+    permissions=ToolPermissions(
+        data=(DataScope.READ_REMOTE,),
+        network=(NetworkScope.HTTP,),
+        hosts=_COMPARISON_HOSTS,
+    ),
+)
+async def compare_service_quotes(candidates: str = "[]") -> dict:
+    """Compare live 402 quotes for a bounded candidate set — no payment.
+
+    Parameters
+    ----------
+    candidates:
+        JSON array (or single object) of ``{"talos_id": ..., "service_type":
+        ...}`` entries. ``service_type`` is optional. At most
+        ``MAX_QUOTE_COMPARISON_CANDIDATES`` entries are evaluated; extras are
+        counted in ``candidates_dropped``.
+
+    Returns
+    -------
+    dict with ``quotes`` (eligible first, ranked by price then expiry),
+    ``best_quote``, and counters describing the bounded evaluation.
+    """
+    if _deps().api is None:
+        return {"error": "API client not configured", "code": "NO_API"}
+
+    try:
+        raw = json.loads(candidates) if candidates else []
+    except json.JSONDecodeError:
+        return {
+            "error": "candidates must be a JSON array of {talos_id, service_type} objects",
+            "code": "INVALID_CANDIDATES",
+        }
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list) or not raw:
+        return {
+            "error": "candidates must be a non-empty JSON array of {talos_id, service_type} objects",
+            "code": "INVALID_CANDIDATES",
+        }
+
+    requested = len(raw)
+    bounded = raw[:MAX_QUOTE_COMPARISON_CANDIDATES]
+    dropped = requested - len(bounded)
+
+    rows: list[dict] = []
+    for entry in bounded:
+        if not isinstance(entry, dict):
+            rows.append(
+                {
+                    "talos_id": "",
+                    "service_type": "",
+                    "eligible": False,
+                    "price": None,
+                    "price_usdc": None,
+                    "currency": "USDC",
+                    "capability": "",
+                    "service_name": "",
+                    "fulfillment_mode": "",
+                    "expires_at": None,
+                    "reason": "Candidate entry is not an object",
+                    "code": "INVALID_CANDIDATE",
+                }
+            )
+            continue
+        talos_id = str(entry.get("talos_id") or entry.get("talosId") or "").strip()
+        service_type = str(
+            entry.get("service_type") or entry.get("serviceType") or ""
+        ).strip()
+        if not talos_id:
+            rows.append(
+                {
+                    "talos_id": "",
+                    "service_type": service_type,
+                    "eligible": False,
+                    "price": None,
+                    "price_usdc": None,
+                    "currency": "USDC",
+                    "capability": "",
+                    "service_name": "",
+                    "fulfillment_mode": "",
+                    "expires_at": None,
+                    "reason": "Candidate is missing talos_id",
+                    "code": "INVALID_CANDIDATE",
+                }
+            )
+            continue
+        rows.append(await _fetch_quote_candidate(talos_id, service_type))
+
+    def _expiry_sort_key(row: dict) -> tuple[int, float]:
+        expires_at = row.get("expires_at")
+        parsed = parse_iso8601_timestamp(expires_at)
+        if parsed is None:
+            # No advertised expiry never blocks a purchase, so it sorts as the
+            # most favourable deadline within the same price tier.
+            return (0, 0.0)
+        return (1, -parsed.timestamp())
+
+    eligible = sorted(
+        (r for r in rows if r["eligible"]),
+        key=lambda r: (r["price_usdc"], *_expiry_sort_key(r)),
+    )
+    ineligible = sorted(
+        (r for r in rows if not r["eligible"]),
+        key=lambda r: (r.get("price_usdc") is None, r.get("price_usdc") or 0, r["talos_id"]),
+    )
+    for rank, row in enumerate(eligible, start=1):
+        row["rank"] = rank
+    for row in ineligible:
+        row["rank"] = None
+
+    return {
+        "status": "compared",
+        "dry_run": True,
+        "payment_executed": False,
+        "candidates_requested": requested,
+        "candidates_evaluated": len(rows),
+        "candidates_dropped": dropped,
+        "max_candidates": MAX_QUOTE_COMPARISON_CANDIDATES,
+        "eligible_count": len(eligible),
+        "quotes": eligible + ineligible,
+        "best_quote": eligible[0] if eligible else None,
+    }
+
+
+@tool(
+    "preview_purchase",
+    "Preview a purchase WITHOUT signing or submitting. Returns the applied "
+    "quote clock-policy diagnostics (safety margin, remaining validity, verdict) "
+    "alongside the same budget / approval shapes as purchase_service.",
+)
+async def preview_purchase(talos_id: str, service_type: str = "", payload: str = "{}") -> dict:
+    """Non-signing preview of the purchase path (#1440).
+
+    Runs the same pre-signing steps as :func:`purchase_service` — budget,
+    GET service, 402 parse, quote expiry — and returns the applied clock-policy
+    diagnostics under ``clock_policy``. Signs nothing, submits nothing, and
+    returns no payment header, signature, or proof.
+    """
+    try:
+        json.loads(payload)
+    except json.JSONDecodeError:
+        return {"error": "Invalid payload JSON", "code": "BAD_INPUT"}
+
+    talos_config = _deps().db.get_talos_config()
+    gtm_budget = float((talos_config or {}).get("gtmBudget", 200))
+    spent_month = _deps().db.get_spending_period(30)
+    if spent_month >= gtm_budget:
+        return {
+            "error": "GTM budget exhausted for this month",
+            "budget": gtm_budget,
+            "spent": spent_month,
+        }
+
+    response = await _deps().api.get_service(talos_id, service_type=service_type or None)
+    if response.status_code != 402:
+        return {"error": f"Expected 402, got {response.status_code}", "body": response.text[:200]}
+
+    payment_details = response.json()
+    if not isinstance(payment_details, dict):
+        return {"error": "Malformed 402 payment details", "code": "INVALID_QUOTE"}
+
+    clock_policy = quote_clock_policy_diagnostics(
+        payment_details,
+        policy=DEFAULT_X402_CLOCK_SKEW_POLICY,
+    )
+
+    quote_obj = payment_details.get("quote")
+    expiry_error = enforce_commerce_quote_expiry(
+        payment_details,
+        require_expiry=isinstance(quote_obj, dict),
+        policy=DEFAULT_X402_CLOCK_SKEW_POLICY,
+    )
+    if expiry_error is not None:
+        return {**expiry_error, "clock_policy": clock_policy}
+
+    price = payment_details.get("price", 0)
+    if isinstance(quote_obj, dict) and quote_obj.get("amount") is not None:
+        try:
+            price = float(quote_obj["amount"])
+        except (TypeError, ValueError):
+            return {
+                "error": "Commerce quote amount is malformed",
+                "code": "INVALID_QUOTE",
+                "clock_policy": clock_policy,
+            }
+
+    return {
+        "status": "preview",
+        "talos_id": talos_id,
+        "service_type": service_type,
+        "price": price,
+        "budget_remaining": gtm_budget - spent_month,
+        "clock_policy": clock_policy,
+    }
+
+
 @tool(
     "poll_service_result",
     "Poll for the result of a purchased service. Returns the result or 'pending' status.",
 )
 async def poll_service_result(job_id: str) -> dict:
-    result = await _api.get_job_result(job_id)
+    result = await _deps().api.get_job_result(job_id)
 
     if not result:
         return {"status": "pending", "job_id": job_id}
 
     status = result.get("status", "pending")
     if status == "completed":
-        _db.update_commerce_status(job_id, "completed")
+        _deps().db.update_commerce_status(job_id, "completed")
 
         # If it's a playbook, save it
         job_result = result.get("result", {})
         if isinstance(job_result, dict) and "templates" in job_result:
             name = job_result.get("name", f"Playbook from job {job_id}")
-            _db.save_playbook(name, job_result, source_talos=result.get("talosId"))
+            _deps().db.save_playbook(name, job_result, source_talos=result.get("talosId"))
             return {
                 "status": "completed",
                 "type": "playbook",
@@ -235,11 +659,11 @@ async def apply_playbook(playbook_name: str) -> dict:
     except ValueError as exc:
         return {"error": str(exc)}
 
-    row = _db.find_playbook_by_name(normalized_name)
+    row = _deps().db.find_playbook_by_name(normalized_name)
     if not row:
         return {"error": f"No playbook found named '{normalized_name}'"}
 
-    _db.apply_playbook(row["id"])
+    _deps().db.apply_playbook(row["id"])
 
     return {
         "status": "applied",
@@ -260,14 +684,14 @@ _claimed_jobs_lock: asyncio.Lock | None = None
 
 
 def _get_claimed_jobs_lock() -> asyncio.Lock:
-    global _claimed_jobs_lock
-    if _claimed_jobs_lock is None:
-        _claimed_jobs_lock = asyncio.Lock()
-    return _claimed_jobs_lock
+    deps = _deps()
+    if deps.claimed_jobs_lock is None:
+        deps.claimed_jobs_lock = asyncio.Lock()
+    return deps.claimed_jobs_lock
 
 
 def get_claimed_jobs_copy() -> dict[str, int]:
-    return dict(_claimed_jobs)
+    return dict(_deps().claimed_jobs)
 
 
 async def set_claimed_job(
@@ -291,10 +715,10 @@ async def set_claimed_job(
         Optional server-reported expiry; used for accurate pruning on restore.
     """
     async with _get_claimed_jobs_lock():
-        _claimed_jobs[job_id] = fencing_token
-        if _db is not None:
+        _deps().claimed_jobs[job_id] = fencing_token
+        if _deps().db is not None:
             try:
-                _db.upsert_claimed_job(
+                _deps().db.upsert_claimed_job(
                     job_id,
                     fencing_token,
                     ttl_seconds=ttl_seconds,
@@ -312,10 +736,10 @@ async def set_claimed_job(
 async def remove_claimed_job(job_id: str) -> None:
     """Remove a job claim from memory *and* from the DB."""
     async with _get_claimed_jobs_lock():
-        _claimed_jobs.pop(job_id, None)
-        if _db is not None:
+        _deps().claimed_jobs.pop(job_id, None)
+        if _deps().db is not None:
             try:
-                _db.delete_claimed_job(job_id)
+                _deps().db.delete_claimed_job(job_id)
             except Exception as _exc:  # pragma: no cover  # noqa: BLE001
                 import logging as _logging
                 _logging.getLogger(__name__).warning(
@@ -323,6 +747,50 @@ async def remove_claimed_job(job_id: str) -> None:
                     job_id,
                     _exc,
                 )
+
+
+async def release_claimed_jobs() -> tuple[int, int]:
+    """Release all locally persisted remote job leases.
+
+    Returns ``(released, failed)``. Failed releases remain persisted so the
+    normal restore reconciliation can retry/verify ownership on the next run.
+    Only aggregate counts are logged to avoid exposing job payloads or proofs.
+    """
+    if _deps().api is None or _deps().db is None:
+        return 0, 0
+
+    try:
+        claims = _deps().db.get_all_claimed_jobs()
+    except Exception as exc:  # pragma: no cover - defensive shutdown path
+        log.warning("job_shutdown_claim_read_failed", error_type=type(exc).__name__)
+        return 0, 1
+
+    released = 0
+    failed = 0
+    for claim in claims:
+        try:
+            response = await _deps().api.release_job(
+                claim["job_id"],
+                claim["fencing_token"],
+            )
+            if response:
+                await remove_claimed_job(claim["job_id"])
+                released += 1
+            else:
+                failed += 1
+        except Exception as exc:  # pragma: no cover - defensive shutdown path
+            failed += 1
+            log.warning(
+                "job_shutdown_claim_release_failed",
+                error_type=type(exc).__name__,
+            )
+
+    log.info(
+        "job_shutdown_claim_release_complete",
+        released=released,
+        failed=failed,
+    )
+    return released, failed
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -335,14 +803,14 @@ async def remove_claimed_job(job_id: str) -> None:
     "Check for incoming x402 service requests that Other Taloses have purchased from us. Returns pending jobs available to fulfill.",
 )
 async def get_pending_jobs() -> dict:
-    if _job_effect_store is not None:
+    if _deps().job_effect_store is not None:
         try:
-            jobs = await _api.get_pending_jobs()
+            jobs = await _deps().api.get_pending_jobs()
         except Exception:
             jobs = []
         for job in jobs:
             try:
-                _job_effect_store.ingest(job)
+                _deps().job_effect_store.ingest(job)
             except Exception as exc:
                 from talos_agent.job_effects import JobEffectError
 
@@ -350,12 +818,12 @@ async def get_pending_jobs() -> dict:
                     log.warning("job_inbox_rejected", error_code=exc.code)
                     continue
                 raise
-        durable_jobs = _job_effect_store.pending_jobs()
+        durable_jobs = _deps().job_effect_store.pending_jobs()
         if not durable_jobs:
             return {"status": "no_pending_jobs", "count": 0}
         return {"jobs": durable_jobs, "count": len(durable_jobs)}
 
-    jobs = await _api.get_pending_jobs()
+    jobs = await _deps().api.get_pending_jobs()
     if not jobs:
         return {"status": "no_pending_jobs", "count": 0}
     summary = [
@@ -379,7 +847,7 @@ async def get_pending_jobs() -> dict:
     "Call this before working on a job, then call fulfill_job with the result.",
 )
 async def claim_job(job_id: str, ttl_seconds: int = 300) -> dict:
-    if _job_effect_store is not None:
+    if _deps().job_effect_store is not None:
         if (
             not isinstance(ttl_seconds, int)
             or isinstance(ttl_seconds, bool)
@@ -391,11 +859,17 @@ async def claim_job(job_id: str, ttl_seconds: int = 300) -> dict:
         # first preserves the invariant that remote leases always have a local
         # owner and payload record.
         await get_pending_jobs()
-    result = await _api.claim_job(job_id, ttl_seconds=ttl_seconds)
+    result = await _deps().api.claim_job(job_id, ttl_seconds=ttl_seconds)
     if not result:
         return {"error": f"Failed to claim job {job_id} — it may be leased by another worker"}
     fencing_token = result.get("fencingToken")
-    if fencing_token is not None:
+    if fencing_token is not None and _deps().job_effect_store is not None:
+        _deps().job_effect_store.mark_claimed(
+            job_id,
+            fencing_token=fencing_token,
+            lease_expires_at=result.get("leaseExpiresAt"),
+        )
+    elif fencing_token is not None:
         # Parse server-reported expiry for accurate lease tracking
         expires_raw = result.get("leaseExpiresAt")
         lease_expires_at: datetime | None = None
@@ -432,11 +906,11 @@ async def fulfill_job(job_id: str, result: str = "{}") -> dict:
     except json.JSONDecodeError:
         result_dict = {"text": result}
 
-    if _job_effect_store is not None and _job_effect_dispatcher is not None:
+    if _deps().job_effect_store is not None and _deps().job_effect_dispatcher is not None:
         try:
-            effect_id = _job_effect_store.prepare_effect(job_id, result_dict)
-            await _job_effect_dispatcher.dispatch_once()
-            effect = _job_effect_store.effect_status(effect_id)
+            effect_id = _deps().job_effect_store.prepare_effect(job_id, result_dict)
+            await _deps().job_effect_dispatcher.dispatch_once()
+            effect = _deps().job_effect_store.effect_status(effect_id)
         except Exception as exc:
             from talos_agent.job_effects import JobEffectError
 
@@ -462,11 +936,11 @@ async def fulfill_job(job_id: str, result: str = "{}") -> dict:
             "effect_state": effect["state"],
         }
 
-    fencing_token = _claimed_jobs.get(job_id, 0)
-    response = await _api.submit_job_result(job_id, result_dict, fencing_token=fencing_token)
+    fencing_token = _deps().claimed_jobs.get(job_id, 0)
+    response = await _deps().api.submit_job_result(job_id, result_dict, fencing_token=fencing_token)
     if response:
         await remove_claimed_job(job_id)
-        _db.add_activity("commerce", f"Fulfilled job {job_id}", "x402")
+        _deps().db.add_activity("commerce", f"Fulfilled job {job_id}", "x402")
         return {"status": "fulfilled", "job_id": job_id}
     return {"error": f"Failed to submit result for job {job_id}"}
 
@@ -485,8 +959,8 @@ async def generate_playbook(
 ) -> dict:
     """Generate a playbook from agent's accumulated GTM data and publish it."""
     # Gather agent's activity data for playbook content
-    recent_content = _db.get_recent_content(50)
-    active_playbook = _db.get_active_playbook()
+    recent_content = _deps().db.get_recent_content(50)
+    active_playbook = _deps().db.get_active_playbook()
 
     # Compile content history into structured playbook
     content_by_channel: dict[str, list[str]] = {}
@@ -519,7 +993,7 @@ async def generate_playbook(
             playbook_content["hashtags"] = existing["hashtags"]
 
     # Compute basic metrics from activity
-    conn = _db._conn
+    conn = _deps().db._conn
     total_posts = conn.execute(
         "SELECT COUNT(*) as cnt FROM activity_log WHERE type = 'post'"
     ).fetchone()
@@ -543,7 +1017,7 @@ async def generate_playbook(
     )
 
     # Publish to marketplace via API
-    result = await _api.publish_playbook(
+    result = await _deps().api.publish_playbook(
         title=title,
         category=category,
         channel=channel,
@@ -579,8 +1053,8 @@ async def register_service(
     price: float,
     wallet_address: str = "",
 ) -> dict:
-    result = await _api.register_service(
-        _settings.talos_id,
+    result = await _deps().api.register_service(
+        _deps().settings.talos_id,
         service_name=service_name,
         description=description,
         price=price,
@@ -605,9 +1079,9 @@ async def evaluate_marketplace_bid(
     min_acceptable_price_usdc: float,
 ) -> dict:
     """Evaluate a bid using current budget state and price thresholds."""
-    talos_config = _db.get_talos_config()
+    talos_config = _deps().db.get_talos_config()
     gtm_budget = float((talos_config or {}).get("gtmBudget", 200))
-    spent_month = _db.get_spending_period(30)
+    spent_month = _deps().db.get_spending_period(30)
     budget_remaining = gtm_budget - spent_month
     budget_tight = budget_remaining < (gtm_budget * 0.15)
 

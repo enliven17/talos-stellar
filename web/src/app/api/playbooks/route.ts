@@ -1,14 +1,23 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPlaybooks, tlsPlaybookPurchases } from "@/db/schema";
-import { and, arrayContains, desc, eq, ilike, lt, or, sql } from "drizzle-orm";
+import { and, arrayContains, eq, ilike, lt, or, sql, type SQLWrapper } from "drizzle-orm";
 import { createPlaybookSchema, parseBody } from "@/lib/schemas";
 import { parseLimit } from "@/lib/parse-limit";
+import {
+  buildMarketplaceOrderBy,
+  isDefaultMarketplaceSort,
+  parseMarketplaceSort,
+  PLAYBOOKS_SORT_FIELDS,
+  type PlaybooksSortField,
+} from "@/lib/marketplace-sort";
 import { withTraceContext } from "@/lib/tracing";
+import { resolveTalosFromRequest } from "@/lib/auth";
+import { withRequestId } from "@/lib/with-request-id";
 
 
 // GET /api/playbooks — List playbooks (with optional filters and cursor pagination)
-export async function GET(request: NextRequest) {
+async function _GET(request: NextRequest) {
   try {
     const { searchParams } = request.nextUrl;
     const category = searchParams.get("category");
@@ -18,6 +27,33 @@ export async function GET(request: NextRequest) {
     const parsedLimit = parseLimit(searchParams.get("limit"), 50, 100);
     if (!parsedLimit.ok) return parsedLimit.response;
     const limit = parsedLimit.limit;
+
+    const parsedSort = parseMarketplaceSort(
+      searchParams.get("sort"),
+      searchParams.get("direction"),
+      { allowedFields: PLAYBOOKS_SORT_FIELDS, fieldLabel: "createdAt, price, title" },
+    );
+    if (!parsedSort.ok) return parsedSort.response;
+    const sort = parsedSort.sort;
+
+    // Cursor pagination encodes a `createdAt|id` position, so it is only
+    // compatible with the default `createdAt desc` ordering.
+    if (cursor && !isDefaultMarketplaceSort(sort)) {
+      return Response.json(
+        {
+          error:
+            "cursor pagination is only supported with the default createdAt desc sort",
+        },
+        { status: 400 },
+      );
+    }
+
+    const sortColumns: Record<PlaybooksSortField, SQLWrapper> = {
+      createdAt: tlsPlaybooks.createdAt,
+      price: tlsPlaybooks.price,
+      title: tlsPlaybooks.title,
+    };
+    const orderBy = buildMarketplaceOrderBy(sort, sortColumns, tlsPlaybooks.id);
 
     const conditions = [eq(tlsPlaybooks.status, "active")];
 
@@ -88,7 +124,7 @@ export async function GET(request: NextRequest) {
       .innerJoin(tlsTalos, eq(tlsPlaybooks.talosId, tlsTalos.id))
       .leftJoin(purchaseCount, eq(tlsPlaybooks.id, purchaseCount.playbookId))
       .where(and(...conditions))
-      .orderBy(desc(tlsPlaybooks.createdAt), desc(tlsPlaybooks.id))
+      .orderBy(...orderBy)
       .limit(limit + 1);
 
     const hasMore = playbooks.length > limit;
@@ -111,6 +147,8 @@ export async function GET(request: NextRequest) {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withRequestId(_GET);
 
 // POST /api/playbooks — Create a playbook (requires TALOS apiKey)
 async function handlePost(request: NextRequest) {

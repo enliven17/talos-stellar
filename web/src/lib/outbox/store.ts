@@ -1,4 +1,4 @@
-import { and, desc, eq, isNotNull, lt, sql } from "drizzle-orm";
+import { and, count, desc, eq, isNotNull, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { tlsOutboxEvents } from "@/db/schema";
 import type { OutboxEvent, OutboxStatus, WriteEventInput } from "./types";
@@ -236,4 +236,20 @@ export async function listEvents(filter: ListEventsFilter = {}): Promise<{ event
 export async function getEvent(eventId: string): Promise<OutboxEvent | null> {
   const row = await db.select().from(tlsOutboxEvents).where(eq(tlsOutboxEvents.id, eventId)).limit(1).then((r) => r[0] ?? null);
   return row ? toEvent(row) : null;
+}
+
+/**
+ * Dead-letter backlog grouped by eventType (largest first), for the
+ * operator dead-letter view. Counts only; never reads payloads.
+ */
+export async function summarizeDeadLetters(): Promise<{ total: number; byEventType: { eventType: string; count: number }[] }> {
+  const rows = await db
+    .select({ eventType: tlsOutboxEvents.eventType, count: count() })
+    .from(tlsOutboxEvents)
+    .where(eq(tlsOutboxEvents.status, "dead_letter"))
+    .groupBy(tlsOutboxEvents.eventType)
+    .orderBy(desc(count()), tlsOutboxEvents.eventType);
+
+  const byEventType = rows.map((r) => ({ eventType: r.eventType, count: Number(r.count) }));
+  return { total: byEventType.reduce((sum, r) => sum + r.count, 0), byEventType };
 }

@@ -1,146 +1,368 @@
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsCommerceServices } from "@/db/schema";
-import { and, desc, eq, ilike, lt, ne, or } from "drizzle-orm";
+import { and, arrayContains, eq, gte, ilike, isNull, lt, lte, ne, or, type SQL, type SQLWrapper } from "drizzle-orm";
 import { parseLimit } from "@/lib/parse-limit";
+import {
+  buildMarketplaceOrderBy,
+  isDefaultMarketplaceSort,
+  parseMarketplaceSort,
+  SERVICES_SORT_FIELDS,
+  type ServicesSortField,
+} from "@/lib/marketplace-sort";
+import { parsePriceRange } from "@/lib/parse-price";
 import { fetchReputations } from "@/lib/reputation-ledger";
 import { withTraceContext } from "@/lib/tracing";
+import { internalError } from "@/lib/api-response";
 
-// GET /api/services — Discover available services across all TALOS agents
+export type ServiceCursor = {
+  createdAt: string;
+  id: string;
+};
+
+type ServiceRow = {
+  id: string;
+  talosId: string;
+  talosName: string;
+  talosCategory: string;
+  talosStatus: string;
+  serviceName: string;
+  description: string | null;
+  price: string | number;
+  currency: string;
+  chains: string[];
+  createdAt: Date;
+};
+
+type ServiceResult = Omit<ServiceRow, "price" | "createdAt" | "id"> & {
+  price: number;
+};
+
+export function encodeServiceCursor(cursor: ServiceCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+export function decodeServiceCursor(raw: string | null): ServiceCursor | null {
+  if (raw === null) return null;
+
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(raw, "base64url").toString("utf8"),
+    ) as Partial<ServiceCursor>;
+    const date = new Date(parsed.createdAt ?? "");
+    if (
+      typeof parsed.createdAt !== "string" ||
+      Number.isNaN(date.getTime()) ||
+      typeof parsed.id !== "string" ||
+      parsed.id.length === 0
+    ) {
+      return null;
+    }
+    return { createdAt: date.toISOString(), id: parsed.id };
+  } catch {
+    return null;
+  }
+}
+
+
+/** Normalize / validate `network` query param (supported payment chain). */
+export function parseServiceNetwork(
+  raw: string | null,
+): { ok: true; network: string | null } | { ok: false; response: Response } {
+  if (raw === null) {
+    return { ok: true, network: null };
+  }
+
+  const network = raw.trim().toLowerCase();
+  if (network.length === 0) {
+    return {
+      ok: false,
+      response: Response.json(
+        { error: "network must be a non-empty payment network identifier" },
+        { status: 400 },
+      ),
+    };
+  }
+
+  // Reject obviously malformed values (whitespace already trimmed; keep identifiers short).
+  if (network.length > 64 || !/^[a-z0-9][a-z0-9_-]*$/.test(network)) {
+    return {
+      ok: false,
+      response: Response.json(
+        {
+          error:
+            "network must be a lowercase alphanumeric payment network id (e.g. stellar, ethereum)",
+        },
+        { status: 400 },
+      ),
+    };
+  }
+
+  return { ok: true, network };
+}
+
 async function handleGet(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const category = searchParams.get("category");
     const selfId = searchParams.get("self");
-    const cursor = searchParams.get("cursor");
+    const parsedNetwork = parseServiceNetwork(searchParams.get("network"));
+    if (!parsedNetwork.ok) return parsedNetwork.response;
+    const network = parsedNetwork.network;
+    const rawCursor = searchParams.get("cursor");
+    const cursor = decodeServiceCursor(rawCursor);
+    if (searchParams.has("cursor") && !cursor) {
+      return Response.json(
+        { error: "cursor must be a valid service cursor" },
+        { status: 400 },
+      );
+    }
     const parsedLimit = parseLimit(searchParams.get("limit"), 50, 100);
     if (!parsedLimit.ok) return parsedLimit.response;
     const limit = parsedLimit.limit;
 
-    const minScore = searchParams.has("minScore") ? Number(searchParams.get("minScore")) : undefined;
-    const minConfidence = searchParams.has("minConfidence") ? Number(searchParams.get("minConfidence")) : undefined;
+    const parsedSort = parseMarketplaceSort(
+      searchParams.get("sort"),
+      searchParams.get("direction"),
+      { allowedFields: SERVICES_SORT_FIELDS, fieldLabel: "createdAt, price" },
+    );
+    if (!parsedSort.ok) return parsedSort.response;
+    const sort = parsedSort.sort;
+
+    const parsedPrice = parsePriceRange(
+      searchParams.get("minPrice"),
+      searchParams.get("maxPrice"),
+    );
+    if (!parsedPrice.ok) return parsedPrice.response;
+    const { minPrice, maxPrice } = parsedPrice;
+
+    if (cursor && !isDefaultMarketplaceSort(sort)) {
+      return Response.json(
+        {
+          error:
+            "cursor pagination is only supported with the default createdAt desc sort",
+        },
+        { status: 400 },
+      );
+    }
+
+    const sortColumns: Record<ServicesSortField, SQLWrapper> = {
+      createdAt: tlsCommerceServices.createdAt,
+      price: tlsCommerceServices.price,
+    };
+    const orderBy = buildMarketplaceOrderBy(
+      sort,
+      sortColumns,
+      tlsCommerceServices.id,
+    );
+
+    const minScore = searchParams.has("minScore")
+      ? Number(searchParams.get("minScore"))
+      : undefined;
+    const minConfidence = searchParams.has("minConfidence")
+      ? Number(searchParams.get("minConfidence"))
+      : undefined;
     const allowColdStart = searchParams.get("allowColdStart") === "true";
 
-    let currentCursor = cursor;
-    const accumulated: any[] = [];
-    let exhausted = false;
+    const accumulated: ServiceResult[] = [];
+    let currentCursor: ServiceCursor | null = cursor;
+    let pageCursor: ServiceCursor | null = null;
+    let hasMore = false;
+    let dbExhausted = false;
 
-    // Loop until we fulfill the limit or exhaust the DB
-    while (accumulated.length < limit && !exhausted) {
-      const conditions = [eq(tlsTalos.status, "Active")];
+    while (!dbExhausted && !(accumulated.length === limit && hasMore)) {
+      const conditions = buildConditions(
+        currentCursor,
+        category,
+        selfId,
+        minPrice,
+        maxPrice,
+        network,
+      );
 
-      // Exclude the requesting TALOS's own services
-      if (selfId) {
-        conditions.push(ne(tlsCommerceServices.talosId, selfId));
-      }
-
-      // Filter by TALOS category (case-insensitive match in DB)
-      if (category) {
-        conditions.push(ilike(tlsTalos.category, category));
-      }
-
-      // Cursor condition (createdAt DESC with id tiebreaker)
-      if (currentCursor) {
-        const [cursorDate, cursorId] = currentCursor.split("|");
-        if (cursorDate && cursorId) {
-          conditions.push(
-            or(
-              lt(tlsCommerceServices.createdAt, new Date(cursorDate)),
-              and(
-                eq(tlsCommerceServices.createdAt, new Date(cursorDate)),
-                lt(tlsCommerceServices.id, cursorId),
-              ),
-            )!,
-          );
-        }
-      }
-
-      const services = await db
-        .select({
-          id: tlsCommerceServices.id,
-          talosId: tlsCommerceServices.talosId,
-          talosName: tlsTalos.name,
-          talosCategory: tlsTalos.category,
-          serviceName: tlsCommerceServices.serviceName,
-          description: tlsCommerceServices.description,
-          price: tlsCommerceServices.price,
-          currency: tlsCommerceServices.currency,
-          chains: tlsCommerceServices.chains,
-          createdAt: tlsCommerceServices.createdAt,
-        })
-        .from(tlsCommerceServices)
-        .innerJoin(tlsTalos, eq(tlsCommerceServices.talosId, tlsTalos.id))
-        .where(conditions.length > 0 ? and(...conditions) : undefined)
-        .orderBy(desc(tlsCommerceServices.createdAt), desc(tlsCommerceServices.id))
-        .limit(limit * 2);
+      const services = await fetchServicesBatch(
+        conditions,
+        orderBy,
+        limit * 2,
+      );
 
       if (services.length === 0) {
-        exhausted = true;
+        dbExhausted = true;
         break;
       }
-
       if (services.length < limit * 2) {
-        exhausted = true;
+        dbExhausted = true;
       }
 
       const talosIds = Array.from(new Set(services.map((s) => s.talosId)));
       const reputations = await fetchReputations(talosIds, new Date());
 
       for (const service of services) {
-        let valid = true;
-        
-        if (minScore !== undefined || minConfidence !== undefined || allowColdStart) {
-          const rep = reputations.get(service.talosId);
-          if (rep) {
-            if (rep.evidence === "insufficient") {
-              if (!allowColdStart) valid = false;
-            } else {
-              if (minScore !== undefined && rep.score < minScore) valid = false;
-              if (minConfidence !== undefined && rep.confidence < minConfidence) valid = false;
-            }
-          } else {
-            // Cold start
-            if (!allowColdStart) valid = false;
-          }
+        const valid = isValidService(
+          service,
+          reputations,
+          minScore,
+          minConfidence,
+          allowColdStart,
+        );
+
+        const advanced: ServiceCursor = {
+          createdAt: service.createdAt.toISOString(),
+          id: service.id,
+        };
+
+        if (valid && accumulated.length < limit) {
+          accumulated.push(toServiceResult(service));
+          pageCursor = advanced;
+        } else if (valid && accumulated.length === limit) {
+          hasMore = true;
         }
 
-        if (valid) {
-          accumulated.push({
-            id: service.id,
-            talosId: service.talosId,
-            talosName: service.talosName,
-            talosCategory: service.talosCategory,
-            serviceName: service.serviceName,
-            description: service.description,
-            price: Number(service.price),
-            currency: service.currency,
-            chains: service.chains,
-            createdAt: service.createdAt,
-          });
-          if (accumulated.length === limit) {
-            currentCursor = `${service.createdAt.toISOString()}|${service.id}`;
-            break;
-          }
+        currentCursor = advanced;
+
+        if (accumulated.length === limit && hasMore) {
+          break;
         }
-        currentCursor = `${service.createdAt.toISOString()}|${service.id}`;
       }
     }
 
-    // Shuffle for diversity — agents see different services each cycle
-    for (let i = accumulated.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [accumulated[i], accumulated[j]] = [accumulated[j], accumulated[i]];
-    }
+    const nextCursor =
+      accumulated.length === limit && hasMore ? pageCursor : null;
 
-    const nextCursor = (exhausted && accumulated.length < limit) ? null : currentCursor;
-
-    // Remove cursor tracking fields from the output to match original payload structure
-    const results = accumulated.map(({ id, createdAt, ...rest }) => rest);
-
-    return Response.json({ data: results, nextCursor });
+    return Response.json({
+      data: accumulated,
+      nextCursor: nextCursor ? encodeServiceCursor(nextCursor) : null,
+    });
   } catch {
     return internalError(request);
   }
+}
+
+function buildConditions(
+  cursor: ServiceCursor | null,
+  category: string | null,
+  selfId: string | null,
+  minPrice: number | undefined,
+  maxPrice: number | undefined,
+  network: string | null,
+) {
+  const conditions = [or(eq(tlsTalos.status, "Active"), eq(tlsTalos.status, "Draining"))!, isNull(tlsTalos.deletedAt)];
+
+  if (selfId) {
+    conditions.push(ne(tlsCommerceServices.talosId, selfId));
+  }
+
+  if (category) {
+    conditions.push(ilike(tlsTalos.category, category));
+  }
+
+  if (minPrice !== undefined) {
+    conditions.push(gte(tlsCommerceServices.price, String(minPrice)));
+  }
+
+  if (maxPrice !== undefined) {
+    conditions.push(lte(tlsCommerceServices.price, String(maxPrice)));
+  }
+
+  if (network) {
+    // `chains` lists supported payment networks for the service.
+    conditions.push(arrayContains(tlsCommerceServices.chains, [network]));
+  }
+
+  if (cursor) {
+    const cursorCondition = or(
+      lt(tlsCommerceServices.createdAt, new Date(cursor.createdAt)),
+      and(
+        eq(tlsCommerceServices.createdAt, new Date(cursor.createdAt)),
+        lt(tlsCommerceServices.id, cursor.id),
+      ),
+    );
+    if (cursorCondition) conditions.push(cursorCondition);
+  }
+
+  return conditions;
+}
+
+function fetchServicesBatch(
+  conditions: ReturnType<typeof buildConditions>,
+  orderBy: SQL[],
+  batchSize: number,
+) {
+  return db
+    .select({
+      id: tlsCommerceServices.id,
+      talosId: tlsCommerceServices.talosId,
+      talosName: tlsTalos.name,
+      talosCategory: tlsTalos.category,
+      talosStatus: tlsTalos.status,
+      serviceName: tlsCommerceServices.serviceName,
+      description: tlsCommerceServices.description,
+      price: tlsCommerceServices.price,
+      currency: tlsCommerceServices.currency,
+      chains: tlsCommerceServices.chains,
+      createdAt: tlsCommerceServices.createdAt,
+    })
+    .from(tlsCommerceServices)
+    .innerJoin(tlsTalos, eq(tlsCommerceServices.talosId, tlsTalos.id))
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .orderBy(...orderBy)
+    .limit(batchSize);
+}
+
+function isValidService(
+  service: ServiceRow,
+  reputations: Map<
+    string,
+    { evidence: string; score?: number; confidence?: number }
+  >,
+  minScore: number | undefined,
+  minConfidence: number | undefined,
+  allowColdStart: boolean,
+): boolean {
+  if (
+    minScore === undefined &&
+    minConfidence === undefined &&
+    !allowColdStart
+  ) {
+    return true;
+  }
+
+  const rep = reputations.get(service.talosId);
+  if (rep) {
+    if (rep.evidence === "insufficient") {
+      return allowColdStart;
+    }
+    if (
+      minScore !== undefined &&
+      (rep.score === undefined || rep.score < minScore)
+    ) {
+      return false;
+    }
+    if (
+      minConfidence !== undefined &&
+      (rep.confidence === undefined || rep.confidence < minConfidence)
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  return allowColdStart;
+}
+
+function toServiceResult(service: ServiceRow): ServiceResult {
+  return {
+    talosId: service.talosId,
+    talosName: service.talosName,
+    talosCategory: service.talosCategory,
+    availability: service.talosStatus === "Draining" ? "draining" : "available",
+    acceptsNewWork: service.talosStatus === "Active",
+    serviceName: service.serviceName,
+    description: service.description,
+    price: Number(service.price),
+    currency: service.currency,
+    chains: service.chains,
+  };
 }
 
 export const GET = withTraceContext(handleGet);

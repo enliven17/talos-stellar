@@ -3,14 +3,238 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, time, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from talos_agent.scheduler import run_dividend_distribution, run_loan_repayment
+from talos_agent.config import Settings
+from talos_agent.scheduler import (
+    check_should_run,
+    plan_interval_runs,
+    run_dividend_distribution,
+    run_loan_repayment,
+)
+
+
+class FixedClock:
+    def __init__(self, now: datetime):
+        self._now = now
+
+    def now_utc(self) -> datetime:
+        return self._now
 
 
 # ── Scheduler core tests ───────────────────────────────────────────────────────
+
+def test_check_should_run_uses_clock_and_utc_boundaries():
+    clock = FixedClock(datetime(2024, 1, 2, 6, 0, 0, tzinfo=timezone.utc))
+
+    assert check_should_run(
+        now=clock.now_utc(),
+        last_run=datetime(2024, 1, 1, 5, 59, 59, tzinfo=timezone.utc),
+        interval_seconds=3600,
+        clock=clock,
+    ) is True
+
+    assert check_should_run(
+        now=clock.now_utc(),
+        last_run=datetime(2024, 1, 2, 5, 59, 59, tzinfo=timezone.utc),
+        interval_seconds=3600,
+        clock=clock,
+    ) is False
+
+
+def test_check_should_run_respects_configured_timezone_boundary():
+    clock = FixedClock(datetime(2024, 1, 2, 17, 0, 0, tzinfo=timezone.utc))
+
+    assert check_should_run(
+        now=clock.now_utc(),
+        last_run=datetime(2024, 1, 1, 8, 59, 0, tzinfo=timezone.utc),
+        schedule_time=time(9, 0),
+        timezone_name="America/Los_Angeles",
+        clock=clock,
+    ) is True
+
+
+def test_check_should_run_handles_dst_gap_and_overlap():
+    gap_now = datetime(2024, 3, 10, 3, 30, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
+    overlap_now = datetime(2024, 11, 3, 1, 30, 0, tzinfo=ZoneInfo("America/New_York"))
+
+    assert check_should_run(
+        now=gap_now,
+        last_run=gap_now - timedelta(hours=1),
+        schedule_time=time(2, 30),
+        timezone_name="America/Los_Angeles",
+    ) is True
+
+    assert check_should_run(
+        now=overlap_now,
+        last_run=overlap_now - timedelta(hours=1),
+        schedule_time=time(1, 30),
+        timezone_name="America/New_York",
+    ) is True
+
+
+@pytest.mark.parametrize(
+    ("policy", "expected_runs"),
+    [("skip", 0), ("coalesce", 1), ("catch_up", 3)],
+)
+def test_plan_interval_runs_distinguishes_missed_run_policies(policy, expected_runs):
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    last_run = now - timedelta(seconds=550)
+
+    decision = plan_interval_runs(
+        now,
+        last_run,
+        interval_seconds=100,
+        policy=policy,
+        max_catch_up_runs=3,
+    )
+
+    assert decision.due_runs == 5
+    assert decision.runs_to_execute == expected_runs
+    assert decision.lateness_seconds == pytest.approx(450)
+    assert decision.policy == policy
+
+
+def test_skip_policy_runs_single_due_interval_at_boundary():
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    decision = plan_interval_runs(
+        now,
+        now - timedelta(seconds=100),
+        interval_seconds=100,
+        policy="skip",
+    )
+
+    assert decision.due_runs == 1
+    assert decision.runs_to_execute == 1
+    assert decision.lateness_seconds == 0
+
+
+def test_plan_interval_runs_waits_until_next_interval():
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    decision = plan_interval_runs(
+        now,
+        now - timedelta(seconds=99),
+        interval_seconds=100,
+        policy="catch_up",
+    )
+
+    assert decision.due_runs == 0
+    assert decision.runs_to_execute == 0
+    assert decision.next_run_in_seconds == 1
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"policy": "replay"}, "policy must be"),
+        ({"max_catch_up_runs": 0}, "max_catch_up_runs must be"),
+        ({"max_catch_up_runs": True}, "max_catch_up_runs must be"),
+        ({"max_catch_up_runs": 11}, "max_catch_up_runs must be"),
+    ],
+)
+def test_plan_interval_runs_rejects_invalid_policy_options(kwargs, message):
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    with pytest.raises(ValueError, match=message):
+        plan_interval_runs(now, None, interval_seconds=100, **kwargs)
+
+
+def test_plan_interval_runs_rejects_unrepresentable_interval():
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    with pytest.raises(ValueError, match="interval_seconds must be"):
+        plan_interval_runs(now, None, interval_seconds=10**1000)
+
+
+def test_plan_interval_runs_bounds_extreme_backlog():
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    decision = plan_interval_runs(
+        now,
+        now - timedelta(seconds=1),
+        interval_seconds=1e-320,
+        policy="catch_up",
+        max_catch_up_runs=3,
+    )
+
+    assert decision.due_runs > 3
+    assert decision.runs_to_execute == 3
+
+
+def test_scheduler_missed_run_settings_are_validated():
+    settings = Settings(_env_file=None)
+    assert settings.scheduler_missed_run_policy == "coalesce"
+    assert settings.scheduler_max_catch_up_runs == 3
+
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, scheduler_missed_run_policy="replay")
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, scheduler_max_catch_up_runs=11)
+
+
+@pytest.mark.parametrize(
+    ("policy", "expected_runs"),
+    [("skip", 0), ("coalesce", 1), ("catch_up", 3)],
+)
+@pytest.mark.asyncio
+async def test_dividend_task_executes_missed_runs_according_to_policy(
+    policy, expected_runs, monkeypatch
+):
+    from talos_agent.scheduler import tasks
+
+    interval = 3600
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    db = MagicMock()
+    db.get_last_run.return_value = now - timedelta(seconds=interval * 5 + interval // 2)
+    settings = MagicMock()
+    settings.dividend_distribution_interval = interval
+    settings.scheduler_missed_run_policy = policy
+    settings.scheduler_max_catch_up_runs = 3
+    settings.dividend_usdc_threshold = 100
+    settings.talos_id = "test-talos"
+    shutdown_event = asyncio.Event()
+    run_distribution = AsyncMock(return_value="success")
+    lateness_records = []
+    wait_calls = 0
+
+    async def fake_wait_for(awaitable, timeout):
+        nonlocal wait_calls
+        wait_calls += 1
+        awaitable.close()
+        if wait_calls == 1:
+            raise asyncio.TimeoutError
+        shutdown_event.set()
+        return True
+
+    monkeypatch.setattr(tasks, "run_dividend_distribution", run_distribution)
+    monkeypatch.setattr(
+        tasks.metrics,
+        "record_schedule_lateness",
+        lambda task, selected_policy, lateness: lateness_records.append(
+            (task, selected_policy, lateness)
+        ),
+    )
+    monkeypatch.setattr(tasks.asyncio, "wait_for", fake_wait_for)
+
+    await tasks.dividend_distribution_task(
+        shutdown_event=shutdown_event,
+        settings=settings,
+        stellar=MagicMock(),
+        api=MagicMock(),
+        db=db,
+        talos_config={},
+        effective_clock=FixedClock(now),
+    )
+
+    assert run_distribution.await_count == expected_runs
+    assert lateness_records == [
+        ("dividend_distribution", policy, interval * 4 + interval // 2)
+    ]
+    assert db.update_schedule.call_count == (1 if policy == "skip" else 0)
+
 
 @pytest.mark.asyncio
 async def test_agent_lock_prevents_concurrent_execution():

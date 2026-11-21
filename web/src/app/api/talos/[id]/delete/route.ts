@@ -1,12 +1,15 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPatrons, tlsActivities, tlsApprovals, tlsCommerceJobs, tlsCommerceServices, tlsPlaybooks } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { deleteAgentSchema, parseBody } from "@/lib/schemas";
+import { revalidateTag } from "next/cache";
+import { agentMutationTags } from "@/lib/cache-tags";
 
 // POST /api/talos/:id/delete - Privacy deletion (soft delete, preserves historical links)
 // Requires Stellar ED25519 signature proof of wallet ownership.
-export async function POST(
+async function _POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -38,7 +41,7 @@ export async function POST(
       }
 
       if (talos.deletedAt) {
-        return { error: "TALOS already deleted", status: 400 };
+        return { error: "TALOS already deleted", status: 409 };
       }
 
       // Only the creator wallet can delete
@@ -120,6 +123,8 @@ export async function POST(
       return Response.json({ error: result.error }, { status: result.status });
     }
 
+    for (const tag of agentMutationTags(id)) (revalidateTag as any)(tag);
+
     return Response.json({
       id: result.data.id,
       agentName: result.data.agentName,
@@ -132,3 +137,5 @@ export async function POST(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);

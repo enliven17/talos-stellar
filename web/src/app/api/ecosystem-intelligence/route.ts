@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { 
   tlsTalos, 
@@ -18,6 +18,8 @@ import {
   suppressSparseRecord,
   suppressSparseRows,
 } from "@/lib/analytics-privacy";
+import { parseAnalyticsLimit } from "@/lib/analytics-limits";
+import { withRequestId } from "@/lib/with-request-id";
 
 export const dynamic = 'force-dynamic';
 
@@ -102,13 +104,20 @@ interface EcosystemMetrics {
   };
 }
 
-export async function GET(req: Request) {
+async function _GET(req: Request | NextRequest) {
   // For now, this is a public endpoint for ecosystem-wide metrics.
   // If authorization is needed, uncomment the following:
   // const wallet = req.nextUrl.searchParams.get("wallet");
   // if (!wallet) {
   //   return NextResponse.json({ error: "wallet parameter required" }, { status: 400 });
   // }
+
+  const url = new URL(req.url);
+  const parsedLimit = parseAnalyticsLimit(url.searchParams.get("limit"), 10, 50);
+  if (!parsedLimit.ok) {
+    return parsedLimit.response;
+  }
+  const detailedLimit = parsedLimit.limit;
   
   try {
     const now = new Date();
@@ -309,7 +318,7 @@ export async function GET(req: Request) {
     );
     const byAgent = visibleByAgent.rows
       .sort((a, b) => b.completionRate - a.completionRate)
-      .slice(0, 10);
+      .slice(0, detailedLimit);
 
     // Opportunity metrics
     // Calculate demand vs supply by category
@@ -351,7 +360,7 @@ export async function GET(req: Request) {
       row => categoryCohortSizes[row.category] ?? 0,
     );
     const underservedCategories = visibleUnderservedCategories.rows
-      .slice(0, 5);
+      .slice(0, Math.min(detailedLimit, 5));
 
     // Trending agents (by revenue growth)
     const agentRevenue7d = new Map<string, { total: number; events: number }>();
@@ -383,7 +392,7 @@ export async function GET(req: Request) {
       row => row.cohortSize,
     );
     const trendingAgents = visibleTrendingAgents.rows
-      .slice(0, 5)
+      .slice(0, Math.min(detailedLimit, 5))
       .map(agent => ({
         agentId: agent.agentId,
         agentName: agent.agentName,
@@ -504,3 +513,5 @@ export async function GET(req: Request) {
     );
   }
 }
+
+export const GET = withRequestId(_GET);

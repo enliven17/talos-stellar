@@ -12,6 +12,13 @@ import {
   negotiateApiVersion,
   stripVersionPrefix,
 } from "@/lib/api-versioning";
+import {
+  CSP_NONCE_HEADER,
+  CSP_REPORT_ENDPOINT,
+  createCspNonce,
+  getCspHeader,
+  getReportingEndpointsHeader,
+} from "@/lib/security-headers.mjs";
 
 // ─── Trusted proxy IP extraction ──────────────────────────────────
 //
@@ -63,12 +70,20 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
   const { pathname } = request.nextUrl;
 
   if (!pathname.startsWith("/api/")) {
-    return NextResponse.next();
+    // Document (page) request: attach a per-request Content-Security-Policy.
+    // The static baseline headers from next.config.mjs still apply on top.
+    return applyContentSecurityPolicy(request);
   }
 
   const ip = getClientIp(request);
   const apiKey = getApiKey(request);
   const method = request.method.toUpperCase();
+
+  // Computed up front (pure, no I/O) so it's available for every response
+  // path below, including the 429 rate-limit rejection — a client that gets
+  // rate-limited on a deprecated version still needs the Deprecation/Sunset
+  // signal so a retry lands on the right version.
+  const versionInfo = negotiateApiVersion(pathname);
 
   // Identify which policy bucket applies to this request.
   const isAuthRoute =
@@ -84,12 +99,24 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
       limit: p.limit,
       windowMs: p.windowMs,
     });
+    result.policy = p.name;
+  } else if (pathname === CSP_REPORT_ENDPOINT) {
+    // CSP violation reports are fire-and-forget telemetry: they get their
+    // own bucket so a report-only rollout can never exhaust the budget of
+    // real client writes coming from the same IP.
+    const p = RATE_LIMIT_POLICIES.cspReport;
+    result = await rateLimit(`${p.keyPrefix}:${ip}`, {
+      limit: p.limit,
+      windowMs: p.windowMs,
+    });
+    result.policy = p.name;
   } else if (method === "GET") {
     const p = RATE_LIMIT_POLICIES.read;
     result = await rateLimit(`${p.keyPrefix}:${ip}`, {
       limit: p.limit,
       windowMs: p.windowMs,
     });
+    result.policy = p.name;
   } else if (method === "POST" && apiKey) {
     const p = RATE_LIMIT_POLICIES.writeKey;
     // Hash the API key so raw secrets never reach the shared store.
@@ -102,21 +129,23 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
       limit: p.limit,
       windowMs: p.windowMs,
     });
+    result.policy = p.name;
   } else {
     const p = RATE_LIMIT_POLICIES.writeIp;
     result = await rateLimit(`${p.keyPrefix}:${ip}`, {
       limit: p.limit,
       windowMs: p.windowMs,
     });
+    result.policy = p.name;
   }
 
   if (!result.ok) {
-    return rateLimitResponse(result) as NextResponse;
+    const response = rateLimitResponse(result);
+    addVersionHeaders(response.headers, versionInfo);
+    return response as NextResponse;
   }
 
   // ─── API versioning ───────────────────────────────────────────
-
-  const versionInfo = negotiateApiVersion(pathname);
 
   if (isVersionedPath(pathname)) {
     const url = request.nextUrl.clone();
@@ -129,6 +158,32 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
   const response = NextResponse.next();
   addVersionHeaders(response.headers, versionInfo);
   return applyRateLimitHeaders(response, result) as NextResponse;
+}
+
+/**
+ * Attach a per-request Content-Security-Policy to document responses.
+ *
+ * A fresh nonce is minted for every request and mirrored into the request
+ * headers (`Content-Security-Policy` + `x-nonce`) so Next.js server
+ * rendering stamps it onto framework, bundle and inline <script> tags.
+ * The response header name follows the active mode: report-only unless
+ * CSP_ENFORCE selects enforcement (see resolveCspMode).
+ */
+function applyContentSecurityPolicy(request: NextRequest): NextResponse {
+  const nonce = createCspNonce();
+  const csp = getCspHeader({ nonce });
+
+  const requestHeaders = new Headers(request.headers);
+  // Next.js extracts the nonce from this request header during rendering.
+  requestHeaders.set("Content-Security-Policy", csp.value);
+  requestHeaders.set(CSP_NONCE_HEADER, nonce);
+
+  const response = NextResponse.next({ request: { headers: requestHeaders } });
+  response.headers.set(csp.key, csp.value);
+
+  const reporting = getReportingEndpointsHeader();
+  response.headers.set(reporting.key, reporting.value);
+  return response;
 }
 
 /**
@@ -145,5 +200,20 @@ function sanitizeApiKey(apiKey: string): string {
 }
 
 export const config = {
-  matcher: "/api/:path*",
+  matcher: [
+    // API routes keep their own catch-all: rate limiting and versioning must
+    // run on every API request.  This entry is listed first so the prefetch
+    // exclusion below can never be used to bypass it.
+    "/api/:path*",
+    // Documents get the per-request CSP.  Static assets and link prefetches
+    // don't need one (per Next.js CSP guidance).
+    {
+      source:
+        "/((?!_next/static|_next/image|favicon.ico|icon.svg|robots.txt).*)",
+      missing: [
+        { type: "header", key: "next-router-prefetch" },
+        { type: "header", key: "purpose", value: "prefetch" },
+      ],
+    },
+  ],
 };
