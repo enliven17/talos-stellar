@@ -715,5 +715,3 @@ export interface ListWebhookDeliveriesParams extends CursorRequestOptions {
 }
 
 export type WebhookDeliveryPage = CursorPage<WebhookDelivery>;
-
-

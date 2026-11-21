@@ -164,6 +164,7 @@ The agent is configured via environment variables and/or `~/.talos-agent/config.
 | `heartbeat_interval` | `HEARTBEAT_INTERVAL` | `60` | No | Seconds between heartbeats |
 | `scheduler_missed_run_policy` | `SCHEDULER_MISSED_RUN_POLICY` | `coalesce` | No | Dividend interval misfires: `skip` drops all work when multiple intervals are due (one due interval still runs), `coalesce` runs once for any backlog, or `catch_up` runs once per due interval up to the configured cap. |
 | `scheduler_max_catch_up_runs` | `SCHEDULER_MAX_CATCH_UP_RUNS` | `3` | No | Maximum dividend catch-up executions per scheduler pass (1–10). |
+| `scheduler_max_concurrent_tasks` | `SCHEDULER_MAX_CONCURRENT_TASKS` | `4` | No | Maximum active non-critical scheduler work units per agent (1–16). Heartbeats and the independently paced Telegram queue are excluded; periodic waits do not occupy slots. |
 | `max_iterations` | `MAX_ITERATIONS` | `20` | No | Max tool-call iterations per cycle |
 | `approval_threshold` | `APPROVAL_THRESHOLD` | `10` | No | USD threshold for auto-approval |
 | `browser_headless` | `BROWSER_HEADLESS` | `false` | No | Run browser in headless mode |
@@ -200,6 +201,7 @@ Additional architectural, configuration, and operational guides:
 - **Package Documentation (`packages/prime-agent/docs/`)**:
   - [A2A Composition](./docs/a2a_composition.md) — Agent-to-Agent communication protocols and timeouts.
   - [Adapter Diagnostics](./docs/adapter-diagnostics.md) — Adapter health checks, status reporting, and troubleshooting.
+  - [Adapter HTTP Testing](./docs/adapter-http-testing.md) — Fake transport contract for isolated communication-adapter tests.
   - [Adapter Health Snapshots](./docs/adapter-health-snapshots.md) — Runtime health snapshot captures and telemetry.
   - [Discord Reconnect Policy](./docs/discord-reconnect-policy.md) — Connection lifecycle and reconnect backoff behavior for Discord.
   - [Logging Policy](./docs/LOGGING_POLICY.md) — Structured logging standards, redaction rules, and severity levels.
@@ -530,3 +532,13 @@ See the
 [Stellar retry failure runbook](../../docs/prime-agent-stellar-retry-failures.md)
 for the input → class mapping, privacy guarantees, compatibility notes, and
 how to consume the classification.
+
+## Purchased commerce result retention
+
+When a purchased commerce job reaches `completed`, the local database records
+its payload retention deadline as 30 days after completion and performs one
+cleanup pass. Each pass removes at most 100 expired payloads; later completed
+jobs continue draining any backlog. Cleanup retains the job, status, retention
+deadline, and spending records while clearing only the private result payload.
+Repeated completion polls do not extend the original deadline. Existing
+completed rows receive deadlines during the database migration.

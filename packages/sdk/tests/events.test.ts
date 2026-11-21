@@ -479,7 +479,11 @@ describe("TalosEventStream — HTTP error handling", () => {
 describe("TalosEventStream — abort & close", () => {
   it("close() stops the stream and emits close event", async () => {
     // stream that never ends
-    const body = new ReadableStream({ start() {} });
+    const cancelBody = vi.fn();
+    const body = new ReadableStream({
+      start() {},
+      cancel: cancelBody,
+    });
     const mockFetch = vi.fn().mockResolvedValue(sseResponse(body));
     const stream = new TalosEventStream("http://localhost", {
       fetch: mockFetch,
@@ -495,10 +499,40 @@ describe("TalosEventStream — abort & close", () => {
     // Let connection open
     await Promise.resolve();
     stream.close();
+    stream.close();
     await vi.runAllTimersAsync();
 
     expect(closed).toBe(true);
     expect(stream.connectionState).toBe("closed");
+    expect(cancelBody).toHaveBeenCalledTimes(1);
+    expect(body.locked).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not reopen when close() races with a pending connection", async () => {
+    let resolveResponse!: (response: Response) => void;
+    const responsePromise = new Promise<Response>((resolve) => {
+      resolveResponse = resolve;
+    });
+    const body = new ReadableStream({ start() {} });
+    const mockFetch = vi.fn().mockReturnValue(responsePromise);
+    const stream = new TalosEventStream("http://localhost", {
+      fetch: mockFetch,
+      heartbeatIntervalMs: 0,
+      maxReconnectAttempts: 5,
+    });
+
+    stream.connect();
+    stream.close();
+    stream.close();
+    resolveResponse(sseResponse(body));
+    await vi.runAllTimersAsync();
+    await Promise.resolve();
+
+    expect(stream.connectionState).toBe("closed");
+    expect(body.locked).toBe(false);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("external AbortSignal closes the stream", async () => {

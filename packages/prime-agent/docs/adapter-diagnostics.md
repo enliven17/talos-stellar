@@ -105,5 +105,3 @@ result = queue.apply_disposition(
 Attempting to apply a disposition to an actively running or already terminal operation
 raises a `ValueError`. Automatic background loops are strictly forbidden from silently
 re-executing indeterminate publications.
-
-

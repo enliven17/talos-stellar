@@ -8,10 +8,10 @@ here so it can be unit-tested without starting the full scheduler loop.
 from __future__ import annotations
 
 import math
+
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
-from fractions import Fraction
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 try:
     from zoneinfo import ZoneInfo
@@ -20,6 +20,59 @@ except ImportError:
 
 if TYPE_CHECKING:
     from talos_agent.clock import ClockProtocol
+
+
+@dataclass(frozen=True)
+class SchedulerConsistencyReport:
+    """Read-only comparison of persisted scheduler identities and live tasks."""
+
+    matched: tuple[str, ...]
+    orphaned_durable: tuple[str, ...]
+    untracked_active: tuple[str, ...]
+    uncertain: tuple[str, ...]
+    recovery_plan: tuple[str, ...]
+
+
+def build_consistency_report(
+    durable_execution_ids: set[str] | frozenset[str] | list[str] | tuple[str, ...],
+    active_task_ids: set[str] | frozenset[str] | list[str] | tuple[str, ...],
+    *,
+    durable_source_available: bool = True,
+    active_source_available: bool = True,
+) -> SchedulerConsistencyReport:
+    """Compare durable execution identities with active asyncio task names.
+
+    This function never mutates state or requeues work. If either observation
+    source is unavailable, the affected side is reported as uncertain instead
+    of being treated as orphaned, preventing an unsafe recovery decision.
+    """
+    durable = set(durable_execution_ids)
+    active = set(active_task_ids)
+    matched = tuple(sorted(durable & active))
+    orphaned = tuple(sorted(durable - active)) if durable_source_available and active_source_available else ()
+    untracked = tuple(sorted(active - durable)) if durable_source_available and active_source_available else ()
+    uncertain: list[str] = []
+    if not durable_source_available:
+        uncertain.append("durable execution store unavailable")
+    if not active_source_available:
+        uncertain.append("active asyncio task snapshot unavailable")
+
+    plan = [
+        "Inspect orphaned durable executions and verify lease ownership before recovery.",
+        "Do not requeue or cancel work from this report; an operator must confirm the state.",
+    ]
+    if orphaned:
+        plan.insert(0, f"Review {len(orphaned)} durable execution(s) with no matching active task.")
+    if uncertain:
+        plan.insert(0, "Retry the observation before making a recovery decision.")
+
+    return SchedulerConsistencyReport(
+        matched=matched,
+        orphaned_durable=orphaned,
+        untracked_active=untracked,
+        uncertain=tuple(uncertain),
+        recovery_plan=tuple(plan),
+    )
 
 
 MissedRunPolicy = Literal["skip", "coalesce", "catch_up"]

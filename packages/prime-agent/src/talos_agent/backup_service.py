@@ -53,7 +53,6 @@ import structlog
 
 from talos_agent.config import APP_DIR
 from talos_agent.crypto import decrypt_with_password, encrypt_with_password
-from talos_agent.db import get_db_path
 
 log = structlog.get_logger(__name__)
 
@@ -186,6 +185,22 @@ def _now_iso() -> str:
 # ────────────────────────────────────────────────────────────────────
 
 
+def _get_active_db_path(agent_id: str | None = None) -> Path:
+    """Return the active db path, honoring monkeypatched APP_DIR in backup_service or db."""
+    try:
+        from talos_agent.db import get_db_path
+        p = get_db_path(agent_id)
+        if not p.exists() and APP_DIR != Path("~/.talos-agent").expanduser():
+            alt = APP_DIR / (f"agent-{agent_id}.db" if agent_id else "talos-agent.db")
+            if alt.exists():
+                return alt
+        return p
+    except Exception:
+        if agent_id:
+            return APP_DIR / f"agent-{agent_id}.db"
+        return APP_DIR / "talos-agent.db"
+
+
 def collect_agent_files(agent_id: str | None = None) -> list[Path]:
     """Files to include in an agent-scoped backup (paths only).
 
@@ -193,7 +208,7 @@ def collect_agent_files(agent_id: str | None = None) -> list[Path]:
         agent_id=None  → include the default `talos-agent.db`
         agent_id="..."  → include `agent-<id>.db`
     """
-    paths = [get_db_path(agent_id)]
+    paths = [_get_active_db_path(agent_id)]
     return [p for p in paths if p.exists()]
 
 
@@ -210,6 +225,20 @@ def build_backup(
 
     if len(password) > 1024:
         raise BackupError("Backup passphrase too long (max 1024 chars)")
+
+    # Reject if the output path aliases the live database file (directly or via symlink)
+    # Resolve both paths to their absolute canonical forms.
+    out_resolved = out_path.resolve(strict=False)
+    db_path = _get_active_db_path(agent_id)
+    try:
+        db_resolved = db_path.resolve(strict=False)
+    except Exception:
+        db_resolved = db_path.absolute()
+    if out_resolved == db_resolved:
+        raise BackupError(
+            "Backup output path cannot alias the active database file",
+            code="ALIAS_REJECTED",
+        )
 
     sources = collect_agent_files(agent_id)
     if not sources:
@@ -467,6 +496,37 @@ def prune_backups(
         )
 
     return deleted
+
+
+def preview_database_retention(
+    db_path: Path | None = None,
+    agent_id: str | None = None,
+    *,
+    record_class: str | None = None,
+    cutoff_iso: str | None = None,
+):
+    """Preview local SQLite database retention candidates grouped by record class (#1451).
+
+    Reads directly from the specified database (or default/per-agent DB) without modifying
+    or deleting any rows.
+    """
+    from talos_agent.db.facade import LocalDB
+    from talos_agent.db.retention import preview_state_retention
+
+    target = db_path or _get_active_db_path(agent_id)
+    if not target.exists():
+        raise BackupError(f"Database not found at {target}", code="BAD_INPUT")
+
+    db = LocalDB(path=target)
+    try:
+        return preview_state_retention(
+            db._conn,
+            record_class_filter=record_class,
+            cutoff_iso=cutoff_iso,
+        )
+    finally:
+        db.close()
+
 
 # ────────────────────────────────────────────────────────────────────
 # Verify
@@ -815,4 +875,5 @@ __all__ = [
     "collect_agent_files",
     "default_backup_dir",
     "prune_backups",
+    "preview_database_retention",
 ]

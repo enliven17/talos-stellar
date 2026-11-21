@@ -388,6 +388,16 @@ class Settings(BaseSettings):
         le=10,
         description="Maximum dividend catch-up runs after an outage.",
     )
+    scheduler_max_concurrent_tasks: int = Field(
+        default=4,
+        ge=1,
+        le=16,
+        validation_alias="SCHEDULER_MAX_CONCURRENT_TASKS",
+        description=(
+            "Maximum concurrent non-critical scheduler work units per agent. "
+            "Agent/job heartbeats and the independently paced Telegram queue are excluded."
+        ),
+    )
     max_iterations: int = Field(default=20, description="Max tool-call iterations per cycle")
     approval_threshold: Decimal = Field(default=Decimal(10), description="USD threshold for auto-approval")
     browser_headless: bool = Field(default=False, description="Run browser in headless mode")

@@ -162,7 +162,7 @@ describe("AgentLifecycleChecklist", () => {
 
     expect(screen.getByTestId("lifecycle-checklist")).toBeInTheDocument();
     expect(screen.getByTestId("checklist-readiness-badge")).toHaveTextContent("Obligations Pending");
-    
+
     const inFlightObligation = screen.getByTestId("obligation-in_flight_jobs");
     expect(inFlightObligation).toHaveTextContent("Drain Active Jobs");
     expect(inFlightObligation).toHaveTextContent("2");

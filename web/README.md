@@ -250,6 +250,7 @@ Limits are stored in two Postgres tables (added in migration `0013_add_quota_tab
 
 - `tls_quota_configs` — one row per `(talosId, resource)` with limit, window, and enabled flag. A `NULL` `talosId` row is the platform default applied when no agent-specific row exists.
 - `tls_quota_usage` — one row per `(talosId, resource, windowStart)`. The counter is incremented atomically via `INSERT … ON CONFLICT DO UPDATE` so concurrent requests never double-count.
+- `tls_quota_scope_usage` — bounded per-scope counters for the current window (added in migration `0023_add_quota_scope_usage`). These are observability breakdowns only; `tls_quota_usage` remains authoritative for the total limit and enforcement.
 
 The increment-then-check pattern costs one DB round-trip per request with no distributed locking.
 
@@ -306,7 +307,18 @@ Response:
         "remaining": 458,
         "limit": 500,
         "resetAt": "2026-07-25T00:00:00.000Z",
-        "ok": true
+        "ok": true,
+        "byScope": {
+          "activity:write": 42,
+          "commerce:read": 0,
+          "commerce:write": 0,
+          "wallet:read": 0,
+          "wallet:sign": 0,
+          "settings:read": 0,
+          "settings:write": 0,
+          "revenue:read": 0,
+          "revenue:write": 0
+        }
       }
     }
   }
