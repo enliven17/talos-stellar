@@ -216,10 +216,11 @@ async function _POST(
           fromState: toLifecycleState(talos.status),
           toState: "retired",
           actorId: stellarPublicKey,
-          actorRole: "creator",
+          actorRole: talos.creatorPublicKey === stellarPublicKey ? "creator" : "operator",
           detail: { reason, supersededBy: supersededBy || null },
+          idempotencyKey: `retire:${id}:${message}`,
         },
-        tx
+        tx,
       ).catch((err) => {
         logger.warn({ err }, "failed to emit lifecycle event on retire");
       });
