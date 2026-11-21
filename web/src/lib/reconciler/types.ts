@@ -83,7 +83,7 @@ export interface TxRecordUpdate {
 /** Outcome of applying downstream repair for a confirmed/failed/expired tx. */
 export type RepairOutcome =
   | { ok: true;  repaired: boolean; detail?: string }
-  | { ok: false; error: string };
+  | { ok: false; error: string; stale?: boolean };
 
 // ─── Reconciler Config ────────────────────────────────────────────────────────
 
