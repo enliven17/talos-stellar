@@ -98,6 +98,7 @@ is a `major` bump.
 | `protocol_fee`      | `set_protocol_fee` / `calculate_protocol_fee`.               |
 | `interface_query`   | `version` / `interface_id` / `supports_version`.             |
 | `fees_collector`    | Capture 3% fee on Talos creation (configurable).             |
+| `agent_identity_export` | Read-only `export_agent_identity` + `agent_identity/` offline-verification fixtures. |
 
 ### TalosNameService
 

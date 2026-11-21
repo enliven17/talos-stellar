@@ -204,6 +204,25 @@ pub enum DataKey {
     ResumeController(u32),
 }
 
+/// A portable, offline-verifiable binding of a Talos agent identity.
+///
+/// `export_agent_identity` binds the registry contract that issued the
+/// record, the agent's stable on-chain `talos_id`, its human-readable
+/// `name`, the Talos `owner` (creator) and the `network` the export was
+/// produced against, so an offline verifier can re-derive and compare the
+/// record without a live network. `owner` is `None` when the `talos_id`
+/// has not been registered as a Talos.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentIdentity {
+    pub registry_id: Address,
+    pub talos_id: u32,
+    pub name: String,
+    pub owner: Option<Address>,
+    pub network: String,
+    pub exported_at: u64,
+}
+
 // ── Events ──────────────────────────────────────────────────────────
 //
 // Event schema (topics → data):
@@ -672,6 +691,30 @@ impl TalosRegistry {
     /// Get the creator address of a Talos.
     pub fn creator_of(e: Env, talos_id: u32) -> Option<Address> {
         e.storage().persistent().get(&DataKey::CreatorOf(talos_id))
+    }
+
+    /// Export a portable [`AgentIdentity`] for offline ownership verification.
+    ///
+    /// Binds the issuing registry contract (`registry_id` = this contract's
+    /// own address), the agent's stable `talos_id`, the caller-supplied
+    /// `name`, the Talos `owner` via [`Self::creator_of`] (`None` when the
+    /// `talos_id` is not a registered Talos), the caller-supplied `network`
+    /// (the Stellar network the export is bound to) and the export timestamp
+    /// (`ledger().timestamp()`).
+    ///
+    /// Read-only — requires no authorization and performs no ledger writes,
+    /// so it is safe to call for offline verification tooling. Historical
+    /// agent identifiers (`talos_id`) stay stable across ownership changes:
+    /// a name-service/admin transfer never mutates `CreatorOf`.
+    pub fn export_agent_identity(e: Env, talos_id: u32, name: String, network: String) -> AgentIdentity {
+        AgentIdentity {
+            registry_id: e.current_contract_address(),
+            talos_id,
+            name,
+            owner: Self::creator_of(e.clone(), talos_id),
+            network,
+            exported_at: e.ledger().timestamp(),
+        }
     }
 
     /// Check if a Talos is active.
