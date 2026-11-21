@@ -1058,13 +1058,16 @@ export const tlsLeaderboardAggregates = pgMaterializedView(
 
 export const capabilities = pgTable("capabilities", {
   id: uuid("id").primaryKey().defaultRandom(),
-  name: text("name").notNull().unique(),
+  name: text("name").notNull(),
+  version: integer("version").notNull().default(1),
   description: text("description").notNull(),
   category: text("category").notNull(),
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { mode: "date" }).defaultNow().notNull(),
-});
+}, (t) => [
+  uniqueIndex("capabilities_name_version_unique").on(t.name, t.version),
+]);
 
 export const marketplaceItems = pgTable("marketplace_items", {
   id: uuid("id").primaryKey().defaultRandom(),
