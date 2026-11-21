@@ -59,8 +59,13 @@ def test_check_should_run_respects_configured_timezone_boundary():
 
 
 def test_check_should_run_handles_dst_gap_and_overlap():
-    gap_now = datetime(2024, 3, 10, 3, 30, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
-    overlap_now = datetime(2024, 11, 3, 1, 30, 0, tzinfo=ZoneInfo("America/New_York"))
+    try:
+        la_tz = ZoneInfo("America/Los_Angeles")
+        ny_tz = ZoneInfo("America/New_York")
+    except Exception:
+        pytest.skip("tzdata not available on this platform")
+    gap_now = datetime(2024, 3, 10, 3, 30, 0, tzinfo=la_tz)
+    overlap_now = datetime(2024, 11, 3, 1, 30, 0, tzinfo=ny_tz)
 
     assert check_should_run(
         now=gap_now,

@@ -13,7 +13,7 @@ import logging
 from typing import Any
 
 from talos_agent.policy.engine import PolicyEngine
-from talos_agent.policy.schema import ActionSpec, Policy, PolicyResult
+from talos_agent.policy.schema import ActionSpec, PolicyApproval, PolicyResult
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ class PolicySimulator:
         # affect the real engine's metrics
         result = self._engine.evaluate(spec)
 
-        # Mark as simulation
+        # Mark as simulation and preserve digests
         simulated_result = PolicyResult(
             decision=result.decision,
             violated_rules=result.violated_rules,
@@ -60,6 +60,9 @@ class PolicySimulator:
             evidence=result.evidence,
             evaluated_at=result.evaluated_at,
             simulation=True,
+            trace=result.trace,
+            policy_digest=self._engine.policy_digest,
+            action_digest=spec.action_digest,
         )
 
         logger.debug(
@@ -69,6 +72,71 @@ class PolicySimulator:
         )
 
         return simulated_result
+
+    @property
+    def engine(self) -> PolicyEngine:
+        """The underlying policy engine."""
+        return self._engine
+
+    def create_approval(
+        self,
+        action: str,
+        params: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
+        *,
+        approval_id: str | None = None,
+        status: str = "pending",
+        decided_by: str | None = None,
+        reason: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[PolicyResult, PolicyApproval]:
+        """Simulate an action and bind an approval to the exact simulated policy digest.
+
+        Returns (simulated_result, approval).
+        """
+        params = params or {}
+        context = context or {}
+        sim_result = self.simulate(action, params, context)
+        spec = ActionSpec(action=action, params=params, context=context)
+
+        import uuid
+
+        app_id = approval_id or str(uuid.uuid4())
+        approval = PolicyApproval(
+            approval_id=app_id,
+            action=action,
+            params=dict(params),
+            context=dict(context),
+            action_digest=spec.action_digest,
+            policy_digest=self._engine.policy_digest,
+            simulated_result_digest=sim_result.result_digest,
+            decision=sim_result.decision,
+            status=status,
+            decided_by=decided_by,
+            reason=reason,
+            metadata=dict(metadata or {}),
+        )
+        return sim_result, approval
+
+    def verify_execution(
+        self,
+        approval: PolicyApproval,
+        action: str | None = None,
+        params: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
+        *,
+        spec: ActionSpec | None = None,
+        raise_on_mismatch: bool = True,
+    ) -> bool:
+        """Verify that execution matches the approved action and the current engine's policy digest."""
+        return self._engine.verify_approved_execution(
+            approval=approval,
+            spec=spec,
+            action=action,
+            params=params,
+            context=context,
+            raise_on_mismatch=raise_on_mismatch,
+        )
 
     def simulate_batch(
         self,
@@ -85,19 +153,23 @@ class PolicySimulator:
             context = scenario.get("context", {})
             try:
                 result = self.simulate(action, params, context)
-                results.append({
-                    "scenario_index": i,
-                    "action": action,
-                    "decision": result.decision.value,
-                    "evidence": list(result.evidence),
-                    "result_digest": result.result_digest,
-                })
+                results.append(
+                    {
+                        "scenario_index": i,
+                        "action": action,
+                        "decision": result.decision.value,
+                        "evidence": list(result.evidence),
+                        "result_digest": result.result_digest,
+                    }
+                )
             except Exception as exc:
-                results.append({
-                    "scenario_index": i,
-                    "action": action,
-                    "error": str(exc),
-                })
+                results.append(
+                    {
+                        "scenario_index": i,
+                        "action": action,
+                        "error": str(exc),
+                    }
+                )
         return results
 
     @staticmethod

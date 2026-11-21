@@ -9,7 +9,11 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from talos_agent.payments.stellar_kit import StellarKit
+from talos_agent.payments.stellar_kit import (
+    StellarKit,
+    format_stellar_amount,
+    to_stellar_amount,
+)
 from talos_agent.payments.stellar_retry import (
     attach_stellar_failure,
     classify_stellar_failure,
@@ -40,14 +44,20 @@ def _get_kit() -> StellarKit:
     return deps.stellar_kit
 
 
-@tool("transfer_xlm", "Transfer XLM to a Stellar account (dividends, payments). Auto-checks approval threshold.")
+@tool(
+    "transfer_xlm",
+    "Transfer XLM to a Stellar account (dividends, payments). Auto-checks approval threshold.",
+)
 async def transfer_xlm(to_account: str, amount: float | str, reason: str = "") -> dict:
     kit = _get_kit()
     await kit.initialize()
 
+    dec_amount = to_stellar_amount(amount)
+    formatted_amount = format_stellar_amount(dec_amount)
+
     # Check threshold
     threshold = float(_deps().settings.approval_threshold)
-    if amount > threshold:
+    if float(formatted_amount) > threshold:
         result = await _deps().api.create_approval(
             _deps().settings.talos_id,
             type_="transaction",
@@ -72,8 +82,13 @@ async def get_xlm_balance() -> dict:
     return await kit.get_balance()
 
 
-@tool("create_pulse_token", "Request Pulse (equity) token creation. Name must be 1-32 characters and symbol 1-12 alphanumeric characters. Requires Creator approval on Dashboard.")
-async def create_pulse_token(name: str, symbol: str, initial_supply: int = 1000000) -> dict:
+@tool(
+    "create_pulse_token",
+    "Request Pulse (equity) token creation. Name must be 1-32 characters and symbol 1-12 alphanumeric characters. Requires Creator approval on Dashboard.",
+)
+async def create_pulse_token(
+    name: str, symbol: str, initial_supply: int = 1000000
+) -> dict:
     if not name.strip() or len(name) > 32:
         return {"error": "name must be between 1 and 32 characters"}
     if re.fullmatch(r"[A-Za-z0-9]{1,12}", symbol) is None:
@@ -154,7 +169,10 @@ def _validate_airdrop_recipients(recipient_list: list) -> tuple[list, str | None
             return [], f"recipients[{idx}]: 'amount' must be numeric, got {raw_amt!r}"
 
         if not _math.isfinite(amt):
-            return [], f"recipients[{idx}]: 'amount' must be a finite number, got {raw_amt!r}"
+            return (
+                [],
+                f"recipients[{idx}]: 'amount' must be a finite number, got {raw_amt!r}",
+            )
 
         if amt <= 0:
             return [], (
@@ -167,14 +185,22 @@ def _validate_airdrop_recipients(recipient_list: list) -> tuple[list, str | None
     return validated, None
 
 
-@tool("airdrop_pulse", "Distribute Pulse tokens to Patron Stellar accounts (G... addresses). Requires Creator approval for large amounts.")
+@tool(
+    "airdrop_pulse",
+    "Distribute Pulse tokens to Patron Stellar accounts (G... addresses). Requires Creator approval for large amounts.",
+)
 async def airdrop_pulse(token_id: str, recipients: str) -> dict:
     """recipients: JSON string of [{"account": "G...", "amount": 1000}, ...]."""
     import json as _json
+
     try:
-        recipient_list = _json.loads(recipients) if isinstance(recipients, str) else recipients
+        recipient_list = (
+            _json.loads(recipients) if isinstance(recipients, str) else recipients
+        )
     except _json.JSONDecodeError:
-        return {"error": 'recipients must be valid JSON: [{"account": "G...", "amount": N}, ...]'}
+        return {
+            "error": 'recipients must be valid JSON: [{"account": "G...", "amount": N}, ...]'
+        }
 
     # --- Security: validate all entries before touching the threshold calc ---
     validated, err = _validate_airdrop_recipients(recipient_list)
@@ -216,8 +242,13 @@ async def airdrop_pulse(token_id: str, recipients: str) -> dict:
     return {"status": "completed", "transfers": results}
 
 
-@tool("execute_approved_transfer", "Execute a previously approved XLM or token transfer. Call after check_approval returns 'approved'.")
-async def execute_approved_transfer(to_account: str, amount: float, currency: str = "XLM", token_id: str = "") -> dict:
+@tool(
+    "execute_approved_transfer",
+    "Execute a previously approved XLM or token transfer. Call after check_approval returns 'approved'.",
+)
+async def execute_approved_transfer(
+    to_account: str, amount: float, currency: str = "XLM", token_id: str = ""
+) -> dict:
     result = await _deps().api.request_transfer(
         to_account=to_account,
         amount=amount,
@@ -230,11 +261,19 @@ async def execute_approved_transfer(to_account: str, amount: float, currency: st
         # carries a privacy-safe message rather than raw upstream text.
         return attach_stellar_failure(result, failure)
     if result:
-        return {"status": "completed", "to": to_account, "amount": amount, "result": result}
+        return {
+            "status": "completed",
+            "to": to_account,
+            "amount": amount,
+            "result": result,
+        }
     return attach_stellar_failure(None, classify_stellar_failure())
 
 
-@tool("get_pulse_balance", "Check Pulse token balance for a specific Stellar G... account via Horizon")
+@tool(
+    "get_pulse_balance",
+    "Check Pulse token balance for a specific Stellar G... account via Horizon",
+)
 async def get_pulse_balance(account_id: str, token_id: str) -> dict:
     kit = _get_kit()
     await kit.initialize()

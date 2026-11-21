@@ -503,7 +503,8 @@ class TestPublishTimeout:
         adapter = FakeAdapter(channel_name="X", post_delay=0.2)
         registry = _make_registry(X=adapter)
         with patch.object(publishing, "_adapter_registry", registry), \
-                patch.object(publishing, "_TIMEOUT", 5):
+                patch.object(publishing, "_TIMEOUT", 5), \
+                patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
             result = await publishing.publish_content("Hello", channel="X")
         assert "error" in result
         assert "5s" in result["error"]

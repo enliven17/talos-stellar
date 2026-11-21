@@ -173,14 +173,18 @@ async def run_loan_repayment(
             result["errors"] += 1
             # Classify so the operator-facing summary distinguishes a
             # transient outage (retryable) from a terminal failure.
-            failure = classify_stellar_result(transfer_result) or classify_stellar_failure()
+            failure = (
+                classify_stellar_result(transfer_result) or classify_stellar_failure()
+            )
             classes = result["failure_classes"]
             classes[failure.classification.value] = (
                 classes.get(failure.classification.value, 0) + 1
             )
             continue
 
-        db.record_repayment(loan_id, repay_amount, tx_hash=transfer_result.get("tx_hash"))
+        db.record_repayment(
+            loan_id, repay_amount, tx_hash=transfer_result.get("tx_hash")
+        )
         db.add_activity(
             "loan_repayment",
             f"Auto-repaid loan {loan_id}: {repay_amount} XLM. TX: {transfer_result.get('tx_hash', 'pending')}",

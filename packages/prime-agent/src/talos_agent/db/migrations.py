@@ -532,6 +532,15 @@ CREATE INDEX IF NOT EXISTS idx_cycle_summaries_talos_id
     ON cycle_summaries(talos_id, created_at DESC);
         """,
     ),
+    (
+        14,
+        """
+ALTER TABLE approval_cache ADD COLUMN action_digest TEXT;
+ALTER TABLE approval_cache ADD COLUMN policy_digest TEXT;
+ALTER TABLE approval_cache ADD COLUMN canonical_action TEXT;
+ALTER TABLE approval_cache ADD COLUMN simulated_result_digest TEXT;
+        """,
+    ),
 ]
 
 

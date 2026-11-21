@@ -204,7 +204,7 @@ class ReplayStore:
             f"""
             SELECT event_id, cycle_id, seq, kind, ts, payload
               FROM replay_events
-             WHERE {' AND '.join(filters)}
+             WHERE {" AND ".join(filters)}
              ORDER BY seq ASC
              LIMIT ?
             """,

@@ -18,7 +18,11 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
+from talos_agent.adapters.base import (
+    BaseSocialAdapter,
+    ChannelCapabilities,
+    PublishResult,
+)
 from talos_agent.adapters.capability import (
     AdapterHTTPClient,
     AdapterSandboxError,
@@ -183,7 +187,9 @@ class MastodonAdapter(BaseSocialAdapter):
         }
         return await self._send(payload, content)
 
-    async def reply(self, target_url: str, content: str, **kwargs: Any) -> PublishResult:
+    async def reply(
+        self, target_url: str, content: str, **kwargs: Any
+    ) -> PublishResult:
         if not self._is_configured():
             return PublishResult(
                 status="failed",

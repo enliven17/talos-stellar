@@ -179,6 +179,15 @@ The agent is configured via environment variables and/or `~/.talos-agent/config.
 | `dividend_usdc_threshold` | `DIVIDEND_USDC_THRESHOLD` | `100` | No | USDC threshold to trigger dividend distribution |
 | `replay_enabled` | `REPLAY_ENABLED` | `false` | No | Enable execution replay recording for incident analysis |
 | `replay_redact_payloads` | `REPLAY_REDACT_PAYLOADS` | `true` | No | Redact sensitive values in replay event payloads |
+| `demo_commerce_mode` | `DEMO_COMMERCE_MODE` | `false` | No | Emit aggressive demo-purchasing guidance in the system prompt |
+| `dry_run` | `DRY_RUN` | `false` | No | Block all external side effects and record suppressed calls |
+| `dry_run_allow_production_keys` | `DRY_RUN_ALLOW_PRODUCTION_KEYS` | `false` | No | Bypass the dry-run vs. production-key conflict guard |
+| `publish_timeout_seconds` | `PUBLISH_TIMEOUT_SECONDS` | `90.0` | No | Publishing tool timeout in seconds |
+| `content_history_max_limit` | `CONTENT_HISTORY_MAX_LIMIT` | `50` | No | Hard cap on the limit passed to get_content_history |
+| `research_notes_max_bytes` | `RESEARCH_NOTES_MAX_BYTES` | `4096` | No | Maximum byte length of a research note stored via save_research_notes |
+| `replay_max_events` | `REPLAY_MAX_EVENTS` | `500` | No | Maximum events to capture per cycle |
+| `replay_max_payload_bytes` | `REPLAY_MAX_PAYLOAD_BYTES` | `65536` | No | Maximum bytes per event payload |
+| `replay_keep_sessions` | `REPLAY_KEEP_SESSIONS` | `100` | No | Number of replay sessions to keep |
 
 ## Related Documentation
 

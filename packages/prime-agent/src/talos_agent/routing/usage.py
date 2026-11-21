@@ -156,10 +156,14 @@ class UsageTracker:
 
         # Calculate cost
         try:
-            cost = self._registry.get_cost_estimate(provider_name, prompt_tokens, completion_tokens)
+            cost = self._registry.get_cost_estimate(
+                provider_name, prompt_tokens, completion_tokens
+            )
         except KeyError:
             cost = Decimal("0")
-            logger.debug("Cannot calculate cost for unknown provider '%s'", provider_name)
+            logger.debug(
+                "Cannot calculate cost for unknown provider '%s'", provider_name
+            )
 
         record = UsageRecord(
             provider_name=provider_name,
@@ -178,7 +182,9 @@ class UsageTracker:
             try:
                 self._persist_callback(record)
             except Exception:
-                logger.exception("Usage persistence callback failed for %s/%s", provider_name, model)
+                logger.exception(
+                    "Usage persistence callback failed for %s/%s", provider_name, model
+                )
 
         return record
 
@@ -226,7 +232,9 @@ class UsageTracker:
                 }
             pt = provider_totals[prov]
             pt["prompt_tokens"] = int(pt["prompt_tokens"]) + record.prompt_tokens
-            pt["completion_tokens"] = int(pt["completion_tokens"]) + record.completion_tokens
+            pt["completion_tokens"] = (
+                int(pt["completion_tokens"]) + record.completion_tokens
+            )
             pt["total_tokens"] = int(pt["total_tokens"]) + record.total_tokens
             pt["cost_usd"] = Decimal(str(pt["cost_usd"])) + record.cost_usd
             pt["request_count"] = int(pt["request_count"]) + 1
@@ -280,7 +288,9 @@ class UsageTracker:
             total_requests = int(prov_usage.get("request_count", 0))
         else:
             total_cost = snapshot.total_cost_usd
-            total_tokens = snapshot.total_prompt_tokens + snapshot.total_completion_tokens
+            total_tokens = (
+                snapshot.total_prompt_tokens + snapshot.total_completion_tokens
+            )
             total_requests = snapshot.record_count
 
         if config.max_cost_usd is not None and total_cost >= config.max_cost_usd:
@@ -292,7 +302,10 @@ class UsageTracker:
             )
             return False
 
-        if config.max_total_tokens is not None and total_tokens >= config.max_total_tokens:
+        if (
+            config.max_total_tokens is not None
+            and total_tokens >= config.max_total_tokens
+        ):
             logger.warning(
                 "Budget exceeded: tokens %d >= %d (provider=%s)",
                 total_tokens,

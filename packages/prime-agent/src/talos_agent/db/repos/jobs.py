@@ -29,7 +29,9 @@ class JobsRepo:
         expires_iso = (
             lease_expires_at.isoformat()
             if lease_expires_at is not None
-            else (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
+            else (
+                datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+            ).isoformat()
         )
         self._conn.execute(
             """INSERT INTO claimed_jobs (job_id, fencing_token, lease_expires_at, ttl_seconds)
@@ -56,7 +58,8 @@ class JobsRepo:
             "claimed_at": datetime.fromisoformat(row["claimed_at"]),
             "lease_expires_at": (
                 datetime.fromisoformat(row["lease_expires_at"])
-                if row["lease_expires_at"] else None
+                if row["lease_expires_at"]
+                else None
             ),
             "ttl_seconds": int(row["ttl_seconds"]),
         }
@@ -73,7 +76,8 @@ class JobsRepo:
                 "claimed_at": datetime.fromisoformat(r["claimed_at"]),
                 "lease_expires_at": (
                     datetime.fromisoformat(r["lease_expires_at"])
-                    if r["lease_expires_at"] else None
+                    if r["lease_expires_at"]
+                    else None
                 ),
                 "ttl_seconds": int(r["ttl_seconds"]),
             }

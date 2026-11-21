@@ -226,7 +226,9 @@ def _table_row_count(conn: sqlite3.Connection, table: str) -> int:
         return 0
 
 
-def _table_key_map(conn: sqlite3.Connection, table: str, key_column: str) -> dict[str, str]:
+def _table_key_map(
+    conn: sqlite3.Connection, table: str, key_column: str
+) -> dict[str, str]:
     """Map primary-key -> stable non-sensitive fingerprint (never raw secret values)."""
     try:
         col_info = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
@@ -247,7 +249,9 @@ def _table_key_map(conn: sqlite3.Connection, table: str, key_column: str) -> dic
                 key_s = f"<redacted:{len(key_s)}>"
             # Fingerprint is only used for equality; never expose raw values.
             payload = json.dumps(list(row[1:]), sort_keys=False, default=str)
-            fp = hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()[:16]
+            fp = hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()[
+                :16
+            ]
             out[key_s] = fp
         return out
     except sqlite3.Error:
@@ -280,8 +284,12 @@ def compute_restore_state_diff(
         diff = RestoreStateDiff(would_commit=True)
 
         for table in all_tables:
-            before = _table_row_count(current_conn, table) if current_conn is not None else 0
-            after = _table_row_count(staged_conn, table) if table in staged_tables else 0
+            before = (
+                _table_row_count(current_conn, table) if current_conn is not None else 0
+            )
+            after = (
+                _table_row_count(staged_conn, table) if table in staged_tables else 0
+            )
             table_diff = RestoreTableDiff(
                 table=table,
                 before_count=before,
@@ -293,17 +301,23 @@ def compute_restore_state_diff(
             if key_col is not None:
                 table_diff.key_column = key_col
                 before_keys = (
-                    _table_key_map(current_conn, table, key_col) if current_conn is not None else {}
+                    _table_key_map(current_conn, table, key_col)
+                    if current_conn is not None
+                    else {}
                 )
                 after_keys = (
-                    _table_key_map(staged_conn, table, key_col) if table in staged_tables else {}
+                    _table_key_map(staged_conn, table, key_col)
+                    if table in staged_tables
+                    else {}
                 )
                 before_set = set(before_keys)
                 after_set = set(after_keys)
                 table_diff.added_keys = sorted(after_set - before_set)
                 table_diff.removed_keys = sorted(before_set - after_set)
                 table_diff.changed_keys = sorted(
-                    k for k in (before_set & after_set) if before_keys[k] != after_keys[k]
+                    k
+                    for k in (before_set & after_set)
+                    if before_keys[k] != after_keys[k]
                 )
 
             diff.tables.append(table_diff)
@@ -532,6 +546,7 @@ def record_reconciliation_telemetry(
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
+
 @dataclass
 class ReconcileConfig:
     """Thresholds and options for :func:`reconcile_after_restore`.
@@ -573,6 +588,7 @@ _DEFAULT_CONFIG = ReconcileConfig()
 
 # ── Result dataclass ───────────────────────────────────────────────────────────
 
+
 @dataclass
 class ReconcileResult:
     """Summary of actions taken during reconciliation.
@@ -591,9 +607,9 @@ class ReconcileResult:
 
     # Claimed jobs
     claimed_jobs_found: int = 0
-    claimed_jobs_restored: int = 0   # lease verified ✓ → populated in memory
-    claimed_jobs_dropped: int = 0    # lease lost/expired → removed from DB
-    claimed_jobs_deferred: int = 0   # API unreachable → kept in DB, not in memory
+    claimed_jobs_restored: int = 0  # lease verified ✓ → populated in memory
+    claimed_jobs_dropped: int = 0  # lease lost/expired → removed from DB
+    claimed_jobs_deferred: int = 0  # API unreachable → kept in DB, not in memory
     encryption_key_rotations: int = 0
 
     # Restore checksum (privacy-safe)
@@ -625,6 +641,7 @@ class ReconcileResult:
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+
 def _parse_dt(value: str | None) -> datetime | None:
     """Parse an ISO-8601 string (possibly without timezone) into a UTC datetime."""
     if not value:
@@ -644,6 +661,7 @@ def _now_utc() -> datetime:
 
 # ── Step 1: prune expired completion markers ───────────────────────────────────
 
+
 def _prune_completion_markers(db: LocalDB, result: ReconcileResult) -> None:
     """Delete completion markers whose ``expires_at`` is in the past."""
     try:
@@ -661,6 +679,7 @@ def _prune_completion_markers(db: LocalDB, result: ReconcileResult) -> None:
 
 
 # ── Step 2: cap future-skewed backoff timestamps ───────────────────────────────
+
 
 def _cap_stale_backoff(
     db: LocalDB,
@@ -735,14 +754,13 @@ def _cap_stale_backoff(
                     skew_secs=round((next_at - now).total_seconds()),
                 )
             except Exception as exc:  # noqa: BLE001
-                msg = (
-                    f"cap_stale_backoff: failed to cap row for {task_name!r}: {exc}"
-                )
+                msg = f"cap_stale_backoff: failed to cap row for {task_name!r}: {exc}"
                 result.errors.append(msg)
                 logger.warning(msg)
 
 
 # ── Step 3: validate schedule timestamps for clock skew ───────────────────────
+
 
 def _validate_schedule_timestamps(
     db: LocalDB,
@@ -822,6 +840,7 @@ def _validate_schedule_timestamps(
 
 
 # ── Step 4: re-verify claimed jobs against authoritative API ───────────────────
+
 
 async def _verify_claimed_jobs(
     db: LocalDB,
@@ -904,6 +923,7 @@ async def _verify_claimed_jobs(
         # ── Verify via API heartbeat ───────────────────────────────────────
         try:
             import asyncio
+
             heartbeat_ok = await asyncio.wait_for(
                 api.heartbeat_job(job_id, fencing_token),
                 timeout=config.api_timeout_secs,
@@ -953,6 +973,7 @@ async def _verify_claimed_jobs(
 
 
 # ── Public entry point ─────────────────────────────────────────────────────────
+
 
 async def reconcile_after_restore(
     db: LocalDB,
@@ -1066,6 +1087,7 @@ async def reconcile_after_restore(
 
 
 # ── Transactional Staged Checkpoint Restore ────────────────────────────────────
+
 
 class StagedRestoreError(Exception):
     """Base class for transactional staged restore errors."""
@@ -1236,8 +1258,12 @@ class StagedRestoreManager:
             result.dry_run = True
             result.committed = False
             try:
-                current_for_diff: Path | None = target_path if target_path.exists() else None
-                result.state_diff = compute_restore_state_diff(current_for_diff, staged_path)
+                current_for_diff: Path | None = (
+                    target_path if target_path.exists() else None
+                )
+                result.state_diff = compute_restore_state_diff(
+                    current_for_diff, staged_path
+                )
             finally:
                 staged_path.unlink(missing_ok=True)
                 for ext in ("-wal", "-shm"):
@@ -1248,7 +1274,9 @@ class StagedRestoreManager:
                 "restore_staged_dry_run_complete",
                 agent_id=agent_id,
                 duration_ms=result.duration_ms,
-                tables_changed=len(result.state_diff.tables_changed) if result.state_diff else 0,
+                tables_changed=len(result.state_diff.tables_changed)
+                if result.state_diff
+                else 0,
             )
             return result
 
@@ -1320,7 +1348,10 @@ class StagedRestoreManager:
         if payload_agent_id is not None:
             if not isinstance(payload_agent_id, str):
                 raise PreflightError("Checkpoint agent_id must be a string")
-            if self.config.require_agent_match and payload_agent_id != expected_agent_id:
+            if (
+                self.config.require_agent_match
+                and payload_agent_id != expected_agent_id
+            ):
                 raise PreflightError(
                     f"Checkpoint agent_id ({payload_agent_id!r}) does not match expected ({expected_agent_id!r})"
                 )
@@ -1333,7 +1364,9 @@ class StagedRestoreManager:
                 if not isinstance(table_name, str):
                     raise PreflightError("Table names must be strings")
                 if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-                    raise PreflightError(f"Row count for table {table_name!r} must be a non-negative integer")
+                    raise PreflightError(
+                        f"Row count for table {table_name!r} must be a non-negative integer"
+                    )
                 result.tables_restored[table_name] = count
 
         return payload
@@ -1349,8 +1382,12 @@ class StagedRestoreManager:
         target_dir = target_path.parent
         target_dir.mkdir(parents=True, exist_ok=True)
 
-        staging_dir = Path(self.config.staging_dir) if self.config.staging_dir else target_dir
-        staged_path = staging_dir / f"{target_path.name}.staged.{secrets.token_hex(8)}.db"
+        staging_dir = (
+            Path(self.config.staging_dir) if self.config.staging_dir else target_dir
+        )
+        staged_path = (
+            staging_dir / f"{target_path.name}.staged.{secrets.token_hex(8)}.db"
+        )
 
         try:
             from talos_agent.db import LocalDB
@@ -1389,7 +1426,9 @@ class StagedRestoreManager:
             staged_counts: dict[str, int] = {}
             for table_name in _CHECKPOINT_TABLES:
                 try:
-                    cnt = staged_db._conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+                    cnt = staged_db._conn.execute(
+                        f'SELECT COUNT(*) FROM "{table_name}"'
+                    ).fetchone()[0]
                     staged_counts[table_name] = cnt
                 except sqlite3.OperationalError:
                     pass
@@ -1425,15 +1464,22 @@ class StagedRestoreManager:
 
             check = conn.execute("PRAGMA quick_check").fetchone()
             if not check or check[0] != "ok":
-                raise InvariantError(f"SQLite integrity check failed: {check[0] if check else 'empty'}")
+                raise InvariantError(
+                    f"SQLite integrity check failed: {check[0] if check else 'empty'}"
+                )
 
             existing_tables = {
-                r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                r["name"]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
             }
             required_tables = {"schedules", "talos_config", "activity_log"}
             missing = required_tables - existing_tables
             if missing:
-                raise InvariantError(f"Staged database missing required tables: {missing}")
+                raise InvariantError(
+                    f"Staged database missing required tables: {missing}"
+                )
 
             for tbl in existing_tables:
                 if not tbl.startswith("sqlite_"):
@@ -1441,7 +1487,9 @@ class StagedRestoreManager:
                     if cnt < 0:
                         raise InvariantError(f"Negative row count in table {tbl}")
 
-            cfg_row = conn.execute("SELECT value FROM talos_config WHERE key='agent_id'").fetchone()
+            cfg_row = conn.execute(
+                "SELECT value FROM talos_config WHERE key='agent_id'"
+            ).fetchone()
             if cfg_row and cfg_row["value"] != expected_agent_id:
                 raise InvariantError(
                     f"In-database agent_id ({cfg_row['value']!r}) does not match expected ({expected_agent_id!r})"
@@ -1453,7 +1501,9 @@ class StagedRestoreManager:
                 staged_path.unlink(missing_ok=True)
             if isinstance(exc, InvariantError):
                 raise
-            raise InvariantError(f"Staged database invariant verification failed: {exc}") from exc
+            raise InvariantError(
+                f"Staged database invariant verification failed: {exc}"
+            ) from exc
 
     async def _commit_and_reconcile(
         self,
@@ -1479,7 +1529,9 @@ class StagedRestoreManager:
 
             if target_path.exists():
                 timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
-                backup_path = target_path.parent / f"{target_path.name}.backup.{timestamp_str}"
+                backup_path = (
+                    target_path.parent / f"{target_path.name}.backup.{timestamp_str}"
+                )
                 shutil.copy2(target_path, backup_path)
                 result.backup_path = str(backup_path)
                 journal_payload["backup_path"] = str(backup_path)
@@ -1505,8 +1557,12 @@ class StagedRestoreManager:
 
             active_db = LocalDB(path=target_path)
             try:
-                reconcile_cfg = ReconcileConfig(api_verify_leases=self.config.api_verify_leases)
-                reconcile_res = await reconcile_after_restore(active_db, api=api, config=reconcile_cfg)
+                reconcile_cfg = ReconcileConfig(
+                    api_verify_leases=self.config.api_verify_leases
+                )
+                reconcile_res = await reconcile_after_restore(
+                    active_db, api=api, config=reconcile_cfg
+                )
                 result.reconciliation_result = reconcile_res
                 log.info("restore_staged_reconciliation_completed")
             finally:
@@ -1521,19 +1577,25 @@ class StagedRestoreManager:
                     result.rolled_back = True
                     journal_payload["status"] = "rolled_back"
                     journal_path.write_text(json.dumps(journal_payload, indent=2))
-                    log.warning("restore_staged_rollback_executed", target_path=str(target_path))
+                    log.warning(
+                        "restore_staged_rollback_executed", target_path=str(target_path)
+                    )
                 except Exception as rollback_exc:
                     logger.error(f"Failed to rollback active DB: {rollback_exc}")
 
             if staged_path.exists():
                 staged_path.unlink(missing_ok=True)
 
-            raise RollbackError(f"Restore commit failed and active state was rolled back: {exc}") from exc
+            raise RollbackError(
+                f"Restore commit failed and active state was rolled back: {exc}"
+            ) from exc
 
     def _prune_old_backups(self, target_path: Path) -> None:
         """Prune old database backups beyond backup_retain_count."""
         pattern = f"{target_path.name}.backup.*"
-        backups = sorted(target_path.parent.glob(pattern), key=lambda p: p.stat().st_mtime)
+        backups = sorted(
+            target_path.parent.glob(pattern), key=lambda p: p.stat().st_mtime
+        )
         while len(backups) > self.config.backup_retain_count:
             oldest = backups.pop(0)
             oldest.unlink(missing_ok=True)
@@ -1575,7 +1637,6 @@ def perform_staged_restore_sync(
             api=api,
         )
     )
-
 
 
 async def perform_restore_dry_run(
@@ -1636,7 +1697,9 @@ def recover_interrupted_restore(target_db_path: Path | str) -> bool:
             backup_path = Path(backup_path_str)
             if backup_path.exists():
                 os.replace(backup_path, target_path)
-                log.warning("restore_interrupted_recovered", target_path=str(target_path))
+                log.warning(
+                    "restore_interrupted_recovered", target_path=str(target_path)
+                )
 
         journal_path.unlink(missing_ok=True)
         return True
@@ -1671,4 +1734,3 @@ __all__ = [
     "record_reconciliation_telemetry",
     "recover_interrupted_restore",
 ]
-

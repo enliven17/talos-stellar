@@ -729,11 +729,12 @@ def test_module_deps_view_reads_and_writes_the_module_globals():
 
 
 def test_the_scheduler_binds_the_agents_context_right_after_building_its_tools():
-    source = inspect.getsource(scheduler)
+    target = getattr(scheduler, "runner", scheduler)
+    source = inspect.getsource(target.run)
 
-    build = source.index("tools = build_all_tools(api=api, db=db, browser=browser, settings=settings,")
+    build = source.index("_build_browser_manager(")
     bind = source.index("tool_context_module.bind(tool_context)")
-    first_task = source.index('asyncio.create_task(agent_cycle_task(), name="agent_cycle")')
+    first_task = source.index("_build_task_list(")
 
     assert "tool_context = tools.context" in source
     # Bound after the tools exist and before any task the agent starts, so every
@@ -742,7 +743,8 @@ def test_the_scheduler_binds_the_agents_context_right_after_building_its_tools()
 
 
 def test_every_rebuild_in_the_scheduler_reuses_the_agents_context():
-    source = inspect.getsource(scheduler)
+    target = getattr(scheduler, "runner", scheduler)
+    source = inspect.getsource(target)
 
     calls = [m.start() for m in re.finditer(r"build_all_tools\(", source)]
     assert len(calls) == 3  # the first build, and the two browser-recovery rebuilds
@@ -752,7 +754,8 @@ def test_every_rebuild_in_the_scheduler_reuses_the_agents_context():
 
 
 def test_the_scheduler_no_longer_reads_a_tool_modules_adapter_registry_global():
-    source = inspect.getsource(scheduler)
+    target = getattr(scheduler, "runner", scheduler)
+    source = inspect.getsource(target)
 
     assert "from talos_agent.tools.publishing import _adapter_registry" not in source
     assert "_publishing_tools" not in source

@@ -244,7 +244,11 @@ def enforce_commerce_quote_expiry(
             return None
         # If a nested quote object exists but lacks expiry, that is INVALID;
         # a completely quote-less legacy 402 is MISSING when require_expiry.
-        quote = payment_details.get("quote") if isinstance(payment_details, Mapping) else None
+        quote = (
+            payment_details.get("quote")
+            if isinstance(payment_details, Mapping)
+            else None
+        )
         if isinstance(quote, Mapping):
             return {
                 "error": "Commerce quote is missing a valid expiresAt timestamp",

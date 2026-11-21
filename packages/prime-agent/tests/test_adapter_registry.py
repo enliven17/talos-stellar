@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
+from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities
 from talos_agent.adapters.registry import AdapterRegistry
 
 
