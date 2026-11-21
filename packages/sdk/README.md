@@ -648,6 +648,49 @@ Every error also exposes:
 - `timestamp` — ISO 8601 string captured at construction.
 - `toJSON()` — compact log-friendly representation.
 
+### Error taxonomy & versioned fixtures
+
+On top of the hierarchy, `classifyError(error)` maps any thrown value (an SDK
+error, a signing error, or a generic `Error`) to a **stable, versioned
+classification**:
+
+```typescript
+import { classifyError, codeToCategory, toErrorContract } from "@talos-protocol/sdk";
+
+const { code, category, retryable } = classifyError(err);
+// code        — stable TalosErrorCode string (e.g. "rate_limit_error")
+// category    — coarse bucket: validation | authentication | authorization |
+//               not_found | conflict | payment | quota | server | transport |
+//               timeout | api
+// retryable   — boolean hint
+```
+
+`codeToCategory(code)` is the canonical code → category table, so transport,
+validation, quota and payment failures map consistently regardless of which
+call site threw. `toErrorContract(error)` produces a single, JSON-serializable,
+privacy-safe object for structured logs and dashboards — `name`, `code`,
+`category`, `status`, `retryable`, optional `requestId` / `timestamp` / `path`,
+the taxonomy `taxonomyVersion`, and a redacted `causeChain`.
+
+The taxonomy contract is **versioned** via `ERROR_TAXONOMY_VERSION`. The
+canonical expected-output table is committed as a fixture at
+`tests/fixtures/error-taxonomy.json` (carrying the same `version`) and
+drift-checked against the runtime case table in CI, so a taxonomy change must
+bump both the constant and the fixture together.
+
+### Redacted cause chains (Node + browser)
+
+`toErrorContract` and `buildCauseChain` walk the standard ES2022 `cause` chain
+into a bounded array of plain `{ name, message, code? }` frames:
+
+- **Bounded** — at most 8 frames, so a cyclic or very deep chain never loops
+  forever or OOMs a log sink.
+- **Redacted** — bearer tokens, `sk-`/`tak_` API keys, and 56-char Stellar
+  secret keys in cause messages are replaced with `[REDACTED]`; messages are
+  capped.
+- **Portable** — plain JSON-serializable objects with no Node-specific
+  `inspect`/symbols, so the same chain serializes on Node and browser builds.
+
 ### Catching typed errors
 
 ```typescript
