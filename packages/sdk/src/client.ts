@@ -42,6 +42,9 @@ import type {
   RotateWebhookSecretParams,
   RotateWebhookSecretResult,
   FinalizeWebhookSecretRotationResult,
+  WebhookDelivery,
+  ListWebhookDeliveriesParams,
+  WebhookDeliveryPage,
 } from "./types.js";
 
 import {
@@ -2265,6 +2268,51 @@ export class TalosClient {
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
     });
+  }
+
+  // ── Webhook Deliveries ──────────────────────────────────────────
+
+  /**
+   * List webhook deliveries with cursor pagination.
+   *
+   * @param params - Query parameters (limit, cursor, status, subscriptionId, eventType) and request options.
+   * @returns Page of webhook deliveries with nextCursor.
+   */
+  async listWebhookDeliveries(
+    params?: ListWebhookDeliveriesParams,
+  ): Promise<WebhookDeliveryPage> {
+    const { signal, timeoutMs, ...query } = params ?? {};
+    return this.request("/api/webhooks/deliveries", {
+      params: query,
+      signal,
+      timeoutMs,
+    });
+  }
+
+  /**
+   * Async iterator for paginated webhook delivery history.
+   *
+   * Reuses typed pagination and cancellation. Stops at an explicit caller
+   * limit without fetching an unnecessary page.
+   *
+   * @param options - Pagination options (limit, maxPages, signal, timeoutMs) and delivery filters (status, subscriptionId, eventType).
+   * @returns Async iterable iterator yielding individual WebhookDelivery items.
+   *
+   * @example
+   * ```ts
+   * for await (const delivery of client.paginateWebhookDeliveries({ limit: 10, status: "failed" })) {
+   *   console.log(delivery.id, delivery.status, delivery.lastError);
+   * }
+   * ```
+   */
+  paginateWebhookDeliveries(
+    options?: AsyncPaginationIteratorOptions & ListWebhookDeliveriesParams,
+  ): AsyncPaginationIterator<WebhookDelivery> {
+    const { maxPages, signal, timeoutMs, limit, ...query } = options ?? {};
+    return createPaginationIterator<WebhookDelivery>(
+      (opts) => this.listWebhookDeliveries({ ...query, ...opts }),
+      { maxPages, signal, timeoutMs, limit },
+    );
   }
 }
 

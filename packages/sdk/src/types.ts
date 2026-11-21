@@ -684,3 +684,36 @@ export interface FinalizeWebhookSecretRotationResult {
   rotationActive: false;
 }
 
+// ── Webhook Deliveries ───────────────────────────────────────────
+
+export type WebhookDeliveryStatus =
+  | "pending"
+  | "success"
+  | "failed"
+  | "dead_letter"
+  | (string & {});
+
+export interface WebhookDelivery {
+  id: string;
+  subscriptionId: string;
+  eventType: string;
+  status: WebhookDeliveryStatus;
+  attempts: number;
+  maxAttempts: number;
+  lastStatusCode: number | null;
+  lastError: string | null;
+  lastAttemptAt: string | null;
+  nextAttemptAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+}
+
+export interface ListWebhookDeliveriesParams extends CursorRequestOptions {
+  status?: string;
+  subscriptionId?: string;
+  eventType?: string;
+}
+
+export type WebhookDeliveryPage = CursorPage<WebhookDelivery>;
+
+
