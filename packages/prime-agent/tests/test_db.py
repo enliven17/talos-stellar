@@ -93,7 +93,10 @@ class TestCommerceLifecycle:
     def test_prune_completed_payloads_keeps_financial_record(self, mock_db: LocalDB):
         mock_db.add_commerce_job("job-old", "seller", "research", {"private": "output"})
         mock_db.update_commerce_status("job-old", "completed")
-        mock_db._conn.execute("UPDATE commerce_queue SET updated_at = datetime('now', '-31 days')")
+        mock_db._conn.execute(
+            "UPDATE commerce_queue SET updated_at = datetime('now', '-31 days'), "
+            "payload_retained_until = datetime('now', '-1 day')"
+        )
         mock_db.record_spending(2.5, "x402_purchase", "job-old")
         assert mock_db.prune_completed_commerce_payloads(30) == 1
         row = mock_db._conn.execute(
@@ -107,7 +110,10 @@ class TestCommerceLifecycle:
     def test_prune_completed_payloads_is_idempotent_and_preserves_pending(self, mock_db: LocalDB):
         mock_db.add_commerce_job("job-done", "seller", "research", {"private": "output"})
         mock_db.update_commerce_status("job-done", "completed")
-        mock_db._conn.execute("UPDATE commerce_queue SET updated_at = datetime('now', '-31 days')")
+        mock_db._conn.execute(
+            "UPDATE commerce_queue SET updated_at = datetime('now', '-31 days'), "
+            "payload_retained_until = datetime('now', '-1 day')"
+        )
         mock_db.add_commerce_job("job-pending", "seller", "research", {"private": "output"})
         assert mock_db.prune_completed_commerce_payloads(30) == 1
         assert mock_db.prune_completed_commerce_payloads(30) == 0
@@ -115,6 +121,45 @@ class TestCommerceLifecycle:
             "SELECT payload FROM commerce_queue WHERE job_id = 'job-pending'"
         ).fetchone()
         assert pending["payload"] is not None
+
+    def test_completion_lifecycle_prunes_a_bounded_batch(self, mock_db: LocalDB):
+        old_jobs = [
+            (f"old-{i}", "seller", "research", '{"private":"output"}', "completed", "2000-01-01")
+            for i in range(101)
+        ]
+        mock_db._conn.executemany(
+            "INSERT INTO commerce_queue "
+            "(job_id, talos_id, service_type, payload, status, payload_retained_until) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            old_jobs,
+        )
+        mock_db._conn.commit()
+        mock_db.add_commerce_job("job-current", "seller", "research", {"private": "new"})
+
+        # Completing a purchase is the normal cleanup path. One pass may scrub
+        # at most 100 expired rows, while the current result gets its deadline.
+        mock_db.update_commerce_status("job-current", "completed")
+        remaining = mock_db._conn.execute(
+            "SELECT COUNT(*) FROM commerce_queue "
+            "WHERE job_id LIKE 'old-%' AND payload IS NOT NULL"
+        ).fetchone()[0]
+        assert remaining == 1
+
+        row = mock_db._conn.execute(
+            "SELECT payload, payload_retained_until FROM commerce_queue "
+            "WHERE job_id = 'job-current'"
+        ).fetchone()
+        original_deadline = row["payload_retained_until"]
+        assert row["payload"] == '{"private": "new"}'
+        assert original_deadline is not None
+        assert original_deadline > "2000-01-01"
+
+        # Repeated completion polls do not extend the retention window.
+        mock_db.update_commerce_status("job-current", "completed")
+        repeated = mock_db._conn.execute(
+            "SELECT payload_retained_until FROM commerce_queue WHERE job_id = 'job-current'"
+        ).fetchone()[0]
+        assert repeated == original_deadline
 
 
 class TestPlaybookLookup:

@@ -515,3 +515,13 @@ See the
 [Stellar retry failure runbook](../../docs/prime-agent-stellar-retry-failures.md)
 for the input → class mapping, privacy guarantees, compatibility notes, and
 how to consume the classification.
+
+## Purchased commerce result retention
+
+When a purchased commerce job reaches `completed`, the local database records
+its payload retention deadline as 30 days after completion and performs one
+cleanup pass. Each pass removes at most 100 expired payloads; later completed
+jobs continue draining any backlog. Cleanup retains the job, status, retention
+deadline, and spending records while clearing only the private result payload.
+Repeated completion polls do not extend the original deadline. Existing
+completed rows receive deadlines during the database migration.
