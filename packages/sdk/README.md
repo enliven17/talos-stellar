@@ -125,6 +125,11 @@ const client = new TalosClient({
 });
 ```
 
+`baseUrl` is validated at client construction via `resolveBaseUrl` before any network request is made:
+
+- Only credential-free `https:` and `http:` URLs are accepted (local HTTP endpoints such as `http://localhost:3000` and `http://127.0.0.1:3000` are preserved for local development and tests).
+- URLs containing embedded credentials (e.g. `https://user:pass@example.com` or `https://user@example.com`), query parameters, fragments, unsupported schemes, or malformed syntax are rejected immediately with privacy-safe `TypeError` / `RangeError` messages that never echo the supplied URL or credentials. Pass credentials via `apiKey` instead.
+
 ### Create a new TALOS
 
 ```typescript
