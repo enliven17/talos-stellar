@@ -124,9 +124,47 @@ export function nextWindowStart(windowStart: Date, windowSize: WindowSize): Date
   } else if (windowSize === "daily") {
     d.setUTCDate(d.getUTCDate() + 1);
   } else {
+    d.setUTCDate(1);
     d.setUTCMonth(d.getUTCMonth() + 1);
   }
   return d;
+}
+
+export interface WindowBoundaries {
+  /** UTC timestamp (Date) for start of the current window. */
+  windowStart: Date;
+  /** Unix epoch milliseconds when the current window resets (start of the next window). */
+  resetAt: number;
+  /** ISO-8601 string representation of resetAt, used in JSON response bodies. */
+  resetAtIso: string;
+  /** Unix epoch seconds string representation of resetAt, used in X-Quota-Reset headers. */
+  resetAtHeader: string;
+}
+
+/**
+ * Canonical calculation of quota window boundaries and reset representations.
+ * Ensures consistent reset time calculation across response bodies and HTTP headers,
+ * accepting an optional injected clock (Date or Unix epoch ms) for predictable testing
+ * across month transitions, leap days, and exact window boundaries.
+ *
+ * @param now        Current time or injected clock (Date or timestamp in ms)
+ * @param windowSize Granularity of quota window ("hourly" | "daily" | "monthly")
+ */
+export function computeQuotaWindow(
+  now: Date | number = new Date(),
+  windowSize: WindowSize,
+): WindowBoundaries {
+  const clockDate = typeof now === "number" ? new Date(now) : new Date(now);
+  const windowStart = floorToWindow(clockDate, windowSize);
+  const nextStart = nextWindowStart(windowStart, windowSize);
+  const resetAt = nextStart.getTime();
+
+  return {
+    windowStart,
+    resetAt,
+    resetAtIso: new Date(resetAt).toISOString(),
+    resetAtHeader: String(Math.ceil(resetAt / 1000)),
+  };
 }
 
 // ─── Config resolution ────────────────────────────────────────────────────────
@@ -204,18 +242,17 @@ export async function resolveQuotaConfig(
  * @param db       Drizzle DB instance
  * @param talosId  Agent being checked
  * @param resource Resource being consumed
+ * @param clock    Optional injected clock (Date or timestamp in ms)
  * @returns        QuotaResult describing the outcome
  */
 export async function checkAndIncrementQuota(
   db: Db,
   talosId: string,
   resource: QuotaResource,
+  clock?: Date | number,
 ): Promise<QuotaResult> {
   const config = await resolveQuotaConfig(db, talosId, resource);
-
-  const now = new Date();
-  const windowStart = floorToWindow(now, config.windowSize);
-  const resetAt = nextWindowStart(windowStart, config.windowSize).getTime();
+  const boundaries = computeQuotaWindow(clock ?? new Date(), config.windowSize);
 
   if (!config.enabled) {
     return {
@@ -223,7 +260,7 @@ export async function checkAndIncrementQuota(
       limit: config.maxCount,
       remaining: config.maxCount,
       used: 0,
-      resetAt,
+      resetAt: boundaries.resetAt,
       resource,
     };
   }
@@ -234,9 +271,9 @@ export async function checkAndIncrementQuota(
     .values({
       talosId,
       resource,
-      windowStart,
+      windowStart: boundaries.windowStart,
       count: 1,
-      updatedAt: now,
+      updatedAt: typeof clock === "number" ? new Date(clock) : clock ?? new Date(),
     })
     .onConflictDoUpdate({
       target: [tlsQuotaUsage.talosId, tlsQuotaUsage.resource, tlsQuotaUsage.windowStart],
@@ -251,23 +288,26 @@ export async function checkAndIncrementQuota(
   const remaining = Math.max(0, config.maxCount - used);
   const ok = used <= config.maxCount;
 
-  return { ok, limit: config.maxCount, remaining, used, resetAt, resource };
+  return { ok, limit: config.maxCount, remaining, used, resetAt: boundaries.resetAt, resource };
 }
 
 /**
  * Read the current usage for (talosId, resource) in the current window WITHOUT
  * incrementing the counter.  Used by the admin quota route.
+ *
+ * @param db       Drizzle DB instance
+ * @param talosId  Agent being checked
+ * @param resource Resource being consumed
+ * @param clock    Optional injected clock (Date or timestamp in ms)
  */
 export async function readQuotaUsage(
   db: Db,
   talosId: string,
   resource: QuotaResource,
+  clock?: Date | number,
 ): Promise<QuotaResult> {
   const config = await resolveQuotaConfig(db, talosId, resource);
-
-  const now = new Date();
-  const windowStart = floorToWindow(now, config.windowSize);
-  const resetAt = nextWindowStart(windowStart, config.windowSize).getTime();
+  const boundaries = computeQuotaWindow(clock ?? new Date(), config.windowSize);
 
   const row = await db
     .select({ count: tlsQuotaUsage.count })
@@ -276,7 +316,7 @@ export async function readQuotaUsage(
       and(
         eq(tlsQuotaUsage.talosId, talosId),
         eq(tlsQuotaUsage.resource, resource),
-        eq(tlsQuotaUsage.windowStart, windowStart),
+        eq(tlsQuotaUsage.windowStart, boundaries.windowStart),
       ),
     )
     .limit(1)
@@ -286,7 +326,7 @@ export async function readQuotaUsage(
   const remaining = Math.max(0, config.maxCount - used);
   const ok = used <= config.maxCount;
 
-  return { ok, limit: config.maxCount, remaining, used, resetAt, resource };
+  return { ok, limit: config.maxCount, remaining, used, resetAt: boundaries.resetAt, resource };
 }
 
 // ─── Response helpers ────────────────────────────────────────────────────────

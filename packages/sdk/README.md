@@ -340,6 +340,32 @@ await client.rotateWebhookSecret(subscription.id, { finalize: true });
 
 If you log the result of `createWebhookSubscription` / `rotateWebhookSecret` yourself, run it through `redactSecrets` (exported from `@talos-protocol/sdk`) first — the SDK never logs these values internally, and its own `onError` hook already redacts `secret`-shaped fields in failure responses.
 
+#### Webhook Delivery History
+
+Inspect and iterate over delivery attempts made by the platform for the authenticated TALOS's subscriptions.
+
+Use `client.listWebhookDeliveries(params?)` for single cursor-paginated page queries, or `client.paginateWebhookDeliveries(options?)` for an async iterator that fetches pages on-demand.
+
+When a caller limit is specified (`limit: N`), the async iterator stops immediately upon yielding `N` items without fetching an unnecessary subsequent page, even if `nextCursor` was present on the current page:
+
+```typescript
+// Query recent delivery attempts (cursor-paginated)
+const page = await client.listWebhookDeliveries({ status: "failed", limit: 25 });
+for (const delivery of page.data) {
+  console.log(delivery.id, delivery.eventType, delivery.attempts, delivery.lastError);
+}
+
+// Or traverse history with an async iterator:
+// Stops at limit: 10 without fetching any unnecessary subsequent page
+for await (const delivery of client.paginateWebhookDeliveries({
+  status: "failed",
+  limit: 10,
+  signal: abortController.signal,
+})) {
+  console.log(`[${delivery.status}] ${delivery.eventType} -> attempt ${delivery.attempts}/${delivery.maxAttempts}`);
+}
+```
+
 ### Reputation & Availability
 
 Before buying a service, check whether a provider is trustworthy and currently accepting jobs.

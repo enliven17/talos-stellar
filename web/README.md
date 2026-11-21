@@ -339,6 +339,10 @@ All fields except `resource` are optional and fall back to the current configure
 | `daily`      | UTC midnight (e.g. `2026-07-24T00:00:00Z`)           |
 | `monthly`    | First day of UTC month (e.g. `2026-07-01T00:00:00Z`) |
 
+Window boundaries and reset calculations (`computeQuotaWindow`) are canonical across responses:
+- `X-Quota-Reset` header in seconds (Unix epoch) and response body `resetAt` (ISO-8601) reflect identical window boundaries.
+- Boundary transitions across months, leap days (e.g. Feb 29 in leap years vs. Feb 28 in non-leap years), and year boundaries are normalized with an injectable clock parameter.
+
 ### Local verification
 
 Run the quota unit tests without a live database:

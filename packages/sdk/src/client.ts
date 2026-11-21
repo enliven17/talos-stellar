@@ -42,6 +42,9 @@ import type {
   RotateWebhookSecretParams,
   RotateWebhookSecretResult,
   FinalizeWebhookSecretRotationResult,
+  WebhookDelivery,
+  ListWebhookDeliveriesParams,
+  WebhookDeliveryPage,
 } from "./types.js";
 
 import {

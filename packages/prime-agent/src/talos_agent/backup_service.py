@@ -304,6 +304,7 @@ def build_backup(
                 "encryption": run.encryption,
                 "scope": run.scope,
                 "timestamp": run.timestamp,
+                "agent_id": agent_id,
                 "database": run.database,
                 "filesMeta": run.files,
                 "body": ordered_files,
@@ -616,6 +617,7 @@ def restore_backup(
     confirm: bool,
     agent_id: str | None = None,
     restore_root: Path | None = None,
+    allow_agent_mismatch: bool = False,
 ) -> BackupRun:
     """Restore SQLite state from an artifact.
 
@@ -653,6 +655,35 @@ def restore_backup(
     payload = json.loads(plain.decode("utf8"))
     body: dict = payload.get("body") or {}
     files_meta: dict = payload.get("filesMeta") or verified.files
+
+    # ── Agent-identifier guard (issue #1454) ─────────────────────────────
+    # Compare the archive's recorded agent_id with the caller's selected
+    # agent_id before any state is written. Behaviour:
+    #   - Both present and equal   → proceed (same-agent restore)
+    #   - Both present and differ  → raise AGENT_ID_MISMATCH unless the
+    #                                caller explicitly opts into migration
+    #                                via allow_agent_mismatch=True
+    #   - Either side missing      → proceed (legacy archive, or caller did
+    #                                not specify a target agent)
+    # Never mixes state silently: mismatch fails closed.
+    archive_agent_id = payload.get("agent_id")
+    if (
+        agent_id
+        and archive_agent_id
+        and agent_id != archive_agent_id
+    ):
+        if not allow_agent_mismatch:
+            raise BackupError(
+                f"Archive agent_id {archive_agent_id!r} does not match "
+                f"selected agent {agent_id!r}. Refusing to mix state; "
+                f"pass allow_agent_mismatch=True to migrate explicitly.",
+                code="AGENT_ID_MISMATCH",
+            )
+        log.warning(
+            "prime_agent_restore_agent_mismatch_allowed",
+            archive_agent_id=archive_agent_id,
+            selected_agent_id=agent_id,
+        )
 
     with single_flight("agent_restore"):
         staging_root = APP_DIR / "restore-staging"
