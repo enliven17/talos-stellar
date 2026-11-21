@@ -13,6 +13,7 @@ import {
   TalosServerRetryableError,
   TalosTransportError,
   TalosTimeoutError,
+  TalosDeadlineExceededError,
   errorFromResponse,
   classifyTransportError,
   sanitizeBody,
@@ -482,6 +483,78 @@ it("should fetch one activity page with typed cursor response", async () => {
   });
 
   describe("Request and Retry Policy", () => {
+    it("rejects a retry delay that exceeds the remaining deadline and preserves response metadata", async () => {
+      const deadlineClient = new TalosClient({
+        baseUrl: "http://localhost:3000",
+        timeoutMs: 100,
+        retry: {
+          maxAttempts: 2,
+          baseDelayMs: 1000,
+          maxDelayMs: 1000,
+          jitter: 0,
+        },
+      });
+      vi.mocked(fetch).mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        headers: new Headers({
+          "Retry-After": "1",
+          "x-request-id": "request-123",
+        }),
+        text: async () => JSON.stringify({ error: "temporarily unavailable" }),
+      } as Response);
+
+      const error = await deadlineClient.getTalos("1").catch((value) => value);
+
+      expect(error).toBeInstanceOf(TalosDeadlineExceededError);
+      expect(error).toMatchObject({
+        code: "deadline_exceeded",
+        status: 503,
+        path: "/api/talos/1",
+        requestId: "request-123",
+        retryAfterMs: 1000,
+        headers: {
+          "retry-after": "1",
+          "x-request-id": "request-123",
+        },
+        retryDelayMs: 1000,
+        body: JSON.stringify({ error: "temporarily unavailable" }),
+        data: { error: "temporarily unavailable" },
+      });
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects a retry delay equal to the remaining deadline", async () => {
+      const deadlineClient = new TalosClient({
+        baseUrl: "http://localhost:3000",
+        timeoutMs: 1000,
+        retry: {
+          maxAttempts: 2,
+          baseDelayMs: 1000,
+          maxDelayMs: 1000,
+          jitter: 0,
+        },
+      });
+      vi.mocked(fetch).mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        headers: new Headers({ "Retry-After": "1" }),
+        text: async () => "temporarily unavailable",
+      } as Response);
+
+      vi.useFakeTimers();
+      const request = deadlineClient.getTalos("1");
+      const error = await request.catch((value) => value);
+      vi.useRealTimers();
+
+      expect(error).toBeInstanceOf(TalosDeadlineExceededError);
+      expect(error).toMatchObject({
+        retryDelayMs: 1000,
+        remainingMs: 1000,
+      });
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
     it("should fetch one activity page with typed cursor response", async () => {
       const mockPage = {
         stats: {

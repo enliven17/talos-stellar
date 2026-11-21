@@ -35,6 +35,22 @@ import {
   type RequestSigner,
   type SigningControllerOptions,
 } from "./signing.js";
+import {
+  TalosAPIError,
+  TalosDeadlineExceededError,
+  TalosPaymentError,
+  classifyTransportError,
+  errorFromResponse,
+  parseX402Challenge,
+} from "./errors.js";
+import { ChaosInjectedError, ChaosInjector, FaultType } from "./chaos.js";
+import {
+  IdempotencyConflictError,
+  isPayloadConflict,
+  validateIdempotencyKey,
+} from "./idempotency.js";
+
+export { TalosAPIError };
 
 export interface RetryPolicyOptions {
   maxAttempts?: number;
@@ -46,11 +62,37 @@ export interface RetryPolicyOptions {
   random?: () => number;
 }
 
+export interface RetryOptions {
+  maxAttempts?: number;
+  idempotentOnly?: boolean;
+  maxRetryAfterMs?: number;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  jitter?: number;
+  onRetry?: (event: {
+    attempt: number;
+    error: TalosAPIError;
+    delayMs: number;
+  }) => void;
+}
+
+export interface WriteOptions {
+  idempotencyKey?: string;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
 export interface TalosClientOptions {
   /** Base URL of the Talos API. Defaults to `https://talos-stellar.vercel.app`. */
   baseUrl?: string;
   /** Bearer token (TALOS API key). Adds `Authorization: Bearer <key>` header. */
   apiKey?: string;
+  retryPolicy?: RetryPolicyOptions;
+  retry?: RetryOptions;
+  timeoutMs?: number;
+  onError?: (event: TalosErrorEvent) => void;
+  fetch?: typeof fetch;
+  chaosInjector?: ChaosInjector;
   /** Opt-in request signer. Omitting it preserves the legacy wire format. */
   signer?: RequestSigner;
   signing?: SigningControllerOptions;
@@ -113,6 +155,13 @@ export class TalosClient {
   private baseUrl: string;
   private headers: Record<string, string>;
   private signer?: SigningController;
+  private readonly retryPolicy: Required<RetryPolicyOptions>;
+  private readonly retryOptions: Required<RetryOptions>;
+  private readonly timeoutMs?: number;
+  private readonly fetchOverride?: typeof fetch;
+  private readonly onError?: TalosClientOptions["onError"];
+  private readonly chaosInjector?: ChaosInjector;
+  private readonly typedRetryEnabled: boolean;
 
   constructor(options: TalosClientOptions = {}) {
     const normalizedRetryMethods = options.retryPolicy?.retryMethods?.map(
@@ -135,9 +184,24 @@ export class TalosClient {
       jitter: options.retryPolicy?.jitter ?? true,
       random: options.retryPolicy?.random ?? Math.random,
     };
+    this.retryOptions = {
+      ...DEFAULT_RETRY,
+      ...options.retry,
+      maxAttempts: Math.min(
+        options.retry === undefined
+          ? options.retryPolicy?.maxAttempts ?? 3
+          : options.retry.maxAttempts ?? 1,
+        8,
+      ),
+    };
+    this.typedRetryEnabled = options.retry !== undefined;
     this.baseUrl = (
       options.baseUrl ?? "https://talos-stellar.vercel.app"
     ).replace(/\/$/, "");
+    this.timeoutMs = options.timeoutMs;
+    this.fetchOverride = options.fetch;
+    this.onError = options.onError;
+    this.chaosInjector = options.chaosInjector;
     this.headers = { "Content-Type": "application/json" };
     if (options.apiKey) {
       this.headers["Authorization"] = `Bearer ${options.apiKey}`;
@@ -165,8 +229,27 @@ export class TalosClient {
     if (retryAfterHeader) {
       const headerDelay = this.parseRetryAfter(retryAfterHeader);
       if (headerDelay !== null) {
+        if (this.typedRetryEnabled) {
+          return Math.min(
+            headerDelay,
+            this.retryOptions.maxRetryAfterMs,
+            this.retryOptions.maxDelayMs,
+          );
+        }
         return Math.min(headerDelay, this.retryPolicy.maxDelayMs);
       }
+    }
+
+    if (this.typedRetryEnabled) {
+      const delay = Math.min(
+        this.retryOptions.baseDelayMs * Math.pow(2, attempt - 1),
+        this.retryOptions.maxDelayMs,
+      );
+      const jitter = this.retryOptions.jitter;
+      return Math.max(
+        0,
+        Math.round(delay * (1 - jitter + 2 * jitter * Math.random())),
+      );
     }
 
     const exponent = Math.pow(2, attempt - 1);
@@ -224,11 +307,17 @@ export class TalosClient {
     init?: RequestInit & {
       params?: Record<string, string | number | boolean>;
       idempotencyKey?: string;
+      timeoutMs?: number;
     },
   ): Promise<T> {
     let url = `${this.baseUrl}${path}`;
-    const { params, signal, idempotencyKey, ...requestInit } = init ?? {};
-    const normalizedSignal = signal ?? undefined;
+    const {
+      params,
+      signal,
+      idempotencyKey,
+      timeoutMs,
+      ...requestInit
+    } = init ?? {};
     if (params) {
       const filteredParams = Object.entries(params)
         .filter(([_, value]) => value !== undefined)
@@ -236,21 +325,37 @@ export class TalosClient {
       const qs = new URLSearchParams(filteredParams).toString();
       if (qs) url += `?${qs}`;
     }
-    const headers = { ...this.headers, ...init?.headers };
+    const method = (requestInit.method ?? "GET").toUpperCase();
+    const headers: Record<string, string> = { ...this.headers };
+    if (requestInit.headers instanceof Headers) {
+      requestInit.headers.forEach((value, key) => {
+        headers[key] = value;
+      });
+    } else if (Array.isArray(requestInit.headers)) {
+      for (const [key, value] of requestInit.headers) {
+        headers[key] = value;
+      }
+    } else if (requestInit.headers) {
+      Object.assign(headers, requestInit.headers);
+    }
+    if (idempotencyKey) {
+      validateIdempotencyKey(idempotencyKey);
+      headers["Idempotency-Key"] = idempotencyKey;
+    }
     if (this.signer) {
       const timestamp = new Date().toISOString();
       const nonce = globalThis.crypto.randomUUID();
       const bytes = await canonicalizeRequest({
-        method: init?.method ?? "GET",
+        method,
         url,
         headers,
-        body: init?.body,
+        body: requestInit.body,
         timestamp,
         nonce,
       });
       const signed = await this.signer.sign(
         { kind: "http-request-v1", bytes },
-        { signal: init?.signal ?? undefined, requestId: nonce },
+        { signal: signal ?? undefined, requestId: nonce },
       );
       Object.assign(headers, {
         "X-Talos-Signature-Version": "talos-request-v1",
@@ -261,24 +366,172 @@ export class TalosClient {
         "X-Talos-Signature": encodeSignature(signed.signature),
       });
     }
-    const res = await fetch(url, {
-      ...init,
-      headers,
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      throw new TalosAPIError(res.status, body, path);
-    }
 
-    throw new Error("Unexpected retry failure");
+    const requestTimeoutMs = timeoutMs ?? this.timeoutMs;
+    const hasDeadline = requestTimeoutMs !== undefined && requestTimeoutMs > 0;
+    const deadline = hasDeadline ? Date.now() + requestTimeoutMs : undefined;
+    const controller = new AbortController();
+    const onAbort = () => controller.abort(signal?.reason);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    const requestSignal = hasDeadline ? controller.signal : signal ?? undefined;
+    const deadlineTimer = hasDeadline
+      ? setTimeout(
+          () => controller.abort(new Error("Request deadline exceeded")),
+          requestTimeoutMs,
+        )
+      : undefined;
+    let lastError: TalosAPIError | undefined;
+
+    const finishWithError = (error: TalosAPIError, attempt: number, startedAt: number): never => {
+      this.onError?.({
+        error,
+        path,
+        method,
+        attempt,
+        durationMs: Date.now() - startedAt,
+      });
+      throw error;
+    };
+
+    try {
+      if (signal?.aborted) {
+        throw classifyTransportError(new Error("Request aborted"), path);
+      }
+      for (let attempt = 1; attempt <= this.retryOptions.maxAttempts; attempt += 1) {
+        const attemptStartedAt = Date.now();
+        if (deadline !== undefined && Date.now() >= deadline && lastError) {
+          throw new TalosDeadlineExceededError(lastError, 0, 0);
+        }
+
+        let response: Response;
+        try {
+          await this.chaosInjector?.maybeInjectFault(FaultType.NETWORK_DELAY);
+          await this.chaosInjector?.maybeInjectFault(FaultType.NETWORK_DROP);
+          await this.chaosInjector?.maybeInjectFault(FaultType.API_TIMEOUT);
+          if (signal?.aborted) {
+            throw classifyTransportError(new Error("Request aborted"), path);
+          }
+          response = await this.resolveFetch()(url, {
+            ...requestInit,
+            method,
+            headers,
+            signal: requestSignal,
+          });
+        } catch (error) {
+          if (error instanceof ChaosInjectedError) throw error;
+          const transportError = classifyTransportError(error, path);
+          const remainingMs = deadline === undefined ? Infinity : deadline - Date.now();
+          const canRetry =
+            this.typedRetryEnabled &&
+            attempt < this.retryOptions.maxAttempts &&
+            transportError.isRetryable &&
+            !signal?.aborted &&
+            (!this.retryOptions.idempotentOnly ||
+              IDEMPOTENT_METHODS.has(method) ||
+              Boolean(idempotencyKey));
+          if (!canRetry) {
+            return finishWithError(transportError, attempt, attemptStartedAt);
+          }
+          const delayMs = this.getRetryDelay(attempt, transportError.retryAfterMs?.toString() ?? null);
+          if (delayMs >= remainingMs) {
+            throw new TalosDeadlineExceededError(
+              transportError,
+              delayMs,
+              remainingMs,
+            );
+          }
+          this.retryOptions.onRetry({ attempt, error: transportError, delayMs });
+          await this.wait(delayMs, requestSignal);
+          continue;
+        }
+
+        if (response.ok) {
+          if (response.status === 204) return undefined as T;
+          return (await response.json()) as T;
+        }
+
+        const responseHeaders = response.headers ?? new Headers();
+        const responseBody = await response.text();
+        lastError = errorFromResponse(
+          response.status,
+          path,
+          responseBody,
+          responseHeaders,
+        );
+        if (
+          response.status === 409 &&
+          idempotencyKey &&
+          isPayloadConflict(responseBody)
+        ) {
+          throw new IdempotencyConflictError(
+            idempotencyKey,
+            path,
+            responseBody,
+          );
+        }
+        if (signal?.aborted) {
+          throw classifyTransportError(new Error("Request aborted"), path);
+        }
+        const remainingMs = deadline === undefined ? Infinity : deadline - Date.now();
+        const policyRetry =
+          !this.typedRetryEnabled &&
+          this.shouldRetry(
+            method,
+            response.status,
+            idempotencyKey
+              ? [...this.retryPolicy.retryMethods, method]
+              : undefined,
+          );
+        const typedRetry =
+          this.typedRetryEnabled &&
+          lastError.isRetryable &&
+          (!this.retryOptions.idempotentOnly ||
+            IDEMPOTENT_METHODS.has(method) ||
+            Boolean(idempotencyKey));
+        const canRetry =
+          attempt < this.retryOptions.maxAttempts &&
+          !signal?.aborted &&
+          (policyRetry || typedRetry);
+        if (!canRetry) {
+          return finishWithError(lastError, attempt, attemptStartedAt);
+        }
+
+        const delayMs = this.getRetryDelay(
+          attempt,
+          responseHeaders.get("Retry-After"),
+        );
+        if (delayMs >= remainingMs) {
+          throw new TalosDeadlineExceededError(lastError, delayMs, remainingMs);
+        }
+        this.retryOptions.onRetry({ attempt, error: lastError, delayMs });
+        await this.wait(delayMs, requestSignal);
+      }
+
+      throw new Error("Retry loop exited unexpectedly");
+    } catch (error) {
+      if (
+        error instanceof TalosAPIError ||
+        error instanceof ChaosInjectedError ||
+        error instanceof IdempotencyConflictError ||
+        error instanceof SyntaxError
+      ) {
+        throw error;
+      }
+      const requestError = classifyTransportError(error, path);
+      return finishWithError(requestError, this.retryOptions.maxAttempts, Date.now());
+    } finally {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   private async requestPage<T>(
     path: string,
     options?: CursorRequestOptions,
   ): Promise<CursorPage<T>> {
-    const { signal, ...params } = options ?? {};
-    return this.request(path, { params, signal });
+    const { signal, timeoutMs, ...params } = options ?? {};
+    return this.request(path, { params, signal, timeoutMs });
   }
 
   // ── Talos CRUD ────────────────────────────────────────────
@@ -295,32 +548,41 @@ export class TalosClient {
     return this.request("/api/talos/me");
   }
 
-  async createTalos(params: CreateTalosParams): Promise<TalosCreated> {
+  async createTalos(
+    params: CreateTalosParams,
+    options?: WriteOptions,
+  ): Promise<TalosCreated> {
     return this.request("/api/talos", {
       method: "POST",
       body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
   // ── Activity ───────────────────────────────────────────────
 
   async listActivities(params?: ActivityPageOptions): Promise<ActivityPage> {
-    const { signal, ...query } = params ?? {};
+    const { signal, timeoutMs, ...query } = params ?? {};
     return this.request<ActivityPage>("/api/activity", {
       params: query,
       signal,
+      timeoutMs,
     });
   }
 
   async reportActivity(
     talosId: string,
     params: ReportActivityParams,
+    options?: WriteOptions,
   ): Promise<Activity> {
     return this.request(`/api/talos/${talosId}/activity`, {
       method: "POST",
       body: JSON.stringify(params),
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
@@ -333,12 +595,14 @@ export class TalosClient {
   async reportRevenue(
     talosId: string,
     params: ReportRevenueParams,
+    options?: WriteOptions,
   ): Promise<Revenue> {
     return this.request(`/api/talos/${talosId}/revenue`, {
       method: "POST",
       body: JSON.stringify(params),
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
@@ -351,12 +615,14 @@ export class TalosClient {
   async createApproval(
     talosId: string,
     params: CreateApprovalParams,
+    options?: WriteOptions,
   ): Promise<Approval> {
     return this.request(`/api/talos/${talosId}/approvals`, {
       method: "POST",
       body: JSON.stringify(params),
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
@@ -409,6 +675,7 @@ export class TalosClient {
       headers: { "X-PAYMENT": params.paymentHeader },
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
@@ -444,10 +711,11 @@ export class TalosClient {
       method: "POST",
       body: JSON.stringify({ payload }),
     });
-    res = await fetch(url, {
+    const res = await this.resolveFetch()(url, {
       method: "POST",
       headers: initialHeaders,
       body: JSON.stringify({ payload }),
+      signal: options?.signal,
     });
 
     if (res.status === 402) {
@@ -474,7 +742,7 @@ export class TalosClient {
       //    keys above (parseX402Challenge rejects partial challenges), but
       //    `price` could still be the literal "abc" — guard explicitly so
       //    a malformed header never feeds NaN to the downstream /sign call.
-      const amount = parseFloat(challenge.price);
+      const amount = parseFloat(challenge.price ?? "");
       if (!Number.isFinite(amount)) {
         throw new TalosPaymentError(402, "Invalid x402 challenge", path, {
           message: "Invalid x402 challenge",
@@ -497,11 +765,11 @@ export class TalosClient {
 
     // Non-402 responses — wrap them through the typed dispatch.
     if (!res.ok) {
-      const body = await res.text();
-      throw new TalosAPIError(
+      throw errorFromResponse(
         res.status,
-        body,
         `/api/talos/${talosId}/service`,
+        await res.text(),
+        res.headers,
       );
     }
 
@@ -539,15 +807,6 @@ export class TalosClient {
     };
   }
 
-  private parseX402Challenge(header: string): Record<string, string> {
-    const parts = header.slice(5).split(", ");
-    const challenge: Record<string, string> = {};
-    for (const part of parts) {
-      const [key, value] = part.split("=");
-      challenge[key] = value.replace(/"/g, "");
-    }
-  }
-
   // ── Wallet & Payments ──────────────────────────────────────
 
   async getWallet(talosId: string): Promise<Wallet> {
@@ -567,12 +826,14 @@ export class TalosClient {
   async transfer(
     talosId: string,
     params: TransferParams,
+    options?: WriteOptions,
   ): Promise<TransferResponse> {
     return this.request(`/api/talos/${talosId}/transfer`, {
       method: "POST",
       body: JSON.stringify(params),
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
@@ -599,6 +860,7 @@ export class TalosClient {
       body: JSON.stringify({ result }),
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
@@ -635,6 +897,7 @@ export class TalosClient {
       body: JSON.stringify(params),
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 }

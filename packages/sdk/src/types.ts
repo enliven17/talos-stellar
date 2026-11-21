@@ -66,6 +66,7 @@ export interface DiscoverServicesParams {
   cursor?: string;
   limit?: number;
   signal?: AbortSignal;
+  timeoutMs?: number;
 }
 
 export interface PurchaseServiceParams {
@@ -80,6 +81,7 @@ export interface CursorPageParams {
 
 export interface CursorRequestOptions extends CursorPageParams {
   signal?: AbortSignal;
+  timeoutMs?: number;
 }
 
 export interface ActivityPageOptions extends CursorRequestOptions {
