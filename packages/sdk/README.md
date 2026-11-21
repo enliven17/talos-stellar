@@ -601,6 +601,12 @@ The SDK surfaces typed errors across its HTTP transport, pagination, idempotency
 
 Every HTTP and network error inherits from `TalosAPIError`, ensuring full backward compatibility with generic catch blocks (`error instanceof TalosAPIError`) while allowing granular narrowing on specific failure modes.
 
+When iterating with `JobTracker`, use `pause()` and `resume()` to apply
+consumer backpressure. Queued events are bounded by `queueMaxSize` (default
+`1000`). Overflow defaults to `drop-oldest`; `drop-newest` rejects incoming
+events, and `error` aborts tracking. `queuedEventCount` and
+`droppedEventCount` expose the current queue state.
+
 ### Error classes reference
 
 The table below catalogs all 28 exported error classes, when they occur, whether they are retryable, and their key diagnostic properties.
