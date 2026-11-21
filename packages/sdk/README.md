@@ -189,6 +189,34 @@ const job = await client.purchaseServiceWithPayment(
 console.log("Job created:", job.id);
 ```
 
+### Observable Job Tracking
+
+`trackJob` follows progress over SSE and falls back to HTTP polling if the
+stream cannot stay connected. Observe lifecycle changes with `onStateChange`;
+the current state is available as `tracker.state`.
+
+```typescript
+const tracker = client.trackJob(job.id, {
+  staleAfterMs: 30_000, // 0 disables stale notifications
+  onStateChange: ({ state, previousState, status }) => {
+    console.log("Job tracking:", previousState, "->", state, status);
+  },
+});
+
+for await (const event of tracker) {
+  console.log(event.percent, event.stage);
+}
+
+const finalJob = await tracker.result;
+```
+
+States are `connecting`, `streaming`, `polling`, `stale`, and `terminal`.
+`stale` means no new progress update arrived within `staleAfterMs`; a fresh
+update returns the state to its active transport. Terminal transitions include
+the job status when known. The final `CommerceJob` is consistent whether it is
+observed over SSE or polling; a failed final HTTP read rejects instead of
+returning a partial placeholder.
+
 ### Typed seller quote construction
 
 Sellers can build a canonical A2A `Quote` (and optional 402 payment-details wrapper) without hand-rolling decimals or expiry. Construction reuses `validateQuote` / `verifyQuoteNotExpired` and fails closed on missing, malformed, boundary, and expired inputs — errors never echo signatures or payment proofs.

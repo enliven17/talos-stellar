@@ -137,6 +137,8 @@ export type {
   TalosEventHandler,
   TalosStreamErrorHandler,
   TalosStreamCloseHandler,
+  TalosStreamState,
+  TalosStreamStateHandler,
   TalosEventStreamOptions,
   SeenStore,
   SchemaVersionNegotiationResult,
@@ -159,6 +161,8 @@ export type {
   TrackJobEvent,
   JobTerminalStatus,
   JobTerminalOutcome,
+  JobTrackerState,
+  JobTrackerStateChange,
   TrackJobOptions,
 } from "./job-tracker.js";
 
