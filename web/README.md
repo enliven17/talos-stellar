@@ -331,6 +331,18 @@ Content-Type: application/json
 
 All fields except `resource` are optional and fall back to the current configured value. Returns the updated config + live usage.
 
+An optional `"reason"` string (max 500 chars, default `"unspecified"`) may be supplied.
+
+### Adjustment audit trail
+
+Every successful `PATCH` appends a row to `tls_quota_adjustments` (migration `0023_add_quota_adjustments`) recording the `actor` (`agent:<id>`), `reason`, `priorPolicy` and `newPolicy` (`maxCount`, `windowSize`, `enabled`, `notes`). API credentials are never stored: the actor is the agent id, and bearer tokens / key-like strings in `reason` and `notes` are replaced with `[REDACTED]`.
+
+```
+GET /api/talos/:id/quota?view=adjustments
+```
+
+Returns `{ talosId, adjustments: [{ id, resource, actor, reason, priorPolicy, newPolicy, createdAt }] }`, newest first.
+
 ### Reset windows
 
 | `windowSize` | Window start                                         |
@@ -338,6 +350,10 @@ All fields except `resource` are optional and fall back to the current configure
 | `hourly`     | UTC hour boundary (e.g. `14:00:00`)                  |
 | `daily`      | UTC midnight (e.g. `2026-07-24T00:00:00Z`)           |
 | `monthly`    | First day of UTC month (e.g. `2026-07-01T00:00:00Z`) |
+
+Window boundaries and reset calculations (`computeQuotaWindow`) are canonical across responses:
+- `X-Quota-Reset` header in seconds (Unix epoch) and response body `resetAt` (ISO-8601) reflect identical window boundaries.
+- Boundary transitions across months, leap days (e.g. Feb 29 in leap years vs. Feb 28 in non-leap years), and year boundaries are normalized with an injectable clock parameter.
 
 ### Local verification
 

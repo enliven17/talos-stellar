@@ -1,7 +1,12 @@
 import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
-import { tlsTalos, tlsQuotaConfigs } from "@/db/schema";
+import { tlsTalos, tlsQuotaConfigs, tlsQuotaAdjustments } from "@/db/schema";
+import {
+  actorForAgent,
+  normalizeReason,
+  snapshotPolicy,
+} from "@/lib/quota-audit";
 import { eq, isNull, or, and } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
 import {
@@ -9,6 +14,7 @@ import {
   resolveQuotaConfig,
   ALL_QUOTA_RESOURCES,
   type QuotaResource,
+  type WindowSize,
 } from "@/lib/quota";
 
 /**
@@ -57,6 +63,26 @@ async function _GET(
   // Agent must authenticate with its own API key
   const auth = await verifyAgentApiKey(request, id);
   if (!auth.ok) return auth.response;
+
+  // GET ?view=adjustments → quota adjustment audit trail (newest first)
+  if (request.nextUrl.searchParams.get("view") === "adjustments") {
+    const rows = await db
+      .select()
+      .from(tlsQuotaAdjustments)
+      .where(eq(tlsQuotaAdjustments.talosId, id));
+    const adjustments = rows
+      .map((r) => ({
+        id: r.id,
+        resource: r.resource,
+        actor: r.actor,
+        reason: r.reason,
+        priorPolicy: r.priorPolicy,
+        newPolicy: r.newPolicy,
+        createdAt: new Date(r.createdAt).toISOString(),
+      }))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return Response.json({ talosId: id, adjustments });
+  }
 
   // Confirm the TALOS exists (auth already does this, but keep it explicit)
   const talos = await db
@@ -135,7 +161,11 @@ async function _GET(
  *   windowSize?: WindowSize, // "hourly" | "daily" | "monthly"
  *   enabled?: boolean,       // Enable or disable enforcement
  *   notes?: string,          // Admin notes
+ *   reason?: string,         // Audit reason (credentials are redacted)
  * }
+ *
+ * Every successful adjustment appends an audit record (actor, reason, prior
+ * policy, new policy). Read it with GET /api/talos/:id/quota?view=adjustments.
  */
 async function _PATCH(
   request: NextRequest,
@@ -206,6 +236,14 @@ async function _PATCH(
   const newEnabled = typeof enabled === "boolean" ? enabled : current.enabled;
   const newNotes = typeof notes === "string" ? notes : current.notes;
 
+  const bearer = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
+  const knownSecrets = bearer ? [bearer] : [];
+  const priorPolicy = snapshotPolicy(current, knownSecrets);
+  const newPolicy = snapshotPolicy(
+    { maxCount: newMaxCount, windowSize: newWindowSize as WindowSize, enabled: newEnabled, notes: newNotes ?? null },
+    knownSecrets,
+  );
+
   // Upsert the agent-specific config row
   await db
     .insert(tlsQuotaConfigs)
@@ -226,6 +264,16 @@ async function _PATCH(
         notes: newNotes ?? null,
       },
     });
+
+  // Append-only audit record: actor, reason, prior and new policy.
+  await db.insert(tlsQuotaAdjustments).values({
+    talosId: id,
+    resource: resource as string,
+    actor: actorForAgent(id),
+    reason: normalizeReason(body && (body as Record<string, unknown>).reason, knownSecrets),
+    priorPolicy,
+    newPolicy,
+  });
 
   const [updatedConfig, usage] = await Promise.all([
     resolveQuotaConfig(db, id, resource as QuotaResource),
