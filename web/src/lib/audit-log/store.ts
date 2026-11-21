@@ -2,6 +2,10 @@ import { and, desc, eq, gte, lte, lt, or, sql, type SQL } from "drizzle-orm";
 import { db } from "@/db";
 import { tlsApiAuditLogs } from "@/db/schema";
 import {
+  buildAuditExportFilename,
+  type AuditExportFormat,
+} from "@/lib/audit-chain";
+import {
   escapeIlikePattern,
   statusClassRange,
   type AuditLogFilters,
@@ -86,4 +90,136 @@ export async function listAuditLogs(
     : null;
 
   return { logs: page.map(toRecord), nextCursor };
+}
+
+export interface AuditLogExportOptions {
+  /** Export payload format (`"json"` or `"csv"`, defaults to `"json"`). */
+  format?: AuditExportFormat;
+  /** Optional export timestamp used in the payload and safe filename. */
+  exportedAt?: Date | string;
+  /** Optional pre-fetched audit log records; if omitted, queries `listAuditLogs`. */
+  logs?: AuditLogRecord[];
+  /** Optional pagination cursor corresponding to pre-fetched `logs`. */
+  nextCursor?: string | null;
+}
+
+export interface AuditLogExportBundle {
+  /** Bounded ASCII-only filename derived strictly from validated identifiers. */
+  filename: string;
+  /** MIME content type including UTF-8 charset so Unicode in data is preserved. */
+  contentType: string;
+  /** Ready-to-use Content-Disposition header value. */
+  contentDisposition: string;
+  /** Serialized UTF-8 export payload preserving Unicode within the exported data. */
+  data: string;
+  /** Underlying audit log records included in the export. */
+  logs: AuditLogRecord[];
+  /** Next pagination cursor if additional rows exist beyond the page limit. */
+  nextCursor: string | null;
+}
+
+function escapeCsvCell(value: string | number | null | undefined): string {
+  if (value === null || value === undefined) return '""';
+  const text = String(value);
+  const safeText = /^[\u0000-\u0020]*[=+\-@]/.test(text) ? `'${text}` : text;
+  return `"${safeText.replaceAll('"', '""')}"`;
+}
+
+/**
+ * Serialize audit log records to UTF-8 CSV or JSON while preserving full
+ * Unicode characters inside the exported data payload.
+ */
+export function serializeAuditLogExport(
+  logs: AuditLogRecord[],
+  options: {
+    format?: AuditExportFormat;
+    filters?: AuditLogFilters;
+    exportedAt?: Date | string;
+  } = {},
+): string {
+  const format: AuditExportFormat = options.format ?? "json";
+
+  if (format === "csv") {
+    const header =
+      "id,talosId,method,path,statusCode,denialReason,scopesRequired,ipAddress,sequenceNumber,previousHash,entryHash,chainVersion,createdAt";
+    const rows = logs.map((row) =>
+      [
+        row.id,
+        row.talosId,
+        row.method,
+        row.path,
+        row.statusCode,
+        row.denialReason ?? "",
+        row.scopesRequired ? row.scopesRequired.join(";") : "",
+        row.ipAddress ?? "",
+        row.sequenceNumber ?? "",
+        row.previousHash ?? "",
+        row.entryHash ?? "",
+        row.chainVersion ?? "",
+        row.createdAt,
+      ]
+        .map(escapeCsvCell)
+        .join(","),
+    );
+    return [header, ...rows].join("\r\n") + "\r\n";
+  }
+
+  const exportedAtIso =
+    options.exportedAt !== undefined
+      ? (options.exportedAt instanceof Date
+          ? options.exportedAt
+          : new Date(options.exportedAt)
+        ).toISOString()
+      : new Date().toISOString();
+
+  return JSON.stringify(
+    {
+      exportedAt: exportedAtIso,
+      count: logs.length,
+      logs,
+    },
+    null,
+    2,
+  );
+}
+
+/**
+ * Export audit logs with a bounded, safe filename generated only from
+ * validated identifiers while preserving Unicode inside the exported data.
+ */
+export async function exportAuditLogs(
+  filter: AuditLogFilters,
+  options: AuditLogExportOptions = {},
+): Promise<AuditLogExportBundle> {
+  const format: AuditExportFormat = options.format ?? "json";
+  const exportedAt = options.exportedAt ?? new Date();
+  const filename = buildAuditExportFilename({
+    talosId: filter.talosId,
+    format,
+    exportedAt,
+  });
+
+  const { logs, nextCursor } =
+    options.logs !== undefined
+      ? { logs: options.logs, nextCursor: options.nextCursor ?? null }
+      : await listAuditLogs(filter);
+  const data = serializeAuditLogExport(logs, {
+    format,
+    filters: filter,
+    exportedAt,
+  });
+
+  const contentType =
+    format === "csv"
+      ? "text/csv; charset=utf-8"
+      : "application/json; charset=utf-8";
+
+  return {
+    filename,
+    contentType,
+    contentDisposition: `attachment; filename="${filename}"`,
+    data,
+    logs,
+    nextCursor,
+  };
 }
