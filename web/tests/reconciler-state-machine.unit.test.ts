@@ -54,6 +54,11 @@ import {
   isWallClockExpired,
   isLedgerExpired,
   isTerminal,
+  detectAssociationConflict,
+  hasConflictingAssociation,
+  canCreditJob,
+  formatAssociationConflictError,
+  TxAssociationConflictError,
 } from "../src/lib/reconciler/state-machine";
 import type { TxRecord, ReconcilerConfig, HorizonPollResult } from "../src/lib/reconciler/types";
 
@@ -455,5 +460,104 @@ describe("State machine edge cases", () => {
     const rec = makeRecord({ pollCount: 0 });
     const update = transitionFromPending(rec, NOT_FOUND_POLL, 1010, config);
     expect(update?.finalityStatus).toBe("NOT_FOUND");
+  });
+});
+
+// ─── Association conflict detection ──────────────────────────────────────────
+
+describe("detectAssociationConflict & canCreditJob", () => {
+  it("returns null for compatible (idempotent) associations with the same txHash", () => {
+    const conflict = detectAssociationConflict(
+      { txHash: "abc123def456", sourceType: "commerce_job", sourceId: "job_1" },
+      { txHash: "abc123def456", sourceType: "commerce_job", sourceId: "job_1" },
+    );
+    expect(conflict).toBeNull();
+  });
+
+  it("returns null when txHashes differ", () => {
+    const conflict = detectAssociationConflict(
+      { txHash: "hash_a", sourceType: "commerce_job", sourceId: "job_1" },
+      { txHash: "hash_b", sourceType: "commerce_job", sourceId: "job_2" },
+    );
+    expect(conflict).toBeNull();
+  });
+
+  it("detects conflict when one txHash is associated with two different jobs", () => {
+    const now = new Date("2026-11-19T00:00:00.000Z");
+    const conflict = detectAssociationConflict(
+      { txHash: "abc123def456", sourceType: "commerce_job", sourceId: "job_1" },
+      { txHash: "abc123def456", sourceType: "commerce_job", sourceId: "job_2" },
+      now,
+    );
+
+    expect(conflict).not.toBeNull();
+    expect(conflict?.txHash).toBe("abc123def456");
+    expect(conflict?.existingSourceId).toBe("job_1");
+    expect(conflict?.incomingSourceId).toBe("job_2");
+    expect(conflict?.detectedAt).toEqual(now);
+    expect(formatAssociationConflictError(conflict!)).toContain("ASSOCIATION_CONFLICT:");
+  });
+
+  it("detects conflict across case/whitespace differences in txHash and across sourceTypes", () => {
+    const conflict = detectAssociationConflict(
+      { txHash: "  ABC123DEF456 ", sourceType: "commerce_job", sourceId: "job_1" },
+      { txHash: "abc123def456", sourceType: "token_purchase", sourceId: "abc123def456" },
+    );
+
+    expect(conflict).not.toBeNull();
+    expect(conflict?.existingSourceType).toBe("commerce_job");
+    expect(conflict?.incomingSourceType).toBe("token_purchase");
+  });
+
+  it("detects conflict when existing sourceId is null and incoming sourceId is non-null", () => {
+    const conflict = detectAssociationConflict(
+      { txHash: "abc123def456", sourceType: "commerce_job", sourceId: null },
+      { txHash: "abc123def456", sourceType: "commerce_job", sourceId: "job_1" },
+    );
+    expect(conflict).not.toBeNull();
+  });
+
+  it("canCreditJob allows CONFIRMED record with only compatible associations", () => {
+    const rec = makeRecord({ finalityStatus: "CONFIRMED", sourceId: "job_1" });
+    const decision = canCreditJob(rec, [
+      { txHash: rec.txHash, sourceType: "commerce_job", sourceId: "job_1" },
+    ]);
+    expect(decision).toEqual({ allowed: true });
+  });
+
+  it("canCreditJob rejects CONFIRMED record when a conflicting job association exists", () => {
+    const rec = makeRecord({ finalityStatus: "CONFIRMED", sourceId: "job_2" });
+    const decision = canCreditJob(rec, [
+      { txHash: rec.txHash, sourceType: "commerce_job", sourceId: "job_1" },
+    ]);
+    expect(decision.allowed).toBe(false);
+    if (!decision.allowed) {
+      expect(decision.conflict?.existingSourceId).toBe("job_1");
+      expect(decision.conflict?.incomingSourceId).toBe("job_2");
+    }
+  });
+
+  it("canCreditJob rejects non-CONFIRMED record even without association conflicts", () => {
+    const rec = makeRecord({ finalityStatus: "CONFIRMING", sourceId: "job_1" });
+    const decision = canCreditJob(rec, [
+      { txHash: rec.txHash, sourceType: "commerce_job", sourceId: "job_1" },
+    ]);
+    expect(decision.allowed).toBe(false);
+    if (!decision.allowed) {
+      expect(decision.conflict).toBeUndefined();
+      expect(decision.reason).toContain("CONFIRMING");
+    }
+  });
+
+  it("hasConflictingAssociation and TxAssociationConflictError preserve conflict metadata", () => {
+    const rec = makeRecord({ sourceId: "job_2" });
+    const conflict = hasConflictingAssociation(rec, [
+      { txHash: "other_hash", sourceType: "commerce_job", sourceId: "job_9" },
+      { txHash: rec.txHash, sourceType: "commerce_job", sourceId: "job_1" },
+    ]);
+    expect(conflict).not.toBeNull();
+    const err = new TxAssociationConflictError(conflict!);
+    expect(err.name).toBe("TxAssociationConflictError");
+    expect(err.conflict).toEqual(conflict);
   });
 });
