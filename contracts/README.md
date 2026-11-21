@@ -94,6 +94,8 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
   - `execute_proposal(proposal_id)`: Mark an approved proposal as `Executed` (permissionless).
   - `get_proposal(proposal_id) -> Option<Proposal>`: Read proposal struct and current tallies.
   - `get_vote(proposal_id, voter) -> Option<Vote>`: Read a voter's cast vote.
+  - `get_proposal_action_digest(proposal_id) -> Option<BytesN<32>>`: Canonical approved action digest.
+  - `get_execution_receipt(proposal_id) -> Option<ExecutionReceipt>`: Immutable successful execution receipt.
   - `get_proposal_quorum_state(proposal_id) -> Option<ProposalQuorumState>`: Real-time query of quorum attainment and approval bps.
   - `delegate(delegator, delegatee)`: Delegate voting weight to another account (delegator auth).
   - `get_past_votes(account, ledger) -> i128`: Query historical voting weight at a specific ledger.
@@ -113,15 +115,16 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
   - `get_storage_health() -> (u32, u32, u32, u32, u32)`: Query proposal storage health tuple `(min_age, max_age, keys_below_warn, keys_below_crit, total_keys)`.
   - `pause_domain(domain_id, duration)` / `unpause_domain(domain_id)`: Emergency pause controls (admin auth).
   - `is_domain_paused(domain_id) -> bool` / `get_domain_pause_status(domain_id) -> Option<PauseStatus>`: Pause status queries.
-  - `version() -> (u32, u32, u32)`: Returns compile-time `(1, 1, 0)`.
+  - `version() -> (u32, u32, u32)`: Returns compile-time `(1, 2, 0)`.
   - `interface_id() -> BytesN<32>`: Stable 32-byte interface identifier.
   - `deployment_manifest_digest() -> BytesN<32>`: Manifest digest.
   - `supports_version(major, minor, patch) -> bool`: SemVer compatibility check.
-  - `interface_features() -> Vec<Symbol>`: Returns `["proposal_lifecycle", "vote_weighting", "config_admin", "interface_query", "quorum_state"]`.
+  - `interface_features() -> Vec<Symbol>`: Returns `["proposal_lifecycle", "vote_weighting", "config_admin", "interface_query", "quorum_state", "execution_receipts"]`.
 - **Events**:
   - `prop_crt`: `(symbol_short!("prop_crt"), proposal_id: u32)` → `EventProposalCreated { proposal_id, talos_id, proposer, snapshot_ledger, end_ledger }`.
   - `vote`: `(symbol_short!("vote"), proposal_id: u32)` → `EventVoteCast { proposal_id, voter, choice, weight }`.
   - `prop_stat`: `(symbol_short!("prop_stat"), proposal_id: u32)` → `EventProposalStatusChanged { proposal_id, status }`.
+  - `act_rcpt`: `(symbol_short!("act_rcpt"), proposal_id: u64)` → `(namespace: String, action_digest: BytesN<32>, executed_at: u64)` after successful execution.
   - `qrm_rchd`: `(symbol_short!("qrm_rchd"), proposal_id: u32)` → `EventQuorumReached { proposal_id, votes_cast, quorum_threshold, approval_bps }`.
   - `div_snap`: `(symbol_short!("div_snap"), epoch: u32)` → `EventDividendSnapshotRecorded { epoch, talos_id, total_usdc, per_token_usdc, snapshot_ledger }`.
   - Pause events: `dom_paus`, `dom_resm`, `dom_expd`.

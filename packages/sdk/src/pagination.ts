@@ -33,6 +33,11 @@ export interface AsyncPaginationIteratorOptions {
    * `timeoutMs` for each page fetch.
    */
   timeoutMs?: number | undefined;
+  /**
+   * Explicit limit on the total number of items to yield across pages.
+   * When reached, iteration stops without fetching any unnecessary page.
+   */
+  limit?: number | undefined;
 }
 
 /**
@@ -65,6 +70,7 @@ interface PaginationState<T> {
   itemIndex: number;
   exhausted: boolean;
   fetchedFirstPage: boolean;
+  yieldedCount: number;
 }
 
 /**
@@ -105,10 +111,17 @@ export class AsyncPaginationIterator<T> implements AsyncIterableIterator<T> {
       throw new TypeError("maxPages must be a positive number or Infinity");
     }
 
+    if (options.limit !== undefined) {
+      if (typeof options.limit !== "number" || options.limit < 0 || Number.isNaN(options.limit)) {
+        throw new TypeError("limit must be a non-negative number");
+      }
+    }
+
     this.options = {
       maxPages,
       signal: options.signal,
       timeoutMs: options.timeoutMs,
+      limit: options.limit,
     };
 
     this.state = {
@@ -118,6 +131,7 @@ export class AsyncPaginationIterator<T> implements AsyncIterableIterator<T> {
       itemIndex: 0,
       exhausted: false,
       fetchedFirstPage: false,
+      yieldedCount: 0,
     };
 
     // Set up abort handling if a signal is provided
@@ -153,6 +167,11 @@ export class AsyncPaginationIterator<T> implements AsyncIterableIterator<T> {
       throw new PaginationAbortedError();
     }
 
+    // Check if we've already reached the item limit
+    if (this.options.limit !== undefined && this.state.yieldedCount >= this.options.limit) {
+      return;
+    }
+
     // Merge caller's signal with our internal abort controller
     const signal = this.abortController?.signal ?? this.options.signal;
 
@@ -167,6 +186,11 @@ export class AsyncPaginationIterator<T> implements AsyncIterableIterator<T> {
       
       if (this.options.timeoutMs !== undefined) {
         fetchOptions.timeoutMs = this.options.timeoutMs;
+      }
+
+      if (this.options.limit !== undefined && Number.isFinite(this.options.limit)) {
+        const remaining = Math.max(0, this.options.limit - this.state.yieldedCount);
+        fetchOptions.limit = remaining;
       }
 
       const page = await this.fetcher(fetchOptions);
@@ -211,6 +235,12 @@ export class AsyncPaginationIterator<T> implements AsyncIterableIterator<T> {
       throw new PaginationAbortedError();
     }
 
+    // If caller specified an explicit limit and we've reached it (e.g. limit: 0 or reached limit)
+    if (this.options.limit !== undefined && this.state.yieldedCount >= this.options.limit) {
+      this.cleanup();
+      return { done: true, value: undefined as unknown as T };
+    }
+
     // If we haven't fetched the first page yet, fetch it
     if (!this.state.fetchedFirstPage) {
       await this.fetchNextPage();
@@ -229,6 +259,12 @@ export class AsyncPaginationIterator<T> implements AsyncIterableIterator<T> {
         return { done: true, value: undefined as unknown as T };
       }
 
+      // Check explicit caller limit before fetching the next page
+      if (this.options.limit !== undefined && this.state.yieldedCount >= this.options.limit) {
+        this.cleanup();
+        return { done: true, value: undefined as unknown as T };
+      }
+
       await this.fetchNextPage();
 
       // If the new page is empty, we're done
@@ -238,9 +274,16 @@ export class AsyncPaginationIterator<T> implements AsyncIterableIterator<T> {
       }
     }
 
+    // Check again before yielding in case fetchNextPage found we were at limit
+    if (this.options.limit !== undefined && this.state.yieldedCount >= this.options.limit) {
+      this.cleanup();
+      return { done: true, value: undefined as unknown as T };
+    }
+
     // Return the current item and advance the index
     const value = this.state.currentItems[this.state.itemIndex];
     this.state.itemIndex++;
+    this.state.yieldedCount++;
 
     return { done: false, value };
   }
