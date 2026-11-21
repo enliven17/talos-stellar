@@ -762,7 +762,9 @@ impl TalosGovernance {
             .unwrap_or(DEFAULT_SNAPSHOT_OFFSET_LEDGERS);
         let snapshot_ledger = current_ledger.saturating_sub(snapshot_offset);
         let proposal_id = Self::next_proposal_id(env.clone());
-        let end_ledger = current_ledger + config.voting_period_ledgers;
+        let end_ledger = current_ledger
+            .checked_add(config.voting_period_ledgers)
+            .expect("Voting deadline overflows ledger sequence");
 
         let proposal = Proposal {
             id: proposal_id,
