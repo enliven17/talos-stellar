@@ -331,6 +331,15 @@ describe("computeTransition", () => {
     // confirmationDepth=2, 1000+2=1002 → CONFIRMED
     expect(update?.finalityStatus).toBe("CONFIRMED");
   });
+
+  it("rejects non-monotonic ledger observations (regression)", () => {
+    const rec = makeRecord({ finalityStatus: "PENDING", lastLedgerChecked: 1010 });
+    // currentLedger is 1000, which is < lastLedgerChecked 1010
+    const update = computeTransition(rec, CONFIRMED_POLL, 1000, BASE_CONFIG);
+    expect(update?.lastError).toMatch(/regression/i);
+    expect(update?.lastLedgerChecked).toBeUndefined(); // Should not update
+    expect(update?.finalityStatus).toBeUndefined(); // Should not change state
+  });
 });
 
 // ─── needsRepair ─────────────────────────────────────────────────────────────

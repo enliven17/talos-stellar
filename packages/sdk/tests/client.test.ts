@@ -1635,6 +1635,65 @@ describe("Typed SDK Error Hierarchy", () => {
       });
     });
 
+    it("reports redacted structured retry decisions for status and typed retries", async () => {
+      vi.mocked(fetch)
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          headers: new Headers({
+            "Retry-After": "0",
+            "Set-Cookie": "payment-secret=do-not-expose",
+          }),
+          text: async () => "Authorization: Bearer payment-secret",
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ id: "1" }),
+        } as Response);
+
+      const statusHook = vi.fn();
+      const typedHook = vi.fn();
+      const c = new TalosClient({
+        baseUrl: "http://localhost:3000",
+        retryPolicy: {
+          maxAttempts: 2,
+          baseDelayMs: 0,
+          maxDelayMs: 0,
+          jitter: false,
+          onRetry: statusHook,
+        },
+        retry: {
+          maxAttempts: 2,
+          baseDelayMs: 0,
+          maxDelayMs: 0,
+          jitter: 0,
+          onRetry: typedHook,
+        },
+      });
+
+      await expect(c.getTalos("1")).resolves.toEqual({ id: "1" });
+      expect(statusHook).toHaveBeenCalledTimes(1);
+      expect(typedHook).toHaveBeenCalledTimes(1);
+
+      const statusEvent = statusHook.mock.calls[0]?.[0];
+      expect(statusEvent).toMatchObject({
+        attempt: 1,
+        reason: "retry-after",
+        nextDelayMs: 0,
+        delayMs: 0,
+        metadata: {
+          code: "server_retryable_error",
+          status: 503,
+          isRetryable: true,
+        },
+      });
+      expect(statusEvent.error.body).toBe("");
+      expect(statusEvent.error.headers).toEqual({});
+      expect(statusEvent.error.data).toBeUndefined();
+      expect(statusEvent.error.cause).toBeUndefined();
+      expect(JSON.stringify(statusEvent)).not.toContain("payment-secret");
+    });
+
     it("caps maxAttempts at 8 even if user requests more", async () => {
       vi.mocked(fetch).mockResolvedValue({
         ok: false,

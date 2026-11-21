@@ -17,6 +17,7 @@ from typing import Any
 from talos_agent.policy.engine import PolicyEngine
 from talos_agent.policy.schema import (
     ActionSpec,
+    Policy,
     PolicyDecisionTrace,
     PolicyResult,
 )
@@ -215,6 +216,72 @@ class PolicySimulator:
                     "error": str(exc),
                 })
         return results
+
+    @staticmethod
+    def compare_policies(
+        baseline: list[Policy],
+        candidate: list[Policy],
+        scenarios: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Offline comparison of two policy versions over the same scenarios.
+
+        Each version is evaluated on its own freshly created, enabled engine,
+        so no live engine state or metrics are touched and nothing is
+        enforced, persisted or sent anywhere.
+
+        ``newly_allowed`` lists scenarios whose decision changed from
+        non-approve to ``approve``; ``newly_denied`` lists scenarios that went
+        from ``approve`` to ``deny`` or ``escalate``.  Other decision changes
+        (e.g. escalate -> deny) appear in ``other_changes``.
+        """
+        sims = []
+        for policies in (baseline, candidate):
+            engine = PolicyEngine()
+            engine.enabled = True
+            engine.load(list(policies))
+            sims.append(PolicySimulator(engine))
+        base_rows = sims[0].simulate_batch(scenarios)
+        cand_rows = sims[1].simulate_batch(scenarios)
+
+        newly_allowed: list[dict[str, Any]] = []
+        newly_denied: list[dict[str, Any]] = []
+        other_changes: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        unchanged = 0
+        for b, c in zip(base_rows, cand_rows):
+            if "error" in b or "error" in c:
+                errors.append({
+                    "scenario_index": b["scenario_index"],
+                    "action": b["action"],
+                    "baseline_error": b.get("error"),
+                    "candidate_error": c.get("error"),
+                })
+                continue
+            before, after = b["decision"], c["decision"]
+            if before == after:
+                unchanged += 1
+                continue
+            row = {
+                "scenario_index": b["scenario_index"],
+                "action": b["action"],
+                "baseline": before,
+                "candidate": after,
+            }
+            if after == "approve":
+                newly_allowed.append(row)
+            elif before == "approve":
+                newly_denied.append(row)
+            else:
+                other_changes.append(row)
+
+        return {
+            "total": len(scenarios),
+            "unchanged": unchanged,
+            "newly_allowed": newly_allowed,
+            "newly_denied": newly_denied,
+            "other_changes": other_changes,
+            "errors": errors,
+        }
 
     def export_scenarios(self, scenarios: list[dict[str, Any]], path: str) -> None:
         """Run a batch of scenarios and write the results to a JSON file.

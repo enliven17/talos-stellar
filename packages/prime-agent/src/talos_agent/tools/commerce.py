@@ -19,9 +19,16 @@ from talos_agent.payments.x402_signer import X402Signer
 from talos_agent.commerce_quote import (
     DEFAULT_X402_CLOCK_SKEW_POLICY,
     enforce_commerce_quote_expiry,
+    parse_iso8601_timestamp,
+    quote_clock_policy_diagnostics,
     quote_expiry_iso,
 )
 from talos_agent.tools import context as _context
+from talos_agent.tools.permissions import (
+    DataScope,
+    NetworkScope,
+    ToolPermissions,
+)
 from talos_agent.tools.registry import tool
 
 if TYPE_CHECKING:
@@ -266,6 +273,347 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
         "price": price,
         "talos_id": talos_id,
         "service_type": service_type,
+    }
+
+
+# ── Dry-run quote comparison ────────────────────────────────────────
+
+#: Hard bound on how many service quotes one comparison may fetch. Keeps the
+#: dry-run cheap and prevents an agent (or a malformed tool call) from turning
+#: a read-only check into an unbounded scan of the marketplace.
+MAX_QUOTE_COMPARISON_CANDIDATES = 5
+
+#: Hosts the comparison may contact — the same Talos Web API surface the
+#: other commerce tools use.
+_COMPARISON_HOSTS = ("*.talos.xyz", "localhost", "127.0.0.1")
+
+
+def _quote_price_units(payment_details: dict) -> tuple[int, float] | None:
+    """Return ``(price_usdc_units, price_float)`` for a 402 quote, or None.
+
+    Mirrors the purchase path: a nested ``quote.amount`` (canonical A2A
+    decimal) wins over the legacy top-level ``price``. The amount is parsed
+    with :func:`price_to_usdc_units` so comparisons use exact USDC smallest
+    units rather than IEEE 754 floats; malformed prices return None instead
+    of raising so one bad quote cannot sink the whole comparison.
+    """
+    quote_obj = payment_details.get("quote")
+    raw_price = payment_details.get("price", 0)
+    if isinstance(quote_obj, dict) and quote_obj.get("amount") is not None:
+        raw_price = quote_obj["amount"]
+    try:
+        units = price_to_usdc_units(str(raw_price))
+        display = float(raw_price)
+    except (ValueError, TypeError):
+        return None
+    return units, display
+
+
+def _quote_capability(payment_details: dict) -> str:
+    """Best-effort capability descriptor for a 402 quote.
+
+    Prefers an explicit ``capability`` field (A2A quote shape), then the
+    advertised service name, then the fulfillment mode. Returns "" when the
+    payload carries none of them.
+    """
+    quote_obj = payment_details.get("quote")
+    for source in (payment_details, quote_obj if isinstance(quote_obj, dict) else {}):
+        capability = source.get("capability")
+        if isinstance(capability, str) and capability.strip():
+            return capability.strip()
+    for key in ("serviceName", "service_name", "fulfillmentMode"):
+        value = payment_details.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+async def _fetch_quote_candidate(
+    talos_id: str,
+    service_type: str,
+) -> dict:
+    """Fetch and evaluate one service quote. Read-only: GET only, never signs."""
+    row: dict = {
+        "talos_id": talos_id,
+        "service_type": service_type,
+        "eligible": False,
+        "price": None,
+        "price_usdc": None,
+        "currency": "USDC",
+        "capability": "",
+        "service_name": "",
+        "fulfillment_mode": "",
+        "expires_at": None,
+        "reason": None,
+        "code": None,
+    }
+    try:
+        response = await _deps().api.get_service(
+            talos_id, service_type=service_type or None
+        )
+    except Exception as exc:  # noqa: BLE001 - comparison must survive one bad fetch
+        row["reason"] = "Failed to fetch service quote"
+        row["code"] = "FETCH_FAILED"
+        row["error_type"] = type(exc).__name__
+        return row
+
+    if response is None or getattr(response, "status_code", None) != 402:
+        status = getattr(response, "status_code", None) if response is not None else None
+        row["reason"] = "No 402 quote returned for this service"
+        row["code"] = "NO_QUOTE"
+        row["status_code"] = status
+        return row
+
+    try:
+        details = response.json()
+    except Exception:  # noqa: BLE001 - malformed body is an ineligible quote
+        details = None
+    if not isinstance(details, dict):
+        row["reason"] = "Malformed 402 payment details"
+        row["code"] = "INVALID_QUOTE"
+        return row
+
+    quote_obj = details.get("quote")
+    expiry_error = enforce_commerce_quote_expiry(
+        details,
+        require_expiry=isinstance(quote_obj, dict),
+        policy=DEFAULT_X402_CLOCK_SKEW_POLICY,
+    )
+    if expiry_error is not None:
+        row["reason"] = expiry_error["error"]
+        row["code"] = expiry_error["code"]
+        row["expires_at"] = expiry_error.get("expires_at")
+        row["capability"] = _quote_capability(details)
+        return row
+
+    price = _quote_price_units(details)
+    if price is None:
+        row["reason"] = "Commerce quote price is malformed"
+        row["code"] = "INVALID_QUOTE"
+        row["expires_at"] = quote_expiry_iso(details)
+        row["capability"] = _quote_capability(details)
+        return row
+
+    units, display = price
+    currency = details.get("currency")
+    row.update(
+        {
+            "eligible": True,
+            "price": display,
+            "price_usdc": units,
+            "currency": str(currency).upper() if currency else "USDC",
+            "capability": _quote_capability(details),
+            "service_name": str(details.get("serviceName") or ""),
+            "fulfillment_mode": str(details.get("fulfillmentMode") or ""),
+            "expires_at": quote_expiry_iso(details),
+        }
+    )
+    return row
+
+
+@tool(
+    "compare_service_quotes",
+    "Dry-run comparison of eligible x402 service quotes across a bounded set of "
+    "candidate services. For each candidate it fetches the seller's 402 quote "
+    "(GET only) and compares total price in exact USDC units, capability and "
+    "quote expiry, ranking eligible quotes cheapest-first. Quotes that are "
+    "expired, expire too soon to settle, or carry malformed prices are listed "
+    "as ineligible with a reason code. This tool NEVER signs a payment, "
+    "submits commerce, records spending, or creates approvals — no paid calls "
+    "are made during comparison.",
+    permissions=ToolPermissions(
+        data=(DataScope.READ_REMOTE,),
+        network=(NetworkScope.HTTP,),
+        hosts=_COMPARISON_HOSTS,
+    ),
+)
+async def compare_service_quotes(candidates: str = "[]") -> dict:
+    """Compare live 402 quotes for a bounded candidate set — no payment.
+
+    Parameters
+    ----------
+    candidates:
+        JSON array (or single object) of ``{"talos_id": ..., "service_type":
+        ...}`` entries. ``service_type`` is optional. At most
+        ``MAX_QUOTE_COMPARISON_CANDIDATES`` entries are evaluated; extras are
+        counted in ``candidates_dropped``.
+
+    Returns
+    -------
+    dict with ``quotes`` (eligible first, ranked by price then expiry),
+    ``best_quote``, and counters describing the bounded evaluation.
+    """
+    if _deps().api is None:
+        return {"error": "API client not configured", "code": "NO_API"}
+
+    try:
+        raw = json.loads(candidates) if candidates else []
+    except json.JSONDecodeError:
+        return {
+            "error": "candidates must be a JSON array of {talos_id, service_type} objects",
+            "code": "INVALID_CANDIDATES",
+        }
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list) or not raw:
+        return {
+            "error": "candidates must be a non-empty JSON array of {talos_id, service_type} objects",
+            "code": "INVALID_CANDIDATES",
+        }
+
+    requested = len(raw)
+    bounded = raw[:MAX_QUOTE_COMPARISON_CANDIDATES]
+    dropped = requested - len(bounded)
+
+    rows: list[dict] = []
+    for entry in bounded:
+        if not isinstance(entry, dict):
+            rows.append(
+                {
+                    "talos_id": "",
+                    "service_type": "",
+                    "eligible": False,
+                    "price": None,
+                    "price_usdc": None,
+                    "currency": "USDC",
+                    "capability": "",
+                    "service_name": "",
+                    "fulfillment_mode": "",
+                    "expires_at": None,
+                    "reason": "Candidate entry is not an object",
+                    "code": "INVALID_CANDIDATE",
+                }
+            )
+            continue
+        talos_id = str(entry.get("talos_id") or entry.get("talosId") or "").strip()
+        service_type = str(
+            entry.get("service_type") or entry.get("serviceType") or ""
+        ).strip()
+        if not talos_id:
+            rows.append(
+                {
+                    "talos_id": "",
+                    "service_type": service_type,
+                    "eligible": False,
+                    "price": None,
+                    "price_usdc": None,
+                    "currency": "USDC",
+                    "capability": "",
+                    "service_name": "",
+                    "fulfillment_mode": "",
+                    "expires_at": None,
+                    "reason": "Candidate is missing talos_id",
+                    "code": "INVALID_CANDIDATE",
+                }
+            )
+            continue
+        rows.append(await _fetch_quote_candidate(talos_id, service_type))
+
+    def _expiry_sort_key(row: dict) -> tuple[int, float]:
+        expires_at = row.get("expires_at")
+        parsed = parse_iso8601_timestamp(expires_at)
+        if parsed is None:
+            # No advertised expiry never blocks a purchase, so it sorts as the
+            # most favourable deadline within the same price tier.
+            return (0, 0.0)
+        return (1, -parsed.timestamp())
+
+    eligible = sorted(
+        (r for r in rows if r["eligible"]),
+        key=lambda r: (r["price_usdc"], *_expiry_sort_key(r)),
+    )
+    ineligible = sorted(
+        (r for r in rows if not r["eligible"]),
+        key=lambda r: (r.get("price_usdc") is None, r.get("price_usdc") or 0, r["talos_id"]),
+    )
+    for rank, row in enumerate(eligible, start=1):
+        row["rank"] = rank
+    for row in ineligible:
+        row["rank"] = None
+
+    return {
+        "status": "compared",
+        "dry_run": True,
+        "payment_executed": False,
+        "candidates_requested": requested,
+        "candidates_evaluated": len(rows),
+        "candidates_dropped": dropped,
+        "max_candidates": MAX_QUOTE_COMPARISON_CANDIDATES,
+        "eligible_count": len(eligible),
+        "quotes": eligible + ineligible,
+        "best_quote": eligible[0] if eligible else None,
+    }
+
+
+@tool(
+    "preview_purchase",
+    "Preview a purchase WITHOUT signing or submitting. Returns the applied "
+    "quote clock-policy diagnostics (safety margin, remaining validity, verdict) "
+    "alongside the same budget / approval shapes as purchase_service.",
+)
+async def preview_purchase(talos_id: str, service_type: str = "", payload: str = "{}") -> dict:
+    """Non-signing preview of the purchase path (#1440).
+
+    Runs the same pre-signing steps as :func:`purchase_service` — budget,
+    GET service, 402 parse, quote expiry — and returns the applied clock-policy
+    diagnostics under ``clock_policy``. Signs nothing, submits nothing, and
+    returns no payment header, signature, or proof.
+    """
+    try:
+        json.loads(payload)
+    except json.JSONDecodeError:
+        return {"error": "Invalid payload JSON", "code": "BAD_INPUT"}
+
+    talos_config = _deps().db.get_talos_config()
+    gtm_budget = float((talos_config or {}).get("gtmBudget", 200))
+    spent_month = _deps().db.get_spending_period(30)
+    if spent_month >= gtm_budget:
+        return {
+            "error": "GTM budget exhausted for this month",
+            "budget": gtm_budget,
+            "spent": spent_month,
+        }
+
+    response = await _deps().api.get_service(talos_id, service_type=service_type or None)
+    if response.status_code != 402:
+        return {"error": f"Expected 402, got {response.status_code}", "body": response.text[:200]}
+
+    payment_details = response.json()
+    if not isinstance(payment_details, dict):
+        return {"error": "Malformed 402 payment details", "code": "INVALID_QUOTE"}
+
+    clock_policy = quote_clock_policy_diagnostics(
+        payment_details,
+        policy=DEFAULT_X402_CLOCK_SKEW_POLICY,
+    )
+
+    quote_obj = payment_details.get("quote")
+    expiry_error = enforce_commerce_quote_expiry(
+        payment_details,
+        require_expiry=isinstance(quote_obj, dict),
+        policy=DEFAULT_X402_CLOCK_SKEW_POLICY,
+    )
+    if expiry_error is not None:
+        return {**expiry_error, "clock_policy": clock_policy}
+
+    price = payment_details.get("price", 0)
+    if isinstance(quote_obj, dict) and quote_obj.get("amount") is not None:
+        try:
+            price = float(quote_obj["amount"])
+        except (TypeError, ValueError):
+            return {
+                "error": "Commerce quote amount is malformed",
+                "code": "INVALID_QUOTE",
+                "clock_policy": clock_policy,
+            }
+
+    return {
+        "status": "preview",
+        "talos_id": talos_id,
+        "service_type": service_type,
+        "price": price,
+        "budget_remaining": gtm_budget - spent_month,
+        "clock_policy": clock_policy,
     }
 
 

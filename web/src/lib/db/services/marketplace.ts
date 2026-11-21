@@ -14,6 +14,7 @@ export async function getCapabilityFilters(): Promise<CapabilityFilter[]> {
     return filters.map((cap) => ({
       id: cap.id,
       name: cap.name,
+      version: cap.version,
       description: cap.description,
       category: cap.category,
       isActive: cap.isActive,

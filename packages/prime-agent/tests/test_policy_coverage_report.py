@@ -107,4 +107,3 @@ def test_short_circuit_keeps_later_rule_unobserved():
     assert report.unobserved_rules == ("payments/after-block",)
     assert report.observed_branch_count == 1
     assert report.percentage == 100.0
-

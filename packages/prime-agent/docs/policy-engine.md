@@ -140,6 +140,19 @@ result = sim.simulate("transfer_xlm", {"amount": 500}, {"budget_remaining": 1000
 print(result.decision)  # "escalate"
 ```
 
+### Offline policy comparison
+
+Run the same synthetic scenarios against two policy versions and see what
+changes. Each version is evaluated on its own temporary engine, so nothing is
+enforced and live engine metrics are untouched.
+
+```python
+report = PolicySimulator.compare_policies(old_policies, new_policies, scenarios)
+report["newly_allowed"]  # approve in new, not in old
+report["newly_denied"]   # approve in old, deny/escalate in new
+report["other_changes"]  # e.g. escalate -> deny
+```
+
 ## Rollback / disabling
 
 To disable the engine:
