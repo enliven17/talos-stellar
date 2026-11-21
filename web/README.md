@@ -331,6 +331,18 @@ Content-Type: application/json
 
 All fields except `resource` are optional and fall back to the current configured value. Returns the updated config + live usage.
 
+An optional `"reason"` string (max 500 chars, default `"unspecified"`) may be supplied.
+
+### Adjustment audit trail
+
+Every successful `PATCH` appends a row to `tls_quota_adjustments` (migration `0023_add_quota_adjustments`) recording the `actor` (`agent:<id>`), `reason`, `priorPolicy` and `newPolicy` (`maxCount`, `windowSize`, `enabled`, `notes`). API credentials are never stored: the actor is the agent id, and bearer tokens / key-like strings in `reason` and `notes` are replaced with `[REDACTED]`.
+
+```
+GET /api/talos/:id/quota?view=adjustments
+```
+
+Returns `{ talosId, adjustments: [{ id, resource, actor, reason, priorPolicy, newPolicy, createdAt }] }`, newest first.
+
 ### Reset windows
 
 | `windowSize` | Window start                                         |

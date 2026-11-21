@@ -1012,6 +1012,29 @@ export const tlsQuotaUsage = pgTable(
   ],
 );
 
+// ─── Quota Adjustment Audit Trail ────────────────────────────────
+//
+// Append-only record of every quota policy change: who (actor), why (reason),
+// the prior policy and the new policy. Never stores API credentials; free-text
+// fields are redacted before insert (see lib/quota-audit.ts).
+
+export const tlsQuotaAdjustments = pgTable(
+  "tls_quota_adjustments",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    resource: text("resource").notNull(),
+    actor: text("actor").notNull(),
+    reason: text("reason").notNull(),
+    priorPolicy: jsonb("priorPolicy").notNull(),
+    newPolicy: jsonb("newPolicy").notNull(),
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tls_quota_adjustments_talosId_createdAt_idx").on(t.talosId, t.createdAt),
+  ],
+);
+
 // ─── Backup Runs (DR audit trail) ──────────────────────────────────
 
 export const tlsBackupRuns = pgTable(
