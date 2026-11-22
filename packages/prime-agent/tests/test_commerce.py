@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
+import asyncio
 import pytest
 from talos_agent.payments import USDC_DECIMALS, USDC_TESTNET_ISSUER, USDC_UNIT_SCALE
 from talos_agent.tools.commerce import (
@@ -473,3 +474,40 @@ class TestApplyPlaybook:
         assert result == {"error": "No playbook found named 'Growth'"}
         mock_db.find_playbook_by_name.assert_called_once_with("Growth")
         mock_db.apply_playbook.assert_not_called()
+
+
+class TestCommerceBudgetReservations:
+    @pytest.mark.asyncio
+    async def test_concurrent_reservations_do_not_aggregate_overspend(self):
+        from talos_agent.tools import commerce
+
+        mock_db = MagicMock()
+        mock_db.get_talos_config.return_value = {"gtmBudget": 1}
+        mock_db.get_spending_period.return_value = 0.0
+
+        with patch("talos_agent.tools.commerce._db", mock_db):
+            commerce._budget_reserved_units = 0
+            commerce._budget_reservation_lock = asyncio.Lock()
+            first, second = await asyncio.gather(
+                commerce._reserve_budget_units(1_000_000),
+                commerce._reserve_budget_units(1_000_000),
+            )
+
+        assert sum(reserved for reserved, _, _ in (first, second)) == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_reservation_is_released(self):
+        from talos_agent.tools import commerce
+
+        mock_db = MagicMock()
+        mock_db.get_talos_config.return_value = {"gtmBudget": 2}
+        mock_db.get_spending_period.return_value = 1.0
+
+        with patch("talos_agent.tools.commerce._db", mock_db):
+            commerce._budget_reserved_units = 0
+            commerce._budget_reservation_lock = asyncio.Lock()
+            await commerce._reserve_budget_units(500_000)
+            await commerce._release_budget_units(500_000)
+            reserved, _, _ = await commerce._reserve_budget_units(500_000)
+
+        assert reserved

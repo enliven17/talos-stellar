@@ -173,20 +173,29 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
                 "error": "Commerce quote amount is malformed",
                 "code": "INVALID_QUOTE",
             }
-    # Check if purchase would exceed GTM budget
-    if spent_month + float(price) > gtm_budget:
+    # Convert price to USDC smallest units before reserving or signing.
+    try:
+        amount_units = price_to_usdc_units(str(price))
+    except ValueError:
+        return {
+            "error": f"Commerce quote price is malformed: {price}",
+            "code": "INVALID_QUOTE",
+        }
+
+    reserved, gtm_budget_units, aggregate_units = await _reserve_budget_units(amount_units)
+    if not reserved:
         return {
             "error": f"Purchase of ${price} would exceed GTM budget",
-            "budget": gtm_budget,
-            "spent": spent_month,
-            "remaining": gtm_budget - spent_month,
+            "budget": gtm_budget_units / USDC_UNIT_SCALE,
+            "spent": aggregate_units / USDC_UNIT_SCALE,
+            "remaining": max(0, gtm_budget_units - aggregate_units) / USDC_UNIT_SCALE,
             "price": price,
             "suggestion": "Request approval to exceed budget or wait for next period",
         }
 
-    # Check approval threshold
     threshold = float(_deps().settings.approval_threshold)
     if float(price) > threshold:
+        await _release_budget_units(amount_units)
         result = await _deps().api.create_approval(
             _deps().settings.talos_id,
             type_="transaction",
@@ -203,40 +212,40 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
 
     # Step 2: Sign payment (EIP-3009)
     signer = _get_signer()
-    await signer.initialize()
-
-    # Convert price to USDC smallest unit (6 decimals) — string-based to avoid float rounding.
-    # A malformed quote fails here rather than being signed at a silently truncated amount.
     try:
-        amount_units = price_to_usdc_units(str(price))
-    except ValueError:
-        return {
-            "error": f"Commerce quote price is malformed: {price}",
-            "code": "INVALID_QUOTE",
-        }
-
-    sign_result = await signer.sign_payment(
-        payee=payee,
-        amount=amount_units,
-        asset_code="USDC",
-        asset_issuer=USDC_TESTNET_ISSUER,
-    )
+        await signer.initialize()
+        sign_result = await signer.sign_payment(
+            payee=payee,
+            amount=amount_units,
+            asset_code="USDC",
+            asset_issuer=USDC_TESTNET_ISSUER,
+        )
+    except Exception as e:
+        await _release_budget_units(amount_units)
+        return {"error": "Signing failed", "details": str(e)}
 
     if "error" in sign_result:
+        await _release_budget_units(amount_units)
         return sign_result
 
     # Step 3: POST with X-PAYMENT header
-    submit_result = await _deps().api.submit_commerce(
-        talos_id,
-        payment_header=sign_result["payment_header"],
-        payload=payload_dict,
-    )
+    try:
+        submit_result = await _deps().api.submit_commerce(
+            talos_id,
+            payment_header=sign_result["payment_header"],
+            payload=payload_dict,
+        )
+    except Exception:
+        await _release_budget_units(amount_units)
+        raise
 
     if not submit_result:
+        await _release_budget_units(amount_units)
         return {"error": "Commerce submission failed"}
 
     # Server returns error JSON if payment verification failed
     if "error" in submit_result:
+        await _release_budget_units(amount_units)
         return {"error": submit_result["error"], "details": submit_result.get("details", "")}
 
     job_id = submit_result.get("jobId") or submit_result.get("id", "")
@@ -248,12 +257,8 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
         tracked_payload.setdefault("_quote_expires_at", expiry_iso)
     _deps().db.add_commerce_job(job_id, talos_id, service_type, tracked_payload)
 
-    # Record spending against GTM budget
-    _deps().db.record_spending(
-        amount=float(price),
-        category="x402_purchase",
-        description=f"Service from Talos {talos_id}: {service_type}",
-    )
+    # Commit budget reservation (release reserved units, persist actual spending)
+    await _commit_budget_units(amount_units, price, talos_id, service_type)
 
     # Instant fulfillment: result is already in the response
     if submit_result.get("status") == "completed" and submit_result.get("result"):
@@ -1134,3 +1139,50 @@ async def evaluate_marketplace_bid(
             "remaining": budget_remaining,
         },
     }
+
+_budget_reserved_units = 0
+_budget_reservation_lock: asyncio.Lock | None = None
+
+
+def _get_budget_reservation_lock() -> asyncio.Lock:
+    deps = _deps()
+    if deps.budget_reservation_lock is None:
+        deps.budget_reservation_lock = asyncio.Lock()
+    return deps.budget_reservation_lock
+
+
+async def _reserve_budget_units(amount_units: int) -> tuple[bool, int, int]:
+    async with _get_budget_reservation_lock():
+        deps = _deps()
+        talos_config = deps.db.get_talos_config()
+        try:
+            gtm_budget_units = price_to_usdc_units(str((talos_config or {}).get("gtmBudget", 200)))
+        except ValueError:
+            gtm_budget_units = price_to_usdc_units("200")
+        spent_units = price_to_usdc_units(str(deps.db.get_spending_period(30)))
+        aggregate_units = spent_units + deps.budget_reserved_units
+        if aggregate_units + amount_units > gtm_budget_units:
+            return False, gtm_budget_units, aggregate_units
+        deps.budget_reserved_units += amount_units
+        return True, gtm_budget_units, aggregate_units
+
+
+async def _release_budget_units(amount_units: int) -> None:
+    async with _get_budget_reservation_lock():
+        deps = _deps()
+        deps.budget_reserved_units = max(0, deps.budget_reserved_units - amount_units)
+
+
+async def _commit_budget_units(amount_units: int, price: float, talos_id: str, service_type: str) -> None:
+    async with _get_budget_reservation_lock():
+        deps = _deps()
+        try:
+            deps.db.record_spending(
+                amount=price,
+                category="x402_purchase",
+                description=f"Service from Talos {talos_id}: {service_type}",
+            )
+        except Exception:
+            deps.budget_reserved_units = max(0, deps.budget_reserved_units - amount_units)
+            raise
+        deps.budget_reserved_units = max(0, deps.budget_reserved_units - amount_units)
