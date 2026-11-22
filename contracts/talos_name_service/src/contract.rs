@@ -1,9 +1,15 @@
 use soroban_sdk::{contract, contractimpl, panic_with_error, Address, Env, IntoVal, String, Symbol, Vec, BytesN};
 
-use crate::events::{emit_name_fee_paid, emit_name_registered, emit_registry_updated};
+use crate::events::{
+    emit_name_fee_paid, emit_name_registered, emit_name_transfer_accepted,
+    emit_name_transfer_cancelled, emit_name_transfer_proposed, emit_registry_updated,
+};
 use crate::interface::{CONTRACT_VERSION, features_list, version_supports, INTERFACE_ID};
 use crate::pause::{PAUSE_NAME_CONFIG, PAUSE_NAME_REGISTRATION};
-use crate::types::{DataKey, NamesPage, MAX_REVERSE_PAGE_SIZE, MAX_REVERSE_SCAN_WINDOW, EVENT_SCHEMA_VERSION};
+use crate::types::{
+    DataKey, NameTransfer, NamesPage, MAX_REVERSE_PAGE_SIZE, MAX_REVERSE_SCAN_WINDOW,
+    NAME_TRANSFER_WINDOW_SECS, EVENT_SCHEMA_VERSION,
+};
 use crate::validation::{canonicalize_name, validate_name};
 use pause_control;
 use ttl_manager;
@@ -82,6 +88,187 @@ impl TalosNameService {
             .set(&DataKey::TalosName(talos_id), &name);
 
         emit_name_registered(&e, talos_id, name, owner);
+    }
+
+    /// Propose transferring a Talos name to another Talos identity.
+    ///
+    /// The current registry creator authorizes the proposal. The destination
+    /// Talos must exist and have no registered name. The current name remains
+    /// assigned to the source until the destination's creator accepts.
+    pub fn propose_name_transfer(e: Env, owner: Address, talos_id: u32, recipient_talos_id: u32) {
+        owner.require_auth();
+        if talos_id == recipient_talos_id {
+            panic!("Cannot transfer a name to the same Talos");
+        }
+
+        let name: String = e
+            .storage()
+            .persistent()
+            .get(&DataKey::TalosName(talos_id))
+            .expect("Talos has no registered name");
+        let registry: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RegistryContract)
+            .expect("Registry contract not initialized");
+        let source_creator: Option<Address> = e.invoke_contract(
+            &registry,
+            &Symbol::new(&e, "creator_of"),
+            soroban_sdk::vec![&e, talos_id.into_val(&e)],
+        );
+        if source_creator != Some(owner.clone()) {
+            panic_with_error!(&e, crate::types::ContractError::UnauthorizedCaller);
+        }
+
+        let recipient: Option<Address> = e.invoke_contract(
+            &registry,
+            &Symbol::new(&e, "creator_of"),
+            soroban_sdk::vec![&e, recipient_talos_id.into_val(&e)],
+        );
+        let recipient = recipient.expect("Recipient Talos does not exist");
+        if e.storage()
+            .persistent()
+            .get::<_, String>(&DataKey::TalosName(recipient_talos_id))
+            .is_some()
+        {
+            panic!("Recipient Talos already has a name");
+        }
+
+        let key = DataKey::PendingNameTransfer(talos_id);
+        let now = e.ledger().timestamp();
+        if let Some(pending) = e.storage().persistent().get::<_, NameTransfer>(&key) {
+            if now <= pending.expires_at {
+                panic!("Name transfer already pending");
+            }
+            e.storage().persistent().remove(&key);
+        }
+        let expires_at = now.saturating_add(NAME_TRANSFER_WINDOW_SECS);
+        let transfer = NameTransfer {
+            name: name.clone(),
+            source_owner: owner,
+            recipient: recipient.clone(),
+            recipient_talos_id,
+            expires_at,
+        };
+        e.storage().persistent().set(&key, &transfer);
+        emit_name_transfer_proposed(
+            &e,
+            talos_id,
+            name,
+            recipient_talos_id,
+            recipient,
+            expires_at,
+        );
+    }
+
+    /// Accept a pending name transfer as the current creator of its destination Talos.
+    pub fn accept_name_transfer(e: Env, recipient: Address, source_talos_id: u32) {
+        recipient.require_auth();
+        let key = DataKey::PendingNameTransfer(source_talos_id);
+        let transfer: NameTransfer = e
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("No pending name transfer");
+        if e.ledger().timestamp() > transfer.expires_at {
+            panic!("Name transfer proposal expired");
+        }
+
+        let registry: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RegistryContract)
+            .expect("Registry contract not initialized");
+        let source_creator: Option<Address> = e.invoke_contract(
+            &registry,
+            &Symbol::new(&e, "creator_of"),
+            soroban_sdk::vec![&e, source_talos_id.into_val(&e)],
+        );
+        if source_creator != Some(transfer.source_owner.clone()) {
+            panic!("Source Talos owner changed during transfer");
+        }
+        let recipient_creator: Option<Address> = e.invoke_contract(
+            &registry,
+            &Symbol::new(&e, "creator_of"),
+            soroban_sdk::vec![&e, transfer.recipient_talos_id.into_val(&e)],
+        );
+        if recipient != transfer.recipient || recipient_creator != Some(recipient.clone()) {
+            panic_with_error!(&e, crate::types::ContractError::UnauthorizedCaller);
+        }
+
+        let current_name: Option<String> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::TalosName(source_talos_id));
+        if current_name != Some(transfer.name.clone())
+            || e.storage()
+                .persistent()
+                .get::<_, u32>(&DataKey::NameRecord(transfer.name.clone()))
+                != Some(source_talos_id)
+        {
+            panic!("Source name changed during transfer");
+        }
+        if e.storage()
+            .persistent()
+            .get::<_, String>(&DataKey::TalosName(transfer.recipient_talos_id))
+            .is_some()
+        {
+            panic!("Recipient Talos already has a name");
+        }
+
+        e.storage()
+            .persistent()
+            .remove(&DataKey::TalosName(source_talos_id));
+        e.storage().persistent().set(
+            &DataKey::NameRecord(transfer.name.clone()),
+            &transfer.recipient_talos_id,
+        );
+        e.storage().persistent().set(
+            &DataKey::TalosName(transfer.recipient_talos_id),
+            &transfer.name,
+        );
+        e.storage().persistent().remove(&key);
+        emit_name_transfer_accepted(
+            &e,
+            source_talos_id,
+            transfer.name,
+            transfer.recipient_talos_id,
+            recipient,
+        );
+    }
+
+    /// Cancel a pending name transfer as the current creator of the source Talos.
+    pub fn cancel_name_transfer(e: Env, owner: Address, source_talos_id: u32) {
+        owner.require_auth();
+        let key = DataKey::PendingNameTransfer(source_talos_id);
+        let transfer: NameTransfer = e
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("No pending name transfer");
+        let registry: Address = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RegistryContract)
+            .expect("Registry contract not initialized");
+        let source_creator: Option<Address> = e.invoke_contract(
+            &registry,
+            &Symbol::new(&e, "creator_of"),
+            soroban_sdk::vec![&e, source_talos_id.into_val(&e)],
+        );
+        if source_creator != Some(owner) {
+            panic_with_error!(&e, crate::types::ContractError::UnauthorizedCaller);
+        }
+
+        e.storage().persistent().remove(&key);
+        emit_name_transfer_cancelled(&e, source_talos_id, transfer.name);
+    }
+
+    /// Return the pending transfer for a source Talos, if one exists.
+    pub fn pending_name_transfer(e: Env, source_talos_id: u32) -> Option<NameTransfer> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::PendingNameTransfer(source_talos_id))
     }
 
     pub fn initialize(e: Env, registry_id: Address, admin: Address, name_fee: i128) {

@@ -250,6 +250,7 @@ Limits are stored in two Postgres tables (added in migration `0013_add_quota_tab
 
 - `tls_quota_configs` — one row per `(talosId, resource)` with limit, window, and enabled flag. A `NULL` `talosId` row is the platform default applied when no agent-specific row exists.
 - `tls_quota_usage` — one row per `(talosId, resource, windowStart)`. The counter is incremented atomically via `INSERT … ON CONFLICT DO UPDATE` so concurrent requests never double-count.
+- `tls_quota_scope_usage` — bounded per-scope counters for the current window (added in migration `0023_add_quota_scope_usage`). These are observability breakdowns only; `tls_quota_usage` remains authoritative for the total limit and enforcement.
 
 The increment-then-check pattern costs one DB round-trip per request with no distributed locking.
 
@@ -306,7 +307,18 @@ Response:
         "remaining": 458,
         "limit": 500,
         "resetAt": "2026-07-25T00:00:00.000Z",
-        "ok": true
+        "ok": true,
+        "byScope": {
+          "activity:write": 42,
+          "commerce:read": 0,
+          "commerce:write": 0,
+          "wallet:read": 0,
+          "wallet:sign": 0,
+          "settings:read": 0,
+          "settings:write": 0,
+          "revenue:read": 0,
+          "revenue:write": 0
+        }
       }
     }
   }
@@ -340,6 +352,18 @@ Content-Type: application/json
 
 All fields except `resource` are optional and fall back to the current configured value. Returns the updated config + live usage.
 
+An optional `"reason"` string (max 500 chars, default `"unspecified"`) may be supplied.
+
+### Adjustment audit trail
+
+Every successful `PATCH` appends a row to `tls_quota_adjustments` (migration `0023_add_quota_adjustments`) recording the `actor` (`agent:<id>`), `reason`, `priorPolicy` and `newPolicy` (`maxCount`, `windowSize`, `enabled`, `notes`). API credentials are never stored: the actor is the agent id, and bearer tokens / key-like strings in `reason` and `notes` are replaced with `[REDACTED]`.
+
+```
+GET /api/talos/:id/quota?view=adjustments
+```
+
+Returns `{ talosId, adjustments: [{ id, resource, actor, reason, priorPolicy, newPolicy, createdAt }] }`, newest first.
+
 ### Reset windows
 
 | `windowSize` | Window start                                         |
@@ -347,6 +371,10 @@ All fields except `resource` are optional and fall back to the current configure
 | `hourly`     | UTC hour boundary (e.g. `14:00:00`)                  |
 | `daily`      | UTC midnight (e.g. `2026-07-24T00:00:00Z`)           |
 | `monthly`    | First day of UTC month (e.g. `2026-07-01T00:00:00Z`) |
+
+Window boundaries and reset calculations (`computeQuotaWindow`) are canonical across responses:
+- `X-Quota-Reset` header in seconds (Unix epoch) and response body `resetAt` (ISO-8601) reflect identical window boundaries.
+- Boundary transitions across months, leap days (e.g. Feb 29 in leap years vs. Feb 28 in non-leap years), and year boundaries are normalized with an injectable clock parameter.
 
 ### Local verification
 

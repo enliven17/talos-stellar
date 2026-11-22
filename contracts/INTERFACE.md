@@ -18,8 +18,8 @@ emitted bytes (otherwise the deployed WASM has been tampered with).
 | Contract                | `CONTRACT_VERSION` | `INTERFACE_NAMESPACE` | Interface ID prefix (first 16 bytes) |
 |-------------------------|--------------------|-----------------------|--------------------------------------|
 | `TalosRegistry`         | `(1, 1, 0)`        | `"TalosRegistry"`     | `54 61 6C 6F 73 52 65 67 69 73 74 72 79 00 00 00` ("TalosRegistry\0\0\0") |
-| `TalosNameService`      | `(1, 1, 0)`        | `"TalosNameService"`  | `54 61 6C 6F 73 4E 61 6D 65 53 65 72 76 69 63 65` ("TalosNameService") |
-| `TalosGovernance`       | `(1, 1, 0)`        | `"TalosGovernance"`   | `54 61 6C 6F 73 47 6F 76 65 72 6E 61 6E 63 65 00` ("TalosGovernance\0") |
+| `TalosNameService`      | `(1, 5, 0)`        | `"TalosNameService"`  | `54 61 6C 6F 73 4E 61 6D 65 53 65 72 76 69 63 65` ("TalosNameService") |
+| `TalosGovernance`       | `(1, 2, 0)`        | `"TalosGovernance"`   | `54 61 6C 6F 73 47 6F 76 65 72 6E 61 6E 63 65 00` ("TalosGovernance\0") |
 
 A new contract added later MUST keep `major = 1` until a hard upgrade is
 scheduled — bumping `major` is a deployment-grade event and operators
@@ -110,6 +110,13 @@ is a `major` bump.
 | `registry_pointer`  | `set_registry_contract` — points at the TalosRegistry.       |
 | `interface_query`   | `version` / `interface_id` / `supports_version`.             |
 | `cross_contract`    | `creator_of` invoke against the configured registry pointer. |
+| `name_transfer`     | `propose_name_transfer` / `accept_name_transfer` / `cancel_name_transfer`. |
+
+Name transfers target another existing Talos ID that does not currently have
+a name. The source creator proposes the transfer; the destination Talos'
+current registry creator must accept it within seven days. The source name
+remains resolvable until acceptance. The source creator may cancel at any
+time, and an expired proposal cannot be accepted.
 
 ### TalosGovernance
 
@@ -120,6 +127,7 @@ is a `major` bump.
 | `config_admin`      | `update_config` / `cache_token_balance` (admin only).        |
 | `interface_query`   | `version` / `interface_id` / `supports_version`.             |
 | `quorum_state`      | `get_proposal_quorum_state` query; `EventQuorumReached` emitted once per proposal when quorum is first crossed. |
+| `execution_receipts` | `get_proposal_action_digest` / `get_execution_receipt`; canonical action digest checked before execution. |
 | `proposal_threshold`| `create_proposal` requires the proposer's snapshot voting power to meet `proposal_threshold` (default `0` preserves prior behavior). |
 
 #### Storage & Input Bounds
@@ -129,7 +137,7 @@ To prevent unbounded storage writes and spam when creating proposals, `TalosGove
 - `MAX_TITLE_LEN`: `128` bytes (non-empty, maximum 128 bytes)
 - `MAX_DESCRIPTION_LEN`: `2048` bytes (non-empty, maximum 2048 bytes)
 
-Inputs at the limit succeed; inputs exceeding the limit (or empty) are rejected before writing to persistent storage.
+Inputs at the limit succeed; inputs exceeding the limit (or empty) are rejected before writing to persistent storage. Rejections are returned as typed contract errors (`TitleTooLong`, `DescriptionTooLong`, `EmptyTitle`, `EmptyDescription`), and validation runs fully before any write, so a rejected call never leaves a partially created proposal behind.
 
 #### Proposal threshold
 
@@ -207,6 +215,13 @@ to align the byte slices at canonical boundaries.
 00 00 00 01 00 00 00 01   00 00 00 00 00 00 00 00
 ```
 
+#### TalosNameService `(1, 5, 0)` @ `"TalosNameService"` _(current)_
+
+```
+54 61 6C 6F 73 4E 61 6D   65 53 65 72 76 69 63 65
+00 00 00 01 00 00 00 05   00 00 00 00 00 00 00 00
+```
+
 #### TalosGovernance `(1, 0, 0)` @ `"TalosGovernance"`
 
 ```
@@ -214,11 +229,18 @@ to align the byte slices at canonical boundaries.
 00 00 00 01 00 00 00 00   00 00 00 00 00 00 00 00
 ```
 
-#### TalosGovernance `(1, 1, 0)` @ `"TalosGovernance"` _(current)_
+#### TalosGovernance `(1, 1, 0)` @ `"TalosGovernance"`
 
 ```
 54 61 6C 6F 73 47 6F 76   65 72 6E 61 6E 63 65 00
 00 00 00 01 00 00 00 01   00 00 00 00 00 00 00 00
+```
+
+#### TalosGovernance `(1, 2, 0)` @ `"TalosGovernance"` _(current)_
+
+```
+54 61 6C 6F 73 47 6F 76   65 72 6E 61 6E 63 65 00
+00 00 00 01 00 00 00 02   00 00 00 00 00 00 00 00
 ```
 
 ## 8. Cross-contract compatibility

@@ -140,6 +140,19 @@ result = sim.simulate("transfer_xlm", {"amount": 500}, {"budget_remaining": 1000
 print(result.decision)  # "escalate"
 ```
 
+### Offline policy comparison
+
+Run the same synthetic scenarios against two policy versions and see what
+changes. Each version is evaluated on its own temporary engine, so nothing is
+enforced and live engine metrics are untouched.
+
+```python
+report = PolicySimulator.compare_policies(old_policies, new_policies, scenarios)
+report["newly_allowed"]  # approve in new, not in old
+report["newly_denied"]   # approve in old, deny/escalate in new
+report["other_changes"]  # e.g. escalate -> deny
+```
+
 ## Rollback / disabling
 
 To disable the engine:
@@ -169,6 +182,22 @@ Traces include per-rule and per-condition steps.  Secret-shaped fields
 (`api_key`, `seed`, `token`, `payment_proof`, etc.) are redacted as
 `[redacted]` and never logged or returned in cleartext.  BLOCKER
 short-circuits still emit the full trace up to the denying rule.
+
+### Dry-run policy coverage
+
+Simulation traces can be aggregated without exposing action parameters:
+
+```python
+report = sim.coverage_report(simulate_batch_results)
+print(report.to_dict())
+```
+
+Coverage is based only on rule steps present in the redacted traces. Each
+observed rule reports its `matched` and `not_matched` branches as exercised or
+unexercised. A rule omitted from every trace, including a rule after a blocker
+short-circuit, is listed under `unobserved_rules` and is not counted as tested.
+This prevents a partial dry-run cycle from falsely claiming coverage for
+rules it never reached.
 
 ## Observability
 
