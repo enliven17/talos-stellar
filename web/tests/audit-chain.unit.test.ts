@@ -92,12 +92,54 @@ describe("audit-chain", () => {
 
       expect(computeEntryHash(a)).not.toBe(computeEntryHash(b));
     });
+
+    it.each([
+      ["NaN", Number.NaN],
+      ["Infinity", Number.POSITIVE_INFINITY],
+      ["-Infinity", Number.NEGATIVE_INFINITY],
+    ])("rejects nonfinite sequenceNumber (%s) before serialization", (_label, value) => {
+      const entry = makeEntry({ sequenceNumber: value });
+      expect(() => canonicalize(entry)).toThrow(RangeError);
+      expect(() => canonicalize(entry)).toThrow(/nonfinite sequenceNumber/i);
+    });
+
+    it.each([
+      ["NaN", Number.NaN],
+      ["Infinity", Number.POSITIVE_INFINITY],
+      ["-Infinity", Number.NEGATIVE_INFINITY],
+    ])("rejects nonfinite statusCode (%s) before serialization", (_label, value) => {
+      const entry = makeEntry({ statusCode: value });
+      expect(() => canonicalize(entry)).toThrow(RangeError);
+      expect(() => canonicalize(entry)).toThrow(/nonfinite statusCode/i);
+    });
+
+    it("accepts boundary finite numbers deterministically", () => {
+      const zeroEntry = makeEntry({ sequenceNumber: -0, statusCode: 200 });
+      expect(canonicalize(zeroEntry)).toContain('"sequenceNumber":0');
+
+      const maxSafeEntry = makeEntry({
+        sequenceNumber: Number.MAX_SAFE_INTEGER,
+        statusCode: 599,
+      });
+      expect(canonicalize(maxSafeEntry)).toContain(
+        `"sequenceNumber":${Number.MAX_SAFE_INTEGER}`,
+      );
+    });
   });
 
   describe("computeEntryHash", () => {
     it("produces a 64-character lowercase hex SHA-256 digest", () => {
       const hash = computeEntryHash(makeEntry());
       expect(hash).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it("fails before hashing when canonical payload contains nonfinite numbers", () => {
+      expect(() => computeEntryHash(makeEntry({ sequenceNumber: Number.NaN }))).toThrow(
+        RangeError,
+      );
+      expect(() =>
+        computeEntryHash(makeEntry({ statusCode: Number.POSITIVE_INFINITY })),
+      ).toThrow(RangeError);
     });
 
     it("is deterministic", () => {

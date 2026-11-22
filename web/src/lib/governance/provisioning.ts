@@ -21,10 +21,10 @@
  * - **Single-writer**: a lease with a fencing token prevents two workers from
  *   advancing the same run.
  */
-import { and, eq, lt, or, sql } from "drizzle-orm";
+import { and, eq, inArray, lt, or, sql } from "drizzle-orm";
 
 import { db } from "@/db";
-import { tlsProvisioningJobs } from "@/db/schema";
+import { tlsCommerceJobs, tlsProvisioningJobs } from "@/db/schema";
 import { logger } from "@/lib/logger";
 
 import { LIFECYCLE_EVENTS, emitLifecycleEvent } from "./events";
@@ -258,6 +258,13 @@ async function withTimeout<T>(
   }
 }
 
+export class ProvisioningDeferredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProvisioningDeferredError";
+  }
+}
+
 export interface RunResult {
   jobId: string;
   status: ProvisioningJobStatus;
@@ -369,6 +376,19 @@ export async function runProvisioningJob(
         idempotencyKey: `${record.idempotencyKey}:completed`,
       });
     } catch (err) {
+      if (err instanceof ProvisioningDeferredError) {
+        record.attempts -= 1;
+        record.status = "pending";
+        record.error = null;
+        await persist(jobId, { steps, cursor: i, status: "pending" });
+        return {
+          jobId,
+          status: "pending",
+          finalState: null,
+          completedSteps: Object.keys(outputs),
+          failedStep: null,
+        };
+      }
       record.error = safeError(err);
       const exhausted = record.attempts >= MAX_STEP_ATTEMPTS;
       record.status = exhausted ? "failed" : "pending";
@@ -661,6 +681,27 @@ export function buildRetirementWorkflow(effects: ProvisioningEffects): WorkflowD
     successState: "retired",
     failureState: "failed",
     steps: [
+      {
+        name: "drain-jobs",
+        run: async ({ talosId, signal }) => {
+          if (signal.aborted) throw new Error("Job drain was interrupted");
+          const inFlight = await db
+            .select({ id: tlsCommerceJobs.id })
+            .from(tlsCommerceJobs)
+            .where(
+              and(
+                eq(tlsCommerceJobs.talosId, talosId),
+                inArray(tlsCommerceJobs.status, ["pending", "in_progress"]),
+              ),
+            )
+            .limit(1);
+          if (inFlight.length > 0) {
+            throw new ProvisioningDeferredError("Retirement is waiting for in-flight jobs to finish");
+          }
+          return { drained: true };
+        },
+        compensate: async () => {},
+      },
       {
         name: "runtime",
         run: (ctx) => effects.stopRuntime(ctx).then(() => ({ stopped: true })),

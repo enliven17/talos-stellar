@@ -10,6 +10,12 @@ export interface RunOnceOptions {
   workerId?: string;
   leaseDurationMs?: number;
   heartbeatIntervalMs?: number;
+  /**
+   * Maximum jobs any single queue may contribute to one drain batch.
+   * Default 0 (unlimited). When set, the batch is assembled by claiming at
+   * most this many jobs per queue in priority/runAt order.
+   */
+  fairBatchPerQueue?: number;
   /** Aborts in-flight handlers (e.g. from graceful shutdown). */
   signal?: AbortSignal;
   /**
@@ -47,7 +53,7 @@ export async function runOnce(opts: RunOnceOptions = {}): Promise<RunOnceSummary
 
   if (queues.length === 0) return summary;
 
-  const batch = await store.leaseBatch(queues, opts.batchSize ?? jobsConfig.batchSize, opts.workerId, opts.leaseDurationMs);
+  const batch = await store.leaseBatch(queues, opts.batchSize ?? jobsConfig.batchSize, opts.workerId, opts.leaseDurationMs, opts.fairBatchPerQueue);
   summary.leased = batch.length;
   opts.onLeased?.(batch);
 
@@ -105,7 +111,13 @@ async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnce
     }
 
     const completed = await store.complete(job.id, leaseId, result, Date.now() - startedAt);
-    if (completed) summary.completed += 1;
+    if (completed === "conflict_cancelled") {
+      // Cancellation raced with completion: the financial effect already ran,
+      // so report the conflict instead of claiming cancellation succeeded.
+      summary.completed += 1;
+    } else if (completed) {
+      summary.completed += 1;
+    }
   } catch (err) {
     if (lostLease || cancelled) {
       if (cancelled) summary.cancelled += 1;

@@ -26,6 +26,7 @@ from talos_agent.db.repos import (
     ReplayRepo,
     RetryRepo,
     SpendingRepo,
+    TaskExecutionRepo,
 )
 
 
@@ -35,6 +36,12 @@ class LocalDB:
     All domain logic is delegated to per-domain repositories; this class
     exists purely as a backwards-compatible façade so existing callers do
     not need to be updated.
+
+    Backup / restore / verify do NOT live here: they are in
+    ``talos_agent.backup_service``. In particular, ``verify_backup`` refuses
+    any ``*.incomplete`` artifact up front (issue #1452), so a partial write
+    can never be presented as a verified backup — the façade never proxies
+    a verification call through to it.
     """
 
     def __init__(self, path: Path = DB_PATH, *, timeout_ms: int = 5000):
@@ -67,6 +74,7 @@ class LocalDB:
         self._retry = RetryRepo(self._conn)
         self._replay = ReplayRepo(self._conn)
         self._cycles = CyclesRepo(self._conn)
+        self._executions = TaskExecutionRepo(self._conn)
 
     # ── Legacy migration runner (kept for tests that monkeypatch it) ──────
 
@@ -81,6 +89,20 @@ class LocalDB:
 
     def update_schedule(self, task_name: str) -> None:
         self._config.update_schedule(task_name)
+
+    # ── Scheduler execution identities ───────────────────────────────────
+
+    def reserve_task_execution(self, task_name: str, owner_id: str | None = None) -> dict | None:
+        return self._executions.reserve(task_name, owner_id)
+
+    def finish_task_execution(self, execution_id: str, status: str) -> None:
+        self._executions.finish(execution_id, status)
+
+    def resolve_task_execution(self, execution_id: str, status: str) -> None:
+        self._executions.resolve_uncertain(execution_id, status)
+
+    def get_task_execution(self, execution_id: str) -> dict | None:
+        return self._executions.get(execution_id)
 
     # ── Activity Log ──────────────────────────────────────────────────────
 
@@ -127,8 +149,8 @@ class LocalDB:
     def count_pending_commerce_jobs(self) -> int:
         return self._commerce.count_pending_commerce_jobs()
 
-    def get_commerce_jobs(self, limit: int = 25) -> list[dict]:
-        return self._commerce.get_commerce_jobs(limit)
+    def prune_completed_commerce_payloads(self, retention_days: int = 30) -> int:
+        return self._commerce.prune_completed_payloads(retention_days)
 
     # ── Approval Cache ────────────────────────────────────────────────────
 
@@ -423,6 +445,25 @@ class LocalDB:
         keep_last: int = 200,
     ) -> int:
         return self._cycles.prune_old_cycle_summaries(talos_id, keep_last)
+
+    # ── State Retention Preview ───────────────────────────────────────────
+
+    def preview_retention(
+        self,
+        *,
+        record_class: str | None = None,
+        cutoff_iso: str | None = None,
+    ):
+        """Report candidate record counts and date boundaries by record class (#1451).
+
+        Separates private content from financial and audit records.
+        """
+        from talos_agent.db.retention import preview_state_retention
+        return preview_state_retention(
+            self._conn,
+            record_class_filter=record_class,
+            cutoff_iso=cutoff_iso,
+        )
 
     # ── Cleanup ───────────────────────────────────────────────────────────
 
