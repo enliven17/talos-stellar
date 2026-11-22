@@ -97,6 +97,16 @@ rule IDs remain the stable link between decision traces and policy overrides.
 | `in`, `not_in` | Set membership |
 | `exists` | Field is present and non-null |
 | `regex` | Field matches the pattern in `value` |
+| `glob` | Field matches `*`, `?`, and character-class wildcards in `value` |
+
+Glob patterns support `*` (zero or more characters other than `/`), `?`
+(exactly one character other than `/`), `[abc]` and `[a-z]` (character
+classes), and `[!abc]` (negated character classes). Character classes match
+their explicit members, including `/`; `[[]` matches a literal `[`. Repeated
+`*` characters have the same behavior as `*` and do not match `/`. Empty,
+unclosed, or malformed character classes are rejected while policies are
+loaded; the agent will not silently ignore the invalid policy or fall back to
+built-in defaults.
 
 ### Field paths
 
