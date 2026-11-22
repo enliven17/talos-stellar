@@ -12,8 +12,11 @@ export { enqueue, getJob, getJobAttempts, listJobs, recordAttempt, release, requ
 export { registerHandler } from "./registry";
 export { runOnce } from "./runner";
 export { jobsConfig, JOBS_ENABLED } from "./config";
+export { boundError, boundResult, truncateError, truncateResult } from "./metrics";
 export type {
-  AttemptTerminalReason,
+  BoundedResultDiagnostic,
+  BoundErrorOutcome,
+  BoundResultOutcome,
   EnqueueOptions,
   JobAttemptRecord,
   JobContext,

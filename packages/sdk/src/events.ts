@@ -4,7 +4,8 @@
  * Design properties:
  * - Uses the Fetch API to open a text/event-stream connection; works in browsers and Node ≥18.
  * - Sends `Last-Event-ID` on every reconnect so the server can resume from the last seen event.
- * - Exponential backoff with jitter and a configurable cap; respects `retry:` field from server.
+ * - Exponential backoff with jitter and a configurable cap; respects valid,
+ *   bounded `retry:` fields from the server.
  * - Heartbeat detection: treats N consecutive comment-only ticks as a stall and reconnects.
  * - Duplicate suppression: an optional SeenStore lets callers skip already-processed event IDs.
  * - Abort/close: the stream can be cancelled at any time via `close()` or an external AbortSignal.
@@ -224,6 +225,17 @@ export type TalosStreamErrorHandler = (error: unknown, attempt: number) => void;
 /** Callback invoked when the stream closes permanently (abort or budget exhausted). */
 export type TalosStreamCloseHandler = () => void;
 
+/** Connection lifecycle states exposed by the event stream. */
+export type TalosStreamState =
+  | "idle"
+  | "connecting"
+  | "open"
+  | "reconnecting"
+  | "closed";
+
+/** Callback invoked when the event stream changes connection state. */
+export type TalosStreamStateHandler = (state: TalosStreamState) => void;
+
 // ── Duplicate suppression ──────────────────────────────────────────────────────
 
 /**
@@ -250,6 +262,94 @@ export class InMemorySeenStore implements SeenStore {
       this.ids.splice(0, Math.ceil(this.capacity * 0.1)); // evict oldest 10%
     }
     this.ids.push(id);
+  }
+}
+
+// ── Resumable checkpoint ───────────────────────────────────────────────────────
+
+/**
+ * A persisted checkpoint capturing the last acknowledged event identity for a
+ * stream. The stream loads this on connect so resumption survives process
+ * restarts, and saves an updated checkpoint after every acknowledged event.
+ */
+export interface EventStreamCheckpoint {
+  /** The SSE `id:` of the last acknowledged event. Drives `Last-Event-ID`. */
+  eventId: string;
+  /**
+   * Monotonic ordering hint when the server provides one (parsed from the
+   * event payload). Informational; the stream does not require it to resume.
+   */
+  sequence?: number;
+  /** ISO 8601 timestamp captured when the checkpoint was recorded. */
+  recordedAt: string;
+  /**
+   * `true` when the resume that produced this checkpoint detected a
+   * server-side history gap (the server could not replay from the prior
+   * cursor). Lets callers distinguish a clean resume from a gap recovery.
+   */
+  hadHistoryGap?: boolean;
+}
+
+/** How the server signalled a history gap on reconnect. */
+export type HistoryGapSignal = "response-header" | "event";
+
+/**
+ * Information surfaced to {@link TalosEventStreamOptions.onHistoryGap} when the
+ * stream detects that the server could not replay history from the last
+ * checkpoint, distinguishing a history gap from an ordinary reconnect.
+ */
+export interface HistoryGapInfo {
+  /** The checkpoint the stream attempted to resume from, if any. */
+  requestedAfterEventId?: string;
+  /** How the gap was signalled. */
+  signal: HistoryGapSignal;
+  /** Server-supplied reason, when present. */
+  reason?: string;
+  /** The earliest event id the server can currently replay, if provided. */
+  firstAvailableEventId?: string;
+  /** ISO 8601 timestamp the gap was detected. */
+  detectedAt: string;
+}
+
+/**
+ * Caller-supplied durable store for the last acknowledged event identity.
+ *
+ * Used by {@link TalosEventStream} so resume cursors survive process restarts.
+ * The stream calls `load()` once on connect to seed `Last-Event-ID`, and
+ * `save()` after every acknowledged event (in `"auto"` ack mode) or when the
+ * caller calls {@link TalosEventStream.acknowledge} (in `"manual"` mode).
+ *
+ * Implementations must not throw from `load` / `save` / `clear` — a thrown
+ * error is swallowed and treated as "no checkpoint available" so a
+ * misbehaving store never wedges the stream.
+ */
+export interface CheckpointStore {
+  /** Load the persisted checkpoint, or `undefined` when none exists. */
+  load(): Promise<EventStreamCheckpoint | undefined>;
+  /** Persist (overwrite) the current checkpoint. */
+  save(checkpoint: EventStreamCheckpoint): Promise<void>;
+  /** Drop the persisted checkpoint. */
+  clear(): Promise<void>;
+}
+
+/** When the stream persists a checkpoint. See {@link TalosEventStreamOptions.ackMode}. */
+export type CheckpointAckMode = "auto" | "manual";
+
+/**
+ * Simple in-memory {@link CheckpointStore} for process-lifetime resume.
+ * Supply a persistent implementation (DB, Redis, file) for cross-restart
+ * guarantees. Methods are async to match the {@link CheckpointStore} contract.
+ */
+export class InMemoryCheckpointStore implements CheckpointStore {
+  private checkpoint?: EventStreamCheckpoint;
+  async load(): Promise<EventStreamCheckpoint | undefined> {
+    return this.checkpoint;
+  }
+  async save(checkpoint: EventStreamCheckpoint): Promise<void> {
+    this.checkpoint = { ...checkpoint };
+  }
+  async clear(): Promise<void> {
+    this.checkpoint = undefined;
   }
 }
 
@@ -296,7 +396,10 @@ export interface TalosEventStreamOptions {
   /** Reconnect budget — maximum number of reconnect attempts before giving up. @default 10 */
   maxReconnectAttempts?: number;
 
-  /** Base reconnect delay in milliseconds. @default 1000 */
+  /**
+   * Base reconnect delay in milliseconds. Valid server `retry:` hints may
+   * update this value, capped at `maxReconnectDelayMs`. @default 1000
+   */
   baseReconnectDelayMs?: number;
 
   /** Maximum reconnect delay in milliseconds. @default 30_000 */
@@ -320,6 +423,36 @@ export interface TalosEventStreamOptions {
 
   /** Optional store for duplicate-event suppression. */
   seenStore?: SeenStore;
+
+  /**
+   * Optional durable checkpoint store for cross-restart resume. When set,
+   * the stream seeds `Last-Event-ID` from the persisted checkpoint on connect
+   * and persists an updated checkpoint after every acknowledged event, so a
+   * process restart resumes from the last acknowledged event identity rather
+   * than the live (in-memory) cursor.
+   *
+   * Omitting it preserves the prior in-memory-only behavior.
+   */
+  checkpointStore?: CheckpointStore;
+
+  /**
+   * When to persist a checkpoint to {@link TalosEventStreamOptions.checkpointStore}.
+   *
+   * - `"auto"` (default): persist after every delivered, non-duplicate event.
+   * - `"manual"`: only persist when the caller calls
+   *   {@link TalosEventStream.acknowledge} with the event id it has processed.
+   *
+   * Has no effect when `checkpointStore` is not set.
+   */
+  ackMode?: CheckpointAckMode;
+
+  /**
+   * Handler invoked when the stream detects a server-side history gap on
+   * reconnect (the server could not replay from the last checkpoint). Lets
+   * callers distinguish a history gap from an ordinary (replayable) reconnect.
+   * Invoked fire-and-forget and must not throw.
+   */
+  onHistoryGap?: (info: HistoryGapInfo) => void;
 
   /** Privacy-safe logger. Payloads and credentials are never passed to it. */
   logger?: Logger;
@@ -353,7 +486,7 @@ export interface TalosEventStreamOptions {
 
 // ── Internal state ─────────────────────────────────────────────────────────────
 
-type StreamState = "idle" | "connecting" | "open" | "reconnecting" | "closed";
+type StreamState = TalosStreamState;
 const StreamState = {
   Idle: "idle" as StreamState,
   Connecting: "connecting" as StreamState,
@@ -389,6 +522,8 @@ export class TalosEventStream {
       | "signal"
       | "fetch"
       | "chaosInjector"
+      | "checkpointStore"
+      | "onHistoryGap"
     >
   > &
     Pick<
@@ -399,15 +534,26 @@ export class TalosEventStream {
       | "signal"
       | "fetch"
       | "chaosInjector"
+      | "checkpointStore"
+      | "onHistoryGap"
     >;
 
   private state: StreamState = StreamState.Idle;
   private lastEventId: string | undefined;
   private reconnectAttempt = 0;
+  /**
+   * Whether the current connection's resume detected a server-side history
+   * gap. Reset to `false` at the start of every connection; set to `true` when
+   * a gap is signalled (response header or `event: history.gap`). Recorded on
+   * each persisted checkpoint so callers can distinguish a clean resume from a
+   * gap recovery.
+   */
+  private lastResumeHadHistoryGap = false;
 
   // heartbeat watchdog
   private heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
   private heartbeatMisses = 0;
+  private reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 
   // internal abort for this stream instance
   private readonly controller = new AbortController();
@@ -416,6 +562,7 @@ export class TalosEventStream {
   private readonly eventHandlers = new Set<TalosEventHandler>();
   private readonly errorHandlers = new Set<TalosStreamErrorHandler>();
   private readonly closeHandlers = new Set<TalosStreamCloseHandler>();
+  private readonly stateHandlers = new Set<TalosStreamStateHandler>();
 
   // schema version negotiation result from the most recent connection
   private _schemaVersionInfo: SchemaVersionNegotiationResult | undefined;
@@ -441,6 +588,9 @@ export class TalosEventStream {
       signal: opts.signal,
       fetch: opts.fetch,
       chaosInjector: opts.chaosInjector,
+      ackMode: opts.ackMode ?? "auto",
+      checkpointStore: opts.checkpointStore,
+      onHistoryGap: opts.onHistoryGap,
     };
 
     // Forward external abort
@@ -455,12 +605,15 @@ export class TalosEventStream {
   on(event: "event", handler: TalosEventHandler): this;
   on(event: "error", handler: TalosStreamErrorHandler): this;
   on(event: "close", handler: TalosStreamCloseHandler): this;
+  on(event: "state", handler: TalosStreamStateHandler): this;
   on(event: string, handler: unknown): this {
     if (event === "event") this.eventHandlers.add(handler as TalosEventHandler);
     else if (event === "error")
       this.errorHandlers.add(handler as TalosStreamErrorHandler);
     else if (event === "close")
       this.closeHandlers.add(handler as TalosStreamCloseHandler);
+    else if (event === "state")
+      this.stateHandlers.add(handler as TalosStreamStateHandler);
     return this;
   }
 
@@ -468,6 +621,7 @@ export class TalosEventStream {
   off(event: "event", handler: TalosEventHandler): this;
   off(event: "error", handler: TalosStreamErrorHandler): this;
   off(event: "close", handler: TalosStreamCloseHandler): this;
+  off(event: "state", handler: TalosStreamStateHandler): this;
   off(event: string, handler: unknown): this {
     if (event === "event")
       this.eventHandlers.delete(handler as TalosEventHandler);
@@ -475,6 +629,8 @@ export class TalosEventStream {
       this.errorHandlers.delete(handler as TalosStreamErrorHandler);
     else if (event === "close")
       this.closeHandlers.delete(handler as TalosStreamCloseHandler);
+    else if (event === "state")
+      this.stateHandlers.delete(handler as TalosStreamStateHandler);
     return this;
   }
 
@@ -491,17 +647,24 @@ export class TalosEventStream {
     void this.run();
   }
 
-  /** Permanently close the stream. No reconnects will be attempted after this. */
+  /**
+   * Permanently close the stream. No reconnects will be attempted after this.
+   * Safe to call repeatedly; the active reader and timers are cancelled.
+   */
   close(): void {
     if (this.state === StreamState.Closed) return;
     this._setState(StreamState.Closed);
     this.controller.abort();
     this._clearHeartbeatTimer();
+    const reader = this.reader;
+    if (reader) {
+      void reader.cancel().catch(() => undefined);
+    }
     this._emitClose();
   }
 
   /** Current connection state, primarily for testing and observability. */
-  get connectionState(): string {
+  get connectionState(): TalosStreamState {
     return this.state;
   }
 
@@ -525,6 +688,11 @@ export class TalosEventStream {
   // ── Internal connection loop ───────────────────────────────────────────────
 
   private async run(): Promise<void> {
+    // Seed the resume cursor from the durable checkpoint so a fresh process
+    // resumes from the last acknowledged event identity rather than starting
+    // live. Done once, before the reconnect loop, so mid-loop reconnects keep
+    // using the in-memory cursor that the stream keeps up to date.
+    await this._loadCheckpoint();
     while (
       this.state !== StreamState.Closed &&
       this.reconnectAttempt <= this.opts.maxReconnectAttempts
@@ -613,6 +781,8 @@ export class TalosEventStream {
       signal: this.controller.signal,
     });
 
+    if (this.state === StreamState.Closed) return;
+
     if (!res.ok) {
       const body = await res.text().catch(() => "(unreadable)");
       throw new TalosStreamError(res.status, body, url);
@@ -655,6 +825,7 @@ export class TalosEventStream {
 
   private async _readStream(body: ReadableStream<Uint8Array>): Promise<void> {
     const reader = body.getReader();
+    this.reader = reader;
     const decoder = new TextDecoder();
     let buffer = "";
     let firstChunk = true;
@@ -669,7 +840,6 @@ export class TalosEventStream {
     try {
       while (true) {
         if (this.state === StreamState.Closed) {
-          reader.cancel().catch(() => undefined);
           return;
         }
 
@@ -787,22 +957,30 @@ export class TalosEventStream {
               const finalId = eventId;
               const finalType = eventType;
 
-              // Advance Last-Event-ID
-              if (finalId !== undefined) {
-                this.lastEventId = finalId;
-              }
-
               this.heartbeatMisses = 0;
               this._resetHeartbeatTimer();
 
-              if (finalType !== "heartbeat") {
-                const evt: TalosStreamEvent = {
-                  id: finalId,
-                  type: finalType,
-                  data,
-                  receivedAt: new Date(),
-                };
-                await this._dispatch(evt);
+              if (finalType === "history.gap") {
+                // Server-side history gap signalled mid-stream — distinguish it
+                // from an ordinary reconnect. Control events never advance
+                // the resume cursor and are never dispatched to user handlers.
+                this._handleHistoryGapEvent(data);
+              } else {
+                // Advance Last-Event-ID (preserves prior behavior, including
+                // heartbeat events that carry an id).
+                if (finalId !== undefined) {
+                  this.lastEventId = finalId;
+                }
+
+                if (finalType !== "heartbeat") {
+                  const evt: TalosStreamEvent = {
+                    id: finalId,
+                    type: finalType,
+                    data,
+                    receivedAt: new Date(),
+                  };
+                  await this._dispatch(evt);
+                }
               }
             }
             // Reset accumulator
@@ -858,10 +1036,13 @@ export class TalosEventStream {
               }
               break;
             case "retry": {
-              const ms = parseInt(fieldValue, 10);
-              if (!Number.isNaN(ms)) {
-                // Server hint: update base reconnect delay
-                this.opts.baseReconnectDelayMs = ms;
+              if (/^[0-9]+$/.test(fieldValue)) {
+                // SSE retry values are ASCII digits; keep server hints within
+                // the configured reconnect-delay ceiling.
+                this.opts.baseReconnectDelayMs = Math.min(
+                  Number(fieldValue),
+                  this.opts.maxReconnectDelayMs,
+                );
               }
               break;
             }
@@ -872,6 +1053,9 @@ export class TalosEventStream {
         }
       }
     } finally {
+      if (this.reader === reader) {
+        this.reader = undefined;
+      }
       reader.releaseLock();
     }
   }
@@ -902,6 +1086,97 @@ export class TalosEventStream {
         });
       }
     }
+
+    // Auto-ack: persist a checkpoint for the last delivered event identity so
+    // a restart resumes from here. Manual mode leaves persistence to
+    // acknowledge(). Only events with an id can anchor a checkpoint.
+    if (
+      this.opts.ackMode === "auto" &&
+      this.opts.checkpointStore !== undefined &&
+      evt.id !== undefined
+    ) {
+      await this._persistCheckpoint(evt.id);
+    }
+  }
+
+  // ── Checkpoint persistence ─────────────────────────────────────────────────
+
+  /** Seed {@link lastEventId} from the durable checkpoint once, before run(). */
+  private async _loadCheckpoint(): Promise<void> {
+    if (this.opts.checkpointStore === undefined) return;
+    // An in-memory cursor already set this session wins over the stored one.
+    if (this.lastEventId !== undefined) return;
+    try {
+      const cp = await this.opts.checkpointStore.load();
+      if (cp && typeof cp.eventId === "string" && cp.eventId !== "") {
+        this.lastEventId = cp.eventId;
+      }
+    } catch {
+      // A misbehaving store must not wedge the stream; treat as no checkpoint.
+    }
+  }
+
+  /** Persist a checkpoint for the given event id. Never throws. */
+  private async _persistCheckpoint(eventId: string): Promise<void> {
+    if (this.opts.checkpointStore === undefined) return;
+    try {
+      await this.opts.checkpointStore.save({
+        eventId,
+        recordedAt: new Date().toISOString(),
+        hadHistoryGap: this.lastResumeHadHistoryGap,
+      });
+    } catch {
+      // Swallow; a failing store must not break the stream.
+    }
+  }
+
+  // ── History-gap detection ──────────────────────────────────────────────────
+
+  /**
+   * Surface a server-side history gap. Sets the per-connection gap flag (so
+   * subsequent checkpoints record it) and notifies the caller's handler.
+   */
+  private _emitHistoryGap(info: Omit<HistoryGapInfo, "detectedAt">): void {
+    this.lastResumeHadHistoryGap = true;
+    const full: HistoryGapInfo = { ...info, detectedAt: new Date().toISOString() };
+    this.opts.logger?.warn("sse:history_gap", {
+      signal: full.signal,
+      requestedAfterEventId: full.requestedAfterEventId ?? null,
+      reason: full.reason ?? null,
+    });
+    if (this.opts.onHistoryGap) {
+      try {
+        this.opts.onHistoryGap(full);
+      } catch {
+        // An observer must not break the stream.
+      }
+    }
+  }
+
+  /** Parse an `event: history.gap` payload and surface the gap. */
+  private _handleHistoryGapEvent(data: string): void {
+    let reason: string | undefined;
+    let firstAvailableEventId: string | undefined;
+    if (data.length > 0) {
+      try {
+        const parsed: unknown = JSON.parse(data);
+        if (parsed != null && typeof parsed === "object") {
+          const obj = parsed as Record<string, unknown>;
+          if (typeof obj.reason === "string") reason = obj.reason;
+          const fa =
+            obj.firstAvailableEventId ?? obj.first_available_event_id;
+          if (typeof fa === "string") firstAvailableEventId = fa;
+        }
+      } catch {
+        // Non-JSON data — still a gap signal, just without metadata.
+      }
+    }
+    this._emitHistoryGap({
+      signal: "event",
+      requestedAfterEventId: this.lastEventId,
+      reason,
+      firstAvailableEventId,
+    });
   }
 
   // ── Heartbeat watchdog ─────────────────────────────────────────────────────
@@ -953,11 +1228,16 @@ export class TalosEventStream {
       return Promise.reject(new Error("Stream closed during sleep"));
     }
     return new Promise((resolve, reject) => {
-      const t = setTimeout(resolve, ms);
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const onAbort = () => {
-        clearTimeout(t);
+        if (timer !== undefined) clearTimeout(timer);
+        this.controller.signal.removeEventListener("abort", onAbort);
         reject(new Error("Stream closed during sleep"));
       };
+      timer = setTimeout(() => {
+        this.controller.signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
       this.controller.signal.addEventListener("abort", onAbort, { once: true });
     });
   }
@@ -965,7 +1245,18 @@ export class TalosEventStream {
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   private _setState(s: StreamState): void {
+    if (this.state === s) return;
     this.state = s;
+    for (const handler of this.stateHandlers) {
+      try {
+        handler(s);
+      } catch (error) {
+        this.opts.logger?.error("sse:state_handler_error", {
+          state: s,
+          errorType: error instanceof Error ? error.constructor.name : typeof error,
+        });
+      }
+    }
   }
 
   private _emitError(err: unknown, attempt: number): void {

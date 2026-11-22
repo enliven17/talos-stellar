@@ -1,10 +1,19 @@
-import { and, asc, desc, eq, inArray, isNotNull, lt, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNotNull, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { tlsJobs, tlsJobAttempts } from "@/db/schema";
 import type { AttemptTerminalReason, EnqueueOptions, JobAttemptRecord, JobRecord, JobStatus, RetryClass } from "./types";
 import { decideRetry } from "./retry";
 import { jobsConfig } from "./config";
-import { logJobEvent, truncateError } from "./metrics";
+import { boundError, boundResult, logJobEvent } from "./metrics";
+
+/** Typed result returned when cancellation races with completion. */
+export class CancellationConflictError extends Error {
+  readonly code = "CANCELLATION_CONFLICT" as const;
+  constructor(readonly jobId: string) {
+    super(`cancellation conflict: job ${jobId} already completed`);
+    this.name = "CancellationConflictError";
+  }
+}
 
 function toRecord(row: typeof tlsJobs.$inferSelect): JobRecord {
   return row as unknown as JobRecord;
@@ -111,16 +120,69 @@ export async function enqueue<TPayload = unknown>(
  * instances draining the same table) never claim the same row — this is
  * the only query in the module that needs raw SQL, since drizzle's query
  * builder doesn't expose SKIP LOCKED.
+ *
+ * When `fairBatchPerQueue` is > 0 the batch is assembled by claiming at most
+ * that many jobs per queue in priority/runAt order, then stopping once the
+ * global `limit` is reached. This bounds any single queue's share of a drain
+ * batch so a high-volume queue cannot starve lower-volume ones.
  */
 export async function leaseBatch(
   queues: string[],
   limit: number = jobsConfig.batchSize,
   workerId: string = jobsConfig.workerId,
   leaseDurationMs: number = jobsConfig.leaseDurationMs,
+  fairBatchPerQueue: number = jobsConfig.fairBatchPerQueue,
 ): Promise<JobRecord[]> {
   if (queues.length === 0 || limit <= 0) return [];
 
   const leaseExpiresAt = sql`now() + (${leaseDurationMs}::text || ' milliseconds')::interval`;
+
+  // ── Fair-share path ──────────────────────────────────────────────────────
+  // When fairBatchPerQueue > 0, claim up to fairBatchPerQueue rows from each
+  // queue in turn (preserving priority DESC, runAt ASC within each queue) and
+  // stop once we have reached the global limit. We iterate queues in stable
+  // registration order so relative queue priority is consistent across ticks.
+  if (fairBatchPerQueue > 0) {
+    const perQueue = Math.min(fairBatchPerQueue, limit);
+    const allRows: (typeof tlsJobs.$inferSelect)[] = [];
+
+    for (const queue of queues) {
+      if (allRows.length >= limit) break;
+      const remaining = limit - allRows.length;
+      const take = Math.min(perQueue, remaining);
+
+      const result = await db.execute(sql`
+        UPDATE ${tlsJobs}
+        SET
+          status = 'leased',
+          "leaseId" = gen_random_uuid()::text,
+          "leaseOwner" = ${workerId},
+          "leaseExpiresAt" = ${leaseExpiresAt},
+          "heartbeatAt" = now(),
+          attempts = attempts + 1,
+          "updatedAt" = now()
+        WHERE id IN (
+          SELECT id FROM ${tlsJobs}
+          WHERE status = 'pending'
+            AND queue = ${queue}
+            AND "runAt" <= now()
+          ORDER BY priority DESC, "runAt" ASC
+          FOR UPDATE SKIP LOCKED
+          LIMIT ${take}
+        )
+        RETURNING *
+      `);
+      const rows = (result as unknown as { rows: (typeof tlsJobs.$inferSelect)[] }).rows ?? [];
+      allRows.push(...rows);
+    }
+
+    for (const row of allRows) {
+      logJobEvent("job_leased", { jobId: row.id, queue: row.queue, attempts: row.attempts, workerId });
+    }
+    return allRows.map(toRecord);
+  }
+
+  // ── Default path (no per-queue cap) ──────────────────────────────────────
   const result = await db.execute(sql`
     UPDATE ${tlsJobs}
     SET
@@ -153,9 +215,12 @@ export async function leaseBatch(
 /**
  * Extends a held lease and reports cooperative-cancellation state. Returns
  * `ok: false` when the lease no longer belongs to this worker (already
- * completed, reaped and re-leased elsewhere, etc.) — the caller must stop
- * processing immediately to avoid duplicate side effects racing another
- * worker.
+ * completed, reaped and re-leased elsewhere, or its lease deadline has
+ * elapsed) — the caller must stop processing immediately to avoid duplicate
+ * side effects racing another worker.
+ *
+ * Heartbeats arriving after `leaseExpiresAt` has elapsed are rejected without
+ * mutating the row, leaving expired ownership eligible for reapExpiredLeases().
  */
 export async function heartbeat(
   jobId: string,
@@ -166,7 +231,14 @@ export async function heartbeat(
   const [row] = await db
     .update(tlsJobs)
     .set({ leaseExpiresAt, heartbeatAt: sql`now()` })
-    .where(and(eq(tlsJobs.id, jobId), eq(tlsJobs.leaseId, leaseId), eq(tlsJobs.status, "leased")))
+    .where(
+      and(
+        eq(tlsJobs.id, jobId),
+        eq(tlsJobs.leaseId, leaseId),
+        eq(tlsJobs.status, "leased"),
+        gt(tlsJobs.leaseExpiresAt, sql`now()`),
+      ),
+    )
     .returning({ cancelRequested: tlsJobs.cancelRequested, queue: tlsJobs.queue });
 
   if (!row) return { ok: false, cancelled: false };
@@ -174,13 +246,14 @@ export async function heartbeat(
   return { ok: true, cancelled: row.cancelRequested };
 }
 
-/** Marks a leased job completed. No-ops (returns null) if the lease was lost. */
+/** Marks a leased job completed. Bounds oversized or unserializable results independently of errors. No-ops (returns null) if the lease was lost. */
 export async function complete(jobId: string, leaseId: string, result: unknown, durationMs?: number): Promise<JobRecord | null> {
+  const bounded = boundResult(result, jobsConfig.maxResultBytes);
   const [row] = await db
     .update(tlsJobs)
     .set({
       status: "completed",
-      result: (result ?? null) as Record<string, unknown> | null,
+      result: (bounded.value ?? null) as Record<string, unknown> | null,
       completedAt: sql`now()`,
       leaseId: null,
       leaseOwner: null,
@@ -190,16 +263,16 @@ export async function complete(jobId: string, leaseId: string, result: unknown, 
     .returning();
 
   if (!row) return null;
-
-  await recordAttempt({
-    jobId: row.id,
-    attemptNumber: row.attempts,
-    workerId: row.leaseOwner,
-    leaseId,
-    durationMs,
-    terminalReason: "completed",
-  });
-
+  if (bounded.truncated) {
+    logJobEvent("job_result_truncated", {
+      jobId,
+      queue: row.queue,
+      attempts: row.attempts,
+      reason: bounded.reason,
+      actualBytes: bounded.actualBytes,
+      maxBytes: bounded.maxBytes,
+    });
+  }
   logJobEvent("job_completed", { jobId, queue: row.queue, attempts: row.attempts, durationMs });
   return toRecord(row);
 }
@@ -208,7 +281,7 @@ export async function complete(jobId: string, leaseId: string, result: unknown, 
  * Records a handler failure and applies the retry policy: either reschedule
  * (status back to pending, runAt pushed out by the backoff delay) or move
  * to dead_letter once the retry class/attempt ceiling says to stop.
- * No-ops if the lease was lost.
+ * Bounds `lastError` independently of `result`. No-ops if the lease was lost.
  */
 export async function fail(jobId: string, leaseId: string, error: unknown, durationMs?: number): Promise<JobRecord | null> {
   const current = await db
@@ -220,7 +293,17 @@ export async function fail(jobId: string, leaseId: string, error: unknown, durat
 
   if (!current) return null;
 
-  const lastError = truncateError(error);
+  const boundedErr = boundError(error, jobsConfig.maxErrorBytes);
+  const lastError = boundedErr.value;
+  if (boundedErr.truncated) {
+    logJobEvent("job_error_truncated", {
+      jobId,
+      queue: current.queue,
+      attempts: current.attempts,
+      actualBytes: boundedErr.actualBytes,
+      maxBytes: boundedErr.maxBytes,
+    });
+  }
   const decision = decideRetry({
     retryClass: current.retryClass as RetryClass,
     attempts: current.attempts,
@@ -289,6 +372,9 @@ export async function release(jobId: string, leaseId: string): Promise<JobRecord
  * Requests cooperative cancellation. A pending job is cancelled immediately
  * (nothing is running yet); a leased job is flagged and relies on the
  * handler observing `cancelRequested` via its next heartbeat() call.
+ *
+ * Throws `CancellationConflictError` when the job already completed, so a
+ * cancellation that raced with completion is never reported as successful.
  */
 export async function requestCancel(jobId: string): Promise<JobRecord | null> {
   const [pendingRow] = await db
@@ -306,7 +392,20 @@ export async function requestCancel(jobId: string): Promise<JobRecord | null> {
     .set({ cancelRequested: true })
     .where(and(eq(tlsJobs.id, jobId), eq(tlsJobs.status, "leased")))
     .returning();
-  return leasedRow ? toRecord(leasedRow) : null;
+  if (leasedRow) return toRecord(leasedRow);
+
+  // A conditional probe: if the job has already completed, the cancellation
+  // raced with completion and must not be reported as successful.
+  const finished = await db
+    .select({ status: tlsJobs.status })
+    .from(tlsJobs)
+    .where(eq(tlsJobs.id, jobId))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+  if (finished?.status === "completed") {
+    throw new CancellationConflictError(jobId);
+  }
+  return null;
 }
 
 /**
@@ -395,26 +494,5 @@ export interface ListJobsFilter {
 }
 
 export async function listJobs(filter: ListJobsFilter = {}): Promise<{ jobs: JobRecord[]; nextCursor: string | null }> {
-  const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
-  const conditions = [];
-  if (filter.status) conditions.push(eq(tlsJobs.status, filter.status));
-  if (filter.queue) conditions.push(eq(tlsJobs.queue, filter.queue));
-  if (filter.cursor) conditions.push(lt(tlsJobs.createdAt, new Date(filter.cursor)));
-
-  const rows = await db
-    .select()
-    .from(tlsJobs)
-    .where(conditions.length ? and(...conditions) : undefined)
-    .orderBy(desc(tlsJobs.createdAt))
-    .limit(limit + 1);
-
-  const hasMore = rows.length > limit;
-  const page = hasMore ? rows.slice(0, limit) : rows;
-  const nextCursor = hasMore ? page[page.length - 1]?.createdAt.toISOString() ?? null : null;
-  return { jobs: page.map(toRecord), nextCursor };
-}
-
-export async function getJob(jobId: string): Promise<JobRecord | null> {
-  const row = await db.select().from(tlsJobs).where(eq(tlsJobs.id, jobId)).limit(1).then((r) => r[0] ?? null);
-  return row ? toRecord(row) : null;
+  const limit = Math.min(Math.max(filter.limit ?? jobsConfig.batchSize, 1), 100);
 }

@@ -37,7 +37,7 @@ from talos_agent.policy.schema import (
     Severity,
     redact_trace_value,
 )
-from talos_agent.policy.simulator import PolicySimulator
+from talos_agent.policy.simulator import PolicyCoverageReport, PolicySimulator
 
 __all__ = [
     "ActionSpec",
@@ -45,6 +45,7 @@ __all__ = [
     "Policy",
     "PolicyDecision",
     "PolicyDecisionTrace",
+    "PolicyCoverageReport",
     "PolicyEngine",
     "PolicyLoader",
     "PolicyMiddleware",
