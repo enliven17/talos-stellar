@@ -79,3 +79,32 @@ export interface RunOnceSummary {
   cancelled: number;
   reaped: number;
 }
+
+/**
+ * Bounded diagnostic envelope stored in `tls_jobs.result` when a handler's
+ * return value exceeds `jobsConfig.maxResultBytes` or cannot be serialized
+ * to JSON. Prevents unbounded database writes while retaining a stable,
+ * machine-readable diagnostic for operators.
+ */
+export interface BoundedResultDiagnostic {
+  truncated: true;
+  reason: "result_exceeds_max_bytes" | "result_unserializable";
+  maxBytes: number;
+  actualBytes: number | null;
+  diagnostic: string;
+}
+
+export interface BoundResultOutcome {
+  value: unknown;
+  truncated: boolean;
+  reason?: "result_exceeds_max_bytes" | "result_unserializable";
+  actualBytes?: number;
+  maxBytes: number;
+}
+
+export interface BoundErrorOutcome {
+  value: string;
+  truncated: boolean;
+  actualBytes: number;
+  maxBytes: number;
+}

@@ -4,7 +4,7 @@ import { tlsJobs } from "@/db/schema";
 import type { EnqueueOptions, JobRecord, JobStatus, RetryClass } from "./types";
 import { decideRetry } from "./retry";
 import { jobsConfig } from "./config";
-import { logJobEvent, truncateError } from "./metrics";
+import { boundError, boundResult, logJobEvent } from "./metrics";
 
 /** Typed result returned when cancellation races with completion. */
 export class CancellationConflictError extends Error {
@@ -191,13 +191,14 @@ export async function heartbeat(
   return { ok: true, cancelled: row.cancelRequested };
 }
 
-/** Marks a leased job completed. No-ops (returns null) if the lease was lost. */
+/** Marks a leased job completed. Bounds oversized or unserializable results independently of errors. No-ops (returns null) if the lease was lost. */
 export async function complete(jobId: string, leaseId: string, result: unknown, durationMs?: number): Promise<JobRecord | null> {
+  const bounded = boundResult(result, jobsConfig.maxResultBytes);
   const [row] = await db
     .update(tlsJobs)
     .set({
       status: "completed",
-      result: (result ?? null) as Record<string, unknown> | null,
+      result: (bounded.value ?? null) as Record<string, unknown> | null,
       completedAt: sql`now()`,
       leaseId: null,
       leaseOwner: null,
@@ -207,6 +208,16 @@ export async function complete(jobId: string, leaseId: string, result: unknown, 
     .returning();
 
   if (!row) return null;
+  if (bounded.truncated) {
+    logJobEvent("job_result_truncated", {
+      jobId,
+      queue: row.queue,
+      attempts: row.attempts,
+      reason: bounded.reason,
+      actualBytes: bounded.actualBytes,
+      maxBytes: bounded.maxBytes,
+    });
+  }
   logJobEvent("job_completed", { jobId, queue: row.queue, attempts: row.attempts, durationMs });
   return toRecord(row);
 }
@@ -215,7 +226,7 @@ export async function complete(jobId: string, leaseId: string, result: unknown, 
  * Records a handler failure and applies the retry policy: either reschedule
  * (status back to pending, runAt pushed out by the backoff delay) or move
  * to dead_letter once the retry class/attempt ceiling says to stop.
- * No-ops if the lease was lost.
+ * Bounds `lastError` independently of `result`. No-ops if the lease was lost.
  */
 export async function fail(jobId: string, leaseId: string, error: unknown, durationMs?: number): Promise<JobRecord | null> {
   const current = await db
@@ -227,7 +238,17 @@ export async function fail(jobId: string, leaseId: string, error: unknown, durat
 
   if (!current) return null;
 
-  const lastError = truncateError(error);
+  const boundedErr = boundError(error, jobsConfig.maxErrorBytes);
+  const lastError = boundedErr.value;
+  if (boundedErr.truncated) {
+    logJobEvent("job_error_truncated", {
+      jobId,
+      queue: current.queue,
+      attempts: current.attempts,
+      actualBytes: boundedErr.actualBytes,
+      maxBytes: boundedErr.maxBytes,
+    });
+  }
   const decision = decideRetry({
     retryClass: current.retryClass as RetryClass,
     attempts: current.attempts,
