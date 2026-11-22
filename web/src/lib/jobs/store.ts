@@ -1,7 +1,7 @@
 import { and, desc, eq, gt, inArray, isNotNull, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { tlsJobs } from "@/db/schema";
-import type { EnqueueOptions, JobRecord, JobStatus, RetryClass } from "./types";
+import { tlsJobs, tlsJobAttempts } from "@/db/schema";
+import type { AttemptTerminalReason, EnqueueOptions, JobAttemptRecord, JobRecord, JobStatus, RetryClass } from "./types";
 import { decideRetry } from "./retry";
 import { jobsConfig } from "./config";
 import { boundError, boundResult, logJobEvent } from "./metrics";
@@ -17,6 +17,61 @@ export class CancellationConflictError extends Error {
 
 function toRecord(row: typeof tlsJobs.$inferSelect): JobRecord {
   return row as unknown as JobRecord;
+}
+
+function toAttemptRecord(row: typeof tlsJobAttempts.$inferSelect): JobAttemptRecord {
+  return row as unknown as JobAttemptRecord;
+}
+
+/**
+ * Appends an immutable attempt record to `tls_job_attempts`.
+ * Safely catches errors so attempt recording never crashes the main state transition.
+ */
+export async function recordAttempt(data: {
+  jobId: string;
+  attemptNumber: number;
+  workerId?: string | null;
+  leaseId?: string | null;
+  startedAt?: Date;
+  completedAt?: Date | null;
+  durationMs?: number | null;
+  terminalReason: AttemptTerminalReason;
+  error?: unknown;
+}): Promise<JobAttemptRecord | null> {
+  try {
+    const errorString = data.error !== undefined && data.error !== null ? truncateError(data.error) : null;
+    const [row] = await db
+      .insert(tlsJobAttempts)
+      .values({
+        jobId: data.jobId,
+        attemptNumber: data.attemptNumber,
+        workerId: data.workerId ?? null,
+        leaseId: data.leaseId ?? null,
+        startedAt: data.startedAt ?? new Date(),
+        completedAt: data.completedAt ?? new Date(),
+        durationMs: data.durationMs ?? null,
+        terminalReason: data.terminalReason,
+        error: errorString,
+      })
+      .returning();
+    return row ? toAttemptRecord(row) : null;
+  } catch (err) {
+    // If an attempt record insert fails, log warning but don't break the caller
+    console.warn("[jobs:recordAttempt] failed to record attempt", err);
+    return null;
+  }
+}
+
+/**
+ * Gets immutable execution attempt history for a job ordered by attemptNumber.
+ */
+export async function getJobAttempts(jobId: string): Promise<JobAttemptRecord[]> {
+  const rows = await db
+    .select()
+    .from(tlsJobAttempts)
+    .where(eq(tlsJobAttempts.jobId, jobId))
+    .orderBy(asc(tlsJobAttempts.attemptNumber), asc(tlsJobAttempts.createdAt));
+  return rows.map(toAttemptRecord);
 }
 
 /**
@@ -262,6 +317,17 @@ export async function fail(jobId: string, leaseId: string, error: unknown, durat
       .where(and(eq(tlsJobs.id, jobId), eq(tlsJobs.leaseId, leaseId), eq(tlsJobs.status, "leased")))
       .returning();
     if (!row) return null;
+
+    await recordAttempt({
+      jobId: row.id,
+      attemptNumber: row.attempts,
+      workerId: current.leaseOwner,
+      leaseId,
+      durationMs,
+      terminalReason: "dead_letter",
+      error: lastError,
+    });
+
     logJobEvent("job_dead_letter", { jobId, queue: row.queue, attempts: row.attempts, maxAttempts: row.maxAttempts, durationMs });
     return toRecord(row);
   }
@@ -273,6 +339,17 @@ export async function fail(jobId: string, leaseId: string, error: unknown, durat
     .where(and(eq(tlsJobs.id, jobId), eq(tlsJobs.leaseId, leaseId), eq(tlsJobs.status, "leased")))
     .returning();
   if (!row) return null;
+
+  await recordAttempt({
+    jobId: row.id,
+    attemptNumber: row.attempts,
+    workerId: current.leaseOwner,
+    leaseId,
+    durationMs,
+    terminalReason: "retry_scheduled",
+    error: lastError,
+  });
+
   logJobEvent("job_retry_scheduled", { jobId, queue: row.queue, attempts: row.attempts, delayMs: decision.delayMs, durationMs });
   return toRecord(row);
 }
@@ -390,10 +467,19 @@ export async function reapExpiredLeases(): Promise<{ requeued: number; deadLette
         sql`${tlsJobs.attempts} >= ${tlsJobs.maxAttempts}`,
       ),
     )
-    .returning({ id: tlsJobs.id, queue: tlsJobs.queue });
+    .returning({ id: tlsJobs.id, queue: tlsJobs.queue, attempts: tlsJobs.attempts, leaseOwner: tlsJobs.leaseOwner });
 
   for (const row of requeuedRows) logJobEvent("job_lease_reaped", { jobId: row.id, queue: row.queue });
-  for (const row of deadLetteredRows) logJobEvent("job_dead_letter", { jobId: row.id, queue: row.queue });
+  for (const row of deadLetteredRows) {
+    logJobEvent("job_dead_letter", { jobId: row.id, queue: row.queue });
+    await recordAttempt({
+      jobId: row.id,
+      attemptNumber: row.attempts,
+      workerId: row.leaseOwner,
+      terminalReason: "dead_letter",
+      error: "lease expired and max attempts reached (worker did not heartbeat)",
+    });
+  }
 
   return { requeued: requeuedRows.length, deadLettered: deadLetteredRows.length };
 }

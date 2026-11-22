@@ -106,7 +106,17 @@ async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnce
     });
 
     if (lostLease || cancelled) {
-      if (cancelled) summary.cancelled += 1;
+      if (cancelled) {
+        summary.cancelled += 1;
+        await store.recordAttempt({
+          jobId: job.id,
+          attemptNumber: job.attempts,
+          workerId: opts.workerId ?? job.leaseOwner,
+          leaseId,
+          durationMs: Date.now() - startedAt,
+          terminalReason: "cancelled",
+        });
+      }
       return;
     }
 
@@ -120,7 +130,18 @@ async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnce
     }
   } catch (err) {
     if (lostLease || cancelled) {
-      if (cancelled) summary.cancelled += 1;
+      if (cancelled) {
+        summary.cancelled += 1;
+        await store.recordAttempt({
+          jobId: job.id,
+          attemptNumber: job.attempts,
+          workerId: opts.workerId ?? job.leaseOwner,
+          leaseId,
+          durationMs: Date.now() - startedAt,
+          terminalReason: "cancelled",
+          error: err,
+        });
+      }
       return;
     }
 
