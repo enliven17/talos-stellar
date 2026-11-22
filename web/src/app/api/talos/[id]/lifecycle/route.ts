@@ -20,6 +20,7 @@ import { LIFECYCLE_EVENTS, emitLifecycleEvent, readLifecycleEvents } from "@/lib
 import {
   LifecycleError,
   allowedActions,
+  evaluateLifecycleChecklist,
   evaluateTransition,
   toLegacyStatus,
   toLifecycleState,
@@ -167,6 +168,17 @@ async function _GET(request: NextRequest, { params }: { params: Promise<{ id: st
         .limit(100),
     ]);
 
+    const checklist = evaluateLifecycleChecklist({
+      talosId: id,
+      state,
+      actor: { id: viewer || "anonymous", roles: viewerRoles },
+      agentOnline: Boolean(agent.agentOnline),
+      inFlightJobs: inFlightJobs.length,
+      pendingProposalsCount: pendingProposals.length,
+      hasWallet: Boolean(agent.agentWalletId),
+      retiredAt: agent.status === "Retired" ? agent.updatedAt : null,
+    });
+
     return Response.json(
       {
         talosId: id,
@@ -184,6 +196,7 @@ async function _GET(request: NextRequest, { params }: { params: Promise<{ id: st
         viewerRoles,
         inFlightJobs: inFlightJobs.length,
         pendingProposals,
+        checklist,
         run,
         events,
         nextCursor,
@@ -304,7 +317,7 @@ async function _POST(request: NextRequest, { params }: { params: Promise<{ id: s
 
       await db
         .update(tlsTalos)
-        .set({ status: toLegacyStatus(decision.to) })
+        .set({ status: decision.to === "retiring" ? "Draining" : toLegacyStatus(decision.to) })
         .where(eq(tlsTalos.id, id));
 
       return Response.json(

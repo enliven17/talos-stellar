@@ -7,7 +7,7 @@
  * and tests without a database.
  *
  * Legacy compatibility: `tls_talos.status` predates this machine and only ever
- * held "Active" | "Paused" | "Retired". `toLifecycleState` / `toLegacyStatus`
+ * held "Active" | "Paused" | "Retired" (plus the explicit "Draining" marketplace state). `toLifecycleState` / `toLegacyStatus`
  * map between the two so existing rows and API consumers keep working while the
  * richer state is tracked in the lifecycle event log.
  */
@@ -343,6 +343,7 @@ const LEGACY_TO_LIFECYCLE: Record<string, AgentLifecycleState> = {
   proposed: "proposed",
   provisioning: "provisioning",
   retiring: "retiring",
+  draining: "retiring",
   recovery_pending: "recovery_pending",
   failed: "failed",
 };
@@ -371,4 +372,247 @@ export function toLegacyStatus(state: AgentLifecycleState): "Active" | "Paused" 
 
 export function acceptsNewWork(state: AgentLifecycleState): boolean {
   return OPERATIONAL_STATES.has(state);
+}
+
+// ── Lifecycle Checklist ──────────────────────────────────────────────
+
+export type ObligationId =
+  | "owner_authorization"
+  | "in_flight_jobs"
+  | "service_availability"
+  | "governance_approval"
+  | "wallet_bound";
+
+export interface LifecycleObligation {
+  id: ObligationId;
+  title: string;
+  description: string;
+  satisfied: boolean;
+  blocking: boolean;
+  count?: number;
+  requiredFor: LifecycleAction[];
+}
+
+export interface LifecycleNextAction {
+  action: LifecycleAction;
+  label: string;
+  description: string;
+  enabled: boolean;
+  blockingObligationIds: ObligationId[];
+}
+
+export interface LifecycleChecklistContext {
+  talosId: string;
+  state: AgentLifecycleState;
+  actor: LifecycleActor;
+  agentOnline: boolean;
+  inFlightJobs: number;
+  pendingProposalsCount: number;
+  hasWallet: boolean;
+  hasApprovedProposal?: boolean;
+  retiredAt?: Date | string | null;
+}
+
+export interface LifecycleChecklist {
+  talosId: string;
+  state: AgentLifecycleState;
+  legacyStatus: "Active" | "Paused" | "Retired";
+  isOwner: boolean;
+  canRetire: boolean;
+  obligations: LifecycleObligation[];
+  allowedNextActions: LifecycleNextAction[];
+  observedAt: string;
+}
+
+/**
+ * Evaluate the owner-facing lifecycle checklist for an agent.
+ *
+ * Checks all blocking obligations (in-flight commerce jobs, service intake availability,
+ * governance proposals, owner authorization) and returns the allowed next actions.
+ * Preserves private financial details by returning only high-level status, counts,
+ * and public addresses.
+ */
+export function evaluateLifecycleChecklist(ctx: LifecycleChecklistContext): LifecycleChecklist {
+  if (!isLifecycleState(ctx.state)) {
+    throw new LifecycleError("LIFECYCLE_UNKNOWN_STATE", `Unknown lifecycle state: ${ctx.state}`, {
+      allowed: [...AGENT_LIFECYCLE_STATES],
+    });
+  }
+
+  const isOwner = ctx.actor.roles.includes("creator") || ctx.actor.roles.includes("operator");
+  const isRetired = ctx.state === "retired" || Boolean(ctx.retiredAt);
+
+  const obligations: LifecycleObligation[] = [];
+
+  // 1. Owner authorization
+  obligations.push({
+    id: "owner_authorization",
+    title: "Owner Authorization",
+    description: isOwner
+      ? "Connected wallet is verified as agent owner/operator"
+      : "Connected wallet holds no owner role on this agent",
+    satisfied: isOwner,
+    blocking: !isOwner,
+    requiredFor: ["activate", "pause", "retire", "recover"],
+  });
+
+  // 2. In-flight jobs
+  const inFlightCount = Math.max(0, ctx.inFlightJobs);
+  const jobsSettled = isRetired || inFlightCount === 0;
+  obligations.push({
+    id: "in_flight_jobs",
+    title: "In-Flight Commerce Jobs",
+    description: isRetired
+      ? "Historical commerce jobs are settled"
+      : inFlightCount === 0
+        ? "No commerce jobs in flight"
+        : `${inFlightCount} in-flight job(s) must drain before retirement`,
+    satisfied: jobsSettled,
+    blocking: !jobsSettled,
+    count: inFlightCount,
+    requiredFor: ["retire"],
+  });
+
+  // 3. Service availability (intake paused)
+  const intakePaused = isRetired || !ctx.agentOnline || ctx.state === "paused";
+  obligations.push({
+    id: "service_availability",
+    title: "Service Intake Paused",
+    description: isRetired
+      ? "Agent services are permanently retired"
+      : intakePaused
+        ? "Service intake is paused and agent is offline"
+        : "Agent is online and accepting new requests (pause required before retirement)",
+    satisfied: intakePaused,
+    blocking: ctx.state === "active" && ctx.agentOnline,
+    requiredFor: ["retire"],
+  });
+
+  // 4. Governance proposals
+  const pendingCount = Math.max(0, ctx.pendingProposalsCount);
+  const govSatisfied = isRetired ? true : pendingCount === 0 || Boolean(ctx.hasApprovedProposal);
+  obligations.push({
+    id: "governance_approval",
+    title: "Governance Approvals",
+    description: isRetired
+      ? "All governance proposals concluded"
+      : ctx.state === "proposed"
+        ? (ctx.hasApprovedProposal ? "Governance proposal approved" : "Awaiting governance proposal approval")
+        : pendingCount === 0
+          ? "No unresolved governance proposals"
+          : `${pendingCount} pending proposal(s) awaiting resolution`,
+    satisfied: govSatisfied,
+    blocking: ctx.state === "proposed" && !ctx.hasApprovedProposal,
+    count: pendingCount,
+    requiredFor: ["activate", "retire"],
+  });
+
+  // 5. Wallet binding
+  obligations.push({
+    id: "wallet_bound",
+    title: "Agent Wallet Bound",
+    description: ctx.hasWallet
+      ? "Agent wallet is provisioned and bound"
+      : "No agent wallet assigned",
+    satisfied: ctx.hasWallet,
+    blocking: !ctx.hasWallet && ctx.state === "proposed",
+    requiredFor: ["activate"],
+  });
+
+  // Determine canRetire
+  const canRetire =
+    !isRetired &&
+    isOwner &&
+    (ctx.state === "active" || ctx.state === "paused") &&
+    inFlightCount === 0 &&
+    intakePaused;
+
+  // Determine allowedNextActions
+  const allowedNextActions: LifecycleNextAction[] = [];
+
+  if (!isRetired) {
+    if (ctx.state === "active") {
+      const pauseBlockedBy: ObligationId[] = [];
+      if (!isOwner) pauseBlockedBy.push("owner_authorization");
+
+      allowedNextActions.push({
+        action: "pause",
+        label: "Pause Agent",
+        description: "Halt new request intake so in-flight work can drain",
+        enabled: isOwner,
+        blockingObligationIds: pauseBlockedBy,
+      });
+
+      const retireBlockedBy: ObligationId[] = [];
+      if (!isOwner) retireBlockedBy.push("owner_authorization");
+      if (inFlightCount > 0) retireBlockedBy.push("in_flight_jobs");
+      if (ctx.agentOnline) retireBlockedBy.push("service_availability");
+
+      allowedNextActions.push({
+        action: "retire",
+        label: "Retire Agent",
+        description: "Permanently retire this agent and preserve historical records",
+        enabled: canRetire,
+        blockingObligationIds: retireBlockedBy,
+      });
+    } else if (ctx.state === "paused") {
+      const activateBlockedBy: ObligationId[] = [];
+      if (!isOwner) activateBlockedBy.push("owner_authorization");
+
+      allowedNextActions.push({
+        action: "activate",
+        label: "Resume Agent",
+        description: "Unpause agent and resume accepting customer requests",
+        enabled: isOwner,
+        blockingObligationIds: activateBlockedBy,
+      });
+
+      const retireBlockedBy: ObligationId[] = [];
+      if (!isOwner) retireBlockedBy.push("owner_authorization");
+      if (inFlightCount > 0) retireBlockedBy.push("in_flight_jobs");
+
+      allowedNextActions.push({
+        action: "retire",
+        label: "Retire Agent",
+        description: "Permanently retire this agent and preserve historical records",
+        enabled: canRetire,
+        blockingObligationIds: retireBlockedBy,
+      });
+    } else if (ctx.state === "proposed") {
+      const activateBlockedBy: ObligationId[] = [];
+      if (!isOwner) activateBlockedBy.push("owner_authorization");
+      if (!ctx.hasApprovedProposal) activateBlockedBy.push("governance_approval");
+      if (!ctx.hasWallet) activateBlockedBy.push("wallet_bound");
+
+      allowedNextActions.push({
+        action: "activate",
+        label: "Activate Agent",
+        description: "Provision agent wallet and services once proposal is approved",
+        enabled: isOwner && Boolean(ctx.hasApprovedProposal) && ctx.hasWallet,
+        blockingObligationIds: activateBlockedBy,
+      });
+    } else if (ctx.state === "failed") {
+      const recoverBlockedBy: ObligationId[] = [];
+      if (!isOwner) recoverBlockedBy.push("owner_authorization");
+
+      allowedNextActions.push({
+        action: "recover",
+        label: "Recover Agent",
+        description: "Initiate recovery workflow after failed provisioning",
+        enabled: isOwner,
+        blockingObligationIds: recoverBlockedBy,
+      });
+    }
+  }
+
+  return {
+    talosId: ctx.talosId,
+    state: ctx.state,
+    legacyStatus: toLegacyStatus(ctx.state),
+    isOwner,
+    canRetire,
+    obligations,
+    allowedNextActions,
+    observedAt: new Date().toISOString(),
+  };
 }

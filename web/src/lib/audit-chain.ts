@@ -95,12 +95,38 @@ export function verifyChainRootSeal(
 }
 
 export interface ChainVerificationResult {
+  /** True only when the chain is complete and every link verifies. */
   valid: boolean;
+  /**
+   * Distinct outcome classification:
+   *   - "valid":      all chained rows verified, no gaps.
+   *   - "incomplete": a predecessor is missing (gap in sequence numbers or
+   *                   the chain starts after GENESIS). Evidence is missing,
+   *                   not proven tampered.
+   *   - "mismatch":   contradictory evidence (hash/linkage does not match
+   *                   recomputed values). Indicates tampering.
+   */
+  status: "valid" | "incomplete" | "mismatch";
   totalEntries: number;
   verifiedEntries: number;
   brokenAtSequence: number | null;
+  /** Sequence number expected at the point a gap was detected. */
+  missingFromSequence: number | null;
   chainVersion: string | null;
 }
+
+export type ChainRow = {
+  sequenceNumber: number | null;
+  entryHash: string | null;
+  previousHash: string | null;
+  chainVersion: string | null;
+  talosId: string;
+  method: string;
+  path: string;
+  statusCode: number;
+  ipAddress: string | null;
+  createdAt: Date;
+};
 
 /**
  * Verify a sequence of audit log entries against the hash chain.
@@ -109,27 +135,20 @@ export interface ChainVerificationResult {
  *   1. entryHash === computeEntryHash(entry)
  *   2. previousHash === entryHash of the preceding entry (or GENESIS for seq 0)
  *   3. sequenceNumber is sequential (0, 1, 2, ...)
+ *
+ * A missing predecessor (sequence gap, or chain not starting at 0) is reported
+ * as "incomplete" so operators can distinguish missing evidence from
+ * contradictory hashes, which are reported as "mismatch".
  */
-export function verifyChain(
-  rows: Array<{
-    sequenceNumber: number | null;
-    entryHash: string | null;
-    previousHash: string | null;
-    chainVersion: string | null;
-    talosId: string;
-    method: string;
-    path: string;
-    statusCode: number;
-    ipAddress: string | null;
-    createdAt: Date;
-  }>,
-): ChainVerificationResult {
+export function verifyChain(rows: ChainRow[]): ChainVerificationResult {
   if (rows.length === 0) {
     return {
       valid: true,
+      status: "valid",
       totalEntries: 0,
       verifiedEntries: 0,
       brokenAtSequence: null,
+      missingFromSequence: null,
       chainVersion: null,
     };
   }
@@ -137,6 +156,30 @@ export function verifyChain(
   let previousEntryHash: string | null = null;
   let chainIndex = 0;
   let verifiedCount = 0;
+
+  const mismatch = (seq: number, version: string | null): ChainVerificationResult => ({
+    valid: false,
+    status: "mismatch",
+    totalEntries: rows.length,
+    verifiedEntries: verifiedCount,
+    brokenAtSequence: seq,
+    missingFromSequence: null,
+    chainVersion: version,
+  });
+
+  const incomplete = (
+    missingFrom: number,
+    seq: number | null,
+    version: string | null,
+  ): ChainVerificationResult => ({
+    valid: false,
+    status: "incomplete",
+    totalEntries: rows.length,
+    verifiedEntries: verifiedCount,
+    brokenAtSequence: seq,
+    missingFromSequence: missingFrom,
+    chainVersion: version,
+  });
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -146,27 +189,23 @@ export function verifyChain(
       continue;
     }
 
-    // Validate sequence number is sequential within the chain
-    if (row.sequenceNumber !== chainIndex) {
-      return {
-        valid: false,
-        totalEntries: rows.length,
-        verifiedEntries: verifiedCount,
-        brokenAtSequence: row.sequenceNumber,
-        chainVersion: row.chainVersion,
-      };
+    // A sequence number ahead of the expected one means predecessor(s) are
+    // absent: incomplete evidence, not a contradiction. Reported as a gap at
+    // the first missing sequence number, never as tampering.
+    if (row.sequenceNumber > chainIndex) {
+      return incomplete(chainIndex, row.sequenceNumber, row.chainVersion);
+    }
+
+    // A sequence number behind the expected one is a duplicate/out-of-order
+    // row, which contradicts the chain.
+    if (row.sequenceNumber < chainIndex) {
+      return mismatch(row.sequenceNumber, row.chainVersion);
     }
 
     // Validate previousHash linkage
     const expectedPreviousHash = previousEntryHash ?? GENESIS_HASH;
     if (row.previousHash !== expectedPreviousHash) {
-      return {
-        valid: false,
-        totalEntries: rows.length,
-        verifiedEntries: verifiedCount,
-        brokenAtSequence: row.sequenceNumber,
-        chainVersion: row.chainVersion,
-      };
+      return mismatch(row.sequenceNumber, row.chainVersion);
     }
 
     // Validate entryHash integrity
@@ -182,13 +221,7 @@ export function verifyChain(
 
     const recomputed = computeEntryHash(entry);
     if (recomputed !== row.entryHash) {
-      return {
-        valid: false,
-        totalEntries: rows.length,
-        verifiedEntries: verifiedCount,
-        brokenAtSequence: row.sequenceNumber,
-        chainVersion: row.chainVersion,
-      };
+      return mismatch(row.sequenceNumber, row.chainVersion);
     }
 
     previousEntryHash = row.entryHash;
@@ -198,9 +231,11 @@ export function verifyChain(
 
   return {
     valid: true,
+    status: "valid",
     totalEntries: rows.length,
     verifiedEntries: verifiedCount,
     brokenAtSequence: null,
+    missingFromSequence: null,
     chainVersion: rows[rows.length - 1].chainVersion,
   };
 }
