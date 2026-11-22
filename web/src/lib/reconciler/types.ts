@@ -59,6 +59,8 @@ export type TxSourceType = "commerce_job" | "token_purchase" | "other";
 export interface TxRecord {
   id: string;
   txHash: string;
+  /** Pinned Stellar network identity (network passphrase) against which this payment is tracked. */
+  networkPassphrase?: string | null;
   sourceType: TxSourceType;
   sourceId: string | null;
   finalityStatus: FinalityStatus;
@@ -77,16 +79,17 @@ export interface TxRecord {
 
 /** Discriminated union returned by the Horizon polling layer. */
 export type HorizonPollResult =
-  | { outcome: "confirmed"; ledger: number; successful: true }
-  | { outcome: "failed";    ledger: number; successful: false; detail?: string }
-  | { outcome: "not_found" }
-  | { outcome: "error";     message: string; retryable: boolean };
+  | { outcome: "confirmed"; ledger: number; successful: true; networkPassphrase?: string }
+  | { outcome: "failed";    ledger: number; successful: false; detail?: string; networkPassphrase?: string }
+  | { outcome: "not_found"; networkPassphrase?: string }
+  | { outcome: "error";     message: string; retryable: boolean; networkPassphrase?: string };
 
 // ─── State Transition ─────────────────────────────────────────────────────────
 
 /** Fields that may be updated during a state transition. */
 export interface TxRecordUpdate {
   finalityStatus?: FinalityStatus;
+  networkPassphrase?: string | null;
   lastLedgerChecked?: number;
   confirmedLedger?: number;
   pollCount?: number;
@@ -146,6 +149,12 @@ export interface ReconcilerConfig {
    * Default: 5.
    */
   concurrencyLimit?: number;
+
+  /**
+   * Pinned Stellar network identity (passphrase) to reconcile against.
+   * Defaults to STELLAR_NETWORK_PASSPHRASE or network-derived passphrase.
+   */
+  networkPassphrase?: string;
 }
 
 // ─── Scheduler State (in-process singleton) ──────────────────────────────────

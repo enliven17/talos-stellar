@@ -76,6 +76,7 @@ export async function GET(
       .select({
         id: tlsStellarTxRecords.id,
         txHash: tlsStellarTxRecords.txHash,
+        networkPassphrase: tlsStellarTxRecords.networkPassphrase,
         finalityStatus: tlsStellarTxRecords.finalityStatus,
         confirmedLedger: tlsStellarTxRecords.confirmedLedger,
         lastLedgerChecked: tlsStellarTxRecords.lastLedgerChecked,
@@ -99,6 +100,7 @@ export async function GET(
       return Response.json({
         jobId: job.id,
         txHash: txRecord.txHash,
+        networkPassphrase: txRecord.networkPassphrase ?? null,
         finalityStatus: txRecord.finalityStatus,
         confirmedLedger: txRecord.confirmedLedger ?? null,
         lastLedgerChecked: txRecord.lastLedgerChecked ?? null,
