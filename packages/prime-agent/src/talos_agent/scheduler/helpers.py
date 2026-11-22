@@ -28,6 +28,7 @@ async def run_dividend_distribution(
     stellar,
     api,
     db,
+    execution_id: str | None = None,
 ) -> str:
     """Core dividend distribution logic extracted for testability.
 
@@ -58,10 +59,10 @@ async def run_dividend_distribution(
     if not creator_public_key:
         return "missing_creator"
 
-    result = await api.distribute_dividends(
-        talos_id,
-        requester_public_key=creator_public_key,
-    )
+    kwargs = {"requester_public_key": creator_public_key}
+    if execution_id is not None:
+        kwargs["idempotency_key"] = execution_id
+    result = await api.distribute_dividends(talos_id, **kwargs)
 
     if not result or "error" in result:
         return "distribution_failed"
@@ -77,6 +78,7 @@ async def run_loan_repayment(
     api,
     db,
     days: int = 7,
+    execution_id: str | None = None,
 ) -> dict:
     """Monitor and auto-repay due loans. Returns a structured result summary."""
     loans_due = db.get_loans_due_soon(days=days)
@@ -158,10 +160,14 @@ async def run_loan_repayment(
             result["warnings"] += 1
             continue
 
+        transfer_kwargs = {}
+        if execution_id is not None:
+            transfer_kwargs["idempotency_key"] = f"{execution_id}:{loan_id}"
         transfer_result = await api.request_transfer(
             to_account=repayment_address,
             amount=repay_amount,
             currency="XLM",
+            **transfer_kwargs,
         )
 
         if not transfer_result or "error" in transfer_result:

@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/db";
 import { tlsApiAuditLogs } from "@/db/schema";
+import {
+  AuditLogFilterError,
+  MAX_CURSOR_LEN,
+  MAX_Q_LEN,
+  MAX_TALOS_ID_LEN,
+} from "../src/lib/audit-log/filters";
 import { listAuditLogs } from "../src/lib/audit-log/store";
 
 const { mockDb } = vi.hoisted(() => ({
@@ -139,5 +145,84 @@ describe("listAuditLogs", () => {
     mockDb.limit.mockRejectedValueOnce(new Error("Database connection failed"));
 
     await expect(listAuditLogs({})).rejects.toThrow("Database connection failed");
+  });
+
+  describe("filter validation before query execution", () => {
+    it("rejects oversized or empty talosId (actor) without executing a query", async () => {
+      await expect(
+        listAuditLogs({ talosId: "a".repeat(MAX_TALOS_ID_LEN + 1) }),
+      ).rejects.toMatchObject({
+        name: "AuditLogFilterError",
+        code: "INVALID_AUDIT_FILTER",
+        message: `talosId must be 1–${MAX_TALOS_ID_LEN} characters`,
+      });
+
+      await expect(listAuditLogs({ talosId: "   " })).rejects.toBeInstanceOf(
+        AuditLogFilterError,
+      );
+      expect(mockDb.select).not.toHaveBeenCalled();
+    });
+
+    it("rejects malformed or oversized method (action) without executing a query", async () => {
+      await expect(
+        listAuditLogs({ method: "TRACE" as never }),
+      ).rejects.toMatchObject({
+        name: "AuditLogFilterError",
+        code: "INVALID_AUDIT_FILTER",
+      });
+
+      await expect(
+        listAuditLogs({ method: "G".repeat(32) as never }),
+      ).rejects.toBeInstanceOf(AuditLogFilterError);
+      expect(mockDb.select).not.toHaveBeenCalled();
+    });
+
+    it("rejects oversized or malformed cursor without executing a query", async () => {
+      await expect(
+        listAuditLogs({ cursor: "2026-01-01T00:00:00.000Z".padEnd(MAX_CURSOR_LEN + 1, "0") }),
+      ).rejects.toMatchObject({
+        name: "AuditLogFilterError",
+        code: "INVALID_AUDIT_FILTER",
+        message: `cursor must be at most ${MAX_CURSOR_LEN} characters`,
+      });
+
+      await expect(
+        listAuditLogs({ cursor: "not-a-timestamp" }),
+      ).rejects.toBeInstanceOf(AuditLogFilterError);
+      expect(mockDb.select).not.toHaveBeenCalled();
+    });
+
+    it("rejects oversized q/denialReason and invalid date ranges without executing a query", async () => {
+      await expect(
+        listAuditLogs({ q: "x".repeat(MAX_Q_LEN + 1) }),
+      ).rejects.toBeInstanceOf(AuditLogFilterError);
+
+      await expect(
+        listAuditLogs({ denialReason: "x".repeat(MAX_Q_LEN + 1) }),
+      ).rejects.toBeInstanceOf(AuditLogFilterError);
+
+      await expect(
+        listAuditLogs({
+          from: "2026-02-01T00:00:00.000Z",
+          to: "2026-01-01T00:00:00.000Z",
+        }),
+      ).rejects.toBeInstanceOf(AuditLogFilterError);
+
+      expect(mockDb.select).not.toHaveBeenCalled();
+    });
+
+    it("accepts filters at exact maximum allowed lengths", async () => {
+      mockDb.limit.mockResolvedValueOnce([]);
+
+      await listAuditLogs({
+        talosId: "a".repeat(MAX_TALOS_ID_LEN),
+        method: "OPTIONS",
+        q: "q".repeat(MAX_Q_LEN),
+        denialReason: "r".repeat(MAX_Q_LEN),
+        cursor: "2026-10-17T12:00:00.000Z",
+      });
+
+      expect(mockDb.select).toHaveBeenCalledTimes(1);
+    });
   });
 });

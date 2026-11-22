@@ -45,7 +45,7 @@ from talos_agent.policy.schema import (
     compute_action_digest,
     redact_trace_value,
 )
-from talos_agent.policy.simulator import PolicySimulator
+from talos_agent.policy.simulator import PolicyCoverageReport, PolicySimulator
 
 __all__ = [
     "ActionDigestMismatchError",

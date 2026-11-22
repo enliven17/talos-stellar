@@ -506,6 +506,13 @@ class ScopedSecretProvider:
 
 
 class AdapterHTTPClient(Protocol):
+    """HTTP boundary injected into HTTP-backed adapters.
+
+    Implementations provide deterministic ``get`` and ``post`` methods; test
+    clients should fail on unconfigured requests rather than falling through
+    to the network.
+    """
+
     async def get(self, url: str, **kwargs: Any) -> httpx.Response: ...
     async def post(self, url: str, **kwargs: Any) -> httpx.Response: ...
 

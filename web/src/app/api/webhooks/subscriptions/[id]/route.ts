@@ -146,7 +146,10 @@ async function _PATCH(
         newSecret: data.secret,
       });
       if ("error" in rotated) {
-        return Response.json({ error: rotated.error }, { status: rotated.status });
+        return Response.json(
+          rotated.code ? { error: rotated.error, code: rotated.code } : { error: rotated.error },
+          { status: rotated.status },
+        );
       }
       // Drop secret from field list so we don't double-apply below.
       delete (data as { secret?: string }).secret;

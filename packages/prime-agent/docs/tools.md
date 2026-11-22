@@ -148,7 +148,7 @@ Dry-run comparison of eligible x402 service quotes across a bounded set of candi
 
 **Permissions**
 
-**Capabilities:** `data.read_remote`, `network.http`  
+**Capabilities:** `data.read_remote`, `network.http`
 **Allowed hosts:** `*.talos.xyz`, `localhost`, `127.0.0.1`
 
 **Timeout:** `30.0s`

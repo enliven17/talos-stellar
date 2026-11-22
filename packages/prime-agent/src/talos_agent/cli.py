@@ -15,9 +15,11 @@ from pathlib import Path
 
 import click
 from rich.console import Console
+from rich.table import Table
 
 from talos_agent import __version__
 from talos_agent.checkpoint_cli import checkpoint
+from talos_agent.clock import SystemClock
 from talos_agent.config import APP_DIR, Settings, ensure_app_dir, safe_config_error
 
 console = Console()
@@ -199,6 +201,62 @@ def start(talos_id: str | None, env_file: str):
         from talos_agent.scheduler import run_multi
 
         asyncio.run(run_multi(settings, all_keys))
+
+
+@main.command(name="scheduler-preview")
+@click.option(
+    "--count",
+    default=20,
+    type=click.IntRange(1, 1000),
+    show_default=True,
+    help="Maximum number of upcoming executions to show.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print the preview as JSON.")
+def scheduler_preview(count: int, as_json: bool) -> None:
+    """Preview nominal scheduler executions without starting the agent."""
+    from pydantic import ValidationError
+
+    from talos_agent.scheduler.preview import preview_schedule
+
+    try:
+        settings = Settings()
+        entries = preview_schedule(settings, SystemClock(), count=count)
+    except (ValidationError, ValueError) as exc:
+        raise click.ClickException(safe_config_error(exc)) from None
+
+    if as_json:
+        console.print(
+            json.dumps(
+                [
+                    {
+                        "task": entry.task_name,
+                        "scheduled_at": entry.scheduled_at.isoformat().replace("+00:00", "Z"),
+                        "interval_seconds": entry.interval_seconds,
+                    }
+                    for entry in entries
+                ],
+                indent=2,
+            ),
+            markup=False,
+        )
+        return
+
+    table = Table(title="Nominal scheduler preview (UTC)")
+    table.add_column("Scheduled at", style="cyan")
+    table.add_column("Task", style="bold")
+    table.add_column("Interval (seconds)", justify="right")
+    for entry in entries:
+        table.add_row(
+            entry.scheduled_at.isoformat().replace("+00:00", "Z"),
+            entry.task_name,
+            str(entry.interval_seconds),
+        )
+    console.print(table)
+    console.print(
+        "Preview uses configured intervals only; persisted retry deadlines, "
+        "backoff, and runtime conditions are not included.",
+        style="dim",
+    )
 
 
 @main.command()
@@ -717,6 +775,41 @@ def status(talos_id: str | None, db_path: str | None, as_json: bool):
         db.close()
 
     sys.exit(1 if is_degraded else 0)
+
+
+# ─── Database doctor ────────────────────────────────────────────────
+
+
+@main.command()
+@click.option("--db-dir", default=None, type=click.Path(file_okay=False, path_type=Path), help="Directory containing talos-agent.db and agent-*.db.")
+@click.option("--json", "as_json", is_flag=True, help="Emit per-agent results as JSON.")
+def doctor(db_dir: Path | None, as_json: bool):
+    """Run read-only integrity and schema checks for every local agent DB."""
+    from talos_agent.db.integrity import check_agent_databases
+
+    directory = db_dir or APP_DIR
+    reports = check_agent_databases(directory)
+    overall = "healthy" if reports and all(report.status == "healthy" for report in reports) else "degraded"
+    payload = {
+        "directory": str(directory),
+        "overall": overall,
+        "agents": [report.to_dict() for report in reports],
+    }
+    if as_json:
+        console.print_json(json.dumps(payload))
+    else:
+        console.print(f"[bold]Agent Database Doctor:[/bold] {overall.upper()}")
+        if not reports:
+            console.print("  No agent databases found.")
+        for report in reports:
+            colour = "green" if report.status == "healthy" else "red"
+            console.print(f"  [{colour}]{report.agent_id}[/{colour}] {report.status} — {report.path}")
+            if report.error:
+                console.print(f"    {report.error}")
+            if report.missing_tables or report.missing_columns or report.foreign_key_errors:
+                console.print(f"    missing_tables={list(report.missing_tables)} missing_columns={list(report.missing_columns)} foreign_key_errors={report.foreign_key_errors}")
+    if overall != "healthy":
+        raise click.exceptions.Exit(1)
 
 
 # ─── Backup / Restore / Verify ──────────────────────────────────────

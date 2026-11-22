@@ -98,6 +98,8 @@ is a `major` bump.
 | `protocol_fee`      | `set_protocol_fee` / `calculate_protocol_fee`.               |
 | `interface_query`   | `version` / `interface_id` / `supports_version`.             |
 | `fees_collector`    | Capture 3% fee on Talos creation (configurable).             |
+| `schema_migrations` | `schema_version` / `run_migrations` / `rollback_schema` + history log. |
+| `migration_manifest`| Read-only `migration_key_manifest_version` + `migration_manifest/` key-mapping fixtures. |
 
 ### TalosNameService
 
@@ -105,9 +107,11 @@ is a `major` bump.
 |---------------------|--------------------------------------------------------------|
 | `name_registration` | `register_name` / `resolve_name` / `is_name_available`.      |
 | `name_lifecycle`    | `update_name` / `has_name` / `name_of` — revoke + aliasing.  |
+| `name_reservation` | Read-only `name_reservation` (owner + ledger expiry; active/expired/nonexistent). |
 | `admin_transfer`    | `set_admin` for admin handover.                              |
 | `timelock_admin`    | `schedule_action` / `execute_action` / `cancel_action`.      |
 | `registry_pointer`  | `set_registry_contract` — points at the TalosRegistry.       |
+| `transfer_history`  | Bounded `nm_prp`/`nm_acc`/`nm_cnl`/`nm_exp` events + `transfer_history_len` / `transfer_record_at` + `expire_transfer`. |
 | `interface_query`   | `version` / `interface_id` / `supports_version`.             |
 | `cross_contract`    | `creator_of` invoke against the configured registry pointer. |
 | `name_transfer`     | `propose_name_transfer` / `accept_name_transfer` / `cancel_name_transfer`. |

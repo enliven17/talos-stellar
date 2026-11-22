@@ -16,6 +16,7 @@ from talos_agent.policy.middleware import (
     PolicyMiddleware,
     PolicyViolationError,
 )
+from talos_agent.policy.patterns import PolicyPatternError
 from talos_agent.policy.schema import (
     ActionSpec,
     MatchCondition,
@@ -85,6 +86,28 @@ class TestMatchCondition:
         spec = ActionSpec("test", {"email": "not-an-email"})
         cond = MatchCondition("email", "regex", r".+@.+")
         assert _evaluate_condition(cond, spec) is False
+
+    @pytest.mark.parametrize("pattern", ["[", "[]", "[!]", "[z-a]"])
+    def test_invalid_glob_patterns_are_rejected(self, pattern):
+        with pytest.raises(PolicyPatternError, match="Invalid glob pattern"):
+            MatchCondition("action", "glob", pattern)
+
+    @pytest.mark.parametrize(
+        ("pattern", "value", "expected"),
+        [
+            ("purchase_*", "purchase_service", True),
+            ("purchase_?", "purchase_a", True),
+            ("purchase_[ab]", "purchase_b", True),
+            ("purchase_[!a]", "purchase_b", True),
+            ("purchase_*", "purchase/service", False),
+            ("[/]", "/", True),
+            ("[[]", "[", True),
+        ],
+    )
+    def test_glob_wildcard_semantics(self, pattern, value, expected):
+        spec = ActionSpec("test", {"action_name": value})
+        cond = MatchCondition("action_name", "glob", pattern)
+        assert _evaluate_condition(cond, spec) is expected
 
     def test_context_field_resolution(self):
         spec = ActionSpec(
@@ -264,6 +287,22 @@ class TestPolicyEngine:
         engine.load([p1, p2])
         assert engine._policies[0].name == "a-policy"
         assert engine._policies[1].name == "z-policy"
+
+    def test_load_rejects_duplicate_rule_ids_before_installing(self, engine):
+        original = Policy(name="original", rules=(PolicyRule("stable-id", "first"),))
+        duplicate = Policy(name="override", rules=(PolicyRule("stable-id", "second"),))
+        engine.load([original])
+
+        with pytest.raises(ValueError, match="Duplicate rule identifier 'stable-id'"):
+            engine.load([original, duplicate])
+
+        assert tuple(p.name for p in engine.policies) == ("original",)
+
+    def test_load_rejects_empty_rule_id(self, engine):
+        policy = Policy(name="invalid", rules=(PolicyRule("", "missing"),))
+
+        with pytest.raises(ValueError, match="empty rule identifier"):
+            engine.load([policy])
 
     def test_blocker_triggers_deny(self, engine, sample_policies):
         engine.enabled = True
@@ -452,6 +491,25 @@ class TestPolicyLoader:
         assert len(result) == 1
         assert result[0].name == "test-policy"
         assert len(result[0].rules) == 1
+
+    def test_load_from_file_rejects_invalid_glob(self, tmp_path: Path):
+        path = tmp_path / "invalid-glob.json"
+        path.write_text(json.dumps({
+            "policies": [{
+                "name": "invalid-policy",
+                "rules": [{
+                    "rule_id": "invalid-glob",
+                    "conditions": [{
+                        "field": "action",
+                        "operator": "glob",
+                        "value": "purchase_[",
+                    }],
+                }],
+            }]
+        }))
+
+        with pytest.raises(PolicyPatternError, match="Invalid glob pattern"):
+            _load_from_file(path)
 
 
 # ── PolicyMiddleware tests ────────────────────────────────────────────────────

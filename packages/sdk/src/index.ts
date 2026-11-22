@@ -2,8 +2,12 @@
 
 export {
   TalosClient,
+  DEFAULT_BASE_URL,
+  resolveBaseUrl,
   resolveRetryPolicy,
   resolveRetryOptions,
+  ETAG_CACHE_VERSION,
+  BoundedETagStore,
 } from "./client.js";
 export type {
   TalosClientOptions,
@@ -18,7 +22,33 @@ export type {
   TalosResponseEvent,
   ReadOptions,
   WriteOptions,
+  ETagCacheEntry,
+  ETagStore,
+  ETagCacheOptions,
+  DedupeInFlightGetsOptions,
 } from "./client.js";
+
+// ── HTTP Transcript (support cases & deterministic replay) ─────────
+
+export {
+  TranscriptRecorder,
+  TranscriptReplayer,
+  createTranscriptRecorder,
+  createTranscriptReplayer,
+  sanitizeTranscriptPath,
+  sanitizeTranscriptHeaders,
+  sanitizeTranscriptResponseBody,
+  parseTranscript,
+} from "./transcript.js";
+export type {
+  HttpTranscript,
+  TranscriptEntry,
+  TranscriptRequest,
+  TranscriptResponse,
+  TranscriptTiming,
+  TranscriptRecorderOptions,
+  TranscriptReplayOptions,
+} from "./transcript.js";
 
 // ── Pagination ─────────────────────────────────────────────────────
 
@@ -72,6 +102,7 @@ export {
   TalosServerRetryableError,
   TalosTransportError,
   TalosTimeoutError,
+  TalosDeadlineExceededError,
   errorFromResponse,
   classifyTransportError,
   sanitizeBody,
@@ -85,6 +116,21 @@ export {
   MAX_BODY_BYTES,
 } from "./errors.js";
 export type { RateLimitInfo, HeaderSource } from "./errors.js";
+
+// ── Stable error-code taxonomy (versioned) ────────────────────────────────────
+export {
+  ERROR_TAXONOMY_VERSION,
+  classifyError,
+  codeToCategory,
+  toErrorContract,
+  buildCauseChain,
+} from "./error-taxonomy.js";
+export type {
+  TalosErrorCategory,
+  ErrorClassification,
+  ErrorContract,
+  RedactedCauseFrame,
+} from "./error-taxonomy.js";
 
 // ── Domain types ──────────────────────────────────────────────────
 
@@ -136,6 +182,8 @@ export type {
   TalosEventHandler,
   TalosStreamErrorHandler,
   TalosStreamCloseHandler,
+  TalosStreamState,
+  TalosStreamStateHandler,
   TalosEventStreamOptions,
   SeenStore,
   SchemaVersionNegotiationResult,
@@ -158,6 +206,8 @@ export type {
   TrackJobEvent,
   JobTerminalStatus,
   JobTerminalOutcome,
+  JobTrackerState,
+  JobTrackerStateChange,
   TrackJobOptions,
 } from "./job-tracker.js";
 

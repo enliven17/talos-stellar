@@ -118,6 +118,8 @@ class ApprovalStatusError(ApprovalBindingError):
         )
         super().__init__(msg)
 
+from talos_agent.policy.patterns import PolicyPatternError, compile_glob
+
 
 # ── Enums ─────────────────────────────────────────────────────────────────────
 
@@ -211,6 +213,15 @@ class MatchCondition:
     field: str
     operator: str = "eq"
     value: Any = None
+
+    def __post_init__(self) -> None:
+        if self.operator == "glob":
+            try:
+                compile_glob(self.value)
+            except PolicyPatternError as exc:
+                raise PolicyPatternError(
+                    f"Invalid glob pattern for condition field {self.field!r}: {exc}"
+                ) from exc
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> MatchCondition:

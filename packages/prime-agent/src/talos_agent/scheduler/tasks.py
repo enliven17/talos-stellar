@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 from typing import TYPE_CHECKING
+import uuid
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING, AsyncIterator
 
 import structlog
 from rich.console import Console
@@ -26,6 +28,12 @@ from talos_agent.circuit_breaker import cb_registry
 from talos_agent.observability import log
 from talos_agent.scheduler.backoff import DurableBackoff
 from talos_agent.scheduler.helpers import run_dividend_distribution, run_loan_repayment
+from talos_agent.scheduler.intervals import (
+    ACTIVITY_FLUSH_INTERVAL_SECONDS,
+    LEARNING_CYCLE_INTERVAL_SECONDS,
+    LOAN_REPAYMENT_INTERVAL_SECONDS,
+    TELEMETRY_INTERVAL_SECONDS,
+)
 from talos_agent.scheduler.policy import plan_interval_runs
 from talos_agent.tracing import traced_span
 
@@ -35,6 +43,54 @@ if TYPE_CHECKING:
 
 console = Console()
 logger = logging.getLogger(__name__)
+
+
+def _reserve_execution(db, task_name: str) -> dict | None:
+    """Reserve durable identity before a task performs external work."""
+    execution = db.reserve_task_execution(task_name)
+    if execution is None:
+        logger.warning(
+            "scheduler_execution_uncertain",
+            extra={"task_name": task_name},
+        )
+    return execution
+
+
+def _finish_execution(db, execution: dict, status: str) -> None:
+    db.finish_task_execution(execution["execution_id"], status)
+@asynccontextmanager
+async def _task_slot(
+    task_slots: asyncio.Semaphore | None,
+    shutdown_event: asyncio.Event,
+) -> AsyncIterator[bool]:
+    """Acquire one work slot, abandoning the wait promptly during shutdown."""
+    if task_slots is None:
+        yield not shutdown_event.is_set()
+        return
+    if shutdown_event.is_set():
+        yield False
+        return
+
+    acquire_task = asyncio.create_task(task_slots.acquire())
+    shutdown_task = asyncio.create_task(shutdown_event.wait())
+    acquired = False
+    try:
+        done, _ = await asyncio.wait(
+            (acquire_task, shutdown_task),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if acquire_task in done:
+            acquired = acquire_task.result()
+        yield acquired and not shutdown_event.is_set()
+    finally:
+        for waiter in (acquire_task, shutdown_task):
+            if not waiter.done():
+                waiter.cancel()
+        await asyncio.gather(acquire_task, shutdown_task, return_exceptions=True)
+        if not acquired and acquire_task.done() and not acquire_task.cancelled():
+            acquired = acquire_task.result()
+        if acquired:
+            task_slots.release()
 
 
 # ── Shared span helper ─────────────────────────────────────────────────────────
@@ -77,16 +133,20 @@ async def agent_cycle_task(
     policy_middleware,
     ensure_browser_healthy,
     effective_clock: "ClockProtocol",
+    task_slots: asyncio.Semaphore | None = None,
 ) -> None:
     """Run agent loop every ``settings.agent_cycle_interval`` seconds."""
     from talos_agent.agent.context import AgentContext
     from talos_agent.agent.loop import agent_loop
 
     while not shutdown_event.is_set():
-        async with agent_lock:
-            if shutdown_event.is_set():
+        async with agent_lock, _task_slot(task_slots, shutdown_event) as has_slot:
+            if shutdown_event.is_set() or not has_slot:
                 break
-            cycle_id = str(uuid.uuid4())
+            execution = _reserve_execution(db, "agent_cycle")
+            if execution is None:
+                return
+            cycle_id = execution["execution_id"]
             structlog.contextvars.bind_contextvars(cycle_id=cycle_id)
             api.set_request_id(cycle_id)
             try:
@@ -143,6 +203,7 @@ async def agent_cycle_task(
                     )
 
                     db.update_schedule("agent_cycle")
+                    _finish_execution(db, execution, "succeeded")
 
                     # ── Record completion ────────────────────────────────
                     if replay_recorder is not None:
@@ -153,7 +214,11 @@ async def agent_cycle_task(
                         db.finish_replay_session(cycle_id, status="completed")
 
                     log.info("agent_cycle_complete", cycle_id=cycle_id)
+            except asyncio.CancelledError:
+                _finish_execution(db, execution, "uncertain")
+                raise
             except Exception as e:
+                _finish_execution(db, execution, "uncertain")
                 console.print(f"[red]Agent cycle error: {e}[/red]")
                 log.error("agent_cycle_error", error=str(e), cycle_id=cycle_id)
 
@@ -200,6 +265,7 @@ async def polling_task(
     db,
     talos_config: dict,
     job_effect_store,
+    task_slots: asyncio.Semaphore | None = None,
 ) -> None:
     """Poll Web API for approvals and commerce jobs."""
     backoff = DurableBackoff(
@@ -210,20 +276,23 @@ async def polling_task(
     )
     await _wait_for_restored_deadline(shutdown_event, backoff)
     while not shutdown_event.is_set():
-        try:
-            with _traced_task_run("polling", talos_config):
-                approvals = await api.get_approvals(settings.talos_id, status="pending")
-                for a in approvals:
-                    cached = db.get_pending_approvals()
-                    cached_ids = {c["approval_id"] for c in cached}
-                    if a["id"] not in cached_ids:
-                        db.cache_approval(
-                            a["id"],
-                            a["type"],
-                            a["title"],
-                            a.get("description"),
-                            a.get("amount"),
-                        )
+        async with _task_slot(task_slots, shutdown_event) as has_slot:
+            if not has_slot:
+                break
+            try:
+                with _traced_task_run("polling", talos_config):
+                    approvals = await api.get_approvals(settings.talos_id, status="pending")
+                    for a in approvals:
+                        cached = db.get_pending_approvals()
+                        cached_ids = {c["approval_id"] for c in cached}
+                        if a["id"] not in cached_ids:
+                            db.cache_approval(
+                                a["id"],
+                                a["type"],
+                                a["title"],
+                                a.get("description"),
+                                a.get("amount"),
+                            )
 
             jobs = await api.get_pending_jobs()
             for job in jobs:
@@ -245,13 +314,13 @@ async def polling_task(
                         job.get("payload"),
                     )
 
-            backoff.success()
-        except Exception as e:
-            console.print(f"[dim red]Polling error: {e}[/dim red]")
-            backoff.failure()
-            if backoff.terminal:
-                logger.warning("polling_task: reached max_attempts — stopping task")
-                break
+                backoff.success()
+            except Exception as e:
+                console.print(f"[dim red]Polling error: {e}[/dim red]")
+                backoff.failure()
+                if backoff.terminal:
+                    logger.warning("polling_task: reached max_attempts — stopping task")
+                    break
 
         try:
             await asyncio.wait_for(
@@ -359,12 +428,13 @@ async def activity_flush_task(
     api,
     db,
     talos_config: dict,
+    task_slots: asyncio.Semaphore | None = None,
 ) -> None:
     """Flush buffered activity logs to Web API."""
     backoff = DurableBackoff(
         task_name="activity_flush",
         db=db,
-        base_delay=30,
+        base_delay=ACTIVITY_FLUSH_INTERVAL_SECONDS,
         jitter_identity=settings.talos_id,
     )
     await _wait_for_restored_deadline(shutdown_event, backoff)
@@ -390,6 +460,25 @@ async def activity_flush_task(
                     "activity_flush_task: reached max_attempts — stopping task"
                 )
                 break
+            try:
+                with _traced_task_run("activity_flush", talos_config):
+                    pending = db.get_pending_activities()
+                    if pending:
+                        for act in pending:
+                            await api.report_activity(
+                                settings.talos_id,
+                                type_=act["type"],
+                                content=act["content"],
+                                channel=act["channel"],
+                            )
+                        db.mark_activities_sent([a["id"] for a in pending])
+                backoff.success()
+            except Exception as e:
+                logger.debug(f"Activity flush error: {e}")
+                backoff.failure()
+                if backoff.terminal:
+                    logger.warning("activity_flush_task: reached max_attempts — stopping task")
+                    break
 
         try:
             await asyncio.wait_for(
@@ -410,13 +499,14 @@ async def learning_cycle_task(
     db,
     ensure_browser_healthy,
     effective_clock: "ClockProtocol",
+    task_slots: asyncio.Semaphore | None = None,
 ) -> None:
     """Run a dedicated learning cycle every 6 hours: measure → review → evolve."""
     from talos_agent.agent.context import AgentContext
     from talos_agent.agent.loop import agent_loop
     from talos_agent.agent.prompt import build_learning_prompt
 
-    learning_interval = 6 * 3600  # 6 hours
+    learning_interval = LEARNING_CYCLE_INTERVAL_SECONDS
 
     try:
         await asyncio.wait_for(shutdown_event.wait(), timeout=learning_interval)
@@ -425,8 +515,8 @@ async def learning_cycle_task(
         pass
 
     while not shutdown_event.is_set():
-        async with agent_lock:
-            if shutdown_event.is_set():
+        async with agent_lock, _task_slot(task_slots, shutdown_event) as has_slot:
+            if shutdown_event.is_set() or not has_slot:
                 break
 
             if not await ensure_browser_healthy():
@@ -481,6 +571,7 @@ async def dividend_distribution_task(
     db,
     talos_config: dict,
     effective_clock: "ClockProtocol",
+    task_slots: asyncio.Semaphore | None = None,
 ) -> None:
     """Periodically check USDC balance and distribute dividends to patrons."""
     distribution_interval = settings.dividend_distribution_interval
@@ -522,6 +613,32 @@ async def dividend_distribution_task(
                 except asyncio.TimeoutError:
                     continue
 
+            execution = _reserve_execution(db, "dividend_distribution")
+            if execution is None:
+                result = "uncertain"
+            else:
+                try:
+                    with _traced_task_run("dividend_distribution", talos_config):
+                        result = await run_dividend_distribution(
+                            talos_id=settings.talos_id,
+                            talos_config=talos_config,
+                            settings=settings,
+                            stellar=stellar,
+                            api=api,
+                            db=db,
+                            execution_id=execution["execution_id"],
+                        )
+                    _finish_execution(
+                        db,
+                        execution,
+                        "succeeded" if result == "success" else "retryable",
+                    )
+                except asyncio.CancelledError:
+                    _finish_execution(db, execution, "uncertain")
+                    raise
+                except Exception:
+                    _finish_execution(db, execution, "uncertain")
+                    raise
             metrics.record_schedule_lateness(
                 "dividend_distribution",
                 decision.policy,
@@ -548,15 +665,18 @@ async def dividend_distribution_task(
                 for _ in range(decision.runs_to_execute):
                     if shutdown_event.is_set():
                         break
-                    with _traced_task_run("dividend_distribution", talos_config):
-                        result = await run_dividend_distribution(
-                            talos_id=settings.talos_id,
-                            talos_config=talos_config,
-                            settings=settings,
-                            stellar=stellar,
-                            api=api,
-                            db=db,
-                        )
+                    async with _task_slot(task_slots, shutdown_event) as has_slot:
+                        if not has_slot:
+                            break
+                        with _traced_task_run("dividend_distribution", talos_config):
+                            result = await run_dividend_distribution(
+                                talos_id=settings.talos_id,
+                                talos_config=talos_config,
+                                settings=settings,
+                                stellar=stellar,
+                                api=api,
+                                db=db,
+                            )
 
             _RESULT_MESSAGES = {
                 "no_wallet": (
@@ -608,11 +728,12 @@ async def loan_repayment_task(
     api,
     db,
     talos_config: dict,
+    task_slots: asyncio.Semaphore | None = None,
 ) -> None:
     """Monitor and auto-repay loan interests. Runs every 24 hours."""
     from talos_agent.payments.stellar_kit import StellarKit
 
-    repayment_interval = 24 * 3600
+    repayment_interval = LOAN_REPAYMENT_INTERVAL_SECONDS
 
     try:
         await asyncio.wait_for(shutdown_event.wait(), timeout=repayment_interval)
@@ -623,22 +744,30 @@ async def loan_repayment_task(
     stellar_kit = StellarKit(api)
 
     while not shutdown_event.is_set():
-        async with agent_lock:
-            if shutdown_event.is_set():
+        async with agent_lock, _task_slot(task_slots, shutdown_event) as has_slot:
+            if shutdown_event.is_set() or not has_slot:
                 break
-            try:
-                with _traced_task_run("loan_repayment", talos_config):
-                    result = await run_loan_repayment(
-                        settings=settings,
-                        stellar_kit=stellar_kit,
-                        api=api,
-                        db=db,
+            execution = _reserve_execution(db, "loan_repayment")
+            if execution is not None:
+                try:
+                    with _traced_task_run("loan_repayment", talos_config):
+                        result = await run_loan_repayment(
+                            settings=settings,
+                            stellar_kit=stellar_kit,
+                            api=api,
+                            db=db,
+                            execution_id=execution["execution_id"],
+                        )
+                    _finish_execution(db, execution, "succeeded")
+                    console.print(
+                        f"[bold cyan]Loan repayment cycle complete: {result}[/bold cyan]"
                     )
-                console.print(
-                    f"[bold cyan]Loan repayment cycle complete: {result}[/bold cyan]"
-                )
-            except Exception as e:
-                console.print(f"[red]Loan repayment cycle error: {e}[/red]")
+                except asyncio.CancelledError:
+                    _finish_execution(db, execution, "uncertain")
+                    raise
+                except Exception as e:
+                    _finish_execution(db, execution, "uncertain")
+                    console.print(f"[red]Loan repayment cycle error: {e}[/red]")
         try:
             await asyncio.wait_for(shutdown_event.wait(), timeout=repayment_interval)
             break
@@ -654,6 +783,7 @@ async def telemetry_log_task(
     talos_config: dict,
     adapter_health_reporter,
     policy_engine,
+    task_slots: asyncio.Semaphore | None = None,
 ) -> None:
     """Periodically log runtime telemetry for operator observability.
 
@@ -662,7 +792,7 @@ async def telemetry_log_task(
     """
     from talos_agent.telemetry import TelemetryCollector
 
-    telemetry_interval = 30 * 60  # 30 minutes
+    telemetry_interval = TELEMETRY_INTERVAL_SECONDS
 
     try:
         await asyncio.wait_for(shutdown_event.wait(), timeout=telemetry_interval)
@@ -671,20 +801,23 @@ async def telemetry_log_task(
         pass
 
     while not shutdown_event.is_set():
-        try:
-            collector = TelemetryCollector(
-                db=db,
-                agent_name=talos_config.get("name", settings.talos_id),
-            )
-            report = collector.collect(
-                cb_registry=cb_registry,
-                policy_engine=policy_engine if policy_engine.enabled else None,
-            )
+        async with _task_slot(task_slots, shutdown_event) as has_slot:
+            if not has_slot:
+                break
             try:
-                health_report = await adapter_health_reporter.report()
-                collector.add_adapter_health(report, health_report.adapters)
-            except Exception as _ah_exc:
-                logger.debug("Telemetry adapter health probe failed: %s", _ah_exc)
+                collector = TelemetryCollector(
+                    db=db,
+                    agent_name=talos_config.get("name", settings.talos_id),
+                )
+                report = collector.collect(
+                    cb_registry=cb_registry,
+                    policy_engine=policy_engine if policy_engine.enabled else None,
+                )
+                try:
+                    health_report = await adapter_health_reporter.report()
+                    collector.add_adapter_health(report, health_report.adapters)
+                except Exception as _ah_exc:
+                    logger.debug("Telemetry adapter health probe failed: %s", _ah_exc)
 
             log.info(
                 "telemetry_snapshot",
@@ -732,6 +865,7 @@ async def job_effect_dispatch_task(
     settings: "Settings",
     db,
     job_effect_dispatcher,
+    task_slots: asyncio.Semaphore | None = None,
 ) -> None:
     """Recover and dispatch durable provider-job effects."""
     if job_effect_dispatcher is None:
@@ -745,22 +879,25 @@ async def job_effect_dispatch_task(
     )
     await _wait_for_restored_deadline(shutdown_event, backoff)
     while not shutdown_event.is_set():
-        try:
-            result = await job_effect_dispatcher.dispatch_once()
-            if result["claimed"]:
-                log.info(
-                    "job_effect_dispatch_batch",
-                    claimed=result["claimed"],
-                    succeeded=result["succeeded"],
-                    retryable=result["retryable"],
-                    indeterminate=result["indeterminate"],
-                    conflict=result["conflict"],
-                    dead=result["dead"],
-                )
-            backoff.success()
-        except Exception:
-            log.error("job_effect_dispatch_batch_failed", error_code="batch_failure")
-            backoff.failure()
+        async with _task_slot(task_slots, shutdown_event) as has_slot:
+            if not has_slot:
+                break
+            try:
+                result = await job_effect_dispatcher.dispatch_once()
+                if result["claimed"]:
+                    log.info(
+                        "job_effect_dispatch_batch",
+                        claimed=result["claimed"],
+                        succeeded=result["succeeded"],
+                        retryable=result["retryable"],
+                        indeterminate=result["indeterminate"],
+                        conflict=result["conflict"],
+                        dead=result["dead"],
+                    )
+                backoff.success()
+            except Exception:
+                log.error("job_effect_dispatch_batch_failed", error_code="batch_failure")
+                backoff.failure()
         try:
             await asyncio.wait_for(
                 shutdown_event.wait(), timeout=backoff.delay_until_next_attempt()

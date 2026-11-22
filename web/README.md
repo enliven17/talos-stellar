@@ -250,6 +250,7 @@ Limits are stored in two Postgres tables (added in migration `0013_add_quota_tab
 
 - `tls_quota_configs` — one row per `(talosId, resource)` with limit, window, and enabled flag. A `NULL` `talosId` row is the platform default applied when no agent-specific row exists.
 - `tls_quota_usage` — one row per `(talosId, resource, windowStart)`. The counter is incremented atomically via `INSERT … ON CONFLICT DO UPDATE` so concurrent requests never double-count.
+- `tls_quota_scope_usage` — bounded per-scope counters for the current window (added in migration `0023_add_quota_scope_usage`). These are observability breakdowns only; `tls_quota_usage` remains authoritative for the total limit and enforcement.
 
 The increment-then-check pattern costs one DB round-trip per request with no distributed locking.
 
@@ -259,15 +260,15 @@ The increment-then-check pattern costs one DB round-trip per request with no dis
 
 Every 2xx write response includes quota state headers:
 
-| Header              | Value                                           |
-| ------------------- | ----------------------------------------------- |
-| `X-Quota-Limit`     | Effective limit for this window                 |
-| `X-Quota-Remaining` | Remaining calls after this one                  |
-| `X-Quota-Used`      | Total calls used in this window                 |
-| `X-Quota-Reset`     | Unix timestamp (seconds) when the window resets |
-| `X-Quota-Resource`  | Which resource was checked                      |
+| Header              | Value                                                                      |
+| ------------------- | -------------------------------------------------------------------------- |
+| `X-Quota-Limit`     | Effective limit for this window                                            |
+| `X-Quota-Remaining` | Remaining calls after this one                                             |
+| `X-Quota-Used`      | Total calls used in this window                                            |
+| `X-Quota-Reset`     | Unix timestamp (seconds) when the window resets (omitted if unknown/invalid) |
+| `X-Quota-Resource`  | Which resource was checked                                                 |
 
-When a limit is exceeded the API returns `429 Too Many Requests` with the same headers and a JSON body:
+When a limit is exceeded the API returns `429 Too Many Requests` with the same `X-Quota-*` headers, a bounded `Retry-After` header (whole seconds), and a JSON body:
 
 ```json
 {
@@ -277,6 +278,14 @@ When a limit is exceeded the API returns `429 Too Many Requests` with the same h
   "resetAt": "2026-07-25T00:00:00.000Z"
 }
 ```
+
+#### `Retry-After` capping & unknown reset times
+
+- **Finite upper bound:** `Retry-After` on `429` quota exhaustion responses is always a finite positive integer clamped to `[1, QUOTA_MAX_RETRY_AFTER_SECONDS]` (default `3600` seconds, hard ceiling `86400` seconds), preventing multi-day or unbounded delays on daily/monthly quota windows.
+- **Unknown or invalid reset times:** when `resetAt` is missing, `null`, non-finite, or otherwise invalid, `Retry-After` falls back to `QUOTA_UNKNOWN_RESET_RETRY_AFTER_SECONDS` (default `60` seconds, capped by `QUOTA_MAX_RETRY_AFTER_SECONDS`), `X-Quota-Reset` is omitted (never negative, `"NaN"`, or `"Infinity"`), and the JSON body emits `"resetAt": null`.
+- **Optional environment variables:**
+  - `QUOTA_MAX_RETRY_AFTER_SECONDS` — maximum `Retry-After` header value in seconds (integer `1–86400`, default `3600`).
+  - `QUOTA_UNKNOWN_RESET_RETRY_AFTER_SECONDS` — fallback `Retry-After` delay in seconds when the reset time is unknown (integer `1–86400`, default `60`).
 
 ### Reading and overriding quotas
 
@@ -306,7 +315,18 @@ Response:
         "remaining": 458,
         "limit": 500,
         "resetAt": "2026-07-25T00:00:00.000Z",
-        "ok": true
+        "ok": true,
+        "byScope": {
+          "activity:write": 42,
+          "commerce:read": 0,
+          "commerce:write": 0,
+          "wallet:read": 0,
+          "wallet:sign": 0,
+          "settings:read": 0,
+          "settings:write": 0,
+          "revenue:read": 0,
+          "revenue:write": 0
+        }
       }
     }
   }

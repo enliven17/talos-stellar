@@ -84,6 +84,10 @@ Policies are JSON files or Python dataclasses. Example:
 
 Save to `~/.talos-agent/policies.json`.  The engine hot-reloads on file change.
 
+Each `rule_id` must be non-empty and unique across the complete loaded policy
+set. Duplicate or empty identifiers are rejected before policies are installed;
+rule IDs remain the stable link between decision traces and policy overrides.
+
 ### Supported operators
 
 | Operator | Description |
@@ -93,6 +97,16 @@ Save to `~/.talos-agent/policies.json`.  The engine hot-reloads on file change.
 | `in`, `not_in` | Set membership |
 | `exists` | Field is present and non-null |
 | `regex` | Field matches the pattern in `value` |
+| `glob` | Field matches `*`, `?`, and character-class wildcards in `value` |
+
+Glob patterns support `*` (zero or more characters other than `/`), `?`
+(exactly one character other than `/`), `[abc]` and `[a-z]` (character
+classes), and `[!abc]` (negated character classes). Character classes match
+their explicit members, including `/`; `[[]` matches a literal `[`. Repeated
+`*` characters have the same behavior as `*` and do not match `/`. Empty,
+unclosed, or malformed character classes are rejected while policies are
+loaded; the agent will not silently ignore the invalid policy or fall back to
+built-in defaults.
 
 ### Field paths
 
@@ -205,6 +219,22 @@ Traces include per-rule and per-condition steps.  Secret-shaped fields
 (`api_key`, `seed`, `token`, `payment_proof`, etc.) are redacted as
 `[redacted]` and never logged or returned in cleartext.  BLOCKER
 short-circuits still emit the full trace up to the denying rule.
+
+### Dry-run policy coverage
+
+Simulation traces can be aggregated without exposing action parameters:
+
+```python
+report = sim.coverage_report(simulate_batch_results)
+print(report.to_dict())
+```
+
+Coverage is based only on rule steps present in the redacted traces. Each
+observed rule reports its `matched` and `not_matched` branches as exercised or
+unexercised. A rule omitted from every trace, including a rule after a blocker
+short-circuit, is listed under `unobserved_rules` and is not counted as tested.
+This prevents a partial dry-run cycle from falsely claiming coverage for
+rules it never reached.
 
 ## Observability
 
