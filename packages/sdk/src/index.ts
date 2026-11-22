@@ -2,6 +2,8 @@
 
 export {
   TalosClient,
+  DEFAULT_BASE_URL,
+  resolveBaseUrl,
   resolveRetryPolicy,
   resolveRetryOptions,
 } from "./client.js";
