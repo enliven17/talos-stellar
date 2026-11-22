@@ -106,6 +106,48 @@ describe("jobs/store — heartbeat", () => {
     const result = await store.heartbeat("job_1", "stale_lease");
     expect(result).toEqual({ ok: false, cancelled: false });
   });
+
+  it("checks both lease identifier and lease expiry (leaseExpiresAt > now()) in where clause", async () => {
+    const chain = chainable([{ cancelRequested: false, queue: "q" }]);
+    mockDb.update.mockReturnValue(chain);
+
+    await store.heartbeat("job_1", "lease_1");
+
+    expect(chain.where).toHaveBeenCalledTimes(1);
+    const whereCondition = chain.where.mock.calls[0][0];
+    const { PgDialect } = await import("drizzle-orm/pg-core");
+    const dialect = new PgDialect();
+    const compiled = dialect.sqlToQuery(whereCondition.getSQL());
+    expect(compiled.sql).toContain('"tls_jobs"."leaseExpiresAt" > now()');
+    expect(compiled.sql).toContain('"tls_jobs"."leaseId" = $');
+    expect(compiled.sql).toContain('"tls_jobs"."status" = $');
+    expect(compiled.params).toContain("job_1");
+    expect(compiled.params).toContain("lease_1");
+    expect(compiled.params).toContain("leased");
+  });
+
+  it("rejects heartbeat requests after lease deadline has elapsed (0 rows updated)", async () => {
+    // When the lease has expired, the WHERE clause (leaseExpiresAt > now()) matches no rows.
+    mockDb.update.mockReturnValue(chainable([]));
+    const result = await store.heartbeat("job_1", "expired_lease");
+    expect(result).toEqual({ ok: false, cancelled: false });
+  });
+
+  it("leaves expired lease eligible for reapExpiredLeases after heartbeat is rejected", async () => {
+    // 1. Worker attempts heartbeat on expired lease -> rejected without modifying db state
+    mockDb.update.mockReturnValueOnce(chainable([]));
+    const heartbeatResult = await store.heartbeat("job_expired", "lease_expired");
+    expect(heartbeatResult.ok).toBe(false);
+
+    // 2. Normal reaper runs and recovers the unmutated expired lease
+    const reapedRow = { id: "job_expired", queue: "q" };
+    mockDb.update
+      .mockReturnValueOnce(chainable([reapedRow])) // requeued
+      .mockReturnValueOnce(chainable([])); // deadLettered
+
+    const reapSummary = await store.reapExpiredLeases();
+    expect(reapSummary).toEqual({ requeued: 1, deadLettered: 0 });
+  });
 });
 
 describe("jobs/store — complete", () => {

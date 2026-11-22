@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNotNull, lt, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNotNull, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { tlsJobs } from "@/db/schema";
 import type { EnqueueOptions, JobRecord, JobStatus, RetryClass } from "./types";
@@ -160,9 +160,12 @@ export async function leaseBatch(
 /**
  * Extends a held lease and reports cooperative-cancellation state. Returns
  * `ok: false` when the lease no longer belongs to this worker (already
- * completed, reaped and re-leased elsewhere, etc.) — the caller must stop
- * processing immediately to avoid duplicate side effects racing another
- * worker.
+ * completed, reaped and re-leased elsewhere, or its lease deadline has
+ * elapsed) — the caller must stop processing immediately to avoid duplicate
+ * side effects racing another worker.
+ *
+ * Heartbeats arriving after `leaseExpiresAt` has elapsed are rejected without
+ * mutating the row, leaving expired ownership eligible for reapExpiredLeases().
  */
 export async function heartbeat(
   jobId: string,
@@ -173,7 +176,14 @@ export async function heartbeat(
   const [row] = await db
     .update(tlsJobs)
     .set({ leaseExpiresAt, heartbeatAt: sql`now()` })
-    .where(and(eq(tlsJobs.id, jobId), eq(tlsJobs.leaseId, leaseId), eq(tlsJobs.status, "leased")))
+    .where(
+      and(
+        eq(tlsJobs.id, jobId),
+        eq(tlsJobs.leaseId, leaseId),
+        eq(tlsJobs.status, "leased"),
+        gt(tlsJobs.leaseExpiresAt, sql`now()`),
+      ),
+    )
     .returning({ cancelRequested: tlsJobs.cancelRequested, queue: tlsJobs.queue });
 
   if (!row) return { ok: false, cancelled: false };
