@@ -23,6 +23,17 @@ const IDEMPOTENCY_KEY = z
 
 const REASON = z.string().min(1).max(500);
 
+const EXPECTED_STATE = z.enum([
+  "proposed",
+  "provisioning",
+  "active",
+  "paused",
+  "retiring",
+  "retired",
+  "recovery_pending",
+  "failed",
+]);
+
 /**
  * Capability grants an agent may hold. These are governance-level grants; the
  * per-tool manifests enforced inside the agent runtime are a separate, finer
@@ -93,6 +104,7 @@ export const createAgentPayloadSchema = z
     budgets: budgetsSchema,
     services: z.array(serviceSchema).max(10).default([]),
     idempotencyKey: IDEMPOTENCY_KEY.optional(),
+    expectedState: EXPECTED_STATE.optional(),
   })
   .strict();
 
@@ -105,6 +117,7 @@ export const activateAgentPayloadSchema = z
     // confirmation dialog and it is never defaulted server-side.
     confirmed: z.literal(true),
     idempotencyKey: IDEMPOTENCY_KEY.optional(),
+    expectedState: EXPECTED_STATE.optional(),
   })
   .strict();
 
@@ -116,6 +129,7 @@ export const pauseAgentPayloadSchema = z
     /** Cancel queued-but-unstarted jobs. In-flight leases always drain. */
     cancelPendingJobs: z.boolean().default(true),
     idempotencyKey: IDEMPOTENCY_KEY.optional(),
+    expectedState: EXPECTED_STATE.optional(),
   })
   .strict();
 
@@ -131,6 +145,7 @@ export const retireAgentPayloadSchema = z
     /** Where residual treasury balance is swept on retirement. */
     residualBeneficiary: STELLAR_ADDRESS.optional(),
     idempotencyKey: IDEMPOTENCY_KEY.optional(),
+    expectedState: EXPECTED_STATE.optional(),
   })
   .strict();
 
@@ -148,6 +163,7 @@ export const recoverAgentPayloadSchema = z
     forceCompensate: z.boolean().default(false),
     confirmed: z.literal(true),
     idempotencyKey: IDEMPOTENCY_KEY.optional(),
+    expectedState: EXPECTED_STATE.optional(),
   })
   .strict();
 
@@ -256,11 +272,8 @@ export function assertPrerequisites(parsed: LifecyclePayload, ctx: PrerequisiteC
       break;
 
     case "retire": {
-      if (parsed.payload.drainJobs && ctx.inFlightJobs > 0) {
-        fail("Agent still has in-flight jobs; drain them or retire with drainJobs=false", {
-          inFlightJobs: ctx.inFlightJobs,
-        });
-      }
+      // The durable retirement workflow marks the agent draining first, then
+      // waits for these jobs before stopping the runtime.
       if (parsed.payload.residualBeneficiary && !ctx.hasWallet) {
         fail("Cannot sweep residual balance: agent has no wallet");
       }

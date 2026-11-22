@@ -152,4 +152,163 @@ describe("Webhook secret rotation (zero-downtime)", () => {
       expect(generateWebhookSecret()).not.toBe(s);
     });
   });
+
+  describe("key identifier reuse rejection", () => {
+    it("derives deterministic key identifiers and compares in constant time", async () => {
+      const { deriveWebhookKeyId, isSameWebhookKey } = await import(
+        "@/lib/webhooks/signing"
+      );
+      const secretA = "whsec_active_secret_key_11111111";
+      const secretB = "whsec_rotated_secret_key_2222222";
+
+      expect(deriveWebhookKeyId(secretA)).toBe(deriveWebhookKeyId(secretA));
+      expect(deriveWebhookKeyId(secretA)).not.toBe(deriveWebhookKeyId(secretB));
+      expect(isSameWebhookKey(secretA, secretA)).toBe(true);
+      expect(isSameWebhookKey(secretA, secretB)).toBe(false);
+    });
+
+    it("rejects rotation with 409 conflict when reusing the active key identifier and preserves current key", async () => {
+      const { encryptSecret } = await import("@/lib/webhooks/signing");
+      const activeSecret = "whsec_active_secret_key_11111111";
+      const activeCiphertext = encryptSecret(activeSecret);
+
+      const updateSpy = vi.fn();
+      vi.doMock("@/db", () => ({
+        db: {
+          select: () => ({
+            from: () => ({
+              where: () => ({
+                limit: () => Promise.resolve([{ id: "sub_1", secretCiphertext: activeCiphertext }]),
+              }),
+            }),
+          }),
+          update: updateSpy,
+        },
+      }));
+
+      const { rotateWebhookSecret, WEBHOOK_SECRET_KEY_REUSE_ERROR_CODE } = await import(
+        "@/lib/webhooks/rotation"
+      );
+
+      const result = await rotateWebhookSecret({
+        subscriptionId: "sub_1",
+        talosId: "talos_1",
+        newSecret: activeSecret,
+      });
+
+      expect(result).toEqual({
+        error: "New webhook secret must not reuse the active key identifier",
+        code: WEBHOOK_SECRET_KEY_REUSE_ERROR_CODE,
+        status: 409,
+      });
+      // Current signing key and pending deliveries remain untouched (no DB update)
+      expect(updateSpy).not.toHaveBeenCalled();
+
+      vi.doUnmock("@/db");
+    });
+
+    it("rotates successfully when new secret has a distinct key identifier", async () => {
+      const { encryptSecret, decryptSecret } = await import("@/lib/webhooks/signing");
+      const activeSecret = "whsec_active_secret_key_11111111";
+      const nextSecret = "whsec_rotated_secret_key_2222222";
+      const activeCiphertext = encryptSecret(activeSecret);
+
+      let capturedSet: Record<string, unknown> | null = null;
+      vi.doMock("@/db", () => ({
+        db: {
+          select: () => ({
+            from: () => ({
+              where: () => ({
+                limit: () => Promise.resolve([{ id: "sub_1", secretCiphertext: activeCiphertext }]),
+              }),
+            }),
+          }),
+          update: () => ({
+            set: (vals: Record<string, unknown>) => {
+              capturedSet = vals;
+              return {
+                where: () => ({
+                  returning: () =>
+                    Promise.resolve([
+                      {
+                        id: "sub_1",
+                        secretRotatedAt: vals.secretRotatedAt,
+                        previousSecretExpiresAt: vals.previousSecretExpiresAt,
+                      },
+                    ]),
+                }),
+              };
+            },
+          }),
+        },
+      }));
+
+      const { rotateWebhookSecret } = await import("@/lib/webhooks/rotation");
+
+      const result = await rotateWebhookSecret({
+        subscriptionId: "sub_1",
+        talosId: "talos_1",
+        newSecret: nextSecret,
+        graceSeconds: 600,
+      });
+
+      expect("error" in result).toBe(false);
+      if (!("error" in result)) {
+        expect(result.id).toBe("sub_1");
+        expect(result.rotationActive).toBe(true);
+        expect(result.graceSeconds).toBe(600);
+      }
+      expect(capturedSet).not.toBeNull();
+      expect(capturedSet!.previousSecretCiphertext).toBe(activeCiphertext);
+      expect(decryptSecret(capturedSet!.secretCiphertext as string)).toBe(nextSecret);
+
+      vi.doUnmock("@/db");
+    });
+
+    it("allows recovery rotation when stored active ciphertext cannot be decrypted", async () => {
+      const nextSecret = "whsec_recovery_secret_key_333333";
+
+      const updateSpy = vi.fn(() => ({
+        set: (vals: Record<string, unknown>) => ({
+          where: () => ({
+            returning: () =>
+              Promise.resolve([
+                {
+                  id: "sub_corrupt",
+                  secretRotatedAt: vals.secretRotatedAt,
+                  previousSecretExpiresAt: vals.previousSecretExpiresAt,
+                },
+              ]),
+          }),
+        }),
+      }));
+
+      vi.doMock("@/db", () => ({
+        db: {
+          select: () => ({
+            from: () => ({
+              where: () => ({
+                limit: () =>
+                  Promise.resolve([{ id: "sub_corrupt", secretCiphertext: "deadbeef_corrupted" }]),
+              }),
+            }),
+          }),
+          update: updateSpy,
+        },
+      }));
+
+      const { rotateWebhookSecret } = await import("@/lib/webhooks/rotation");
+
+      const result = await rotateWebhookSecret({
+        subscriptionId: "sub_corrupt",
+        talosId: "talos_1",
+        newSecret: nextSecret,
+      });
+
+      expect("error" in result).toBe(false);
+      expect(updateSpy).toHaveBeenCalledTimes(1);
+
+      vi.doUnmock("@/db");
+    });
+  });
 });

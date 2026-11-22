@@ -6,6 +6,7 @@ from talos_agent.db.repos.config import ConfigRepo
 from talos_agent.db.repos.content import ContentRepo
 from talos_agent.db.repos.cycles import CyclesRepo
 from talos_agent.db.repos.dividends import DividendRepo
+from talos_agent.db.repos.executions import TaskExecutionRepo
 from talos_agent.db.repos.jobs import JobsRepo
 from talos_agent.db.repos.learnings import LearningsRepo
 from talos_agent.db.repos.loans import LoanRepo
@@ -20,6 +21,7 @@ __all__ = [
     "ContentRepo",
     "CyclesRepo",
     "DividendRepo",
+    "TaskExecutionRepo",
     "JobsRepo",
     "LearningsRepo",
     "LoanRepo",
