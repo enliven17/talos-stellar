@@ -43,6 +43,34 @@ import { tlsQuotaConfigs, tlsQuotaScopeUsage, tlsQuotaUsage } from "@/db/schema"
 import { VALID_SCOPES, type Scope } from "@/lib/api-scopes";
 import type { db as appDb } from "@/db";
 
+// ─── Limit validation ─────────────────────────────────────────────────────────
+
+/**
+ * Typed error returned when a quota configuration row contains an unsafe limit.
+ * Callers can distinguish this from a normal QuotaResult via the `type` discriminant.
+ */
+export class QuotaConfigError extends Error {
+  readonly type = "QuotaConfigError" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "QuotaConfigError";
+  }
+}
+
+/**
+ * Returns true when `value` is a finite, positive integer within JS safe-integer
+ * range.  Values outside this range corrupt quota arithmetic — e.g. floats produce
+ * fractional remaining counts, and values above Number.MAX_SAFE_INTEGER lose
+ * precision when incremented.
+ */
+export function validateQuotaLimit(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value > 0
+  );
+}
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 /** Supported resource identifiers. */
@@ -215,6 +243,11 @@ export async function resolveQuotaConfig(
   // Agent-specific override takes precedence
   const agentRow = rows.find((r) => r.talosId === talosId);
   if (agentRow) {
+    if (!validateQuotaLimit(agentRow.maxCount)) {
+      throw new QuotaConfigError(
+        `Unsafe quota limit for agent "${talosId}" resource "${resource}": maxCount=${agentRow.maxCount}`,
+      );
+    }
     return {
       talosId: agentRow.talosId,
       resource: agentRow.resource as QuotaResource,
@@ -228,6 +261,11 @@ export async function resolveQuotaConfig(
   // Platform default
   const platformRow = rows.find((r) => r.talosId === null);
   if (platformRow) {
+    if (!validateQuotaLimit(platformRow.maxCount)) {
+      throw new QuotaConfigError(
+        `Unsafe platform quota limit for resource "${resource}": maxCount=${platformRow.maxCount}`,
+      );
+    }
     return {
       talosId: null,
       resource: platformRow.resource as QuotaResource,
