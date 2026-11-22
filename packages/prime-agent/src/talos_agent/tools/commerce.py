@@ -30,6 +30,7 @@ from talos_agent.tools.permissions import (
     ToolPermissions,
 )
 from talos_agent.tools.registry import tool
+from talos_agent.response_bounds import bounded_error_body
 
 if TYPE_CHECKING:
     from talos_agent.api_client import TalosAPIClient
@@ -134,7 +135,7 @@ async def purchase_service(talos_id: str, service_type: str = "", payload: str =
     response = await _deps().api.get_service(talos_id, service_type=service_type or None)
 
     if response.status_code != 402:
-        return {"error": f"Expected 402, got {response.status_code}", "body": response.text[:200]}
+        return {"error": f"Expected 402, got {response.status_code}", "body": bounded_error_body(response.content, 200)}
 
     # Parse 402 response
     payment_details = response.json()

@@ -6,6 +6,8 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from talos_agent.response_bounds import MAX_REMOTE_ERROR_BODY_BYTES, bounded_error_body
+
 MAX_PROVIDER_LENGTH = 64
 MAX_ACCOUNT_LENGTH = 64
 MAX_OPERATION_LENGTH = 64
@@ -24,6 +26,10 @@ _VALID_OPERATIONS = frozenset({"post", "reply", "get_mentions", "search", "get_p
 _VALID_STATUSES = frozenset({"succeeded", "failed", "timed_out", "denied"})
 _VALID_CAPABILITIES = frozenset({"secret", "network", "browser", "browser_host", "filesystem_read", "filesystem_write", "tool", "manifest", "operation"})
 _VALID_RESOURCES = frozenset({"input", "output", "request", "network_requests", "network_response", "browser_actions"})
+
+__all__ = ["MAX_REMOTE_ERROR_BODY_BYTES", "bounded_error_body", "safe_adapter_diagnostic_fields"]
+
+
 
 
 def _redact(value: Any, seen: set[int] | None = None) -> Any:
