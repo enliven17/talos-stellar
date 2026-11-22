@@ -529,6 +529,7 @@ export const tlsWebhookSubscriptions = pgTable(
     eventTypes: text("event_types").array().notNull().default([]),
     description: text("description"),
     active: boolean("active").notNull().default(true),
+    paused: boolean("paused").notNull().default(false),
 
     createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
@@ -593,6 +594,9 @@ export const tlsStellarTxRecords = pgTable(
 
     // The Stellar transaction hash being tracked (unique per record)
     txHash: text("tx_hash").notNull(),
+
+    // Pinned Stellar network identity (network passphrase) against which this payment is tracked
+    networkPassphrase: text("network_passphrase"),
 
     // Which subsystem originated the tx: "commerce_job" | "token_purchase" | "other"
     sourceType: text("source_type").notNull().default("other"),
@@ -946,6 +950,9 @@ export const tlsOutboxEvents = pgTable(
 
     lastError: text("lastError"),
 
+    // Lineage link to original failed attempt when requeued from dead_letter. Nullable.
+    originalEventId: text("originalEventId"),
+
     createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
     updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
     dispatchedAt: timestamp("dispatchedAt", { mode: "date", precision: 3 }),
@@ -1011,6 +1018,50 @@ export const tlsQuotaUsage = pgTable(
   ],
 );
 
+// Optional per-scope usage breakdown. The total counter above remains the
+// source of truth for quota enforcement; this table is observability only.
+export const tlsQuotaScopeUsage = pgTable(
+  "tls_quota_scope_usage",
+  {
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    resource: text("resource").notNull(),
+    scope: text("scope").notNull(),
+    windowStart: timestamp("windowStart", { mode: "date", precision: 3 }).notNull(),
+    count: integer("count").notNull().default(0),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("tls_quota_scope_usage_key").on(t.talosId, t.resource, t.scope, t.windowStart),
+    index("tls_quota_scope_usage_talosId_resource_idx").on(t.talosId, t.resource),
+  ],
+);
+
+// ─── Quota Adjustment Audit Trail ────────────────────────────────
+//
+// Append-only record of every quota policy change: who (actor), why (reason),
+// the prior policy and the new policy. Never stores API credentials; free-text
+// fields are redacted before insert (see lib/quota-audit.ts).
+
+export const tlsQuotaAdjustments = pgTable(
+  "tls_quota_adjustments",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    resource: text("resource").notNull(),
+    actor: text("actor").notNull(),
+    reason: text("reason").notNull(),
+    priorPolicy: jsonb("priorPolicy").notNull(),
+    newPolicy: jsonb("newPolicy").notNull(),
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tls_quota_adjustments_talosId_createdAt_idx").on(t.talosId, t.createdAt),
+  ],
+);
+
 // ─── Backup Runs (DR audit trail) ──────────────────────────────────
 
 export const tlsBackupRuns = pgTable(
@@ -1058,13 +1109,16 @@ export const tlsLeaderboardAggregates = pgMaterializedView(
 
 export const capabilities = pgTable("capabilities", {
   id: uuid("id").primaryKey().defaultRandom(),
-  name: text("name").notNull().unique(),
+  name: text("name").notNull(),
+  version: integer("version").notNull().default(1),
   description: text("description").notNull(),
   category: text("category").notNull(),
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { mode: "date" }).defaultNow().notNull(),
-});
+}, (t) => [
+  uniqueIndex("capabilities_name_version_unique").on(t.name, t.version),
+]);
 
 export const marketplaceItems = pgTable("marketplace_items", {
   id: uuid("id").primaryKey().defaultRandom(),

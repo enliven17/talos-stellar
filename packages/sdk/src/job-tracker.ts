@@ -245,6 +245,15 @@ export interface TrackJobOptions {
   maxStreamReconnectAttempts?: number;
 
   /**
+   * Milliseconds without a new progress update before the tracker reports `stale`.
+   * Set to `0` to disable stale-state notifications. Default: 30_000ms.
+   */
+  staleAfterMs?: number;
+
+  /** Called for each observable job-tracker lifecycle transition. */
+  onStateChange?: (transition: JobTrackerStateChange) => void;
+
+  /**
    * Whether to prefer SSE first before falling back to polling.
    * Default: true. Set to false to disable SSE and use polling only.
    */
@@ -261,6 +270,24 @@ export interface TrackJobOptions {
 
   /** Auth header override (e.g. `"Bearer <token>"`). */
   authHeader?: string;
+}
+
+/** Observable lifecycle states emitted by a {@link JobTracker}. */
+export type JobTrackerState =
+  | "connecting"
+  | "streaming"
+  | "polling"
+  | "stale"
+  | "terminal";
+
+/** Details for an observable job-tracker lifecycle transition. */
+export interface JobTrackerStateChange {
+  jobId: string;
+  state: JobTrackerState;
+  previousState?: JobTrackerState;
+  changedAt: Date;
+  source?: "stream" | "poll";
+  status?: string;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -309,6 +336,7 @@ function computeEventFingerprint(
  *   and concludes with the final result event.
  * - On `const { value, done } = await tracker.next()`: when `done: true`, `value` is the final `CommerceJob`.
  * - Property `tracker.result`: a Promise resolving to the final `CommerceJob`.
+ * Terminal states stop the event stream and polling timers before final result lookup.
  */
 export class JobTracker implements AsyncIterableIterator<TrackJobEvent, CommerceJob> {
   public readonly jobId: string;
@@ -337,15 +365,26 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
   // Lifecycle flags
   private isTerminal = false;
   private isClosed = false;
+  private isCleanedUp = false;
   private isPolling = false;
   private isFallbackEngaged = false;
+  private trackerState: JobTrackerState = "connecting";
+  private hasReportedState = false;
 
   private stream?: TalosEventStream;
   private deadlineTimer?: ReturnType<typeof setTimeout>;
+  private staleTimer?: ReturnType<typeof setTimeout>;
   private lastSeenResult?: unknown;
   private lastSeenJob?: unknown;
 
   constructor(client: TalosClient, jobId: string, options: TrackJobOptions = {}) {
+    if (
+      options.staleAfterMs !== undefined &&
+      (!Number.isFinite(options.staleAfterMs) || options.staleAfterMs < 0)
+    ) {
+      throw new RangeError("staleAfterMs must be a non-negative finite number");
+    }
+
     this.client = client;
     this.jobId = jobId;
     this.options = options;
@@ -410,9 +449,9 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
     return this.isFallbackEngaged;
   }
 
-  /** Serialize the latest SSE cursor, or retain the supplied cursor before a new event arrives. */
-  serializeCursor(): string | undefined {
-    return this.stream?.serializeCursor() ?? this.options.cursor;
+  /** Current observable tracking state. */
+  get state(): JobTrackerState {
+    return this.trackerState;
   }
 
   // ── AsyncIterator Protocol ──────────────────────────────────────────────────
@@ -433,17 +472,19 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
   }
 
   async return(value?: CommerceJob | PromiseLike<CommerceJob>): Promise<IteratorResult<TrackJobEvent, CommerceJob>> {
+    this.isClosed = true;
     this.cleanup();
     const resolved = await Promise.resolve(value as CommerceJob);
     return { done: true, value: resolved };
   }
 
   async throw(e?: unknown): Promise<IteratorResult<TrackJobEvent, CommerceJob>> {
+    this.isClosed = true;
     this.cleanup();
     throw e;
   }
 
-  /** Manually abort tracking. Cleans up streams, polling, and timers. */
+  /** Manually abort tracking. Cleans up streams, polling, and timers; safe to repeat. */
   abort(reason?: unknown): void {
     const err = reason instanceof Error ? reason : new JobTrackAbortedError(this.jobId);
     this.handleAbort(err);
@@ -483,6 +524,7 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
       return;
     }
 
+    this.setState("connecting");
     const clientAny = this.client as any;
     const chaos = this.options.chaosInjector ?? clientAny.getChaosInjector?.() ?? clientAny.chaosInjector;
 
@@ -500,7 +542,21 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
       });
 
       this.stream.on("event", (evt) => {
-        void this.handleStreamEvent(evt);
+        void this.handleStreamEvent(evt).catch((error: unknown) => {
+          this.handleTrackingError(error);
+        });
+      });
+
+      this.stream.on("state", (state) => {
+        if (this.isTerminal || this.isClosed) return;
+        if (state === "open") {
+          this.setState("streaming");
+        } else if (
+          (state === "connecting" || state === "reconnecting") &&
+          !this.isPolling
+        ) {
+          this.setState("connecting");
+        }
       });
 
       this.stream.on("error", (err, attempt) => {
@@ -550,8 +606,8 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
       if (status === "completed") {
         await this.completeJob({
           status: "completed",
-          result: payload?.result ?? this.lastSeenResult,
-          job: this.lastSeenJob,
+          result: payload?.result !== undefined ? payload.result : this.lastSeenResult,
+          job: payload,
           source: "stream",
         });
       } else {
@@ -628,6 +684,7 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
     };
 
     this.enqueue({ kind: "value", value: event });
+    this.markFresh("streaming", "stream");
   }
 
   // ── Polling Fallback ────────────────────────────────────────────────────────
@@ -637,6 +694,8 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
       return;
     }
     this.isPolling = true;
+    this.setState("polling");
+    this.stream?.close();
     void this.runPollingLoop();
   }
 
@@ -747,6 +806,7 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
     };
 
     this.enqueue({ kind: "value", value: event });
+    this.markFresh("polling", "poll");
   }
 
   // ── Terminal Outcomes ───────────────────────────────────────────────────────
@@ -762,6 +822,7 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
   }): Promise<void> {
     if (this.isTerminal) return;
     this.isTerminal = true;
+    this.cleanup();
 
     let finalJob: CommerceJob;
     if (details.job && details.job.id && details.result !== undefined) {
@@ -779,23 +840,27 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
       };
     } else {
       try {
+        finalJob = await this.client.getJobResult(this.jobId);
+      } catch {
+        finalJob = {
+          ...details.job,
+          id: this.jobId,
+          status: details.status,
+          result: details.result !== undefined ? details.result : details.job.result,
+        };
+      } else {
         finalJob = await this.client.getJobResult(this.jobId, {
           signal: this.abortController.signal,
         });
-      } catch {
-        finalJob = {
-          id: this.jobId,
-          status: details.status,
-          result: details.result,
-          talosId: "",
-          requesterTalosId: "",
-          serviceName: "",
-          amount: "0",
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
       }
+    } catch (error) {
+      this.handleTrackingError(error);
+      return;
     }
+
+    if (this.isTerminal || this.isClosed) return;
+    this.isTerminal = true;
+    this.setState("terminal", { source: details.source, status: details.status });
 
     const resultEvent: TrackJobEvent = {
       type: "result",
@@ -809,7 +874,7 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
       percent: details.percent ?? 100,
       stage: details.stage ?? "completed",
       message: details.message ?? null,
-      result: finalJob.result ?? details.result,
+      result: finalJob.result !== undefined ? finalJob.result : details.result,
       source: details.source,
       receivedAt: new Date(),
       raw: finalJob,
@@ -818,12 +883,12 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
     this.enqueue({ kind: "value", value: resultEvent });
     this.enqueue({ kind: "return", value: finalJob });
     this.resolveResult(finalJob);
-    this.cleanup();
   }
 
   private async failJob(status: string, job?: any): Promise<void> {
     if (this.isTerminal) return;
     this.isTerminal = true;
+    this.setState("terminal", { status });
     this.cleanup();
 
     const commerceJob: CommerceJob = {
@@ -872,6 +937,18 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
     if (this.isClosed || this.isTerminal) return;
     this.isClosed = true;
     this.isTerminal = true;
+    this.setState("terminal", {
+      status: error instanceof JobTrackTimeoutError ? "timeout" : "aborted",
+    });
+    this.cleanup();
+    this.enqueue({ kind: "error", error });
+    this.rejectResult(error);
+  }
+
+  private handleTrackingError(error: unknown): void {
+    if (this.isClosed || this.isTerminal) return;
+    this.isTerminal = true;
+    this.setState("terminal", { status: "error" });
     this.cleanup();
     this.enqueue({ kind: "error", error });
     this.rejectResult(error);
@@ -904,6 +981,8 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
   }
 
   private cleanup(): void {
+    if (this.isCleanedUp) return;
+    this.isCleanedUp = true;
     if (this.stream) {
       try {
         this.stream.close();
@@ -916,6 +995,64 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
     }
     this.activeTimers.clear();
     this.abortController.abort();
+  }
+
+  private setState(
+    state: JobTrackerState,
+    details: { source?: "stream" | "poll"; status?: string } = {},
+  ): void {
+    const previousState = this.hasReportedState ? this.trackerState : undefined;
+    if (!this.hasReportedState || previousState !== state) {
+      this.trackerState = state;
+      this.hasReportedState = true;
+      try {
+        this.options.onStateChange?.({
+          jobId: this.jobId,
+          state,
+          previousState,
+          changedAt: new Date(),
+          ...details,
+        });
+      } catch (error) {
+        this.logger?.error("track_job:state_handler_error", {
+          jobId: this.jobId,
+          state,
+          errorType: error instanceof Error ? error.constructor.name : typeof error,
+        });
+      }
+    }
+
+    if (this.staleTimer !== undefined) {
+      clearTimeout(this.staleTimer);
+      this.activeTimers.delete(this.staleTimer);
+      this.staleTimer = undefined;
+    }
+
+    const staleAfterMs = this.options.staleAfterMs ?? 30_000;
+    if (
+      staleAfterMs <= 0 ||
+      (state !== "streaming" && state !== "polling") ||
+      this.isTerminal ||
+      this.isClosed
+    ) {
+      return;
+    }
+
+    const activeState = state;
+    const source = details.source ?? (state === "streaming" ? "stream" : "poll");
+    const timer = setTimeout(() => {
+      this.activeTimers.delete(timer);
+      this.staleTimer = undefined;
+      if (!this.isTerminal && !this.isClosed && this.trackerState === activeState) {
+        this.setState("stale", { source });
+      }
+    }, staleAfterMs);
+    this.staleTimer = timer;
+    this.activeTimers.add(timer);
+  }
+
+  private markFresh(state: "streaming" | "polling", source: "stream" | "poll"): void {
+    this.setState(state, { source });
   }
 }
 

@@ -739,12 +739,14 @@ class TalosAPIClient:
         return None
 
     async def distribute_dividends(
-        self, talos_id: str, *, requester_public_key: str
+        self, talos_id: str, *, requester_public_key: str,
+        idempotency_key: str | None = _NO_KEY,
     ) -> dict | None:
         """Execute dividend distribution to patrons."""
         r = await self._post(
             f"/api/talos/{talos_id}/revenue/distribute",
             json={"requesterPublicKey": requester_public_key},
+            idempotency_key=idempotency_key,
         )
         if r.status_code in (200, 201):
             return r.json()
