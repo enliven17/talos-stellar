@@ -42,6 +42,24 @@ import { and, eq, isNull, or, sql } from "drizzle-orm";
 import { tlsQuotaConfigs, tlsQuotaScopeUsage, tlsQuotaUsage } from "@/db/schema";
 import { VALID_SCOPES, type Scope } from "@/lib/api-scopes";
 import type { db as appDb } from "@/db";
+import {
+  computeRetryAfterSeconds,
+  formatResetEpochSeconds,
+  formatResetIsoString,
+  type RetryAfterOptions,
+} from "@/lib/retry-after";
+
+export {
+  ABSOLUTE_MAX_RETRY_AFTER_SECONDS,
+  DEFAULT_MAX_RETRY_AFTER_SECONDS,
+  DEFAULT_UNKNOWN_RESET_RETRY_AFTER_SECONDS,
+  MIN_RETRY_AFTER_SECONDS,
+  computeRetryAfterSeconds,
+  isValidResetAt,
+  resolveMaxRetryAfterSeconds,
+  resolveUnknownResetRetryAfterSeconds,
+  type RetryAfterOptions,
+} from "@/lib/retry-after";
 
 // ─── Limit validation ─────────────────────────────────────────────────────────
 
@@ -126,6 +144,11 @@ export interface QuotaResult {
   /** The resource that was checked. */
   resource: QuotaResource;
 }
+
+/** Input accepted by response and header helpers, including unknown/null reset times. */
+export type QuotaHeaderInput = Omit<QuotaResult, "resetAt"> & {
+  resetAt?: number | null;
+};
 
 // ─── DB type alias (Drizzle's inferred type) ─────────────────────────────────
 
@@ -459,20 +482,28 @@ export async function readQuotaUsage(
 // ─── Response helpers ────────────────────────────────────────────────────────
 
 /**
- * Build a 429 Response with X-Quota-* headers when a quota is exceeded.
+ * Build a 429 Response with bounded `Retry-After` and `X-Quota-*` headers
+ * when a quota is exceeded.
  */
-export function quotaExceededResponse(result: QuotaResult): Response {
+export function quotaExceededResponse(
+  result: QuotaHeaderInput,
+  options?: RetryAfterOptions,
+): Response {
+  const retryAfterSec = computeRetryAfterSeconds(result.resetAt, options);
+  const resetIso = formatResetIsoString(result.resetAt);
+
   return new Response(
     JSON.stringify({
       error: "Quota exceeded",
       resource: result.resource,
       limit: result.limit,
-      resetAt: new Date(result.resetAt).toISOString(),
+      resetAt: resetIso,
     }),
     {
       status: 429,
       headers: {
         "Content-Type": "application/json",
+        "Retry-After": String(retryAfterSec),
         ...buildQuotaHeaders(result),
       },
     },
@@ -482,24 +513,33 @@ export function quotaExceededResponse(result: QuotaResult): Response {
 /**
  * Return the X-Quota-* header set for a given QuotaResult.
  * Attach these to 200/201 responses so clients can monitor their usage.
+ * Omits `X-Quota-Reset` when the reset timestamp is unknown or invalid.
  */
-export function buildQuotaHeaders(result: QuotaResult): Record<string, string> {
-  return {
+export function buildQuotaHeaders(result: QuotaHeaderInput): Record<string, string> {
+  const headers: Record<string, string> = {
     "X-Quota-Limit": String(result.limit),
     "X-Quota-Remaining": String(result.remaining),
     "X-Quota-Used": String(result.used),
-    "X-Quota-Reset": String(Math.ceil(result.resetAt / 1000)),
     "X-Quota-Resource": result.resource,
   };
+  const resetSeconds = formatResetEpochSeconds(result.resetAt);
+  if (resetSeconds !== null) {
+    headers["X-Quota-Reset"] = resetSeconds;
+  }
+  return headers;
 }
 
 /**
  * Apply X-Quota-* headers to an existing Response object (mutates headers).
+ * Removes any stale `X-Quota-Reset` header when the reset timestamp is unknown.
  */
-export function applyQuotaHeaders(response: Response, result: QuotaResult): Response {
+export function applyQuotaHeaders(response: Response, result: QuotaHeaderInput): Response {
   const headers = buildQuotaHeaders(result);
   for (const [key, value] of Object.entries(headers)) {
     response.headers.set(key, value);
+  }
+  if (headers["X-Quota-Reset"] === undefined) {
+    response.headers.delete("X-Quota-Reset");
   }
   return response;
 }
