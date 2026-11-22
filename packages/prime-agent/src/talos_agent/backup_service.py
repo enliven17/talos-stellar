@@ -17,6 +17,13 @@ Reuses:
 Bounded:
     - SQLite backup uses the official sqlite3.Connection.backup() API,
       which is bounded by the source DB size (no unbounded read).
+    - Plaintext backup envelope is capped at MAX_PLAINTEXT_BYTES (10 MiB)
+      to prevent accidental disk-fill from rogue input.
+    - Decompressed restore bytes are capped at MAX_DECOMPRESSED_RESTORE_BYTES
+      (10 MiB), independently enforced during extraction. This prevents a
+      maliciously crafted artifact (compressed bomb, recursive expansion, or
+      manifest lying about file sizes) from exhausting disk or memory.
+      The check happens before writing files to disk, so restore fails fast.
     - Web API calls reuse `http.request_with_retry` (3 attempts, exp
       backoff with jitter).
     - Single-concurrency: a per-root lock file in `.talos-agent/locks/`
@@ -63,6 +70,14 @@ BACKUP_ENCRYPTION_LABEL = "AES-256-GCM#PBKDF2-SHA256#200000"
 # state is easily a few MiB. We allow generous headroom but still defend
 # against accidental disk-fill from rogue input.
 MAX_PLAINTEXT_BYTES = 10 * 1024 * 1024
+
+# Cap decompressed restore bytes: independently enforce a ceiling on the
+# cumulative size of all files extracted during restore. This prevents a
+# maliciously crafted artifact (compressed bomb, recursive expansion, or
+# manifest lying about file sizes) from exhausting disk or memory during
+# extraction. Set to match MAX_PLAINTEXT_BYTES so restore honors the same
+# envelope limit that backup enforces at creation time.
+MAX_DECOMPRESSED_RESTORE_BYTES = MAX_PLAINTEXT_BYTES
 
 
 @dataclass
@@ -751,6 +766,7 @@ def restore_backup(
         staging = Path(tempfile.mkdtemp(prefix="restore-", dir=str(staging_root)))
         try:
             placed: list[tuple[Path, Path, int]] = []
+            cumulative_decompressed_bytes = 0
             for name, meta in files_meta.items():
                 safe = _safe_filename(name)
                 if not safe.startswith("db/"):
@@ -765,6 +781,17 @@ def restore_backup(
                         code="BAD_INPUT",
                     )
                 raw = _b64_decode(body[safe])
+                
+                # Bound decompressed bytes independently of archive size.
+                # Check cumulative size BEFORE writing to disk to fail fast.
+                cumulative_decompressed_bytes += len(raw)
+                if cumulative_decompressed_bytes > MAX_DECOMPRESSED_RESTORE_BYTES:
+                    raise BackupError(
+                        f"Decompressed restore size {cumulative_decompressed_bytes}B exceeds "
+                        f"MAX_DECOMPRESSED_RESTORE_BYTES={MAX_DECOMPRESSED_RESTORE_BYTES}B",
+                        code="BAD_INPUT",
+                    )
+                
                 expected_sha = meta.get("sha256")
                 expected_size = meta.get("size_bytes")
                 if expected_sha:
@@ -865,6 +892,7 @@ __all__ = [
     "BACKUP_FORMAT_VERSION",
     "BACKUP_ENCRYPTION_LABEL",
     "MAX_PLAINTEXT_BYTES",
+    "MAX_DECOMPRESSED_RESTORE_BYTES",
     "BackupRun",
     "BackupError",
     "BackupBusyError",
