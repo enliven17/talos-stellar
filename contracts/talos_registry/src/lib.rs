@@ -202,6 +202,7 @@ pub enum DataKey {
     PauseState(PauseDomain),
     PauseController(u32),
     ResumeController(u32),
+    TalosRevision(u32), // talos_id → metadata revision counter (u32)
 }
 
 // ── Events ──────────────────────────────────────────────────────────
@@ -368,6 +369,31 @@ fn emit_talos_paused(env: &Env, talos_id: u32, controller: Address) {
 fn emit_talos_resumed(env: &Env, talos_id: u32, controller: Address) {
     let topics = (symbol_short!("tls_resu"), talos_id);
     env.events().publish(topics, controller);
+}
+
+/// Emitted after every successful metadata mutation (update_patron, update_kernel,
+/// update_pulse). Binds the change to its predecessor revision so off-chain
+/// indexers can order edits without duplicating private state.
+///
+/// Event schema: topics (`meta_rev`, talos_id: u32) → data (prev_revision: u32, new_revision: u32)
+fn emit_metadata_revised(env: &Env, talos_id: u32, prev_revision: u32, new_revision: u32) {
+    let topics = (symbol_short!("meta_rev"), talos_id);
+    env.events().publish(topics, (prev_revision, new_revision));
+}
+
+/// Increment the per-talos revision counter and return (prev, new).
+/// Starts at 0 implicitly; first call returns (0, 1).
+fn increment_talos_revision(e: &Env, talos_id: u32) -> (u32, u32) {
+    let prev: u32 = e
+        .storage()
+        .persistent()
+        .get(&DataKey::TalosRevision(talos_id))
+        .unwrap_or(0);
+    let next = prev + 1;
+    e.storage()
+        .persistent()
+        .set(&DataKey::TalosRevision(talos_id), &next);
+    (prev, next)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -661,12 +687,32 @@ impl TalosRegistry {
 
         emit_talos_created(&e, next_id, talos.creator.clone(), name, talos.category.clone());
 
+        // Initialise revision to 1 for this talos.
+        e.storage()
+            .persistent()
+            .set(&DataKey::TalosRevision(next_id), &1u32);
+
         next_id
     }
 
     /// Get Talos by ID.
     pub fn get_talos(e: Env, talos_id: u32) -> Option<Talos> {
         e.storage().persistent().get(&DataKey::Talos(talos_id))
+    }
+
+    /// Return the current metadata revision counter for a Talos.
+    ///
+    /// The revision starts at 1 when the Talos is created and increments by 1
+    /// on every successful call to `update_patron`, `update_kernel`, or
+    /// `update_pulse`. Off-chain indexers can compare the revision they cached
+    /// with the on-chain value to detect a stale metadata view without
+    /// fetching the full record.
+    ///
+    /// Returns `None` if the Talos does not exist.
+    pub fn get_talos_revision(e: Env, talos_id: u32) -> Option<u32> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::TalosRevision(talos_id))
     }
 
     /// Get the creator address of a Talos.
@@ -710,6 +756,9 @@ impl TalosRegistry {
             .set(&DataKey::Talos(talos_id), &talos);
 
         emit_patron_updated(&e, talos_id, &patron);
+
+        let (prev_rev, new_rev) = increment_talos_revision(&e, talos_id);
+        emit_metadata_revised(&e, talos_id, prev_rev, new_rev);
     }
 
     /// Update kernel policy for a Talos.
@@ -727,6 +776,9 @@ impl TalosRegistry {
         e.storage()
             .persistent()
             .set(&DataKey::Talos(talos_id), &talos);
+
+        let (prev_rev, new_rev) = increment_talos_revision(&e, talos_id);
+        emit_metadata_revised(&e, talos_id, prev_rev, new_rev);
     }
 
     /// Update pulse token config for a Talos.
