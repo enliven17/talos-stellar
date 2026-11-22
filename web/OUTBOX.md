@@ -156,6 +156,25 @@ same rationale as `web/JOBS.md`).
 - No priority/ordering guarantee across different aggregates; within one lease batch, order is `runAt` only.
 - The serverless drain endpoint needs an external scheduler wired up per-deployment (no Vercel Cron config checked in yet).
 
+## Deterministic replay harness
+
+`runOutboxReplay(sequence, opts)` (`src/lib/outbox/replay-harness.ts`) runs
+recorded synthetic event sequences through registered consumers using a virtual
+clock, seeded retry backoff PRNG, and in-memory lease ownership — without
+contacting Postgres, Stellar, or any live service.
+
+- **Duplicate effect reporting**: records each consumer invocation under a
+  logical effect key (customizable via `effectKeyFor`; defaults to
+  `${eventType}:${aggregateType}:${aggregateId}:consumer#${consumerIndex}`) and
+  surfaces any key executed more than once in `report.duplicateEffects`
+  (including partial-consumer retry re-runs, simulated mid-lease expiry
+  redeliveries via `simulateLeaseExpiryOnAttempts`, and non-deduplicated
+  duplicate events).
+- **Deduplication**: mirrors `writeOutboxEvent`'s `(eventType, dedupeKey)`
+  collapse and reports the count in `report.deduplicatedWrites`.
+- **Focused verification**:
+  `pnpm --dir web exec vitest run tests/outbox-replay-harness.unit.test.ts`
+
 ## Local verification
 
 ```bash

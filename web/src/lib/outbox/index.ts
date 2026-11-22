@@ -21,5 +21,14 @@ export {
 export type { DeadLetterView, DeadLetterSummary, DeadLetterQuery } from "./dead-letter";
 export { registerConsumer } from "./registry";
 export { dispatchOnce } from "./dispatcher";
+export { runOutboxReplay } from "./replay-harness";
+export type {
+  DuplicateEffectReport,
+  ReplayEffect,
+  ReplayEventInput,
+  ReplayEventOutcome,
+  ReplayOptions,
+  ReplayReport,
+} from "./replay-harness";
 export { outboxConfig, OUTBOX_ENABLED } from "./config";
 export type { Consumer, DispatchSummary, OutboxEvent, OutboxStatus, WriteEventInput } from "./types";
