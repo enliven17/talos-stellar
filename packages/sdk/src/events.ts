@@ -554,7 +554,7 @@ function deserializeEventCursor(
     throw new TalosCursorValidationError("invalid_cursor");
   }
   const eventId = (cursor as SerializedEventCursor).eventId;
-  if (/[\0\r\n]/.test(eventId)) {
+  if (eventId.length === 0 || /[\0\r\n]/.test(eventId)) {
     throw new TalosCursorValidationError("invalid_cursor");
   }
 

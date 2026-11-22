@@ -173,6 +173,7 @@ export {
   SCHEMA_VERSION_RESPONSE_HEADER,
   SchemaVersionMismatchError,
   TalosCursorValidationError,
+  validateTalosEventCursor,
   negotiateSchemaVersion,
   SSE_MAX_FIELD_BYTES,
   SSE_MAX_DATA_LINES,

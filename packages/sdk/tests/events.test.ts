@@ -294,6 +294,30 @@ describe("TalosEventStream — Last-Event-ID", () => {
         }),
     ).toThrowError(TalosCursorValidationError);
   });
+
+  it("rejects malformed and empty event IDs", () => {
+    expect(() =>
+      new TalosEventStream("https://api.example.test", {
+        cursor: JSON.stringify({
+          version: 1,
+          origin: "https://api.example.test",
+          stream: "/api/events",
+          eventId: "",
+        }),
+      }),
+    ).toThrowError(TalosCursorValidationError);
+
+    expect(() =>
+      new TalosEventStream("https://api.example.test", {
+        cursor: JSON.stringify({
+          version: 1,
+          origin: "https://api.example.test",
+          stream: "/api/events",
+          eventId: "id\r\ninjected",
+        }),
+      }),
+    ).toThrowError(TalosCursorValidationError);
+  });
 });
 
 // ── Auth ───────────────────────────────────────────────────────────────────────
