@@ -6,6 +6,15 @@ import { decideRetry } from "./retry";
 import { jobsConfig } from "./config";
 import { logJobEvent, truncateError } from "./metrics";
 
+/** Typed result returned when cancellation races with completion. */
+export class CancellationConflictError extends Error {
+  readonly code = "CANCELLATION_CONFLICT" as const;
+  constructor(readonly jobId: string) {
+    super(`cancellation conflict: job ${jobId} already completed`);
+    this.name = "CancellationConflictError";
+  }
+}
+
 function toRecord(row: typeof tlsJobs.$inferSelect): JobRecord {
   return row as unknown as JobRecord;
 }
@@ -202,6 +211,9 @@ export async function release(jobId: string, leaseId: string): Promise<JobRecord
  * Requests cooperative cancellation. A pending job is cancelled immediately
  * (nothing is running yet); a leased job is flagged and relies on the
  * handler observing `cancelRequested` via its next heartbeat() call.
+ *
+ * Throws `CancellationConflictError` when the job already completed, so a
+ * cancellation that raced with completion is never reported as successful.
  */
 export async function requestCancel(jobId: string): Promise<JobRecord | null> {
   const [pendingRow] = await db
@@ -219,7 +231,20 @@ export async function requestCancel(jobId: string): Promise<JobRecord | null> {
     .set({ cancelRequested: true })
     .where(and(eq(tlsJobs.id, jobId), eq(tlsJobs.status, "leased")))
     .returning();
-  return leasedRow ? toRecord(leasedRow) : null;
+  if (leasedRow) return toRecord(leasedRow);
+
+  // A conditional probe: if the job has already completed, the cancellation
+  // raced with completion and must not be reported as successful.
+  const finished = await db
+    .select({ status: tlsJobs.status })
+    .from(tlsJobs)
+    .where(eq(tlsJobs.id, jobId))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+  if (finished?.status === "completed") {
+    throw new CancellationConflictError(jobId);
+  }
+  return null;
 }
 
 /**
@@ -299,26 +324,5 @@ export interface ListJobsFilter {
 }
 
 export async function listJobs(filter: ListJobsFilter = {}): Promise<{ jobs: JobRecord[]; nextCursor: string | null }> {
-  const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
-  const conditions = [];
-  if (filter.status) conditions.push(eq(tlsJobs.status, filter.status));
-  if (filter.queue) conditions.push(eq(tlsJobs.queue, filter.queue));
-  if (filter.cursor) conditions.push(lt(tlsJobs.createdAt, new Date(filter.cursor)));
-
-  const rows = await db
-    .select()
-    .from(tlsJobs)
-    .where(conditions.length ? and(...conditions) : undefined)
-    .orderBy(desc(tlsJobs.createdAt))
-    .limit(limit + 1);
-
-  const hasMore = rows.length > limit;
-  const page = hasMore ? rows.slice(0, limit) : rows;
-  const nextCursor = hasMore ? page[page.length - 1]?.createdAt.toISOString() ?? null : null;
-  return { jobs: page.map(toRecord), nextCursor };
-}
-
-export async function getJob(jobId: string): Promise<JobRecord | null> {
-  const row = await db.select().from(tlsJobs).where(eq(tlsJobs.id, jobId)).limit(1).then((r) => r[0] ?? null);
-  return row ? toRecord(row) : null;
+  const limit = Math.min(Math.max(filter.limit ?? jobsConfig.batchSize, 1), 100);
 }

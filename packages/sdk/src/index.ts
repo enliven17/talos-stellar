@@ -11,6 +11,9 @@ export type {
   RetryOptions,
   ResolvedRetryPolicy,
   ResolvedRetryOptions,
+  RetryDecisionReason,
+  RetryDecisionEvent,
+  RedactedRetryMetadata,
   TalosErrorEvent,
   TalosResponseEvent,
   ReadOptions,
@@ -31,6 +34,8 @@ export type { AsyncPaginationIteratorOptions } from "./pagination.js";
 export {
   generateIdempotencyKey,
   validateIdempotencyKey,
+  validateIdempotencyKeyConflict,
+  readIdempotencyKeyHeader,
   IdempotencyConflictError,
   isUuidV4,
   isPayloadConflict,
@@ -67,6 +72,7 @@ export {
   TalosServerRetryableError,
   TalosTransportError,
   TalosTimeoutError,
+  TalosDeadlineExceededError,
   errorFromResponse,
   classifyTransportError,
   sanitizeBody,
@@ -131,6 +137,8 @@ export type {
   TalosEventHandler,
   TalosStreamErrorHandler,
   TalosStreamCloseHandler,
+  TalosStreamState,
+  TalosStreamStateHandler,
   TalosEventStreamOptions,
   SeenStore,
   SchemaVersionNegotiationResult,
@@ -153,6 +161,8 @@ export type {
   TrackJobEvent,
   JobTerminalStatus,
   JobTerminalOutcome,
+  JobTrackerState,
+  JobTrackerStateChange,
   TrackJobOptions,
 } from "./job-tracker.js";
 
@@ -226,6 +236,21 @@ export type {
   SerializedChaosScenario,
   ChaosFixtureBundle,
 } from "./chaos-fixtures.js";
+
+// ── Synthetic event-stream fault fixtures ─────────────────────────────────────
+
+export {
+  EVENT_STREAM_FAULT_FIXTURES,
+  getEventStreamFaultFixture,
+  encodeSyntheticSSEFrame,
+  createSyntheticEventStreamTransport,
+} from "./event-stream-fixtures.js";
+export type {
+  EventStreamFaultKind,
+  SyntheticSSEFrame,
+  EventStreamFaultFixture,
+  SyntheticEventStreamTransport,
+} from "./event-stream-fixtures.js";
 
 // ── Contract readers ──────────────────────────────────────────────────────
 

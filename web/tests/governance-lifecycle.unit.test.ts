@@ -13,6 +13,7 @@ import {
   allowedActions,
   evaluateTransition,
   failureStateFor,
+  acceptsNewWork,
   toLegacyStatus,
   toLifecycleState,
   type LifecycleActor,
@@ -175,8 +176,11 @@ describe("lifecycle state machine", () => {
   it("reads legacy status values, defaulting unknown ones to active", () => {
     expect(toLifecycleState("Active")).toBe("active");
     expect(toLifecycleState("Paused")).toBe("paused");
+    expect(toLifecycleState("Draining")).toBe("retiring");
     expect(toLifecycleState(null)).toBe("active");
     expect(toLifecycleState("Whatever")).toBe("active");
+    expect(acceptsNewWork(toLifecycleState("Active"))).toBe(true);
+    expect(acceptsNewWork(toLifecycleState("Draining"))).toBe(false);
   });
 
   it("exposes a failure edge only for in-flight states", () => {
@@ -317,18 +321,13 @@ describe("prerequisites", () => {
     expectCode(() => assertPrerequisites(parsed, ctx), "LIFECYCLE_PREREQUISITE_FAILED");
   });
 
-  it("refuses retirement that would strand in-flight jobs", () => {
+  it("allows retirement to enter draining while in-flight jobs finish", () => {
     const parsed = parseLifecyclePayload({
       action: "retire",
       payload: { reason: "sunset", proposalId: "p1", confirmed: true, drainJobs: true },
     });
 
-    const err = expectCode(
-      () => assertPrerequisites(parsed, { ...ctx, inFlightJobs: 3 }),
-      "LIFECYCLE_PREREQUISITE_FAILED",
-    );
-    expect(err.details.inFlightJobs).toBe(3);
-    expect(err.status).toBe(422);
+    expect(() => assertPrerequisites(parsed, { ...ctx, inFlightJobs: 3 })).not.toThrow();
   });
 
   it("allows retirement that explicitly opts out of draining", () => {
