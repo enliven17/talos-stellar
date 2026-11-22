@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from talos_agent.policy.patterns import compile_glob
@@ -36,6 +37,7 @@ from talos_agent.policy.schema import (
     ConditionTrace,
     MatchCondition,
     Policy,
+    PolicyException,
     PolicyDecision,
     PolicyDecisionTrace,
     PolicyResult,
@@ -192,6 +194,7 @@ class PolicyEngine:
 
     def __init__(self) -> None:
         self._policies: tuple[Policy, ...] = ()
+        self._exceptions: dict[tuple[str, str], PolicyException] = {}
         self._enabled: bool = False
         self._evaluation_count: int = 0
         self._deny_count: int = 0
@@ -256,6 +259,11 @@ class PolicyEngine:
                 key=lambda p: (-p.priority, p.name),
             )
         )
+        self._exceptions = {
+            (policy.name, exception.rule_id): exception
+            for policy in self._policies
+            for exception in policy.exceptions
+        }
         logger.info(
             "PolicyEngine loaded %d policies (%d enabled)",
             len(self._policies),
@@ -264,7 +272,12 @@ class PolicyEngine:
 
     # ── Evaluation ────────────────────────────────────────────────────────
 
-    def evaluate(self, spec: ActionSpec) -> PolicyResult:
+    def evaluate(
+        self,
+        spec: ActionSpec,
+        *,
+        now: datetime | None = None,
+    ) -> PolicyResult:
         """Evaluate all loaded policies against *spec* and return a decision.
 
         Evaluation is pure and deterministic.  The result includes a SHA-256
@@ -275,6 +288,9 @@ class PolicyEngine:
         ``APPROVE`` with an evidence note and a disabled-engine trace.
         """
         self._evaluation_count += 1
+        evaluation_time = now or datetime.now(timezone.utc)
+        if evaluation_time.tzinfo is None or evaluation_time.utcoffset() is None:
+            raise ValueError("policy evaluation now must be timezone-aware")
 
         if not self._enabled:
             trace = PolicyDecisionTrace.disabled(spec.action)
@@ -348,6 +364,33 @@ class PolicyEngine:
                         )
                     )
                     continue
+
+                exception = self._exceptions.get((policy.name, rule.rule_id))
+                if exception is not None:
+                    if exception.is_active(evaluation_time):
+                        all_results[-1]["exception"] = "applied"
+                        steps.append(
+                            RuleTraceStep(
+                                policy=policy.name,
+                                rule_id=rule.rule_id,
+                                severity=rule.severity.value,
+                                matched=True,
+                                decision="not_applicable",
+                                reason="Time-bounded policy exception applied",
+                                conditions=cond_traces,
+                                effect="exception_applied",
+                            )
+                        )
+                        evidence.append(
+                            f"[{policy.name}/{rule.rule_id}] exception applied "
+                            f"by {exception.actor}: {exception.reason}"
+                        )
+                        continue
+                    all_results[-1]["exception"] = "expired"
+                    evidence.append(
+                        f"[{policy.name}/{rule.rule_id}] exception expired; "
+                        "original policy effect enforced"
+                    )
 
                 # Rule matched — record violation
                 violated.append(rule)
