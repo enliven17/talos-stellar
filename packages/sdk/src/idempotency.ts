@@ -71,6 +71,61 @@ export function validateIdempotencyKey(key: string): string {
 }
 
 /**
+ * Return the Idempotency-Key header value from HeadersInit without
+ * case-sensitivity or key-value leakage in validation errors.
+ */
+export function readIdempotencyKeyHeader(headers: HeadersInit | undefined): string | undefined {
+  if (headers === undefined) return undefined;
+  if (headers instanceof Headers) {
+    return headers.get("Idempotency-Key") ?? undefined;
+  }
+  if (Array.isArray(headers)) {
+    for (const [name, value] of headers) {
+      if (typeof name === "string" && name.toLowerCase() === "idempotency-key") {
+        return value;
+      }
+    }
+    return undefined;
+  }
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() === "idempotency-key") return value;
+  }
+  return undefined;
+}
+
+/**
+ * Validate that an explicit idempotency key and Idempotency-Key headers agree.
+ * Throws before a mutation is signed or sent. Error text intentionally omits
+ * both key values.
+ */
+export function validateIdempotencyKeyConflict(
+  optionKey: string | undefined,
+  ...headerSets: (HeadersInit | Record<string, string> | undefined)[]
+): void {
+  if (optionKey === undefined) return;
+  const option = validateIdempotencyKey(optionKey);
+  for (const headers of headerSets) {
+    let headerValue: string | undefined;
+    if (headers instanceof Headers) {
+      headerValue = headers.get("Idempotency-Key") ?? undefined;
+    } else if (headers) {
+      headerValue = readIdempotencyKeyHeader(headers as HeadersInit);
+    }
+    if (headerValue !== undefined) {
+      if (typeof headerValue !== "string" || headerValue.trim() === "") {
+        throw new TypeError("Idempotency-Key header must be a non-empty string");
+      }
+      const normalized = validateIdempotencyKey(headerValue);
+      if (normalized !== option) {
+        throw new TypeError(
+          "Conflicting idempotency keys: idempotencyKey option and Idempotency-Key header must match",
+        );
+      }
+    }
+  }
+}
+
+/**
  * Returns true if the string is a well-formed RFC 4122 v4 UUID.
  * Non-UUID keys are still valid; this is only informational.
  */

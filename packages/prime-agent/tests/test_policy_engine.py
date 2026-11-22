@@ -17,6 +17,7 @@ from talos_agent.policy.middleware import (
     PolicyMiddleware,
     PolicyViolationError,
 )
+from talos_agent.policy.patterns import PolicyPatternError
 from talos_agent.policy.schema import (
     ActionSpec,
     MatchCondition,
@@ -87,6 +88,28 @@ class TestMatchCondition:
         spec = ActionSpec("test", {"email": "not-an-email"})
         cond = MatchCondition("email", "regex", r".+@.+")
         assert _evaluate_condition(cond, spec) is False
+
+    @pytest.mark.parametrize("pattern", ["[", "[]", "[!]", "[z-a]"])
+    def test_invalid_glob_patterns_are_rejected(self, pattern):
+        with pytest.raises(PolicyPatternError, match="Invalid glob pattern"):
+            MatchCondition("action", "glob", pattern)
+
+    @pytest.mark.parametrize(
+        ("pattern", "value", "expected"),
+        [
+            ("purchase_*", "purchase_service", True),
+            ("purchase_?", "purchase_a", True),
+            ("purchase_[ab]", "purchase_b", True),
+            ("purchase_[!a]", "purchase_b", True),
+            ("purchase_*", "purchase/service", False),
+            ("[/]", "/", True),
+            ("[[]", "[", True),
+        ],
+    )
+    def test_glob_wildcard_semantics(self, pattern, value, expected):
+        spec = ActionSpec("test", {"action_name": value})
+        cond = MatchCondition("action_name", "glob", pattern)
+        assert _evaluate_condition(cond, spec) is expected
 
     def test_context_field_resolution(self):
         spec = ActionSpec(
@@ -266,6 +289,22 @@ class TestPolicyEngine:
         engine.load([p1, p2])
         assert engine._policies[0].name == "a-policy"
         assert engine._policies[1].name == "z-policy"
+
+    def test_load_rejects_duplicate_rule_ids_before_installing(self, engine):
+        original = Policy(name="original", rules=(PolicyRule("stable-id", "first"),))
+        duplicate = Policy(name="override", rules=(PolicyRule("stable-id", "second"),))
+        engine.load([original])
+
+        with pytest.raises(ValueError, match="Duplicate rule identifier 'stable-id'"):
+            engine.load([original, duplicate])
+
+        assert tuple(p.name for p in engine.policies) == ("original",)
+
+    def test_load_rejects_empty_rule_id(self, engine):
+        policy = Policy(name="invalid", rules=(PolicyRule("", "missing"),))
+
+        with pytest.raises(ValueError, match="empty rule identifier"):
+            engine.load([policy])
 
     def test_blocker_triggers_deny(self, engine, sample_policies):
         engine.enabled = True
@@ -546,6 +585,25 @@ class TestPolicyLoader:
         assert result[0].name == "test-policy"
         assert len(result[0].rules) == 1
 
+    def test_load_from_file_rejects_invalid_glob(self, tmp_path: Path):
+        path = tmp_path / "invalid-glob.json"
+        path.write_text(json.dumps({
+            "policies": [{
+                "name": "invalid-policy",
+                "rules": [{
+                    "rule_id": "invalid-glob",
+                    "conditions": [{
+                        "field": "action",
+                        "operator": "glob",
+                        "value": "purchase_[",
+                    }],
+                }],
+            }]
+        }))
+
+        with pytest.raises(PolicyPatternError, match="Invalid glob pattern"):
+            _load_from_file(path)
+
 
 # ── PolicyMiddleware tests ────────────────────────────────────────────────────
 
@@ -709,6 +767,64 @@ class TestPolicySimulator:
         raw = json.loads(out_path.read_text())
         assert "scenarios" in raw
         assert len(raw["scenarios"]) == 1
+
+
+class TestComparePolicies:
+    @staticmethod
+    def _policy(threshold: float | None, decision=PolicyDecision.DENY) -> list[Policy]:
+        if threshold is None:
+            return [Policy(name="p", rules=())]
+        rule = PolicyRule(
+            rule_id="cap",
+            description="cap",
+            conditions=(MatchCondition(field="params.amount", operator="gt", value=threshold),),
+            decision=decision,
+            severity=Severity.BLOCKER,
+            reason="too big",
+        )
+        return [Policy(name="p", rules=(rule,))]
+
+    SCENARIOS = [
+        {"action": "purchase_service", "params": {"amount": 5}},
+        {"action": "purchase_service", "params": {"amount": 50}},
+        {"action": "purchase_service", "params": {"amount": 500}},
+    ]
+
+    def test_newly_allowed_and_denied(self):
+        # v1 blocks > 100; v2 blocks > 10
+        report = PolicySimulator.compare_policies(
+            self._policy(100), self._policy(10), self.SCENARIOS
+        )
+        assert [r["scenario_index"] for r in report["newly_denied"]] == [1]
+        assert report["newly_allowed"] == []
+        assert report["unchanged"] == 2
+        # reverse direction
+        rev = PolicySimulator.compare_policies(
+            self._policy(10), self._policy(100), self.SCENARIOS
+        )
+        assert [r["scenario_index"] for r in rev["newly_allowed"]] == [1]
+        assert rev["newly_denied"] == []
+
+    def test_identical_policies_and_no_side_effects(self):
+        engine = PolicyEngine()
+        engine.enabled = True
+        engine.load(self._policy(10))
+        report = PolicySimulator.compare_policies(
+            self._policy(10), self._policy(10), self.SCENARIOS
+        )
+        assert report["unchanged"] == 3
+        assert not (report["newly_allowed"] or report["newly_denied"])
+        assert engine.metrics["evaluation_count"] == 0
+
+    def test_empty_scenarios_and_error_scenario(self):
+        empty = PolicySimulator.compare_policies(self._policy(1), self._policy(None), [])
+        assert empty["total"] == 0 and empty["unchanged"] == 0
+        bad = PolicySimulator.compare_policies(
+            self._policy(1), self._policy(None),
+            [{"action": "x", "params": None, "context": "nope"}],
+        )
+        assert bad["total"] == 1
+        assert len(bad["errors"]) + bad["unchanged"] + len(bad["newly_allowed"]) == 1
 
 
 # ── PolicyResult convenience factories ────────────────────────────────────────

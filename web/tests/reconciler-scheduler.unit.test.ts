@@ -24,6 +24,7 @@ import {
   startReconciler,
   stopReconciler,
   runOneTick,
+  registerTx,
   getStats,
   getActiveCount,
   getQueueCount,
@@ -239,7 +240,7 @@ describe("reconciler/scheduler - Cancellation & Graceful Shutdown", () => {
     });
 
     startReconciler({ ...BASE_CONFIG, concurrencyLimit: 1 });
-    const summary = await runOneTick({ ...BASE_CONFIG, concurrencyLimit: 1 });
+    await runOneTick({ ...BASE_CONFIG, concurrencyLimit: 1 });
 
     // Wait slightly
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -251,5 +252,71 @@ describe("reconciler/scheduler - Cancellation & Graceful Shutdown", () => {
 
     expect(getActiveCount()).toBe(0);
     expect(getQueueCount()).toBe(0);
+  });
+});
+
+describe("reconciler/scheduler - Pinned Network Identity", () => {
+  const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
+  const MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015";
+
+  it("registerTx persists pinned network passphrase into database record", async () => {
+    mocks.mockDb.select.mockReturnValue(chainable([])); // No existing record
+    mocks.mockDb.insert.mockReturnValue(chainable([]));
+
+    const id = await registerTx({
+      txHash: "0xdeadbeef123",
+      sourceType: "commerce_job",
+      sourceId: "job_pinned",
+      networkPassphrase: "testnet",
+    });
+
+    expect(id).toBeDefined();
+    expect(mocks.mockDb.insert).toHaveBeenCalled();
+    const insertArg = mocks.mockDb.insert.mock.results[0]?.value?.values?.mock?.calls?.[0]?.[0];
+    expect(insertArg).toMatchObject({
+      txHash: "0xdeadbeef123",
+      networkPassphrase: TESTNET_PASSPHRASE,
+      sourceType: "commerce_job",
+      sourceId: "job_pinned",
+      finalityStatus: "PENDING",
+    });
+  });
+
+  it("rejects foreign network observations without confirming or applying repair", async () => {
+    const record = makeRecord({
+      id: "rec_foreign",
+      txHash: "h_foreign",
+      finalityStatus: "PENDING",
+      networkPassphrase: TESTNET_PASSPHRASE,
+    });
+    mocks.mockDb.select.mockReturnValue(chainable([record]));
+    mocks.horizon.pollTransaction.mockResolvedValue({
+      outcome: "confirmed",
+      ledger: 1005,
+      successful: true,
+      networkPassphrase: MAINNET_PASSPHRASE,
+    });
+
+    const summary = await runOneTick({
+      ...BASE_CONFIG,
+      networkPassphrase: TESTNET_PASSPHRASE,
+    });
+
+    // Summary must show NO confirmations and NO repairs
+    expect(summary.processed).toBe(1);
+    expect(summary.confirmed).toBe(0);
+    expect(summary.failed).toBe(0);
+    expect(summary.repairsApplied).toBe(0);
+    expect(mocks.repair.applyRepair).not.toHaveBeenCalled();
+
+    // Database update must have retained PENDING and set lastError
+    expect(mocks.mockDb.update).toHaveBeenCalled();
+    const updateArg = mocks.mockDb.update.mock.results[0]?.value?.set?.mock?.calls?.[0]?.[0];
+    expect(updateArg).toMatchObject({
+      finalityStatus: "PENDING",
+      networkPassphrase: TESTNET_PASSPHRASE,
+    });
+    expect(updateArg.lastError).toContain("Rejected observation from foreign network");
+    expect(updateArg.lastError).toContain(MAINNET_PASSPHRASE);
   });
 });

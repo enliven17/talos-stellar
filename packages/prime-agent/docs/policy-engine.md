@@ -102,6 +102,10 @@ the original rule is enforced again; it never grants unrelated permissions.
 Expiry is exclusive, so an exception at exactly `expires_at` is already
 expired. Invalid exception metadata is rejected when the policy file loads.
 
+Each `rule_id` must be non-empty and unique across the complete loaded policy
+set. Duplicate or empty identifiers are rejected before policies are installed;
+rule IDs remain the stable link between decision traces and policy overrides.
+
 ### Supported operators
 
 | Operator | Description |
@@ -111,6 +115,16 @@ expired. Invalid exception metadata is rejected when the policy file loads.
 | `in`, `not_in` | Set membership |
 | `exists` | Field is present and non-null |
 | `regex` | Field matches the pattern in `value` |
+| `glob` | Field matches `*`, `?`, and character-class wildcards in `value` |
+
+Glob patterns support `*` (zero or more characters other than `/`), `?`
+(exactly one character other than `/`), `[abc]` and `[a-z]` (character
+classes), and `[!abc]` (negated character classes). Character classes match
+their explicit members, including `/`; `[[]` matches a literal `[`. Repeated
+`*` characters have the same behavior as `*` and do not match `/`. Empty,
+unclosed, or malformed character classes are rejected while policies are
+loaded; the agent will not silently ignore the invalid policy or fall back to
+built-in defaults.
 
 ### Field paths
 
@@ -158,6 +172,19 @@ result = sim.simulate("transfer_xlm", {"amount": 500}, {"budget_remaining": 1000
 print(result.decision)  # "escalate"
 ```
 
+### Offline policy comparison
+
+Run the same synthetic scenarios against two policy versions and see what
+changes. Each version is evaluated on its own temporary engine, so nothing is
+enforced and live engine metrics are untouched.
+
+```python
+report = PolicySimulator.compare_policies(old_policies, new_policies, scenarios)
+report["newly_allowed"]  # approve in new, not in old
+report["newly_denied"]   # approve in old, deny/escalate in new
+report["other_changes"]  # e.g. escalate -> deny
+```
+
 ## Rollback / disabling
 
 To disable the engine:
@@ -187,6 +214,22 @@ Traces include per-rule and per-condition steps.  Secret-shaped fields
 (`api_key`, `seed`, `token`, `payment_proof`, etc.) are redacted as
 `[redacted]` and never logged or returned in cleartext.  BLOCKER
 short-circuits still emit the full trace up to the denying rule.
+
+### Dry-run policy coverage
+
+Simulation traces can be aggregated without exposing action parameters:
+
+```python
+report = sim.coverage_report(simulate_batch_results)
+print(report.to_dict())
+```
+
+Coverage is based only on rule steps present in the redacted traces. Each
+observed rule reports its `matched` and `not_matched` branches as exercised or
+unexercised. A rule omitted from every trace, including a rule after a blocker
+short-circuit, is listed under `unobserved_rules` and is not counted as tested.
+This prevents a partial dry-run cycle from falsely claiming coverage for
+rules it never reached.
 
 ## Observability
 
