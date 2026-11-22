@@ -538,6 +538,19 @@ CREATE INDEX IF NOT EXISTS idx_cycle_summaries_talos_id
     (
         14,
         """
+CREATE TABLE IF NOT EXISTS task_executions (
+    execution_id TEXT PRIMARY KEY,
+    task_name    TEXT NOT NULL,
+    status       TEXT NOT NULL CHECK (
+        status IN ('reserved', 'succeeded', 'retryable', 'uncertain')
+    ),
+    owner_id     TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_executions_task_status
+    ON task_executions(task_name, status, created_at DESC);
 ALTER TABLE commerce_queue ADD COLUMN payload_retained_until TEXT;
 UPDATE commerce_queue
 SET payload_retained_until = datetime(updated_at, '+30 days')
