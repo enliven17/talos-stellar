@@ -2,7 +2,7 @@ import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsApprovals, tlsCommerceJobs, tlsTalos } from "@/db/schema";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import { retireAgentSchema, parseBody } from "@/lib/schemas";
 import { evaluateLifecycleChecklist, toLifecycleState } from "@/lib/governance/lifecycle";
 import { LIFECYCLE_EVENTS, emitLifecycleEvent } from "@/lib/governance/events";
@@ -112,9 +112,15 @@ async function _POST(
     const parsed = await parseBody(request, retireAgentSchema);
     if (parsed.error) return parsed.error;
 
-    const { reason, supersededBy, stellarPublicKey, signature, message, drainJobs } =
-      parsed.data;
-
+const {
+  reason,
+  supersededBy,
+  stellarPublicKey,
+  signature,
+  message,
+  expectedState,
+  drainJobs,
+} = parsed.data;
     // Verify the message contains the TALOS ID to prevent replay across TALOSes
     if (!message.includes(id)) {
       return Response.json(
@@ -173,26 +179,9 @@ async function _POST(
         return { error: "Invalid signature", status: 403 };
       }
 
-      // Check blocking obligations: in-flight jobs must be drained unless drainJobs is explicitly false
-      const inFlightJobs = await tx
-        .select({ id: tlsCommerceJobs.id })
-        .from(tlsCommerceJobs)
-        .where(
-          and(
-            eq(tlsCommerceJobs.talosId, id),
-            inArray(tlsCommerceJobs.status, ["pending", "in_progress"])
-          )
-        )
-        .limit(10);
-
-      const shouldDrain = drainJobs ?? true;
-      if (inFlightJobs.length > 0 && shouldDrain) {
-        return {
-          error: `Cannot retire agent with ${inFlightJobs.length} in-flight job(s). Drain pending work before retiring.`,
-          code: "LIFECYCLE_PREREQUISITE_FAILED",
-          status: 409,
-          details: { inFlightJobs: inFlightJobs.length },
-        };
+      const observedState = talos.status.toLowerCase();
+      if (expectedState && observedState !== expectedState) {
+        return { error: "Lifecycle state changed", status: 409 };
       }
 
       // Update agent with retirement status
@@ -206,25 +195,29 @@ async function _POST(
           agentOnline: false,
           updatedAt: new Date(),
         })
-        .where(eq(tlsTalos.id, id))
+        .where(and(eq(tlsTalos.id, id), eq(tlsTalos.status, talos.status), isNull(tlsTalos.retiredAt)))
         .returning();
 
-      // Emit lifecycle event to governance audit trail
-      await emitLifecycleEvent(
-        {
-          talosId: id,
-          eventType: LIFECYCLE_EVENTS.RETIRED,
-          fromState: toLifecycleState(talos.status),
-          toState: "retired",
-          actorId: stellarPublicKey,
-          actorRole: talos.creatorPublicKey === stellarPublicKey ? "creator" : "operator",
-          detail: { reason, supersededBy: supersededBy || null },
-          idempotencyKey: `retire:${id}:${message}`,
-        },
-        tx,
-      ).catch((err) => {
-        logger.warn({ err }, "failed to emit lifecycle event on retire");
-      });
+if (!retiredTalos) {
+  return { error: "Lifecycle state changed", status: 409 };
+}
+
+// Emit lifecycle event to governance audit trail
+await emitLifecycleEvent(
+  {
+    talosId: id,
+    eventType: LIFECYCLE_EVENTS.RETIRED,
+    fromState: toLifecycleState(talos.status),
+    toState: "retired",
+    actorId: stellarPublicKey,
+    actorRole: talos.creatorPublicKey === stellarPublicKey ? "creator" : "operator",
+    detail: { reason, supersededBy: supersededBy || null },
+    idempotencyKey: `retire:${id}:${message}`,
+  },
+  tx,
+).catch((err) => {
+  logger.warn({ err }, "failed to emit lifecycle event on retire");
+});
 
       return { data: retiredTalos };
     });

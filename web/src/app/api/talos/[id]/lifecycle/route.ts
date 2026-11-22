@@ -262,6 +262,8 @@ async function _POST(request: NextRequest, { params }: { params: Promise<{ id: s
       from,
       actor,
       governanceApproved,
+      expectedState:
+        "expectedState" in parsed.payload ? parsed.payload.expectedState : undefined,
     });
 
     const inFlight = await db
@@ -291,6 +293,17 @@ async function _POST(request: NextRequest, { params }: { params: Promise<{ id: s
     // Durable actions hand off to the provisioning worker and return 202 —
     // the client polls GET for progress rather than holding a request open.
     if (decision.durable) {
+      const [claimed] = await db
+        .update(tlsTalos)
+        .set({ status: toLegacyStatus(decision.to) })
+        .where(and(eq(tlsTalos.id, id), eq(tlsTalos.status, toLegacyStatus(from))))
+        .returning({ id: tlsTalos.id });
+      if (!claimed) {
+        throw new LifecycleError("LIFECYCLE_CONFLICT", "Lifecycle state changed before transition", {
+          expectedState: from,
+        });
+      }
+
       const workflow = workflowFor(parsed.action, databaseEffects);
       const { jobId, created } = await submitProvisioningJob({
         talosId: id,
@@ -315,11 +328,10 @@ async function _POST(request: NextRequest, { params }: { params: Promise<{ id: s
         idempotencyKey: `${jobId}:requested`,
       });
 
-      await db
-        .update(tlsTalos)
-        .set({ status: decision.to === "retiring" ? "Draining" : toLegacyStatus(decision.to) })
-        .where(eq(tlsTalos.id, id));
-
+await db
+  .update(tlsTalos)
+  .set({ status: decision.to === "retiring" ? "Draining" : toLegacyStatus(decision.to) })
+  .where(eq(tlsTalos.id, id));
       return Response.json(
         { talosId: id, state: decision.to, jobId, created, action: parsed.action },
         { status: 202 },
@@ -334,14 +346,20 @@ async function _POST(request: NextRequest, { params }: { params: Promise<{ id: s
         .where(and(eq(tlsCommerceJobs.talosId, id), eq(tlsCommerceJobs.status, "pending")));
     }
 
-    await db
+    const [updated] = await db
       .update(tlsTalos)
       .set({
         status: toLegacyStatus(decision.to),
         agentOnline: decision.to === "active",
         agentLastSeen: new Date(),
       })
-      .where(eq(tlsTalos.id, id));
+      .where(and(eq(tlsTalos.id, id), eq(tlsTalos.status, toLegacyStatus(from))))
+      .returning({ id: tlsTalos.id });
+    if (!updated) {
+      throw new LifecycleError("LIFECYCLE_CONFLICT", "Lifecycle state changed before transition", {
+        expectedState: from,
+      });
+    }
 
     const eventType =
       decision.to === "active"
