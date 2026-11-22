@@ -265,6 +265,22 @@ class TestPolicyEngine:
         assert engine._policies[0].name == "a-policy"
         assert engine._policies[1].name == "z-policy"
 
+    def test_load_rejects_duplicate_rule_ids_before_installing(self, engine):
+        original = Policy(name="original", rules=(PolicyRule("stable-id", "first"),))
+        duplicate = Policy(name="override", rules=(PolicyRule("stable-id", "second"),))
+        engine.load([original])
+
+        with pytest.raises(ValueError, match="Duplicate rule identifier 'stable-id'"):
+            engine.load([original, duplicate])
+
+        assert tuple(p.name for p in engine.policies) == ("original",)
+
+    def test_load_rejects_empty_rule_id(self, engine):
+        policy = Policy(name="invalid", rules=(PolicyRule("", "missing"),))
+
+        with pytest.raises(ValueError, match="empty rule identifier"):
+            engine.load([policy])
+
     def test_blocker_triggers_deny(self, engine, sample_policies):
         engine.enabled = True
         engine.load(sample_policies)
