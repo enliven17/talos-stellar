@@ -687,10 +687,18 @@ async def reconcile_purchases(limit: int = 25) -> dict:
                 classification="incomplete",
                 detail="Local purchase record has no job ID",
             )
-        else:
-            remote = await _deps().api.get_commerce_payment_status(
-                purchase["talos_id"], job_id
+        elif not purchase.get("talos_id"):
+            record.update(
+                classification="incomplete",
+                detail="Local purchase record has no Talos ID",
             )
+        else:
+            try:
+                remote = await _deps().api.get_commerce_payment_status(
+                    purchase["talos_id"], job_id
+                )
+            except Exception:
+                remote = {"error": "Payment status query failed"}
             payment_status = remote.get("finalityStatus")
             record["payment_status"] = payment_status
 

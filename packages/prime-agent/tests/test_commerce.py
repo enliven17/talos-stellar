@@ -188,6 +188,31 @@ async def test_reconcile_purchases_rejects_out_of_range_limit():
     mock_db.get_commerce_jobs.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_reconcile_purchases_handles_missing_identity_and_api_exception():
+    purchases = [
+        {"job_id": None, "talos_id": "seller-a", "service_type": "research", "status": "pending"},
+        {"job_id": "job-2", "talos_id": "", "service_type": "analysis", "status": "pending"},
+        {"job_id": "job-3", "talos_id": "seller-c", "service_type": "design", "status": "pending"},
+    ]
+    mock_db = MagicMock()
+    mock_db.get_commerce_jobs.return_value = purchases
+    mock_api = MagicMock()
+    mock_api.get_commerce_payment_status = AsyncMock(side_effect=RuntimeError("offline"))
+
+    with patch("talos_agent.tools.commerce._api", mock_api), patch(
+        "talos_agent.tools.commerce._db", mock_db
+    ):
+        result = await reconcile_purchases()
+
+    assert [item["classification"] for item in result["purchases"]] == [
+        "incomplete",
+        "incomplete",
+        "unavailable",
+    ]
+    assert mock_api.get_commerce_payment_status.await_count == 1
+
+
 class TestPurchaseServiceSignPayment:
     """Verify purchase_service forwards correct asset kwargs to sign_payment."""
 

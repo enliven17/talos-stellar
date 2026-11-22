@@ -514,15 +514,21 @@ class TalosAPIClient:
         """Read the recorded Stellar finality status for a purchased job."""
         path_talos_id = quote(talos_id, safe="")
         path_job_id = quote(job_id, safe="")
-        r = await self._get(
-            f"/api/talos/{path_talos_id}/jobs/{path_job_id}/payment-status"
-        )
+        try:
+            r = await self._get(
+                f"/api/talos/{path_talos_id}/jobs/{path_job_id}/payment-status"
+            )
+        except Exception:
+            return {"error": "Payment status query failed"}
         if r.status_code != 200:
             return {
                 "error": "Payment status query failed",
                 "http_status": r.status_code,
             }
-        data = r.json()
+        try:
+            data = r.json()
+        except Exception:
+            return {"error": "Malformed payment status response"}
         if not isinstance(data, dict):
             return {"error": "Malformed payment status response"}
         return data

@@ -479,6 +479,32 @@ class TestCommercePaymentStatus:
             "http_status": 404,
         }
 
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_get_commerce_payment_status_malformed_json(
+        self, api_client: TalosAPIClient
+    ):
+        respx.get(
+            "http://test.local/api/talos/seller-a/jobs/job-1/payment-status"
+        ).mock(return_value=Response(200, text="not-json"))
+
+        assert await api_client.get_commerce_payment_status(
+            "seller-a", "job-1"
+        ) == {"error": "Malformed payment status response"}
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_get_commerce_payment_status_url_encodes_path(
+        self, api_client: TalosAPIClient
+    ):
+        respx.get(
+            "http://test.local/api/talos/seller%2Fa/jobs/job%3F1/payment-status"
+        ).mock(return_value=Response(200, json={"finalityStatus": "PENDING"}))
+
+        assert await api_client.get_commerce_payment_status(
+            "seller/a", "job?1"
+        ) == {"finalityStatus": "PENDING"}
+
 
 class TestDiscoverServices:
     """Test service discovery marketplace."""

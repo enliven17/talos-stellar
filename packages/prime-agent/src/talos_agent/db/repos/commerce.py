@@ -87,6 +87,8 @@ class CommerceRepo:
         return row["cnt"] if row else 0
 
     def get_commerce_jobs(self, limit: int = 25) -> list[dict]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 25:
+            raise ValueError("limit must be an integer from 1 to 25")
         rows = self._conn.execute(
             """SELECT job_id, talos_id, service_type, status, created_at
                FROM commerce_queue
