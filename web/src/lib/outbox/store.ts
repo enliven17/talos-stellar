@@ -180,11 +180,17 @@ export async function deferRetry(eventId: string, leaseId: string, delayMs: numb
   return toEvent(row);
 }
 
-/** Admin action: requeue a dead_letter event (resets attempts, clears lastError, runAt = now). */
+/** Admin action: requeue a dead_letter event (resets attempts, clears lastError, runAt = now, preserves original failure identity via originalEventId). */
 export async function requeue(eventId: string): Promise<OutboxEvent | null> {
   const [row] = await db
     .update(tlsOutboxEvents)
-    .set({ status: "pending", attempts: 0, lastError: null, runAt: sql`now()` })
+    .set({
+      status: "pending",
+      attempts: 0,
+      lastError: null,
+      runAt: sql`now()`,
+      originalEventId: sql`COALESCE(${tlsOutboxEvents.originalEventId}, ${tlsOutboxEvents.id})`,
+    })
     .where(and(eq(tlsOutboxEvents.id, eventId), eq(tlsOutboxEvents.status, "dead_letter")))
     .returning();
   return row ? toEvent(row) : null;

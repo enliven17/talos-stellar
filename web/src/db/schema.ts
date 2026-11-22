@@ -947,6 +947,9 @@ export const tlsOutboxEvents = pgTable(
 
     lastError: text("lastError"),
 
+    // Lineage link to original failed attempt when requeued from dead_letter. Nullable.
+    originalEventId: text("originalEventId"),
+
     createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
     updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
     dispatchedAt: timestamp("dispatchedAt", { mode: "date", precision: 3 }),
