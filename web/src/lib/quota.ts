@@ -511,3 +511,215 @@ export const ALL_QUOTA_RESOURCES: QuotaResource[] = [
   "revenue_writes",
   "sse_connections",
 ];
+
+// ─── Reservation / Commit / Release ──────────────────────────────────────────
+//
+// Reserve-commit-release semantics let callers pre-claim capacity before doing
+// billable work, then either commit (charge) or release (refund) the reservation.
+//
+// In-flight reservations are tracked in a module-level Map so no additional
+// DB columns or migrations are required.  The map is keyed by reservationId
+// (a UUID) and stores enough metadata to validate the commit/release, detect
+// window expiry, and account for concurrent reservations when checking headroom.
+//
+// Concurrency contract:
+//   • reserveQuota reads committed usage + all pending reservations for the
+//     same (talosId, resource, windowStart) before granting, so two parallel
+//     callers cannot both succeed if only one slot remains.
+//   • commitReservation calls checkAndIncrementQuota which performs an atomic
+//     DB upsert — the increment is durable even if the in-process map is lost.
+//   • releaseReservation simply removes the in-flight entry; the committed
+//     counter in the DB is unaffected.
+//
+// Limitations:
+//   • The map is process-local, so reservations made on one instance are
+//     invisible to another.  For multi-region deployments, replace the map
+//     with a Redis SETNX reservation key.
+//   • A reservation that is never committed or released is an orphan.  Call
+//     _pruneExpiredReservations() on a periodic tick (or in tests via
+//     _resetReservationsForTests()) to reclaim stale headroom.
+
+import { randomUUID } from "crypto";
+
+/** An in-flight (uncommitted, unreleased) reservation. */
+export interface ReservationEntry {
+  reservationId: string;
+  talosId: string;
+  resource: QuotaResource;
+  count: number;
+  windowStart: Date;
+  createdAt: Date;
+}
+
+/** Result returned by reserveQuota. */
+export interface ReservationResult {
+  /** false when the limit would be exceeded by this reservation. */
+  ok: boolean;
+  reservationId: string;
+  limit: number;
+  remaining: number;
+  resetAt: number;
+  resource: QuotaResource;
+}
+
+/** Result returned by commitReservation and releaseReservation. */
+export interface ReservationActionResult {
+  /** false when the reservationId was not found (already committed/released). */
+  ok: boolean;
+  reservationId: string;
+}
+
+// Module-level store for in-flight reservations.
+const _reservations = new Map<string, ReservationEntry>();
+
+/**
+ * Reserve `count` units of capacity for (talosId, resource) in the current
+ * window.  Returns ok:false without modifying the DB if the reservation would
+ * push committed + reserved usage over the configured limit.
+ *
+ * @param db       Drizzle DB instance (used to read config and committed usage)
+ * @param talosId  Agent requesting the reservation
+ * @param resource Resource being reserved
+ * @param count    Number of units to reserve (default 1)
+ */
+export async function reserveQuota(
+  db: Db,
+  talosId: string,
+  resource: QuotaResource,
+  count = 1,
+): Promise<ReservationResult> {
+  const config = await resolveQuotaConfig(db, talosId, resource);
+
+  const now = new Date();
+  const windowStart = floorToWindow(now, config.windowSize);
+  const resetAt = nextWindowStart(windowStart, config.windowSize).getTime();
+
+  // When enforcement is off, every reservation succeeds without DB work.
+  if (!config.enabled) {
+    const reservationId = randomUUID();
+    _reservations.set(reservationId, { reservationId, talosId, resource, count, windowStart, createdAt: now });
+    return { ok: true, reservationId, limit: config.maxCount, remaining: config.maxCount, resetAt, resource };
+  }
+
+  // Read committed usage for the current window.
+  const usageRow = await db
+    .select({ count: tlsQuotaUsage.count })
+    .from(tlsQuotaUsage)
+    .where(
+      and(
+        eq(tlsQuotaUsage.talosId, talosId),
+        eq(tlsQuotaUsage.resource, resource),
+        eq(tlsQuotaUsage.windowStart, windowStart),
+      ),
+    )
+    .limit(1)
+    .then((r: { count: number }[]) => r[0] ?? null);
+
+  const committed = usageRow?.count ?? 0;
+
+  // Sum up all in-flight reservations for this (talosId, resource, window).
+  const windowKey = windowStart.toISOString();
+  let pending = 0;
+  for (const r of _reservations.values()) {
+    if (
+      r.talosId === talosId &&
+      r.resource === resource &&
+      r.windowStart.toISOString() === windowKey
+    ) {
+      pending += r.count;
+    }
+  }
+
+  const projected = committed + pending + count;
+  if (projected > config.maxCount) {
+    return {
+      ok: false,
+      reservationId: "",
+      limit: config.maxCount,
+      remaining: Math.max(0, config.maxCount - committed - pending),
+      resetAt,
+      resource,
+    };
+  }
+
+  const reservationId = randomUUID();
+  _reservations.set(reservationId, { reservationId, talosId, resource, count, windowStart, createdAt: now });
+
+  return {
+    ok: true,
+    reservationId,
+    limit: config.maxCount,
+    remaining: Math.max(0, config.maxCount - projected),
+    resetAt,
+    resource,
+  };
+}
+
+/**
+ * Commit a previously reserved reservation, converting it to actual (durable)
+ * usage by calling checkAndIncrementQuota.  Returns ok:false when the
+ * reservationId is unknown (already committed or released).
+ */
+export async function commitReservation(
+  db: Db,
+  talosId: string,
+  resource: QuotaResource,
+  reservationId: string,
+): Promise<ReservationActionResult> {
+  const entry = _reservations.get(reservationId);
+  if (!entry || entry.talosId !== talosId || entry.resource !== resource) {
+    return { ok: false, reservationId };
+  }
+
+  // Remove the reservation before committing so a concurrent caller cannot
+  // double-count this slot if checkAndIncrementQuota is slow.
+  _reservations.delete(reservationId);
+
+  // Persist the usage increment for each unit reserved.
+  for (let i = 0; i < entry.count; i++) {
+    await checkAndIncrementQuota(db, talosId, resource);
+  }
+
+  return { ok: true, reservationId };
+}
+
+/**
+ * Release (cancel) a previously reserved reservation without recording any
+ * usage.  Idempotent: returns ok:true whether or not the entry existed.
+ */
+export async function releaseReservation(
+  talosId: string,
+  resource: QuotaResource,
+  reservationId: string,
+): Promise<ReservationActionResult> {
+  const entry = _reservations.get(reservationId);
+  if (!entry || entry.talosId !== talosId || entry.resource !== resource) {
+    // Already released or committed — treat as success (idempotent).
+    return { ok: true, reservationId };
+  }
+  _reservations.delete(reservationId);
+  return { ok: true, reservationId };
+}
+
+/**
+ * Remove reservations created in a window that has since expired.
+ * Call on a periodic tick in long-running services to prevent orphaned
+ * entries from blocking capacity in the next window.
+ */
+export function _pruneExpiredReservations(): number {
+  const now = new Date();
+  let pruned = 0;
+  for (const [id, entry] of _reservations) {
+    const windowEnd = nextWindowStart(entry.windowStart, "hourly"); // conservative 1-hour TTL
+    if (windowEnd < now) {
+      _reservations.delete(id);
+      pruned++;
+    }
+  }
+  return pruned;
+}
+
+/** Test-only: clear all in-flight reservations between test cases. */
+export function _resetReservationsForTests(): void {
+  _reservations.clear();
+}
