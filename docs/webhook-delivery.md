@@ -276,6 +276,7 @@ consumers that still verify with the previous secret.
 - Existing single-signature consumers continue to work (first `v1=` matches)
 - Consumers that already accept `secret: string[]` (SDK) can hold both keys
 - `PATCH /subscriptions/:id` with `{ "secret": "..." }` uses the same rotation path
+- Rotating to a secret that reuses the active key identifier is rejected with `409 Conflict` (`code: "WEBHOOK_SECRET_KEY_REUSE"`) before replacement, preserving the current signing key, any active grace window, and pending deliveries
 - Secrets are never logged; API responses never include ciphertext
 
 ### Env
