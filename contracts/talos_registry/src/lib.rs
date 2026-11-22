@@ -18,6 +18,8 @@ pub(crate) mod timelock;
 pub(crate) mod ttl;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod registry_migration_manifest;
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub mod registry_schema_fixtures;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod registry_schema_tests;
@@ -543,6 +545,11 @@ const SCHEMA_TIMELOCK_DEFAULTS: u32 = 2;
 pub const SCHEMA_LATEST: u32 = SCHEMA_TIMELOCK_DEFAULTS;
 /// `rollback_schema` may only move the version pointer back this many steps.
 const MAX_ROLLBACK_DEPTH: u32 = 1;
+
+/// Version of the TalosRegistry storage-key migration compatibility manifest
+/// published by this WASM. Matches `spec_version` in
+/// `contracts/fixtures/registry_schema/migration_manifest/manifest.json`.
+const MIGRATION_KEY_MANIFEST_VERSION: u32 = 1;
 
 /// Compile-time interface version of TalosRegistry.
 ///
@@ -1610,6 +1617,19 @@ impl TalosRegistry {
     /// Fetch a single migration/rollback history entry, oldest first.
     pub fn migration_record_at(e: Env, index: u32) -> Option<storage_migration::MigrationRecord> {
         storage_migration::migration_record_at(&e, index)
+    }
+
+    /// Publish the version of the registry storage-key migration compatibility
+    /// manifest that this WASM implements.
+    ///
+    /// Off-chain tooling reads this stable marker to select the correct old →
+    /// new `DataKey` mapping (see `contracts/fixtures/registry_schema/
+    /// migration_manifest/manifest.json`). Bumping it is a minor,
+    /// backwards-compatible change: a higher version only adds mapping rows.
+    ///
+    /// Read-only — requires no authorization and performs no ledger writes.
+    pub fn migration_key_manifest_version(_e: Env) -> u32 {
+        MIGRATION_KEY_MANIFEST_VERSION
     }
 }
 
