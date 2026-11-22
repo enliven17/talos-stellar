@@ -531,12 +531,25 @@ export const tlsWebhookSubscriptions = pgTable(
     active: boolean("active").notNull().default(true),
     paused: boolean("paused").notNull().default(false),
 
+    /**
+     * Destination verification status ('pending' | 'verified' | 'failed').
+     * NULL = legacy subscription created before verification existed (treated as verified).
+     */
+    destinationVerificationStatus: text("destination_verification_status"),
+    /** Opaque verification challenge token for active handshake. */
+    destinationVerificationToken: text("destination_verification_token"),
+    /** Bounded lifetime of the verification challenge / validity window. */
+    destinationVerificationExpiresAt: timestamp("destination_verification_expires_at", { mode: "date", precision: 3 }),
+    /** Wall-clock time when the destination handshake was successfully verified. */
+    destinationVerifiedAt: timestamp("destination_verified_at", { mode: "date", precision: 3 }),
+
     createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
   },
   (t) => [
     index("tls_webhook_subscriptions_talos_id_idx").on(t.talosId),
     index("tls_webhook_subscriptions_previous_expires_idx").on(t.previousSecretExpiresAt),
+    index("tls_webhook_subscriptions_verification_expires_idx").on(t.destinationVerificationExpiresAt),
   ],
 );
 
