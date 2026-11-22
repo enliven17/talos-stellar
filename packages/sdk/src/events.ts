@@ -102,6 +102,23 @@ export class SchemaVersionMismatchError extends Error {
   }
 }
 
+/** Why a serialized event cursor could not be used by a stream. */
+export type TalosCursorValidationReason =
+  | "invalid_cursor"
+  | "origin_mismatch"
+  | "stream_mismatch"
+  | "invalid_stream_url";
+
+/** Thrown locally when a serialized event cursor is malformed or out of scope. */
+export class TalosCursorValidationError extends Error {
+  public readonly code = "cursor_validation_error";
+
+  constructor(public readonly reason: TalosCursorValidationReason) {
+    super(`Invalid Talos event cursor: ${reason.replaceAll("_", " ")}`);
+    this.name = "TalosCursorValidationError";
+  }
+}
+
 // ── Version negotiation helper ─────────────────────────────────────────────────
 
 /**
@@ -363,6 +380,13 @@ export interface TalosEventStreamOptions {
   path?: string;
 
   /**
+   * Serialized cursor returned by {@link TalosEventStream.serializeCursor}.
+   * The cursor is validated against this stream's API origin and path before
+   * the stream starts.
+   */
+  cursor?: string;
+
+  /**
    * Auth header value — typically `"Bearer <key>"`.
    * When not set, no Authorization header is sent.
    */
@@ -484,6 +508,76 @@ export interface TalosEventStreamOptions {
   maxDataLines?: number;
 }
 
+interface SerializedEventCursor {
+  version: 1;
+  origin: string;
+  stream: string;
+  eventId: string;
+}
+
+function eventStreamIdentity(
+  baseUrl: string,
+  path: string,
+): Pick<SerializedEventCursor, "origin" | "stream"> {
+  let url: URL;
+  try {
+    url = new URL(`${baseUrl.replace(/\/$/, "")}${path}`);
+  } catch {
+    throw new TalosCursorValidationError("invalid_stream_url");
+  }
+  return {
+    origin: url.origin,
+    stream: `${url.pathname}${url.search}`,
+  };
+}
+
+function deserializeEventCursor(
+  serialized: string,
+  baseUrl: string,
+  path: string,
+): string {
+  let cursor: unknown;
+  try {
+    cursor = JSON.parse(serialized);
+  } catch {
+    throw new TalosCursorValidationError("invalid_cursor");
+  }
+  if (
+    typeof cursor !== "object" ||
+    cursor === null ||
+    Array.isArray(cursor) ||
+    (cursor as Partial<SerializedEventCursor>).version !== 1 ||
+    typeof (cursor as Partial<SerializedEventCursor>).origin !== "string" ||
+    typeof (cursor as Partial<SerializedEventCursor>).stream !== "string" ||
+    typeof (cursor as Partial<SerializedEventCursor>).eventId !== "string"
+  ) {
+    throw new TalosCursorValidationError("invalid_cursor");
+  }
+  const eventId = (cursor as SerializedEventCursor).eventId;
+  if (eventId.length === 0 || /[\0\r\n]/.test(eventId)) {
+    throw new TalosCursorValidationError("invalid_cursor");
+  }
+
+  const identity = eventStreamIdentity(baseUrl, path);
+  const metadata = cursor as SerializedEventCursor;
+  if (metadata.origin !== identity.origin) {
+    throw new TalosCursorValidationError("origin_mismatch");
+  }
+  if (metadata.stream !== identity.stream) {
+    throw new TalosCursorValidationError("stream_mismatch");
+  }
+  return eventId;
+}
+
+/** Validate a cursor for a stream without opening a connection. */
+export function validateTalosEventCursor(
+  serialized: string,
+  baseUrl: string,
+  path: string,
+): void {
+  deserializeEventCursor(serialized, baseUrl, path);
+}
+
 // ── Internal state ─────────────────────────────────────────────────────────────
 
 type StreamState = TalosStreamState;
@@ -592,6 +686,13 @@ export class TalosEventStream {
       checkpointStore: opts.checkpointStore,
       onHistoryGap: opts.onHistoryGap,
     };
+    if (opts.cursor !== undefined) {
+      this.lastEventId = deserializeEventCursor(
+        opts.cursor,
+        this.baseUrl,
+        this.opts.path,
+      );
+    }
 
     // Forward external abort
     if (opts.signal) {
@@ -671,6 +772,19 @@ export class TalosEventStream {
   /** The last event ID seen — sent as `Last-Event-ID` on reconnect. */
   get lastSeenEventId(): string | undefined {
     return this.lastEventId;
+  }
+
+  /**
+   * Serialize the current event ID with this stream's API origin and path.
+   * Returns `undefined` until the stream has received an event ID.
+   */
+  serializeCursor(): string | undefined {
+    if (this.lastEventId === undefined) return undefined;
+    return JSON.stringify({
+      version: 1,
+      ...eventStreamIdentity(this.baseUrl, this.opts.path),
+      eventId: this.lastEventId,
+    } satisfies SerializedEventCursor);
   }
 
   /**
