@@ -193,10 +193,44 @@ describe("outbox/store — fail", () => {
     expect(result?.status).toBe("dead_letter");
   });
 
+  it("schedules retry runAt using a relative SQL interval instead of wall-clock Date.now()", async () => {
+    const updateChain = chainable([{ id: "evt_1", eventType: "x", status: "pending", attempts: 1 }]);
+    mockDb.select.mockReturnValue(chainable([{ id: "evt_1", leaseId: "l1", status: "leased", attempts: 2, maxAttempts: 8 }]));
+    mockDb.update.mockReturnValue(updateChain);
+
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    try {
+      const result = await store.fail("evt_1", "l1", new Error("boom"));
+      expect(result?.status).toBe("pending");
+      expect(dateNowSpy).not.toHaveBeenCalled();
+      const setArg = (updateChain.set as ReturnType<typeof vi.fn>).mock.calls[0][0] as { runAt: unknown };
+      expect(setArg.runAt).not.toBeInstanceOf(Date);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
   it("returns null when the lease was already lost", async () => {
     mockDb.select.mockReturnValue(chainable([]));
     expect(await store.fail("evt_1", "stale", new Error("x"))).toBeNull();
     expect(mockDb.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("outbox/store — deferRetry", () => {
+  it("defers a prematurely-leased event with a bounded relative SQL interval", async () => {
+    const updateChain = chainable([{ id: "evt_1", eventType: "x", status: "pending", attempts: 1 }]);
+    mockDb.update.mockReturnValue(updateChain);
+
+    const result = await store.deferRetry("evt_1", "l1", 10_000);
+    expect(result?.status).toBe("pending");
+    const setArg = (updateChain.set as ReturnType<typeof vi.fn>).mock.calls[0][0] as { runAt: unknown };
+    expect(setArg.runAt).not.toBeInstanceOf(Date);
+  });
+
+  it("returns null when the lease was lost", async () => {
+    mockDb.update.mockReturnValue(chainable([]));
+    expect(await store.deferRetry("evt_1", "stale", 5_000)).toBeNull();
   });
 });
 
