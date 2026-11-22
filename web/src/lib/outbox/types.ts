@@ -26,6 +26,7 @@ export interface WriteEventInput<TPayload = unknown> {
   aggregateId: string;
   eventType: string;
   payload: TPayload;
+  payloadVersion?: number;
   maxAttempts?: number;
   dedupeKey?: string;
 }
