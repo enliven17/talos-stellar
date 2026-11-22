@@ -28,6 +28,28 @@ export type {
   DedupeInFlightGetsOptions,
 } from "./client.js";
 
+// ── HTTP Transcript (support cases & deterministic replay) ─────────
+
+export {
+  TranscriptRecorder,
+  TranscriptReplayer,
+  createTranscriptRecorder,
+  createTranscriptReplayer,
+  sanitizeTranscriptPath,
+  sanitizeTranscriptHeaders,
+  sanitizeTranscriptResponseBody,
+  parseTranscript,
+} from "./transcript.js";
+export type {
+  HttpTranscript,
+  TranscriptEntry,
+  TranscriptRequest,
+  TranscriptResponse,
+  TranscriptTiming,
+  TranscriptRecorderOptions,
+  TranscriptReplayOptions,
+} from "./transcript.js";
+
 // ── Pagination ─────────────────────────────────────────────────────
 
 export {
