@@ -65,16 +65,69 @@ export async function enqueue<TPayload = unknown>(
  * instances draining the same table) never claim the same row — this is
  * the only query in the module that needs raw SQL, since drizzle's query
  * builder doesn't expose SKIP LOCKED.
+ *
+ * When `fairBatchPerQueue` is > 0 the batch is assembled by claiming at most
+ * that many jobs per queue in priority/runAt order, then stopping once the
+ * global `limit` is reached. This bounds any single queue's share of a drain
+ * batch so a high-volume queue cannot starve lower-volume ones.
  */
 export async function leaseBatch(
   queues: string[],
   limit: number = jobsConfig.batchSize,
   workerId: string = jobsConfig.workerId,
   leaseDurationMs: number = jobsConfig.leaseDurationMs,
+  fairBatchPerQueue: number = jobsConfig.fairBatchPerQueue,
 ): Promise<JobRecord[]> {
   if (queues.length === 0 || limit <= 0) return [];
 
   const leaseExpiresAt = sql`now() + (${leaseDurationMs}::text || ' milliseconds')::interval`;
+
+  // ── Fair-share path ──────────────────────────────────────────────────────
+  // When fairBatchPerQueue > 0, claim up to fairBatchPerQueue rows from each
+  // queue in turn (preserving priority DESC, runAt ASC within each queue) and
+  // stop once we have reached the global limit. We iterate queues in stable
+  // registration order so relative queue priority is consistent across ticks.
+  if (fairBatchPerQueue > 0) {
+    const perQueue = Math.min(fairBatchPerQueue, limit);
+    const allRows: (typeof tlsJobs.$inferSelect)[] = [];
+
+    for (const queue of queues) {
+      if (allRows.length >= limit) break;
+      const remaining = limit - allRows.length;
+      const take = Math.min(perQueue, remaining);
+
+      const result = await db.execute(sql`
+        UPDATE ${tlsJobs}
+        SET
+          status = 'leased',
+          "leaseId" = gen_random_uuid()::text,
+          "leaseOwner" = ${workerId},
+          "leaseExpiresAt" = ${leaseExpiresAt},
+          "heartbeatAt" = now(),
+          attempts = attempts + 1,
+          "updatedAt" = now()
+        WHERE id IN (
+          SELECT id FROM ${tlsJobs}
+          WHERE status = 'pending'
+            AND queue = ${queue}
+            AND "runAt" <= now()
+          ORDER BY priority DESC, "runAt" ASC
+          FOR UPDATE SKIP LOCKED
+          LIMIT ${take}
+        )
+        RETURNING *
+      `);
+      const rows = (result as unknown as { rows: (typeof tlsJobs.$inferSelect)[] }).rows ?? [];
+      allRows.push(...rows);
+    }
+
+    for (const row of allRows) {
+      logJobEvent("job_leased", { jobId: row.id, queue: row.queue, attempts: row.attempts, workerId });
+    }
+    return allRows.map(toRecord);
+  }
+
+  // ── Default path (no per-queue cap) ──────────────────────────────────────
   const result = await db.execute(sql`
     UPDATE ${tlsJobs}
     SET
