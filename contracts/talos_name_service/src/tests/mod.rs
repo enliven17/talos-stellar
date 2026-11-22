@@ -208,7 +208,7 @@ mod property_tests {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke},
+        testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
         Address, Env, IntoVal, InvokeError, Symbol, TryFromVal,
     };
     use std::string::ToString;
@@ -471,7 +471,7 @@ mod tests {
     #[test]
     fn version_returns_compile_time_constant() {
         let (_env, _registry_contract, _contract_id, _admin, _registry_client, client) = setup();
-        assert_eq!(client.version(), (1u32, 4u32, 0u32));
+        assert_eq!(client.version(), (1u32, 5u32, 0u32));
     }
 
     #[test]
@@ -1104,6 +1104,114 @@ mod tests {
         assert_eq!(got_version2, 1);
         assert_eq!(got_name2, name);
         assert_eq!(got_owner2, owner);
+    }
+
+    #[test]
+    fn name_transfer_requires_recipient_acceptance_and_moves_both_mappings() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let source_owner = Address::generate(&env);
+        let recipient_owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let source_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &source_owner,
+            &protocol_wallet,
+        );
+        let recipient_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &recipient_owner,
+            &protocol_wallet,
+        );
+        let name = s(&env, "transferbot");
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &source_owner,
+            source_id,
+            &name,
+        );
+
+        client
+            .mock_all_auths()
+            .propose_name_transfer(&source_owner, &source_id, &recipient_id);
+        let pending = client.pending_name_transfer(&source_id).unwrap();
+        assert_eq!(pending.recipient_talos_id, recipient_id);
+        assert_eq!(client.resolve_name(&name), Some(source_id));
+        assert_eq!(client.name_of(&source_id), Some(name.clone()));
+
+        let stranger = Address::generate(&env);
+        assert!(client
+            .mock_all_auths()
+            .try_accept_name_transfer(&stranger, &source_id)
+            .is_err());
+        assert_eq!(client.resolve_name(&name), Some(source_id));
+
+        env.ledger().set_timestamp(pending.expires_at);
+        client
+            .mock_all_auths()
+            .accept_name_transfer(&recipient_owner, &source_id);
+
+        assert_eq!(client.resolve_name(&name), Some(recipient_id));
+        assert_eq!(client.name_of(&source_id), None);
+        assert_eq!(client.name_of(&recipient_id), Some(name));
+        assert!(client.pending_name_transfer(&source_id).is_none());
+    }
+
+    #[test]
+    fn expired_name_transfer_keeps_source_name_and_can_be_cancelled() {
+        let (env, registry_contract, contract_id, _admin, registry_client, client) = setup();
+        let source_owner = Address::generate(&env);
+        let recipient_owner = Address::generate(&env);
+        let protocol_wallet = Address::generate(&env);
+        let source_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &source_owner,
+            &protocol_wallet,
+        );
+        let recipient_id = create_talos_with_auth(
+            &env,
+            &registry_client,
+            &registry_contract,
+            &recipient_owner,
+            &protocol_wallet,
+        );
+        let name = s(&env, "transferbot");
+        register_name_with_auth(
+            &env,
+            &client,
+            &contract_id,
+            &registry_contract,
+            &source_owner,
+            source_id,
+            &name,
+        );
+
+        client
+            .mock_all_auths()
+            .propose_name_transfer(&source_owner, &source_id, &recipient_id);
+        let pending = client.pending_name_transfer(&source_id).unwrap();
+        env.ledger()
+            .set_timestamp(pending.expires_at.saturating_add(1));
+        assert!(client
+            .mock_all_auths()
+            .try_accept_name_transfer(&recipient_owner, &source_id)
+            .is_err());
+        assert_eq!(client.resolve_name(&name), Some(source_id));
+        assert_eq!(client.name_of(&source_id), Some(name.clone()));
+
+        client
+            .mock_all_auths()
+            .cancel_name_transfer(&source_owner, &source_id);
+        assert!(client.pending_name_transfer(&source_id).is_none());
+        assert_eq!(client.resolve_name(&name), Some(source_id));
     }
 
     #[test]

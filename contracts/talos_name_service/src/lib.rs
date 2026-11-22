@@ -33,7 +33,10 @@ mod validation;
 pub use admin::{AdminAction, ProposalStatus, TimelockConfig, TimelockProposal};
 pub use types::{PauseDomain, PauseState, PauseInfo};
 pub use types::{DataKey, ContractError, EventSchemaVersion, EVENT_SCHEMA_VERSION};
-pub use types::{NamesPage, MAX_REVERSE_PAGE_SIZE, MAX_REVERSE_SCAN_WINDOW};
+pub use types::{
+    NameTransfer, NamesPage, MAX_REVERSE_PAGE_SIZE, MAX_REVERSE_SCAN_WINDOW,
+    NAME_TRANSFER_WINDOW_SECS,
+};
 pub use interface::{INTERFACE_ID, INTERFACE_NAMESPACE, CONTRACT_VERSION};
 pub use interface::{EXPECTED_REGISTRY_INTERFACE_ID, features_list, DEPRECATED_DIRECT_ADMIN};
 pub use interface::{version_supports, check_registry_compatible};

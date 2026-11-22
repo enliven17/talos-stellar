@@ -21,6 +21,7 @@ from talos_agent.observability import log
 from talos_agent.observability import setup as setup_observability
 from talos_agent.tracing import force_flush as force_flush_tracing
 from talos_agent.tracing import shutdown_tracing
+from talos_agent.scheduler.policy import build_consistency_report
 
 if TYPE_CHECKING:
     from talos_agent.config import Settings
@@ -391,6 +392,7 @@ def _build_task_list(
         polling_task,
     )
 
+    task_slots = asyncio.BoundedSemaphore(settings.scheduler_max_concurrent_tasks)
     _shared = dict(
         shutdown_event=shutdown_event,
         settings=settings,
@@ -406,11 +408,16 @@ def _build_task_list(
                 policy_engine=policy_engine, policy_middleware=policy_middleware,
                 ensure_browser_healthy=ensure_browser_healthy,
                 effective_clock=effective_clock,
+                task_slots=task_slots,
             ),
             name="agent_cycle",
         ),
         asyncio.create_task(
-            polling_task(**_shared, job_effect_store=job_effect_store),
+            polling_task(
+                **_shared,
+                job_effect_store=job_effect_store,
+                task_slots=task_slots,
+            ),
             name="polling",
         ),
         asyncio.create_task(heartbeat_task(**_shared), name="heartbeat"),
@@ -422,29 +429,37 @@ def _build_task_list(
             ),
             name="job_heartbeat",
         ),
-        asyncio.create_task(activity_flush_task(**_shared), name="activity_flush"),
+        asyncio.create_task(
+            activity_flush_task(**_shared, task_slots=task_slots),
+            name="activity_flush",
+        ),
         asyncio.create_task(
             learning_cycle_task(
                 **_shared, agent_lock=agent_lock, tools=tools,
                 ensure_browser_healthy=ensure_browser_healthy,
                 effective_clock=effective_clock,
+                task_slots=task_slots,
             ),
             name="learning_cycle",
         ),
         asyncio.create_task(
             dividend_distribution_task(
                 **_shared, stellar=stellar, effective_clock=effective_clock,
+                task_slots=task_slots,
             ),
             name="dividend_distribution",
         ),
         asyncio.create_task(
-            loan_repayment_task(**_shared, agent_lock=agent_lock),
+            loan_repayment_task(
+                **_shared, agent_lock=agent_lock, task_slots=task_slots,
+            ),
             name="loan_repayment",
         ),
         asyncio.create_task(
             telemetry_log_task(
                 **_shared, adapter_health_reporter=adapter_health_reporter,
                 policy_engine=policy_engine,
+                task_slots=task_slots,
             ),
             name="telemetry_log",
         ),
@@ -455,6 +470,7 @@ def _build_task_list(
                 job_effect_dispatch_task(
                     shutdown_event=shutdown_event, settings=settings,
                     db=db, job_effect_dispatcher=job_effect_dispatcher,
+                    task_slots=task_slots,
                 ),
                 name="job_effect_dispatch",
             )
@@ -470,6 +486,19 @@ def _build_task_list(
             )
         )
     return task_list
+
+
+def scheduler_consistency_report(db, tasks):
+    """Return a read-only report comparing durable and live scheduler work."""
+    try:
+        durable_ids = db.list_durable_execution_ids()
+        active_ids = {task.get_name() for task in tasks if not task.done()}
+        return build_consistency_report(durable_ids, active_ids)
+    except Exception as exc:
+        logger.warning("scheduler_consistency_observation_failed: %s", type(exc).__name__)
+        return build_consistency_report(
+            (), (), durable_source_available=False, active_source_available=False
+        )
 
 
 async def _cleanup(api, browser_state, settings, db):
@@ -612,6 +641,14 @@ async def run(settings: "Settings", agent_slot: int = 0) -> None:
         job_effect_store=job_effect_store, job_effect_dispatcher=job_effect_dispatcher,
         telegram_queue_worker=telegram_queue_worker,
         adapter_health_reporter=adapter_health_reporter,
+    )
+    consistency = scheduler_consistency_report(db, async_tasks)
+    log.info(
+        "scheduler_consistency_report",
+        matched=list(consistency.matched),
+        orphaned_durable=list(consistency.orphaned_durable),
+        untracked_active=list(consistency.untracked_active),
+        uncertain=list(consistency.uncertain),
     )
 
     try:

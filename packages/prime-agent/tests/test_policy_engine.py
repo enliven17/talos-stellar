@@ -618,6 +618,64 @@ class TestPolicySimulator:
         assert len(raw["scenarios"]) == 1
 
 
+class TestComparePolicies:
+    @staticmethod
+    def _policy(threshold: float | None, decision=PolicyDecision.DENY) -> list[Policy]:
+        if threshold is None:
+            return [Policy(name="p", rules=())]
+        rule = PolicyRule(
+            rule_id="cap",
+            description="cap",
+            conditions=(MatchCondition(field="params.amount", operator="gt", value=threshold),),
+            decision=decision,
+            severity=Severity.BLOCKER,
+            reason="too big",
+        )
+        return [Policy(name="p", rules=(rule,))]
+
+    SCENARIOS = [
+        {"action": "purchase_service", "params": {"amount": 5}},
+        {"action": "purchase_service", "params": {"amount": 50}},
+        {"action": "purchase_service", "params": {"amount": 500}},
+    ]
+
+    def test_newly_allowed_and_denied(self):
+        # v1 blocks > 100; v2 blocks > 10
+        report = PolicySimulator.compare_policies(
+            self._policy(100), self._policy(10), self.SCENARIOS
+        )
+        assert [r["scenario_index"] for r in report["newly_denied"]] == [1]
+        assert report["newly_allowed"] == []
+        assert report["unchanged"] == 2
+        # reverse direction
+        rev = PolicySimulator.compare_policies(
+            self._policy(10), self._policy(100), self.SCENARIOS
+        )
+        assert [r["scenario_index"] for r in rev["newly_allowed"]] == [1]
+        assert rev["newly_denied"] == []
+
+    def test_identical_policies_and_no_side_effects(self):
+        engine = PolicyEngine()
+        engine.enabled = True
+        engine.load(self._policy(10))
+        report = PolicySimulator.compare_policies(
+            self._policy(10), self._policy(10), self.SCENARIOS
+        )
+        assert report["unchanged"] == 3
+        assert not (report["newly_allowed"] or report["newly_denied"])
+        assert engine.metrics["evaluation_count"] == 0
+
+    def test_empty_scenarios_and_error_scenario(self):
+        empty = PolicySimulator.compare_policies(self._policy(1), self._policy(None), [])
+        assert empty["total"] == 0 and empty["unchanged"] == 0
+        bad = PolicySimulator.compare_policies(
+            self._policy(1), self._policy(None),
+            [{"action": "x", "params": None, "context": "nope"}],
+        )
+        assert bad["total"] == 1
+        assert len(bad["errors"]) + bad["unchanged"] + len(bad["newly_allowed"]) == 1
+
+
 # ── PolicyResult convenience factories ────────────────────────────────────────
 
 
