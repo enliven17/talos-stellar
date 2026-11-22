@@ -249,7 +249,12 @@ export interface ETagCacheEntry<T = unknown> {
   etag: string;
   /** The cached response body. */
   body: T;
+  /** Schema version of this cache entry. Increment when the serialization format changes. */
+  version: number;
 }
+
+/** Current ETag cache entry schema version. */
+export const ETAG_CACHE_VERSION = 1;
 
 /**
  * Pluggable ETag store interface.
@@ -264,6 +269,16 @@ export interface ETagStore {
   set(key: string, entry: ETagCacheEntry): void;
   /** Remove a cache entry (called when the server returns a non-304 / non-2xx on a conditional request). */
   delete(key: string): void;
+  /**
+   * Optional: serialize the entire store for persistence.
+   * Returned data should be opaque to callers; use {@link deserialize} to restore.
+   */
+  serialize?(): string;
+  /**
+   * Optional: restore the store from a previously serialized string.
+   * Implementations should ignore entries with unknown/unsupported versions.
+   */
+  deserialize?(data: string): void;
 }
 
 /**
@@ -302,15 +317,18 @@ export interface ETagCacheOptions {
 
 /**
  * A simple insertion-order LRU map bounded to `maxEntries`.
- *
- * @internal
  */
-class BoundedETagStore implements ETagStore {
+export class BoundedETagStore implements ETagStore {
   private readonly map = new Map<string, ETagCacheEntry>();
   constructor(private readonly maxEntries: number) {}
 
   get(key: string): ETagCacheEntry | undefined {
-    return this.map.get(key);
+    const entry = this.map.get(key);
+    // Skip entries with unsupported versions (future-proofing).
+    if (entry && entry.version > ETAG_CACHE_VERSION) {
+      return undefined;
+    }
+    return entry;
   }
 
   set(key: string, entry: ETagCacheEntry): void {
@@ -321,7 +339,8 @@ class BoundedETagStore implements ETagStore {
       const oldest = this.map.keys().next().value;
       if (oldest !== undefined) this.map.delete(oldest);
     }
-    this.map.set(key, entry);
+    // Ensure the entry has the current version.
+    this.map.set(key, { ...entry, version: ETAG_CACHE_VERSION });
   }
 
   delete(key: string): void {
@@ -331,6 +350,45 @@ class BoundedETagStore implements ETagStore {
   /** Number of entries currently in the store (for tests/observability). */
   get size(): number {
     return this.map.size;
+  }
+
+  /** Serialize the store to a JSON string for persistence. */
+  serialize(): string {
+    const entries: Array<[string, ETagCacheEntry]> = [];
+    for (const [key, value] of this.map.entries()) {
+      entries.push([key, value]);
+    }
+    return JSON.stringify({ version: ETAG_CACHE_VERSION, entries });
+  }
+
+  /** Restore the store from a previously serialized string. */
+  deserialize(data: string): void {
+    try {
+      const parsed = JSON.parse(data);
+      if (!parsed || typeof parsed !== "object") return;
+      if (parsed.version !== ETAG_CACHE_VERSION) {
+        // Unknown version — ignore the entire payload.
+        return;
+      }
+      if (!Array.isArray(parsed.entries)) return;
+      this.map.clear();
+      for (const entry of parsed.entries) {
+        if (!Array.isArray(entry) || entry.length !== 2) continue;
+        const [key, value] = entry;
+        if (typeof key !== "string") continue;
+        if (!value || typeof value !== "object") continue;
+        if (typeof value.etag !== "string" || value.version !== ETAG_CACHE_VERSION) continue;
+        // Only restore entries with the current supported version.
+        this.map.set(key, value as ETagCacheEntry);
+      }
+      // Enforce capacity limit after restore.
+      while (this.map.size > this.maxEntries) {
+        const oldest = this.map.keys().next().value;
+        if (oldest !== undefined) this.map.delete(oldest);
+      }
+    } catch {
+      // Malformed data — ignore and start fresh.
+    }
   }
 }
 
@@ -946,8 +1004,17 @@ export class TalosClient {
       if (!Number.isInteger(maxEntries) || maxEntries < 1) {
         throw new RangeError("etagCache.maxEntries must be a positive integer");
       }
-      if (raw.store !== undefined && typeof raw.store !== "object") {
-        throw new TypeError("etagCache.store must be an object");
+      if (raw.onCacheHit !== undefined && typeof raw.onCacheHit !== "function") {
+        throw new TypeError("etagCache.onCacheHit must be a function");
+      }
+      if (raw.store !== undefined) {
+        if (typeof raw.store !== "object" || raw.store === null) {
+          throw new TypeError("etagCache.store must be an object");
+        }
+        const store = raw.store as { get: unknown; set: unknown; delete: unknown; serialize?: unknown; deserialize?: unknown };
+        if (typeof store.get !== "function" || typeof store.set !== "function" || typeof store.delete !== "function") {
+          throw new TypeError("etagCache.store must implement get, set, and delete methods");
+        }
       }
       this.etagStore = raw.store ?? new BoundedETagStore(maxEntries);
       this.onCacheHit = raw.onCacheHit;
@@ -965,7 +1032,11 @@ export class TalosClient {
 
   private etagCacheKey(method: string, url: string): string | null {
     if (method.toUpperCase() !== "GET" || !this.etagStore) return null;
-    return `${url}\n${this.headers["Authorization"] ?? ""}`;
+    // Include the origin (baseUrl) explicitly in the cache key to prevent
+    // cross-origin cache reuse when a persistent store is shared across clients
+    // with different base URLs.
+    const origin = new URL(this.baseUrl).origin;
+    return `${origin}\n${url}\n${this.headers["Authorization"] ?? ""}`;
   }
 
 
@@ -1547,7 +1618,7 @@ export class TalosClient {
           if (cacheKey !== null && this.etagStore) {
             const etag = res.headers.get("ETag") ?? res.headers.get("etag");
             if (etag) {
-              this.etagStore.set(cacheKey, { etag, body });
+              this.etagStore.set(cacheKey, { etag, body, version: ETAG_CACHE_VERSION });
             }
           }
 
