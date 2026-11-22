@@ -9,7 +9,8 @@
  *
  * See web/OUTBOX.md for configuration, operational signals, and rollback.
  */
-export { writeOutboxEvent, getEvent, listEvents, requeue, summarizeDeadLetters } from "./store";
+export { writeOutboxEvent, getEvent, listEvents, requeue, summarizeDeadLetters, getLagDiagnostics } from "./store";
+export type { ConsumerLagStats, LagDiagnostics } from "./store";
 export {
   toDeadLetterView,
   sanitizeOutboxError,
@@ -19,6 +20,15 @@ export {
 } from "./dead-letter";
 export type { DeadLetterView, DeadLetterSummary, DeadLetterQuery } from "./dead-letter";
 export { registerConsumer } from "./registry";
-export { dispatchOnce, extractAndValidatePayloadVersion, UnsupportedPayloadVersionError } from "./dispatcher";
-export { outboxConfig, OUTBOX_ENABLED, DEFAULT_OUTBOX_PAYLOAD_VERSION, DEFAULT_SUPPORTED_PAYLOAD_VERSIONS } from "./config";
+export { dispatchOnce } from "./dispatcher";
+export { runOutboxReplay } from "./replay-harness";
+export type {
+  DuplicateEffectReport,
+  ReplayEffect,
+  ReplayEventInput,
+  ReplayEventOutcome,
+  ReplayOptions,
+  ReplayReport,
+} from "./replay-harness";
+export { outboxConfig, OUTBOX_ENABLED } from "./config";
 export type { Consumer, DispatchSummary, OutboxEvent, OutboxStatus, WriteEventInput } from "./types";

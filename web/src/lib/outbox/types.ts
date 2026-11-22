@@ -15,6 +15,7 @@ export interface OutboxEvent<TPayload = unknown> {
   maxAttempts: number;
   dedupeKey: string | null;
   lastError: string | null;
+  originalEventId: string | null;
   createdAt: Date;
   updatedAt: Date;
   dispatchedAt: Date | null;

@@ -1,55 +1,55 @@
 import * as store from "./store";
 import { getConsumers } from "./registry";
-import { DEFAULT_OUTBOX_PAYLOAD_VERSION, DEFAULT_SUPPORTED_PAYLOAD_VERSIONS, outboxConfig } from "./config";
-import type { DispatchSummary, OutboxEvent } from "./types";
+import { outboxConfig } from "./config";
+import { boundRetryDelayMs } from "./retry";
+import type { DispatchSummary } from "./types";
 
-export class UnsupportedPayloadVersionError extends Error {
-  readonly version: unknown;
-  readonly supportedVersions: number[];
+const MAX_TRACKED_RETRY_COOLDOWNS = 10_000;
 
-  constructor(version: unknown, supportedVersions: number[] = DEFAULT_SUPPORTED_PAYLOAD_VERSIONS) {
-    const supportedList = Array.isArray(supportedVersions) ? supportedVersions : DEFAULT_SUPPORTED_PAYLOAD_VERSIONS;
-    super(
-      `Unsupported outbox event payload version: ${String(version)}. Supported versions: [${supportedList.join(", ")}]`,
-    );
-    this.name = "UnsupportedPayloadVersionError";
-    this.version = version;
-    this.supportedVersions = supportedList;
+/**
+ * In-process monotonic retry deadlines (`eventId -> monotonicMs`).
+ * Guards against backward system-clock jumps causing a failed backlog to be
+ * immediately re-dispatched before its bounded relative backoff has elapsed.
+ */
+const retryNotBeforeMonotonicMs = new Map<string, number>();
+
+function defaultMonotonicNowMs(): number {
+  return performance.now();
+}
+
+function pruneExpiredCooldowns(nowMonotonicMs: number): void {
+  for (const [id, deadline] of retryNotBeforeMonotonicMs) {
+    if (deadline <= nowMonotonicMs) retryNotBeforeMonotonicMs.delete(id);
   }
 }
 
-/**
- * Extracts and validates the payload version from an outbox event.
- * If the payload is unversioned (no version field), it defaults to DEFAULT_OUTBOX_PAYLOAD_VERSION (1).
- * If the version is not among the supported versions, throws UnsupportedPayloadVersionError.
- */
-export function extractAndValidatePayloadVersion(
-  event: OutboxEvent,
-  supportedVersions: number[] = outboxConfig.supportedPayloadVersions ?? DEFAULT_SUPPORTED_PAYLOAD_VERSIONS,
-): number {
-  const allowed = Array.isArray(supportedVersions) && supportedVersions.length > 0
-    ? supportedVersions
-    : DEFAULT_SUPPORTED_PAYLOAD_VERSIONS;
-
-  const payload = event.payload;
-  let version: unknown = DEFAULT_OUTBOX_PAYLOAD_VERSION;
-
-  if (payload && typeof payload === "object" && !Array.isArray(payload) && "version" in payload) {
-    version = (payload as Record<string, unknown>).version;
+function recordRetryCooldown(eventId: string, nowMonotonicMs: number, delayMs: number): void {
+  const bounded = boundRetryDelayMs(delayMs);
+  if (bounded <= 0) {
+    retryNotBeforeMonotonicMs.delete(eventId);
+    return;
   }
-
-  if (typeof version !== "number" || !Number.isInteger(version) || !allowed.includes(version)) {
-    throw new UnsupportedPayloadVersionError(version, allowed);
+  if (retryNotBeforeMonotonicMs.size >= MAX_TRACKED_RETRY_COOLDOWNS) {
+    pruneExpiredCooldowns(nowMonotonicMs);
+    if (retryNotBeforeMonotonicMs.size >= MAX_TRACKED_RETRY_COOLDOWNS) {
+      const oldestKey = retryNotBeforeMonotonicMs.keys().next().value;
+      if (oldestKey !== undefined) retryNotBeforeMonotonicMs.delete(oldestKey);
+    }
   }
+  retryNotBeforeMonotonicMs.set(eventId, nowMonotonicMs + bounded);
+}
 
-  return version;
+/** Test-only helper to clear in-process monotonic retry state between cases. */
+export function __resetMonotonicRetryStateForTests(): void {
+  retryNotBeforeMonotonicMs.clear();
 }
 
 export interface DispatchOnceOptions {
   batchSize?: number;
   workerId?: string;
   leaseDurationMs?: number;
-  supportedPayloadVersions?: number[];
+  /** Optional monotonic clock source in milliseconds (defaults to `performance.now()`). */
+  monotonicNowMs?: () => number;
 }
 
 /**
@@ -66,6 +66,7 @@ export interface DispatchOnceOptions {
  */
 export async function dispatchOnce(opts: DispatchOnceOptions = {}): Promise<DispatchSummary> {
   const summary: DispatchSummary = { leased: 0, dispatched: 0, retried: 0, deadLettered: 0, reaped: 0, pruned: 0 };
+  const monotonicNow = opts.monotonicNowMs ?? defaultMonotonicNowMs;
 
   const reaped = await store.reapExpiredLeases();
   summary.reaped = reaped.requeued + reaped.deadLettered;
@@ -79,19 +80,27 @@ export async function dispatchOnce(opts: DispatchOnceOptions = {}): Promise<Disp
   await Promise.all(
     batch.map(async (event) => {
       const leaseId = event.leaseId!; // guaranteed by leaseBatch()
-
-      try {
-        extractAndValidatePayloadVersion(event, supportedVersions);
-      } catch (err) {
-        await store.fail(event.id, leaseId, err, { fatal: true });
-        summary.deadLettered += 1;
-        return;
+      const nowMonotonic = monotonicNow();
+      const notBefore = retryNotBeforeMonotonicMs.get(event.id);
+      if (notBefore !== undefined) {
+        if (nowMonotonic < notBefore) {
+          const remainingMs = boundRetryDelayMs(notBefore - nowMonotonic);
+          if (typeof store.deferRetry === "function") {
+            const deferred = await store.deferRetry(event.id, leaseId, remainingMs);
+            if (deferred) summary.retried += 1;
+          } else {
+            summary.retried += 1;
+          }
+          return;
+        }
+        retryNotBeforeMonotonicMs.delete(event.id);
       }
 
       const handlers = getConsumers(event.eventType);
 
       if (handlers.length === 0) {
         await store.fail(event.id, leaseId, new Error(`No consumer registered for event type "${event.eventType}"`));
+        retryNotBeforeMonotonicMs.delete(event.id);
         summary.deadLettered += 1;
         return;
       }
@@ -99,11 +108,26 @@ export async function dispatchOnce(opts: DispatchOnceOptions = {}): Promise<Disp
       try {
         for (const handler of handlers) await handler(event);
         const acked = await store.ack(event.id, leaseId);
-        if (acked) summary.dispatched += 1;
+        if (acked) {
+          retryNotBeforeMonotonicMs.delete(event.id);
+          summary.dispatched += 1;
+        }
       } catch (err) {
         const failed = await store.fail(event.id, leaseId, err);
-        if (failed?.status === "dead_letter") summary.deadLettered += 1;
-        else if (failed?.status === "pending") summary.retried += 1;
+        if (failed?.status === "dead_letter") {
+          retryNotBeforeMonotonicMs.delete(event.id);
+          summary.deadLettered += 1;
+        } else if (failed?.status === "pending") {
+          const runAtMs = failed.runAt instanceof Date ? failed.runAt.getTime() : NaN;
+          const updatedAtMs = failed.updatedAt instanceof Date ? failed.updatedAt.getTime() : NaN;
+          const relativeDelayMs = Number.isFinite(runAtMs) && Number.isFinite(updatedAtMs)
+            ? runAtMs - updatedAtMs
+            : Number.isFinite(runAtMs)
+              ? runAtMs - Date.now()
+              : 0;
+          recordRetryCooldown(event.id, monotonicNow(), relativeDelayMs);
+          summary.retried += 1;
+        }
       }
     }),
   );

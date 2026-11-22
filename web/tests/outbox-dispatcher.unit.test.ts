@@ -7,11 +7,12 @@ const mocks = vi.hoisted(() => ({
     leaseBatch: vi.fn(),
     ack: vi.fn(),
     fail: vi.fn(),
+    deferRetry: vi.fn(),
   },
 }));
 vi.mock("../src/lib/outbox/store", () => mocks.store);
 
-import { dispatchOnce, extractAndValidatePayloadVersion, UnsupportedPayloadVersionError } from "../src/lib/outbox/dispatcher";
+import { dispatchOnce, __resetMonotonicRetryStateForTests } from "../src/lib/outbox/dispatcher";
 import { registerConsumer, __resetRegistryForTests } from "../src/lib/outbox/registry";
 import type { OutboxEvent } from "../src/lib/outbox/types";
 
@@ -41,6 +42,7 @@ function makeEvent(overrides: Partial<OutboxEvent> = {}): OutboxEvent {
 beforeEach(() => {
   vi.clearAllMocks();
   __resetRegistryForTests();
+  __resetMonotonicRetryStateForTests();
   mocks.store.reapExpiredLeases.mockResolvedValue({ requeued: 0, deadLettered: 0 });
   mocks.store.pruneDispatched.mockResolvedValue(0);
 });
@@ -131,93 +133,64 @@ describe("outbox/dispatcher — dispatchOnce", () => {
     expect(summary.dispatched).toBe(2);
   });
 
-  describe("payload version validation at dispatch boundary", () => {
-    it("dispatches successfully when payload version is supported", async () => {
-      const consumer = vi.fn().mockResolvedValue(undefined);
-      registerConsumer("test.event", consumer);
-      mocks.store.leaseBatch.mockResolvedValue([
-        makeEvent({ id: "evt_v2", payload: { version: 2, data: "hello" } }),
+  it("defers a failed backlog instead of retrying immediately when the system clock moves backward", async () => {
+    let monotonicMs = 10_000;
+    const consumer = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("downstream 500"))
+      .mockRejectedValueOnce(new Error("downstream 500"))
+      .mockResolvedValue(undefined);
+    registerConsumer("test.event", consumer);
+
+    const updatedAt = new Date("2026-11-19T12:00:00.000Z");
+    const runAt = new Date("2026-11-19T12:00:10.000Z"); // 10s relative backoff
+
+    mocks.store.leaseBatch.mockResolvedValueOnce([
+      makeEvent({ id: "evt_1", leaseId: "l1" }),
+      makeEvent({ id: "evt_2", leaseId: "l2" }),
+    ]);
+    mocks.store.fail
+      .mockResolvedValueOnce(makeEvent({ id: "evt_1", status: "pending", updatedAt, runAt }))
+      .mockResolvedValueOnce(makeEvent({ id: "evt_2", status: "pending", updatedAt, runAt }));
+
+    const first = await dispatchOnce({ monotonicNowMs: () => monotonicMs });
+    expect(first.retried).toBe(2);
+    expect(consumer).toHaveBeenCalledTimes(2);
+
+    // Simulate system wall clock moving backward by 10 minutes while monotonic
+    // time only advances by 500ms, and the DB returns both failed events early.
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(updatedAt.getTime() - 600_000);
+    try {
+      monotonicMs += 500;
+      mocks.store.leaseBatch.mockResolvedValueOnce([
+        makeEvent({ id: "evt_1", leaseId: "l3" }),
+        makeEvent({ id: "evt_2", leaseId: "l4" }),
       ]);
-      mocks.store.ack.mockResolvedValue(makeEvent({ status: "dispatched" }));
+      mocks.store.deferRetry
+        .mockResolvedValueOnce(makeEvent({ id: "evt_1", status: "pending" }))
+        .mockResolvedValueOnce(makeEvent({ id: "evt_2", status: "pending" }));
 
-      const summary = await dispatchOnce({ supportedPayloadVersions: [1, 2] });
+      const duringRollback = await dispatchOnce({ monotonicNowMs: () => monotonicMs });
+      expect(duringRollback.retried).toBe(2);
+      expect(consumer).toHaveBeenCalledTimes(2); // not retried early
+      expect(mocks.store.deferRetry).toHaveBeenCalledWith("evt_1", "l3", 9_500);
+      expect(mocks.store.deferRetry).toHaveBeenCalledWith("evt_2", "l4", 9_500);
 
-      expect(consumer).toHaveBeenCalledTimes(1);
-      expect(mocks.store.ack).toHaveBeenCalledWith("evt_v2", "lease_1");
-      expect(summary.dispatched).toBe(1);
-      expect(summary.deadLettered).toBe(0);
-    });
-
-    it("defaults unversioned payload to version 1 and dispatches when version 1 is supported", async () => {
-      const consumer = vi.fn().mockResolvedValue(undefined);
-      registerConsumer("test.event", consumer);
-      mocks.store.leaseBatch.mockResolvedValue([
-        makeEvent({ id: "evt_unversioned", payload: { data: "legacy" } }),
+      // Once monotonic time advances past the 10s cooldown, retries proceed normally.
+      monotonicMs += 9_500;
+      mocks.store.leaseBatch.mockResolvedValueOnce([
+        makeEvent({ id: "evt_1", leaseId: "l5" }),
+        makeEvent({ id: "evt_2", leaseId: "l6" }),
       ]);
-      mocks.store.ack.mockResolvedValue(makeEvent({ status: "dispatched" }));
+      mocks.store.ack
+        .mockResolvedValueOnce(makeEvent({ id: "evt_1", status: "dispatched" }))
+        .mockResolvedValueOnce(makeEvent({ id: "evt_2", status: "dispatched" }));
 
-      const summary = await dispatchOnce({ supportedPayloadVersions: [1] });
-
-      expect(consumer).toHaveBeenCalledTimes(1);
-      expect(mocks.store.ack).toHaveBeenCalledWith("evt_unversioned", "lease_1");
-      expect(summary.dispatched).toBe(1);
-    });
-
-    it("dead-letters immediately with fatal flag when payload version is unsupported", async () => {
-      const consumer = vi.fn().mockResolvedValue(undefined);
-      registerConsumer("test.event", consumer);
-      mocks.store.leaseBatch.mockResolvedValue([
-        makeEvent({ id: "evt_bad_ver", payload: { version: 99 } }),
-      ]);
-
-      const summary = await dispatchOnce({ supportedPayloadVersions: [1] });
-
-      expect(consumer).not.toHaveBeenCalled();
-      expect(mocks.store.ack).not.toHaveBeenCalled();
-      expect(mocks.store.fail).toHaveBeenCalledWith(
-        "evt_bad_ver",
-        "lease_1",
-        expect.any(UnsupportedPayloadVersionError),
-        { fatal: true },
-      );
-      expect(summary.deadLettered).toBe(1);
-    });
-
-    it("dead-letters when payload version is not a valid integer", async () => {
-      const consumer = vi.fn().mockResolvedValue(undefined);
-      registerConsumer("test.event", consumer);
-      mocks.store.leaseBatch.mockResolvedValue([
-        makeEvent({ id: "evt_nan_ver", payload: { version: "v2" } }),
-      ]);
-
-      const summary = await dispatchOnce({ supportedPayloadVersions: [1, 2] });
-
-      expect(consumer).not.toHaveBeenCalled();
-      expect(mocks.store.fail).toHaveBeenCalledWith(
-        "evt_nan_ver",
-        "lease_1",
-        expect.any(UnsupportedPayloadVersionError),
-        { fatal: true },
-      );
-      expect(summary.deadLettered).toBe(1);
-    });
-  });
-
-  describe("extractAndValidatePayloadVersion", () => {
-    it("returns version 1 for unversioned objects, nulls, or primitives", () => {
-      expect(extractAndValidatePayloadVersion(makeEvent({ payload: {} }), [1])).toBe(1);
-      expect(extractAndValidatePayloadVersion(makeEvent({ payload: null }), [1])).toBe(1);
-      expect(extractAndValidatePayloadVersion(makeEvent({ payload: "string" }), [1])).toBe(1);
-    });
-
-    it("returns explicit valid version when supported", () => {
-      expect(extractAndValidatePayloadVersion(makeEvent({ payload: { version: 2 } }), [1, 2])).toBe(2);
-    });
-
-    it("throws UnsupportedPayloadVersionError when version is unsupported", () => {
-      expect(() =>
-        extractAndValidatePayloadVersion(makeEvent({ payload: { version: 3 } }), [1, 2]),
-      ).toThrow(UnsupportedPayloadVersionError);
-    });
+      const afterCooldown = await dispatchOnce({ monotonicNowMs: () => monotonicMs });
+      expect(afterCooldown.dispatched).toBe(2);
+      expect(consumer).toHaveBeenCalledTimes(4);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
   });
 });

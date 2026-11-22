@@ -279,6 +279,171 @@ describe("TalosClient.trackJob (#1017)", () => {
     });
   });
 
+  describe("Observable state transitions", () => {
+    it("emits connecting, streaming, polling, and terminal during fallback", async () => {
+      const streamBody = sseStream(
+        'event: snapshot\ndata: {"id":"job-1017","status":"pending","progress":{"percent":30,"stage":"working","updatedAt":"2026-01-01T00:00:01Z"}}\n\n',
+      );
+      let pollCount = 0;
+      const mockFetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/progress")) {
+          return Promise.resolve(sseResponse(streamBody));
+        }
+        pollCount += 1;
+        return Promise.resolve(
+          jsonResponse(
+            pollCount === 1
+              ? makeJob("pending", { percent: 30, stage: "working", updatedAt: "2026-01-01T00:00:01Z" })
+              : makeJob("completed", { percent: 100, stage: "completed" }, { answer: 42 }),
+          ),
+        );
+      });
+      const client = new TalosClient({
+        baseUrl: "https://api.example.com",
+        fetch: mockFetch,
+      });
+      const states: string[] = [];
+      const tracker = client.trackJob("job-1017", {
+        intervalMs: 50,
+        maxIntervalMs: 50,
+        staleAfterMs: 0,
+        onStateChange: ({ state }) => states.push(state),
+      });
+
+      await vi.runAllTimersAsync();
+      const finalJob = await tracker.result;
+
+      expect(states).toEqual(["connecting", "streaming", "polling", "terminal"]);
+      expect(finalJob.status).toBe("completed");
+      expect(finalJob.result).toEqual({ answer: 42 });
+    });
+
+    it("reports stale at the configured inactivity boundary and recovers on fresh progress", async () => {
+      let pollCount = 0;
+      const mockFetch = vi.fn().mockImplementation(() => {
+        pollCount += 1;
+        if (pollCount === 1) {
+          return Promise.resolve(jsonResponse(
+            makeJob("pending", { percent: 10, stage: "working", updatedAt: "2026-01-01T00:00:01Z" }),
+          ));
+        }
+        if (pollCount === 2) {
+          return Promise.resolve(jsonResponse(
+            makeJob("pending", { percent: 50, stage: "working", updatedAt: "2026-01-01T00:00:02Z" }),
+          ));
+        }
+        return Promise.resolve(jsonResponse(
+          makeJob("completed", { percent: 100, stage: "completed" }, { answer: 42 }),
+        ));
+      });
+      const client = new TalosClient({
+        baseUrl: "https://api.example.com",
+        fetch: mockFetch,
+      });
+      const states: string[] = [];
+      const tracker = client.trackJob("job-1017", {
+        preferSse: false,
+        intervalMs: 100,
+        maxIntervalMs: 100,
+        backoffMultiplier: 1,
+        staleAfterMs: 50,
+        onStateChange: ({ state }) => states.push(state),
+      });
+
+      await vi.runAllTimersAsync();
+      await tracker.result;
+
+      expect(states).toEqual([
+        "polling",
+        "stale",
+        "polling",
+        "stale",
+        "terminal",
+      ]);
+    });
+
+    it("returns the same final job through SSE and polling", async () => {
+      const finalJob = makeJob(
+        "completed",
+        { percent: 100, stage: "completed" },
+        { answer: 42 },
+      );
+      const streamClient = new TalosClient({
+        baseUrl: "https://api.example.com",
+        fetch: vi.fn().mockResolvedValue(
+          sseResponse(sseStream(`event: done\ndata: ${JSON.stringify(finalJob)}\n\n`)),
+        ),
+      });
+      const pollClient = new TalosClient({
+        baseUrl: "https://api.example.com",
+        fetch: vi.fn().mockResolvedValue(jsonResponse(finalJob)),
+      });
+      const streamedTracker = streamClient.trackJob("job-1017", { staleAfterMs: 0 });
+      const polledTracker = pollClient.trackJob("job-1017", {
+        preferSse: false,
+        staleAfterMs: 0,
+      });
+
+      await vi.runAllTimersAsync();
+      const streamedResult = await streamedTracker.result;
+      const polledResult = await polledTracker.result;
+
+      expect(streamedResult).toEqual(finalJob);
+      expect(polledResult).toEqual(finalJob);
+      expect(streamedResult).toEqual(polledResult);
+    });
+
+    it("logs state callback errors without interrupting tracking", async () => {
+      const finalJob = makeJob("completed");
+      const logger = {
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      };
+      const client = new TalosClient({
+        baseUrl: "https://api.example.com",
+        fetch: vi.fn().mockResolvedValue(jsonResponse(finalJob)),
+      });
+      const tracker = client.trackJob("job-1017", {
+        preferSse: false,
+        staleAfterMs: 0,
+        logger,
+        onStateChange: () => {
+          throw new Error("observer failed");
+        },
+      });
+
+      await vi.runAllTimersAsync();
+
+      await expect(tracker.result).resolves.toEqual(finalJob);
+      expect(logger.error).toHaveBeenCalledWith(
+        "track_job:state_handler_error",
+        expect.objectContaining({ state: "polling" }),
+      );
+    });
+
+    it("rejects a failed final read instead of returning a fabricated job", async () => {
+      const streamResponse = sseResponse(
+        sseStream('event: done\ndata: {"id":"job-1017","status":"completed","result":{"answer":42}}\n\n'),
+      );
+      const finalReadError = new Error("final job read failed");
+      const client = new TalosClient({
+        baseUrl: "https://api.example.com",
+        fetch: vi.fn().mockImplementation((url: string) =>
+          url.includes("/progress")
+            ? Promise.resolve(streamResponse)
+            : Promise.reject(finalReadError),
+        ),
+      });
+      const tracker = client.trackJob("job-1017", { staleAfterMs: 0 });
+
+      await vi.runAllTimersAsync();
+
+      await expect(tracker.result).rejects.toThrow("final job read failed");
+      expect(tracker.state).toBe("terminal");
+    });
+  });
+
   // ── 4. Mid-stream disconnect and seamless polling recovery ──────────────────
 
   describe("Mid-stream disconnect with deduplication", () => {
@@ -346,6 +511,35 @@ describe("TalosClient.trackJob (#1017)", () => {
   // ── 5. Abort and cleanup ────────────────────────────────────────────────────
 
   describe("Abort and resource cleanup", () => {
+    it("does not restart polling after repeated iterator stops", async () => {
+      let notifyStreamFetch!: () => void;
+      const streamFetchStarted = new Promise<void>((resolve) => {
+        notifyStreamFetch = resolve;
+      });
+      const sseBody = new ReadableStream({ start() {} });
+      const mockFetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/progress")) {
+          notifyStreamFetch();
+          return Promise.resolve(sseResponse(sseBody));
+        }
+        return Promise.resolve(jsonResponse(makeJob("pending")));
+      });
+      const client = new TalosClient({
+        baseUrl: "https://api.example.com",
+        fetch: mockFetch,
+      });
+      const tracker = client.trackJob("job-1017");
+
+      await streamFetchStarted;
+      await Promise.resolve();
+      await tracker.return();
+      await tracker.return();
+      await vi.runAllTimersAsync();
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
     it("cleans up streams and timers when caller signal aborts", async () => {
       // A fetch that keeps returning pending indefinitely
       const mockFetch = vi.fn().mockImplementation((url: string) => {
@@ -465,6 +659,72 @@ describe("TalosClient.trackJob (#1017)", () => {
   // ── 7. Typed terminal outcomes and errors ───────────────────────────────────
 
   describe("Typed terminal outcomes and errors", () => {
+    it("releases stream readers and timers before resolving a terminal result", async () => {
+      const encoder = new TextEncoder();
+      let readerCancelCount = 0;
+      const sseBody = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode('event: done\ndata: {"status":"completed"}\n\n'),
+          );
+        },
+        cancel() {
+          readerCancelCount += 1;
+        },
+      });
+
+      let resolveFinalResponse!: (response: Response) => void;
+      const finalResponse = new Promise<Response>((resolve) => {
+        resolveFinalResponse = resolve;
+      });
+      let notifyFinalFetchStarted!: () => void;
+      const finalFetchStarted = new Promise<void>((resolve) => {
+        notifyFinalFetchStarted = resolve;
+      });
+      let resultFetchCount = 0;
+      const mockFetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/progress")) {
+          return Promise.resolve(sseResponse(sseBody));
+        }
+        if (url.includes("/result")) {
+          resultFetchCount += 1;
+          notifyFinalFetchStarted();
+          return finalResponse;
+        }
+        return Promise.reject(new Error(`Unexpected url: ${url}`));
+      });
+      const client = new TalosClient({
+        baseUrl: "https://api.example.com",
+        fetch: mockFetch,
+      });
+      const tracker = client.trackJob("job-1017", { timeoutMs: 10_000 });
+      const events: TrackJobEvent[] = [];
+      const iteration = (async () => {
+        for await (const event of tracker) {
+          events.push(event);
+        }
+      })();
+
+      await finalFetchStarted;
+      for (let i = 0; sseBody.locked && i < 10; i += 1) {
+        await Promise.resolve();
+      }
+      const resourcesReleasedBeforeLookupFinished =
+        readerCancelCount === 1 &&
+        !sseBody.locked &&
+        vi.getTimerCount() === 0;
+
+      resolveFinalResponse(
+        jsonResponse(makeJob("completed", null, { answer: 42 })),
+      );
+      await vi.runAllTimersAsync();
+      await iteration;
+
+      expect(resourcesReleasedBeforeLookupFinished).toBe(true);
+      expect(resultFetchCount).toBe(1);
+      expect(events.at(-1)?.type).toBe("result");
+    });
+
     it("throws JobFailedError when job reaches failed status", async () => {
       const sseBody = sseStream(
         'event: done\ndata: {"id":"job-1017","status":"failed"}\n\n',
