@@ -627,7 +627,7 @@ describe("Webhook Subscription API", () => {
           ]),
         );
 
-      mockDb.update.mockReturnValue(updateChain([]));
+      mockDb.update.mockReturnValue(updateChain([{ id: "delivery_1" }]));
 
       const request = new NextRequest("http://localhost:3000/api/webhooks/deliveries/delivery_1/result", {
         method: "POST",
@@ -703,7 +703,7 @@ describe("Webhook Subscription API", () => {
           ]),
         );
 
-      mockDb.update.mockReturnValue(updateChain([]));
+      mockDb.update.mockReturnValue(updateChain([{ id: "delivery_1" }]));
 
       const request = new NextRequest("http://localhost:3000/api/webhooks/deliveries/delivery_1/result", {
         method: "POST",

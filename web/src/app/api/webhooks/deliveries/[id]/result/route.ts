@@ -82,14 +82,15 @@ async function _POST(
       );
     }
 
-    if (attempt !== undefined && attempt < delivery.attempts) {
+    if (attempt !== undefined && attempt !== delivery.attempts) {
+      const isStale = attempt < delivery.attempts;
       logger.warn(
         { deliveryId: id, attempt, currentAttempts: delivery.attempts },
-        "stale_attempt_acknowledgement_rejected",
+        isStale ? "stale_attempt_acknowledgement_rejected" : "attempt_mismatch_acknowledgement_rejected",
       );
       return Response.json(
         {
-          error: "Stale attempt acknowledgement",
+          error: isStale ? "Stale attempt acknowledgement" : "Attempt mismatch",
           detail: `Acknowledgement is for attempt ${attempt}, but delivery is currently at attempt ${delivery.attempts}`,
         },
         { status: 409 },
@@ -107,7 +108,7 @@ async function _POST(
 
     const nextAttemptAt = newStatus === "failed" ? calculateBackoff(newAttempts) : null;
 
-    await db
+    const [updated] = await db
       .update(tlsWebhookDeliveries)
       .set({
         status: newStatus,
@@ -127,8 +128,24 @@ async function _POST(
         and(
           eq(tlsWebhookDeliveries.id, id),
           eq(tlsWebhookDeliveries.fencingToken, fencingToken),
+          eq(tlsWebhookDeliveries.attempts, delivery.attempts),
         ),
+      )
+      .returning({ id: tlsWebhookDeliveries.id });
+
+    if (!updated) {
+      logger.warn(
+        { deliveryId: id, fencingToken, attempt, currentAttempts: delivery.attempts },
+        "stale_attempt_acknowledgement_race_rejected",
       );
+      return Response.json(
+        {
+          error: "Stale attempt acknowledgement",
+          detail: "Delivery lease or attempt advanced before acknowledgement could be applied",
+        },
+        { status: 409 },
+      );
+    }
 
     const logLevel = newStatus === "dead_letter" ? "error" : newStatus === "delivered" ? "info" : "warn";
     logger[logLevel](
