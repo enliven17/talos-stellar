@@ -357,10 +357,45 @@ Choose the focused command by area:
 | API route or library unit tests | `pnpm --dir web exec vitest run tests/<name>.test.ts` | `Deploy Web -> Vercel` |
 | Local test-data reset (`web/src/lib/local-test-data-reset.ts`, `web/src/db/reset-test-data.ts`, `scripts/local-stack.sh`) | `pnpm --dir web exec vitest run tests/local-test-data-reset.unit.test.ts; bash scripts/local-stack.test.sh` | `Deploy Web -> Vercel` |
 | Backup or restore paths | `pnpm --dir web exec vitest run tests/backup-restore-fixture.test.ts tests/backup-crypto.test.ts tests/backup-types.test.ts` | `Web Backups CI` |
+| `web/src/lib/governance/consistency-report.ts` | `pnpm --dir web exec vitest run tests/lifecycle-consistency-report.unit.test.ts` | `Web & SDK CI` |
+| `web/src/app/api/talos/[id]/retire/route.ts` | `pnpm --dir web exec vitest run tests/retire-lifecycle-history.unit.test.ts` | `Web & SDK CI` |
 
 Use `pnpm --dir web run test:e2e` only when API route behavior depends on the running app or cross-route state. Use the local stack with `pnpm stack:up` when you need Postgres plus the mock Stellar provider, and clean it up with `pnpm stack:down`. Do not use `pnpm stack:reset` unless you intentionally want to destroy and recreate local stack data; `pnpm stack:reset-data` clears test rows without touching the stack volumes.
 
-### SDK changes
+### Offline lifecycle consistency report
+
+`web/src/lib/governance/consistency-report.ts` exports `buildConsistencyReport`, a pure, read-only function that compares lifecycle records, active service registrations, and unresolved commerce jobs. It surfaces contradictions without mutating any funded or operational state.
+
+**Contract guarantees**
+- The function never throws, never performs I/O, and never mutates its inputs.
+- Each `Contradiction` carries a stable `code` from `CONTRADICTION_CODES`. Codes must not be repurposed once released — consumers branch on them.
+- `consistent: true` means all three collections agree with the lifecycle state machine defined in `lifecycle.ts`.
+
+**Contradiction codes**
+
+| Code | Meaning |
+|---|---|
+| `TERMINAL_AGENT_ONLINE` | Agent is in a terminal state but `agentOnline` is `true`. |
+| `TERMINAL_AGENT_WITH_ACTIVE_SERVICE` | Terminal agent has a service with a live Stellar payment key. |
+| `TERMINAL_AGENT_WITH_UNRESOLVED_JOBS` | Terminal agent has commerce jobs that have not reached a terminal status. |
+| `ACTIVE_AGENT_OFFLINE_FLAG` | Agent is `active` (should accept work) but `agentOnline` is `false`. |
+| `STALE_RETIRED_TIMESTAMP` | Non-retired agent has a `retiredAt` timestamp set. |
+| `RETIRED_STATE_MISSING_TIMESTAMP` | Agent is `retired` but has no `retiredAt` timestamp. |
+| `TRANSIENT_AGENT_ONLINE` | Agent is in an in-flight state (`provisioning`, `retiring`) but `agentOnline` is `true`. |
+
+**Usage in the retire route**
+
+`POST /api/talos/:id/retire` appends a `consistencyReport` field to the success response. The report evaluates the agent's post-retirement snapshot — it is observational only and has no effect on the retirement outcome.
+
+**Focused test command**
+
+```bash
+pnpm --dir web exec vitest run tests/lifecycle-consistency-report.unit.test.ts
+```
+
+All tests use synthetic in-memory fixtures. No database, network connection, or Stellar credentials are required. Each contradiction code has a BEFORE/AFTER case that shows the snapshot before and after the contradiction is resolved.
+
+
 
 The TypeScript SDK lives in `packages/sdk/`. The expected build artifact is `packages/sdk/dist/`, including the browser bundle at `packages/sdk/dist/browser/sdk.bundle.js`.
 

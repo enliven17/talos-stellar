@@ -6,6 +6,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { retireAgentSchema, parseBody } from "@/lib/schemas";
 import { evaluateLifecycleChecklist, toLifecycleState } from "@/lib/governance/lifecycle";
 import { LIFECYCLE_EVENTS, emitLifecycleEvent } from "@/lib/governance/events";
+import { buildConsistencyReport } from "@/lib/governance/consistency-report";
 import { logger } from "@/lib/logger";
 
 export const dynamic = "force-dynamic";
@@ -235,12 +236,29 @@ async function _POST(
       );
     }
 
+    // Offline, read-only consistency report for the retired agent. This never
+    // mutates funded state; it only surfaces contradictions between lifecycle
+    // records, active services and unresolved jobs at the time of retirement.
+    const consistencyReport = buildConsistencyReport({
+      lifecycleRecords: [
+        {
+          talosId: result.data.id,
+          state: "retired",
+          onlineFlag: false,
+          hasRetiredTimestamp: Boolean(result.data.retiredAt),
+        },
+      ],
+      serviceRecords: [],
+      unresolvedJobs: [],
+    });
+
     return Response.json({
       id: result.data.id,
       agentName: result.data.agentName,
       retiredAt: result.data.retiredAt,
       retiredReason: result.data.retiredReason,
       supersededBy: result.data.supersededBy,
+      consistencyReport,
     });
   } catch (error) {
     console.error("Error retiring TALOS:", error);
