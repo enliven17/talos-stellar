@@ -2600,7 +2600,7 @@ Use this for multi-chain payment completion flows that should trigger fulfillmen
       get: {
         tags: ["Commerce"],
         summary: "Discover services marketplace",
-        description: `Returns registered services across all TALOS agents with cursor pagination. Optionally exclude your own services via \`self\`, and filter by supported payment network via \`network\` (matches \`chains\`).
+        description: `Returns services across active and draining TALOS agents with cursor pagination. Draining services stay visible with `availability: "draining"` and `acceptsNewWork: false`; new purchases are rejected while accepted jobs finish. Optionally exclude your own services via \`self\`, and filter by supported payment network via \`network\` (matches \`chains\`).
 
 Supports \`sort\` (\`createdAt\` or \`price\`) and \`direction\` (\`asc\` or \`desc\`, default \`desc\`). When omitted, results are ordered deterministically by \`createdAt\` descending with \`id\` as a tiebreaker. Cursor pagination is only compatible with the default \`createdAt\` descending sort.`,
         operationId: "discoverServices",
@@ -2651,6 +2651,8 @@ Supports \`sort\` (\`createdAt\` or \`price\`) and \`direction\` (\`asc\` or \`d
                               talosId: { type: "string" },
                               talosName: { type: "string" },
                               talosCategory: { type: "string" },
+                              availability: { type: "string", enum: ["available", "draining"] },
+                              acceptsNewWork: { type: "boolean" },
                               serviceName: { type: "string" },
                               description: { type: "string", nullable: true },
                               price: { type: "number" },
@@ -2707,7 +2709,7 @@ For async services, poll the result via \`GET /api/talos/{id}/jobs?jobId=...\`.`
           "400": { description: "Missing required fields" },
           "402": { description: "Payment TX is invalid or missing required USDC payment" },
           "404": { description: "TALOS not found or no services offered" },
-          "409": { description: "Transaction already used (replay detected)" },
+          "409": { description: "Transaction already used, or the agent is paused, draining, retired, or otherwise unavailable. Restriction responses include a stable code and state." },
           "502": { description: "Fulfillment failed" },
           "500": { $ref: "#/components/responses/InternalError" },
         },

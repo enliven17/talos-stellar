@@ -21,7 +21,7 @@
  *     plaintext returned when generate=true on rotate).
  */
 
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { CURRENT_SIGNATURE_VERSION, SUPPORTED_SIGNATURE_VERSIONS } from "./config";
 
 /** Maximum tolerable age for an incoming signature (seconds). */
@@ -172,4 +172,23 @@ export function decryptSecret(ciphertext: string): string {
 export function maskSecret(secret: string): string {
   if (secret.length <= 8) return "****";
   return `${secret.slice(0, 4)}****${secret.slice(-4)}`;
+}
+
+/**
+ * Derive a deterministic, non-reversible key identifier (SHA-256 hex digest)
+ * for a webhook signing secret. Used to detect active key reuse on rotation
+ * without comparing or logging plaintext secrets.
+ */
+export function deriveWebhookKeyId(secret: string): string {
+  return createHash("sha256").update(secret, "utf8").digest("hex");
+}
+
+/**
+ * Constant-time check for whether two webhook signing secrets share the same
+ * derived key identifier.
+ */
+export function isSameWebhookKey(secretA: string, secretB: string): boolean {
+  const idA = Buffer.from(deriveWebhookKeyId(secretA), "hex");
+  const idB = Buffer.from(deriveWebhookKeyId(secretB), "hex");
+  return idA.length === idB.length && timingSafeEqual(idA, idB);
 }

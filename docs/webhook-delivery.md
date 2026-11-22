@@ -41,8 +41,11 @@ The webhook delivery system enables TALOS agents to send signed event notificati
    - Content-Type: application/json
 
 6. **Result Recording**: The worker submits the result via `POST /api/webhooks/deliveries/:id/result`, which:
-   - On success (2xx/3xx/4xx): marks delivery as `delivered`
-   - On failure (5xx/network error): increments attempt count, schedules retry with exponential backoff, or moves to `dead_letter` when max attempts are exhausted
+   - Accepts `fencingToken`, `statusCode`, optional `error`/`responseBody`, and optional `attempt`
+   - Binds acknowledgements to the delivery attempt: if `attempt` is provided and does not match the delivery's current `attempts` count (`attempt < delivery.attempts` returns `Stale attempt acknowledgement`; `attempt > delivery.attempts` returns `Attempt mismatch`), the acknowledgement is rejected with HTTP `409 Conflict`, preserving the active lease and status intact
+   - Applies the update atomically guarded by `(id, fencingToken, attempts)` so concurrent advancement between read and write also returns HTTP `409 Conflict` without mutating the newer attempt
+   - On success (2xx/3xx/4xx): marks delivery as `delivered` and releases the lease
+   - On failure (5xx/network error): increments attempt count, schedules retry with exponential backoff, or moves to `dead_letter` when max attempts are exhausted, and releases the lease
 
 ---
 
@@ -277,6 +280,7 @@ consumers that still verify with the previous secret.
 - Existing single-signature consumers continue to work (first `v1=` matches)
 - Consumers that already accept `secret: string[]` (SDK) can hold both keys
 - `PATCH /subscriptions/:id` with `{ "secret": "..." }` uses the same rotation path
+- Rotating to a secret that reuses the active key identifier is rejected with `409 Conflict` (`code: "WEBHOOK_SECRET_KEY_REUSE"`) before replacement, preserving the current signing key, any active grace window, and pending deliveries
 - Secrets are never logged; API responses never include ciphertext
 
 ### Env

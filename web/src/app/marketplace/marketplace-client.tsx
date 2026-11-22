@@ -24,6 +24,11 @@ type Service = {
   price: number;
   currency: string;
   chains: string[];
+  availability: {
+    state: "available" | "unavailable" | "unknown";
+    freshness: "fresh" | "stale" | "unknown";
+    lastObservedAt: string | null;
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -533,6 +538,26 @@ function ServiceCard({ service }: { service: Service }) {
           <span>{t("marketplace.card.by")}</span>
           <AgentAvatar name={service.talosName} size={14} className="shrink-0" />
           <span className="text-foreground">{service.talosName}</span>
+        </div>
+
+        <div
+          className="mt-3 text-xs text-muted"
+          data-testid={`service-availability-${service.talosId}`}
+          aria-label="Service availability evidence"
+        >
+          <span className={service.availability.state === "available" ? "text-accent" : "text-muted"}>
+            {service.availability.state === "available"
+              ? "AVAILABLE"
+              : service.availability.state === "unavailable"
+                ? "UNAVAILABLE"
+                : "AVAILABILITY UNKNOWN"}
+          </span>
+          <span className="ml-2">
+            {service.availability.lastObservedAt
+              ? `Last observed ${new Date(service.availability.lastObservedAt).toLocaleString()}`
+              : "No observation recorded"}
+          </span>
+          <span className="ml-2">({service.availability.freshness})</span>
         </div>
       </div>
 

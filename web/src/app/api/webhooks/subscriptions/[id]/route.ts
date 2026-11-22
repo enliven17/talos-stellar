@@ -41,6 +41,7 @@ const updateSubscriptionSchema = z
     eventTypes: z.array(z.string().min(1)).min(1).optional(),
     description: z.string().max(500).nullable().optional(),
     active: z.boolean().optional(),
+    paused: z.boolean().optional(),
   })
   .refine((data) => Object.keys(data).length > 0, {
     message: "At least one field must be provided",
@@ -145,6 +146,7 @@ async function _PATCH(
     if (data.eventTypes !== undefined) updateData.eventTypes = data.eventTypes;
     if (data.description !== undefined) updateData.description = data.description;
     if (data.active !== undefined) updateData.active = data.active;
+    if (data.paused !== undefined) updateData.paused = data.paused;
 
     // Secret changes use zero-downtime rotation (retain previous during grace).
     if (data.secret !== undefined) {
@@ -154,7 +156,10 @@ async function _PATCH(
         newSecret: data.secret,
       });
       if ("error" in rotated) {
-        return Response.json({ error: rotated.error }, { status: rotated.status });
+        return Response.json(
+          rotated.code ? { error: rotated.error, code: rotated.code } : { error: rotated.error },
+          { status: rotated.status },
+        );
       }
       // Drop secret from field list so we don't double-apply below.
       delete (data as { secret?: string }).secret;
@@ -169,6 +174,7 @@ async function _PATCH(
           eventTypes: tlsWebhookSubscriptions.eventTypes,
           description: tlsWebhookSubscriptions.description,
           active: tlsWebhookSubscriptions.active,
+          paused: tlsWebhookSubscriptions.paused,
           signatureVersion: tlsWebhookSubscriptions.signatureVersion,
           secretRotatedAt: tlsWebhookSubscriptions.secretRotatedAt,
           previousSecretExpiresAt: tlsWebhookSubscriptions.previousSecretExpiresAt,
@@ -220,6 +226,7 @@ async function _PATCH(
         eventTypes: tlsWebhookSubscriptions.eventTypes,
         description: tlsWebhookSubscriptions.description,
         active: tlsWebhookSubscriptions.active,
+        paused: tlsWebhookSubscriptions.paused,
         signatureVersion: tlsWebhookSubscriptions.signatureVersion,
         secretRotatedAt: tlsWebhookSubscriptions.secretRotatedAt,
         previousSecretExpiresAt: tlsWebhookSubscriptions.previousSecretExpiresAt,

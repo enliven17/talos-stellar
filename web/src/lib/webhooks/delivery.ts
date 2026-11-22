@@ -96,6 +96,7 @@ export async function emitWebhookEvent(event: WebhookEvent): Promise<void> {
         and(
           eq(tlsWebhookSubscriptions.talosId, event.talosId),
           eq(tlsWebhookSubscriptions.active, true),
+          eq(tlsWebhookSubscriptions.paused, false),
           sql`${event.type} = ANY(${tlsWebhookSubscriptions.eventTypes})`,
         ),
       );
@@ -215,8 +216,8 @@ export async function attemptDelivery(
     return null;
   }
 
-  if (!isSubscriptionDestinationVerified(subscription)) {
-    await markDeliveryFailed(deliveryId, "destination_unverified", claimed.fencingToken);
+  if (subscription.paused) {
+    await markDeliveryFailed(deliveryId, "subscription_paused", claimed.fencingToken);
     return null;
   }
 
