@@ -22,7 +22,12 @@ Install these before you start working locally:
 Before starting, run `pnpm doctor` to check the required local tool versions
 and the Rust Wasm target. The optional Stellar CLI is reported as a warning;
 missing or outdated required tools make the command exit with a non-zero code.
-Run its mocked platform-independent checks with `pnpm doctor:test`.
+A tool that is installed but cannot be spawned (for example because of
+permissions or a failing `--version` command) is reported separately as
+`could not be executed` and also fails the command. Only a missing executable is
+reported as `not found`; an installed executable with an unsupported version is
+reported as `too old`. Run its mocked platform-independent checks with
+`pnpm doctor:test`.
 
 The supported Node.js, pnpm, Python, Rust, and schema versions are recorded in
 [`compatibility.json`](compatibility.json) and checked with
