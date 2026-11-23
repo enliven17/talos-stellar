@@ -10,7 +10,7 @@ import sqlite3
 from typing import TYPE_CHECKING, Any
 
 from talos_agent.adapters.base import BaseSocialAdapter
-from talos_agent.adapters.diagnostics import CapabilityReport, CapabilityReporter
+from talos_agent.adapters.diagnostics import AdapterPauseController, PauseReport
 
 if TYPE_CHECKING:
     from talos_agent.adapters.capability import AdapterSandbox
@@ -492,17 +492,32 @@ class AdapterRegistry:
             for a in self._adapters.values()
         }
 
-    # ── Capability negotiation ────────────────────────────────────────────────
+    # ── Pause helpers ─────────────────────────────────────────────────────────
 
-    def capability_report(self) -> CapabilityReport:
-        """Return the full capability negotiation report for all adapters.
+    def pause(self, channel: str) -> None:
+        """Stop new publications for *channel*.
 
-        The report separates adapters into ``available`` (fully configured and
-        safe for autonomous tool selection) and ``unavailable`` (missing
-        required configuration).  Callers should consult ``report.available``
-        before passing adapter capabilities to the agent's tool chooser.
+        The pause is adapter-specific: all other registered adapters continue
+        to operate normally.  Calling pause on an already-paused adapter is a
+        no-op.
         """
-        return CapabilityReporter(self).report()
+        self.pause_controller.pause(channel)
+
+    def resume(self, channel: str) -> None:
+        """Resume publications for *channel*."""
+        self.pause_controller.resume(channel)
+
+    def is_paused(self, channel: str) -> bool:
+        """Return ``True`` if *channel* is currently paused."""
+        return self.pause_controller.is_paused(channel)
+
+    def pause_report(self, channel: str) -> PauseReport:
+        """Return the in-flight outcome report for *channel*.
+
+        The report lists every send recorded while the adapter was pausing and
+        its resolved outcome (if known), plus the current pause state.
+        """
+        return self.pause_controller.in_flight_report(channel)
 
     def __len__(self) -> int:
         return len(self._adapters)
