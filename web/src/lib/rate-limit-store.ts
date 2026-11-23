@@ -18,23 +18,42 @@
 
 import { createConnection } from "net";
 import { logger } from "@/lib/logger";
+import {
+  DEFAULT_UNKNOWN_RESET_RETRY_AFTER_SECONDS,
+  isValidResetAt,
+} from "@/lib/retry-after";
 
 // ─── Interfaces ───────────────────────────────────────────────────
 
 export interface RateLimitStore {
   /**
    * Atomically increment the counter for `key` and return its current value
-   * along with the window expiry (Unix ms). Creates the key if absent with a
-   * TTL of `windowMs`.
+   * along with the window expiry (Unix ms), or `null` when the reset time is
+   * unknown (for example, invalid window duration, missing/unbounded Redis
+   * TTL, or fail-closed denial while Redis is unreachable). Creates the key if
+   * absent with a TTL of `windowMs`.
    */
-  increment(key: string, windowMs: number): Promise<{ count: number; resetAt: number }>;
+  increment(key: string, windowMs: number): Promise<{ count: number; resetAt: number | null }>;
+}
+
+/**
+ * Compute a valid future window reset timestamp (Unix ms) or `null` if
+ * `windowMs` is non-positive, non-finite, or produces an out-of-range Date.
+ */
+function resolveWindowResetAt(now: number, windowMs: number): number | null {
+  if (typeof windowMs !== "number" || !Number.isFinite(windowMs) || windowMs <= 0) {
+    return null;
+  }
+  const candidate = now + windowMs;
+  return isValidResetAt(candidate) ? candidate : null;
 }
 
 // ─── In-memory store (process-local) ─────────────────────────────
 
 interface MemWindow {
   count: number;
-  resetAt: number;
+  resetAt: number | null;
+  expiresAt: number;
 }
 
 const memStore = new Map<string, MemWindow>();
@@ -43,18 +62,25 @@ const memStore = new Map<string, MemWindow>();
 const pruneInterval = setInterval(() => {
   const now = Date.now();
   for (const [k, w] of memStore) {
-    if (w.resetAt < now) memStore.delete(k);
+    if (!Number.isFinite(w.expiresAt) || w.expiresAt < now) memStore.delete(k);
   }
 }, 5 * 60 * 1_000);
 // Avoid keeping the Node process alive in test environments.
 if (pruneInterval.unref) pruneInterval.unref();
 
 export class MemoryRateLimitStore implements RateLimitStore {
-  async increment(key: string, windowMs: number): Promise<{ count: number; resetAt: number }> {
+  async increment(
+    key: string,
+    windowMs: number,
+  ): Promise<{ count: number; resetAt: number | null }> {
     const now = Date.now();
+    const validResetAt = resolveWindowResetAt(now, windowMs);
+    const expiresAt =
+      validResetAt ?? now + DEFAULT_UNKNOWN_RESET_RETRY_AFTER_SECONDS * 1_000;
+
     let win = memStore.get(key);
-    if (!win || win.resetAt < now) {
-      win = { count: 1, resetAt: now + windowMs };
+    if (!win || !Number.isFinite(win.expiresAt) || win.expiresAt < now) {
+      win = { count: 1, resetAt: validResetAt, expiresAt };
       memStore.set(key, win);
     } else {
       win.count += 1;
@@ -240,19 +266,25 @@ export class RedisRateLimitStore implements RateLimitStore {
     this.failClosed = failClosed;
   }
 
-  async increment(key: string, windowMs: number): Promise<{ count: number; resetAt: number }> {
+  async increment(
+    key: string,
+    windowMs: number,
+  ): Promise<{ count: number; resetAt: number | null }> {
     const now = Date.now();
-    const resetAt = now + windowMs;
+    const validResetAt = resolveWindowResetAt(now, windowMs);
+    const expireAtMs = Math.ceil(
+      validResetAt ?? now + DEFAULT_UNKNOWN_RESET_RETRY_AFTER_SECONDS * 1_000,
+    );
 
     try {
-      const count = await this.client.incrWithExpire(key, resetAt);
+      const count = await this.client.incrWithExpire(key, expireAtMs);
 
       // On the first increment the key is brand-new; the PEXPIREAT sets TTL.
       // On subsequent increments the TTL is already set; we need to read the
       // actual expiry to return a consistent resetAt.
       if (count === 1) {
-        // First request in this window — resetAt is accurate.
-        return { count, resetAt };
+        // First request in this window — validResetAt is accurate (or null if windowMs invalid).
+        return { count, resetAt: validResetAt };
       }
 
       // For count > 1 the key already existed. Derive resetAt from PTTL.
@@ -260,17 +292,26 @@ export class RedisRateLimitStore implements RateLimitStore {
       try {
         ttlMs = await this.client.pttl(key);
       } catch {
-        // If PTTL fails, approximate from our local clock.
-        ttlMs = windowMs;
+        // PTTL failed — reset time is unknown rather than guessing a misleading timestamp.
+        return { count, resetAt: null };
       }
-      const derivedResetAt = ttlMs > 0 ? Date.now() + ttlMs : resetAt;
-      return { count, resetAt: derivedResetAt };
+
+      if (typeof ttlMs !== "number" || !Number.isFinite(ttlMs) || ttlMs <= 0) {
+        // Negative PTTL (-1 persistent key, -2 missing key) or zero/non-finite means unknown reset.
+        return { count, resetAt: null };
+      }
+
+      const derivedResetAt = Date.now() + ttlMs;
+      return {
+        count,
+        resetAt: isValidResetAt(derivedResetAt) ? derivedResetAt : null,
+      };
     } catch (err) {
       logger.warn({ err, key }, "rate-limit: Redis unavailable, falling back to memory store");
 
       if (this.failClosed) {
-        // Deny all traffic when Redis is down (strict mode).
-        return { count: Number.MAX_SAFE_INTEGER, resetAt };
+        // Deny all traffic when Redis is down (strict mode); reset time is genuinely unknown.
+        return { count: Number.MAX_SAFE_INTEGER, resetAt: null };
       }
 
       return this.fallback.increment(key, windowMs);

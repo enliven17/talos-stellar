@@ -163,6 +163,44 @@ def test_verify_rejects_wrong_password(tmp_path: Path, monkeypatch):
     assert getattr(exc_info.value, "code", "BAD_INPUT") == "AUTH_FAILED"
 
 
+def test_build_rejects_output_path_aliasing_live_db(tmp_path: Path, monkeypatch):
+    """The backup should refuse to write to a path that is the live DB file.
+    This protects the running agent from accidental DB overwrite.
+    """
+    db_path = tmp_path / "talos-agent.db"
+    _seed_agent_db(db_path)
+    from talos_agent import backup_service as bs
+    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
+    monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)
+
+    # Attempt to use the same path as the backup output.
+    with pytest.raises(BackupError) as exc_info:
+        build_backup(password="strongpass123", out_path=db_path)
+    assert getattr(exc_info.value, "code", None) == "ALIAS_REJECTED"
+    # Ensure the DB still exists after the failed attempt.
+    assert db_path.exists()
+
+
+def test_build_rejects_symlink_aliasing_live_db(tmp_path: Path, monkeypatch):
+    """The backup should also refuse if out_path is a symlink pointing to the DB."""
+    db_path = tmp_path / "talos-agent.db"
+    _seed_agent_db(db_path)
+    from talos_agent import backup_service as bs
+    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
+    monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)
+
+    symlink_path = tmp_path / "symlink_to_db.enc"
+    try:
+        symlink_path.symlink_to(db_path)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlinks not supported in this environment")
+
+    with pytest.raises(BackupError) as exc_info:
+        build_backup(password="strongpass123", out_path=symlink_path)
+    assert getattr(exc_info.value, "code", None) == "ALIAS_REJECTED"
+    assert db_path.exists()
+
+
 def test_build_password_must_be_at_least_8_chars(tmp_path: Path, monkeypatch):
     from talos_agent import backup_service as bs
     monkeypatch.setattr(bs, "APP_DIR", tmp_path)
@@ -437,3 +475,364 @@ def test_prune_skips_undeletable_file_without_raising(tmp_path: Path, monkeypatc
     assert [p.name for p in deleted] == ["talos-agent-1.enc"]
     assert (tmp_path / "talos-agent-2.enc").exists()
     assert (tmp_path / "talos-agent-0.enc").exists()
+
+
+
+# ── Decompressed restore bounds (prevents disk/memory exhaustion) ─────
+#
+# MAX_DECOMPRESSED_RESTORE_BYTES == MAX_PLAINTEXT_BYTES == 10 MB.
+# Because base64 expands raw bytes by ~33 %, a file body whose raw size
+# approaches 10 MB would already push the JSON plaintext over the
+# MAX_PLAINTEXT_BYTES ceiling enforced by verify_backup() — before the
+# per-file decompressed check inside restore_backup() is reached.
+#
+# To exercise the decompressed-bytes code path in isolation, the tests
+# monkeypatch MAX_DECOMPRESSED_RESTORE_BYTES to a small value (1 KB).
+# This keeps the JSON plaintext well under MAX_PLAINTEXT_BYTES while
+# still triggering the guard at the correct place in restore_backup().
+#
+# The boundary test uses a 512-byte file with a 1 KB limit: plaintext is
+# tiny, verify_backup passes, and restore succeeds at exactly the boundary.
+
+
+def _make_artifact(
+    files: dict[str, bytes],
+    *,
+    password: str,
+    tmp_path: Path,
+    filename: str = "artifact.enc",
+) -> Path:
+    """Build a minimal valid encrypted artifact containing the given file bodies.
+
+    Keys in `files` must be ``db/<name>`` paths; values are the raw bytes.
+    The artifact passes all structural checks in verify_backup() so the
+    decompressed-bytes check inside restore_backup() is reachable.
+    """
+    import base64
+    import hashlib
+    import json
+
+    from talos_agent.crypto import encrypt_with_password
+
+    files_meta = {}
+    body = {}
+    for name, raw in files.items():
+        sha = hashlib.sha256(raw).hexdigest()
+        files_meta[name] = {"sha256": sha, "size_bytes": len(raw)}
+        body[name] = base64.b64encode(raw).decode("ascii")
+
+    payload = {
+        "version": "1.0",
+        "encryption": "AES-256-GCM#PBKDF2-SHA256#200000",
+        "scope": "agent",
+        "timestamp": "2024-01-01T00:00:00+00:00",
+        "database": {"signalVersion": "3.0.0", "rowCountsSqlite": {}},
+        "filesMeta": files_meta,
+        "body": body,
+        "manifest": {
+            "sha256": "a" * 64,
+            "rowCountTotal": 0,
+            "encryption": "AES-256-GCM#PBKDF2-SHA256#200000",
+            "formatVersion": "1.0",
+            "size_bytes": 100,
+        },
+    }
+    encrypted = encrypt_with_password(json.dumps(payload, sort_keys=True), password)
+    out = tmp_path / filename
+    out.write_text(encrypted, encoding="utf8")
+    return out
+
+
+def test_restore_rejects_oversized_decompressed_single_file(tmp_path: Path, monkeypatch):
+    """A single file whose decoded bytes exceed MAX_DECOMPRESSED_RESTORE_BYTES is
+    rejected before anything is written to disk.
+
+    MAX_DECOMPRESSED_RESTORE_BYTES is patched to 1 KB so the artifact's JSON
+    plaintext stays well under MAX_PLAINTEXT_BYTES and verify_backup() passes,
+    allowing the decompressed-bytes guard inside restore_backup() to fire.
+    """
+    import talos_agent.backup_service as bs
+    from talos_agent.backup_service import BackupError, restore_backup
+
+    SMALL_LIMIT = 1024  # 1 KB — well below the default 10 MB
+    monkeypatch.setattr(bs, "MAX_DECOMPRESSED_RESTORE_BYTES", SMALL_LIMIT)
+    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
+
+    # Single file: 1 KB + 1 byte — just over the patched limit.
+    oversized_raw = b"X" * (SMALL_LIMIT + 1)
+    artifact_path = _make_artifact(
+        {"db/oversized.db": oversized_raw},
+        password="malicious-artifact-pass",
+        tmp_path=tmp_path,
+    )
+
+    restore_root = tmp_path / "restore-target"
+    restore_root.mkdir()
+
+    with pytest.raises(BackupError) as exc_info:
+        restore_backup(
+            artifact_path=artifact_path,
+            password="malicious-artifact-pass",
+            confirm=True,
+            restore_root=restore_root,
+        )
+
+    assert exc_info.value.code == "BAD_INPUT"
+    assert "MAX_DECOMPRESSED_RESTORE_BYTES" in str(exc_info.value)
+    # Nothing must have been written to the restore root.
+    assert not (restore_root / "oversized.db").exists()
+
+
+def test_restore_rejects_cumulative_oversized_files(tmp_path: Path, monkeypatch):
+    """Two files that individually fit within MAX_DECOMPRESSED_RESTORE_BYTES but
+    cumulatively exceed it are rejected before the atomic swap writes anything.
+
+    Uses a patched 1 KB limit: each file is 600 bytes (< 1 KB), but together
+    they total 1 200 bytes (> 1 KB), triggering the cumulative guard.
+    """
+    import talos_agent.backup_service as bs
+    from talos_agent.backup_service import BackupError, restore_backup
+
+    SMALL_LIMIT = 1024  # 1 KB
+    monkeypatch.setattr(bs, "MAX_DECOMPRESSED_RESTORE_BYTES", SMALL_LIMIT)
+    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
+
+    # Two 600-byte files: each fits, but 600 + 600 = 1 200 > 1 024.
+    file_a = b"A" * 600
+    file_b = b"B" * 600
+    artifact_path = _make_artifact(
+        {"db/file-0.db": file_a, "db/file-1.db": file_b},
+        password="cumulative-overflow-pass",
+        tmp_path=tmp_path,
+    )
+
+    restore_root = tmp_path / "restore-target-cumulative"
+    restore_root.mkdir()
+
+    with pytest.raises(BackupError) as exc_info:
+        restore_backup(
+            artifact_path=artifact_path,
+            password="cumulative-overflow-pass",
+            confirm=True,
+            restore_root=restore_root,
+        )
+
+    assert exc_info.value.code == "BAD_INPUT"
+    assert "MAX_DECOMPRESSED_RESTORE_BYTES" in str(exc_info.value)
+    # The atomic swap must not have run — restore_root stays empty.
+    assert len(list(restore_root.glob("*.db"))) == 0
+
+
+def test_restore_accepts_at_boundary(tmp_path: Path, monkeypatch):
+    """A single file whose decoded size is exactly MAX_DECOMPRESSED_RESTORE_BYTES
+    must succeed (boundary is inclusive: > not >=).
+
+    Uses a patched 512-byte limit and a 512-byte file body.
+    """
+    import talos_agent.backup_service as bs
+    from talos_agent.backup_service import restore_backup
+
+    SMALL_LIMIT = 512
+    monkeypatch.setattr(bs, "MAX_DECOMPRESSED_RESTORE_BYTES", SMALL_LIMIT)
+    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
+
+    raw = b"Z" * SMALL_LIMIT  # exactly at the limit
+    artifact_path = _make_artifact(
+        {"db/boundary.db": raw},
+        password="boundary-test-pass-ok",
+        tmp_path=tmp_path,
+    )
+
+    restore_root = tmp_path / "restore-target-boundary"
+    restore_root.mkdir()
+
+    result = restore_backup(
+        artifact_path=artifact_path,
+        password="boundary-test-pass-ok",
+        confirm=True,
+        restore_root=restore_root,
+    )
+
+    assert result.scope == "agent"
+    assert (restore_root / "boundary.db").exists()
+    assert (restore_root / "boundary.db").stat().st_size == SMALL_LIMIT
+
+
+def test_restore_preserves_existing_behavior_for_normal_backups(tmp_path: Path, monkeypatch):
+    """Normal-sized backups continue to work unchanged after adding the bounds check."""
+    db_path = tmp_path / "talos-agent.db"
+    _seed_agent_db(db_path)
+    from talos_agent import backup_service as bs
+    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
+    monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)
+
+    out = tmp_path / "normal.enc"
+    pw = "normal-backup-pass-long"
+    build_backup(password=pw, out_path=out)
+
+    restore_root = tmp_path / "restore-normal"
+    restore_root.mkdir()
+
+    result = restore_backup(
+        artifact_path=out,
+        password=pw,
+        confirm=True,
+        restore_root=restore_root,
+    )
+
+    assert result.version == BACKUP_FORMAT_VERSION
+    assert (restore_root / "talos-agent.db").exists()
+    # Verify the restored DB is valid SQLite (can be opened).
+    import sqlite3
+    conn = sqlite3.connect(str(restore_root / "talos-agent.db"))
+    conn.close()
+
+
+class TestRestoreAgentIdentifierGuard:
+    """Issue #1454 — reject contradictory agent identifiers during restore.
+
+    These tests construct a minimal valid archive payload directly (bypassing
+    build_backup) so the guard is exercised in isolation without needing a
+    live .talos-agent directory. The archive is a real encrypted artifact —
+    encrypt/decrypt path is the production one.
+    """
+
+    def _make_archive(
+        self,
+        tmp_path,
+        *,
+        archive_agent_id: str | None,
+        password: str = "test-password-123",
+    ) -> "Path":
+        import json
+        from talos_agent.backup_service import (
+            BACKUP_ENCRYPTION_LABEL,
+            BACKUP_FORMAT_VERSION,
+            _sha256_bytes,
+            encrypt_with_password,
+            stream_encrypted_artifact,
+        )
+
+        # Minimal body: one tiny SQLite file so restore has something to place.
+        import sqlite3
+        db_bytes = tmp_path / "fake.db"
+        conn = sqlite3.connect(str(db_bytes))
+        conn.execute("CREATE TABLE t (x INTEGER)")
+        conn.commit()
+        conn.close()
+        raw = db_bytes.read_bytes()
+        import base64
+        b64 = base64.b64encode(raw).decode("ascii")
+
+        files_meta = {
+            "db/fake.db": {
+                "sha256": _sha256_bytes(raw),
+                "size_bytes": len(raw),
+            }
+        }
+        manifest_inner = {
+            "encryption": BACKUP_ENCRYPTION_LABEL,
+            "files": files_meta,
+            "rowCountsSqlite": {"fake.db:t": 0},
+            "scope": "agent",
+            "schemaVersion": 3,
+        }
+        manifest_sha = _sha256_bytes(
+            json.dumps(manifest_inner, sort_keys=True).encode("utf8")
+        )
+        payload = {
+            "version": BACKUP_FORMAT_VERSION,
+            "encryption": BACKUP_ENCRYPTION_LABEL,
+            "scope": "agent",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "database": {"signalVersion": "3.0.0", "rowCountsSqlite": {"fake.db:t": 0}},
+            "filesMeta": files_meta,
+            "body": {"db/fake.db": b64},
+            "manifest": {
+                "sha256": manifest_sha,
+                "rowCountTotal": 0,
+                "encryption": BACKUP_ENCRYPTION_LABEL,
+                "formatVersion": BACKUP_FORMAT_VERSION,
+            },
+        }
+        if archive_agent_id is not None:
+            payload["agent_id"] = archive_agent_id
+
+        plaintext = json.dumps(payload, sort_keys=True).encode("utf8")
+        ciphertext = encrypt_with_password(plaintext.decode("utf8"), password)
+        out_path = tmp_path / "archive.enc"
+        stream_encrypted_artifact(ciphertext, out_path)
+        return out_path
+
+    def test_matching_agent_id_restores(self, tmp_path, monkeypatch):
+        """Same agent_id on archive and restore call → proceeds."""
+        from talos_agent import backup_service
+
+        artifact = self._make_archive(tmp_path, archive_agent_id="talos-A")
+        restore_root = tmp_path / "restore"
+        monkeypatch.setattr(backup_service, "APP_DIR", tmp_path)
+        result = backup_service.restore_backup(
+            artifact_path=artifact,
+            password="test-password-123",
+            confirm=True,
+            agent_id="talos-A",
+            restore_root=restore_root,
+        )
+        assert result is not None
+        assert (restore_root / "fake.db").exists()
+
+    def test_mismatched_agent_id_rejected(self, tmp_path, monkeypatch):
+        """Different agent_id → AGENT_ID_MISMATCH, no files written."""
+        from talos_agent import backup_service
+        from talos_agent.backup_service import BackupError
+
+        artifact = self._make_archive(tmp_path, archive_agent_id="talos-A")
+        restore_root = tmp_path / "restore"
+        monkeypatch.setattr(backup_service, "APP_DIR", tmp_path)
+        with pytest.raises(BackupError) as excinfo:
+            backup_service.restore_backup(
+                artifact_path=artifact,
+                password="test-password-123",
+                confirm=True,
+                agent_id="talos-B",
+                restore_root=restore_root,
+            )
+        assert excinfo.value.code == "AGENT_ID_MISMATCH"
+        assert "does not match" in str(excinfo.value)
+        # No files should have been restored.
+        assert not (restore_root / "fake.db").exists()
+
+    def test_mismatched_agent_id_allowed_with_explicit_flag(self, tmp_path, monkeypatch):
+        """allow_agent_mismatch=True lets the caller migrate explicitly."""
+        from talos_agent import backup_service
+
+        artifact = self._make_archive(tmp_path, archive_agent_id="talos-A")
+        restore_root = tmp_path / "restore"
+        monkeypatch.setattr(backup_service, "APP_DIR", tmp_path)
+        result = backup_service.restore_backup(
+            artifact_path=artifact,
+            password="test-password-123",
+            confirm=True,
+            agent_id="talos-B",
+            restore_root=restore_root,
+            allow_agent_mismatch=True,
+        )
+        assert result is not None
+        assert (restore_root / "fake.db").exists()
+
+    def test_legacy_archive_without_agent_id_restores(self, tmp_path, monkeypatch):
+        """Legacy archive with no agent_id field restores unchanged."""
+        from talos_agent import backup_service
+
+        artifact = self._make_archive(tmp_path, archive_agent_id=None)
+        restore_root = tmp_path / "restore"
+        monkeypatch.setattr(backup_service, "APP_DIR", tmp_path)
+        result = backup_service.restore_backup(
+            artifact_path=artifact,
+            password="test-password-123",
+            confirm=True,
+            agent_id="talos-A",
+            restore_root=restore_root,
+        )
+        assert result is not None
+        assert (restore_root / "fake.db").exists()

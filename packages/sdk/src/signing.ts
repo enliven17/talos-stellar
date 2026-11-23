@@ -118,6 +118,11 @@ function base64Url(bytes: Uint8Array): string {
   return encoded.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+/** Encode a signature Uint8Array as a base64 string for transport. */
+export function encodeSignature(signature: Uint8Array): string {
+  return base64Url(signature);
+}
+
 async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
   const digest = await globalThis.crypto.subtle.digest(
     "SHA-256",

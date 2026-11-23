@@ -52,6 +52,8 @@ type Svc = {
   currency: string;
   chains: string[];
   createdAt: Date;
+  agentOnline: boolean;
+  agentLastSeen: Date | null;
 };
 
 function makeSvc(overrides: Partial<Svc> & { id: string; price: string }): Svc {
@@ -63,6 +65,8 @@ function makeSvc(overrides: Partial<Svc> & { id: string; price: string }): Svc {
     description: null,
     currency: "USDC",
     chains: ["stellar"],
+    agentOnline: true,
+    agentLastSeen: new Date("2026-09-01T00:00:00.000Z"),
     createdAt: new Date("2026-09-01T00:00:00.000Z"),
     ...overrides,
   };
