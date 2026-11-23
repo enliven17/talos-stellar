@@ -74,6 +74,14 @@ import {
   type RateLimitInfo,
 } from "./errors.js";
 import {
+  TranscriptRecorder,
+  TranscriptReplayer,
+  type HttpTranscript,
+  type TranscriptEntry,
+  type TranscriptRecorderOptions,
+  type TranscriptReplayOptions,
+} from "./transcript.js";
+import {
   generateIdempotencyKey,
   validateIdempotencyKey,
   isPayloadConflict,
@@ -249,7 +257,12 @@ export interface ETagCacheEntry<T = unknown> {
   etag: string;
   /** The cached response body. */
   body: T;
+  /** Schema version of this cache entry. Increment when the serialization format changes. */
+  version: number;
 }
+
+/** Current ETag cache entry schema version. */
+export const ETAG_CACHE_VERSION = 1;
 
 /**
  * Pluggable ETag store interface.
@@ -264,6 +277,16 @@ export interface ETagStore {
   set(key: string, entry: ETagCacheEntry): void;
   /** Remove a cache entry (called when the server returns a non-304 / non-2xx on a conditional request). */
   delete(key: string): void;
+  /**
+   * Optional: serialize the entire store for persistence.
+   * Returned data should be opaque to callers; use {@link deserialize} to restore.
+   */
+  serialize?(): string;
+  /**
+   * Optional: restore the store from a previously serialized string.
+   * Implementations should ignore entries with unknown/unsupported versions.
+   */
+  deserialize?(data: string): void;
 }
 
 /**
@@ -302,15 +325,18 @@ export interface ETagCacheOptions {
 
 /**
  * A simple insertion-order LRU map bounded to `maxEntries`.
- *
- * @internal
  */
-class BoundedETagStore implements ETagStore {
+export class BoundedETagStore implements ETagStore {
   private readonly map = new Map<string, ETagCacheEntry>();
   constructor(private readonly maxEntries: number) {}
 
   get(key: string): ETagCacheEntry | undefined {
-    return this.map.get(key);
+    const entry = this.map.get(key);
+    // Skip entries with unsupported versions (future-proofing).
+    if (entry && entry.version > ETAG_CACHE_VERSION) {
+      return undefined;
+    }
+    return entry;
   }
 
   set(key: string, entry: ETagCacheEntry): void {
@@ -321,7 +347,8 @@ class BoundedETagStore implements ETagStore {
       const oldest = this.map.keys().next().value;
       if (oldest !== undefined) this.map.delete(oldest);
     }
-    this.map.set(key, entry);
+    // Ensure the entry has the current version.
+    this.map.set(key, { ...entry, version: ETAG_CACHE_VERSION });
   }
 
   delete(key: string): void {
@@ -331,6 +358,45 @@ class BoundedETagStore implements ETagStore {
   /** Number of entries currently in the store (for tests/observability). */
   get size(): number {
     return this.map.size;
+  }
+
+  /** Serialize the store to a JSON string for persistence. */
+  serialize(): string {
+    const entries: Array<[string, ETagCacheEntry]> = [];
+    for (const [key, value] of this.map.entries()) {
+      entries.push([key, value]);
+    }
+    return JSON.stringify({ version: ETAG_CACHE_VERSION, entries });
+  }
+
+  /** Restore the store from a previously serialized string. */
+  deserialize(data: string): void {
+    try {
+      const parsed = JSON.parse(data);
+      if (!parsed || typeof parsed !== "object") return;
+      if (parsed.version !== ETAG_CACHE_VERSION) {
+        // Unknown version — ignore the entire payload.
+        return;
+      }
+      if (!Array.isArray(parsed.entries)) return;
+      this.map.clear();
+      for (const entry of parsed.entries) {
+        if (!Array.isArray(entry) || entry.length !== 2) continue;
+        const [key, value] = entry;
+        if (typeof key !== "string") continue;
+        if (!value || typeof value !== "object") continue;
+        if (typeof value.etag !== "string" || value.version !== ETAG_CACHE_VERSION) continue;
+        // Only restore entries with the current supported version.
+        this.map.set(key, value as ETagCacheEntry);
+      }
+      // Enforce capacity limit after restore.
+      while (this.map.size > this.maxEntries) {
+        const oldest = this.map.keys().next().value;
+        if (oldest !== undefined) this.map.delete(oldest);
+      }
+    } catch {
+      // Malformed data — ignore and start fresh.
+    }
   }
 }
 
@@ -371,7 +437,14 @@ export interface DedupeInFlightGetsOptions {
  * behavior for backward compatibility.
  */
 export interface TalosClientOptions {
-  /** Base URL of the Talos API. Defaults to `https://talos-stellar.vercel.app`. */
+  /**
+   * Base URL of the Talos API. Defaults to `https://talos-stellar.vercel.app`.
+   *
+   * Validated at construction via {@link resolveBaseUrl}: must be a valid
+   * `http:` or `https:` URL without embedded credentials (`user:pass@`),
+   * query parameters, or fragments. Credential-free local HTTP endpoints
+   * (e.g. `http://localhost:3000`, `http://127.0.0.1:3000`) are supported.
+   */
   baseUrl?: string;
   /** Bearer token (TALOS API key). Adds `Authorization: Bearer <key>` header. */
   apiKey?: string;
@@ -403,8 +476,9 @@ export interface TalosClientOptions {
    */
   retry?: RetryOptions;
   /**
-   * Per-request timeout in milliseconds, enforced via `AbortController`.
-   * Timeouts surface as `TalosTimeoutError`.
+   * Total per-request deadline in milliseconds, enforced via `AbortController`
+   * across signing, every retry, backoff delays, and response parsing. Timeouts
+   * surface as `TalosTimeoutError`.
    */
   timeoutMs?: number;
   /**
@@ -432,6 +506,22 @@ export interface TalosClientOptions {
   dedupeInFlightGets?: boolean | DedupeInFlightGetsOptions;
   /** Opt-in ETag conditional-GET caching. */
   etagCache?: boolean | ETagCacheOptions;
+  /**
+   * Enable deterministic HTTP transcript recording for support cases.
+   * - `true`: Records requests with default options.
+   * - `TranscriptRecorder`: Uses an existing recorder instance.
+   * - `TranscriptRecorderOptions`: Configures a new recorder.
+   */
+  recorder?: boolean | TranscriptRecorder | TranscriptRecorderOptions;
+  /**
+   * Replay synthetic responses from a recorded HTTP transcript without
+   * making real network calls. Request bodies are never required or recorded.
+   */
+  replayTranscript?: HttpTranscript | readonly TranscriptEntry[] | TranscriptReplayer;
+  /**
+   * Optional listener invoked whenever an entry is recorded to the transcript.
+   */
+  onTranscriptEntry?: (entry: TranscriptEntry) => void;
 }
 
 
@@ -448,9 +538,10 @@ export interface WriteOptions {
   /** AbortSignal for cancellation. */
   signal?: AbortSignal;
   /**
-   * Per-request timeout in milliseconds. Overrides the client-level
-   * `timeoutMs` for this single call. `0` disables the timeout for this call
-   * regardless of the client default. Surfaces as `TalosTimeoutError`.
+   * Total per-request deadline in milliseconds. Overrides the client-level
+   * `timeoutMs` and spans signing, retries, backoff delays, and response
+   * parsing. `0` disables the deadline for this call regardless of the client
+   * default. Surfaces as `TalosTimeoutError`.
    */
   timeoutMs?: number;
   /**
@@ -474,9 +565,10 @@ export interface ReadOptions {
   /** AbortSignal for cancellation. */
   signal?: AbortSignal;
   /**
-   * Per-request timeout in milliseconds. Overrides the client-level
-   * `timeoutMs` for this single call. `0` disables the timeout for this call
-   * regardless of the client default. Surfaces as `TalosTimeoutError`.
+   * Total per-request deadline in milliseconds. Overrides the client-level
+   * `timeoutMs` and spans signing, retries, backoff delays, and response
+   * parsing. `0` disables the deadline for this call regardless of the client
+   * default. Surfaces as `TalosTimeoutError`.
    */
   timeoutMs?: number;
 }
@@ -545,7 +637,7 @@ type RequestParams = Record<string, string | number | boolean>;
 type RequestOptions = RequestInit & {
   params?: RequestParams;
   idempotencyKey?: string;
-  /** Per-call timeout override in ms. `0` disables; `undefined` falls back to client `timeoutMs`. */
+  /** Total per-call deadline override in ms. `0` disables; `undefined` falls back to client `timeoutMs`. */
   timeoutMs?: number;
 };
 
@@ -780,6 +872,66 @@ function redactedRetryError(err: TalosAPIError): TalosAPIError {
   });
 }
 
+/** Default base URL for the hosted Talos Protocol API. */
+export const DEFAULT_BASE_URL = "https://talos-stellar.vercel.app";
+
+/**
+ * Validate and normalize {@link TalosClientOptions.baseUrl}.
+ *
+ * - Omitted (`undefined`) falls back to {@link DEFAULT_BASE_URL}.
+ * - Accepts credential-free `https:` and `http:` URLs (preserving local HTTP
+ *   development/test targets such as `http://localhost:3000` and `http://127.0.0.1:...`).
+ * - Rejects malformed URLs, non-HTTP(S) schemes, query strings / fragments, and
+ *   embedded credentials (`username` / `password` / `userinfo@`) with privacy-safe
+ *   `TypeError` / `RangeError` messages that never echo the URL or secrets.
+ */
+export function resolveBaseUrl(baseUrl?: string): string {
+  if (baseUrl === undefined) {
+    return DEFAULT_BASE_URL;
+  }
+  if (typeof baseUrl !== "string") {
+    throw new TypeError("baseUrl must be a string");
+  }
+  const trimmed = baseUrl.trim();
+  if (trimmed === "") {
+    throw new RangeError("baseUrl must be a non-empty URL");
+  }
+  if (/[\u0000-\u001f\u007f]/.test(trimmed)) {
+    throw new TypeError("baseUrl must be a valid absolute URL");
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new TypeError("baseUrl must be a valid absolute URL");
+  }
+
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new RangeError("baseUrl must use the http: or https: protocol");
+  }
+
+  // Reject any embedded credentials (including empty `:@` and non-canonical
+  // extra-slash userinfo such as `https:////:@host`) before any request is
+  // issued, without echoing URL contents.
+  const afterScheme = trimmed.slice(parsed.protocol.length).replace(/^[/\\]+/, "");
+  const authority = afterScheme.split(/[/?#\\]/, 1)[0];
+  if (parsed.username !== "" || parsed.password !== "" || authority.includes("@")) {
+    throw new RangeError("baseUrl must not contain embedded credentials");
+  }
+
+  if (
+    parsed.search !== "" ||
+    parsed.hash !== "" ||
+    trimmed.includes("?") ||
+    trimmed.includes("#")
+  ) {
+    throw new RangeError("baseUrl must not contain query parameters or fragments");
+  }
+
+  return parsed.toString().replace(/\/+$/, "");
+}
+
 /**
  * Talos Protocol API client. Wraps `fetch` with typed errors, optional
  * timeout, idempotency keys, request signing, chaos injection and bounded
@@ -789,7 +941,7 @@ function redactedRetryError(err: TalosAPIError): TalosAPIError {
 const DEFAULT_MAX_IN_FLIGHT = 256;
 
 export class TalosClient {
-  private baseUrl: string;
+  private readonly baseUrl: string;
   private headers: Record<string, string>;
   private readonly retryPolicy: Required<RetryPolicyOptions>;
   private readonly retry: Required<RetryOptions>;
@@ -812,6 +964,9 @@ export class TalosClient {
   private signer?: SigningController;
   private readonly etagStore: ETagStore | null = null;
   private readonly onCacheHit?: (event: { url: string; etag: string }) => void;
+  private readonly recorder?: TranscriptRecorder;
+  private readonly replayer?: TranscriptReplayer;
+  private readonly onTranscriptEntry?: (entry: TranscriptEntry) => void;
 
   // ── In-flight GET deduplication ────────────────────────────
   /**
@@ -845,13 +1000,7 @@ export class TalosClient {
     this.onResponse = options.onResponse;
     this.fetchOverride = options.fetch;
     this.chaosInjector = options.chaosInjector;
-    this.baseUrl = (
-      options.baseUrl ?? "https://talos-stellar.vercel.app"
-    ).replace(/\/$/, "");
-    this.timeoutMs = options.timeoutMs;
-    this.fetchOverride = options.fetch;
-    this.onError = options.onError;
-    this.chaosInjector = options.chaosInjector;
+    this.baseUrl = resolveBaseUrl(options.baseUrl);
     this.headers = { "Content-Type": "application/json" };
     if (options.apiKey) {
       this.headers["Authorization"] = `Bearer ${options.apiKey}`;
@@ -885,14 +1034,39 @@ export class TalosClient {
       if (!Number.isInteger(maxEntries) || maxEntries < 1) {
         throw new RangeError("etagCache.maxEntries must be a positive integer");
       }
-      if (raw.store !== undefined && typeof raw.store !== "object") {
-        throw new TypeError("etagCache.store must be an object");
+      if (raw.onCacheHit !== undefined && typeof raw.onCacheHit !== "function") {
+        throw new TypeError("etagCache.onCacheHit must be a function");
+      }
+      if (raw.store !== undefined) {
+        if (typeof raw.store !== "object" || raw.store === null) {
+          throw new TypeError("etagCache.store must be an object");
+        }
+        const store = raw.store as { get: unknown; set: unknown; delete: unknown; serialize?: unknown; deserialize?: unknown };
+        if (typeof store.get !== "function" || typeof store.set !== "function" || typeof store.delete !== "function") {
+          throw new TypeError("etagCache.store must implement get, set, and delete methods");
+        }
       }
       this.etagStore = raw.store ?? new BoundedETagStore(maxEntries);
       this.onCacheHit = raw.onCacheHit;
     } else {
       this.etagStore = null;
     }
+
+    if (options.replayTranscript) {
+      this.replayer =
+        options.replayTranscript instanceof TranscriptReplayer
+          ? options.replayTranscript
+          : new TranscriptReplayer(options.replayTranscript, { baseUrl: this.baseUrl });
+    }
+
+    if (options.recorder === true) {
+      this.recorder = new TranscriptRecorder();
+    } else if (options.recorder instanceof TranscriptRecorder) {
+      this.recorder = options.recorder;
+    } else if (typeof options.recorder === "object" && options.recorder !== null) {
+      this.recorder = new TranscriptRecorder(options.recorder);
+    }
+    this.onTranscriptEntry = options.onTranscriptEntry;
   }
 
   /**
@@ -904,7 +1078,11 @@ export class TalosClient {
 
   private etagCacheKey(method: string, url: string): string | null {
     if (method.toUpperCase() !== "GET" || !this.etagStore) return null;
-    return `${url}\n${this.headers["Authorization"] ?? ""}`;
+    // Include the origin (baseUrl) explicitly in the cache key to prevent
+    // cross-origin cache reuse when a persistent store is shared across clients
+    // with different base URLs.
+    const origin = new URL(this.baseUrl).origin;
+    return `${origin}\n${url}\n${this.headers["Authorization"] ?? ""}`;
   }
 
 
@@ -1013,9 +1191,13 @@ export class TalosClient {
     return this.toJSON();
   }
 
-  /** Resolve the fetch implementation per request. Prefer override; fall back to global. */
+  /** Resolve the fetch implementation per request. Prefer override; fall back to replayer; fall back to global. */
   private resolveFetch(): typeof fetch {
-    const fetchFn = this.fetchOverride ?? globalThis.fetch;
+    const fetchFn =
+      this.fetchOverride ??
+      (this.replayer
+        ? (input: RequestInfo | URL, init?: RequestInit) => this.replayer!.fetch(input, init)
+        : globalThis.fetch);
     if (typeof fetchFn !== "function") {
       throw new TalosTransportError(0, "Fetch implementation is unavailable", "", {
         message: "Fetch implementation is unavailable",
@@ -1126,7 +1308,8 @@ export class TalosClient {
   /**
    * Build a `{ signal, dispose }` pair for the per-request timeout, linked to
    * the caller's signal when present. Returns `null` when no timeout is set.
-   * `dispose()` MUST be called once the attempt settles.
+   * The returned controller must live for the complete request, including
+   * signing, retries, backoff, and response parsing.
    *
    * Resolution order (first non-`undefined` value wins):
    *   1. `callTimeoutMs` — per-call override passed via `WriteOptions` / `ReadOptions`.
@@ -1154,6 +1337,52 @@ export class TalosClient {
         callerSignal?.removeEventListener("abort", onCallerAbort);
       },
     };
+  }
+
+  private awaitRequestStage<T>(
+    operation: () => PromiseLike<T>,
+    signal: AbortSignal | undefined,
+    path: string,
+  ): Promise<T> {
+    if (!signal) {
+      try {
+        return Promise.resolve(operation());
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
+    if (signal.aborted) {
+      return Promise.reject(new TalosTimeoutError(0, "Request aborted or timed out", path));
+    }
+
+    let promise: PromiseLike<T>;
+    try {
+      promise = operation();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = () => {
+        signal.removeEventListener("abort", onAbort);
+        reject(new TalosTimeoutError(0, "Request aborted or timed out", path));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      Promise.resolve(promise).then(
+        (value) => {
+          signal.removeEventListener("abort", onAbort);
+          if (signal.aborted) {
+            reject(new TalosTimeoutError(0, "Request aborted or timed out", path));
+          } else {
+            resolve(value);
+          }
+        },
+        (error: unknown) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+      );
+    });
   }
 
   // ── Status-code retry policy (retryPolicy) ─────────────────
@@ -1440,123 +1669,137 @@ export class TalosClient {
     const typedMaxAttempts = this.computeMaxAttempts(idempotent);
     const maxAttempts = Math.max(this.retryPolicy.maxAttempts, typedMaxAttempts);
     const startedAt = Date.now();
+    const timeout = this.acquireTimeoutController(callerSignal, callTimeoutMs);
+    const effectiveSignal = timeout?.signal ?? callerSignal;
 
     let lastError: TalosAPIError | undefined;
     let attempt = 1;
-    for (; attempt <= maxAttempts; attempt += 1) {
-      const attemptStartedAt = Date.now();
-      if (this.chaosInjector) await this.injectChaos();
-
-      const baseHeaders = this.mergeHeaders(requestInit.headers, extraHeaders);
-      const headers = this.signer
-        ? await this.applySignature(url, method, baseHeaders, requestInit.body, callerSignal)
-        : baseHeaders;
-
-      const timeout = this.acquireTimeoutController(callerSignal, callTimeoutMs);
-      const effectiveSignal = timeout?.signal ?? callerSignal;
-      let delayMs: number | null = null;
-      try {
-        let res: Response;
+    try {
+      for (; attempt <= maxAttempts; attempt += 1) {
+        const attemptStartedAt = Date.now();
+        let delayMs: number | null = null;
         try {
-          res = await this.resolveFetch()(url, {
-            ...requestInit,
-            method,
-            headers,
-            ...(effectiveSignal ? { signal: effectiveSignal } : {}),
-          });
-        } catch (cause) {
-          throw classifyTransportError(cause, path);
-        }
-
-        // Surface rate-limit counters for every response, including the
-        // attempts that are about to fail and be retried.
-        this.observeResponse(path, method, res.status, attempt, Date.now() - attemptStartedAt, res.headers);
-
-        if (res.status === 304 && cachedEntry) {
-          this.onCacheHit?.({ url, etag: cachedEntry.etag });
-          return cachedEntry.body as T;
-        }
-
-        if (res.ok) {
-
-          // Malformed JSON on a 2xx intentionally propagates the raw parse error.
-          const body = (await res.json()) as T;
-
-          // Update ETag cache if the server returned an ETag header.
-          if (cacheKey !== null && this.etagStore) {
-            const etag = res.headers.get("ETag") ?? res.headers.get("etag");
-            if (etag) {
-              this.etagStore.set(cacheKey, { etag, body });
-            }
+          if (this.chaosInjector) {
+            await this.awaitRequestStage(() => this.injectChaos(), effectiveSignal, path);
           }
 
-          return body;
-        }
+          const baseHeaders = this.mergeHeaders(requestInit.headers, extraHeaders);
+          const headers = this.signer
+            ? await this.awaitRequestStage(
+                () => this.applySignature(url, method, baseHeaders, requestInit.body, effectiveSignal),
+                effectiveSignal,
+                path,
+              )
+            : baseHeaders;
 
-        // Non-2xx, non-304: evict stale cache entry if present.
-        if (cacheKey !== null && this.etagStore) {
-          this.etagStore.delete(cacheKey);
-        }
-
-        const rawBody = await res.text().catch(() => "");
-        if (res.status === 409 && idempotencyKey !== undefined && isPayloadConflict(rawBody)) {
-          throw new IdempotencyConflictError(idempotencyKey, path, rawBody);
-        }
-        throw errorFromResponse(res.status, path, rawBody, res.headers);
-      } catch (err) {
-        if (!(err instanceof TalosAPIError)) throw err;
-        lastError = err;
-        const decision = this.nextRetryDelay(err, {
-          method,
-          attempt,
-          idempotent,
-          retryMethodsForCall,
-          typedMaxAttempts,
-        });
-        if (decision === null) break;
-        delayMs = decision.delayMs;
-        const event: RetryDecisionEvent = {
-          attempt,
-          reason: decision.reason,
-          nextDelayMs: decision.delayMs,
-          delayMs: decision.delayMs,
-          metadata: {
-            code: err.code,
-            status: err.status,
-            isRetryable: err.isRetryable,
-            ...(err.retryAfterMs !== undefined ? { retryAfterMs: err.retryAfterMs } : {}),
-          },
-          error: redactedRetryError(err),
-        };
-        if (decision.source === "status-code") {
+          let res: Response;
           try {
-            this.retryPolicy.onRetry(event);
+            res = await this.awaitRequestStage(
+              () => this.resolveFetch()(url, {
+                ...requestInit,
+                method,
+                headers,
+                ...(effectiveSignal ? { signal: effectiveSignal } : {}),
+              }),
+              effectiveSignal,
+              path,
+            );
+          } catch (cause) {
+            if (cause instanceof TalosAPIError) throw cause;
+            throw classifyTransportError(cause, path);
+          }
+
+          // Surface rate-limit counters for every response, including the
+          // attempts that are about to fail and be retried.
+          this.observeResponse(path, method, res.status, attempt, Date.now() - attemptStartedAt, res.headers);
+
+          if (res.status === 304 && cachedEntry) {
+            this.onCacheHit?.({ url, etag: cachedEntry.etag });
+            return cachedEntry.body as T;
+          }
+
+          if (res.ok) {
+            // Malformed JSON on a 2xx intentionally propagates the raw parse error.
+            const body = (await this.awaitRequestStage(() => res.json(), effectiveSignal, path)) as T;
+
+            // Update ETag cache if the server returned an ETag header.
+            if (cacheKey !== null && this.etagStore) {
+              const etag = res.headers.get("ETag") ?? res.headers.get("etag");
+              if (etag) {
+                this.etagStore.set(cacheKey, { etag, body });
+              }
+            }
+
+            return body;
+          }
+
+          // Non-2xx, non-304: evict stale cache entry if present.
+          if (cacheKey !== null && this.etagStore) {
+            this.etagStore.delete(cacheKey);
+          }
+
+          const rawBody = await this.awaitRequestStage(() => res.text(), effectiveSignal, path).catch(
+            (error: unknown) => {
+              if (error instanceof TalosTimeoutError) throw error;
+              return "";
+            },
+          );
+          if (res.status === 409 && idempotencyKey !== undefined && isPayloadConflict(rawBody)) {
+            throw new IdempotencyConflictError(idempotencyKey, path, rawBody);
+          }
+          throw errorFromResponse(res.status, path, rawBody, res.headers);
+        } catch (err) {
+          if (!(err instanceof TalosAPIError)) throw err;
+          lastError = err;
+          if (effectiveSignal?.aborted) {
+            lastError = new TalosTimeoutError(0, "Request aborted or timed out", path);
+            break;
+          }
+          delayMs = this.nextRetryDelay(err, {
+            method,
+            attempt,
+            idempotent,
+            retryMethodsForCall,
+            typedMaxAttempts,
+          });
+          if (delayMs === null) break;
+          try {
+            this.retry.onRetry({ attempt, error: err, delayMs });
           } catch {
             // A misbehaving observer must not break the bounded retry loop.
           }
         }
-        try {
-          this.retry.onRetry(event);
-        } catch {
-          // A misbehaving observer must not break the bounded retry loop.
+
+        if (effectiveSignal?.aborted) {
+          lastError = new TalosTimeoutError(0, "Request aborted or timed out", path);
+          break;
         }
-      } finally {
-        timeout?.dispose();
+        try {
+          await this.awaitRequestStage(
+            () => this.wait(delayMs ?? 0, effectiveSignal),
+            effectiveSignal,
+            path,
+          );
+        } catch (err) {
+          if (!(err instanceof TalosAPIError)) throw err;
+          lastError = err;
+          break;
+        }
       }
 
-      await this.wait(delayMs ?? 0, callerSignal);
+      const finalError = lastError ?? new TalosAPIError(0, "Retry attempts exhausted", path);
+      this.notifyError({
+        error: finalError,
+        path,
+        method,
+        attempt: Math.min(attempt, maxAttempts),
+        durationMs: Date.now() - startedAt,
+        ...(finalError.rateLimit !== undefined ? { rateLimit: finalError.rateLimit } : {}),
+      });
+      throw finalError;
+    } finally {
+      timeout?.dispose();
     }
-
-    const finalError = lastError ?? new TalosAPIError(0, "Retry attempts exhausted", path);
-    this.notifyError({
-      error: finalError,
-      path,
-      method,
-      attempt: Math.min(attempt, maxAttempts),
-      durationMs: Date.now() - startedAt,
-      ...(finalError.rateLimit !== undefined ? { rateLimit: finalError.rateLimit } : {}),
-    });
-    throw finalError;
   }
 
   private async requestPage<T>(
@@ -1787,11 +2030,31 @@ export class TalosClient {
     payload?: Record<string, unknown>,
     options?: WriteOptions,
   ): Promise<CommerceJob> {
+    const timeout = this.acquireTimeoutController(options?.signal, options?.timeoutMs);
+    const signal = timeout?.signal ?? options?.signal;
+    try {
+      return await this.purchaseServiceWithPaymentWithinDeadline(
+        talosId,
+        buyerTalosId,
+        payload,
+        options,
+        signal,
+      );
+    } finally {
+      timeout?.dispose();
+    }
+  }
+
+  private async purchaseServiceWithPaymentWithinDeadline(
+    talosId: string,
+    buyerTalosId: string,
+    payload: Record<string, unknown> | undefined,
+    options: WriteOptions | undefined,
+    signal?: AbortSignal,
+  ): Promise<CommerceJob> {
     const path = `/api/talos/${talosId}/service`;
     const url = `${this.baseUrl}${path}`;
     const body = JSON.stringify({ payload });
-    const signal = options?.signal;
-    const callTimeoutMs = options?.timeoutMs;
     const onProofDiagnostic = options?.onProofDiagnostic;
 
     /** Fire-and-forget diagnostic emitter — never throws. */
@@ -1812,24 +2075,32 @@ export class TalosClient {
       }
     };
 
-    if (this.chaosInjector) await this.injectChaos();
+    if (this.chaosInjector) {
+      await this.awaitRequestStage(() => this.injectChaos(), signal, path);
+    }
 
     // 1. Initial request — possibly hits a 402 challenge.
     const baseHeaders = this.mergeHeaders();
     const initialHeaders = this.signer
-      ? await this.applySignature(url, "POST", baseHeaders, body, signal)
+      ? await this.awaitRequestStage(
+          () => this.applySignature(url, "POST", baseHeaders, body, signal),
+          signal,
+          path,
+        )
       : baseHeaders;
-    const timeout = this.acquireTimeoutController(signal, callTimeoutMs);
-    const effectiveSignal = timeout?.signal ?? signal;
     const challengeAttemptStartedAt = Date.now();
     let res: Response;
     try {
-      res = await this.resolveFetch()(url, {
-        method: "POST",
-        headers: initialHeaders,
-        body,
-        ...(effectiveSignal ? { signal: effectiveSignal } : {}),
-      });
+      res = await this.awaitRequestStage(
+        () => this.resolveFetch()(url, {
+          method: "POST",
+          headers: initialHeaders,
+          body,
+          ...(signal ? { signal } : {}),
+        }),
+        signal,
+        path,
+      );
       // The challenge probe is a response too — surface its counters so a
       // caller throttling on quota sees every hop of the x402 flow.
       this.observeResponse(
@@ -1840,10 +2111,38 @@ export class TalosClient {
         Date.now() - challengeAttemptStartedAt,
         res.headers,
       );
+      if (this.recorder) {
+        let responsePayload: unknown;
+        try {
+          const clone = res.clone();
+          const text = await clone.text().catch(() => "");
+          if (text) {
+            try {
+              responsePayload = JSON.parse(text);
+            } catch {
+              responsePayload = text;
+            }
+          }
+        } catch {
+          // ignore clone error
+        }
+        const entry = this.recorder.record({
+          method: "POST",
+          path: url,
+          status: res.status,
+          statusText: res.statusText,
+          durationMs: Date.now() - challengeAttemptStartedAt,
+          startedAt: new Date(challengeAttemptStartedAt).toISOString(),
+          attempt: 1,
+          requestHeaders: initialHeaders,
+          responseHeaders: res.headers,
+          responseBody: responsePayload,
+        });
+        this.onTranscriptEntry?.(entry);
+      }
     } catch (cause) {
+      if (cause instanceof TalosAPIError) throw cause;
       throw classifyTransportError(cause, path);
-    } finally {
-      timeout?.dispose();
     }
 
     if (res.status === 402) {
@@ -1904,11 +2203,19 @@ export class TalosClient {
 
       let signRes: import("./types.js").SignedPayment;
       try {
-        signRes = await this.signPayment(buyerTalosId, {
-          payee: challenge.payee,
-          amount,
-          assetCode: challenge.token,
-        });
+        signRes = await this.awaitRequestStage(
+          () => this.signPayment(
+            buyerTalosId,
+            {
+              payee: challenge.payee,
+              amount,
+              assetCode: challenge.token,
+            },
+            { signal, timeoutMs: 0 },
+          ),
+          signal,
+          path,
+        );
         emitDiag(challenge, "proof_submitted", { signingSucceeded: true });
       } catch (signErr) {
         const reason =
@@ -1930,7 +2237,7 @@ export class TalosClient {
         job = await this.purchaseService(talosId, {
           paymentHeader: signRes.paymentHeader,
           payload,
-        }, options);
+        }, { ...options, signal, timeoutMs: 0 });
         emitDiag(challenge, "proof_accepted", {
           signingSucceeded: true,
           proofResponseStatus: 200,
@@ -1948,11 +2255,16 @@ export class TalosClient {
 
     // Non-402 responses — wrap them through the typed dispatch.
     if (!res.ok) {
-      const rawBody = await res.text().catch(() => "");
+      const rawBody = await this.awaitRequestStage(() => res.text(), signal, path).catch(
+        (error: unknown) => {
+          if (error instanceof TalosTimeoutError) throw error;
+          return "";
+        },
+      );
       throw errorFromResponse(res.status, path, rawBody, res.headers);
     }
 
-    return (await res.json()) as CommerceJob;
+    return (await this.awaitRequestStage(() => res.json(), signal, path)) as CommerceJob;
   }
 
   // ── Wallet & Payments ──────────────────────────────────────
@@ -1964,10 +2276,13 @@ export class TalosClient {
   async signPayment(
     talosId: string,
     params: SignPaymentParams,
+    options?: Pick<WriteOptions, "signal" | "timeoutMs">,
   ): Promise<SignedPayment> {
     return this.request(`/api/talos/${talosId}/sign`, {
       method: "POST",
       body: JSON.stringify(params),
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
@@ -2408,49 +2723,34 @@ export class TalosClient {
     });
   }
 
-  // ── Webhook Deliveries ──────────────────────────────────────────
+  // ── HTTP Transcript ─────────────────────────────────────────────
 
   /**
-   * List webhook deliveries with cursor pagination.
-   *
-   * @param params - Query parameters (limit, cursor, status, subscriptionId, eventType) and request options.
-   * @returns Page of webhook deliveries with nextCursor.
+   * Return the recorded HTTP transcript, or undefined if recording is disabled.
    */
-  async listWebhookDeliveries(
-    params?: ListWebhookDeliveriesParams,
-  ): Promise<WebhookDeliveryPage> {
-    const { signal, timeoutMs, ...query } = params ?? {};
-    return this.request("/api/webhooks/deliveries", {
-      params: query,
-      signal,
-      timeoutMs,
-    });
+  getTranscript(): HttpTranscript | undefined {
+    return this.recorder?.getTranscript();
   }
 
   /**
-   * Async iterator for paginated webhook delivery history.
-   *
-   * Reuses typed pagination and cancellation. Stops at an explicit caller
-   * limit without fetching an unnecessary page.
-   *
-   * @param options - Pagination options (limit, maxPages, signal, timeoutMs) and delivery filters (status, subscriptionId, eventType).
-   * @returns Async iterable iterator yielding individual WebhookDelivery items.
-   *
-   * @example
-   * ```ts
-   * for await (const delivery of client.paginateWebhookDeliveries({ limit: 10, status: "failed" })) {
-   *   console.log(delivery.id, delivery.status, delivery.lastError);
-   * }
-   * ```
+   * Return the configured TranscriptRecorder instance, or undefined if recording is disabled.
    */
-  paginateWebhookDeliveries(
-    options?: AsyncPaginationIteratorOptions & ListWebhookDeliveriesParams,
-  ): AsyncPaginationIterator<WebhookDelivery> {
-    const { maxPages, signal, timeoutMs, limit, ...query } = options ?? {};
-    return createPaginationIterator<WebhookDelivery>(
-      (opts) => this.listWebhookDeliveries({ ...query, ...opts }),
-      { maxPages, signal, timeoutMs, limit },
-    );
+  getTranscriptRecorder(): TranscriptRecorder | undefined {
+    return this.recorder;
+  }
+
+  /**
+   * Export the recorded HTTP transcript as a JSON string, or undefined if recording is disabled.
+   */
+  exportTranscript(indent = 2): string | undefined {
+    return this.recorder?.export(indent);
+  }
+
+  /**
+   * Return the configured TranscriptReplayer instance, or undefined if replay is disabled.
+   */
+  getTranscriptReplayer(): TranscriptReplayer | undefined {
+    return this.replayer;
   }
 }
 

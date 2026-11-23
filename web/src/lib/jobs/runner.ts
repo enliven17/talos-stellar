@@ -9,7 +9,15 @@ export interface RunOnceOptions {
   batchSize?: number;
   workerId?: string;
   leaseDurationMs?: number;
+  maxLeaseExtensionMs?: number;
+  maxLeaseHorizonMs?: number;
   heartbeatIntervalMs?: number;
+  /**
+   * Maximum jobs any single queue may contribute to one drain batch.
+   * Default 0 (unlimited). When set, the batch is assembled by claiming at
+   * most this many jobs per queue in priority/runAt order.
+   */
+  fairBatchPerQueue?: number;
   /** Aborts in-flight handlers (e.g. from graceful shutdown). */
   signal?: AbortSignal;
   /**
@@ -47,7 +55,7 @@ export async function runOnce(opts: RunOnceOptions = {}): Promise<RunOnceSummary
 
   if (queues.length === 0) return summary;
 
-  const batch = await store.leaseBatch(queues, opts.batchSize ?? jobsConfig.batchSize, opts.workerId, opts.leaseDurationMs);
+  const batch = await store.leaseBatch(queues, opts.batchSize ?? jobsConfig.batchSize, opts.workerId, opts.leaseDurationMs, opts.fairBatchPerQueue);
   summary.leased = batch.length;
   opts.onLeased?.(batch);
 
@@ -74,15 +82,77 @@ async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnce
 
   let lostLease = false;
   let cancelled = false;
-  const runHeartbeat = async () => {
-    const result = await store.heartbeat(job.id, leaseId, opts.leaseDurationMs);
-    if (!result.ok) lostLease = true;
+  let currentLeaseExpiresAt: Date | null = job.leaseExpiresAt ? new Date(job.leaseExpiresAt) : null;
+  const defaultLeaseDurationMs = opts.leaseDurationMs ?? jobsConfig.leaseDurationMs;
+  const maxExtensionMs = opts.maxLeaseExtensionMs ?? jobsConfig.maxLeaseExtensionMs;
+  const maxHorizonMs = opts.maxLeaseHorizonMs ?? jobsConfig.maxLeaseHorizonMs;
+
+  const runHeartbeat = async (requestedDurationMs?: number) => {
+    if (requestedDurationMs !== undefined) {
+      if (
+        !Number.isFinite(requestedDurationMs) ||
+        requestedDurationMs <= 0 ||
+        requestedDurationMs > maxExtensionMs ||
+        requestedDurationMs > maxHorizonMs
+      ) {
+        // Contradictory extension request: reject without modifying or dropping the lease.
+        return { ok: false, cancelled };
+      }
+      if (
+        currentLeaseExpiresAt &&
+        Number.isFinite(currentLeaseExpiresAt.getTime()) &&
+        Date.now() + requestedDurationMs < currentLeaseExpiresAt.getTime()
+      ) {
+        // Reject request that would shorten the currently held lease expiry.
+        return { ok: false, cancelled };
+      }
+    }
+
+    const effectiveDurationMs = requestedDurationMs ?? defaultLeaseDurationMs;
+    const candidateExpiryMs = Date.now() + effectiveDurationMs;
+    const result = await store.heartbeat(job.id, leaseId, effectiveDurationMs);
+    if (!result.ok) {
+      lostLease = true;
+    } else if (
+      !currentLeaseExpiresAt ||
+      !Number.isFinite(currentLeaseExpiresAt.getTime()) ||
+      candidateExpiryMs > currentLeaseExpiresAt.getTime()
+    ) {
+      currentLeaseExpiresAt = new Date(candidateExpiryMs);
+    }
     if (result.cancelled) cancelled = true;
     if (!result.ok || result.cancelled) controller.abort();
     return result;
   };
 
-  const heartbeatTimer = setInterval(runHeartbeat, opts.heartbeatIntervalMs ?? jobsConfig.heartbeatIntervalMs);
+  const runExtendLease = async (extensionMs: number) => {
+    const result = await store.extendLease(job.id, leaseId, extensionMs, {
+      maxExtensionMs,
+      maxHorizonMs,
+    });
+    if (result.ok && result.leaseExpiresAt) {
+      currentLeaseExpiresAt = new Date(result.leaseExpiresAt);
+    }
+    if (result.cancelled) {
+      cancelled = true;
+      controller.abort();
+    } else if (
+      !result.ok &&
+      (result.reason === "not_found" ||
+        result.reason === "lease_mismatch" ||
+        result.reason === "no_active_lease" ||
+        result.reason === "lease_expired" ||
+        result.reason === "invalid_job_state")
+    ) {
+      lostLease = true;
+      controller.abort();
+    }
+    return result;
+  };
+
+  const heartbeatTimer = setInterval(() => {
+    void runHeartbeat();
+  }, opts.heartbeatIntervalMs ?? jobsConfig.heartbeatIntervalMs);
   // Node timers keep the event loop alive; workers must be able to shut down
   // even if a heartbeat is pending.
   heartbeatTimer.unref?.();
@@ -97,10 +167,21 @@ async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnce
       payload: job.payload,
       signal: controller.signal,
       heartbeat: runHeartbeat,
+      extendLease: runExtendLease,
     });
 
     if (lostLease || cancelled) {
-      if (cancelled) summary.cancelled += 1;
+      if (cancelled) {
+        summary.cancelled += 1;
+        await store.recordAttempt({
+          jobId: job.id,
+          attemptNumber: job.attempts,
+          workerId: opts.workerId ?? job.leaseOwner,
+          leaseId,
+          durationMs: Date.now() - startedAt,
+          terminalReason: "cancelled",
+        });
+      }
       return;
     }
 
@@ -114,7 +195,18 @@ async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnce
     }
   } catch (err) {
     if (lostLease || cancelled) {
-      if (cancelled) summary.cancelled += 1;
+      if (cancelled) {
+        summary.cancelled += 1;
+        await store.recordAttempt({
+          jobId: job.id,
+          attemptNumber: job.attempts,
+          workerId: opts.workerId ?? job.leaseOwner,
+          leaseId,
+          durationMs: Date.now() - startedAt,
+          terminalReason: "cancelled",
+          error: err,
+        });
+      }
       return;
     }
 

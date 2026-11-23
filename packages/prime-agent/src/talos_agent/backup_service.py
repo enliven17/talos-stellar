@@ -17,6 +17,13 @@ Reuses:
 Bounded:
     - SQLite backup uses the official sqlite3.Connection.backup() API,
       which is bounded by the source DB size (no unbounded read).
+    - Plaintext backup envelope is capped at MAX_PLAINTEXT_BYTES (10 MiB)
+      to prevent accidental disk-fill from rogue input.
+    - Decompressed restore bytes are capped at MAX_DECOMPRESSED_RESTORE_BYTES
+      (10 MiB), independently enforced during extraction. This prevents a
+      maliciously crafted artifact (compressed bomb, recursive expansion, or
+      manifest lying about file sizes) from exhausting disk or memory.
+      The check happens before writing files to disk, so restore fails fast.
     - Web API calls reuse `http.request_with_retry` (3 attempts, exp
       backoff with jitter).
     - Single-concurrency: a per-root lock file in `.talos-agent/locks/`
@@ -63,6 +70,14 @@ BACKUP_ENCRYPTION_LABEL = "AES-256-GCM#PBKDF2-SHA256#200000"
 # state is easily a few MiB. We allow generous headroom but still defend
 # against accidental disk-fill from rogue input.
 MAX_PLAINTEXT_BYTES = 10 * 1024 * 1024
+
+# Cap decompressed restore bytes: independently enforce a ceiling on the
+# cumulative size of all files extracted during restore. This prevents a
+# maliciously crafted artifact (compressed bomb, recursive expansion, or
+# manifest lying about file sizes) from exhausting disk or memory during
+# extraction. Set to match MAX_PLAINTEXT_BYTES so restore honors the same
+# envelope limit that backup enforces at creation time.
+MAX_DECOMPRESSED_RESTORE_BYTES = MAX_PLAINTEXT_BYTES
 
 
 @dataclass
@@ -176,6 +191,69 @@ def _sqlite_hot_backup(source: Path, dest: Path) -> None:
         src.close()
 
 
+def _get_schema_version(db_path: Path) -> int:
+    """Read the schema version (PRAGMA user_version) from a database."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA user_version;")
+        return int(cursor.fetchone()[0])
+    finally:
+        conn.close()
+
+
+def _get_current_schema_version() -> int:
+    """Get the current schema version from the migrations module."""
+    from talos_agent.db.migrations import _MIGRATIONS
+    return max(m[0] for m in _MIGRATIONS)
+
+
+def check_schema_compatibility(
+    backup_schema_version: int,
+    *,
+    current_schema_version: int | None = None,
+) -> dict:
+    """Check if a backup's schema version is compatible with the current agent.
+
+    Returns a dict with:
+    - "compatible": bool — True if the backup can be restored without data loss
+    - "backup_schema_version": int — schema version in the backup
+    - "current_schema_version": int — schema version of the running agent
+    - "required_migrations": list[int] — migration versions that would need to run
+    - "unsupported_downgrade": bool — True if backup is newer than current agent
+    - "message": str — human-readable explanation
+    """
+    if current_schema_version is None:
+        current_schema_version = _get_current_schema_version()
+
+    if backup_schema_version > current_schema_version:
+        return {
+            "compatible": False,
+            "backup_schema_version": backup_schema_version,
+            "current_schema_version": current_schema_version,
+            "required_migrations": [],
+            "unsupported_downgrade": True,
+            "message": (
+                f"Backup schema version {backup_schema_version} is newer than "
+                f"current agent schema version {current_schema_version}. "
+                f"Restoring would require an unsupported downgrade."
+            ),
+        }
+
+    required_migrations = list(range(backup_schema_version + 1, current_schema_version + 1))
+    return {
+        "compatible": True,
+        "backup_schema_version": backup_schema_version,
+        "current_schema_version": current_schema_version,
+        "required_migrations": required_migrations,
+        "unsupported_downgrade": False,
+        "message": (
+            f"Backup schema version {backup_schema_version} is compatible. "
+            f"{len(required_migrations)} migration(s) would run on first use: {required_migrations or 'none'}."
+        ),
+    }
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -253,9 +331,12 @@ def build_backup(
         try:
             files_meta: dict[str, dict[str, Any]] = {}
             db_row_counts: dict[str, int] = {}
+            db_schema_versions: dict[str, int] = {}
             body_bytes: dict[str, str] = {}  # path → base64
             running_size = 0
             for src in sources:
+                # Capture schema version from the live DB before hot backup.
+                db_schema_versions[src.name] = _get_schema_version(src)
                 # Hot backup to a staging copy, NOT modifying the live DB.
                 safe_name = _safe_filename(f"db/{src.name}")
                 dest = staging / safe_name
@@ -303,15 +384,19 @@ def build_backup(
                 json.dumps(manifest_inner, sort_keys=True).encode("utf8")
             )
 
+            # Include schema versions per database in the top-level database metadata.
+            database_meta = {
+                "signalVersion": sqlite3.sqlite_version,
+                "rowCountsSqlite": db_row_counts,
+                "schemaVersions": db_schema_versions,
+            }
+
             run = BackupRun(
                 version=BACKUP_FORMAT_VERSION,
                 encryption=BACKUP_ENCRYPTION_LABEL,
                 scope=scope,
                 timestamp=_now_iso(),
-                database={
-                    "signalVersion": sqlite3.sqlite_version,
-                    "rowCountsSqlite": db_row_counts,
-                },
+                database=database_meta,
                 files=files_meta,
                 manifest={
                     "sha256": manifest_sha,
@@ -645,6 +730,22 @@ def verify_backup(*, artifact_path: Path, password: str) -> BackupRun:
         # We didn't bake the sha into the plaintext, but we capture and compare
         # externally so `backup-doctor` can flag mismatch.
         pass
+
+    # Extract schema versions from backup metadata.
+    database_meta = data.get("database", {})
+    backup_schema_versions = database_meta.get("schemaVersions", {})
+    # For backward compatibility, also check manifest for a single schemaVersion.
+    if not backup_schema_versions and "schemaVersion" in data.get("manifest", {}):
+        # Legacy format: single schemaVersion in manifest (SQLite version, not user_version).
+        # We can't determine the actual schema version from this, so we leave it empty.
+        pass
+
+    # Compute compatibility for each database in the backup.
+    schema_compatibility = {}
+    for db_name, backup_version in backup_schema_versions.items():
+        compat = check_schema_compatibility(backup_version)
+        schema_compatibility[db_name] = compat
+
     log.info(
         "prime_agent_backup_verified",
         artifact=str(artifact_path),
@@ -654,12 +755,14 @@ def verify_backup(*, artifact_path: Path, password: str) -> BackupRun:
     )
     # Filter to BackupRun dataclass fields; the wire payload carries
     # additional keys (body, filesMeta) that BackupRun does not accept.
+    # Attach schema compatibility report to database metadata.
+    database_meta["schemaCompatibility"] = schema_compatibility
     return BackupRun(
         version=data.get("version", BACKUP_FORMAT_VERSION),
         encryption=data.get("encryption", BACKUP_ENCRYPTION_LABEL),
         scope=data.get("scope", "agent"),
         timestamp=data.get("timestamp", ""),
-        database=data.get("database", {}),
+        database=database_meta,
         files=files_section,
         manifest=data["manifest"],
     )
@@ -704,6 +807,16 @@ def restore_backup(
     # a minimal `BackupRun` view (no bodies) so we can read top-level
     # metadata without exposing raw bytes yet.
     verified = verify_backup(artifact_path=artifact_path, password=password)
+
+    # Check schema compatibility before proceeding with restore.
+    # This prevents unsupported downgrades without changing local state.
+    schema_compat = verified.database.get("schemaCompatibility", {})
+    for compat in schema_compat.values():
+        if not compat.get("compatible", True) and compat.get("unsupported_downgrade", False):
+            raise BackupError(
+                f"Unsupported schema downgrade: {compat['message']}",
+                code="UNSUPPORTED_DOWNGRADE",
+            )
 
     target_root = restore_root or APP_DIR
     target_root.mkdir(parents=True, exist_ok=True)
@@ -751,6 +864,7 @@ def restore_backup(
         staging = Path(tempfile.mkdtemp(prefix="restore-", dir=str(staging_root)))
         try:
             placed: list[tuple[Path, Path, int]] = []
+            cumulative_decompressed_bytes = 0
             for name, meta in files_meta.items():
                 safe = _safe_filename(name)
                 if not safe.startswith("db/"):
@@ -765,6 +879,17 @@ def restore_backup(
                         code="BAD_INPUT",
                     )
                 raw = _b64_decode(body[safe])
+                
+                # Bound decompressed bytes independently of archive size.
+                # Check cumulative size BEFORE writing to disk to fail fast.
+                cumulative_decompressed_bytes += len(raw)
+                if cumulative_decompressed_bytes > MAX_DECOMPRESSED_RESTORE_BYTES:
+                    raise BackupError(
+                        f"Decompressed restore size {cumulative_decompressed_bytes}B exceeds "
+                        f"MAX_DECOMPRESSED_RESTORE_BYTES={MAX_DECOMPRESSED_RESTORE_BYTES}B",
+                        code="BAD_INPUT",
+                    )
+                
                 expected_sha = meta.get("sha256")
                 expected_size = meta.get("size_bytes")
                 if expected_sha:
@@ -841,8 +966,9 @@ async def trigger_web_backup(
     backup call.
     """
 
-    from talos_agent.http import request_with_retry
     import httpx
+
+    from talos_agent.http import request_with_retry
 
     async def send() -> httpx.Response:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
@@ -862,18 +988,18 @@ async def trigger_web_backup(
 
 # Re-export so callers can hit a single object.
 __all__ = [
-    "BACKUP_FORMAT_VERSION",
     "BACKUP_ENCRYPTION_LABEL",
+    "BACKUP_FORMAT_VERSION",
     "MAX_PLAINTEXT_BYTES",
-    "BackupRun",
-    "BackupError",
     "BackupBusyError",
+    "BackupError",
+    "BackupRun",
     "build_backup",
-    "verify_backup",
-    "restore_backup",
-    "trigger_web_backup",
+    "check_schema_compatibility",
     "collect_agent_files",
     "default_backup_dir",
     "prune_backups",
-    "preview_database_retention",
+    "restore_backup",
+    "trigger_web_backup",
+    "verify_backup",
 ]

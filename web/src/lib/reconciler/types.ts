@@ -59,6 +59,8 @@ export type TxSourceType = "commerce_job" | "token_purchase" | "other";
 export interface TxRecord {
   id: string;
   txHash: string;
+  /** Pinned Stellar network identity (network passphrase) against which this payment is tracked. */
+  networkPassphrase?: string | null;
   sourceType: TxSourceType;
   sourceId: string | null;
   finalityStatus: FinalityStatus;
@@ -73,24 +75,74 @@ export interface TxRecord {
   updatedAt: Date;
 }
 
+// ─── Provider Failure Reason Codes ──────────────────────────────────────────
+
+/**
+ * Stable, machine-readable reason codes for Horizon provider failures.
+ * Bounded cardinality prevents metric explosion and enables deterministic error handling.
+ */
+export const HORIZON_PROVIDER_FAILURE_REASONS = [
+  // Authorization failures (e.g. HTTP 401, HTTP 403)
+  "UNAUTHORIZED",
+  "FORBIDDEN",
+  "AUTHORIZATION_FAILURE",
+
+  // Throttling / rate-limiting (e.g. HTTP 429)
+  "RATE_LIMITED",
+  "THROTTLED",
+
+  // Upstream provider / server failures (e.g. HTTP 500, 502, 503, 504)
+  "PROVIDER_UNAVAILABLE",
+  "PROVIDER_ERROR",
+  "PROVIDER_FAILURE",
+  "SERVER_ERROR",
+  "BAD_GATEWAY",
+  "GATEWAY_TIMEOUT",
+
+  // Transport / network failures (e.g. connection refused, timeout, network blip)
+  "NETWORK_ERROR",
+
+  // Client errors (e.g. HTTP 400 Bad Request)
+  "BAD_REQUEST",
+
+  // Unclassified / unknown errors
+  "UNKNOWN",
+] as const;
+
+export type HorizonProviderFailureReasonCode =
+  (typeof HORIZON_PROVIDER_FAILURE_REASONS)[number];
+
+/** Aliases for forward and backward compatibility. */
+export type ProviderFailureReasonCode = HorizonProviderFailureReasonCode;
+export type HorizonFailureReasonCode = HorizonProviderFailureReasonCode;
+
+/** Broad category classification for provider failure reasons. */
+export type HorizonFailureCategory =
+  | "authorization"
+  | "throttling"
+  | "provider_failure"
+  | "unknown";
+
 // ─── Horizon Poll Result ──────────────────────────────────────────────────────
 
 /** Discriminated union returned by the Horizon polling layer. */
 export type HorizonPollResult =
-  | { outcome: "confirmed"; ledger: number; successful: true }
-  | { outcome: "failed";    ledger: number; successful: false; detail?: string }
-  | { outcome: "not_found" }
-  | { outcome: "error";     message: string; retryable: boolean };
+  | { outcome: "confirmed"; ledger: number; successful: true; networkPassphrase?: string }
+  | { outcome: "failed";    ledger: number; successful: false; detail?: string; networkPassphrase?: string }
+  | { outcome: "not_found"; networkPassphrase?: string }
+  | { outcome: "error";     message: string; retryable: boolean; networkPassphrase?: string };
 
 // ─── State Transition ─────────────────────────────────────────────────────────
 
 /** Fields that may be updated during a state transition. */
 export interface TxRecordUpdate {
   finalityStatus?: FinalityStatus;
+  networkPassphrase?: string | null;
   lastLedgerChecked?: number;
   confirmedLedger?: number;
   pollCount?: number;
   lastError?: string | null;
+  reasonCode?: HorizonProviderFailureReasonCode;
   repairApplied?: boolean;
   updatedAt?: Date;
 }
@@ -100,7 +152,7 @@ export interface TxRecordUpdate {
 /** Outcome of applying downstream repair for a confirmed/failed/expired tx. */
 export type RepairOutcome =
   | { ok: true;  repaired: boolean; detail?: string }
-  | { ok: false; error: string };
+  | { ok: false; error: string; stale?: boolean };
 
 // ─── Reconciler Config ────────────────────────────────────────────────────────
 
@@ -146,6 +198,12 @@ export interface ReconcilerConfig {
    * Default: 5.
    */
   concurrencyLimit?: number;
+
+  /**
+   * Pinned Stellar network identity (passphrase) to reconcile against.
+   * Defaults to STELLAR_NETWORK_PASSPHRASE or network-derived passphrase.
+   */
+  networkPassphrase?: string;
 }
 
 // ─── Scheduler State (in-process singleton) ──────────────────────────────────

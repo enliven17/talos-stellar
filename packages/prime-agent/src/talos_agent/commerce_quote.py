@@ -43,6 +43,9 @@ policy for callers that take payments (see ``tools/commerce.py``).
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -55,6 +58,8 @@ EXPIRED_QUOTE = "EXPIRED_QUOTE"
 INVALID_QUOTE = "INVALID_QUOTE"
 MISSING_QUOTE_EXPIRY = "MISSING_QUOTE_EXPIRY"
 INSUFFICIENT_VALIDITY = "INSUFFICIENT_VALIDITY"
+INVALID_QUOTE_RECEIPT = "INVALID_QUOTE_RECEIPT"
+QUOTE_RECEIPT_MISMATCH = "QUOTE_RECEIPT_MISMATCH"
 
 _DEFAULT_CLOCK: ClockProtocol = SystemClock()
 
@@ -347,3 +352,124 @@ def quote_expiry_iso(payment_details: Mapping[str, Any] | None) -> str | None:
     if dt is None:
         return None
     return _expiry_iso(dt)
+
+
+def canonical_request_digest(request: Any) -> str:
+    """Return a SHA-256 digest of JSON using stable key ordering and spacing."""
+    canonical = json.dumps(
+        request,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def normalize_stellar_network(network: object, *, default: object = "testnet") -> str | None:
+    """Normalize supported Stellar network labels to a chain-qualified value."""
+    value = network.strip().lower() if isinstance(network, str) else ""
+    if not value or value == "stellar":
+        value = default.strip().lower() if isinstance(default, str) else ""
+    if value in ("testnet", "stellar:testnet"):
+        return "stellar:testnet"
+    if value in ("mainnet", "stellar:mainnet"):
+        return "stellar:mainnet"
+    return None
+
+
+def create_quote_acceptance_receipt(
+    *,
+    seller_id: str,
+    payee: str,
+    service_type: str,
+    amount_units: int,
+    network: str,
+    request_digest: str,
+) -> dict[str, Any]:
+    """Create an integrity-checked receipt bound to one exact purchase request."""
+    binding = {
+        "version": 1,
+        "seller_id": seller_id,
+        "payee": payee,
+        "service_type": service_type,
+        "amount_units": amount_units,
+        "network": network,
+        "request_digest": request_digest,
+    }
+    return {
+        **binding,
+        "receipt_digest": canonical_request_digest(binding),
+    }
+
+
+def verify_quote_acceptance_receipt(
+    receipt: object,
+    *,
+    seller_id: str,
+    payee: str,
+    service_type: str,
+    amount_units: int,
+    network: str,
+    request_digest: str,
+) -> dict[str, Any] | None:
+    """Return a privacy-safe error if a receipt is invalid or for another request."""
+    if not isinstance(receipt, Mapping):
+        return {
+            "error": "Quote acceptance receipt must be an object",
+            "code": INVALID_QUOTE_RECEIPT,
+        }
+
+    expected = create_quote_acceptance_receipt(
+        seller_id=seller_id,
+        payee=payee,
+        service_type=service_type,
+        amount_units=amount_units,
+        network=network,
+        request_digest=request_digest,
+    )
+    if (
+        set(receipt) != set(expected)
+        or isinstance(receipt.get("version"), bool)
+        or receipt.get("version") != 1
+    ):
+        return {
+            "error": "Quote acceptance receipt is malformed",
+            "code": INVALID_QUOTE_RECEIPT,
+        }
+    for key in (
+        "seller_id",
+        "payee",
+        "service_type",
+        "amount_units",
+        "network",
+        "request_digest",
+    ):
+        value = receipt.get(key)
+        if key == "amount_units":
+            if isinstance(value, bool) or not isinstance(value, int):
+                return {
+                    "error": "Quote acceptance receipt is malformed",
+                    "code": INVALID_QUOTE_RECEIPT,
+                }
+        elif not isinstance(value, str):
+            return {
+                "error": "Quote acceptance receipt is malformed",
+                "code": INVALID_QUOTE_RECEIPT,
+            }
+
+    if any(receipt.get(key) != expected[key] for key in expected if key != "receipt_digest"):
+        return {
+            "error": "Quote acceptance receipt does not match this purchase",
+            "code": QUOTE_RECEIPT_MISMATCH,
+        }
+
+    supplied_digest = receipt.get("receipt_digest")
+    if not isinstance(supplied_digest, str) or not hmac.compare_digest(
+        supplied_digest, expected["receipt_digest"]
+    ):
+        return {
+            "error": "Quote acceptance receipt integrity check failed",
+            "code": INVALID_QUOTE_RECEIPT,
+        }
+    return None

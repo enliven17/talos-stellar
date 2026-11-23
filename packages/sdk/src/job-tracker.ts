@@ -17,6 +17,8 @@
 import type { TalosClient } from "./client.js";
 import {
   TalosEventStream,
+  TalosCursorValidationError,
+  validateTalosEventCursor,
   type TalosStreamEvent,
   type SeenStore,
   InMemorySeenStore,
@@ -260,8 +262,26 @@ export interface TrackJobOptions {
   /** Base URL override (used when trackJob is called standalone without a client). */
   baseUrl?: string;
 
+  /**
+   * Serialized cursor returned by {@link JobTracker.serializeCursor}. It must
+   * have been issued for this API origin and this job's progress stream.
+   */
+  cursor?: string;
+
   /** Auth header override (e.g. `"Bearer <token>"`). */
   authHeader?: string;
+
+  /**
+   * Maximum number of queued iterator events retained while consumption is
+   * paused or not keeping up. Default: 1000.
+   */
+  queueMaxSize?: number;
+
+  /**
+   * Behavior when queueMaxSize is reached. Default: "drop-oldest".
+   * "drop-newest" rejects the incoming event; "error" aborts tracking.
+   */
+  queueOverflow?: "drop-oldest" | "drop-newest" | "error";
 }
 
 /** Observable lifecycle states emitted by a {@link JobTracker}. */
@@ -350,6 +370,11 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
 
   // Iterator queue
   private readonly queue: QueueEntry<TrackJobEvent, CommerceJob>[] = [];
+  private readonly queueMaxSize: number;
+  private readonly queueOverflow: "drop-oldest" | "drop-newest" | "error";
+  private readonly pauseResolvers: Array<() => void> = [];
+  private paused = false;
+  private droppedEventCount = 0;
   private readonly waitingResolvers: Array<
     (entry: QueueEntry<TrackJobEvent, CommerceJob>) => void
   > = [];
@@ -385,10 +410,22 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
     // Resolve connection config from client or options
     const clientAny = client as any;
     this.baseUrl = (options.baseUrl ?? clientAny.getBaseUrl?.() ?? clientAny.baseUrl ?? "https://talos-stellar.vercel.app").replace(/\/$/, "");
+    if (options.cursor !== undefined) {
+      validateTalosEventCursor(
+        options.cursor,
+        this.baseUrl,
+        options.path ?? `/api/jobs/${encodeURIComponent(this.jobId)}/progress`,
+      );
+    }
     this.authHeader = options.authHeader ?? clientAny.getAuthHeader?.() ?? clientAny.headers?.["Authorization"];
     this.fetchFn = options.fetch ?? clientAny.getFetch?.() ?? clientAny.fetchOverride ?? globalThis.fetch;
 
     this.seenStore = options.seenStore ?? new InMemorySeenStore();
+    this.queueMaxSize = options.queueMaxSize ?? 1_000;
+    this.queueOverflow = options.queueOverflow ?? "drop-oldest";
+    if (!Number.isInteger(this.queueMaxSize) || this.queueMaxSize < 1) {
+      throw new RangeError("queueMaxSize must be a positive integer");
+    }
 
     // Setup result promise
     this.result = new Promise<CommerceJob>((resolve, reject) => {
@@ -475,11 +512,57 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
     this.handleAbort(err);
   }
 
+  /** Pause consumption without allowing the iterator queue to grow unbounded. */
+  pause(): void {
+    this.paused = true;
+  }
+
+  /** Resume consumption of queued events. */
+  resume(): void {
+    this.paused = false;
+    for (const resolve of this.pauseResolvers.splice(0)) resolve();
+  }
+
+  get isPaused(): boolean {
+    return this.paused;
+  }
+
+  get queuedEventCount(): number {
+    return this.queue.filter((entry) => entry.kind === "value").length;
+  }
+
+  get droppedEventCount(): number {
+    return this.droppedEventCount;
+  }
+
   // ── Queue Management ────────────────────────────────────────────────────────
 
   private enqueue(entry: QueueEntry<TrackJobEvent, CommerceJob>): void {
     if (this.isClosed && entry.kind !== "error") {
       return;
+    }
+    if (entry.kind === "value") {
+      if (this.queue.filter((queued) => queued.kind === "value").length >= this.queueMaxSize) {
+        if (this.queueOverflow === "drop-newest") {
+          this.droppedEventCount += 1;
+          return;
+        }
+        if (this.queueOverflow === "error") {
+          this.droppedEventCount += 1;
+          this.handleAbort(
+            new JobTrackAbortedError(
+              this.jobId,
+              `event queue exceeded ${this.queueMaxSize} entries`,
+            ),
+          );
+          return;
+        }
+        const oldest = this.queue.findIndex((queued) => queued.kind === "value");
+        if (oldest >= 0) {
+          this.queue.splice(oldest, 1);
+          this.droppedEventCount += 1;
+        }
+      }
     }
     const resolver = this.waitingResolvers.shift();
     if (resolver) {
@@ -490,6 +573,13 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
   }
 
   private dequeue(): Promise<QueueEntry<TrackJobEvent, CommerceJob>> {
+    if (this.paused) {
+      return new Promise((resolve) => {
+        this.pauseResolvers.push(() => {
+          void this.dequeue().then(resolve);
+        });
+      });
+    }
     const entry = this.queue.shift();
     if (entry) {
       return Promise.resolve(entry);
@@ -523,6 +613,7 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
         logger: this.logger,
         maxReconnectAttempts: this.options.maxStreamReconnectAttempts ?? 5,
         seenStore: this.seenStore,
+        cursor: this.options.cursor,
       });
 
       this.stream.on("event", (evt) => {
@@ -564,6 +655,7 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
 
       this.stream.connect();
     } catch (err) {
+      if (err instanceof TalosCursorValidationError) throw err;
       this.logger?.warn("track_job:stream_connect_failed", {
         jobId: this.jobId,
         error: err instanceof Error ? err.message : String(err),

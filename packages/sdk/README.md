@@ -125,6 +125,11 @@ const client = new TalosClient({
 });
 ```
 
+`baseUrl` is validated at client construction via `resolveBaseUrl` before any network request is made:
+
+- Only credential-free `https:` and `http:` URLs are accepted (local HTTP endpoints such as `http://localhost:3000` and `http://127.0.0.1:3000` are preserved for local development and tests).
+- URLs containing embedded credentials (e.g. `https://user:pass@example.com` or `https://user@example.com`), query parameters, fragments, unsupported schemes, or malformed syntax are rejected immediately with privacy-safe `TypeError` / `RangeError` messages that never echo the supplied URL or credentials. Pass credentials via `apiKey` instead.
+
 ### Create a new TALOS
 
 ```typescript
@@ -170,6 +175,36 @@ const nextPage = await client.listActivities({
   limit: 25,
 });
 ```
+
+### Resumable SSE streams
+
+`TalosEventStream` can serialize its latest `Last-Event-ID` with the API
+origin and stream path. Supply that cursor when recreating the same stream;
+cursors from another origin or stream path throw `TalosCursorValidationError`
+locally before a request is made.
+
+```typescript
+import {
+  TalosEventStream,
+  TalosCursorValidationError,
+} from "@talos-protocol/sdk";
+
+const stream = new TalosEventStream(client.getBaseUrl(), {
+  path: "/api/events",
+});
+stream.on("event", (event) => {
+  // Persist stream.serializeCursor() alongside processed event state.
+});
+stream.connect();
+
+const resumed = new TalosEventStream(client.getBaseUrl(), {
+  path: "/api/events",
+  cursor: savedCursor,
+});
+```
+
+`client.trackJob(jobId, { cursor })` supports the same behavior for that job's
+progress stream, and `tracker.serializeCursor()` returns the latest cursor.
 
 ### Commerce & x402 Payments
 
@@ -557,6 +592,51 @@ const score = await client.getCreditScore("talos_id", { signal: controller.signa
 - `signPayment(id, params)`: Sign an x402 payment header via Web API.
 - `transfer(id, params)`: Execute USDC transfer (subject to approval thresholds).
 
+### Event Stream
+
+`TalosEventStream` is a browser- and Node-compatible SSE client for the platform
+event stream. It sends `Last-Event-ID` on every reconnect, applies bounded
+exponential backoff, suppresses duplicates via an optional `SeenStore`, and can
+be cancelled via `close()` or an external `AbortSignal`.
+
+#### Resumable checkpoints
+
+By default the resume cursor lives only in memory, so a process restart
+re-subscribes from "now". Supply a `checkpointStore` to persist the last
+acknowledged event identity across restarts:
+
+```typescript
+import { TalosEventStream, InMemoryCheckpointStore } from "@talos-protocol/sdk";
+
+const checkpointStore = new InMemoryCheckpointStore();
+const stream = new TalosEventStream("https://talos-stellar.vercel.app", {
+  authHeader: "Bearer my-api-key",
+  checkpointStore, // seeds Last-Event-ID from the stored cursor on connect
+  // ackMode: "auto" (default) — persist after every delivered, non-duplicate event
+});
+```
+
+In `ackMode: "manual"`, delivery alone does not persist a checkpoint — call
+`await stream.acknowledge(eventId)` once your handler has durably processed the
+event, so the cursor only advances for events you have actually committed.
+
+#### Distinguishing history gaps from ordinary reconnects
+
+On a reconnect the server usually replays from the supplied `Last-Event-ID`.
+When it cannot (history has rotated/expired), it signals a **history gap** so the
+client can tell a gap recovery apart from an ordinary reconnect. The stream
+surfaces this in two ways:
+
+- `onHistoryGap(info)` — fired with `{ signal: "response-header" | "event", requestedAfterEventId, reason?, firstAvailableEventId?, detectedAt }`. The `signal` field tells whether the gap was announced via the `x-talos-stream-gap` response header or an in-stream `event: history.gap` control event.
+- `stream.hadHistoryGapOnLastResume` — `true` for the current connection once a gap is detected.
+- The `hadHistoryGap` flag is also recorded on each persisted checkpoint, so a
+  caller reading a `CheckpointStore` later can see whether the resume that
+  produced a given cursor hit a gap.
+
+A misbehaving `CheckpointStore` (one whose `load`/`save`/`clear` throws) is
+swallowed and treated as "no checkpoint available" so it never wedges the
+stream.
+
 ## Testing
 
 The SDK includes comprehensive unit tests that cover request/response behavior without making real network calls. Tests use mocked fetch to verify:
@@ -661,6 +741,12 @@ The SDK surfaces typed errors across its HTTP transport, pagination, idempotency
 
 Every HTTP and network error inherits from `TalosAPIError`, ensuring full backward compatibility with generic catch blocks (`error instanceof TalosAPIError`) while allowing granular narrowing on specific failure modes.
 
+When iterating with `JobTracker`, use `pause()` and `resume()` to apply
+consumer backpressure. Queued events are bounded by `queueMaxSize` (default
+`1000`). Overflow defaults to `drop-oldest`; `drop-newest` rejects incoming
+events, and `error` aborts tracking. `queuedEventCount` and
+`droppedEventCount` expose the current queue state.
+
 ### Error classes reference
 
 The table below catalogs all 28 exported error classes, when they occur, whether they are retryable, and their key diagnostic properties.
@@ -708,6 +794,49 @@ Every error also exposes:
 - `data` — parsed JSON body (sanitized; secrets redacted).
 - `timestamp` — ISO 8601 string captured at construction.
 - `toJSON()` — compact log-friendly representation.
+
+### Error taxonomy & versioned fixtures
+
+On top of the hierarchy, `classifyError(error)` maps any thrown value (an SDK
+error, a signing error, or a generic `Error`) to a **stable, versioned
+classification**:
+
+```typescript
+import { classifyError, codeToCategory, toErrorContract } from "@talos-protocol/sdk";
+
+const { code, category, retryable } = classifyError(err);
+// code        — stable TalosErrorCode string (e.g. "rate_limit_error")
+// category    — coarse bucket: validation | authentication | authorization |
+//               not_found | conflict | payment | quota | server | transport |
+//               timeout | api
+// retryable   — boolean hint
+```
+
+`codeToCategory(code)` is the canonical code → category table, so transport,
+validation, quota and payment failures map consistently regardless of which
+call site threw. `toErrorContract(error)` produces a single, JSON-serializable,
+privacy-safe object for structured logs and dashboards — `name`, `code`,
+`category`, `status`, `retryable`, optional `requestId` / `timestamp` / `path`,
+the taxonomy `taxonomyVersion`, and a redacted `causeChain`.
+
+The taxonomy contract is **versioned** via `ERROR_TAXONOMY_VERSION`. The
+canonical expected-output table is committed as a fixture at
+`tests/fixtures/error-taxonomy.json` (carrying the same `version`) and
+drift-checked against the runtime case table in CI, so a taxonomy change must
+bump both the constant and the fixture together.
+
+### Redacted cause chains (Node + browser)
+
+`toErrorContract` and `buildCauseChain` walk the standard ES2022 `cause` chain
+into a bounded array of plain `{ name, message, code? }` frames:
+
+- **Bounded** — at most 8 frames, so a cyclic or very deep chain never loops
+  forever or OOMs a log sink.
+- **Redacted** — bearer tokens, `sk-`/`tak_` API keys, and 56-char Stellar
+  secret keys in cause messages are replaced with `[REDACTED]`; messages are
+  capped.
+- **Portable** — plain JSON-serializable objects with no Node-specific
+  `inspect`/symbols, so the same chain serializes on Node and browser builds.
 
 ### Catching typed errors
 
@@ -893,33 +1022,15 @@ switch (error.code) {
 
 ---
 
-### Synthetic event-stream fault fixtures
+### Total request deadline
 
-The SDK exports a deterministic, network-free fixture kit for exercising SSE
-and reconnect behavior:
-
-```typescript
-import {
-  getEventStreamFaultFixture,
-  createSyntheticEventStreamTransport,
-  TalosEventStream,
-} from "@talos-protocol/sdk";
-
-const fixture = getEventStreamFaultFixture("reconnect-race")!;
-const transport = createSyntheticEventStreamTransport(fixture);
-const stream = new TalosEventStream("http://synthetic.invalid", {
-  fetch: transport.fetch,
-  maxReconnectAttempts: 1,
-  jitter: false,
-});
-```
-
-The kit includes `truncated-frame`, `history-gap`, and `reconnect-race`
-fixtures. Fixtures are immutable, deterministic, and contain no secrets or
-network endpoints. History gaps expose missing numeric event IDs; reconnect
-fixtures replay synthetic frames and verify `Last-Event-ID` handling.
-
----
+`timeoutMs` is one wall-clock budget for the complete SDK call, not a fresh
+timeout for every fetch attempt. It covers request signing, retry backoff,
+fetch, response-body parsing, and (for `purchaseServiceWithPayment`) the x402
+challenge and proof hops. When the budget expires, outstanding work is
+aborted and the call rejects with `TalosTimeoutError`; no later retry is sent.
+A per-call `timeoutMs` overrides the client default, and `timeoutMs: 0`
+disables the deadline for that call.
 
 ### Retry policy resolution and mechanics
 
@@ -967,7 +1078,7 @@ const typedPolicy = resolveRetryOptions({
 const client = new TalosClient({
   baseUrl: "https://talos-stellar.vercel.app",
   apiKey: process.env.TALOS_KEY!,
-  timeoutMs: 30_000, // per-request AbortController timeout
+  timeoutMs: 30_000, // total request deadline, including retries and signing
 
   // Status-code driven policy (active by default):
   retryPolicy: {
@@ -1082,6 +1193,57 @@ Error bodies are sanitized before being surfaced:
   `…[truncated]` marker.
 - Only a fixed set of response headers is preserved.
 - Request bodies are **never** included.
+
+## Deterministic HTTP Transcript Recorder & Replayer
+
+For SDK support cases and reliable diagnostics, `TalosClient` supports recording sanitized HTTP transcripts and deterministically replaying synthetic responses without requiring network access.
+
+### Privacy & Safety Guarantees
+- **No private request bodies**: Request payloads are **never recorded** (omitted completely).
+- **Sanitized paths**: Sensitive credential parameters in query strings (`token`, `apiKey`, `signature`, `payment`, etc.) are automatically replaced with `[REDACTED]`.
+- **Sanitized headers**: Headers such as `Authorization`, `X-Api-Key`, `Cookie`, and `X-Payment` are redacted in both request and response records.
+- **Accurate timings**: Records exact `durationMs` and ISO 8601 `startedAt` timestamps.
+
+### Recording Transcripts
+
+Enable recording on `TalosClient`:
+
+```typescript
+import { TalosClient } from "@talos-protocol/sdk";
+
+const client = new TalosClient({
+  baseUrl: "https://talos-stellar.vercel.app",
+  apiKey: process.env.TALOS_API_KEY,
+  recorder: true, // or pass { maxEntries: 100, captureResponseBody: true }
+});
+
+// Perform operations normally
+await client.getPendingJobs();
+await client.getTalos("talos-123");
+
+// Export transcript for support investigation
+const transcript = client.getTranscript();
+console.log(client.exportTranscript());
+```
+
+### Deterministic Replay
+
+Replay recorded synthetic responses in unit tests, staging environments, or support reproducer scripts:
+
+```typescript
+import { TalosClient, createTranscriptReplayer } from "@talos-protocol/sdk";
+
+// Replay directly with TalosClient (no network calls made)
+const replayClient = new TalosClient({
+  baseUrl: "https://talos-stellar.vercel.app",
+  replayTranscript: transcript,
+});
+
+const jobs = await replayClient.getPendingJobs();
+
+// Or create a custom fetch replayer function:
+const mockFetch = createTranscriptReplayer(transcript, { strategy: "fifo" });
+```
 
 ### Migration / Rollback
 

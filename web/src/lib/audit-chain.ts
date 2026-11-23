@@ -34,13 +34,36 @@ export interface AuditChainEntry {
 }
 
 /**
+ * Validate that all numeric fields in the canonical audit payload are finite.
+ * Rejects NaN, Infinity, and -Infinity before JSON serialization, which would
+ * otherwise silently coerce nonfinite numbers to null.
+ */
+function assertFiniteAuditNumbers(entry: AuditChainEntry): void {
+  if (typeof entry.sequenceNumber !== "number" || !Number.isFinite(entry.sequenceNumber)) {
+    throw new RangeError(
+      `Audit entry canonical payload contains nonfinite sequenceNumber: ${String(entry.sequenceNumber)}`,
+    );
+  }
+  if (typeof entry.statusCode !== "number" || !Number.isFinite(entry.statusCode)) {
+    throw new RangeError(
+      `Audit entry canonical payload contains nonfinite statusCode: ${String(entry.statusCode)}`,
+    );
+  }
+}
+
+/**
  * Deterministic JSON serialization with fixed property order.
  *
  * This produces the canonical form used for hashing. Every value is
  * stringified according to its type; no pretty-printing or key reordering
  * is allowed after this function runs.
+ *
+ * @throws {RangeError} If any numeric field in the canonical payload is nonfinite
+ *   (`NaN`, `Infinity`, or `-Infinity`).
  */
 export function canonicalize(entry: AuditChainEntry): string {
+  assertFiniteAuditNumbers(entry);
+
   return JSON.stringify({
     sequenceNumber: entry.sequenceNumber,
     talosId: entry.talosId,
@@ -57,6 +80,8 @@ export function canonicalize(entry: AuditChainEntry): string {
  * prefixed with the domain separator.
  *
  *   hash = SHA-256(domain:canonical_json)
+ *
+ * @throws {RangeError} If the entry's canonical payload contains nonfinite numbers.
  */
 export function computeEntryHash(entry: AuditChainEntry): string {
   const payload = `${AUDIT_CHAIN_DOMAIN}:${canonicalize(entry)}`;

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "contract": "TalosRegistry",
+  "description": "Synthetic v1 (SCHEMA_GENESIS) storage key set. TimelockConfig is absent and resolved via get_timelock_config unwrap_or default; every other key is present and byte-identical to v2.",
+  "keys": [
+    {"key": "NextTalosId",        "present": true,  "value_kind": "u32"},
+    {"key": "Talos",              "present": true,  "value_kind": "Talos(u32) struct"},
+    {"key": "CreatorOf",           "present": true,  "value_kind": "CreatorOf(u32) addr"},
+    {"key": "ProtocolWallet",      "present": true,  "value_kind": "Address"},
+    {"key": "ProtocolFeeBps",      "present": true,  "value_kind": "u32"},
+    {"key": "PendingAdmin",        "present": false, "value_kind": "Address"},
+    {"key": "TimelockConfig",      "present": false, "value_kind": "implicit_default"},
+    {"key": "TimelockProposal",    "present": false, "value_kind": "TimelockProposal(u64) struct"},
+    {"key": "NextTimelockId",      "present": false, "value_kind": "u64"},
+    {"key": "LastTouched",         "present": false, "value_kind": "u32"},
+    {"key": "Guardians",           "present": false, "value_kind": "Vec<Address>"},
+    {"key": "PauseState",          "present": false, "value_kind": "PauseState struct"},
+    {"key": "PauseController",     "present": false, "value_kind": "Address"},
+    {"key": "ResumeController",    "present": false, "value_kind": "Address"}
+  ]
+}

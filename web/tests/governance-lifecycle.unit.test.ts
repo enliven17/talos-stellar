@@ -187,6 +187,32 @@ describe("lifecycle state machine", () => {
     expect(failureStateFor("provisioning")).toBe("failed");
     expect(() => failureStateFor("active")).toThrow(LifecycleError);
   });
+
+  it("rejects a mismatched expected state as a conflict", () => {
+    const err = expectCode(
+      () =>
+        evaluateTransition({
+          action: "retire",
+          from: "paused",
+          actor: GOVERNANCE,
+          governanceApproved: true,
+          expectedState: "active",
+        }),
+      "LIFECYCLE_CONFLICT",
+    );
+    expect(err.status).toBe(409);
+  });
+
+  it("accepts a matching expected state", () => {
+    const decision = evaluateTransition({
+      action: "retire",
+      from: "active",
+      actor: GOVERNANCE,
+      governanceApproved: true,
+      expectedState: "active",
+    });
+    expect(decision.to).toBe("retiring");
+  });
 });
 
 describe("governance payloads", () => {

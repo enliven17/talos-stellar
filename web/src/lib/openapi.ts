@@ -164,6 +164,32 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
           createdAt: { type: "string", format: "date-time" },
           updatedAt: { type: "string", format: "date-time" },
           completedAt: { type: "string", format: "date-time", nullable: true },
+          attemptsHistory: {
+            type: "array",
+            description: "Immutable history of execution attempts for this job, ordered chronologically.",
+            items: { $ref: "#/components/schemas/AdminJobAttemptRecord" },
+          },
+        },
+      },
+      AdminJobAttemptRecord: {
+        type: "object",
+        required: ["id", "jobId", "attemptNumber", "terminalReason", "createdAt"],
+        properties: {
+          id: { type: "string", example: "attempt_01j0abc123def456" },
+          jobId: { type: "string", example: "job_01j0abc123def456" },
+          attemptNumber: { type: "integer", example: 1 },
+          workerId: { type: "string", nullable: true, example: "worker-1" },
+          leaseId: { type: "string", nullable: true, example: "lease_abc123" },
+          startedAt: { type: "string", format: "date-time", example: "2026-09-24T15:00:00.000Z" },
+          completedAt: { type: "string", format: "date-time", nullable: true, example: "2026-09-24T15:00:02.000Z" },
+          durationMs: { type: "integer", nullable: true, example: 2000 },
+          terminalReason: {
+            type: "string",
+            enum: ["completed", "retry_scheduled", "dead_letter", "cancelled"],
+            example: "completed",
+          },
+          error: { type: "string", nullable: true, example: "Connection timeout" },
+          createdAt: { type: "string", format: "date-time" },
         },
       },
       HealthStatus: {
@@ -3568,6 +3594,62 @@ Filter by \`status\` and/or \`queue\`. Returns up to 50 records per page (defaul
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/AdminJobRecord" },
+              },
+            },
+          },
+          "401": { description: "Missing `Authorization` header" },
+          "403": { description: "Wrong admin key" },
+          "404": {
+            description: "Job not found",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { error: { type: "string", example: "Job not found" } },
+                },
+              },
+            },
+          },
+          "500": { description: "Server error or `ADMIN_API_KEY` env var not configured" },
+        },
+      },
+    },
+    "/api/admin/jobs/{id}/attempts": {
+      get: {
+        tags: ["Admin — Jobs"],
+        summary: "Get attempt history for a job",
+        description: `Returns the immutable attempt history for the requested job, separated from the mutable current job row.
+Each attempt records worker ID, lease ID, duration, and terminal reason (completed, retry_scheduled, dead_letter, cancelled).
+
+**Requires the \`AdminAuth\` bearer token.**`,
+        operationId: "adminGetJobAttempts",
+        security: [{ AdminAuth: [] }],
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            schema: { type: "string" },
+            description: "Job ID",
+            example: "job_01j0abc123def456",
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Job attempt history",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["jobId", "attempts"],
+                  properties: {
+                    jobId: { type: "string", example: "job_01j0abc123def456" },
+                    attempts: {
+                      type: "array",
+                      items: { $ref: "#/components/schemas/AdminJobAttemptRecord" },
+                    },
+                  },
+                },
               },
             },
           },
