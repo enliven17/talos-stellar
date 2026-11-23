@@ -1,0 +1,9 @@
+{
+  "kind": "AgentIdentity",
+  "registry_id": "NOT-A-VALID-ADDRESS",
+  "talos_id": 1,
+  "name": "vega",
+  "owner": "GDBYLOLNZLP5FPXG3CXHHZ47I5AKETMOMV2JVQJ3UDHLIQORPKYERYJI",
+  "network": "testnet",
+  "exported_at": 1700000000
+}

@@ -1,0 +1,9 @@
+{
+  "kind": "AgentIdentity",
+  "registry_id": "GATSGV2VGSVIWSMOLRMFFVTAAANHPFINBC3EPLDCJ5A753UTM5WH7V5R",
+  "talos_id": 7,
+  "name": "atlas",
+  "owner": null,
+  "network": "public",
+  "exported_at": 1700000123
+}
