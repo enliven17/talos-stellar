@@ -6,6 +6,7 @@ import { useSearchParams, useRouter } from "next/navigation";
 import { AgentAvatar } from "@/components/agent-avatar";
 import { LazyFinancialProjectionChart } from "@/components/lazy-financial-projection-chart";
 import { FinancialSnapshotBadge, FinancialMetricValue } from "@/components/financial-state";
+import { FinancialStatementButton } from "@/components/financial-statement-button";
 import { TransactionReviewSheet, type TransactionPayload } from "@/components/transaction-review-sheet";
 import { TransactionReviewSheet, type TransactionPayload } from "@/components/transaction-review-sheet";
 
@@ -57,6 +58,7 @@ interface DashboardData {
     talosName: string;
     totalRevenue: number | null;
     observationCount?: number;
+    ownerPublicKeys?: Array<string | null>;
     bySource: Record<string, number>;
     recentTx: { amount: number; source: string; currency: string; date: string }[];
   }[];
@@ -812,12 +814,19 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
                         <AgentAvatar name={rs.talosName} size={18} className="shrink-0" />
                         {rs.talosName}
                       </h3>
-                      <span data-testid={`revenue-total-${rs.talosId}`} className="text-sm text-foreground font-bold">
-                        <FinancialMetricValue
-                          value={rs.totalRevenue != null ? `$${rs.totalRevenue.toFixed(2)}` : null}
-                          state={rs.totalRevenue != null ? "live" : "unavailable"}
+                      <div className="flex items-center gap-3">
+                        <FinancialStatementButton
+                          talosId={rs.talosId}
+                          ownerKeys={rs.ownerPublicKeys}
+                          address={address}
                         />
-                      </span>
+                        <span data-testid={`revenue-total-${rs.talosId}`} className="text-sm text-foreground font-bold">
+                          <FinancialMetricValue
+                            value={rs.totalRevenue != null ? `$${rs.totalRevenue.toFixed(2)}` : null}
+                            state={rs.totalRevenue != null ? "live" : "unavailable"}
+                          />
+                        </span>
+                      </div>
                     </div>
                     <div className="mb-4 px-3 py-2 bg-background border border-border text-xs text-muted">
                       100% Agent Treasury &mdash; revenue funds operations &amp; Mitos buyback
