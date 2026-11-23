@@ -15,7 +15,7 @@
  *   CONFIRMING → CONFIRMED   (currentLedger ≥ confirmedLedger + confirmationDepth)
  *   CONFIRMING → FAILED      (should not happen after first-seen, but defensively allowed)
  *   CONFIRMING → EXPIRED     (confirmation window elapsed without reaching depth)
- *   Any active → EXPIRED     (wall-clock expiresAt exceeded)
+ *   Any active → EXPIRED     (wall-clock expiresAt exceeded; invalid timestamps leave state unchanged)
  */
 
 import type {
@@ -29,6 +29,38 @@ import { TERMINAL_STATES } from "./types";
 
 // ─── Guard ───────────────────────────────────────────────────────────────────
 
+/**
+ * Normalise a Stellar network passphrase or shorthand network name into
+ * its canonical network passphrase.
+ */
+export function normalizeNetworkPassphrase(
+  networkOrPassphrase?: string | null,
+): string | null {
+  if (!networkOrPassphrase) return null;
+  const trimmed = networkOrPassphrase.trim();
+  const lower = trimmed.toLowerCase();
+  if (lower === "testnet") {
+    return "Test SDF Network ; September 2015";
+  }
+  if (lower === "mainnet" || lower === "public") {
+    return "Public Global Stellar Network ; September 2015";
+  }
+  return trimmed;
+}
+
+/**
+ * Returns true if the observed network matches the expected/pinned network.
+ * If either network is unknown or omitted, returns true to preserve backward
+ * compatibility for unpinned records or legacy fixtures.
+ */
+export function isMatchingNetwork(
+  expected?: string | null,
+  observed?: string | null,
+): boolean {
+  if (!expected || !observed) return true;
+  return normalizeNetworkPassphrase(expected) === normalizeNetworkPassphrase(observed);
+}
+
 /** Returns true if the record is already in a terminal state. */
 export function isTerminal(record: TxRecord): boolean {
   return TERMINAL_STATES.has(record.finalityStatus);
@@ -38,11 +70,24 @@ export function isTerminal(record: TxRecord): boolean {
 
 /**
  * Returns true if the record should transition to EXPIRED based on wall-clock
- * time (expiresAt column) regardless of ledger position.
+ * time (expiresAt column) regardless of ledger position. Invalid dates are not
+ * considered expired; transitions reject them without updating the record.
  */
 export function isWallClockExpired(record: TxRecord, now: Date = new Date()): boolean {
   if (!record.expiresAt) return false;
+  if (!isValidDate(record.expiresAt) || !isValidDate(now)) return false;
   return now >= record.expiresAt;
+}
+
+function isValidDate(value: unknown): value is Date {
+  return value instanceof Date && Number.isFinite(value.getTime());
+}
+
+function hasValidExpiryTimestamps(record: TxRecord, now: Date): boolean {
+  return (
+    isValidDate(now) &&
+    (record.expiresAt == null || isValidDate(record.expiresAt))
+  );
 }
 
 /**
@@ -72,6 +117,7 @@ export function transitionFromPending(
   now: Date = new Date(),
 ): TxRecordUpdate | null {
   if (record.finalityStatus !== "PENDING") return null;
+  if (!hasValidExpiryTimestamps(record, now)) return null;
 
   // Wall-clock expiry takes precedence over all other checks
   if (isWallClockExpired(record, now)) {
@@ -90,6 +136,21 @@ export function transitionFromPending(
       finalityStatus: "EXPIRED",
       lastLedgerChecked: currentLedger,
       lastError: `Ledger gap exceeded: current=${currentLedger}, submitted=${record.ledgerSubmitted}, max=${config.maxLedgerGap}`,
+      pollCount: record.pollCount + 1,
+      updatedAt: now,
+    };
+  }
+
+  // Network identity check: reject observations from a foreign network without transitioning financial state
+  const pinnedNetwork = record.networkPassphrase ?? config.networkPassphrase;
+  if (
+    pinnedNetwork &&
+    pollResult.networkPassphrase &&
+    !isMatchingNetwork(pinnedNetwork, pollResult.networkPassphrase)
+  ) {
+    return {
+      lastLedgerChecked: currentLedger,
+      lastError: `Rejected observation from foreign network "${pollResult.networkPassphrase}" (pinned to "${pinnedNetwork}")`,
       pollCount: record.pollCount + 1,
       updatedAt: now,
     };
@@ -139,6 +200,7 @@ export function transitionFromPending(
       return {
         lastLedgerChecked: currentLedger,
         lastError: pollResult.message,
+        reasonCode: pollResult.reasonCode,
         pollCount: record.pollCount + 1,
         updatedAt: now,
       };
@@ -157,8 +219,10 @@ export function transitionFromConfirming(
   currentLedger: number,
   config: ReconcilerConfig,
   now: Date = new Date(),
+  pollResult?: HorizonPollResult | null,
 ): TxRecordUpdate | null {
   if (record.finalityStatus !== "CONFIRMING") return null;
+  if (!hasValidExpiryTimestamps(record, now)) return null;
 
   // Wall-clock expiry
   if (isWallClockExpired(record, now)) {
@@ -166,6 +230,21 @@ export function transitionFromConfirming(
       finalityStatus: "EXPIRED",
       lastLedgerChecked: currentLedger,
       lastError: "Confirmation window expired (wall-clock)",
+      updatedAt: now,
+    };
+  }
+
+  // Network identity check: reject observations from a foreign network without transitioning financial state
+  const pinnedNetwork = record.networkPassphrase ?? config.networkPassphrase;
+  if (
+    pinnedNetwork &&
+    pollResult &&
+    pollResult.networkPassphrase &&
+    !isMatchingNetwork(pinnedNetwork, pollResult.networkPassphrase)
+  ) {
+    return {
+      lastLedgerChecked: currentLedger,
+      lastError: `Rejected observation from foreign network "${pollResult.networkPassphrase}" (pinned to "${pinnedNetwork}")`,
       updatedAt: now,
     };
   }
@@ -218,13 +297,22 @@ export function computeTransition(
 ): TxRecordUpdate | null {
   if (isTerminal(record)) return null;
 
+  // Ledger regression check: reject observations from older ledgers than
+  // previously seen to prevent re-processing stale Horizon data.
+  if (record.lastLedgerChecked !== null && currentLedger < record.lastLedgerChecked) {
+    return {
+      lastError: `Ledger regression detected: current=${currentLedger} < last=${record.lastLedgerChecked}`,
+      updatedAt: now,
+    };
+  }
+
   switch (record.finalityStatus) {
     case "PENDING":
       if (!pollResult) return null;
       return transitionFromPending(record, pollResult, currentLedger, config, now);
 
     case "CONFIRMING":
-      return transitionFromConfirming(record, currentLedger, config, now);
+      return transitionFromConfirming(record, currentLedger, config, now, pollResult);
 
     default:
       return null;
@@ -269,3 +357,13 @@ export function validateTransition(
   }
   return null;
 }
+
+// ─── Provider Failure Reason Code Helpers ─────────────────────────────────────
+
+export {
+  classifyHorizonError,
+  getFailureCategory,
+  isAuthorizationFailure,
+  isThrottlingFailure,
+  isProviderFailure,
+} from "./horizon";

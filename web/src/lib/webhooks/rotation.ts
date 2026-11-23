@@ -20,7 +20,15 @@ import {
   MAX_SECRET_ROTATION_GRACE_SECONDS,
   MIN_SECRET_ROTATION_GRACE_SECONDS,
 } from "./config";
-import { decryptSecret, encryptSecret } from "./signing";
+import { decryptSecret, encryptSecret, isSameWebhookKey } from "./signing";
+
+export const WEBHOOK_SECRET_KEY_REUSE_ERROR_CODE = "WEBHOOK_SECRET_KEY_REUSE";
+
+export interface RotationError {
+  error: string;
+  code?: string;
+  status: number;
+}
 
 export interface RotationResult {
   id: string;
@@ -106,7 +114,7 @@ export async function rotateWebhookSecret(opts: {
   newSecret?: string;
   generate?: boolean;
   graceSeconds?: number;
-}): Promise<RotationResult | { error: string; status: number }> {
+}): Promise<RotationResult | RotationError> {
   const { subscriptionId, talosId, generate } = opts;
 
   let plaintext = opts.newSecret;
@@ -125,17 +133,6 @@ export async function rotateWebhookSecret(opts: {
   const now = new Date();
   const previousSecretExpiresAt = new Date(now.getTime() + graceSeconds * 1000);
 
-  let newCiphertext: string;
-  try {
-    newCiphertext = encryptSecret(plaintext);
-  } catch (err) {
-    logger.error({ err }, "webhook_secret_encrypt_failed");
-    return {
-      error: "Failed to encrypt webhook secret. Check WEBHOOK_SECRET_ENCRYPTION_KEY.",
-      status: 500,
-    };
-  }
-
   const existing = await db
     .select({
       id: tlsWebhookSubscriptions.id,
@@ -153,6 +150,45 @@ export async function rotateWebhookSecret(opts: {
 
   if (!existing) {
     return { error: "Subscription not found", status: 404 };
+  }
+
+  // Reject rotations that reuse the active signing key identifier before replacement,
+  // preserving the current signing key, grace window, and pending deliveries.
+  let currentPlaintext: string | null = null;
+  try {
+    currentPlaintext = decryptSecret(existing.secretCiphertext);
+  } catch (err) {
+    logger.warn(
+      {
+        subscriptionId,
+        talosId,
+        err: err instanceof Error ? err.message : "decrypt_failed",
+      },
+      "webhook_active_secret_decrypt_failed_during_rotation",
+    );
+  }
+
+  if (currentPlaintext !== null && isSameWebhookKey(currentPlaintext, plaintext)) {
+    logger.warn(
+      { subscriptionId, talosId },
+      "webhook_secret_rotate_key_reuse_rejected",
+    );
+    return {
+      error: "New webhook secret must not reuse the active key identifier",
+      code: WEBHOOK_SECRET_KEY_REUSE_ERROR_CODE,
+      status: 409,
+    };
+  }
+
+  let newCiphertext: string;
+  try {
+    newCiphertext = encryptSecret(plaintext);
+  } catch (err) {
+    logger.error({ err }, "webhook_secret_encrypt_failed");
+    return {
+      error: "Failed to encrypt webhook secret. Check WEBHOOK_SECRET_ENCRYPTION_KEY.",
+      status: 500,
+    };
   }
 
   const [updated] = await db

@@ -60,6 +60,13 @@ describe("GET /api/admin/outbox", () => {
     });
   });
 
+  it("accepts status=quarantined filter", async () => {
+    mocks.outbox.listEvents.mockResolvedValue({ events: [{ id: "evt_q", status: "quarantined" }], nextCursor: null });
+    const res = await listRoute(authed("/api/admin/outbox?status=quarantined"));
+    expect(res.status).toBe(200);
+    expect(mocks.outbox.listEvents).toHaveBeenCalledWith(expect.objectContaining({ status: "quarantined" }));
+  });
+
   it("rejects an invalid status filter", async () => {
     const res = await listRoute(authed("/api/admin/outbox?status=bogus"));
     expect(res.status).toBe(400);
@@ -95,6 +102,15 @@ describe("POST /api/admin/outbox/:id/retry", () => {
     mocks.outbox.getEvent.mockResolvedValue({ id: "evt_1", status: "dispatched" });
     const res = await retryRoute(authed("/api/admin/outbox/evt_1/retry", { method: "POST" }), {
       params: Promise.resolve({ id: "evt_1" }),
+    });
+    expect(res.status).toBe(409);
+  });
+
+  it("returns 409 when attempting to retry a quarantined event", async () => {
+    mocks.outbox.requeue.mockResolvedValue(null);
+    mocks.outbox.getEvent.mockResolvedValue({ id: "evt_q", status: "quarantined" });
+    const res = await retryRoute(authed("/api/admin/outbox/evt_q/retry", { method: "POST" }), {
+      params: Promise.resolve({ id: "evt_q" }),
     });
     expect(res.status).toBe(409);
   });
