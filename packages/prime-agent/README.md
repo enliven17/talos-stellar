@@ -204,6 +204,7 @@ Additional architectural, configuration, and operational guides:
   - `talos-agent doctor` — read-only integrity and schema checks for every local agent database.
   - [Adapter HTTP Testing](./docs/adapter-http-testing.md) — Fake transport contract for isolated communication-adapter tests.
   - [Adapter Health Snapshots](./docs/adapter-health-snapshots.md) — Runtime health snapshot captures and telemetry.
+  - [Adapter Registration](./docs/adapter-registration.md) — Idempotent registration and conflicting-capability handling.
   - [Discord Reconnect Policy](./docs/discord-reconnect-policy.md) — Connection lifecycle and reconnect backoff behavior for Discord.
   - [Logging Policy](./docs/LOGGING_POLICY.md) — Structured logging standards, redaction rules, and severity levels.
   - [Policy Engine](./docs/policy-engine.md) — Declarative policy engine rules, evaluation, and enforcement.
