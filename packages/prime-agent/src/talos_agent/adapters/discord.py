@@ -23,6 +23,7 @@ from talos_agent.adapters.capability import (
 from talos_agent.adapters.snapshots import DiscordHealthSnapshot
 from talos_agent.config import resolve_setting_secret
 from talos_agent.redact import redact_text as _redact_text
+from talos_agent.response_bounds import bounded_error_body
 
 if TYPE_CHECKING:
     from talos_agent.config import Settings
@@ -246,7 +247,7 @@ class DiscordAdapter(BaseSocialAdapter):
             status="failed",
             channel=self.channel_name,
             content=content,
-            error=f"Webhook POST failed: HTTP {resp.status_code} — {_redact_text(resp.text[:200])}",
+            error=f"Webhook POST failed: HTTP {resp.status_code} — {bounded_error_body(resp.content, 200)}",
         )
 
     async def _webhook_post_with_reconnect(self, payload: dict, content: str) -> PublishResult:
@@ -269,7 +270,7 @@ class DiscordAdapter(BaseSocialAdapter):
                         url=f"https://discord.com/channels/{guild}/{channel}/{msg_id}",
                         metadata={"method": "webhook", "reconnect_attempts": attempt},
                     )
-                last_error = f"HTTP {resp.status_code} — {_redact_text(resp.text[:200])}"
+                last_error = f"HTTP {resp.status_code} — {bounded_error_body(resp.content, 200)}"
             except Exception as e:  # noqa: BLE001 - catch all for reconnect policy
                 last_error = f"{type(e).__name__}: {_redact_text(str(e)[:200])}"
 
@@ -308,7 +309,7 @@ class DiscordAdapter(BaseSocialAdapter):
             status="failed",
             channel=self.channel_name,
             content=content,
-            error=f"API POST failed: HTTP {resp.status_code} — {_redact_text(resp.text[:200])}",
+            error=f"API POST failed: HTTP {resp.status_code} — {bounded_error_body(resp.content, 200)}",
         )
 
     async def _api_post_with_reconnect(self, url: str, payload: dict, content: str) -> PublishResult:
@@ -330,7 +331,7 @@ class DiscordAdapter(BaseSocialAdapter):
                         url=f"https://discord.com/channels/{guild}/{self._channel_id}/{msg_id}",
                         metadata={"method": "bot_api", "reconnect_attempts": attempt},
                     )
-                last_error = f"HTTP {resp.status_code} — {_redact_text(resp.text[:200])}"
+                last_error = f"HTTP {resp.status_code} — {bounded_error_body(resp.content, 200)}"
             except Exception as e:  # noqa: BLE001 - catch all for reconnect policy
                 last_error = f"{type(e).__name__}: {_redact_text(str(e)[:200])}"
 
@@ -383,7 +384,7 @@ class DiscordAdapter(BaseSocialAdapter):
             status="failed",
             channel=self.channel_name,
             content=content,
-            error=f"Reply failed: HTTP {resp.status_code} — {_redact_text(resp.text[:200])}",
+            error=f"Reply failed: HTTP {resp.status_code} — {bounded_error_body(resp.content, 200)}",
         )
 
     # ── Discovery ────────────────────────────────────────────

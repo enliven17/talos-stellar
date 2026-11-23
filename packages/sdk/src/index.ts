@@ -2,8 +2,12 @@
 
 export {
   TalosClient,
+  DEFAULT_BASE_URL,
+  resolveBaseUrl,
   resolveRetryPolicy,
   resolveRetryOptions,
+  ETAG_CACHE_VERSION,
+  BoundedETagStore,
 } from "./client.js";
 export type {
   TalosClientOptions,
@@ -11,11 +15,40 @@ export type {
   RetryOptions,
   ResolvedRetryPolicy,
   ResolvedRetryOptions,
+  RetryDecisionReason,
+  RetryDecisionEvent,
+  RedactedRetryMetadata,
   TalosErrorEvent,
+  TalosResponseEvent,
   ReadOptions,
   WriteOptions,
-  ReadOptions,
+  ETagCacheEntry,
+  ETagStore,
+  ETagCacheOptions,
+  DedupeInFlightGetsOptions,
 } from "./client.js";
+
+// ── HTTP Transcript (support cases & deterministic replay) ─────────
+
+export {
+  TranscriptRecorder,
+  TranscriptReplayer,
+  createTranscriptRecorder,
+  createTranscriptReplayer,
+  sanitizeTranscriptPath,
+  sanitizeTranscriptHeaders,
+  sanitizeTranscriptResponseBody,
+  parseTranscript,
+} from "./transcript.js";
+export type {
+  HttpTranscript,
+  TranscriptEntry,
+  TranscriptRequest,
+  TranscriptResponse,
+  TranscriptTiming,
+  TranscriptRecorderOptions,
+  TranscriptReplayOptions,
+} from "./transcript.js";
 
 // ── Pagination ─────────────────────────────────────────────────────
 
@@ -31,6 +64,8 @@ export type { AsyncPaginationIteratorOptions } from "./pagination.js";
 export {
   generateIdempotencyKey,
   validateIdempotencyKey,
+  validateIdempotencyKeyConflict,
+  readIdempotencyKeyHeader,
   IdempotencyConflictError,
   isUuidV4,
   isPayloadConflict,
@@ -67,30 +102,47 @@ export {
   TalosServerRetryableError,
   TalosTransportError,
   TalosTimeoutError,
+  TalosDeadlineExceededError,
   errorFromResponse,
   classifyTransportError,
   sanitizeBody,
   redactSecrets,
   snapshotHeaders,
+  parseRateLimit,
   parseRetryAfter,
   parseX402Challenge,
+  redactEventPath,
+  diagnoseBuyerProof,
   MAX_BODY_BYTES,
 } from "./errors.js";
+export type { RateLimitInfo, HeaderSource } from "./errors.js";
 
-// ── Feature Detection ─────────────────────────────────────────────
-//
-// Provides backwards-compatible feature detection for SDK capabilities.
-// This allows consumers to safely check for the presence of specific
-// features without breaking on older versions or environments.
+// ── Stable error-code taxonomy (versioned) ────────────────────────────────────
 export {
-  detectFeature,
-  FeatureFlags,
-  FeatureStatus,
-} from "./features.js";
+  ERROR_TAXONOMY_VERSION,
+  classifyError,
+  codeToCategory,
+  toErrorContract,
+  buildCauseChain,
+} from "./error-taxonomy.js";
+export type {
+  TalosErrorCategory,
+  ErrorClassification,
+  ErrorContract,
+  RedactedCauseFrame,
+} from "./error-taxonomy.js";
 
 // ── Domain types ──────────────────────────────────────────────────
 
 export * from "./types.js";
+
+// ── Name validation ────────────────────────────────────────────────
+
+export {
+  validateName,
+  canonicalizeName,
+  validateAndCanonicalizeName,
+} from "./name-validation.js";
 
 // ── Stellar helpers ───────────────────────────────────────────────
 
@@ -120,7 +172,12 @@ export {
   SCHEMA_VERSION_REQUEST_HEADER,
   SCHEMA_VERSION_RESPONSE_HEADER,
   SchemaVersionMismatchError,
+  TalosCursorValidationError,
+  validateTalosEventCursor,
   negotiateSchemaVersion,
+  validateEventPayloadVersion,
+  UnsupportedEventPayloadVersionError,
+  MAX_SUPPORTED_EVENT_PAYLOAD_VERSION,
   SSE_MAX_FIELD_BYTES,
   SSE_MAX_DATA_LINES,
 } from "./events.js";
@@ -130,10 +187,35 @@ export type {
   TalosEventHandler,
   TalosStreamErrorHandler,
   TalosStreamCloseHandler,
+  TalosStreamState,
+  TalosStreamStateHandler,
   TalosEventStreamOptions,
+  TalosCursorValidationReason,
   SeenStore,
   SchemaVersionNegotiationResult,
 } from "./events.js";
+
+// ── Job Tracker ───────────────────────────────────────────────────
+
+export {
+  JobTracker,
+  trackJob,
+  JobTerminalError,
+  JobFailedError,
+  JobCancelledError,
+  JobTrackAbortedError,
+  JobTrackTimeoutError,
+} from "./job-tracker.js";
+export type {
+  JobProgressDetails,
+  TrackJobEventType,
+  TrackJobEvent,
+  JobTerminalStatus,
+  JobTerminalOutcome,
+  JobTrackerState,
+  JobTrackerStateChange,
+  TrackJobOptions,
+} from "./job-tracker.js";
 
 // ── Contract event decoding ───────────────────────────────────────────────────
 
@@ -205,6 +287,50 @@ export type {
   SerializedChaosScenario,
   ChaosFixtureBundle,
 } from "./chaos-fixtures.js";
+
+// ── Synthetic event-stream fault fixtures ─────────────────────────────────────
+
+export {
+  EVENT_STREAM_FAULT_FIXTURES,
+  getEventStreamFaultFixture,
+  encodeSyntheticSSEFrame,
+  createSyntheticEventStreamTransport,
+} from "./event-stream-fixtures.js";
+export type {
+  EventStreamFaultKind,
+  SyntheticSSEFrame,
+  EventStreamFaultFixture,
+  SyntheticEventStreamTransport,
+} from "./event-stream-fixtures.js";
+
+// ── Contract readers ──────────────────────────────────────────────────────
+
+export {
+  RegistryReader,
+  NameServiceReader,
+  TESTNET_RPC_URL,
+  TESTNET_REGISTRY_CONTRACT_ID,
+  TESTNET_NAME_SERVICE_CONTRACT_ID,
+  TESTNET_NETWORK_PASSPHRASE,
+} from "./contracts.js";
+export type {
+  OnChainTalos,
+  ContractPatron,
+  ContractKernel,
+  ContractPulse,
+  ContractVersion,
+  ContractReaderOptions,
+  RegistryReaderOptions,
+  NameServiceReaderOptions,
+} from "./contracts.js";
+
+// ── Contract reader errors ────────────────────────────────────────────────
+
+export {
+  TalosContractError,
+  TalosContractNotFoundError,
+  TalosContractSimulateError,
+} from "./errors.js";
 
 // ── Runtime compatibility matrix ──────────────────────────────────────────────
 

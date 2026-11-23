@@ -36,15 +36,71 @@ All foreign key constraints changed from `ON DELETE CASCADE` to `ON DELETE RESTR
 
 ## API Endpoints
 
+### GET /api/talos/:id/retire
+
+Owner-facing lifecycle and retirement checklist. Audits blocking obligations and permitted next actions before an agent is retired, preserving private financial details.
+
+**Query Parameters:**
+- `viewer` (or `address` / `stellarPublicKey`): Stellar public key of the requesting viewer. Must match `creatorPublicKey` or `walletPublicKey`.
+
+**Response:**
+```json
+{
+  "talosId": "agent-id",
+  "state": "paused",
+  "isOwner": true,
+  "canRetire": true,
+  "agentName": "Agent Name",
+  "obligations": [
+    {
+      "id": "owner_authorization",
+      "title": "Owner Signature Proof",
+      "description": "Retirement transaction must be signed by creator or wallet owner.",
+      "satisfied": true,
+      "blocking": true
+    },
+    {
+      "id": "in_flight_jobs",
+      "title": "Drain Active Jobs",
+      "description": "All in-flight commerce jobs must be completed before retirement.",
+      "satisfied": true,
+      "blocking": true,
+      "count": 0
+    },
+    {
+      "id": "service_availability",
+      "title": "Service Intake Paused",
+      "description": "Agent service availability must be paused to prevent new job intake.",
+      "satisfied": true,
+      "blocking": true
+    }
+  ],
+  "allowedNextActions": [
+    {
+      "action": "retire",
+      "label": "Retire Agent",
+      "targetState": "retired",
+      "enabled": true,
+      "description": "Permanently retire this agent. Preserves all history.",
+      "blockingObligationIds": []
+    }
+  ]
+}
+```
+
 ### POST /api/talos/:id/retire
 
-Retires an agent while preserving all historical data.
+Retires an agent while preserving all historical data. Enforces signature proof of wallet ownership and verifies that all active/in-flight commerce jobs are drained unless `drainJobs: false` is explicitly specified.
 
 **Request Body:**
 ```json
 {
+  "stellarPublicKey": "G...",
+  "signature": "<base64 ed25519 signature>",
+  "message": "talos:agent-id:retire:...",
   "reason": "Agent retired due to obsolescence",
-  "supersededBy": "optional-replacement-agent-id"
+  "supersededBy": "optional-replacement-agent-id",
+  "drainJobs": true
 }
 ```
 
@@ -206,13 +262,17 @@ The partial unique index (`WHERE retiredAt IS NULL`) allows:
 
 This approach provides flexibility while preventing confusion in historical analysis.
 
-### Soft Deletion
+### Soft Deletion & Listing Exclusions
 
 Privacy deletion uses soft deletion (setting `deletedAt`) rather than hard deletion to:
 - Maintain referential integrity
 - Preserve audit trails
 - Allow historical analysis
 - Support potential data recovery
+
+#### Direct Detail Lookups vs. Public Listings
+- **Public Listings**: To prevent deleted agents from selling services, ranking, or being discovered, `isNull(tlsTalos.deletedAt)` is enforced on marketplace listings (`/api/services`), rankings (`/api/leaderboard`), and directory discovery (`/api/talos`).
+- **Direct Detail Lookups (`/api/talos/[id]`)**: Direct detail lookups continue to return the historical record (HTTP 200 with `deletedAt` populated and sensitive credentials like API keys stripped) rather than returning `410 Gone`. This fulfills the requirement that historical identity, governance, reputation, and commerce records remain queryable and auditable after privacy soft-deletion without breaking historical links or client audit trails.
 
 ## Rollback
 

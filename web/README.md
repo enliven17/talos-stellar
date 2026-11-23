@@ -41,6 +41,89 @@ cd web && pnpm vitest run tests/activity.test.ts tests/activity-pagination.test.
 pnpm test:security-headers
 ```
 
+## Browser Tests
+
+Playwright browser tests cover critical end-to-end user journeys against the local stack. These tests use a stubbed wallet provider and require no real keys or external network.
+
+### Prerequisites
+
+The local stack must be running before executing browser tests:
+
+1. Start the local stack (from repository root):
+```bash
+./scripts/local-stack.sh up
+```
+
+This starts:
+- Postgres on port 5432
+- Mock Stellar service on port 4010
+- Web server on port 3000
+
+2. Ensure the database is seeded (done automatically by local-stack.sh):
+```bash
+pnpm --dir web db:seed
+```
+
+### Running Browser Tests
+
+```bash
+pnpm --dir web test:browser
+```
+
+**Note:** If the local stack is not running, tests will fail with connection errors. The Playwright config does not auto-start the stack because it requires Docker Compose, which must be run separately.
+
+### Test Coverage
+
+The browser tests (`tests/browser/critical-journeys.spec.ts`) cover:
+
+1. **Browse agents** - Navigate to the agents page and verify seeded agents are displayed
+2. **Launch a Talos** - Complete the multi-step launch flow with demo data
+3. **Discover a service** - View an agent's available services
+4. **Purchase with mocked x402 settlement** - Request a service and trigger payment flow (wallet signing is mocked)
+5. **See job result** - View completed jobs in the activity feed
+6. **Full journey** - End-to-end flow combining all steps
+
+### Test Wallet Provider
+
+Tests inject a mock Stellar wallet provider (`tests/browser/helpers/test-wallet-provider.ts`) that:
+- Provides a deterministic test public key
+- Auto-signs all transactions with mock signatures
+- Requires no wallet extensions or private keys
+
+### Configuration
+
+Playwright configuration is in `playwright.config.ts`:
+- Base URL: `http://localhost:3000`
+- Browser: Chromium (Desktop)
+- Headless mode by default
+- Traces on first retry, screenshots on failure
+
+## Offline mock fulfillment mode
+
+By default the instant-fulfillment handlers (`web/src/lib/fulfillment/`) call
+**Tavily** for web search and **Groq / OpenAI** for analysis. Without those keys
+the commerce flow cannot be exercised locally.
+
+Set `FULFILLMENT_MODE=mock` to replace all network calls with deterministic,
+clearly-labelled fixture outputs:
+
+```bash
+# .env.local (or inline when starting the dev server)
+FULFILLMENT_MODE=mock
+```
+
+Every service type (`trend_research`, `competitor_analysis`, `find_leads`,
+`audience_insight`, `intent_signal`, `enrich_profile`, `product_review`) returns
+a valid JSON result with `"_mock": true` so you can tell fixture data apart from
+live results at a glance.
+
+> **Production guard** — the server will throw at startup if
+> `FULFILLMENT_MODE=mock` is set while `NODE_ENV=production`. Never use mock mode
+> with production credentials.
+
+To go back to live results, remove `FULFILLMENT_MODE` (or set it to any value
+other than `mock`) and supply real `TAVILY_API_KEY` and `GROQ_API_KEY` /
+`OPENAI_API_KEY` values.
 ## Getting Started
 
 First, run the development server:
@@ -167,6 +250,7 @@ Limits are stored in two Postgres tables (added in migration `0013_add_quota_tab
 
 - `tls_quota_configs` — one row per `(talosId, resource)` with limit, window, and enabled flag. A `NULL` `talosId` row is the platform default applied when no agent-specific row exists.
 - `tls_quota_usage` — one row per `(talosId, resource, windowStart)`. The counter is incremented atomically via `INSERT … ON CONFLICT DO UPDATE` so concurrent requests never double-count.
+- `tls_quota_scope_usage` — bounded per-scope counters for the current window (added in migration `0023_add_quota_scope_usage`). These are observability breakdowns only; `tls_quota_usage` remains authoritative for the total limit and enforcement.
 
 The increment-then-check pattern costs one DB round-trip per request with no distributed locking.
 
@@ -183,17 +267,27 @@ Every 2xx write response includes quota state headers:
 | `X-Quota-Used`      | Total calls used in this window                 |
 | `X-Quota-Reset`     | Unix timestamp (seconds) when the window resets |
 | `X-Quota-Resource`  | Which resource was checked                      |
+| `X-Quota-Incremented` | `true` when this decision consumed a unit, `false` when the quota is disabled (no write) or the call was a read-only usage lookup |
 
-When a limit is exceeded the API returns `429 Too Many Requests` with the same headers and a JSON body:
+When a limit is exceeded the API returns `429 Too Many Requests` with the same `X-Quota-*` headers, a bounded `Retry-After` header (whole seconds), and a JSON body:
 
 ```json
 {
   "error": "Quota exceeded",
   "resource": "activity_writes",
   "limit": 500,
-  "resetAt": "2026-07-25T00:00:00.000Z"
+  "resetAt": "2026-07-25T00:00:00.000Z",
+  "incremented": true
 }
 ```
+
+#### `Retry-After` capping & unknown reset times
+
+- **Finite upper bound:** `Retry-After` on `429` quota exhaustion responses is always a finite positive integer clamped to `[1, QUOTA_MAX_RETRY_AFTER_SECONDS]` (default `3600` seconds, hard ceiling `86400` seconds), preventing multi-day or unbounded delays on daily/monthly quota windows.
+- **Unknown or invalid reset times:** when `resetAt` is missing, `null`, non-finite, or otherwise invalid, `Retry-After` falls back to `QUOTA_UNKNOWN_RESET_RETRY_AFTER_SECONDS` (default `60` seconds, capped by `QUOTA_MAX_RETRY_AFTER_SECONDS`), `X-Quota-Reset` is omitted (never negative, `"NaN"`, or `"Infinity"`), and the JSON body emits `"resetAt": null`.
+- **Optional environment variables:**
+  - `QUOTA_MAX_RETRY_AFTER_SECONDS` — maximum `Retry-After` header value in seconds (integer `1–86400`, default `3600`).
+  - `QUOTA_UNKNOWN_RESET_RETRY_AFTER_SECONDS` — fallback `Retry-After` delay in seconds when the reset time is unknown (integer `1–86400`, default `60`).
 
 ### Reading and overriding quotas
 
@@ -223,12 +317,32 @@ Response:
         "remaining": 458,
         "limit": 500,
         "resetAt": "2026-07-25T00:00:00.000Z",
-        "ok": true
+        "ok": true,
+        "byScope": {
+          "activity:write": 42,
+          "commerce:read": 0,
+          "commerce:write": 0,
+          "wallet:read": 0,
+          "wallet:sign": 0,
+          "settings:read": 0,
+          "settings:write": 0,
+          "revenue:read": 0,
+          "revenue:write": 0
+        }
       }
     }
   }
 }
 ```
+
+**Export a reproducible quota-window usage statement:**
+
+```
+GET /api/talos/:id/quota?format=statement&asOf=2026-07-24T12:30:00Z
+Authorization: Bearer <api_key>
+```
+
+Returns a canonical, integer-unit usage statement for the authorized agent with stable UTC window boundaries (`windowStart`/`windowEnd` and integer ms), `sourcePolicyVersion`, per-resource `policySource`, aggregate `totals`, and a deterministic SHA-256 `digest` (also exposed in the `X-Quota-Statement-Digest` header). Private request payloads and operator `notes` are omitted. The `asOf` query parameter is optional (defaults to the current UTC time) and returns `400` if not a valid ISO-8601 timestamp.
 
 **Override a quota for a specific agent:**
 
@@ -248,6 +362,18 @@ Content-Type: application/json
 
 All fields except `resource` are optional and fall back to the current configured value. Returns the updated config + live usage.
 
+An optional `"reason"` string (max 500 chars, default `"unspecified"`) may be supplied.
+
+### Adjustment audit trail
+
+Every successful `PATCH` appends a row to `tls_quota_adjustments` (migration `0023_add_quota_adjustments`) recording the `actor` (`agent:<id>`), `reason`, `priorPolicy` and `newPolicy` (`maxCount`, `windowSize`, `enabled`, `notes`). API credentials are never stored: the actor is the agent id, and bearer tokens / key-like strings in `reason` and `notes` are replaced with `[REDACTED]`.
+
+```
+GET /api/talos/:id/quota?view=adjustments
+```
+
+Returns `{ talosId, adjustments: [{ id, resource, actor, reason, priorPolicy, newPolicy, createdAt }] }`, newest first.
+
 ### Reset windows
 
 | `windowSize` | Window start                                         |
@@ -255,6 +381,10 @@ All fields except `resource` are optional and fall back to the current configure
 | `hourly`     | UTC hour boundary (e.g. `14:00:00`)                  |
 | `daily`      | UTC midnight (e.g. `2026-07-24T00:00:00Z`)           |
 | `monthly`    | First day of UTC month (e.g. `2026-07-01T00:00:00Z`) |
+
+Window boundaries and reset calculations (`computeQuotaWindow`) are canonical across responses:
+- `X-Quota-Reset` header in seconds (Unix epoch) and response body `resetAt` (ISO-8601) reflect identical window boundaries.
+- Boundary transitions across months, leap days (e.g. Feb 29 in leap years vs. Feb 28 in non-leap years), and year boundaries are normalized with an injectable clock parameter.
 
 ### Local verification
 

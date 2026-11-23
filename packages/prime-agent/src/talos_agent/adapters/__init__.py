@@ -2,6 +2,7 @@
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
 from talos_agent.adapters.capability import (
+    AdapterHTTPClient,
     AdapterCapabilityManifest,
     AdapterResourceLimits,
     AdapterSandbox,
@@ -23,10 +24,12 @@ from talos_agent.adapters.health import (
     X402PaymentProbe,
     XProbe,
 )
-from talos_agent.adapters.registry import AdapterRegistry
+from talos_agent.adapters.mastodon import MastodonAdapter, MastodonAdapterConfig
+from talos_agent.adapters.registry import AdapterCapabilityConflictError, AdapterRegistry
 from talos_agent.adapters.snapshots import (
     AdapterHealthSnapshot,
     DiscordHealthSnapshot,
+    MastodonHealthSnapshot,
     StellarHealthSnapshot,
     TelegramHealthSnapshot,
     X402HealthSnapshot,
@@ -48,7 +51,9 @@ __all__ = [
     "BaseSocialAdapter",
     "ChannelCapabilities",
     "PublishResult",
+    "AdapterCapabilityConflictError",
     "AdapterRegistry",
+    "AdapterHTTPClient",
     "AdapterCapabilityManifest",
     "AdapterResourceLimits",
     "AdapterSandbox",
@@ -56,6 +61,8 @@ __all__ = [
     "NetworkRule",
     "DiscordAdapter",
     "DiscordAdapterConfig",
+    "MastodonAdapter",
+    "MastodonAdapterConfig",
     "TelegramAdapter",
     "TelegramAdapterConfig",
     "XAdapterConfig",
@@ -75,6 +82,7 @@ __all__ = [
     # Typed adapter health snapshots
     "AdapterHealthSnapshot",
     "DiscordHealthSnapshot",
+    "MastodonHealthSnapshot",
     "TelegramHealthSnapshot",
     "XHealthSnapshot",
     "StellarHealthSnapshot",
@@ -89,4 +97,3 @@ __all__ = [
     "StorageVerificationError",
     "StorageProviderError",
 ]
-

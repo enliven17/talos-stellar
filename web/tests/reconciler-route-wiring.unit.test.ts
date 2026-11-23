@@ -66,7 +66,7 @@ vi.mock("@/lib/fulfillment", () => ({
 
 vi.mock("@/lib/quota", () => ({
   checkAndIncrementQuota: (...args: any[]) => mocks.mockCheckAndIncrementQuota(...args),
-  applyQuotaHeaders: (...args: any[]) => mocks.mockApplyQuotaHeaders(...args),
+  applyQuotaHeaders: (res: any) => mocks.mockApplyQuotaHeaders(res),
   quotaExceededResponse: (...args: any[]) => mocks.mockQuotaExceededResponse(...args),
 }));
 
@@ -335,14 +335,14 @@ describe("jobs route — reconciler wiring", () => {
   function setupSelectResults({
     service = makeService(),
     talos = makeTalos(),
-    idempotencyRow = [] as any[],
+    idempotencyRow = null as any[] | null,
     dupeRow = [] as any[],
   } = {}) {
     mocks._selectCallCount = 0;
     mocks._selectResults = [
       service ? [service] : [],
       talos ? [talos] : [],
-      idempotencyRow,
+      ...(idempotencyRow !== null ? [idempotencyRow] : []),
       dupeRow,
     ];
   }

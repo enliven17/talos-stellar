@@ -17,7 +17,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from talos_agent.payments import USDC_TESTNET_ISSUER
 from talos_agent.payments.stellar_kit import StellarKit, _DEFAULT_HORIZON_TIMEOUT
+
+_VALID_ACCOUNT_ID = "GDWAO2OUSICHFZFL4KAYOLRJO627IQZOWFJS3HO4NTWNJ6VETSAJ7QKX"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -43,16 +46,26 @@ def _make_balance_response(balance_xlm: str = "100.0") -> httpx.Response:
     )
 
 
-def _make_token_response(asset_code: str = "USDC", balance: str = "50.0") -> httpx.Response:
+def _make_token_response(
+    asset_code: str = "USDC",
+    balance: str = "50.0",
+    asset_issuer: str = USDC_TESTNET_ISSUER,
+) -> httpx.Response:
     return httpx.Response(
         200,
         json={
             "balances": [
-                {"asset_type": "credit_alphanum4", "asset_code": asset_code, "balance": balance},
+                {
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": asset_code,
+                    "asset_issuer": asset_issuer,
+                    "balance": balance,
+                },
             ]
         },
         request=httpx.Request("GET", "https://horizon-testnet.stellar.org/accounts/GABC123"),
     )
+
 
 
 # ── Client lifecycle ───────────────────────────────────────────────────────────
@@ -168,7 +181,6 @@ async def test_repeated_balance_calls_reuse_single_client():
     await kit.initialize()
 
     client_ids: set[int] = set()
-    original_get = httpx.AsyncClient.get
 
     async def patched_get(self_: httpx.AsyncClient, url: str, **kwargs):
         client_ids.add(id(self_))
@@ -182,7 +194,7 @@ async def test_repeated_balance_calls_reuse_single_client():
         ]
 
         for _ in range(3):
-            result = await kit.get_balance("GABC123")
+            result = await kit.get_balance(_VALID_ACCOUNT_ID)
             assert "balance_xlm" in result
 
     # The shared client is set once during initialize; confirm it's still the same object
@@ -207,6 +219,30 @@ async def test_repeated_token_balance_calls_reuse_single_client():
             assert result["balance"] == pytest.approx(50.0)
 
     assert kit._client is not None
+    await kit.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["get_balance", "get_token_balance"])
+async def test_balance_calls_use_stellar_horizon_retry_provider(method: str):
+    kit = StellarKit(_make_api_client())
+    await kit.initialize()
+
+    response = (
+        _make_balance_response()
+        if method == "get_balance"
+        else _make_token_response()
+    )
+    with patch(
+        "talos_agent.payments.stellar_kit.request_with_retry",
+        new=AsyncMock(return_value=response),
+    ) as mock_retry:
+        if method == "get_balance":
+            await kit.get_balance(_VALID_ACCOUNT_ID)
+        else:
+            await kit.get_token_balance(_VALID_ACCOUNT_ID, "USDC")
+
+    assert mock_retry.await_args.kwargs["provider"] == "stellar_horizon"
     await kit.close()
 
 

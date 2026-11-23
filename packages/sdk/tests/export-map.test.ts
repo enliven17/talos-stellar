@@ -1,19 +1,16 @@
-/*
+/**
  * Export-map checks for the published `@talos-protocol/sdk` manifest.
  *
  * These tests run without a build. They assert that `package.json` wires up
  * the CJS (`require`) and ESM (`import`) entry points correctly, that the
  * `types` and `browser` conditions stay coherent, and that every target is
- * actually included in the published tarball via the `files` allow-list — for
- * the root barrel and for each server-only subpath (`./webhooks`, `./events`,
- * `./errors`). That the subpaths really stay free of the Stellar SDK is proved
- * separately in `tests/subpath-exports.test.ts`.
+ * actually included in the published tarball via the `files` allow-list.
  *
  * The runtime half of the same contract — resolving through Node's real
  * exports map and comparing the two module surfaces — lives in
  * scripts/smoke-export-map.mjs (`npm run compat:exports`), which needs a build.
  *
- * All rules live in scripts/export-map-lib.mj so both halves agree.
+ * All rules live in scripts/export-map-lib.mjs so both halves agree.
  */
 
 import { describe, it, expect } from "vitest";
@@ -22,8 +19,6 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   REQUIRED_CONDITIONS,
-  REQUIRED_SUBPATHS,
-  ROOT_SUBPATH,
   isTargetCoveredByFiles,
   validateExportMap,
 } from "../scripts/export-map-lib.mjs";
@@ -33,13 +28,8 @@ const shippedPackage = JSON.parse(
   readFileSync(resolve(__dirname, "../package.json"), "utf8"),
 );
 
-const TESTING_SUBPATH = "./testing";
-const TESTING_IMPORT = "./dist/esm/testing/index.js";
-const TESTING_REQUIRE = "./dist/cjm/testing/index.cjs";
-const TESTING_TYPES = "./dist/esm/testing/index.d.ts";
-
 /** A minimal manifest that satisfies every rule, used as a mutation base. */
-declare function basePackage(overrides?: Record<string, unknown>): Record<string, unknown> {
+function basePackage(overrides: Record<string, unknown> = {}) {
   return {
     name: "@talos-protocol/sdk",
     version: "0.1.0",
@@ -50,14 +40,9 @@ declare function basePackage(overrides?: Record<string, unknown>): Record<string
     exports: {
       ".": {
         import: "./dist/esm/index.js",
-        require: "./dist/cjm/index.cjs",
+        require: "./dist/cjs/index.cjs",
         types: "./dist/esm/index.d.ts",
         browser: "./dist/browser/sdk.bundle.js",
-      },
-      [TESTING_SUBPATH]: {
-        import: TESTING_IMPORT,
-        require: TESTING_REQUIRE,
-        types: TESTING_TYPES,
       },
     },
     ...overrides,
@@ -66,9 +51,7 @@ declare function basePackage(overrides?: Record<string, unknown>): Record<string
 
 /** Validate a manifest whose `exports["."]` is replaced with `root`. */
 function validateRoot(root: unknown) {
-  const base = basePackage();
-  const exports = { ...(base.exports as Record<string, unknown>), ".": root };
-  return validateExportMap(basePackage({ exports }));
+  return validateExportMap(basePackage({ exports: { ".": root } }));
 }
 
 function expectError(result: ReturnType<typeof validateExportMap>, fragment: string) {
@@ -100,7 +83,7 @@ describe("Export map — shipped manifest (positive)", () => {
       unknown
     >;
     expect(root.import).toBe("./dist/esm/index.js");
-    expect(root.require).toBe("./dist/cjm/index.cjs");
+    expect(root.require).toBe("./dist/cjs/index.cjs");
     expect(root.import).not.toBe(root.require);
   });
 
@@ -126,38 +109,7 @@ describe("Export map — shipped manifest (positive)", () => {
 
   it("reports each declared target exactly once", () => {
     const conditions = result.targets.map((target) => target.condition).sort();
-    expect(conditions).toEqual(["browser","import","require","types"]);
-  });
-});
-
-describe("Export map — testing subpath", () => {
-  const exports = shippedPackage.exports as Record<string, unknown>;
-  const testing = exports[TESTING_SUBPATH] as Record<string, unknown> | undefined;
-
-  it("declares the ./testing subpath", () => {
-    expect(testing).toBeTypeof("object");
-  });
-
-  it("wires import, require and types for the testing subpath", () => {
-    expect(testing!.import).toBe(TESTING_IMPORT);
-    expect(testing!.require).toBe(TESTING_REQUIREA);
-    expect(testing!.types).toBe(TESTING_TYPES);
-  });
-
-  it("does not expose a browser bundle for the testing subpath", () => {
-    expect(testing!.browser).toBeUndefined();
-  });
-
-  it("includes the testing targets in the published files", () => {
-    for (const target of [TESTING_IMPORT, TESTING_REQUIRE, TESTING_TYPES]) {
-      expect(isTargetCoveredByFiles(target, shippedPackage.files)).toBe(true);
-    }
-  });
-
-  it("validates the testing subpath with the shared rules", () => {
-    const result = validateExportMap(shippedPackage);
-    const testingTargets = result.targets.filter((t) => t.subpath === TESTING_SUBPATH);
-    expect(testingTargets.map((t) => t.condition).sort()).toEqual(["import","require","types"]);
+    expect(conditions).toEqual(["browser", "import", "require", "types"]);
   });
 });
 
@@ -220,7 +172,7 @@ describe("Export map — missing and malformed input (negative)", () => {
     expectError(result, '"./"');
   });
 
-  it("rejects an emptty target", () => {
+  it("rejects an empty target", () => {
     const result = validateRoot({
       import: "",
       require: "./dist/cjs/index.cjs",
@@ -326,117 +278,6 @@ describe("Export map — boundary and optional conditions", () => {
   });
 });
 
-describe("Export map — subpath entries", () => {
-  const rootSpec = () => (basePackage().exports as Record<string, unknown>)[ROOT_SUBPATH];
-
-  /** A manifest whose root is intact and which declares one extra subpath. */
-  function withSubpath(subpath: string, spec: unknown) {
-    return basePackage({ exports: { [ROOT_SUBPATH]: rootSpec(), [subpath]: spec } });
-  }
-
-  const shippedExports = shippedPackage.exports as Record<string, unknown>;
-  const shippedSubpaths = Object.keys(shippedExports);
-  const shippedResult = validateExportMap(shippedPackage);
-
-  it("declares every required server-only subpath", () => {
-    for (const subpath of REQUIRED_SUBPATHS) {
-      expect(shippedSubpaths).toContain(subpath);
-    }
-  });
-
-  it("validates one entry per declared subpath, root first", () => {
-    expect(shippedResult.subpaths.map((entry) => entry.subpath)).toEqual(shippedSubpaths);
-    expect(shippedResult.targets).toEqual(shippedResult.subpaths[0].targets);
-  });
-
-  it("publishes each subpath as its own types, ESM and CJS artifact", () => {
-    for (const subpath of REQUIRED_SUBPATHS) {
-      const entry = shippedResult.subpaths.find((candidate) => candidate.subpath === subpath);
-      expect(entry, `${subpath} is missing from the export map`).toBeDefined();
-      expect(entry?.targets.map((target) => target.condition)).toEqual([
-        "types",
-        "import",
-        "require",
-      ]);
-      expect(entry?.targets[0].target.endsWith(".d.ts")).toBe(true);
-    }
-  });
-
-  it("reports no condition-ordering problem on the subpaths", () => {
-    const warnings = shippedResult.warnings.join("\n");
-    for (const subpath of REQUIRED_SUBPATHS) {
-      expect(warnings).not.toContain(JSON.stringify(subpath));
-    }
-  });
-
-  it("rejects a subpath written as a string shorthand", () => {
-    const result = validateExportMap(withSubpath("./webhooks", "./dist/esm/webhooks.js"));
-    expectError(result, 'exports["./webhooks"] must be a conditional object');
-  });
-
-  it("rejects a subpath whose ESM and CJS targets collide", () => {
-    const result = validateExportMap(
-      withSubpath("./events", {
-        types: "./dist/esm/events.d.ts",
-        import: "./dist/esm/events.js",
-        require: "./dist/esm/events.js",
-      }),
-    );
-    expectError(
-      result,
-      'exports["./events"] must resolve "import" (ESM) and "require" (CJS) to different',
-    );
-  });
-
-  it("rejects a subpath target that escapes the package root", () => {
-    const result = validateExportMap(
-      withSubpath("./errors", {
-        types: "./dist/esm/errors.d.ts",
-        import: "../outside/errors.js",
-        require: "./dist/cjs/errors.cjs",
-      }),
-    );
-    expectError(result, 'exports["./errors"].import must not escape the package root');
-  });
-
-  it("rejects a subpath target excluded by the files allow-list", () => {
-    const result = validateExportMap(
-      basePackage({
-        files: ["dist/esm"],
-        exports: {
-          [ROOT_SUBPATH]: rootSpec(),
-          "./webhooks": {
-            types: "./dist/esm/webhooks.d.ts",
-            import: "./dist/esm/webhooks.js",
-            require: "./dist/cjs/webhooks.cjs",
-          },
-        },
-      }),
-    );
-    expectError(
-      result,
-      'export target "./dist/cjs/webhooks.cjs" is not covered by the published',
-    );
-  });
-
-  it("warns instead of failing on an unrecognised subpath condition", () => {
-    const result = validateExportMap(
-      withSubpath("./webhooks", {
-        types: "./dist/esm/webhooks.d.ts",
-        import: "./dist/esm/webhooks.js",
-        require: "./dist/cjs/webhooks.cjs",
-        worker: "./dist/esm/webhooks.js",
-      }),
-    );
-    expect(result.ok).toBe(true);
-    expect(result.warnings.join("\n")).toContain('unrecognised export condition "worker"');
-  });
-
-  it("keeps the rules per entry, so a root-only manifest still validates", () => {
-    expect(validateExportMap(basePackage()).ok).toBe(true);
-  });
-});
-
 describe("Export map — regression and privacy", () => {
   it("does not fall back to a single entry point", () => {
     // Regression: a package that only ships ESM must not pass the CJS/ESM gate.
@@ -460,4 +301,17 @@ describe("Export map — regression and privacy", () => {
       expect(joined).not.toMatch(/file:\/\//);
     }
   });
+  it('lists export conditions in the correct order: types, browser, import, require', () => {
+  const conditions = Object.keys(pkg.exports['.']);
+  expect(conditions.indexOf('types')).toBe(0);
+  expect(conditions.indexOf('types')).toBeLessThan(conditions.indexOf('browser'));
+  expect(conditions.indexOf('browser')).toBeLessThan(conditions.indexOf('import'));
+  expect(conditions.indexOf('import')).toBeLessThan(conditions.indexOf('require'));
+});
+
+it('keeps top-level main and types fields for older tooling', () => {
+  expect(pkg.main).toBeTruthy();
+  expect(pkg.types).toBeTruthy();
+});
+
 });

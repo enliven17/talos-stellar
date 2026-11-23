@@ -3,7 +3,7 @@ import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsApiKeys } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
-import { verifyAgentApiKey } from "@/lib/auth";
+import { authorizeApiKeyManagement } from "@/lib/api-key-owner-auth";
 import { parseBody } from "@/lib/schemas";
 import { updateApiKeySchema } from "@/lib/schemas";
 
@@ -15,8 +15,8 @@ async function _PATCH(
   const { id, keyId } = await params;
 
   try {
-    const auth = await verifyAgentApiKey(request, id, ["admin"]);
-    if (!auth.ok) return auth.response;
+    const authorizationError = await authorizeApiKeyManagement(request, id);
+    if (authorizationError) return authorizationError;
 
     const key = await db
       .select()
@@ -71,8 +71,8 @@ async function _DELETE(
   const { id, keyId } = await params;
 
   try {
-    const auth = await verifyAgentApiKey(request, id, ["admin"]);
-    if (!auth.ok) return auth.response;
+    const authorizationError = await authorizeApiKeyManagement(request, id);
+    if (authorizationError) return authorizationError;
 
     const key = await db
       .select()

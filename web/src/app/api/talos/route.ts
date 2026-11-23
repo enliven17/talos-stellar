@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { withTransactionRetry } from "@/db/db-retry";
 import { tlsTalos, tlsPatrons, tlsCommerceServices } from "@/db/schema";
-import { and, desc, eq, ilike, lt, or, sql, type SQLWrapper } from "drizzle-orm";
+import { and, desc, eq, ilike, isNull, lt, or, sql, type SQLWrapper } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { createAgentKeypair, fundTestnetAccount, verifyStellarSignature } from "@/lib/stellar";
 import { createTalosSchema, parseBody } from "@/lib/schemas";
@@ -103,6 +103,10 @@ async function _GET(request: NextRequest) {
     if (!parsedCategory.ok) return parsedCategory.response;
     const categoryFilter = parsedCategory.category;
 
+    const parsedAddress = parseDirectoryAddressFilter(searchParams.get("address"));
+    if (!parsedAddress.ok) return parsedAddress.response;
+    const addressFilter = parsedAddress.address;
+
     // -----------------------------------------------------------------------
     // Numeric filter validation
     // -----------------------------------------------------------------------
@@ -153,7 +157,7 @@ async function _GET(request: NextRequest) {
 
     // Loop until we fulfill the limit or exhaust the DB
     while (accumulated.length < limit && !exhausted) {
-      const conditions = [];
+      const conditions = [isNull(tlsTalos.deletedAt)];
 
       // Apply status filter (defaults to excluding "Deleted" if no filter provided)
       if (statusFilter !== null) {
@@ -163,6 +167,15 @@ async function _GET(request: NextRequest) {
       // Apply category filter
       if (categoryFilter !== null) {
         conditions.push(ilike(tlsTalos.category, categoryFilter));
+      }
+
+      if (addressFilter !== null) {
+        conditions.push(or(
+          eq(tlsTalos.walletPublicKey, addressFilter),
+          eq(tlsTalos.creatorPublicKey, addressFilter),
+          eq(tlsTalos.investorPublicKey, addressFilter),
+          eq(tlsTalos.treasuryPublicKey, addressFilter),
+        )!);
       }
 
       if (currentCursor) {
@@ -438,6 +451,10 @@ async function _POST(request: NextRequest) {
   }
 }
 
-// Re-export POST wrapped with drift detection.
-// The original async function above is kept intact so it can be tested directly.
+// Re-export GET and POST wrapped with drift detection.
+// The original async functions above are kept intact so they can be tested directly.
+export const GET = withRequestId(withDriftDetection("GET /api/talos", _GET));
 export const POST = withRequestId(withDriftDetection("POST /api/talos", _POST));
+
+export { _GET, _POST };
+

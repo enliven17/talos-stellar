@@ -1,7 +1,7 @@
 {
-  "spec_version": "1.3.0",
+  "spec_version": "1.4.0",
   "format": "talos-event-fixtures",
-  "description": "Canonical, versioned event-query fixtures for indexers consuming Talos Soroban contract events by topic and ledger range. Consumers load this JSON directly (TypeScript, Python, Rust). Any change that alters decoding MUST bump spec_version and follow the versioning rules in contracts/EVENTS.md.",
+  "description": "Canonical, versioned event-query fixtures for indexers consuming Talos Soroban contract events by topic and ledger range. Consumers load this JSON directly (TypeScript, Python, Rust). Any change that alters decoding MUST bump spec_version and follow the versioning rules in contracts/EVENTS.md. v1.3.0: governance events now carry typed struct payloads (EventProposalCreated, EventVoteCast, EventProposalStatusChanged) instead of raw tuples; full action/vote/execution fixture bundle added.",
   "bounds": {
     "min_page_size": 1,
     "max_page_size": 100,
@@ -75,35 +75,49 @@
     "governance": {
       "prop_crt": {
         "contract": "talos_governance",
+        "encoding": "typed_struct",
+        "struct": "EventProposalCreated",
+        "note": "data is a contracttype-encoded struct, not a raw tuple. Decode as EventProposalCreated { proposal_id, talos_id, proposer, snapshot_ledger, end_ledger }.",
         "topics": [
           { "position": 0, "type": "symbol", "name": "event", "description": "event type symbol" },
           { "position": 1, "type": "u32", "name": "proposal_id" }
         ],
         "data": [
-          { "position": 0, "type": "u32", "name": "talos_id" },
-          { "position": 1, "type": "address", "name": "proposer" }
+          { "position": 0, "type": "u32", "name": "proposal_id" },
+          { "position": 1, "type": "u32", "name": "talos_id" },
+          { "position": 2, "type": "address", "name": "proposer" },
+          { "position": 3, "type": "u32", "name": "snapshot_ledger" },
+          { "position": 4, "type": "u32", "name": "end_ledger" }
         ]
       },
       "vote": {
         "contract": "talos_governance",
+        "encoding": "typed_struct",
+        "struct": "EventVoteCast",
+        "note": "data is a contracttype-encoded struct, not a raw tuple. Decode as EventVoteCast { proposal_id, voter, choice, weight }. choice is VoteChoice (Approve | Reject).",
         "topics": [
           { "position": 0, "type": "symbol", "name": "event", "description": "event type symbol" },
           { "position": 1, "type": "u32", "name": "proposal_id" }
         ],
         "data": [
-          { "position": 0, "type": "address", "name": "voter" },
-          { "position": 1, "type": "symbol", "name": "choice" },
-          { "position": 2, "type": "i128", "name": "weight" }
+          { "position": 0, "type": "u32", "name": "proposal_id" },
+          { "position": 1, "type": "address", "name": "voter" },
+          { "position": 2, "type": "symbol", "name": "choice", "variants": ["Approve", "Reject"] },
+          { "position": 3, "type": "i128", "name": "weight" }
         ]
       },
       "prop_stat": {
         "contract": "talos_governance",
+        "encoding": "typed_struct",
+        "struct": "EventProposalStatusChanged",
+        "note": "data is a contracttype-encoded struct, not a raw tuple. Decode as EventProposalStatusChanged { proposal_id, status }. status is ProposalStatus (Active | Approved | Rejected | Executed).",
         "topics": [
           { "position": 0, "type": "symbol", "name": "event", "description": "event type symbol" },
           { "position": 1, "type": "u32", "name": "proposal_id" }
         ],
         "data": [
-          { "position": 0, "type": "symbol", "name": "status" }
+          { "position": 0, "type": "u32", "name": "proposal_id" },
+          { "position": 1, "type": "symbol", "name": "status", "variants": ["Active", "Approved", "Rejected", "Executed"] }
         ]
       },
       "qrm_rchd": {
@@ -118,6 +132,23 @@
           { "position": 1, "type": "i128", "name": "votes_cast" },
           { "position": 2, "type": "i128", "name": "quorum_threshold" },
           { "position": 3, "type": "i128", "name": "approval_bps" }
+        ]
+      },
+      "cfg_upd": {
+        "contract": "talos_governance",
+        "description": "Emitted once after a successful governance configuration update, with old and new values.",
+        "topics": [
+          { "position": 0, "type": "symbol", "name": "event", "description": "event type symbol" }
+        ],
+        "data": [
+          { "position": 0, "type": "i128", "name": "old_quorum_threshold" },
+          { "position": 1, "type": "i128", "name": "new_quorum_threshold" },
+          { "position": 2, "type": "i128", "name": "old_consensus_threshold" },
+          { "position": 3, "type": "i128", "name": "new_consensus_threshold" },
+          { "position": 4, "type": "u32", "name": "old_voting_period_ledgers" },
+          { "position": 5, "type": "u32", "name": "new_voting_period_ledgers" },
+          { "position": 6, "type": "address", "name": "old_pulse_token_address" },
+          { "position": 7, "type": "address", "name": "new_pulse_token_address" }
         ]
       }
     },
@@ -298,6 +329,8 @@
       "id": "governance.prop_crt.normal",
       "family": "governance",
       "event": "prop_crt",
+      "encoding": "typed_struct",
+      "struct": "EventProposalCreated",
       "contract": "talos_governance",
       "ledger_sequence": 100100,
       "tx_index_in_ledger": 0,
@@ -307,22 +340,36 @@
         { "type": "symbol", "value": "prop_crt" },
         { "type": "u32", "value": 7 }
       ],
-      "data": [
-        { "type": "u32", "value": 1 },
-        { "type": "address", "value": "GDURVWHBP27CFBLJKVI2UISXSQU52MJABOJWVFKJKFYWDC6E6GDOTIFW" }
-      ],
+      "data": {
+        "struct": "EventProposalCreated",
+        "fields": {
+          "proposal_id": 7,
+          "talos_id": 1,
+          "proposer": "GDURVWHBP27CFBLJKVI2UISXSQU52MJABOJWVFKJKFYWDC6E6GDOTIFW",
+          "snapshot_ledger": 100090,
+          "end_ledger": 100120
+        }
+      },
       "decoded": {
         "event": "prop_crt",
         "contract": "talos_governance",
         "ledger_sequence": 100100,
         "topics": { "event": "prop_crt", "proposal_id": 7 },
-        "data": { "talos_id": 1, "proposer": "GDURVWHBP27CFBLJKVI2UISXSQU52MJABOJWVFKJKFYWDC6E6GDOTIFW" }
+        "data": {
+          "proposal_id": 7,
+          "talos_id": 1,
+          "proposer": "GDURVWHBP27CFBLJKVI2UISXSQU52MJABOJWVFKJKFYWDC6E6GDOTIFW",
+          "snapshot_ledger": 100090,
+          "end_ledger": 100120
+        }
       }
     },
     {
-      "id": "governance.vote.normal",
+      "id": "governance.vote.approve",
       "family": "governance",
       "event": "vote",
+      "encoding": "typed_struct",
+      "struct": "EventVoteCast",
       "contract": "talos_governance",
       "ledger_sequence": 100110,
       "tx_index_in_ledger": 0,
@@ -332,23 +379,61 @@
         { "type": "symbol", "value": "vote" },
         { "type": "u32", "value": 7 }
       ],
-      "data": [
-        { "type": "address", "value": "GD7B7EF2S2AHRXDZVOBRUKFOXF373C7J43LAACLCL2NW4XKEFFH63NMK" },
-        { "type": "symbol", "value": "Approve" },
-        { "type": "i128", "value": 150 }
-      ],
+      "data": {
+        "struct": "EventVoteCast",
+        "fields": {
+          "proposal_id": 7,
+          "voter": "GD7B7EF2S2AHRXDZVOBRUKFOXF373C7J43LAACLCL2NW4XKEFFH63NMK",
+          "choice": "Approve",
+          "weight": 150
+        }
+      },
       "decoded": {
         "event": "vote",
         "contract": "talos_governance",
         "ledger_sequence": 100110,
         "topics": { "event": "vote", "proposal_id": 7 },
-        "data": { "voter": "GD7B7EF2S2AHRXDZVOBRUKFOXF373C7J43LAACLCL2NW4XKEFFH63NMK", "choice": "Approve", "weight": 150 }
+        "data": { "proposal_id": 7, "voter": "GD7B7EF2S2AHRXDZVOBRUKFOXF373C7J43LAACLCL2NW4XKEFFH63NMK", "choice": "Approve", "weight": 150 }
       }
     },
     {
-      "id": "governance.prop_stat.normal",
+      "id": "governance.vote.reject",
+      "family": "governance",
+      "event": "vote",
+      "encoding": "typed_struct",
+      "struct": "EventVoteCast",
+      "contract": "talos_governance",
+      "ledger_sequence": 100111,
+      "tx_index_in_ledger": 1,
+      "tx_hash": "e6f70818293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f6071235",
+      "event_index_in_tx": 0,
+      "topics": [
+        { "type": "symbol", "value": "vote" },
+        { "type": "u32", "value": 7 }
+      ],
+      "data": {
+        "struct": "EventVoteCast",
+        "fields": {
+          "proposal_id": 7,
+          "voter": "GBUC4RLWOMRLPAIL4UZPB3MZYHVMMCC2UUEOVJ4DCFVHWHHRT7WY4F33",
+          "choice": "Reject",
+          "weight": 50
+        }
+      },
+      "decoded": {
+        "event": "vote",
+        "contract": "talos_governance",
+        "ledger_sequence": 100111,
+        "topics": { "event": "vote", "proposal_id": 7 },
+        "data": { "proposal_id": 7, "voter": "GBUC4RLWOMRLPAIL4UZPB3MZYHVMMCC2UUEOVJ4DCFVHWHHRT7WY4F33", "choice": "Reject", "weight": 50 }
+      }
+    },
+    {
+      "id": "governance.prop_stat.approved",
       "family": "governance",
       "event": "prop_stat",
+      "encoding": "typed_struct",
+      "struct": "EventProposalStatusChanged",
       "contract": "talos_governance",
       "ledger_sequence": 100120,
       "tx_index_in_ledger": 0,
@@ -358,15 +443,79 @@
         { "type": "symbol", "value": "prop_stat" },
         { "type": "u32", "value": 7 }
       ],
-      "data": [
-        { "type": "symbol", "value": "Approved" }
-      ],
+      "data": {
+        "struct": "EventProposalStatusChanged",
+        "fields": {
+          "proposal_id": 7,
+          "status": "Approved"
+        }
+      },
       "decoded": {
         "event": "prop_stat",
         "contract": "talos_governance",
         "ledger_sequence": 100120,
         "topics": { "event": "prop_stat", "proposal_id": 7 },
-        "data": { "status": "Approved" }
+        "data": { "proposal_id": 7, "status": "Approved" }
+      }
+    },
+    {
+      "id": "governance.prop_stat.executed",
+      "family": "governance",
+      "event": "prop_stat",
+      "encoding": "typed_struct",
+      "struct": "EventProposalStatusChanged",
+      "contract": "talos_governance",
+      "ledger_sequence": 100130,
+      "tx_index_in_ledger": 0,
+      "tx_hash": "a70819293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f60712346",
+      "event_index_in_tx": 0,
+      "topics": [
+        { "type": "symbol", "value": "prop_stat" },
+        { "type": "u32", "value": 7 }
+      ],
+      "data": {
+        "struct": "EventProposalStatusChanged",
+        "fields": {
+          "proposal_id": 7,
+          "status": "Executed"
+        }
+      },
+      "decoded": {
+        "event": "prop_stat",
+        "contract": "talos_governance",
+        "ledger_sequence": 100130,
+        "topics": { "event": "prop_stat", "proposal_id": 7 },
+        "data": { "proposal_id": 7, "status": "Executed" }
+      }
+    },
+    {
+      "id": "governance.prop_stat.rejected",
+      "family": "governance",
+      "event": "prop_stat",
+      "encoding": "typed_struct",
+      "struct": "EventProposalStatusChanged",
+      "contract": "talos_governance",
+      "ledger_sequence": 100140,
+      "tx_index_in_ledger": 0,
+      "tx_hash": "b80920293a4b5c6d7e8f901112131415161718192a2b2c3d4e5f60712347",
+      "event_index_in_tx": 0,
+      "topics": [
+        { "type": "symbol", "value": "prop_stat" },
+        { "type": "u32", "value": 8 }
+      ],
+      "data": {
+        "struct": "EventProposalStatusChanged",
+        "fields": {
+          "proposal_id": 8,
+          "status": "Rejected"
+        }
+      },
+      "decoded": {
+        "event": "prop_stat",
+        "contract": "talos_governance",
+        "ledger_sequence": 100140,
+        "topics": { "event": "prop_stat", "proposal_id": 8 },
+        "data": { "proposal_id": 8, "status": "Rejected" }
       }
     },
     {
@@ -394,6 +543,45 @@
         "ledger_sequence": 100115,
         "topics": { "event": "qrm_rchd", "proposal_id": 7 },
         "data": { "proposal_id": 7, "votes_cast": 100, "quorum_threshold": 100, "approval_bps": 6000 }
+      }
+    },
+    {
+      "id": "governance.cfg_upd.normal",
+      "family": "governance",
+      "event": "cfg_upd",
+      "contract": "talos_governance",
+      "ledger_sequence": 100130,
+      "tx_index_in_ledger": 0,
+      "tx_hash": "18293a4b5c6d7e8f901112131415161718192a2b3c4d5e6f708192a3b4c5d6e7f",
+      "event_index_in_tx": 0,
+      "topics": [
+        { "type": "symbol", "value": "cfg_upd" }
+      ],
+      "data": [
+        { "type": "i128", "value": 100 },
+        { "type": "i128", "value": 250 },
+        { "type": "i128", "value": 5100 },
+        { "type": "i128", "value": 7500 },
+        { "type": "u32", "value": 20 },
+        { "type": "u32", "value": 30 },
+        { "type": "address", "value": "GDURVWHBP27CFBLJKVI2UISXSQU52MJABOJWVFKJKFYWDC6E6GDOTIFW" },
+        { "type": "address", "value": "GAUC4C3V3FNCSJBILLB56MAVMUTOWQR2YQ5P7LTL2SDGC5CQ4D7WHER7" }
+      ],
+      "decoded": {
+        "event": "cfg_upd",
+        "contract": "talos_governance",
+        "ledger_sequence": 100130,
+        "topics": { "event": "cfg_upd" },
+        "data": {
+          "old_quorum_threshold": 100,
+          "new_quorum_threshold": 250,
+          "old_consensus_threshold": 5100,
+          "new_consensus_threshold": 7500,
+          "old_voting_period_ledgers": 20,
+          "new_voting_period_ledgers": 30,
+          "old_pulse_token_address": "GDURVWHBP27CFBLJKVI2UISXSQU52MJABOJWVFKJKFYWDC6E6GDOTIFW",
+          "new_pulse_token_address": "GAUC4C3V3FNCSJBILLB56MAVMUTOWQR2YQ5P7LTL2SDGC5CQ4D7WHER7"
+        }
       }
     },
     {
@@ -593,6 +781,76 @@
           { "type": "string", "value": "Genesis" },
           { "type": "string", "value": "Marketing" }
         ]
+      }
+    },
+    {
+      "id": "malformed.governance.vote_missing_weight",
+      "reason": "governance vote struct missing weight field — struct decode must fail",
+      "fixture": {
+        "id": "malformed.governance.vote_missing_weight.fixture",
+        "family": "governance",
+        "event": "vote",
+        "contract": "talos_governance",
+        "ledger_sequence": 7,
+        "topics": [
+          { "type": "symbol", "value": "vote" },
+          { "type": "u32", "value": 1 }
+        ],
+        "data": {
+          "struct": "EventVoteCast",
+          "fields": {
+            "proposal_id": 1,
+            "voter": "GD7B7EF2S2AHRXDZVOBRUKFOXF373C7J43LAACLCL2NW4XKEFFH63NMK",
+            "choice": "Approve"
+          }
+        }
+      }
+    },
+    {
+      "id": "malformed.governance.prop_stat_invalid_status",
+      "reason": "governance prop_stat struct carries an unrecognised status variant",
+      "fixture": {
+        "id": "malformed.governance.prop_stat_invalid_status.fixture",
+        "family": "governance",
+        "event": "prop_stat",
+        "contract": "talos_governance",
+        "ledger_sequence": 8,
+        "topics": [
+          { "type": "symbol", "value": "prop_stat" },
+          { "type": "u32", "value": 1 }
+        ],
+        "data": {
+          "struct": "EventProposalStatusChanged",
+          "fields": {
+            "proposal_id": 1,
+            "status": "Cancelled"
+          }
+        }
+      }
+    },
+    {
+      "id": "malformed.governance.prop_crt_topic1_not_u32",
+      "reason": "governance prop_crt topic[1] must be u32 proposal_id, got an address",
+      "fixture": {
+        "id": "malformed.governance.prop_crt_topic1_not_u32.fixture",
+        "family": "governance",
+        "event": "prop_crt",
+        "contract": "talos_governance",
+        "ledger_sequence": 9,
+        "topics": [
+          { "type": "symbol", "value": "prop_crt" },
+          { "type": "address", "value": "GDURVWHBP27CFBLJKVI2UISXSQU52MJABOJWVFKJKFYWDC6E6GDOTIFW" }
+        ],
+        "data": {
+          "struct": "EventProposalCreated",
+          "fields": {
+            "proposal_id": 1,
+            "talos_id": 1,
+            "proposer": "GDURVWHBP27CFBLJKVI2UISXSQU52MJABOJWVFKJKFYWDC6E6GDOTIFW",
+            "snapshot_ledger": 90,
+            "end_ledger": 120
+          }
+        }
       }
     }
   ]

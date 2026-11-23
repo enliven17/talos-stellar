@@ -17,8 +17,12 @@
 
 /** Default budget, kept in sync with bundle-size.config.json. */
 export const DEFAULT_BUDGET = Object.freeze({
-  maxRawBytes: 1_120_000,
-  maxGzipBytes: 310_000,
+  // Raised for the rate-limit observability additions (`RateLimitInfo`
+  // parsing + `onResponse` observer) and the restoration of the
+  // seller-quote exports that a bad merge dropped from index.ts: the bundle
+  // measures 1_124_316 bytes raw / 310_626 bytes gzip (+0.4% / +0.2%).
+  maxRawBytes: 1_130_000,
+  maxGzipBytes: 312_000,
 });
 
 export const SIZE_METRICS = Object.freeze(["raw", "gzip"]);

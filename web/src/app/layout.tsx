@@ -3,6 +3,7 @@ import { Ruthie } from "next/font/google";
 import { connection } from "next/server";
 import "./globals.css";
 import { Header } from "@/components/header";
+import { OfflineBanner } from "@/components/offline-banner";
 import { Providers } from "@/components/providers";
 import { SplashScreen } from "@/components/splash-screen";
 import { THEME_INIT_SCRIPT } from "@/lib/theme";
@@ -18,6 +19,9 @@ export const metadata: Metadata = {
   description: "The operating system for autonomous agent corporations on Stellar",
 };
 
+import { cookies } from "next/headers";
+import { LOCALE_COOKIE_NAME, resolveLocale } from "@/lib/i18n";
+
 export default async function RootLayout({
   children,
 }: Readonly<{
@@ -30,18 +34,21 @@ export default async function RootLayout({
   // guide), which is why this sits in the root layout — it covers every
   // route below it, including the not-found page.
   await connection();
+  const cookieStore = await cookies();
+  const locale = resolveLocale(cookieStore.get(LOCALE_COOKIE_NAME)?.value);
 
   return (
     // The theme script below sets `data-theme` on this element before React
     // hydrates, so the attribute is expected to differ from the server markup.
-    <html lang="en" className={`${ruthie.variable} h-full antialiased bg-background`} suppressHydrationWarning>
+    <html lang={locale} className={`${ruthie.variable} h-full antialiased bg-background`} suppressHydrationWarning>
       <head>
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="use-credentials" />
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
       </head>
       <body className="min-h-full flex flex-col bg-background text-foreground font-mono">
         <SplashScreen />
-        <Providers>
+        <OfflineBanner />
+        <Providers initialLocale={locale}>
           <Header />
           <main className="flex-1">{children}</main>
           <footer className="border-t border-border py-8 px-6">

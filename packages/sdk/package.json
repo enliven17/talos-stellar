@@ -7,10 +7,10 @@
   "types": "dist/esm/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/esm/index.js",
-      "require": "./dist/cjs/index.cjs",
       "types": "./dist/esm/index.d.ts",
-      "browser": "./dist/browser/sdk.bundle.js"
+      "browser": "./dist/browser/sdk.bundle.js",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.cjs"
     },
     "./webhooks": {
       "types": "./dist/esm/webhooks.d.ts",
@@ -56,13 +56,13 @@
     "verify:browser": "npm run build:browser && npm run check:bundle-size && npm run compat:browser-bundle"
   },
   "dependencies": {
-    "@stellar/stellar-sdk": "^14.2.0"
+    "@stellar/stellar-sdk": "^17.2.1"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "esbuild": "^0.27.0",
+    "@types/node": "^26.6.5",
+    "esbuild": "^0.28.2",
     "openapi-typescript": "^7.4.3",
-    "typescript": "^5.7.0",
+    "typescript": "^5.9.3",
     "vitest": "^4.1.2"
   },
   "license": "MIT",

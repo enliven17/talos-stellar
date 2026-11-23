@@ -17,8 +17,8 @@
  */
 
 interface AgentAvailabilityBadgeProps {
-  agentOnline: boolean;
-  agentLastSeen: string | null;
+  agentOnline?: boolean;
+  agentLastSeen?: string | null;
   status?: string;
   showLastSeen?: boolean;
   size?: "sm" | "md" | "lg";
@@ -69,8 +69,8 @@ const SIZE_MAP = {
 };
 
 export function AgentAvailabilityBadge({
-  agentOnline,
-  agentLastSeen,
+  agentOnline = false,
+  agentLastSeen = null,
   status = "Active",
   showLastSeen = true,
   size = "md",

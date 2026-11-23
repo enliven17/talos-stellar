@@ -69,6 +69,16 @@ class TestCommerceLifecycle:
         ).fetchone()
         assert row["status"] == "completed"
 
+    def test_get_commerce_jobs_recent_first(self, mock_db: LocalDB):
+        mock_db.add_commerce_job("job-1", "talos-a", "research")
+        mock_db.add_commerce_job("job-2", "talos-b", "analysis")
+        mock_db.update_commerce_status("job-2", "completed")
+
+        jobs = mock_db.get_commerce_jobs(25)
+
+        assert [job["job_id"] for job in jobs] == ["job-2", "job-1"]
+        assert jobs[0]["status"] == "completed"
+        assert jobs[0]["talos_id"] == "talos-b"
     def test_duplicate_ignored(self, mock_db: LocalDB):
         mock_db.add_commerce_job("job-dup", "c1", "svc")
         mock_db.add_commerce_job("job-dup", "c2", "svc2")  # Should be ignored
@@ -89,6 +99,77 @@ class TestCommerceLifecycle:
         mock_db.update_commerce_status("job-3", "failed")
 
         assert mock_db.count_pending_commerce_jobs() == 1
+
+    def test_prune_completed_payloads_keeps_financial_record(self, mock_db: LocalDB):
+        mock_db.add_commerce_job("job-old", "seller", "research", {"private": "output"})
+        mock_db.update_commerce_status("job-old", "completed")
+        mock_db._conn.execute(
+            "UPDATE commerce_queue SET updated_at = datetime('now', '-31 days'), "
+            "payload_retained_until = datetime('now', '-1 day')"
+        )
+        mock_db.record_spending(2.5, "x402_purchase", "job-old")
+        assert mock_db.prune_completed_commerce_payloads(30) == 1
+        row = mock_db._conn.execute(
+            "SELECT job_id, status, payload FROM commerce_queue WHERE job_id = 'job-old'"
+        ).fetchone()
+        assert row["job_id"] == "job-old"
+        assert row["status"] == "completed"
+        assert row["payload"] is None
+        assert mock_db.get_spending_period(30) == 2.5
+
+    def test_prune_completed_payloads_is_idempotent_and_preserves_pending(self, mock_db: LocalDB):
+        mock_db.add_commerce_job("job-done", "seller", "research", {"private": "output"})
+        mock_db.update_commerce_status("job-done", "completed")
+        mock_db._conn.execute(
+            "UPDATE commerce_queue SET updated_at = datetime('now', '-31 days'), "
+            "payload_retained_until = datetime('now', '-1 day')"
+        )
+        mock_db.add_commerce_job("job-pending", "seller", "research", {"private": "output"})
+        assert mock_db.prune_completed_commerce_payloads(30) == 1
+        assert mock_db.prune_completed_commerce_payloads(30) == 0
+        pending = mock_db._conn.execute(
+            "SELECT payload FROM commerce_queue WHERE job_id = 'job-pending'"
+        ).fetchone()
+        assert pending["payload"] is not None
+
+    def test_completion_lifecycle_prunes_a_bounded_batch(self, mock_db: LocalDB):
+        old_jobs = [
+            (f"old-{i}", "seller", "research", '{"private":"output"}', "completed", "2000-01-01")
+            for i in range(101)
+        ]
+        mock_db._conn.executemany(
+            "INSERT INTO commerce_queue "
+            "(job_id, talos_id, service_type, payload, status, payload_retained_until) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            old_jobs,
+        )
+        mock_db._conn.commit()
+        mock_db.add_commerce_job("job-current", "seller", "research", {"private": "new"})
+
+        # Completing a purchase is the normal cleanup path. One pass may scrub
+        # at most 100 expired rows, while the current result gets its deadline.
+        mock_db.update_commerce_status("job-current", "completed")
+        remaining = mock_db._conn.execute(
+            "SELECT COUNT(*) FROM commerce_queue "
+            "WHERE job_id LIKE 'old-%' AND payload IS NOT NULL"
+        ).fetchone()[0]
+        assert remaining == 1
+
+        row = mock_db._conn.execute(
+            "SELECT payload, payload_retained_until FROM commerce_queue "
+            "WHERE job_id = 'job-current'"
+        ).fetchone()
+        original_deadline = row["payload_retained_until"]
+        assert row["payload"] == '{"private": "new"}'
+        assert original_deadline is not None
+        assert original_deadline > "2000-01-01"
+
+        # Repeated completion polls do not extend the retention window.
+        mock_db.update_commerce_status("job-current", "completed")
+        repeated = mock_db._conn.execute(
+            "SELECT payload_retained_until FROM commerce_queue WHERE job_id = 'job-current'"
+        ).fetchone()[0]
+        assert repeated == original_deadline
 
 
 class TestPlaybookLookup:
@@ -261,3 +342,27 @@ class TestDividendLifecycle:
         mock_db.record_dividend("GABC123", "VEGA", 10.0, tx_hash="txabc123")
         history = mock_db.get_dividend_history()
         assert history[0]["tx_hash"] == "txabc123"
+
+
+class TestContentHistoryLifecycle:
+    def test_add_content_returns_id(self, mock_db: LocalDB):
+        cid = mock_db.add_content("New post content", "X")
+        assert isinstance(cid, int)
+        assert cid > 0
+
+    def test_get_content_found(self, mock_db: LocalDB):
+        cid = mock_db.add_content("Found post", "telegram")
+        post = mock_db.get_content(cid)
+        assert post is not None
+        assert post["id"] == cid
+        assert post["content"] == "Found post"
+        assert post["channel"] == "telegram"
+
+    def test_get_content_not_found(self, mock_db: LocalDB):
+        assert mock_db.get_content(9999) is None
+
+    def test_content_exists(self, mock_db: LocalDB):
+        cid = mock_db.add_content("Check exists", "discord")
+        assert mock_db.content_exists(cid) is True
+        assert mock_db.content_exists(9999) is False
+

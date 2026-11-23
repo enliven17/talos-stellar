@@ -46,6 +46,7 @@ from talos_agent.routing.provider import TaskType
 if TYPE_CHECKING:
     from talos_agent.config import Settings
     from talos_agent.db import LocalDB
+    from talos_agent.replay.capture import EventCapture
     from talos_agent.tools.registry import ToolRegistry
 
 console = Console()
@@ -167,6 +168,7 @@ async def agent_loop(
     db: LocalDB,
     system_prompt_override: str | None = None,
     shutdown_event: asyncio.Event | None = None,
+    capture: EventCapture | None = None,
 ) -> list[dict]:
     """Run one agent cycle: LLM decides tools to call until done.
 
@@ -200,7 +202,7 @@ async def _legacy_agent_loop(
     """Original agent loop — Groq preferred, OpenAI fallback."""
     client = get_openai_client(settings.llm_api_key, settings.llm_base_url)
 
-    system_prompt = system_prompt_override or build_system_prompt(talos_config, context)
+    system_prompt = system_prompt_override or build_system_prompt(talos_config, context, settings)
     tool_schemas = tools.openai_schemas()
 
     messages: list[dict] = [
@@ -287,6 +289,13 @@ async def _legacy_agent_loop(
             console.print("[yellow]Agent hit max iterations limit.[/yellow]")
             _cycle_outcome = "max_iterations"
 
+    except asyncio.CancelledError:
+        # Terminal cancellation is not a failure — record it distinctly so
+        # cycle summaries do not report a cancelled cycle as "completed".
+        _cycle_error_type = "CancelledError"
+        _cycle_error_category = "cancelled"
+        _cycle_outcome = "cancelled"
+        raise
     except Exception as exc:
         _cycle_error_type = type(exc).__name__
         _cycle_error_category = "loop_error"
@@ -326,7 +335,7 @@ async def _routed_agent_loop(
     policy = RoutingPolicy(registry)
     usage_tracker = UsageTracker(registry) if settings.routing_budget_enabled else None
 
-    system_prompt = system_prompt_override or build_system_prompt(talos_config, context)
+    system_prompt = system_prompt_override or build_system_prompt(talos_config, context, settings)
     tool_schemas = tools.openai_schemas()
     has_tools = bool(tool_schemas)
 
@@ -486,6 +495,13 @@ async def _routed_agent_loop(
             console.print("[yellow]Agent hit max iterations limit.[/yellow]")
             _cycle_outcome = "max_iterations"
 
+    except asyncio.CancelledError:
+        # Terminal cancellation is not a failure — record it distinctly so
+        # cycle summaries do not report a cancelled cycle as "completed".
+        _cycle_error_type = "CancelledError"
+        _cycle_error_category = "cancelled"
+        _cycle_outcome = "cancelled"
+        raise
     except Exception as exc:
         _cycle_error_type = type(exc).__name__
         _cycle_error_category = "loop_error"
@@ -543,6 +559,10 @@ def _emit_cycle_summary(
 
     This function must be called exactly once per cycle — both success and
     failure paths must reach it.
+
+    ``outcome`` is one of ``completed``, ``shutdown`` (cooperative stop via
+    the shutdown event), ``cancelled`` (asyncio cancellation),
+    ``max_iterations``, ``provider_failure``, or ``error``.
     """
     ended_at = datetime.now(timezone.utc).isoformat()
     tool_calls = len(tool_names)

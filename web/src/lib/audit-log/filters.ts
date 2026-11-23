@@ -33,15 +33,29 @@ export interface AuditLogFilters {
   to?: string;
   /** Exclusive createdAt cursor (ISO-8601), paginating newest-first. */
   cursor?: string;
-  limit: number;
+  limit?: number;
 }
 
 export type FilterParseOk = { ok: true; filters: AuditLogFilters };
 export type FilterParseErr = { ok: false; error: string };
 export type FilterParseResult = FilterParseOk | FilterParseErr;
 
-const MAX_Q_LEN = 200;
-const MAX_ID_LEN = 128;
+export const MAX_Q_LEN = 200;
+export const MAX_TALOS_ID_LEN = 128;
+export const MAX_CURSOR_LEN = 64;
+export const MAX_METHOD_LEN = 16;
+
+const MAX_ID_LEN = MAX_TALOS_ID_LEN;
+
+/** Stable error thrown when audit-log filter validation fails before query execution. */
+export class AuditLogFilterError extends Error {
+  readonly code = "INVALID_AUDIT_FILTER" as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "AuditLogFilterError";
+  }
+}
 
 /** Escape `%` / `_` / `\` so user input is treated as a literal substring in ILIKE. */
 export function escapeIlikePattern(raw: string): string {
@@ -49,11 +63,140 @@ export function escapeIlikePattern(raw: string): string {
 }
 
 function parseIsoDate(raw: string, label: string): FilterParseErr | { ok: true; iso: string } {
-  const d = new Date(raw);
+  if (typeof raw !== "string") {
+    return { ok: false, error: `${label} must be a valid ISO-8601 timestamp` };
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { ok: false, error: `${label} must be a valid ISO-8601 timestamp` };
+  }
+  if (trimmed.length > MAX_CURSOR_LEN) {
+    return { ok: false, error: `${label} must be at most ${MAX_CURSOR_LEN} characters` };
+  }
+  const d = new Date(trimmed);
   if (Number.isNaN(d.getTime())) {
     return { ok: false, error: `${label} must be a valid ISO-8601 timestamp` };
   }
   return { ok: true, iso: d.toISOString() };
+}
+
+/**
+ * Validate and normalize an `AuditLogFilters` object before constructing
+ * database queries. Rejects oversized or malformed actor (`talosId`), action
+ * (`method`, `q`, `denialReason`), and `cursor` / date bounds with stable
+ * error messages so callers never execute partial queries.
+ */
+export function validateAuditLogFilters(filter: AuditLogFilters): FilterParseResult {
+  const normalized: AuditLogFilters = {};
+
+  if (filter.talosId !== undefined) {
+    if (typeof filter.talosId !== "string") {
+      return { ok: false, error: `talosId must be 1–${MAX_TALOS_ID_LEN} characters` };
+    }
+    const trimmed = filter.talosId.trim();
+    if (!trimmed || trimmed.length > MAX_TALOS_ID_LEN) {
+      return { ok: false, error: `talosId must be 1–${MAX_TALOS_ID_LEN} characters` };
+    }
+    normalized.talosId = trimmed;
+  }
+
+  if (filter.method !== undefined) {
+    if (typeof filter.method !== "string" || filter.method.length > MAX_METHOD_LEN) {
+      return {
+        ok: false,
+        error: `Invalid method. Must be one of: ${VALID_HTTP_METHODS.join(", ")}`,
+      };
+    }
+    const upper = filter.method.trim().toUpperCase();
+    if (!VALID_HTTP_METHODS.includes(upper as HttpMethod)) {
+      return {
+        ok: false,
+        error: `Invalid method. Must be one of: ${VALID_HTTP_METHODS.join(", ")}`,
+      };
+    }
+    normalized.method = upper as HttpMethod;
+  }
+
+  if (filter.q !== undefined) {
+    if (typeof filter.q !== "string") {
+      return { ok: false, error: "q must be a non-empty search string" };
+    }
+    const trimmed = filter.q.trim();
+    if (!trimmed) {
+      return { ok: false, error: "q must be a non-empty search string" };
+    }
+    if (trimmed.length > MAX_Q_LEN) {
+      return { ok: false, error: `q must be at most ${MAX_Q_LEN} characters` };
+    }
+    normalized.q = trimmed;
+  }
+
+  if (filter.statusCode !== undefined) {
+    if (
+      typeof filter.statusCode !== "number" ||
+      !Number.isInteger(filter.statusCode) ||
+      filter.statusCode < 100 ||
+      filter.statusCode > 599
+    ) {
+      return { ok: false, error: "statusCode must be between 100 and 599" };
+    }
+    normalized.statusCode = filter.statusCode;
+  }
+
+  if (filter.statusClass !== undefined) {
+    if (!VALID_STATUS_CLASSES.includes(filter.statusClass)) {
+      return {
+        ok: false,
+        error: `Invalid statusClass. Must be one of: ${VALID_STATUS_CLASSES.join(", ")}`,
+      };
+    }
+    if (normalized.statusCode !== undefined) {
+      return { ok: false, error: "statusCode and statusClass are mutually exclusive" };
+    }
+    normalized.statusClass = filter.statusClass;
+  }
+
+  if (filter.denialReason !== undefined) {
+    if (typeof filter.denialReason !== "string") {
+      return { ok: false, error: `denialReason must be 1–${MAX_Q_LEN} characters` };
+    }
+    const trimmed = filter.denialReason.trim();
+    if (!trimmed || trimmed.length > MAX_Q_LEN) {
+      return { ok: false, error: `denialReason must be 1–${MAX_Q_LEN} characters` };
+    }
+    normalized.denialReason = trimmed;
+  }
+
+  if (filter.from !== undefined) {
+    const parsed = parseIsoDate(filter.from, "from");
+    if (!parsed.ok) return parsed;
+    normalized.from = parsed.iso;
+  }
+
+  if (filter.to !== undefined) {
+    const parsed = parseIsoDate(filter.to, "to");
+    if (!parsed.ok) return parsed;
+    normalized.to = parsed.iso;
+  }
+
+  if (normalized.from && normalized.to && normalized.from > normalized.to) {
+    return { ok: false, error: "from must be earlier than or equal to to" };
+  }
+
+  if (filter.cursor !== undefined) {
+    const parsed = parseIsoDate(filter.cursor, "cursor");
+    if (!parsed.ok) return parsed;
+    normalized.cursor = parsed.iso;
+  }
+
+  if (filter.limit !== undefined) {
+    if (typeof filter.limit !== "number" || !Number.isFinite(filter.limit)) {
+      return { ok: false, error: "limit must be a positive integer" };
+    }
+    normalized.limit = filter.limit;
+  }
+
+  return { ok: true, filters: normalized };
 }
 
 /**

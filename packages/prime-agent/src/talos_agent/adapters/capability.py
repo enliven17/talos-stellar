@@ -295,6 +295,18 @@ def default_manifests(limits: AdapterResourceLimits) -> dict[str, AdapterCapabil
             network=(NetworkRule("api.telegram.org", "/", frozenset({"POST"})),),
             limits=limits,
         ),
+        "mastodon": AdapterCapabilityManifest(
+            adapter_id="mastodon",
+            operations=frozenset({"post", "reply"}),
+            secrets=frozenset({"mastodon_access_token"}),
+            # The instance URL is operator-configured; network rules are
+            # validated at runtime in MastodonAdapter._build_url so the
+            # manifest purposefully leaves the host unset here.  A deployment
+            # that enables the sandbox should override this manifest via
+            # TALOS_ADAPTER_CAPABILITY_MANIFESTS with the concrete host.
+            network=(),
+            limits=limits,
+        ),
         "x": AdapterCapabilityManifest(
             adapter_id="x",
             operations=_ADAPTER_OPERATIONS,
@@ -449,6 +461,13 @@ class ScopedSecretProvider:
 
 
 class AdapterHTTPClient(Protocol):
+    """HTTP boundary injected into HTTP-backed adapters.
+
+    Implementations provide deterministic ``get`` and ``post`` methods; test
+    clients should fail on unconfigured requests rather than falling through
+    to the network.
+    """
+
     async def get(self, url: str, **kwargs: Any) -> httpx.Response: ...
     async def post(self, url: str, **kwargs: Any) -> httpx.Response: ...
 
@@ -791,10 +810,6 @@ class AdapterInvocationStore:
                 """,
                 (owner_id, lease.isoformat(), operation_id),
             )
-            self._conn.execute(
-                "UPDATE adapter_invocations SET attempt_count = attempt_count + 1 WHERE operation_id = ?",
-                (operation_id,),
-            )
             self._conn.commit()
         except sqlite3.OperationalError as exc:
             if self._conn.in_transaction:
@@ -963,8 +978,23 @@ class SandboxedAdapter(BaseSocialAdapter):
         operation_id = kwargs.pop("operation_id", None)
         if operation_id is not None and not isinstance(operation_id, str):
             raise InvocationConflictError("operation ID must be a string")
-        if write and operation_id is None:
-            operation_id = str(uuid.uuid4())
+        if write:
+            # Issue #1464: write operations must carry a caller-supplied
+            # stable idempotency identity. Fabricating a fresh UUID here would
+            # make every retry a distinct invocation, defeating
+            # AdapterInvocationStore.admit() dedup and allowing duplicate
+            # publication on transport retry.
+            if operation_id is None:
+                raise InvocationConflictError(
+                    "operation_id is required for write operations "
+                    "(stable idempotency identity)"
+                )
+            if not operation_id.strip():
+                raise InvocationConflictError(
+                    "operation_id must be a non-empty stable idempotency identity"
+                )
+            if not _OPERATION_ID_RE.fullmatch(operation_id):
+                raise InvocationConflictError("operation ID is invalid")
         payload = _safe_json_bytes(
             {"operation": operation, "args": args, "kwargs": kwargs}
         )

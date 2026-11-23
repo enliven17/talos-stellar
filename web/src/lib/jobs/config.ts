@@ -21,6 +21,12 @@ export const jobsConfig = {
   /** How long a lease is held before it's eligible for reaping, in ms. */
   leaseDurationMs: envInt("JOBS_LEASE_DURATION_MS", 30_000),
 
+  /** Maximum duration a single lease extension request may add or set, in ms. */
+  maxLeaseExtensionMs: envInt("JOBS_MAX_LEASE_EXTENSION_MS", 3_600_000),
+
+  /** Maximum absolute future horizon a lease may be extended to from `now`, in ms. */
+  maxLeaseHorizonMs: envInt("JOBS_MAX_LEASE_HORIZON_MS", 86_400_000),
+
   /** How often a running handler should be expected to heartbeat, in ms. */
   heartbeatIntervalMs: envInt("JOBS_HEARTBEAT_INTERVAL_MS", 10_000),
 
@@ -35,6 +41,12 @@ export const jobsConfig = {
 
   /** Grace period for in-flight jobs to finish during graceful shutdown, in ms. */
   shutdownGraceMs: envInt("JOBS_SHUTDOWN_GRACE_MS", 10_000),
+
+  /** Maximum serialized byte size of a persisted job `result` payload before truncation to a bounded diagnostic. */
+  maxResultBytes: envInt("JOBS_MAX_RESULT_BYTES", 65_536),
+
+  /** Maximum UTF-8 byte size of a persisted `lastError` diagnostic message before truncation. */
+  maxErrorBytes: envInt("JOBS_MAX_ERROR_BYTES", 500),
 
   /** Identifies this process in leaseOwner / logs. Stable per process lifetime. */
   workerId: process.env.JOBS_WORKER_ID || `${process.pid}-${randomUUID().slice(0, 8)}`,

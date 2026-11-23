@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import TYPE_CHECKING
 
 from rich.console import Console
@@ -16,6 +17,24 @@ if TYPE_CHECKING:
     from talos_agent.db import LocalDB
 
 console = Console()
+
+# Documented maximum plausible values for engagement metrics.
+# Values exceeding these ceilings are clamped to avoid skewing downstream analytics
+# and prevent overflow while still recording the interaction.
+MAX_LIKES: int = 100_000_000
+MAX_REPOSTS: int = 100_000_000
+MAX_REPLIES: int = 100_000_000
+MAX_IMPRESSIONS: int = 10_000_000_000
+MAX_FOLLOWERS: int = 2_000_000_000
+MAX_METRIC_DEFAULT: int = 1_000_000_000
+
+MAX_METRIC_VALUES: dict[str, int] = {
+    "likes": MAX_LIKES,
+    "reposts": MAX_REPOSTS,
+    "replies": MAX_REPLIES,
+    "impressions": MAX_IMPRESSIONS,
+    "followers_at": MAX_FOLLOWERS,
+}
 
 # Injected by registry.build_all_tools
 _db: LocalDB = None  # type: ignore[assignment]
@@ -68,14 +87,67 @@ async def record_performance(
     impressions: int = 0,
     followers_at: int = 0,
 ) -> dict:
-    _deps().db.record_performance(
+    """Record engagement metrics for a post.
+
+    Rejects non-existent content_id and negative metrics with a structured error.
+    Clamps absurd values exceeding documented ceilings (MAX_METRIC_VALUES).
+    """
+    if isinstance(content_id, bool):
+        return {"error": f"Invalid content_id: {content_id}"}
+    if isinstance(content_id, float) and content_id.is_integer():
+        content_id = int(content_id)
+    if not isinstance(content_id, int) or content_id <= 0:
+        return {"error": f"Invalid content_id: {content_id}"}
+
+    db = _deps().db
+    if db is None:
+        return {"error": "Database not initialized"}
+
+    exists = False
+    if hasattr(db, "content_exists"):
+        exists = db.content_exists(content_id)
+    elif hasattr(db, "get_content"):
+        exists = db.get_content(content_id) is not None
+    elif hasattr(db, "_conn") and db._conn is not None:
+        row = db._conn.execute(
+            "SELECT 1 FROM content_history WHERE id = ?", (content_id,)
+        ).fetchone()
+        exists = row is not None
+
+    if not exists:
+        return {"error": f"Content ID {content_id} not found"}
+
+    raw_metrics = {
+        "likes": likes,
+        "reposts": reposts,
+        "replies": replies,
+        "impressions": impressions,
+        "followers_at": followers_at,
+    }
+
+    clamped_metrics: dict[str, int] = {}
+    for name, val in raw_metrics.items():
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            return {"error": f"Metric '{name}' must be an integer, got {type(val).__name__}"}
+        if isinstance(val, float):
+            if not math.isfinite(val) or not val.is_integer():
+                return {"error": f"Metric '{name}' must be an integer, got {val}"}
+            val = int(val)
+        if val < 0:
+            return {"error": f"Metric '{name}' cannot be negative (got {val})"}
+        max_limit = MAX_METRIC_VALUES.get(name, MAX_METRIC_DEFAULT)
+        clamped_metrics[name] = min(val, max_limit)
+
+    channel_clean = channel.strip() if isinstance(channel, str) and channel.strip() else "X"
+
+    db.record_performance(
         content_id=content_id,
-        channel=channel,
-        likes=likes,
-        reposts=reposts,
-        replies=replies,
-        impressions=impressions,
-        followers_at=followers_at,
+        channel=channel_clean,
+        likes=clamped_metrics["likes"],
+        reposts=clamped_metrics["reposts"],
+        replies=clamped_metrics["replies"],
+        impressions=clamped_metrics["impressions"],
+        followers_at=clamped_metrics["followers_at"],
     )
     return {"status": "recorded", "content_id": content_id}
 

@@ -42,9 +42,8 @@ from talos_agent.circuit_breaker import (
     ProviderCircuitBreaker,
     cb_registry,
 )
+from talos_agent.response_bounds import bounded_error_body
 from talos_agent.redact import (
-    REDACT_FIELD_NAMES as SECRET_FIELD_NAMES,
-    redact_json_value as _sanitize_json_value,
     redact_text as _sanitize_response_text,
     redact_value as _strip_control_chars,
 )
@@ -122,12 +121,12 @@ class ResponseTooLargeError(Exception):
 
 def _extract_safe_response_summary(response: httpx.Response) -> str | None:
     try:
-        body = response.text
+        body = response.content
     except Exception:
         return None
     if not body:
         return None
-    return _sanitize_response_text(body)
+    return bounded_error_body(body, LOG_RESPONSE_SUMMARY_MAX_CHARS)
 
 
 def _extract_safe_exception_summary(exc: BaseException) -> str | None:

@@ -125,6 +125,15 @@ cargo test --target wasm32-unknown-unknown
 cargo build --target wasm32-unknown-unknown --release
 ```
 
+## One-command testnet bootstrap
+
+```bash
+pnpm stack:up            # local Postgres (or set DATABASE_URL)
+pnpm testnet:bootstrap   # keys, Friendbot, USDC trustline, contracts, web/.env.local, DB migrate + seed, mint
+```
+
+Testnet only, safe to re-run. See [`docs/testnet-bootstrap.md`](docs/testnet-bootstrap.md).
+
 ## One-command local integration stack
 
 The repository now includes a reproducible local stack that starts Postgres, a mock Stellar provider, the web app, and optional agent services with a single command:
@@ -312,3 +321,7 @@ Response is always `Cache-Control: no-store`.
 
 **Recommended monitoring** — wire a free [UptimeRobot](https://uptimerobot.com) or [Better Uptime](https://betteruptime.com) monitor to `GET /api/health` on a 1-minute interval. Alert on HTTP 503 for outages, and also inspect `status: "degraded"` in the JSON body so Horizon issues are visible without being treated as hard liveness failures.
 
+## Handsoff notes
+
+<!-- handsoff-issue-1384 -->
+- #1384: feat(contracts): expose a read-only registry metadata schema descriptor

@@ -708,6 +708,8 @@ async def test_api_client_forwards_stable_idempotency_key():
 
 
 def test_database_file_is_owner_only_where_supported(tmp_path: Path):
+    if os.name == "nt":
+        pytest.skip("POSIX file permissions not supported on Windows")
     path = tmp_path / "permissions.db"
     db = LocalDB(path=path)
     mode = os.stat(path).st_mode & 0o777

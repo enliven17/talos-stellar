@@ -1,10 +1,16 @@
 import { withRequestId } from "@/lib/with-request-id";
-import { NextRequest } from "next/server";
+import { NextRequest, after } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsPatrons, tlsActivities, tlsRevenues } from "@/db/schema";
 import { and, desc, eq, sql } from "drizzle-orm";
+import { calculateMarketCap } from "@/lib/market-cap";
 import { badRequest, internalError } from "@/lib/api-response";
 import { parseLimit, LEADERBOARD_DEFAULT_LIMIT, LEADERBOARD_MAX_LIMIT, MAX_CURSOR_LENGTH } from "@/lib/limits";
+import {
+  queryLeaderboardPage,
+  refreshLeaderboardAggregates,
+  type LeaderboardCursor,
+} from "@/lib/leaderboard-aggregates";
 
 // GET /api/leaderboard — Ranking data with cursor-based pagination
 async function _GET(request: NextRequest) {
@@ -15,36 +21,7 @@ async function _GET(request: NextRequest) {
     if (!parsedLimit.ok) return parsedLimit.response;
     const limit = parsedLimit.limit;
 
-    const patronCount = db
-      .select({
-        talosId: tlsPatrons.talosId,
-        count: sql<number>`count(*)::int`.as("patronCount"),
-      })
-      .from(tlsPatrons)
-      .groupBy(tlsPatrons.talosId)
-      .as("patronCount");
-
-    const activityCount = db
-      .select({
-        talosId: tlsActivities.talosId,
-        count: sql<number>`count(*)::int`.as("activityCount"),
-      })
-      .from(tlsActivities)
-      .groupBy(tlsActivities.talosId)
-      .as("activityCount");
-
-    const revenueSum = db
-      .select({
-        talosId: tlsRevenues.talosId,
-        total: sql<number>`coalesce(sum(${tlsRevenues.amount}), 0)::float`.as("revenueTotal"),
-      })
-      .from(tlsRevenues)
-      .groupBy(tlsRevenues.talosId)
-      .as("revenueSum");
-
-    const conditions: ReturnType<typeof sql>[] = [];
-
-    let parsedCursor: [number, string] | null = null;
+    let parsedCursor: LeaderboardCursor | null = null;
     if (cursor) {
       if (cursor.length > MAX_CURSOR_LENGTH) {
         return badRequest(request, "Invalid cursor");
@@ -54,10 +31,10 @@ async function _GET(request: NextRequest) {
         if (
           Array.isArray(decoded) &&
           decoded.length === 2 &&
-          typeof decoded[0] === "number" &&
+          (typeof decoded[0] === "string" || typeof decoded[0] === "number") &&
           typeof decoded[1] === "string"
         ) {
-          parsedCursor = decoded as [number, string];
+          parsedCursor = decoded as LeaderboardCursor;
         } else {
           return badRequest(request, "Invalid cursor format");
         }
@@ -66,42 +43,12 @@ async function _GET(request: NextRequest) {
       }
     }
 
-    if (parsedCursor) {
-      const [cursorRevenue, cursorId] = parsedCursor;
-      conditions.push(
-        sql`coalesce(${
-revenueSum.total}, 0) < ${
-cursorRevenue}
-            OR (coalesce(${revenueSum.total}, 0) = ${cursorRevenue}
-                AND ${tlsTalos.id} < ${cursorId})`,
-      );
-    }
-
-    const rows = await db
-      .select({
-        id: tlsTalos.id,
-        name: tlsTalos.name,
-        category: tlsTalos.category,
-        status: tlsTalos.status,
-        pulsePrice: tlsTalos.pulsePrice,
-        totalSupply: tlsTalos.totalSupply,
-        patronCount: patronCount.count,
-        activityCount: activityCount.count,
-        totalRevenue: sql<number>`coalesce(${
-revenueSum.total}, 0)`,
-      })
-      .from(tlsTalos)
-      .leftJoin(patronCount, eq(tlsTalos.id, patronCount.talosId))
-      .leftJoin(activityCount, eq(tlsTalos.id, activityCount.talosId))
-      .leftJoin(revenueSum, eq(tlsTalos.id, revenueSum.talosId))
-      .where(conditions.length > 0 ? and(...conditions) : undefined)
-      .orderBy(sql`coalesce(${revenueSum.total}, 0) desc`, desc(tlsTalos.id))
-      .limit(limit + 1);
+    const rows = await queryLeaderboardPage(limit, parsedCursor);
 
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
 
-    const data = page.map((c) =>({
+    const data = page.map((c) => ({
       id: c.id,
       name: c.name,
       category: c.category,
@@ -111,18 +58,26 @@ revenueSum.total}, 0)`,
       patronCount: c.patronCount ?? 0,
       activityCount: c.activityCount ?? 0,
       totalRevenue: c.totalRevenue ?? 0,
-      marketCap: Number(c.pulsePrice) * c.totalSupply,
+      marketCap: calculateMarketCap(c.pulsePrice, c.totalSupply),
     }));
 
     const lastItem = page[page.length - 1];
     const nextCursor =
       hasMore && lastItem
-        ? Buffer.from(
-            JSON.stringify([lastItem.totalRevenue, lastItem.id]),
-          ).toString("base64")
+        ? Buffer.from(JSON.stringify([lastItem.totalRevenue, lastItem.id])).toString("base64")
         : null;
 
-    return Response.json({ data, nextCursor });
+    // Keep the aggregate fresh after the response is sent (throttled to once / 30s)
+    try {
+      after(() => refreshLeaderboardAggregates().catch(() => {}));
+    } catch {
+      /* not in a request scope (e.g. unit tests) */
+    }
+
+    return Response.json(
+      { data, nextCursor },
+      { headers: { "Cache-Control": "public, s-maxage=30, stale-while-revalidate=60" } },
+    );
   } catch {
     return internalError(request);
   }

@@ -20,6 +20,7 @@ emitted bytes (otherwise the deployed WASM has been tampered with).
 | `TalosRegistry`         | `(1, 1, 0)`        | `"TalosRegistry"`     | `54 61 6C 6F 73 52 65 67 69 73 74 72 79 00 00 00` ("TalosRegistry\0\0\0") |
 | `TalosNameService`      | `(1, 1, 0)`        | `"TalosNameService"`  | `54 61 6C 6F 73 4E 61 6D 65 53 65 72 76 69 63 65` ("TalosNameService") |
 | `TalosGovernance`       | `(1, 1, 0)`        | `"TalosGovernance"`   | `54 61 6C 6F 73 47 6F 76 65 72 6E 61 6E 63 65 00` ("TalosGovernance\0") |
+| `TalosDividends`        | `(1, 3, 0)`        | `"TalosDividends"`    | `54 61 6C 6F 73 44 69 76 69 64 65 6E 64 73 00 00` ("TalosDividends\0\0") |
 
 A new contract added later MUST keep `major = 1` until a hard upgrade is
 scheduled — bumping `major` is a deployment-grade event and operators
@@ -98,6 +99,8 @@ is a `major` bump.
 | `protocol_fee`      | `set_protocol_fee` / `calculate_protocol_fee`.               |
 | `interface_query`   | `version` / `interface_id` / `supports_version`.             |
 | `fees_collector`    | Capture 3% fee on Talos creation (configurable).             |
+| `schema_migrations` | `schema_version` / `run_migrations` / `rollback_schema` + history log. |
+| `migration_manifest`| Read-only `migration_key_manifest_version` + `migration_manifest/` key-mapping fixtures. |
 
 ### TalosNameService
 
@@ -105,11 +108,20 @@ is a `major` bump.
 |---------------------|--------------------------------------------------------------|
 | `name_registration` | `register_name` / `resolve_name` / `is_name_available`.      |
 | `name_lifecycle`    | `update_name` / `has_name` / `name_of` — revoke + aliasing.  |
+| `name_reservation` | Read-only `name_reservation` (owner + ledger expiry; active/expired/nonexistent). |
 | `admin_transfer`    | `set_admin` for admin handover.                              |
 | `timelock_admin`    | `schedule_action` / `execute_action` / `cancel_action`.      |
 | `registry_pointer`  | `set_registry_contract` — points at the TalosRegistry.       |
+| `transfer_history`  | Bounded `nm_prp`/`nm_acc`/`nm_cnl`/`nm_exp` events + `transfer_history_len` / `transfer_record_at` + `expire_transfer`. |
 | `interface_query`   | `version` / `interface_id` / `supports_version`.             |
 | `cross_contract`    | `creator_of` invoke against the configured registry pointer. |
+| `name_transfer`     | `propose_name_transfer` / `accept_name_transfer` / `cancel_name_transfer`. |
+
+Name transfers target another existing Talos ID that does not currently have
+a name. The source creator proposes the transfer; the destination Talos'
+current registry creator must accept it within seven days. The source name
+remains resolvable until acceptance. The source creator may cancel at any
+time, and an expired proposal cannot be accepted.
 
 ### TalosGovernance
 
@@ -120,6 +132,19 @@ is a `major` bump.
 | `config_admin`      | `update_config` / `cache_token_balance` (admin only).        |
 | `interface_query`   | `version` / `interface_id` / `supports_version`.             |
 | `quorum_state`      | `get_proposal_quorum_state` query; `EventQuorumReached` emitted once per proposal when quorum is first crossed. |
+| `execution_receipts` | `get_proposal_action_digest` / `get_execution_receipt`; canonical action digest checked before execution. |
+| `proposal_threshold`| `create_proposal` requires the proposer's snapshot voting power to meet `proposal_threshold` (default `0` preserves prior behavior). |
+
+### TalosDividends
+
+| Capability             | Description                                                                 |
+|------------------------|-----------------------------------------------------------------------------|
+| `epoch_commitment`     | `commit_epoch` — admin-gated distribution round creation.                   |
+| `pull_claims`          | `claim_dividend` — patron-initiated O(1) claim per epoch.                   |
+| `expiry_recovery`      | `recover_expired` — admin sweeps unclaimed funds after the claim window.    |
+| `rounding_dust`        | `get_rounding_dust` — remainder from integer share division, stored once.   |
+| `interface_query`      | `version` / `interface_id` / `supports_version` / `interface_features`.    |
+| `unclaimed_liabilities`| `get_epoch_liability` / `get_total_unclaimed` — bounded reads of per-epoch and aggregate unclaimed amounts; distinguishes empty rounds from fully-claimed rounds without iterating recipients. |
 
 #### Storage & Input Bounds
 
@@ -128,7 +153,16 @@ To prevent unbounded storage writes and spam when creating proposals, `TalosGove
 - `MAX_TITLE_LEN`: `128` bytes (non-empty, maximum 128 bytes)
 - `MAX_DESCRIPTION_LEN`: `2048` bytes (non-empty, maximum 2048 bytes)
 
-Inputs at the limit succeed; inputs exceeding the limit (or empty) are rejected before writing to persistent storage.
+Inputs at the limit succeed; inputs exceeding the limit (or empty) are rejected before writing to persistent storage. Rejections are returned as typed contract errors (`TitleTooLong`, `DescriptionTooLong`, `EmptyTitle`, `EmptyDescription`), and validation runs fully before any write, so a rejected call never leaves a partially created proposal behind.
+
+#### Proposal threshold
+
+`TalosGovernance` tracks a `proposal_threshold: i128` in its configuration
+(default `0` for backwards compatibility). `create_proposal` reads the
+proposer's voting power at the snapshot ledger via `get_past_votes` and
+rejects the call with a typed error when the value is below the threshold.
+`initialize` and `update_config` validate that `proposal_threshold >= 0`.
+Deployments that leave the default in place behave exactly as before.
 
 ## 6. Deprecation table
 
@@ -197,6 +231,13 @@ to align the byte slices at canonical boundaries.
 00 00 00 01 00 00 00 01   00 00 00 00 00 00 00 00
 ```
 
+#### TalosNameService `(1, 5, 0)` @ `"TalosNameService"` _(current)_
+
+```
+54 61 6C 6F 73 4E 61 6D   65 53 65 72 76 69 63 65
+00 00 00 01 00 00 00 05   00 00 00 00 00 00 00 00
+```
+
 #### TalosGovernance `(1, 0, 0)` @ `"TalosGovernance"`
 
 ```
@@ -204,11 +245,18 @@ to align the byte slices at canonical boundaries.
 00 00 00 01 00 00 00 00   00 00 00 00 00 00 00 00
 ```
 
-#### TalosGovernance `(1, 1, 0)` @ `"TalosGovernance"` _(current)_
+#### TalosGovernance `(1, 1, 0)` @ `"TalosGovernance"`
 
 ```
 54 61 6C 6F 73 47 6F 76   65 72 6E 61 6E 63 65 00
 00 00 00 01 00 00 00 01   00 00 00 00 00 00 00 00
+```
+
+#### TalosGovernance `(1, 2, 0)` @ `"TalosGovernance"` _(current)_
+
+```
+54 61 6C 6F 73 47 6F 76   65 72 6E 61 6E 63 65 00
+00 00 00 01 00 00 00 02   00 00 00 00 00 00 00 00
 ```
 
 ## 8. Cross-contract compatibility
@@ -250,6 +298,8 @@ The tests will:
 5. Verify deprecation event flows (`set_protocol_fee_emits_dep_path_*`,
    `propose_admin_emits_dep_path_*`, `set_registry_contract_emits_dep_path_*`).
 6. Verify cross-contract compatibility (`assert_registry_compatible_returns_true_for_real_registry`).
+7. Verify proposal threshold enforcement (`create_proposal_*_threshold_*`)
+   and config validation (`initialize_*_threshold_*`, `update_config_*_threshold_*`).
 
 ## 10. Rollout and rollback
 

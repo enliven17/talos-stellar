@@ -1,6 +1,6 @@
 # Talos Contract Event Indexing Specification
 
-**Spec version:** 1.3.0
+**Spec version:** 1.4.0
 **Applies to:** talos_registry, talos_governance, talos_name_service, talos_dividends
 
 ## 1. Event envelope
@@ -70,12 +70,24 @@ is idempotent per cursor (see §4).
 | (`tl_cfg`,) | (old_min_delay: u64, new_min_delay: u64, grace_period: u64) | timelock config changed |
 
 ### talos_governance
+Governance action proposals store a domain-separated digest of their canonical action at creation. Execution recomputes and checks this digest before dispatch. Successful execution emits `act_rcpt`; existing proposal and action event shapes stay unchanged.
 | topics | data |
 |---|---|
 | (`prop_crt`, proposal_id: u32) | (talos_id: u32, proposer: Address) |
 | (`vote`, proposal_id: u32) | (voter: Address, choice: VoteChoice, weight: i128) |
 | (`prop_stat`, proposal_id: u32) | status: ProposalStatus |
+| (`act_rcpt`, proposal_id: u64) | (namespace: String, action_digest: BytesN<32>, executed_at: u64) | immutable action execution receipt |
 | (`qrm_rchd`, proposal_id: u32) | (proposal_id: u32, votes_cast: i128, quorum_threshold: i128, approval_bps: i128) |
+| (`cfg_upd`,) | (old_quorum_threshold: i128, new_quorum_threshold: i128, old_consensus_threshold: i128, new_consensus_threshold: i128, old_voting_period_ledgers: u32, new_voting_period_ledgers: u32, old_pulse_token_address: Address, new_pulse_token_address: Address) |
+| (`dlg_chg`, delegator: Address) | (delegatee: Option<Address>) |
+
+`dlg_chg` is emitted by `delegate` (with `Some(delegatee)`) and by `undelegate` (with `None`), so indexers can track the current delegation for each delegator. `delegate` rejects self-delegation (`delegator == delegatee`). Its data is `delegatee: Option<Address>` appended as the sole data field.
+
+`cfg_upd` is emitted once after a successful `update_config` call. Its data includes both the previous and new values for every governance parameter, including the Pulse token address.
+
+| (`adm_prp`,) | EventAdminProposed | admin transfer proposed |
+| (`adm_acc`,) | EventAdminAccepted | admin transfer accepted |
+| (`adm_cnl`,) | EventAdminTransferCancelled | admin transfer cancelled |
 
 `qrm_rchd` is emitted **at most once** per proposal, on the first vote that brings `votes_cast` to or above `quorum_threshold`. A `DataKey::QuorumReached(proposal_id)` sentinel prevents re-emission for subsequent votes.
 
@@ -84,6 +96,9 @@ is idempotent per cursor (see §4).
 |---|---|
 | (`name_reg`, talos_id: u32) | (name: String, owner: Address) |
 | (`name_reg2`, talos_id: u32) | (version: u32, name: String, owner: Address) |
+| (`name_trf`, source_talos_id: u32) | (name: String, recipient_talos_id: u32, recipient: Address, expires_at: u64) |
+| (`name_acc`, source_talos_id: u32) | (name: String, recipient_talos_id: u32, recipient: Address) |
+| (`name_cnl`, source_talos_id: u32) | (name: String,) |
 | (`reg_upd`,) | (old_registry: Address, new_registry: Address) |
 | (`tl_sch`/`tl_exec`/`tl_cnl`/`tl_cfg`) | same shape as registry timelock events |
 | (`pause_on`, domain: PauseDomain) | (actor: Address, expires_at: u64) |
@@ -92,6 +107,11 @@ is idempotent per cursor (see §4).
 | (`guard_rem`,) | (guardian: Address,) |
 | (`name_fee`, talos_id: u32) | (payer: Address, asset: Address, fee: i128) |
 | (`dep_path`,) | (deprecated: String, replacement: String) |
+
+Name transfer proposals expire at `expires_at` (Unix timestamp), seven days
+after proposal. `name_trf` is emitted when a proposal is recorded, `name_acc`
+when the recipient accepts and the name mappings move, and `name_cnl` when
+the source creator cancels.
 
 **`pause_on` semantics:**
 - `domain` identifies the paused write path (`NameRegistration`).
@@ -114,6 +134,9 @@ is idempotent per cursor (see §4).
 | (`div_clm`, epoch_id: u64, patron: Address) | (talos_id: u32, amount: i128, role: PatronRole) |
 | (`div_dst`, epoch_id: u64) | (talos_id: u32, dust: i128) |
 | (`ep_rcv`, epoch_id: u64) | (talos_id: u32, recovered: i128, admin: Address) |
+| (`adm_prp`,) | (current: Address, proposed: Address) |
+| (`adm_acc`,) | (new_admin: Address,) |
+| (`adm_cnl`,) | (cancelled: Address,) |
 
 `VoteChoice` is `{ Approve | Reject }`; `ProposalStatus` is
 `{ Active | Approved | Rejected | Executed }`; `PatronRole` is

@@ -14,6 +14,7 @@ Install these before you start working locally:
 - Python 3.11 or newer
 - `uv`
 - Rust stable toolchain and `cargo`
+- `pre-commit` (or install via `uv tool install pre-commit` / `pip install pre-commit`)
 - Docker (for `scripts/local-stack.sh`)
 - Optional: Soroban CLI, installed as `stellar` via `cargo install --locked stellar-cli --features opt`
 - [`gitleaks`](https://github.com/gitleaks/gitleaks) secret scanner — `brew install gitleaks`, or download a binary from the [releases page](https://github.com/gitleaks/gitleaks/releases) (required for `pnpm run secrets:check`)
@@ -28,6 +29,34 @@ For the Rust contracts, also add the Wasm target:
 ```bash
 rustup target add wasm32-unknown-unknown
 ```
+
+## Cross-Package Task Runner
+
+A `justfile` is provided for short, discoverable commands that run the same checks used by CI across all packages. Install `just`:
+
+- **Linux/macOS**: `cargo install just`
+- **Windows**: `winget install casey.just` or `scoop install just`
+
+Run from the repository root:
+
+```bash
+just                    # List all available recipes
+just test-web           # Run web package tests
+just test-sdk           # Run SDK package tests
+just test-agent         # Run prime-agent package tests
+just test-contracts     # Run contracts package tests
+just test-all           # Run all package tests
+just lint-all           # Run lint for all packages
+just stack-up           # Start local integration stack
+just stack-down         # Stop local integration stack
+just stack-logs         # View stack logs
+just stack-reset        # Reset the stack
+just stack-reset-data --yes    # Reset local test data
+```
+
+Each recipe runs the exact command used by the corresponding CI workflow, so local runs match CI behavior. The root `package.json` scripts remain unchanged; `just` is a convenience layer for contributors.
+
+**Windows note**: The `just` tool runs on Windows, but some recipes (e.g., `stack-*`) use Bash scripts. On Windows, use WSL or Git Bash for those commands, or use the equivalent `pnpm` scripts from the root `package.json`.
 
 ## Repository Layout
 
@@ -96,6 +125,21 @@ To deploy the contracts to testnet, use the provided script from a Bash-compatib
 ```
 
 The script prints the deployed contract IDs that need to be copied into the web app environment file.
+
+### 5. Install pre-commit hooks
+
+To automatically catch formatting, lint, and secret leaks before committing:
+
+```bash
+pre-commit install
+```
+
+To run all configured hooks manually against changed files or all files:
+
+```bash
+pre-commit run
+pre-commit run --all-files
+```
 
 ## Environment Files
 
@@ -173,6 +217,8 @@ It only ever targets a loopback database, requires `--yes` to destroy anything,
 and never logs credentials. See
 [docs/local-test-data-reset.md](./docs/local-test-data-reset.md) for the full
 behavior contract. Regression tests for the shell layer: `bash scripts/local-stack.test.sh`.
+
+For symptoms, root causes, and fixes for common local setup failures (port conflicts, stale volumes, migration journal mismatches, seed guard refusals, and missing environment variables), see the [Local Stack Troubleshooting Guide](./docs/TROUBLESHOOTING.md).
 
 The stack defaults to the web service and a mock Stellar provider. Add the optional prime-agent service with:
 
@@ -311,10 +357,45 @@ Choose the focused command by area:
 | API route or library unit tests | `pnpm --dir web exec vitest run tests/<name>.test.ts` | `Deploy Web -> Vercel` |
 | Local test-data reset (`web/src/lib/local-test-data-reset.ts`, `web/src/db/reset-test-data.ts`, `scripts/local-stack.sh`) | `pnpm --dir web exec vitest run tests/local-test-data-reset.unit.test.ts; bash scripts/local-stack.test.sh` | `Deploy Web -> Vercel` |
 | Backup or restore paths | `pnpm --dir web exec vitest run tests/backup-restore-fixture.test.ts tests/backup-crypto.test.ts tests/backup-types.test.ts` | `Web Backups CI` |
+| `web/src/lib/governance/consistency-report.ts` | `pnpm --dir web exec vitest run tests/lifecycle-consistency-report.unit.test.ts` | `Web & SDK CI` |
+| `web/src/app/api/talos/[id]/retire/route.ts` | `pnpm --dir web exec vitest run tests/retire-lifecycle-history.unit.test.ts` | `Web & SDK CI` |
 
 Use `pnpm --dir web run test:e2e` only when API route behavior depends on the running app or cross-route state. Use the local stack with `pnpm stack:up` when you need Postgres plus the mock Stellar provider, and clean it up with `pnpm stack:down`. Do not use `pnpm stack:reset` unless you intentionally want to destroy and recreate local stack data; `pnpm stack:reset-data` clears test rows without touching the stack volumes.
 
-### SDK changes
+### Offline lifecycle consistency report
+
+`web/src/lib/governance/consistency-report.ts` exports `buildConsistencyReport`, a pure, read-only function that compares lifecycle records, active service registrations, and unresolved commerce jobs. It surfaces contradictions without mutating any funded or operational state.
+
+**Contract guarantees**
+- The function never throws, never performs I/O, and never mutates its inputs.
+- Each `Contradiction` carries a stable `code` from `CONTRADICTION_CODES`. Codes must not be repurposed once released — consumers branch on them.
+- `consistent: true` means all three collections agree with the lifecycle state machine defined in `lifecycle.ts`.
+
+**Contradiction codes**
+
+| Code | Meaning |
+|---|---|
+| `TERMINAL_AGENT_ONLINE` | Agent is in a terminal state but `agentOnline` is `true`. |
+| `TERMINAL_AGENT_WITH_ACTIVE_SERVICE` | Terminal agent has a service with a live Stellar payment key. |
+| `TERMINAL_AGENT_WITH_UNRESOLVED_JOBS` | Terminal agent has commerce jobs that have not reached a terminal status. |
+| `ACTIVE_AGENT_OFFLINE_FLAG` | Agent is `active` (should accept work) but `agentOnline` is `false`. |
+| `STALE_RETIRED_TIMESTAMP` | Non-retired agent has a `retiredAt` timestamp set. |
+| `RETIRED_STATE_MISSING_TIMESTAMP` | Agent is `retired` but has no `retiredAt` timestamp. |
+| `TRANSIENT_AGENT_ONLINE` | Agent is in an in-flight state (`provisioning`, `retiring`) but `agentOnline` is `true`. |
+
+**Usage in the retire route**
+
+`POST /api/talos/:id/retire` appends a `consistencyReport` field to the success response. The report evaluates the agent's post-retirement snapshot — it is observational only and has no effect on the retirement outcome.
+
+**Focused test command**
+
+```bash
+pnpm --dir web exec vitest run tests/lifecycle-consistency-report.unit.test.ts
+```
+
+All tests use synthetic in-memory fixtures. No database, network connection, or Stellar credentials are required. Each contradiction code has a BEFORE/AFTER case that shows the snapshot before and after the contradiction is resolved.
+
+
 
 The TypeScript SDK lives in `packages/sdk/`. The expected build artifact is `packages/sdk/dist/`, including the browser bundle at `packages/sdk/dist/browser/sdk.bundle.js`.
 
@@ -561,13 +642,16 @@ stream.close();
 | `path`                 | `/api/events` | Stream endpoint path                                      |
 | `authHeader`           | —             | Sent as `Authorization` header. Never logged.             |
 | `maxReconnectAttempts` | `10`          | Total attempts before permanent close                     |
-| `baseReconnectDelayMs` | `1000`        | Base delay; doubles per attempt                           |
-| `maxReconnectDelayMs`  | `30000`       | Backoff ceiling                                           |
+| `baseReconnectDelayMs` | `1000`        | Base delay; doubles per attempt; valid server `retry:` hints are capped at the maximum delay |
+| `maxReconnectDelayMs`  | `30000`       | Backoff ceiling and server `retry:` hint cap          |
 | `jitter`               | `true`        | Full-jitter on reconnect delay                            |
 | `maxHeartbeatMisses`   | `3`           | Consecutive missed heartbeat ticks before stall reconnect |
 | `heartbeatIntervalMs`  | `30000`       | Heartbeat watchdog interval                               |
 | `seenStore`            | —             | `SeenStore` implementation for duplicate suppression      |
 | `signal`               | —             | External `AbortSignal` to close the stream                |
+
+Only `retry:` values containing ASCII digits are accepted; malformed retry
+directives and unknown SSE fields are ignored.
 
 ### Operational signals
 
@@ -658,6 +742,9 @@ Cost limits and TTLs (Time-To-Live) are enforced programmatically. If an environ
 
 ### Troubleshooting
 
+For common local integration stack failures (Docker, port allocation, stale volumes, migration drift, seed guard refusals, or missing environment variables), see the [Local Stack Troubleshooting Guide](./docs/TROUBLESHOOTING.md).
+
+For preview environments specifically:
 - **Database provisioning fails**: Check the GitHub Actions logs for `PR Preview Provision`. Ensure your branch passes linting and type checks, as migration errors often cause provisioning failures.
 - **Preview URL is missing**: Vercel manages the web preview natively. Ensure the Vercel GitHub integration is active for the repository.
 - **Stale data**: The environment is seeded once upon provisioning. If you change the seed script, you may need to close and reopen the PR to provision a fresh database.
@@ -756,9 +843,11 @@ bash scripts/ci-contract-cache.test.sh
 1. Create a branch from the latest `main`
 2. Make your changes
 3. Update documentation when setup steps or environment variables change
-4. Run the relevant tests for the area you touched, plus `pnpm run secrets:check` for the local secret scan
+4. Run the relevant tests for the area you touched, plus `pnpm run secrets:check` (or `pre-commit run`) for the local contribution checks
 5. Open a pull request using the template in [`.github/PULL_REQUEST_TEMPLATE.md`](./.github/PULL_REQUEST_TEMPLATE.md)
 6. Link the issue in your PR description, for example `Closes #39`
+
+**Note:** PR descriptions belong in the GitHub PR itself, not as markdown files in the repository. Do not add PR description files (e.g., `pr-*.md` or `pr-description.md`) to the repository root or elsewhere in the codebase.
 
 ## Releases
 
