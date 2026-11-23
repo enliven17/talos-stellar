@@ -1,0 +1,40 @@
+{
+  "manifestVersion": 1,
+  "description": "Supported toolchain and schema versions for Talos Protocol. CI verifies this file with `pnpm run compat:check`.",
+  "toolchains": {
+    "node": {
+      "minimum": "20.0.0",
+      "contributorMinimum": "20.0.0",
+      "source": "package.json#engines.node, scripts/doctor.mjs"
+    },
+    "pnpm": {
+      "minimum": "9.0.0",
+      "source": "scripts/doctor.mjs"
+    },
+    "python": {
+      "minimum": "3.10.0",
+      "contributorMinimum": "3.11.0",
+      "source": "packages/prime-agent/pyproject.toml#project.requires-python, scripts/doctor.mjs"
+    },
+    "rust": {
+      "channel": "stable",
+      "edition": "2021",
+      "wasmTarget": "wasm32-unknown-unknown",
+      "source": "contracts/*/Cargo.toml, .github/workflows/contracts-ci.yml, .devcontainer/Dockerfile"
+    }
+  },
+  "schemas": {
+    "events": {
+      "version": "1",
+      "source": "packages/sdk/src/events.ts#TALOS_EVENT_SCHEMA_VERSION"
+    },
+    "logs": {
+      "version": 1,
+      "source": "web/src/lib/log-schema.ts#LOG_SCHEMA_VERSION"
+    },
+    "databaseMigrations": {
+      "version": "0023_add_outbox_deliveries",
+      "source": "web/drizzle/meta/_journal.json#entries[-1].tag"
+    }
+  }
+}
