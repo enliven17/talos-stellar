@@ -14,7 +14,7 @@ pub const INTERFACE_ID: [u8; 32] = [
     0x65, 0x53, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, // "eService"
     // (major, minor, patch) big-endian u32s
     0x00, 0x00, 0x00, 0x01, // major = 1
-    0x00, 0x00, 0x00, 0x04, // minor = 4
+    0x00, 0x00, 0x00, 0x05, // minor = 5
     0x00, 0x00, 0x00, 0x00, // patch = 0
     // reserved
     0x00, 0x00, 0x00, 0x00,
@@ -49,6 +49,7 @@ pub fn features_list() -> &'static [&'static str] {
         "cross_contract",    // invokes creator_of on the configured registry
         "paginated_reverse_lookup", // names_page — cursor-based reverse scan
         "name_canonicalization", // canonicalize() normalizes names before registration
+        "name_transfer", // propose_name_transfer / accept_name_transfer / cancel_name_transfer
     ]
 }
 
@@ -150,4 +151,4 @@ pub fn check_registry_compatible(
 /// This constant is embedded in the WASM binary at compile time and is
 /// therefore immutable once deployed; it cannot be altered by any admin
 /// call, storage write, or cross-contract invocation.
-pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 4, 0);
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 5, 0);

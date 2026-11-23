@@ -15,6 +15,36 @@ pub fn emit_name_registered(env: &Env, talos_id: u32, name: soroban_sdk::String,
     env.events().publish(topics2, (1u32, name, owner));
 }
 
+pub fn emit_name_transfer_proposed(
+    env: &Env,
+    source_talos_id: u32,
+    name: soroban_sdk::String,
+    recipient_talos_id: u32,
+    recipient: Address,
+    expires_at: u64,
+) {
+    let topics = (symbol_short!("name_trf"), source_talos_id);
+    env.events()
+        .publish(topics, (name, recipient_talos_id, recipient, expires_at));
+}
+
+pub fn emit_name_transfer_accepted(
+    env: &Env,
+    source_talos_id: u32,
+    name: soroban_sdk::String,
+    recipient_talos_id: u32,
+    recipient: Address,
+) {
+    let topics = (symbol_short!("name_acc"), source_talos_id);
+    env.events()
+        .publish(topics, (name, recipient_talos_id, recipient));
+}
+
+pub fn emit_name_transfer_cancelled(env: &Env, source_talos_id: u32, name: soroban_sdk::String) {
+    let topics = (symbol_short!("name_cnl"), source_talos_id);
+    env.events().publish(topics, (name,));
+}
+
 /// Emit a registry contract update event.
 pub fn emit_registry_updated(env: &Env, old_registry: Address, new_registry: Address) {
     let topics = (symbol_short!("reg_upd"),);

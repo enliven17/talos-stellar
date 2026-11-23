@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from talos_agent.policy.engine import PolicyEngine
@@ -92,6 +94,114 @@ def _export_step(step: Any, private_arguments: frozenset[str]) -> dict[str, Any]
     return exported
 
 
+@dataclass(frozen=True)
+class PolicyCoverageReport:
+    """Coverage observed in a collection of redacted policy traces.
+
+    A rule has two observable branches: its conditions matched, or they did
+    not match.  Rules that are absent from every supplied trace are reported
+    separately as ``unobserved_rules`` and never contribute to
+    ``observed_branch_count``.  This distinction is important for dry-run
+    review: an action that never reached a rule is not evidence that the rule
+    was tested.
+    """
+
+    cycle_count: int
+    observed_rules: tuple[str, ...]
+    unobserved_rules: tuple[str, ...]
+    exercised_branches: tuple[str, ...]
+    unexercised_branches: tuple[str, ...]
+
+    @property
+    def observed_branch_count(self) -> int:
+        return len(self.exercised_branches) + len(self.unexercised_branches)
+
+    @property
+    def exercised_branch_count(self) -> int:
+        return len(self.exercised_branches)
+
+    @property
+    def percentage(self) -> float:
+        """Return branch coverage among rules observed in the traces."""
+        if not self.observed_branch_count:
+            return 0.0
+        return self.exercised_branch_count / self.observed_branch_count * 100
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "cycle_count": self.cycle_count,
+            "observed_rules": list(self.observed_rules),
+            "unobserved_rules": list(self.unobserved_rules),
+            "exercised_branches": list(self.exercised_branches),
+            "unexercised_branches": list(self.unexercised_branches),
+            "exercised_branch_count": self.exercised_branch_count,
+            "observed_branch_count": self.observed_branch_count,
+            "percentage": self.percentage,
+        }
+
+
+def _trace_from_record(record: Any) -> PolicyDecisionTrace | None:
+    """Extract a decision trace from a result or redacted serialized record."""
+    if isinstance(record, PolicyResult):
+        return record.trace
+    if isinstance(record, PolicyDecisionTrace):
+        return record
+    if not isinstance(record, Mapping):
+        return None
+
+    if "trace" not in record and "steps" not in record:
+        return None
+    raw_trace = record.get("trace", record)
+    if not isinstance(raw_trace, Mapping):
+        return None
+    raw_steps = raw_trace.get("steps", ())
+    if not isinstance(raw_steps, Iterable) or isinstance(raw_steps, (str, bytes)):
+        return None
+
+    # Rehydrate only the public, redacted trace fields.  Condition values are
+    # never evaluated here, so this report cannot accidentally consume secrets.
+    from talos_agent.policy.schema import ConditionTrace, RuleTraceStep
+
+    steps: list[RuleTraceStep] = []
+    for raw_step in raw_steps:
+        if not isinstance(raw_step, Mapping):
+            continue
+        raw_conditions = raw_step.get("conditions", ())
+        if not isinstance(raw_conditions, Iterable) or isinstance(raw_conditions, (str, bytes)):
+            raw_conditions = ()
+        conditions = tuple(
+            ConditionTrace(
+                field=str(c.get("field", "")),
+                operator=str(c.get("operator", "")),
+                matched=bool(c.get("matched", False)),
+                observed=c.get("observed"),
+                expected=c.get("expected"),
+            )
+            for c in raw_conditions
+            if isinstance(c, Mapping)
+        )
+        steps.append(
+            RuleTraceStep(
+                policy=str(raw_step.get("policy", "")),
+                rule_id=str(raw_step.get("rule_id", "")),
+                severity=str(raw_step.get("severity", "")),
+                matched=bool(raw_step.get("matched", False)),
+                decision=str(raw_step.get("decision", "")),
+                reason=str(raw_step.get("reason", "")),
+                conditions=conditions,
+                effect=str(raw_step.get("effect", "continue")),
+            )
+        )
+    return PolicyDecisionTrace(
+        action=str(raw_trace.get("action", "")),
+        decision=str(raw_trace.get("decision", "")),
+        engine_enabled=bool(raw_trace.get("engine_enabled", True)),
+        short_circuited=bool(raw_trace.get("short_circuited", False)),
+        steps=tuple(steps),
+        summary=str(raw_trace.get("summary", "")),
+    )
+
+
 class PolicySimulator:
     """Evaluate policies in simulation mode — never enforces.
 
@@ -166,6 +276,7 @@ class PolicySimulator:
                     "decision": result.decision.value,
                     "evidence": list(result.evidence),
                     "result_digest": result.result_digest,
+                    "trace": result.trace.to_dict() if result.trace is not None else None,
                 })
             except Exception as exc:
                 results.append({
@@ -242,3 +353,51 @@ class PolicySimulator:
                 sort_keys=True,
             )
         logger.info("Exported %d simulation results to %s", len(results), path)
+
+    def coverage_report(self, records: Iterable[Any]) -> PolicyCoverageReport:
+        """Summarize exercised rule branches from recorded dry-run traces.
+
+        ``records`` may contain ``PolicyResult`` objects, trace objects, or
+        the dictionaries returned by :meth:`simulate_batch` and
+        :meth:`export_scenarios`.  Only rule steps present in a trace are
+        observed.  A blocker short-circuit can therefore leave later rules
+        unobserved, rather than incorrectly marking them as non-matching.
+        """
+        traces = [_trace_from_record(record) for record in records]
+        traces = [trace for trace in traces if trace is not None]
+
+        observed: set[str] = set()
+        exercised: set[str] = set()
+        for trace in traces:
+            for step in trace.steps:
+                if step.effect == "skipped_disabled_policy" or step.rule_id == "*":
+                    continue
+                rule_key = f"{step.policy}/{step.rule_id}"
+                observed.add(rule_key)
+                branch = f"{rule_key}:matched" if step.matched else f"{rule_key}:not_matched"
+                exercised.add(branch)
+
+        configured = {
+            f"{policy.name}/{rule.rule_id}"
+            for policy in self._engine.policies
+            for rule in policy.rules
+            if policy.enabled
+        }
+        observed_branch_space = {
+            f"{rule_key}:{outcome}"
+            for rule_key in observed
+            for outcome in ("matched", "not_matched")
+        }
+        unexercised = observed_branch_space - exercised
+        unobserved = configured - observed
+
+        return PolicyCoverageReport(
+            cycle_count=len(traces),
+            observed_rules=tuple(sorted(observed)),
+            unobserved_rules=tuple(sorted(unobserved)),
+            exercised_branches=tuple(sorted(exercised)),
+            unexercised_branches=tuple(sorted(unexercised)),
+        )
+
+    # Descriptive alias for callers that prefer the report verb first.
+    report_coverage = coverage_report
