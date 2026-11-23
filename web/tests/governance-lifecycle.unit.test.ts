@@ -13,6 +13,7 @@ import {
   allowedActions,
   evaluateTransition,
   failureStateFor,
+  acceptsNewWork,
   toLegacyStatus,
   toLifecycleState,
   type LifecycleActor,
@@ -175,13 +176,42 @@ describe("lifecycle state machine", () => {
   it("reads legacy status values, defaulting unknown ones to active", () => {
     expect(toLifecycleState("Active")).toBe("active");
     expect(toLifecycleState("Paused")).toBe("paused");
+    expect(toLifecycleState("Draining")).toBe("retiring");
     expect(toLifecycleState(null)).toBe("active");
     expect(toLifecycleState("Whatever")).toBe("active");
+    expect(acceptsNewWork(toLifecycleState("Active"))).toBe(true);
+    expect(acceptsNewWork(toLifecycleState("Draining"))).toBe(false);
   });
 
   it("exposes a failure edge only for in-flight states", () => {
     expect(failureStateFor("provisioning")).toBe("failed");
     expect(() => failureStateFor("active")).toThrow(LifecycleError);
+  });
+
+  it("rejects a mismatched expected state as a conflict", () => {
+    const err = expectCode(
+      () =>
+        evaluateTransition({
+          action: "retire",
+          from: "paused",
+          actor: GOVERNANCE,
+          governanceApproved: true,
+          expectedState: "active",
+        }),
+      "LIFECYCLE_CONFLICT",
+    );
+    expect(err.status).toBe(409);
+  });
+
+  it("accepts a matching expected state", () => {
+    const decision = evaluateTransition({
+      action: "retire",
+      from: "active",
+      actor: GOVERNANCE,
+      governanceApproved: true,
+      expectedState: "active",
+    });
+    expect(decision.to).toBe("retiring");
   });
 });
 
@@ -317,18 +347,13 @@ describe("prerequisites", () => {
     expectCode(() => assertPrerequisites(parsed, ctx), "LIFECYCLE_PREREQUISITE_FAILED");
   });
 
-  it("refuses retirement that would strand in-flight jobs", () => {
+  it("allows retirement to enter draining while in-flight jobs finish", () => {
     const parsed = parseLifecyclePayload({
       action: "retire",
       payload: { reason: "sunset", proposalId: "p1", confirmed: true, drainJobs: true },
     });
 
-    const err = expectCode(
-      () => assertPrerequisites(parsed, { ...ctx, inFlightJobs: 3 }),
-      "LIFECYCLE_PREREQUISITE_FAILED",
-    );
-    expect(err.details.inFlightJobs).toBe(3);
-    expect(err.status).toBe(422);
+    expect(() => assertPrerequisites(parsed, { ...ctx, inFlightJobs: 3 })).not.toThrow();
   });
 
   it("allows retirement that explicitly opts out of draining", () => {

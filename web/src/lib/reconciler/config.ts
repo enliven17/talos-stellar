@@ -35,6 +35,12 @@ export function loadReconcilerConfig(): ReconcilerConfig {
     confirmationDepth: parseIntEnv("RECONCILER_CONFIRMATION_DEPTH", 1),
 
     concurrencyLimit: parseIntEnv("RECONCILER_CONCURRENCY_LIMIT", 5),
+
+    networkPassphrase:
+      process.env.STELLAR_NETWORK_PASSPHRASE ??
+      (process.env.STELLAR_NETWORK === "mainnet"
+        ? "Public Global Stellar Network ; September 2015"
+        : "Test SDF Network ; September 2015"),
   };
 }
 

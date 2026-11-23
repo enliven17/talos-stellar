@@ -17,6 +17,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from talos_agent.policy.patterns import PolicyPatternError
 from talos_agent.policy.schema import (
     MatchCondition,
     Policy,
@@ -288,6 +289,19 @@ def _load_from_file(path: Path) -> list[Policy]:
     except (AttributeError, TypeError, ValueError) as exc:
         logger.error("Invalid policy in policies.json: %s", exc)
         raise PolicyLoadError("Policy file contains an invalid policy") from exc
+        policies_data = raw.get("policies", [])
+        if not isinstance(policies_data, list):
+            logger.warning("policies.json 'policies' key must be a list")
+            return []
+        return [Policy.from_dict(p) for p in policies_data]
+    except json.JSONDecodeError as exc:
+        logger.error("Failed to parse policies.json: %s", exc)
+        return []
+    except PolicyPatternError:
+        raise
+    except Exception as exc:
+        logger.error("Unexpected error loading policies.json: %s", exc)
+        return []
 
 
 # ── PolicyLoader ──────────────────────────────────────────────────────────────
@@ -407,6 +421,8 @@ class PolicyLoader:
         except AttributeError:
             # DB doesn't have list_policy_overrides yet; safe fallback
             return []
+        except PolicyPatternError:
+            raise
         except Exception as exc:
             logger.warning("Failed to load policies from DB: %s", exc)
             return []
@@ -439,6 +455,15 @@ class PolicyLoader:
                             "reason": r.reason,
                         }
                         for r in p.rules
+                    ],
+                    "exceptions": [
+                        {
+                            "rule_id": exception.rule_id,
+                            "actor": exception.actor,
+                            "reason": exception.reason,
+                            "expires_at": exception.expires_at.isoformat(),
+                        }
+                        for exception in p.exceptions
                     ],
                 }
                 for p in policies

@@ -51,6 +51,7 @@ _BYPASS_ACTIONS: frozenset[str] = frozenset(
         "check_x_mentions",
         "check_post_performance",
         "poll_service_result",
+        "reconcile_purchases",
         "evaluate_marketplace_bid",
     }
 )
