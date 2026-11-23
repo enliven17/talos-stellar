@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "talos_registry",
+    "talos_dividends",
     "talos_name_service",
     "talos_governance",
     "talos_dividends",

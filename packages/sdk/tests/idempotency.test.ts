@@ -15,6 +15,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   generateIdempotencyKey,
   validateIdempotencyKey,
+  validateIdempotencyKeyConflict,
   isUuidV4,
   isPayloadConflict,
   IdempotencyConflictError,
@@ -89,6 +90,44 @@ describe("validateIdempotencyKey", () => {
     // '©' is 2 bytes in UTF-8. 64 × 2 = 128 bytes → should pass.
     const key = "©".repeat(64);
     expect(() => validateIdempotencyKey(key)).not.toThrow();
+  });
+});
+
+describe("validateIdempotencyKeyConflict", () => {
+  it("allows matching option and header values case-insensitively", () => {
+    expect(() =>
+      validateIdempotencyKeyConflict("stable-key", new Headers({
+        "idempotency-key": "stable-key",
+      })),
+    ).not.toThrow();
+  });
+
+  it("rejects conflicting option and header values without leaking either key", () => {
+    const secretA = "private-key-alpha";
+    const secretB = "private-key-beta";
+    expect(() =>
+      validateIdempotencyKeyConflict(
+        secretA,
+        new Headers({ "Idempotency-Key": secretB }),
+      ),
+    ).toThrowError(
+      "Conflicting idempotency keys: idempotencyKey option and Idempotency-Key header must match",
+    );
+  });
+
+  it("rejects an empty Idempotency-Key header", () => {
+    expect(() =>
+      validateIdempotencyKeyConflict("stable-key", { "idempotency-key": "   " }),
+    ).toThrow(TypeError);
+  });
+
+  it("checks array header forms", () => {
+    expect(() =>
+      validateIdempotencyKeyConflict(
+        "stable-key",
+        [["Idempotency-Key", "different-key"]],
+      ),
+    ).toThrow(TypeError);
   });
 });
 
@@ -200,6 +239,32 @@ describe("TalosClient idempotency integration", () => {
 
     const call = vi.mocked(fetch).mock.calls[0];
     expect(call[1]?.headers).toHaveProperty("Idempotency-Key", key);
+  });
+
+  it("rejects a conflicting request header before signing or fetch", async () => {
+    const signer = vi.fn(
+      async (_url: string, _method: string, headers: Record<string, string>) => headers,
+    );
+    const conflictClient = new TalosClient({
+      baseUrl: "http://localhost:3000",
+      signer,
+      apiKey: "test-key",
+    });
+    const request = (
+      conflictClient as unknown as {
+        request<T>(path: string, init?: Record<string, unknown>): Promise<T>;
+      }
+    ).request.bind(conflictClient);
+
+    await expect(
+      request("/api/talos", {
+        method: "POST",
+        headers: new Headers({ "Idempotency-Key": "header-key" }),
+        idempotencyKey: "option-key",
+      }),
+    ).rejects.toThrow("Conflicting idempotency keys");
+    expect(signer).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("does NOT inject Idempotency-Key when WriteOptions is omitted (backward compat)", async () => {
