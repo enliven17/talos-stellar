@@ -137,7 +137,15 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm --dir packages/sdk build
-          cd packages/sdk && npm pack
+
+      - name: Validate sdk published entry points
+        if: matrix.release.name == 'sdk'
+        run: node scripts/check-package-artifacts.mjs --package packages/sdk
+
+      - name: Pack sdk artifact
+        if: matrix.release.name == 'sdk'
+        working-directory: packages/sdk
+        run: npm pack
 
       # --- agent ---
       - name: Setup Python

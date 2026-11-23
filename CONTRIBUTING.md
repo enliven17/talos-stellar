@@ -24,6 +24,14 @@ and the Rust Wasm target. The optional Stellar CLI is reported as a warning;
 missing or outdated required tools make the command exit with a non-zero code.
 Run its mocked platform-independent checks with `pnpm doctor:test`.
 
+After building a publishable package, run `pnpm artifacts:check` to verify that
+every entry in its `exports`, `main`, `module`, `types`, `browser`, and `bin`
+fields resolves to a file inside the package directory. Missing targets,
+absolute paths, `..` escapes, and symlinks that leave the package fail before
+`npm pack`, so a broken entry point cannot reach a release. The check reads the
+built output, so build first (for example `pnpm --dir packages/sdk build`); its
+tests run without a build via `pnpm test:package-artifacts`.
+
 For the Rust contracts, also add the Wasm target:
 
 ```bash

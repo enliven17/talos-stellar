@@ -259,6 +259,12 @@ jobs:
         working-directory: packages/sdk
         run: pnpm run test
 
+      - name: "[sdk] Verify published entry points"
+        if: matrix.package == 'sdk'
+        run: |
+          node --test scripts/check-package-artifacts.test.mjs
+          node scripts/check-package-artifacts.mjs --package packages/sdk
+
       # ── Prime Agent: ruff, pytest ───────────────────────────────
       - name: "[prime-agent] Lint"
         if: matrix.package == 'prime-agent'
