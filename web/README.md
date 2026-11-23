@@ -254,6 +254,12 @@ Limits are stored in two Postgres tables (added in migration `0013_add_quota_tab
 
 The increment-then-check pattern costs one DB round-trip per request with no distributed locking.
 
+### Bounded Grace Policy on Store Outage
+
+When the quota store or database is unavailable:
+- **Payment & Privileged Operations**: Always fail-closed (`ok: false`, remaining 0, 429 response) to guarantee atomic budget and settlement integrity.
+- **Standard & Read Operations**: Allowed under a bounded grace window (`QUOTA_STORE_GRACE_TTL_MS`, default: 60s). If the outage exceeds this grace ceiling, requests fail closed until store connectivity is restored.
+
 **Backward compatibility:** quota enforcement is enabled by platform-level defaults inserted by the migration. To disable enforcement for a specific agent or resource, call the `PATCH /api/talos/:id/quota` endpoint with `"enabled": false`.
 
 ### Response headers

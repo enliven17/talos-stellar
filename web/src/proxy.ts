@@ -93,11 +93,33 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
 
   let result: RateLimitResult;
 
+  // Explicit operation class per route for fail-open / fail-closed policy
+  const isPaymentRoute =
+    pathname.includes("/buy-token") ||
+    pathname.includes("/jobs") ||
+    pathname.includes("/revenue/distribute") ||
+    pathname.includes("/purchase");
+
+  const isPrivilegedRoute =
+    isAuthRoute ||
+    pathname.includes("/admin") ||
+    pathname.includes("/ops") ||
+    pathname.includes("/internal");
+
+  const opClass = isPaymentRoute
+    ? "payment"
+    : isPrivilegedRoute
+    ? "privileged"
+    : method === "GET"
+    ? "read"
+    : "standard";
+
   if (isAuthRoute) {
     const p = RATE_LIMIT_POLICIES.auth;
     result = await rateLimit(`${p.keyPrefix}:${ip}`, {
       limit: p.limit,
       windowMs: p.windowMs,
+      operationClass: opClass,
     });
     result.policy = p.name;
   } else if (pathname === CSP_REPORT_ENDPOINT) {
@@ -108,6 +130,7 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
     result = await rateLimit(`${p.keyPrefix}:${ip}`, {
       limit: p.limit,
       windowMs: p.windowMs,
+      operationClass: opClass,
     });
     result.policy = p.name;
   } else if (method === "GET") {
@@ -115,6 +138,7 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
     result = await rateLimit(`${p.keyPrefix}:${ip}`, {
       limit: p.limit,
       windowMs: p.windowMs,
+      operationClass: opClass,
     });
     result.policy = p.name;
   } else if (method === "POST" && apiKey) {
@@ -128,6 +152,7 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
     result = await rateLimit(`${p.keyPrefix}:${safeKey}`, {
       limit: p.limit,
       windowMs: p.windowMs,
+      operationClass: opClass,
     });
     result.policy = p.name;
   } else {
@@ -135,6 +160,7 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
     result = await rateLimit(`${p.keyPrefix}:${ip}`, {
       limit: p.limit,
       windowMs: p.windowMs,
+      operationClass: opClass,
     });
     result.policy = p.name;
   }

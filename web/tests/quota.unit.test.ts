@@ -93,6 +93,9 @@ import {
   buildQuotaHeaders,
   buildQuotaExplanation,
   applyQuotaHeaders,
+  getQuotaStoreOutageStatus,
+  _resetQuotaStoreOutage,
+  DEFAULT_QUOTA_STORE_GRACE_TTL_MS,
   type QuotaResource,
   type WindowSize,
 } from "@/lib/quota";
@@ -887,5 +890,125 @@ describe("quotaExceededResponse — body includes explanation", () => {
     expect(body.policy).toBe("agent");
     expect(body.explanation).toContain("Quota exceeded");
     expect(body.ok).toBe(false);
+  });
+});
+
+// ─── Bounded grace policy for verified quota-store outages ───────────────────
+
+describe("checkAndIncrementQuota — bounded grace policy on store outage", () => {
+  beforeEach(() => {
+    _resetQuotaStoreOutage();
+    delete process.env.QUOTA_STORE_GRACE_TTL_MS;
+  });
+
+  it("keeps payment paths strictly fail-closed during outage", async () => {
+    // Simulate database failure during upsert
+    mocks.dbSelect.mockReturnValueOnce(
+      mocks.makeSelectChain([
+        { talosId: "agent-1", resource: "job_writes", maxCount: 100, windowSize: "daily", enabled: true, notes: null },
+      ]),
+    );
+    const failingInsertChain = {
+      values: vi.fn(() => failingInsertChain),
+      onConflictDoUpdate: vi.fn(() => failingInsertChain),
+      returning: vi.fn(() => Promise.reject(new Error("DB connection timeout"))),
+    };
+    mocks.dbInsert.mockReturnValueOnce(failingInsertChain as any);
+
+    const result = await checkAndIncrementQuota(fakeDb, "agent-1", "job_writes", {
+      operationClass: "payment",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.remaining).toBe(0);
+    expect(result.resource).toBe("job_writes");
+    expect(getQuotaStoreOutageStatus().isOutage).toBe(true);
+  });
+
+  it("keeps privileged paths strictly fail-closed during outage", async () => {
+    mocks.dbSelect.mockReturnValueOnce(
+      mocks.makeSelectChain([
+        { talosId: "agent-1", resource: "activity_writes", maxCount: 100, windowSize: "daily", enabled: true, notes: null },
+      ]),
+    );
+    const failingInsertChain = {
+      values: vi.fn(() => failingInsertChain),
+      onConflictDoUpdate: vi.fn(() => failingInsertChain),
+      returning: vi.fn(() => Promise.reject(new Error("DB connection error"))),
+    };
+    mocks.dbInsert.mockReturnValueOnce(failingInsertChain as any);
+
+    const result = await checkAndIncrementQuota(fakeDb, "agent-1", "activity_writes", {
+      operationClass: "privileged",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.remaining).toBe(0);
+    expect(getQuotaStoreOutageStatus().isOutage).toBe(true);
+  });
+
+  it("allows standard operations to fail-open within the bounded grace TTL", async () => {
+    mocks.dbSelect.mockReturnValueOnce(
+      mocks.makeSelectChain([
+        { talosId: "agent-1", resource: "activity_writes", maxCount: 500, windowSize: "daily", enabled: true, notes: null },
+      ]),
+    );
+    const failingInsertChain = {
+      values: vi.fn(() => failingInsertChain),
+      onConflictDoUpdate: vi.fn(() => failingInsertChain),
+      returning: vi.fn(() => Promise.reject(new Error("DB connection error"))),
+    };
+    mocks.dbInsert.mockReturnValueOnce(failingInsertChain as any);
+
+    const result = await checkAndIncrementQuota(fakeDb, "agent-1", "activity_writes", {
+      operationClass: "standard",
+      graceTtlMs: 30_000,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.remaining).toBe(1);
+    expect(result.resource).toBe("activity_writes");
+    expect(getQuotaStoreOutageStatus().isOutage).toBe(true);
+  });
+
+  it("fails closed when outage duration exceeds the bounded grace TTL", async () => {
+    const failingInsertChain = {
+      values: vi.fn(() => failingInsertChain),
+      onConflictDoUpdate: vi.fn(() => failingInsertChain),
+      returning: vi.fn(() => Promise.reject(new Error("DB persistent outage"))),
+    };
+
+    mocks.dbSelect.mockReturnValueOnce(
+      mocks.makeSelectChain([
+        { talosId: "agent-1", resource: "activity_writes", maxCount: 500, windowSize: "daily", enabled: true, notes: null },
+      ]),
+    );
+    mocks.dbInsert.mockReturnValueOnce(failingInsertChain as any);
+
+    // First failure with graceTtlMs = 0 (boundary case: grace expired immediately)
+    const r1 = await checkAndIncrementQuota(fakeDb, "agent-1", "activity_writes", {
+      operationClass: "standard",
+      graceTtlMs: -1, // Force expired grace window
+    });
+
+    expect(r1.ok).toBe(false);
+    expect(r1.remaining).toBe(0);
+  });
+
+  it("handles outage during resolveQuotaConfig lookup with safe fallback bounds", async () => {
+    mocks.dbSelect.mockReturnValueOnce({
+      from: vi.fn(() => ({
+        where: vi.fn(() => Promise.reject(new Error("Postgres unreachable"))),
+      })),
+    } as any);
+
+    const result = await checkAndIncrementQuota(fakeDb, "agent-1", "activity_writes", {
+      operationClass: "standard",
+      graceTtlMs: 60_000,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.limit).toBe(10_000);
+    expect(result.remaining).toBe(1);
   });
 });
