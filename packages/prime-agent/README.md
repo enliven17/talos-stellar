@@ -204,6 +204,7 @@ Additional architectural, configuration, and operational guides:
   - `talos-agent doctor` — read-only integrity and schema checks for every local agent database.
   - [Adapter HTTP Testing](./docs/adapter-http-testing.md) — Fake transport contract for isolated communication-adapter tests.
   - [Adapter Health Snapshots](./docs/adapter-health-snapshots.md) — Runtime health snapshot captures and telemetry.
+  - [Adapter Registration](./docs/adapter-registration.md) — Idempotent registration and conflicting-capability handling.
   - [Discord Reconnect Policy](./docs/discord-reconnect-policy.md) — Connection lifecycle and reconnect backoff behavior for Discord.
   - [Logging Policy](./docs/LOGGING_POLICY.md) — Structured logging standards, redaction rules, and severity levels.
   - [Policy Engine](./docs/policy-engine.md) — Declarative policy engine rules, evaluation, and enforcement.
@@ -534,6 +535,15 @@ See the
 for the input → class mapping, privacy guarantees, compatibility notes, and
 how to consume the classification.
 
+## Scheduler cancellation vs. failed attempts
+
+Scheduled tasks (`polling`, `heartbeat`, `job_heartbeat`, `activity_flush` and `job_effect_dispatch`) distinguish intentional shutdown from a failed attempt:
+
+- If `shutdown_event` is set while an attempt is running, an exception from that attempt is logged as interrupted by shutdown. It does not call `DurableBackoff.failure()`, so it never consumes retry budget or advances `attempt_count`.
+- `asyncio.CancelledError` is always re-raised and never recorded as a failure.
+- A genuine failure while the agent is running still consumes retry budget as before, including the `max_attempts` terminal stop.
+
+Agent cycle summaries record the terminal state in `outcome`: `completed`, `shutdown`, `cancelled`, `max_iterations`, `provider_failure` or `error`. A cancelled cycle is reported with `outcome=cancelled`, `error_type=CancelledError` and `error_category=cancelled`, and is no longer reported as `completed`.
 ## Scheduler execution identities
 
 Financial scheduler cycles reserve a durable execution identity in the local

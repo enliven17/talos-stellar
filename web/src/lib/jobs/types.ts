@@ -69,6 +69,28 @@ export interface HeartbeatResult {
   cancelled: boolean;
 }
 
+/** Reason codes for a rejected lease extension request. */
+export type LeaseExtensionRejectionReason =
+  | "invalid_duration"
+  | "exceeds_max_extension"
+  | "exceeds_max_horizon"
+  | "would_shorten_lease"
+  | "not_found"
+  | "invalid_job_state"
+  | "cancellation_requested"
+  | "no_active_lease"
+  | "lease_expired"
+  | "lease_mismatch";
+
+/** Result returned by extendLease() calls. */
+export interface ExtendLeaseResult {
+  /** true when the lease was extended; false when rejected or lost. */
+  ok: boolean;
+  cancelled: boolean;
+  leaseExpiresAt: Date | null;
+  reason?: LeaseExtensionRejectionReason;
+}
+
 export interface JobContext<TPayload = unknown> {
   id: string;
   queue: string;
@@ -80,7 +102,13 @@ export interface JobContext<TPayload = unknown> {
    * handlers should call this periodically and abort (via `signal`) when
    * `cancelled` is true or `ok` is false.
    */
-  heartbeat: () => Promise<HeartbeatResult>;
+  heartbeat: (leaseDurationMs?: number) => Promise<HeartbeatResult>;
+  /**
+   * Additively extends the current lease expiry by `extensionMs` after
+   * validating extension limits against current expiry and job state.
+   * Rejects contradictory requests without modifying the held lease.
+   */
+  extendLease: (extensionMs: number) => Promise<ExtendLeaseResult>;
   /** Aborts when cancellation is requested or the process is shutting down. */
   signal: AbortSignal;
 }

@@ -227,7 +227,17 @@ export async function heartbeat(
   leaseId: string,
   leaseDurationMs: number = jobsConfig.leaseDurationMs,
 ): Promise<{ ok: boolean; cancelled: boolean }> {
-  const leaseExpiresAt = sql`now() + (${leaseDurationMs}::text || ' milliseconds')::interval`;
+  if (
+    !Number.isFinite(leaseDurationMs) ||
+    leaseDurationMs <= 0 ||
+    leaseDurationMs > jobsConfig.maxLeaseExtensionMs ||
+    leaseDurationMs > jobsConfig.maxLeaseHorizonMs
+  ) {
+    return { ok: false, cancelled: false };
+  }
+
+  const candidateExpiresAt = sql`now() + (${leaseDurationMs}::text || ' milliseconds')::interval`;
+  const leaseExpiresAt = sql`GREATEST(${tlsJobs.leaseExpiresAt}, ${candidateExpiresAt})`;
   const [row] = await db
     .update(tlsJobs)
     .set({ leaseExpiresAt, heartbeatAt: sql`now()` })

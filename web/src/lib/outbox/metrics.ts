@@ -17,6 +17,7 @@ export type OutboxLogEvent =
   | "outbox_event_dispatched"
   | "outbox_event_retry_scheduled"
   | "outbox_event_dead_letter"
+  | "outbox_event_quarantined"
   | "outbox_lease_reaped"
   | "outbox_events_pruned";
 

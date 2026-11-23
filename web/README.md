@@ -260,13 +260,14 @@ The increment-then-check pattern costs one DB round-trip per request with no dis
 
 Every 2xx write response includes quota state headers:
 
-| Header              | Value                                                                      |
-| ------------------- | -------------------------------------------------------------------------- |
-| `X-Quota-Limit`     | Effective limit for this window                                            |
-| `X-Quota-Remaining` | Remaining calls after this one                                             |
-| `X-Quota-Used`      | Total calls used in this window                                            |
-| `X-Quota-Reset`     | Unix timestamp (seconds) when the window resets (omitted if unknown/invalid) |
-| `X-Quota-Resource`  | Which resource was checked                                                 |
+| Header              | Value                                           |
+| ------------------- | ----------------------------------------------- |
+| `X-Quota-Limit`     | Effective limit for this window                 |
+| `X-Quota-Remaining` | Remaining calls after this one                  |
+| `X-Quota-Used`      | Total calls used in this window                 |
+| `X-Quota-Reset`     | Unix timestamp (seconds) when the window resets |
+| `X-Quota-Resource`  | Which resource was checked                      |
+| `X-Quota-Incremented` | `true` when this decision consumed a unit, `false` when the quota is disabled (no write) or the call was a read-only usage lookup |
 
 When a limit is exceeded the API returns `429 Too Many Requests` with the same `X-Quota-*` headers, a bounded `Retry-After` header (whole seconds), and a JSON body:
 
@@ -275,7 +276,8 @@ When a limit is exceeded the API returns `429 Too Many Requests` with the same `
   "error": "Quota exceeded",
   "resource": "activity_writes",
   "limit": 500,
-  "resetAt": "2026-07-25T00:00:00.000Z"
+  "resetAt": "2026-07-25T00:00:00.000Z",
+  "incremented": true
 }
 ```
 
@@ -332,6 +334,15 @@ Response:
   }
 }
 ```
+
+**Export a reproducible quota-window usage statement:**
+
+```
+GET /api/talos/:id/quota?format=statement&asOf=2026-07-24T12:30:00Z
+Authorization: Bearer <api_key>
+```
+
+Returns a canonical, integer-unit usage statement for the authorized agent with stable UTC window boundaries (`windowStart`/`windowEnd` and integer ms), `sourcePolicyVersion`, per-resource `policySource`, aggregate `totals`, and a deterministic SHA-256 `digest` (also exposed in the `X-Quota-Statement-Digest` header). Private request payloads and operator `notes` are omitted. The `asOf` query parameter is optional (defaults to the current UTC time) and returns `400` if not a valid ISO-8601 timestamp.
 
 **Override a quota for a specific agent:**
 

@@ -250,3 +250,28 @@ class DurableBackoff:
         delay = self.next_delay()
         self._next_attempt_at = self._clock.now() + timedelta(seconds=delay)
         self._persist()
+
+    def cancel(self) -> None:
+        """Cancel any pending retry: clear state and mark as terminal.
+
+        Called when the agent enters draining state (shutdown initiated).
+        This prevents the retry timer from being resurrected on restart
+        and stops any new retries from being scheduled.
+        """
+        if self.fail_count > 0 or self._next_attempt_at is not None:
+            logger.info(
+                "DurableBackoff cancelled on draining: task=%s fail_count=%d",
+                self.task_name,
+                self.fail_count,
+            )
+        self.fail_count = 0
+        self._next_attempt_at = None
+        self._terminal = True
+        try:
+            self._db.clear_retry_state(self.task_name)
+        except Exception as exc:
+            logger.warning(
+                "DurableBackoff: failed to clear state for %s on cancel: %s",
+                self.task_name,
+                exc,
+            )

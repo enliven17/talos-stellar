@@ -11,8 +11,18 @@ from pathlib import Path
 
 import pytest
 
-from talos_agent.policy.engine import PolicyEngine, _evaluate_condition, _all_conditions_match
-from talos_agent.policy.loader import PolicyLoader, _build_default_policies, _load_from_file
+from talos_agent.policy.engine import (
+    PolicyEngine,
+    PolicyReloadError,
+    _evaluate_condition,
+    _all_conditions_match,
+)
+from talos_agent.policy.loader import (
+    PolicyLoadError,
+    PolicyLoader,
+    _build_default_policies,
+    _load_from_file,
+)
 from talos_agent.policy.middleware import (
     PolicyMiddleware,
     PolicyViolationError,
@@ -290,6 +300,61 @@ class TestPolicyEngine:
         assert engine._policies[0].name == "a-policy"
         assert engine._policies[1].name == "z-policy"
 
+    def test_reload_preserves_snapshot_when_candidate_is_invalid(self, engine):
+        previous = Policy(
+            name="previous",
+            rules=(
+                PolicyRule(
+                    rule_id="block-sensitive",
+                    description="Keep blocking sensitive actions",
+                    conditions=(MatchCondition("action", "eq", "sensitive"),),
+                    decision=PolicyDecision.DENY,
+                    severity=Severity.BLOCKER,
+                    reason="Sensitive action blocked",
+                ),
+            ),
+        )
+        engine.enabled = True
+        engine.load([Policy(name="initial")])
+        engine.reload([previous])
+        active_snapshot = engine.policies
+        assert engine.policies[0].name == "previous"
+        before = engine.evaluate(ActionSpec("sensitive"))
+        assert before.decision == PolicyDecision.DENY
+
+        invalid_candidate = Policy(
+            name="invalid",
+            rules=(
+                PolicyRule(
+                    rule_id="invalid-regex",
+                    description="Invalid regex",
+                    conditions=(MatchCondition("action", "regex", "["),),
+                ),
+            ),
+        )
+        with pytest.raises(PolicyReloadError, match="invalid regex"):
+            engine.reload([invalid_candidate])
+
+        assert engine.policies is active_snapshot
+        after = engine.evaluate(ActionSpec("sensitive"))
+        assert after.decision == before.decision
+        assert after.violated_rules == before.violated_rules
+
+    def test_reload_simulates_candidate_before_replacing_snapshot(
+        self, engine, monkeypatch
+    ):
+        active = [Policy(name="active")]
+        engine.load(active)
+        active_snapshot = engine.policies
+
+        def fail_simulation(self, action, params=None, context=None):
+            raise RuntimeError("simulation failed")
+
+        monkeypatch.setattr(PolicySimulator, "simulate", fail_simulation)
+        with pytest.raises(PolicyReloadError, match="simulation failed"):
+            engine.reload([Policy(name="candidate")])
+
+        assert engine.policies is active_snapshot
     def test_load_rejects_duplicate_rule_ids_before_installing(self, engine):
         original = Policy(name="original", rules=(PolicyRule("stable-id", "first"),))
         duplicate = Policy(name="override", rules=(PolicyRule("stable-id", "second"),))
@@ -553,11 +618,11 @@ class TestPolicyLoader:
         assert "policies" in raw
         assert len(raw["policies"]) > 0
 
-    def test_load_from_file_invalid_json(self, tmp_path: Path):
+    def test_load_from_file_invalid_json_fails(self, tmp_path: Path):
         path = tmp_path / "bad.json"
         path.write_text("not json")
-        result = _load_from_file(path)
-        assert result == []
+        with pytest.raises(PolicyLoadError, match="Unable to load policy file"):
+            _load_from_file(path)
 
     def test_load_from_file_valid(self, tmp_path: Path):
         path = tmp_path / "good.json"
@@ -705,6 +770,64 @@ class TestPolicyMiddleware:
         error = PolicyViolationError(result, "test_action")
         assert "deny" in str(error).lower()
         assert "Test block" in str(error)
+
+    def test_hot_reload_keeps_active_snapshot_after_invalid_candidate(
+        self, engine, tmp_path: Path, monkeypatch
+    ):
+        from talos_agent.policy.loader import PolicyLoader
+
+        policy_file = tmp_path / "policies.json"
+        policy_file.write_text(json.dumps({
+            "policies": [{
+                "name": "invalid",
+                "rules": [{
+                    "rule_id": "invalid-regex",
+                    "conditions": [
+                        {"field": "action", "operator": "regex", "value": "["}
+                    ],
+                    "decision": "deny",
+                    "severity": "blocker",
+                    "reason": "Invalid candidate",
+                }],
+            }]
+        }))
+        monkeypatch.setattr(
+            "talos_agent.policy.loader._policies_file_path",
+            lambda: policy_file,
+        )
+
+        previous = Policy(
+            name="previous",
+            rules=(
+                PolicyRule(
+                    rule_id="block-sensitive",
+                    description="Keep blocking sensitive actions",
+                    conditions=(MatchCondition("action", "eq", "sensitive"),),
+                    decision=PolicyDecision.DENY,
+                    severity=Severity.BLOCKER,
+                    reason="Sensitive action blocked",
+                ),
+            ),
+        )
+        engine.enabled = True
+        engine.load([previous])
+        active_snapshot = engine.policies
+        loader = PolicyLoader(db=None)
+        middleware = PolicyMiddleware(engine, loader)
+
+        assert middleware.hot_reload() is False
+        assert engine.policies is active_snapshot
+        assert engine.evaluate(ActionSpec("sensitive")).decision == PolicyDecision.DENY
+        assert loader.needs_reload() is True
+        assert loader._cached is None
+
+        policy_file.write_text(json.dumps({"policies": [{"name": "recovered"}]}))
+        assert middleware.hot_reload() is True
+        assert "recovered" in {policy.name for policy in engine.policies}
+        assert {policy.name for policy in loader._cached} == {
+            policy.name for policy in engine.policies
+        }
+        assert loader.needs_reload() is False
 
 
 # ── PolicySimulator tests ─────────────────────────────────────────────────────
