@@ -1,13 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { db } from "@/db";
-import { tlsApiAuditLogs } from "@/db/schema";
 import {
-  AuditLogFilterError,
-  MAX_CURSOR_LEN,
-  MAX_Q_LEN,
-  MAX_TALOS_ID_LEN,
-} from "../src/lib/audit-log/filters";
-import { listAuditLogs } from "../src/lib/audit-log/store";
+  computeEntryHash,
+  GENESIS_HASH,
+  AUDIT_CHAIN_VERSION,
+  verifyAuditCheckpointBundle,
+} from "../src/lib/audit-chain";
+import {
+  listAuditLogs,
+  exportAuditCheckpointBundle,
+} from "../src/lib/audit-log/store";
 
 const { mockDb } = vi.hoisted(() => ({
   mockDb: {
@@ -356,5 +357,127 @@ describe("verifyAuditChainRange", () => {
     expect(result.status).toBe("broken");
     expect(result.failureReason).toBe("predecessor_mismatch");
     expect(result.brokenAtSequence).toBe(1);
+  });
+});
+
+describe("exportAuditCheckpointBundle", () => {
+  const hmacSecret = "store-checkpoint-secret-123";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function makeSyntheticDbRows(count: number, talosId = "t-1") {
+    const rows = [];
+    let prevHash = GENESIS_HASH;
+    for (let i = 0; i < count; i++) {
+      const createdAt = new Date(Date.UTC(2026, 0, 1, 12, 0, i));
+      const entryHash = computeEntryHash({
+        sequenceNumber: i,
+        talosId,
+        method: "POST",
+        path: `/api/talos/${talosId}/sign`,
+        statusCode: 200,
+        ipAddress: "127.0.0.1",
+        createdAt: createdAt.toISOString(),
+      });
+      rows.push({
+        id: `row_${i}`,
+        talosId,
+        method: "POST",
+        path: `/api/talos/${talosId}/sign`,
+        statusCode: 200,
+        denialReason: null,
+        scopesRequired: ["wallet:sign"],
+        ipAddress: "127.0.0.1",
+        sequenceNumber: i,
+        previousHash: prevHash,
+        entryHash,
+        chainVersion: AUDIT_CHAIN_VERSION,
+        createdAt,
+      });
+      prevHash = entryHash;
+    }
+    return rows;
+  }
+
+  it("queries bounded chained rows, builds a signed bundle, and verifies offline without DB access", async () => {
+    const dbRows = makeSyntheticDbRows(3);
+    // Descending order returned from DB when no lower bound is given
+    mockDb.limit.mockResolvedValueOnce([...dbRows].reverse());
+
+    const bundle = await exportAuditCheckpointBundle({
+      talosId: "t-1",
+      limit: 5,
+      hmacSecret,
+      exportedAt: "2026-01-01T13:00:00.000Z",
+    });
+
+    expect(mockDb.limit).toHaveBeenCalledWith(6);
+    expect(bundle.talosId).toBe("t-1");
+    expect(bundle.boundaries.entryCount).toBe(3);
+    expect(bundle.boundaries.startSequence).toBe(0);
+    expect(bundle.boundaries.endSequence).toBe(2);
+    expect(bundle.boundaries.truncated).toBe(false);
+    expect(bundle.chainRoot).toBe(dbRows[2].entryHash);
+
+    const verified = verifyAuditCheckpointBundle(bundle, {
+      hmacSecret,
+      expectedTalosId: "t-1",
+    });
+    expect(verified.valid).toBe(true);
+    expect(verified.verifiedEntries).toBe(3);
+  });
+
+  it("marks truncated=true when DB returns limit + 1 rows and preserves contiguous boundaries", async () => {
+    const dbRows = makeSyntheticDbRows(4);
+    // Simulate DB returning 3 rows (limit=2 -> limit+1=3) for tail query (seq 3, 2, 1)
+    mockDb.limit.mockResolvedValueOnce([dbRows[3], dbRows[2], dbRows[1]]);
+
+    const bundle = await exportAuditCheckpointBundle({
+      talosId: "t-1",
+      limit: 2,
+      hmacSecret,
+    });
+
+    expect(mockDb.limit).toHaveBeenCalledWith(3);
+    expect(bundle.boundaries.truncated).toBe(true);
+    expect(bundle.boundaries.entryCount).toBe(2);
+    expect(bundle.boundaries.startSequence).toBe(2);
+    expect(bundle.boundaries.endSequence).toBe(3);
+    expect(bundle.boundaries.previousChainHash).toBe(dbRows[1].entryHash);
+
+    const verified = verifyAuditCheckpointBundle(bundle, {
+      hmacSecret,
+      expectedPreviousChainHash: dbRows[1].entryHash,
+    });
+    expect(verified.valid).toBe(true);
+    expect(verified.verifiedEntries).toBe(2);
+  });
+
+  it("rejects invalid filter boundaries (empty talosId, negative sequence, reversed sequence or date range)", async () => {
+    await expect(
+      exportAuditCheckpointBundle({ talosId: "   " }),
+    ).rejects.toThrow(/talosId is required/);
+
+    await expect(
+      exportAuditCheckpointBundle({ talosId: "t-1", fromSequence: -1 }),
+    ).rejects.toThrow(/fromSequence must be a non-negative integer/);
+
+    await expect(
+      exportAuditCheckpointBundle({
+        talosId: "t-1",
+        fromSequence: 10,
+        toSequence: 5,
+      }),
+    ).rejects.toThrow(/fromSequence must be less than or equal to toSequence/);
+
+    await expect(
+      exportAuditCheckpointBundle({
+        talosId: "t-1",
+        from: "2026-02-01T00:00:00.000Z",
+        to: "2026-01-01T00:00:00.000Z",
+      }),
+    ).rejects.toThrow(/from must be earlier than or equal to to/);
   });
 });

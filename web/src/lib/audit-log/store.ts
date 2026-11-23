@@ -1,8 +1,26 @@
-import { and, count, desc, eq, gte, isNotNull, lte, lt, or, sql, type SQL } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gte,
+  isNotNull,
+  lte,
+  lt,
+  or,
+  sql,
+  type SQL,
+} from "drizzle-orm";
+import type { KeyObject } from "node:crypto";
 import { db } from "@/db";
 import { tlsApiAuditLogs } from "@/db/schema";
 import {
-  AuditLogFilterError,
+  clampCheckpointLimit,
+  createAuditCheckpointBundle,
+  type AuditCheckpointBundle,
+  type AuditCheckpointRowInput,
+} from "@/lib/audit-chain";
+import {
   escapeIlikePattern,
   statusClassRange,
   validateAuditLogFilters,
@@ -96,57 +114,154 @@ export async function listAuditLogs(
   return { logs: page.map(toRecord), nextCursor };
 }
 
-export async function getAgentAuditReviewBundle(
-  talosId: string,
-  limit: number,
-  cursor?: string,
-): Promise<{
-  auditReferences: AuditLogRecord[];
-  nextCursor: string | null;
-  checkpoint: {
-    chainRoot: string | null;
-    totalEntries: number;
-    chainVersion: string | null;
-    createdAt: string;
-  };
-}> {
-  const referenceConditions = [eq(tlsApiAuditLogs.talosId, talosId)];
-  if (cursor) referenceConditions.push(lt(tlsApiAuditLogs.createdAt, new Date(cursor)));
+export interface ExportAuditCheckpointFilter {
+  talosId: string;
+  /** Inclusive lower sequence bound. */
+  fromSequence?: number;
+  /** Inclusive upper sequence bound. */
+  toSequence?: number;
+  /** Inclusive lower timestamp bound (ISO-8601 or Date). */
+  from?: string | Date;
+  /** Inclusive upper timestamp bound (ISO-8601 or Date). */
+  to?: string | Date;
+  /** Maximum number of chained entries to include (clamped to `[1, 1000]`). */
+  limit?: number;
+  /** Optional export timestamp override. */
+  exportedAt?: Date | string;
+  /** Optional HMAC-SHA256 secret override for signing the checkpoint bundle. */
+  hmacSecret?: string | null;
+  /** Optional Ed25519 private key override (PEM or KeyObject) for signing. */
+  privateKey?: string | KeyObject | null;
+  /** Optional Ed25519 public key override (PEM) embedded in signature metadata. */
+  publicKey?: string | null;
+  /** Optional key identifier. */
+  keyId?: string | null;
+  /** Optional pre-fetched rows; when omitted, queries `tls_api_audit_logs`. */
+  rows?: AuditCheckpointRowInput[];
+}
 
-  const [rows, latestRows, countRows] = await Promise.all([
-    db
-      .select()
-      .from(tlsApiAuditLogs)
-      .where(and(...referenceConditions))
-      .orderBy(desc(tlsApiAuditLogs.createdAt))
-      .limit(limit + 1),
-    db
-      .select({
-        entryHash: tlsApiAuditLogs.entryHash,
-        chainVersion: tlsApiAuditLogs.chainVersion,
-      })
-      .from(tlsApiAuditLogs)
-      .where(and(eq(tlsApiAuditLogs.talosId, talosId), isNotNull(tlsApiAuditLogs.entryHash)))
-      .orderBy(desc(tlsApiAuditLogs.createdAt))
-      .limit(1),
-    db
-      .select({ total: count() })
-      .from(tlsApiAuditLogs)
-      .where(and(eq(tlsApiAuditLogs.talosId, talosId), isNotNull(tlsApiAuditLogs.entryHash))),
-  ]);
+/**
+ * Export a bounded, cryptographically signed audit checkpoint bundle with
+ * explicit chain boundaries (`startSequence`, `endSequence`, `startEntryHash`,
+ * `endEntryHash`, `previousChainHash`, `startTimestamp`, `endTimestamp`,
+ * `entryCount`, `limit`, `truncated`) that can be verified offline without
+ * database connectivity or administrator credentials.
+ */
+export async function exportAuditCheckpointBundle(
+  filter: ExportAuditCheckpointFilter,
+): Promise<AuditCheckpointBundle> {
+  if (!filter.talosId || !filter.talosId.trim()) {
+    throw new Error("talosId is required to export an audit checkpoint bundle");
+  }
+  if (
+    filter.fromSequence !== undefined &&
+    (!Number.isInteger(filter.fromSequence) || filter.fromSequence < 0)
+  ) {
+    throw new Error("fromSequence must be a non-negative integer");
+  }
+  if (
+    filter.toSequence !== undefined &&
+    (!Number.isInteger(filter.toSequence) || filter.toSequence < 0)
+  ) {
+    throw new Error("toSequence must be a non-negative integer");
+  }
+  if (
+    filter.fromSequence !== undefined &&
+    filter.toSequence !== undefined &&
+    filter.fromSequence > filter.toSequence
+  ) {
+    throw new Error("fromSequence must be less than or equal to toSequence");
+  }
 
-  const hasMore = rows.length > limit;
-  const page = hasMore ? rows.slice(0, limit) : rows;
-  const latest = latestRows[0] ?? null;
+  const fromDate =
+    filter.from !== undefined
+      ? filter.from instanceof Date
+        ? filter.from
+        : new Date(filter.from)
+      : null;
+  const toDate =
+    filter.to !== undefined
+      ? filter.to instanceof Date
+        ? filter.to
+        : new Date(filter.to)
+      : null;
 
-  return {
-    auditReferences: page.map(toRecord),
-    nextCursor: hasMore ? page[page.length - 1]?.createdAt.toISOString() ?? null : null,
-    checkpoint: {
-      chainRoot: latest?.entryHash ?? null,
-      totalEntries: countRows[0]?.total ?? 0,
-      chainVersion: latest?.chainVersion ?? null,
-      createdAt: new Date().toISOString(),
-    },
-  };
+  if (fromDate !== null && Number.isNaN(fromDate.getTime())) {
+    throw new Error("from must be a valid ISO-8601 timestamp");
+  }
+  if (toDate !== null && Number.isNaN(toDate.getTime())) {
+    throw new Error("to must be a valid ISO-8601 timestamp");
+  }
+  if (fromDate !== null && toDate !== null && fromDate.getTime() > toDate.getTime()) {
+    throw new Error("from must be earlier than or equal to to");
+  }
+
+  const limit = clampCheckpointLimit(filter.limit);
+
+  if (filter.rows !== undefined) {
+    return createAuditCheckpointBundle({
+      talosId: filter.talosId.trim(),
+      rows: filter.rows,
+      limit,
+      fromSequence: filter.fromSequence,
+      toSequence: filter.toSequence,
+      exportedAt: filter.exportedAt,
+      hmacSecret: filter.hmacSecret,
+      privateKey: filter.privateKey,
+      publicKey: filter.publicKey,
+      keyId: filter.keyId,
+    });
+  }
+
+  const conditions: SQL[] = [
+    eq(tlsApiAuditLogs.talosId, filter.talosId.trim()),
+    isNotNull(tlsApiAuditLogs.entryHash),
+    isNotNull(tlsApiAuditLogs.sequenceNumber),
+  ];
+
+  if (filter.fromSequence !== undefined) {
+    conditions.push(gte(tlsApiAuditLogs.sequenceNumber, filter.fromSequence));
+  }
+  if (filter.toSequence !== undefined) {
+    conditions.push(lte(tlsApiAuditLogs.sequenceNumber, filter.toSequence));
+  }
+  if (fromDate !== null) {
+    conditions.push(gte(tlsApiAuditLogs.createdAt, fromDate));
+  }
+  if (toDate !== null) {
+    conditions.push(lte(tlsApiAuditLogs.createdAt, toDate));
+  }
+
+  // If a lower bound (`fromSequence` or `from`) is specified, order ascending from that bound;
+  // otherwise fetch the latest `limit + 1` chained entries descending so the bundle
+  // captures the latest chain tail up to the current chain root.
+  const orderAscending = filter.fromSequence !== undefined || fromDate !== null;
+
+  const rows = await db
+    .select()
+    .from(tlsApiAuditLogs)
+    .where(and(...conditions))
+    .orderBy(
+      orderAscending
+        ? asc(tlsApiAuditLogs.sequenceNumber)
+        : desc(tlsApiAuditLogs.sequenceNumber),
+    )
+    .limit(limit + 1);
+
+  const truncated = rows.length > limit;
+  const page = truncated ? rows.slice(0, limit) : rows;
+
+  return createAuditCheckpointBundle({
+    talosId: filter.talosId.trim(),
+    rows: page,
+    limit,
+    fromSequence: filter.fromSequence,
+    toSequence: filter.toSequence,
+    truncated,
+    exportedAt: filter.exportedAt,
+    hmacSecret: filter.hmacSecret,
+    privateKey: filter.privateKey,
+    publicKey: filter.publicKey,
+    keyId: filter.keyId,
+  });
 }
