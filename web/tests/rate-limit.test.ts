@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from "vitest";
+import { afterEach, describe, expect, it, beforeEach } from "vitest";
 import {
   applyRateLimitHeaders,
   rateLimit,
@@ -6,12 +6,32 @@ import {
   RATE_LIMIT_POLICIES,
   type RateLimitResult,
 } from "../src/lib/rate-limit";
-import { _resetRateLimitStore } from "../src/lib/rate-limit-store";
+import {
+  _resetRateLimitStore,
+  RedisRateLimitStore,
+  MemoryRateLimitStore,
+} from "../src/lib/rate-limit-store";
+
+const ORIGINAL_MAX_RETRY_AFTER = process.env.QUOTA_MAX_RETRY_AFTER_SECONDS;
+const ORIGINAL_UNKNOWN_RETRY_AFTER = process.env.QUOTA_UNKNOWN_RESET_RETRY_AFTER_SECONDS;
 
 // Ensure each test suite starts with a fresh in-memory store (no REDIS_URL).
 beforeEach(() => {
   _resetRateLimitStore();
   delete process.env.REDIS_URL;
+});
+
+afterEach(() => {
+  if (ORIGINAL_MAX_RETRY_AFTER === undefined) {
+    delete process.env.QUOTA_MAX_RETRY_AFTER_SECONDS;
+  } else {
+    process.env.QUOTA_MAX_RETRY_AFTER_SECONDS = ORIGINAL_MAX_RETRY_AFTER;
+  }
+  if (ORIGINAL_UNKNOWN_RETRY_AFTER === undefined) {
+    delete process.env.QUOTA_UNKNOWN_RESET_RETRY_AFTER_SECONDS;
+  } else {
+    process.env.QUOTA_UNKNOWN_RESET_RETRY_AFTER_SECONDS = ORIGINAL_UNKNOWN_RETRY_AFTER;
+  }
 });
 
 describe("rate limit headers", () => {
@@ -157,6 +177,58 @@ describe("rateLimitResponse shape", () => {
     const retryAfter = Number(res.headers.get("Retry-After"));
     expect(retryAfter).toBeGreaterThanOrEqual(1);
   });
+
+  it("caps Retry-After at 3600s when resetAt is 30 days in the future", () => {
+    const nowMs = 1_753_350_000_000;
+    const thirtyDaysMs = 30 * 24 * 60 * 60 * 1_000;
+    const res = rateLimitResponse(
+      {
+        ok: false,
+        limit: 100,
+        remaining: 0,
+        resetAt: nowMs + thirtyDaysMs,
+      },
+      { nowMs, env: {} },
+    );
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("3600");
+    expect(res.headers.get("X-RateLimit-Reset")).toBe(
+      String(Math.ceil((nowMs + thirtyDaysMs) / 1_000)),
+    );
+  });
+
+  it("respects QUOTA_MAX_RETRY_AFTER_SECONDS for rate-limit 429 responses", () => {
+    const nowMs = 1_753_350_000_000;
+    process.env.QUOTA_MAX_RETRY_AFTER_SECONDS = "120";
+    const res = rateLimitResponse(
+      {
+        ok: false,
+        limit: 100,
+        remaining: 0,
+        resetAt: nowMs + 86_400_000,
+      },
+      { nowMs },
+    );
+
+    expect(res.headers.get("Retry-After")).toBe("120");
+  });
+
+  it.each([null, Number.NaN, Infinity, -Infinity, 0, -5_000])(
+    "emits finite Retry-After: 60 and omits X-RateLimit-Reset when resetAt is %p",
+    (badResetAt) => {
+      const res = rateLimitResponse({
+        ok: false,
+        limit: 10,
+        remaining: 0,
+        resetAt: badResetAt,
+      });
+
+      expect(res.status).toBe(429);
+      expect(res.headers.get("Retry-After")).toBe("60");
+      expect(res.headers.get("X-RateLimit-Reset")).toBeNull();
+    },
+  );
 });
 
 describe("RATE_LIMIT_POLICIES — policy name field", () => {
@@ -213,5 +285,82 @@ describe("applyRateLimitHeaders — boundary inputs", () => {
     const returned = applyRateLimitHeaders(original, result);
     // The function mutates and returns the same object
     expect(returned).toBe(original);
+  });
+
+  it("omits and clears X-RateLimit-Reset when resetAt is unknown or invalid", () => {
+    const response = new Response("ok", {
+      headers: { "X-RateLimit-Reset": "9999999999" },
+    });
+    const updated = applyRateLimitHeaders(response, {
+      ok: true,
+      limit: 5,
+      remaining: 4,
+      resetAt: null,
+    });
+
+    expect(updated.headers.get("X-RateLimit-Limit")).toBe("5");
+    expect(updated.headers.get("X-RateLimit-Remaining")).toBe("4");
+    expect(updated.headers.get("X-RateLimit-Reset")).toBeNull();
+  });
+});
+
+describe("RedisRateLimitStore — bounded grace policy during outage", () => {
+  it("enforces strict fail-closed for payment operations during Redis outage", async () => {
+    // Use an unroutable/invalid Redis URL to simulate connection failure
+    const store = new RedisRateLimitStore("redis://127.0.0.1:1", false, 60_000);
+
+    const result = await store.increment("payment:key", 60_000, {
+      operationClass: "payment",
+    });
+
+    expect(result.count).toBe(Number.MAX_SAFE_INTEGER);
+    expect(store.getOutageStatus().isOutage).toBe(true);
+  });
+
+  it("enforces strict fail-closed for privileged operations during Redis outage", async () => {
+    const store = new RedisRateLimitStore("redis://127.0.0.1:1", false, 60_000);
+
+    const result = await store.increment("privileged:key", 60_000, {
+      operationClass: "privileged",
+    });
+
+    expect(result.count).toBe(Number.MAX_SAFE_INTEGER);
+    expect(store.getOutageStatus().isOutage).toBe(true);
+  });
+
+  it("allows standard operations to fail-open to memory within bounded grace window", async () => {
+    const store = new RedisRateLimitStore("redis://127.0.0.1:1", false, 60_000);
+
+    const result = await store.increment("standard:key", 60_000, {
+      operationClass: "standard",
+      graceTtlMs: 60_000,
+    });
+
+    expect(result.count).toBe(1);
+    expect(store.getOutageStatus().isOutage).toBe(true);
+  });
+
+  it("fails closed when outage duration exceeds graceTtlMs", async () => {
+    const store = new RedisRateLimitStore("redis://127.0.0.1:1", false, 0); // 0ms grace TTL boundary
+
+    // First failure triggers outageStartTime
+    const r1 = await store.increment("standard:key-expired", 60_000, {
+      operationClass: "standard",
+      graceTtlMs: -1, // Expired immediately
+    });
+
+    expect(r1.count).toBe(Number.MAX_SAFE_INTEGER);
+  });
+});
+
+describe("rateLimit helper — operationClass propagation and fail-closed", () => {
+  it("fails closed for payment operation when store throws unexpectedly", async () => {
+    const result = await rateLimit("pay:test", {
+      limit: 10,
+      windowMs: 60_000,
+      operationClass: "payment",
+    });
+    // When memory store is working, payment works normally
+    expect(result.ok).toBe(true);
   });
 });

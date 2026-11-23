@@ -74,6 +74,13 @@ export interface DiscoverServicesParams {
    * regardless of the client default. Surfaces as `TalosTimeoutError`.
    */
   timeoutMs?: number;
+  /**
+   * Per-request required endpoint capabilities. After a 2xx response, the
+   * client reads a bounded capability snapshot from the response headers and
+   * throws {@link TalosCapabilityError} when a required API version or feature
+   * flag is not advertised. Omit to skip negotiation.
+   */
+  requireCapabilities?: RequiredCapabilities;
 }
 
 export interface PurchaseServiceParams {
@@ -94,6 +101,13 @@ export interface CursorRequestOptions extends CursorPageParams {
    * regardless of the client default. Surfaces as `TalosTimeoutError`.
    */
   timeoutMs?: number;
+  /**
+   * Per-request required endpoint capabilities. After a 2xx response, the
+   * client reads a bounded capability snapshot from the response headers and
+   * throws {@link TalosCapabilityError} when a required API version or feature
+   * flag is not advertised. Omit to skip negotiation.
+   */
+  requireCapabilities?: RequiredCapabilities;
 }
 
 export interface ActivityPageOptions extends CursorRequestOptions {
@@ -684,3 +698,34 @@ export interface FinalizeWebhookSecretRotationResult {
   rotationActive: false;
 }
 
+// ── Webhook Deliveries ───────────────────────────────────────────
+
+export type WebhookDeliveryStatus =
+  | "pending"
+  | "success"
+  | "failed"
+  | "dead_letter"
+  | (string & {});
+
+export interface WebhookDelivery {
+  id: string;
+  subscriptionId: string;
+  eventType: string;
+  status: WebhookDeliveryStatus;
+  attempts: number;
+  maxAttempts: number;
+  lastStatusCode: number | null;
+  lastError: string | null;
+  lastAttemptAt: string | null;
+  nextAttemptAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+}
+
+export interface ListWebhookDeliveriesParams extends CursorRequestOptions {
+  status?: string;
+  subscriptionId?: string;
+  eventType?: string;
+}
+
+export type WebhookDeliveryPage = CursorPage<WebhookDelivery>;

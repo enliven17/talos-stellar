@@ -2,8 +2,12 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { WalletGate, useWallet } from "@/components/wallet-gate";
+import { useSearchParams, useRouter } from "next/navigation";
 import { AgentAvatar } from "@/components/agent-avatar";
 import { LazyFinancialProjectionChart } from "@/components/lazy-financial-projection-chart";
+import { FinancialSnapshotBadge, FinancialMetricValue } from "@/components/financial-state";
+import { TransactionReviewSheet, type TransactionPayload } from "@/components/transaction-review-sheet";
+import { TransactionReviewSheet, type TransactionPayload } from "@/components/transaction-review-sheet";
 
 interface DashboardData {
   stats: {
@@ -69,6 +73,7 @@ interface DashboardData {
     apiKeyMasked: string | null;
     apiKeyRaw: string | null;
   }[];
+  observedAt?: string | null;
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -102,6 +107,260 @@ export function DashboardClient() {
 
 function DashboardLoader() {
   const { address } = useWallet();
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const [data, setData] = useState<DashboardData | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // Retrieve saved scroll position
+  const getSavedScroll = () => {
+    const saved = sessionStorage.getItem('dashboardScrollY');
+    const pos = saved ? parseInt(saved, 10) : 0;
+    return isNaN(pos) ? 0 : pos;
+  };
+
+  const fetchData = useCallback(async () => {
+    if (!address) return;
+    setLoading(true);
+    try {
+      // Include any URL-backed filters in the request
+      const filterParams = [];
+      for (const [key, value] of searchParams.entries()) {
+        if (value) filterParams.push(`${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+      }
+      const filterQuery = filterParams.length ? `&${filterParams.join('&')}` : '';
+      const res = await fetch(`/api/dashboard?wallet=${encodeURIComponent(address)}${filterQuery}`);
+      if (res.ok) {
+        setData(await res.json());
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [address, searchParams]);
+
+  // Initial load and restore scroll after data is set
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  useEffect(() => {
+    if (data) {
+      const y = getSavedScroll();
+      window.scrollTo(0, y);
+    }
+    // Save scroll on unmount or navigation away
+    return () => {
+      sessionStorage.setItem('dashboardScrollY', window.scrollY.toString());
+    };
+  }, [data]);
+
+  // SSE: auto-refresh when the agent creates approvals or logs activities
+  useEffect(() => {
+    if (!address) return;
+
+    const es = new EventSource(
+      `/api/events?wallet=${encodeURIComponent(address)}`,
+    );
+
+    es.addEventListener("update", () => fetchData());
+    es.addEventListener("approval", () => fetchData());
+
+    return () => es.close();
+  }, [address, fetchData]);
+
+  if (loading) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-10 animate-pulse">
+        <div className="mb-10 space-y-2">
+          <div className="h-5 w-32 bg-surface border border-border rounded" />
+          <div className="h-4 w-72 bg-border/60 rounded" />
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-10">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="bg-surface border border-border p-5 space-y-2">
+              <div className="h-3 w-24 bg-border/70 rounded" />
+              <div className="h-7 w-20 bg-border rounded" />
+            </div>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-10">
+          <div className="lg:col-span-2 space-y-4">
+            <div className="h-4 w-28 bg-border rounded" />
+            <div className="bg-surface border border-border divide-y divide-border">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="p-4 flex items-center justify-between">
+                  <div className="space-y-2 flex-1">
+                    <div className="h-4 w-48 bg-border rounded" />
+                    <div className="h-3 w-32 bg-border/60 rounded" />
+                  </div>
+                  <div className="flex gap-2">
+                    <div className="h-8 w-20 bg-border rounded" />
+                    <div className="h-8 w-20 bg-border rounded" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="space-y-4">
+            <div className="h-4 w-28 bg-border rounded" />
+            <div className="bg-surface border border-border divide-y divide-border">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="p-4 flex items-center gap-3">
+                  <div className="w-5 h-5 bg-border rounded-full shrink-0" />
+                  <div className="flex-1 space-y-1">
+                    <div className="h-3 w-28 bg-border rounded" />
+                    <div className="h-3 w-16 bg-border/60 rounded" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!data) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-10">
+        <div className="mb-10">
+          <h1 className="text-accent text-lg font-bold tracking-wider mb-1">DASHBOARD</h1>
+          <p className="text-muted text-sm">Failed to load dashboard data.</p>
+        </div>
+      </div>
+    );
+  }
+
+  return <DashboardContent {...data} onRefresh={fetchData} />;
+
+  const { address } = useWallet();
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const [data, setData] = useState<DashboardData | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // Retrieve saved scroll position
+  const getSavedScroll = () => {
+    const saved = sessionStorage.getItem('dashboardScrollY');
+    const pos = saved ? parseInt(saved, 10) : 0;
+    return isNaN(pos) ? 0 : pos;
+  };
+
+  const fetchData = useCallback(async () => {
+    if (!address) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/dashboard?wallet=${encodeURIComponent(address)}`);
+      if (res.ok) {
+        setData(await res.json());
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [address]);
+
+  // Initial load and restore scroll after data is set
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  useEffect(() => {
+    if (data) {
+      const y = getSavedScroll();
+      window.scrollTo(0, y);
+    }
+    // Save scroll on unmount or navigation away
+    return () => {
+      sessionStorage.setItem('dashboardScrollY', window.scrollY.toString());
+    };
+  }, [data]);
+
+  // SSE: auto-refresh when the agent creates approvals or logs activities
+  useEffect(() => {
+    if (!address) return;
+
+    const es = new EventSource(
+      `/api/events?wallet=${encodeURIComponent(address)}`,
+    );
+
+    es.addEventListener("update", () => fetchData());
+    es.addEventListener("approval", () => fetchData());
+
+    return () => es.close();
+  }, [address, fetchData]);
+
+  if (loading) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-10 animate-pulse">
+        <div className="mb-10 space-y-2">
+          <div className="h-5 w-32 bg-surface border border-border rounded" />
+          <div className="h-4 w-72 bg-border/60 rounded" />
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-10">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="bg-surface border border-border p-5 space-y-2">
+              <div className="h-3 w-24 bg-border/70 rounded" />
+              <div className="h-7 w-20 bg-border rounded" />
+            </div>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-10">
+          <div className="lg:col-span-2 space-y-4">
+            <div className="h-4 w-28 bg-border rounded" />
+            <div className="bg-surface border border-border divide-y divide-border">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="p-4 flex items-center justify-between">
+                  <div className="space-y-2 flex-1">
+                    <div className="h-4 w-48 bg-border rounded" />
+                    <div className="h-3 w-32 bg-border/60 rounded" />
+                  </div>
+                  <div className="flex gap-2">
+                    <div className="h-8 w-20 bg-border rounded" />
+                    <div className="h-8 w-20 bg-border rounded" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="space-y-4">
+            <div className="h-4 w-28 bg-border rounded" />
+            <div className="bg-surface border border-border divide-y divide-border">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="p-4 flex items-center gap-3">
+                  <div className="w-5 h-5 bg-border rounded-full shrink-0" />
+                  <div className="flex-1 space-y-1">
+                    <div className="h-3 w-28 bg-border rounded" />
+                    <div className="h-3 w-16 bg-border/60 rounded" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!data) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-10">
+        <div className="mb-10">
+          <h1 className="text-accent text-lg font-bold tracking-wider mb-1">DASHBOARD</h1>
+          <p className="text-muted text-sm">Failed to load dashboard data.</p>
+        </div>
+      </div>
+    );
+  }
+
+  return <DashboardContent {...data} onRefresh={fetchData} />;
+
+  const { address } = useWallet();
+  const searchParams = useSearchParams();
+  const router = useRouter();
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -232,12 +491,20 @@ function ApiKeyCell({ masked, raw }: { talosId: string; masked: string | null; r
   );
 }
 
-function DashboardContent({ stats, approvals: initialApprovals, approvalHistory: initialHistory, activities, agents, revenueStreams, talosManagement, onRefresh }: DashboardData & { onRefresh: () => void }) {
+function DashboardContent({ stats, approvals: initialApprovals, approvalHistory: initialHistory, activities, agents, revenueStreams, talosManagement, observedAt, onRefresh }: DashboardData & { onRefresh: () => void }) {
   const [approvals, setApprovals] = useState(initialApprovals);
   const [approvalHistory, setApprovalHistory] = useState(initialHistory);
   const [approvalTab, setApprovalTab] = useState<"pending" | "history">("pending");
   const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [reviewOpen, setReviewOpen] = useState<
+    null | { id: string; talosId: string; decision: "approved" | "rejected"; payload: TransactionPayload }
+  >(null);
+  const [reviewOpen, setReviewOpen] = useState<
+    null | { id: string; talosId: string; decision: "approved" | "rejected"; payload: TransactionPayload }
+  >(null);
   const { address } = useWallet();
+  const searchParams = useSearchParams();
+  const router = useRouter();
 
   async function handleDecision(id: string, talosId: string, status: "approved" | "rejected") {
     setApprovalError(null);
@@ -281,7 +548,53 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
     { label: "Pending Approvals", value: stats.pendingCount.toString() },
   ];
 
-  return (
+      return (
+    <>
+      <TransactionReviewSheet
+        open={reviewOpen !== null}
+        title={
+          reviewOpen?.decision === "approved"
+            ? "Approve transaction"
+            : "Reject transaction"
+        }
+        payload={
+          reviewOpen?.payload ?? { amount: null, destination: null, network: null }
+        }
+        expectedNetwork={
+          (process.env.NEXT_PUBLIC_STELLAR_NETWORK === "mainnet" ? "mainnet" : "testnet") as
+            | "mainnet"
+            | "testnet"
+        }
+        onDismiss={() => setReviewOpen(null)}
+        onConfirm={async () => {
+          const pending = reviewOpen;
+          setReviewOpen(null);
+          if (pending) handleDecision(pending.id, pending.talosId, pending.decision);
+        }}
+      />
+    <>
+      <TransactionReviewSheet
+        open={reviewOpen !== null}
+        title={
+          reviewOpen?.decision === "approved"
+            ? "Approve transaction"
+            : "Reject transaction"
+        }
+        payload={
+          reviewOpen?.payload ?? { amount: null, destination: null, network: null }
+        }
+        expectedNetwork={
+          (process.env.NEXT_PUBLIC_STELLAR_NETWORK === "mainnet" ? "mainnet" : "testnet") as
+            | "mainnet"
+            | "testnet"
+        }
+        onDismiss={() => setReviewOpen(null)}
+        onConfirm={async () => {
+          const pending = reviewOpen;
+          setReviewOpen(null);
+          if (pending) handleDecision(pending.id, pending.talosId, pending.decision);
+        }}
+      />
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-10">
       <div className="mb-10">
         <h1 className="text-accent text-lg font-bold tracking-wider mb-1">DASHBOARD</h1>
@@ -297,14 +610,25 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
         <>
           {/* Portfolio Overview */}
           <section className="mb-10">
-            <h2 className="text-sm text-muted mb-4 tracking-wide">{/* PORTFOLIO OVERVIEW */}</h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm text-muted tracking-wide">{/* PORTFOLIO OVERVIEW */}</h2>
+              <FinancialSnapshotBadge
+                observedAt={observedAt}
+                onRefresh={onRefresh}
+              />
+            </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               {PORTFOLIO_STATS.map((stat) => {
                 const testId = `portfolio-stat-${stat.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
                 return (
                   <div key={stat.label} data-testid={testId} className="bg-surface border border-border p-5 hover:bg-surface-hover transition-colors">
                     <p className="text-muted text-sm mb-2 uppercase tracking-wider">{stat.label}</p>
-                    <p data-testid={`${testId}-value`} className="text-accent text-2xl font-bold">{stat.value}</p>
+                    <p data-testid={`${testId}-value`} className="text-accent text-2xl font-bold">
+                      <FinancialMetricValue
+                        value={stat.value}
+                        state={stat.value ? "live" : "unavailable"}
+                      />
+                    </p>
                   </div>
                 );
               })}
@@ -469,7 +793,13 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
 
           {/* Revenue Stream */}
           <section className="mb-10">
-            <h2 className="text-sm text-muted mb-4 tracking-wide">{/* REVENUE STREAM */}</h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm text-muted tracking-wide">{/* REVENUE STREAM */}</h2>
+              <FinancialSnapshotBadge
+                observedAt={observedAt}
+                onRefresh={onRefresh}
+              />
+            </div>
             {revenueStreams.length === 0 ? (
               <div className="bg-surface border border-border p-6 text-muted text-sm text-center">No revenue data yet.</div>
             ) : (
@@ -481,7 +811,12 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
                         <AgentAvatar name={rs.talosName} size={18} className="shrink-0" />
                         {rs.talosName}
                       </h3>
-                      <span data-testid={`revenue-total-${rs.talosId}`} className="text-sm text-foreground font-bold">${rs.totalRevenue.toFixed(2)}</span>
+                      <span data-testid={`revenue-total-${rs.talosId}`} className="text-sm text-foreground font-bold">
+                        <FinancialMetricValue
+                          value={rs.totalRevenue != null ? `$${rs.totalRevenue.toFixed(2)}` : null}
+                          state={rs.totalRevenue != null ? "live" : "unavailable"}
+                        />
+                      </span>
                     </div>
                     <div className="mb-4 px-3 py-2 bg-background border border-border text-xs text-muted">
                       100% Agent Treasury &mdash; revenue funds operations &amp; Mitos buyback
@@ -489,7 +824,13 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
                     <div className="flex gap-3 mb-4">
                       {Object.entries(rs.bySource).map(([source, amount]) => (
                         <span key={source} className="text-xs text-muted">
-                          {source}: <span data-testid={`revenue-source-${rs.talosId}-${source.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`} className="text-foreground">${amount.toFixed(2)}</span>
+                          {source}:{" "}
+                          <span data-testid={`revenue-source-${rs.talosId}-${source.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`} className="text-foreground">
+                            <FinancialMetricValue
+                              value={amount != null ? `$${amount.toFixed(2)}` : null}
+                              state={amount != null ? "live" : "unavailable"}
+                            />
+                          </span>
                         </span>
                       ))}
                     </div>
@@ -501,7 +842,12 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
                               <span className="text-muted">{new Date(tx.date).toLocaleDateString()}</span>
                               <span className="text-muted">[{tx.source.toUpperCase()}]</span>
                             </div>
-                            <span data-testid={`recent-revenue-${rs.talosId}-${i}`} className="text-foreground">+${tx.amount.toFixed(2)} {tx.currency}</span>
+                            <span data-testid={`recent-revenue-${rs.talosId}-${i}`} className="text-foreground">
+                              <FinancialMetricValue
+                                value={tx.amount != null ? `+$${tx.amount.toFixed(2)} ${tx.currency}` : null}
+                                state={tx.amount != null ? "live" : "unavailable"}
+                              />
+                            </span>
                           </div>
                         ))}
                       </div>
@@ -653,5 +999,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
         </>
       )}
     </div>
+    </>
+    </>
   );
 }
