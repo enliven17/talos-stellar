@@ -241,7 +241,7 @@ describe("reconciler/scheduler - Cancellation & Graceful Shutdown", () => {
     });
 
     startReconciler({ ...BASE_CONFIG, concurrencyLimit: 1 });
-    const summary = await runOneTick({ ...BASE_CONFIG, concurrencyLimit: 1 });
+    await runOneTick({ ...BASE_CONFIG, concurrencyLimit: 1 });
 
     // Wait slightly
     await new Promise((resolve) => setTimeout(resolve, 10));

@@ -335,14 +335,14 @@ describe("jobs route — reconciler wiring", () => {
   function setupSelectResults({
     service = makeService(),
     talos = makeTalos(),
-    idempotencyRow = [] as any[],
+    idempotencyRow = null as any[] | null,
     dupeRow = [] as any[],
   } = {}) {
     mocks._selectCallCount = 0;
     mocks._selectResults = [
       service ? [service] : [],
       talos ? [talos] : [],
-      idempotencyRow,
+      ...(idempotencyRow !== null ? [idempotencyRow] : []),
       dupeRow,
     ];
   }

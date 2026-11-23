@@ -460,6 +460,10 @@ async function processRecord(
         confirmedLedger: update.confirmedLedger ?? record.confirmedLedger,
         pollCount: update.pollCount ?? record.pollCount,
         lastError: update.lastError !== undefined ? update.lastError : record.lastError,
+        networkPassphrase:
+          update.networkPassphrase !== undefined
+            ? update.networkPassphrase
+            : (record.networkPassphrase ?? config.networkPassphrase ?? null),
         updatedAt: update.updatedAt ?? now,
       })
       .where(eq(tlsStellarTxRecords.id, record.id));
@@ -582,9 +586,13 @@ export async function registerTx(opts: {
   ledgerSubmitted?: number;
   /** If omitted, defaults to now + 1 hour */
   expiresAt?: Date;
+  /** Pinned Stellar network identity (passphrase). Defaults to reconcilerConfig.networkPassphrase */
+  networkPassphrase?: string;
 }): Promise<string> {
   const { txHash, sourceType, sourceId, ledgerSubmitted } = opts;
   const expiresAt = opts.expiresAt ?? new Date(Date.now() + 60 * 60 * 1000);
+  const networkPassphrase =
+    normalizeNetworkPassphrase(opts.networkPassphrase ?? reconcilerConfig.networkPassphrase);
 
   // Check for existing record first
   const existing = await db
@@ -644,6 +652,7 @@ export async function registerTx(opts: {
   await db.insert(tlsStellarTxRecords).values({
     id,
     txHash,
+    networkPassphrase,
     sourceType,
     sourceId: sourceId ?? null,
     finalityStatus: "PENDING",
@@ -654,7 +663,7 @@ export async function registerTx(opts: {
   });
 
   logger.info(
-    { txHash, sourceType, sourceId, id },
+    { txHash, sourceType, sourceId, id, networkPassphrase },
     "reconciler_tx_registered",
   );
 

@@ -204,6 +204,7 @@ async function _GET(req: NextRequest) {
     agents,
     revenueStreams,
     talosManagement,
+    observedAt: new Date().toISOString(),
   });
 }
 

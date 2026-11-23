@@ -235,3 +235,74 @@ async function repairTokenPurchase(record: TxRecord): Promise<RepairOutcome> {
     return { ok: false, error: message };
   }
 }
+
+// ─── Revision-guarded repair (operator-triggered) ─────────────────────────────
+
+/**
+ * Apply downstream repair for `record` and atomically flip `repairApplied`
+ * on the tx record — but only if the record has not been updated since the
+ * caller observed it (optimistic concurrency via `updatedAt`).
+ *
+ * This is the entry point for operator-triggered repair actions. It prevents
+ * a stale repair action from overwriting newer state: if another process
+ * (the background reconciler, a concurrent operator request) has written
+ * to this row since the caller loaded it, the `UPDATE … WHERE updated_at =
+ * :observed` guard matches 0 rows and this function returns
+ * `{ ok: false, stale: true }` without touching any downstream rows.
+ *
+ * Usage
+ * ─────
+ *   const record = await loadTxRecord(id);          // operator observes record
+ *   // …operator decides to trigger repair…
+ *   const result = await applyRepairWithRevisionGuard(record);
+ *   if (!result.ok && result.stale) {
+ *     // The record changed between observation and action — reload and retry
+ *   }
+ */
+export async function applyRepairWithRevisionGuard(
+  record: TxRecord,
+): Promise<RepairOutcome> {
+  // 1. Apply the downstream repair (idempotent — safe to call even if the guard
+  //    later fails; the downstream update's own WHERE clause makes it a no-op
+  //    if it already ran).
+  const repairResult = await applyRepair(record);
+
+  if (!repairResult.ok) {
+    // Downstream repair itself failed — surface the error without touching
+    // the tx record.
+    return repairResult;
+  }
+
+  // 2. Atomically flip repairApplied=true on the tx record, but only if
+  //    updatedAt still matches what the caller observed. If another writer
+  //    beat us here the guard rejects the action.
+  const [flipped] = await db
+    .update(tlsStellarTxRecords)
+    .set({ repairApplied: true, updatedAt: new Date() })
+    .where(
+      and(
+        eq(tlsStellarTxRecords.id, record.id),
+        eq(tlsStellarTxRecords.updatedAt, record.updatedAt),
+      ),
+    )
+    .returning({ id: tlsStellarTxRecords.id });
+
+  if (!flipped) {
+    logger.warn(
+      { txHash: record.txHash, sourceType: record.sourceType, observedUpdatedAt: record.updatedAt },
+      "reconciler_repair_stale_revision",
+    );
+    return {
+      ok: false,
+      error: "Repair rejected: record was updated after it was observed (stale revision)",
+      stale: true,
+    };
+  }
+
+  logger.info(
+    { txHash: record.txHash, sourceType: record.sourceType, detail: repairResult.detail },
+    "reconciler_repair_applied_with_revision_guard",
+  );
+
+  return repairResult;
+}
