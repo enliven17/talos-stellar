@@ -13,7 +13,7 @@ interface DashboardData {
   stats: {
     totalValue: string;
     activeTalos: number;
-    totalRevenue: string;
+    totalRevenue: string | null;
     pendingCount: number;
   };
   approvals: {
@@ -55,7 +55,8 @@ interface DashboardData {
   revenueStreams: {
     talosId: string;
     talosName: string;
-    totalRevenue: number;
+    totalRevenue: number | null;
+    observationCount?: number;
     bySource: Record<string, number>;
     recentTx: { amount: number; source: string; currency: string; date: string }[];
   }[];
@@ -801,7 +802,7 @@ function DashboardContent({ stats, approvals: initialApprovals, approvalHistory:
               />
             </div>
             {revenueStreams.length === 0 ? (
-              <div className="bg-surface border border-border p-6 text-muted text-sm text-center">No revenue data yet.</div>
+              <div className="bg-surface border border-border p-6 text-muted text-sm text-center">No revenue observations recorded yet.</div>
             ) : (
               <div className="space-y-4">
                 {revenueStreams.map((rs) => (
