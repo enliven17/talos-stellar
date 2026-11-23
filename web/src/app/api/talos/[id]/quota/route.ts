@@ -13,6 +13,7 @@ import {
   readQuotaUsage,
   readQuotaUsageBreakdown,
   resolveQuotaConfig,
+  buildQuotaExplanation,
   ALL_QUOTA_RESOURCES,
   type QuotaResource,
   type WindowSize,
@@ -122,6 +123,8 @@ async function _GET(
         (r) => r.talosId === id && r.resource === resource,
       );
 
+      const explanation = buildQuotaExplanation(usage);
+
       return [
         resource,
         {
@@ -140,6 +143,7 @@ async function _GET(
             ok: usage.ok,
             byScope,
           },
+          explanation,
         },
       ] as const;
     }),
@@ -283,6 +287,8 @@ async function _PATCH(
     readQuotaUsage(db, id, resource as QuotaResource),
   ]);
 
+  const explanation = buildQuotaExplanation(usage);
+
   return Response.json({
     talosId: id,
     resource,
@@ -300,6 +306,7 @@ async function _PATCH(
       resetAt: new Date(usage.resetAt).toISOString(),
       ok: usage.ok,
     },
+    explanation,
   });
 }
 

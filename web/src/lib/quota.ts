@@ -143,6 +143,12 @@ export interface QuotaResult {
   resetAt: number;
   /** The resource that was checked. */
   resource: QuotaResource;
+  /** Window granularity for this quota (hourly/daily/monthly). */
+  windowSize: WindowSize;
+  /** Source of the applied policy: "agent" for agent-specific override, "platform" for platform default. */
+  policy: "agent" | "platform";
+  /** Human-readable explanation of the quota decision. */
+  explanation: string;
 }
 
 /** Input accepted by response and header helpers, including unknown/null reset times. */
@@ -334,11 +340,11 @@ export async function checkAndIncrementQuota(
   clock?: Date | number,
 ): Promise<QuotaResult> {
   const config = await resolveQuotaConfig(db, talosId, resource);
-  const scope = typeof scopeOrClock === "string" ? scopeOrClock : quotaScopeForResource(resource);
-  const effectiveClock = typeof scopeOrClock === "string" ? clock : scopeOrClock;
-  const breakdownScope = QUOTA_SCOPES.includes(scope) ? scope : quotaScopeForResource(resource);
-  const boundaries = computeQuotaWindow(effectiveClock ?? new Date(), config.windowSize);
-  const now = typeof effectiveClock === "number" ? new Date(effectiveClock) : effectiveClock ?? new Date();
+
+  const now = new Date();
+  const windowStart = floorToWindow(now, config.windowSize);
+  const resetAt = nextWindowStart(windowStart, config.windowSize).getTime();
+  const policy = config.talosId === talosId ? "agent" : "platform";
 
   if (!config.enabled) {
     return {
@@ -348,6 +354,9 @@ export async function checkAndIncrementQuota(
       used: 0,
       resetAt: boundaries.resetAt,
       resource,
+      windowSize: config.windowSize,
+      policy,
+      explanation: `Quota disabled (${policy} default). No enforcement applied.`,
     };
   }
 
@@ -403,42 +412,11 @@ export async function checkAndIncrementQuota(
   const remaining = Math.max(0, config.maxCount - used);
   const ok = used <= config.maxCount;
 
-  return { ok, limit: config.maxCount, remaining, used, resetAt: boundaries.resetAt, resource };
-}
+  const explanation = ok
+    ? `Used ${used} of ${config.maxCount} (${policy} ${config.windowSize} quota). ${remaining} remaining.`
+    : `Quota exceeded: used ${used} of ${config.maxCount} (${policy} ${config.windowSize} quota). Resets at ${new Date(resetAt).toISOString()}.`;
 
-/** Read bounded per-scope usage for the current window without incrementing. */
-export async function readQuotaUsageBreakdown(
-  db: Db,
-  talosId: string,
-  resource: QuotaResource,
-): Promise<Record<QuotaScope, number>> {
-  const config = await resolveQuotaConfig(db, talosId, resource);
-  const windowStart = floorToWindow(new Date(), config.windowSize);
-  let rows: Array<{ scope: string; count: number }> = [];
-  try {
-    rows = await db
-      .select({ scope: tlsQuotaScopeUsage.scope, count: tlsQuotaScopeUsage.count })
-      .from(tlsQuotaScopeUsage)
-      .where(
-        and(
-          eq(tlsQuotaScopeUsage.talosId, talosId),
-          eq(tlsQuotaScopeUsage.resource, resource),
-          eq(tlsQuotaScopeUsage.windowStart, windowStart),
-        ),
-      );
-  } catch {
-    // The breakdown table may be added after the existing quota migration.
-  }
-
-  const breakdown = Object.fromEntries(
-    QUOTA_SCOPES.map((scope) => [scope, 0]),
-  ) as Record<QuotaScope, number>;
-  for (const row of rows) {
-    if (Object.prototype.hasOwnProperty.call(breakdown, row.scope)) {
-      breakdown[row.scope as QuotaScope] = row.count;
-    }
-  }
-  return breakdown;
+  return { ok, limit: config.maxCount, remaining, used, resetAt, resource, windowSize: config.windowSize, policy, explanation };
 }
 
 /**
@@ -457,7 +435,11 @@ export async function readQuotaUsage(
   clock?: Date | number,
 ): Promise<QuotaResult> {
   const config = await resolveQuotaConfig(db, talosId, resource);
-  const boundaries = computeQuotaWindow(clock ?? new Date(), config.windowSize);
+
+  const now = new Date();
+  const windowStart = floorToWindow(now, config.windowSize);
+  const resetAt = nextWindowStart(windowStart, config.windowSize).getTime();
+  const policy = config.talosId === talosId ? "agent" : "platform";
 
   const row = await db
     .select({ count: tlsQuotaUsage.count })
@@ -476,7 +458,13 @@ export async function readQuotaUsage(
   const remaining = Math.max(0, config.maxCount - used);
   const ok = used <= config.maxCount;
 
-  return { ok, limit: config.maxCount, remaining, used, resetAt: boundaries.resetAt, resource };
+  const explanation = !config.enabled
+    ? `Quota disabled (${policy} default). No enforcement applied.`
+    : ok
+    ? `Used ${used} of ${config.maxCount} (${policy} ${config.windowSize} quota). ${remaining} remaining.`
+    : `Quota exceeded: used ${used} of ${config.maxCount} (${policy} ${config.windowSize} quota). Resets at ${new Date(resetAt).toISOString()}.`;
+
+  return { ok, limit: config.maxCount, remaining, used, resetAt, resource, windowSize: config.windowSize, policy, explanation };
 }
 
 // ─── Response helpers ────────────────────────────────────────────────────────
@@ -497,7 +485,8 @@ export function quotaExceededResponse(
       error: "Quota exceeded",
       resource: result.resource,
       limit: result.limit,
-      resetAt: resetIso,
+      resetAt: new Date(result.resetAt).toISOString(),
+      ...buildQuotaExplanation(result),
     }),
     {
       status: 429,
@@ -521,12 +510,47 @@ export function buildQuotaHeaders(result: QuotaHeaderInput): Record<string, stri
     "X-Quota-Remaining": String(result.remaining),
     "X-Quota-Used": String(result.used),
     "X-Quota-Resource": result.resource,
+    "X-Quota-Window": result.windowSize,
+    "X-Quota-Policy": result.policy,
   };
   const resetSeconds = formatResetEpochSeconds(result.resetAt);
   if (resetSeconds !== null) {
     headers["X-Quota-Reset"] = resetSeconds;
   }
   return headers;
+}
+
+/**
+ * Build a detailed quota explanation object for response bodies.
+ * Includes the human-readable explanation and all relevant quota metadata.
+ * Safe to include in responses to authenticated owners — excludes other agents
+ * and internal administrative secrets.
+ */
+export function buildQuotaExplanation(result: QuotaResult): QuotaExplanation {
+  return {
+    resource: result.resource,
+    limit: result.limit,
+    remaining: result.remaining,
+    used: result.used,
+    resetAt: new Date(result.resetAt).toISOString(),
+    windowSize: result.windowSize,
+    policy: result.policy,
+    explanation: result.explanation,
+    ok: result.ok,
+  };
+}
+
+/** Detailed quota explanation for response bodies. */
+export interface QuotaExplanation {
+  resource: QuotaResource;
+  limit: number;
+  remaining: number;
+  used: number;
+  resetAt: string; // ISO-8601
+  windowSize: WindowSize;
+  policy: "agent" | "platform";
+  explanation: string;
+  ok: boolean;
 }
 
 /**
