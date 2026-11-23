@@ -1,13 +1,11 @@
-import { and, desc, eq, gte, lte, lt, or, sql, type SQL } from "drizzle-orm";
+import { and, count, desc, eq, gte, isNotNull, lte, lt, or, sql, type SQL } from "drizzle-orm";
 import { db } from "@/db";
 import { tlsApiAuditLogs } from "@/db/schema";
 import {
-  buildAuditExportFilename,
-  type AuditExportFormat,
-} from "@/lib/audit-chain";
-import {
+  AuditLogFilterError,
   escapeIlikePattern,
   statusClassRange,
+  validateAuditLogFilters,
   type AuditLogFilters,
 } from "./filters";
 import type { AuditLogRecord } from "./types";
@@ -39,41 +37,47 @@ function toRecord(row: typeof tlsApiAuditLogs.$inferSelect): AuditLogRecord {
 export async function listAuditLogs(
   filter: AuditLogFilters,
 ): Promise<{ logs: AuditLogRecord[]; nextCursor: string | null }> {
-  const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
+  const validated = validateAuditLogFilters(filter);
+  if (!validated.ok) {
+    throw new AuditLogFilterError(validated.error);
+  }
+  const safeFilter = validated.filters;
+
+  const limit = Math.min(Math.max(safeFilter.limit ?? 50, 1), 200);
   const conditions: SQL[] = [];
 
-  if (filter.talosId) {
-    conditions.push(eq(tlsApiAuditLogs.talosId, filter.talosId));
+  if (safeFilter.talosId) {
+    conditions.push(eq(tlsApiAuditLogs.talosId, safeFilter.talosId));
   }
-  if (filter.method) {
-    conditions.push(eq(tlsApiAuditLogs.method, filter.method));
+  if (safeFilter.method) {
+    conditions.push(eq(tlsApiAuditLogs.method, safeFilter.method));
   }
-  if (filter.statusCode !== undefined) {
-    conditions.push(eq(tlsApiAuditLogs.statusCode, filter.statusCode));
+  if (safeFilter.statusCode !== undefined) {
+    conditions.push(eq(tlsApiAuditLogs.statusCode, safeFilter.statusCode));
   }
-  if (filter.statusClass) {
-    const { min, max } = statusClassRange(filter.statusClass);
+  if (safeFilter.statusClass) {
+    const { min, max } = statusClassRange(safeFilter.statusClass);
     conditions.push(gte(tlsApiAuditLogs.statusCode, min));
     conditions.push(lte(tlsApiAuditLogs.statusCode, max));
   }
-  if (filter.denialReason) {
-    conditions.push(eq(tlsApiAuditLogs.denialReason, filter.denialReason));
+  if (safeFilter.denialReason) {
+    conditions.push(eq(tlsApiAuditLogs.denialReason, safeFilter.denialReason));
   }
-  if (filter.q) {
-    const pattern = `%${escapeIlikePattern(filter.q)}%`;
+  if (safeFilter.q) {
+    const pattern = `%${escapeIlikePattern(safeFilter.q)}%`;
     // ESCAPE so literal %/_ in the query don't act as wildcards.
     const pathMatch = sql`${tlsApiAuditLogs.path} ILIKE ${pattern} ESCAPE '\\'`;
     const reasonMatch = sql`${tlsApiAuditLogs.denialReason} ILIKE ${pattern} ESCAPE '\\'`;
     conditions.push(or(pathMatch, reasonMatch)!);
   }
-  if (filter.from) {
-    conditions.push(gte(tlsApiAuditLogs.createdAt, new Date(filter.from)));
+  if (safeFilter.from) {
+    conditions.push(gte(tlsApiAuditLogs.createdAt, new Date(safeFilter.from)));
   }
-  if (filter.to) {
-    conditions.push(lte(tlsApiAuditLogs.createdAt, new Date(filter.to)));
+  if (safeFilter.to) {
+    conditions.push(lte(tlsApiAuditLogs.createdAt, new Date(safeFilter.to)));
   }
-  if (filter.cursor) {
-    conditions.push(lt(tlsApiAuditLogs.createdAt, new Date(filter.cursor)));
+  if (safeFilter.cursor) {
+    conditions.push(lt(tlsApiAuditLogs.createdAt, new Date(safeFilter.cursor)));
   }
 
   const rows = await db
@@ -92,134 +96,57 @@ export async function listAuditLogs(
   return { logs: page.map(toRecord), nextCursor };
 }
 
-export interface AuditLogExportOptions {
-  /** Export payload format (`"json"` or `"csv"`, defaults to `"json"`). */
-  format?: AuditExportFormat;
-  /** Optional export timestamp used in the payload and safe filename. */
-  exportedAt?: Date | string;
-  /** Optional pre-fetched audit log records; if omitted, queries `listAuditLogs`. */
-  logs?: AuditLogRecord[];
-  /** Optional pagination cursor corresponding to pre-fetched `logs`. */
-  nextCursor?: string | null;
-}
-
-export interface AuditLogExportBundle {
-  /** Bounded ASCII-only filename derived strictly from validated identifiers. */
-  filename: string;
-  /** MIME content type including UTF-8 charset so Unicode in data is preserved. */
-  contentType: string;
-  /** Ready-to-use Content-Disposition header value. */
-  contentDisposition: string;
-  /** Serialized UTF-8 export payload preserving Unicode within the exported data. */
-  data: string;
-  /** Underlying audit log records included in the export. */
-  logs: AuditLogRecord[];
-  /** Next pagination cursor if additional rows exist beyond the page limit. */
+export async function getAgentAuditReviewBundle(
+  talosId: string,
+  limit: number,
+  cursor?: string,
+): Promise<{
+  auditReferences: AuditLogRecord[];
   nextCursor: string | null;
-}
+  checkpoint: {
+    chainRoot: string | null;
+    totalEntries: number;
+    chainVersion: string | null;
+    createdAt: string;
+  };
+}> {
+  const referenceConditions = [eq(tlsApiAuditLogs.talosId, talosId)];
+  if (cursor) referenceConditions.push(lt(tlsApiAuditLogs.createdAt, new Date(cursor)));
 
-function escapeCsvCell(value: string | number | null | undefined): string {
-  if (value === null || value === undefined) return '""';
-  const text = String(value);
-  const safeText = /^[\u0000-\u0020]*[=+\-@]/.test(text) ? `'${text}` : text;
-  return `"${safeText.replaceAll('"', '""')}"`;
-}
+  const [rows, latestRows, countRows] = await Promise.all([
+    db
+      .select()
+      .from(tlsApiAuditLogs)
+      .where(and(...referenceConditions))
+      .orderBy(desc(tlsApiAuditLogs.createdAt))
+      .limit(limit + 1),
+    db
+      .select({
+        entryHash: tlsApiAuditLogs.entryHash,
+        chainVersion: tlsApiAuditLogs.chainVersion,
+      })
+      .from(tlsApiAuditLogs)
+      .where(and(eq(tlsApiAuditLogs.talosId, talosId), isNotNull(tlsApiAuditLogs.entryHash)))
+      .orderBy(desc(tlsApiAuditLogs.createdAt))
+      .limit(1),
+    db
+      .select({ total: count() })
+      .from(tlsApiAuditLogs)
+      .where(and(eq(tlsApiAuditLogs.talosId, talosId), isNotNull(tlsApiAuditLogs.entryHash))),
+  ]);
 
-/**
- * Serialize audit log records to UTF-8 CSV or JSON while preserving full
- * Unicode characters inside the exported data payload.
- */
-export function serializeAuditLogExport(
-  logs: AuditLogRecord[],
-  options: {
-    format?: AuditExportFormat;
-    filters?: AuditLogFilters;
-    exportedAt?: Date | string;
-  } = {},
-): string {
-  const format: AuditExportFormat = options.format ?? "json";
-
-  if (format === "csv") {
-    const header =
-      "id,talosId,method,path,statusCode,denialReason,scopesRequired,ipAddress,sequenceNumber,previousHash,entryHash,chainVersion,createdAt";
-    const rows = logs.map((row) =>
-      [
-        row.id,
-        row.talosId,
-        row.method,
-        row.path,
-        row.statusCode,
-        row.denialReason ?? "",
-        row.scopesRequired ? row.scopesRequired.join(";") : "",
-        row.ipAddress ?? "",
-        row.sequenceNumber ?? "",
-        row.previousHash ?? "",
-        row.entryHash ?? "",
-        row.chainVersion ?? "",
-        row.createdAt,
-      ]
-        .map(escapeCsvCell)
-        .join(","),
-    );
-    return [header, ...rows].join("\r\n") + "\r\n";
-  }
-
-  const exportedAtIso =
-    options.exportedAt !== undefined
-      ? (options.exportedAt instanceof Date
-          ? options.exportedAt
-          : new Date(options.exportedAt)
-        ).toISOString()
-      : new Date().toISOString();
-
-  return JSON.stringify(
-    {
-      exportedAt: exportedAtIso,
-      count: logs.length,
-      logs,
-    },
-    null,
-    2,
-  );
-}
-
-/**
- * Export audit logs with a bounded, safe filename generated only from
- * validated identifiers while preserving Unicode inside the exported data.
- */
-export async function exportAuditLogs(
-  filter: AuditLogFilters,
-  options: AuditLogExportOptions = {},
-): Promise<AuditLogExportBundle> {
-  const format: AuditExportFormat = options.format ?? "json";
-  const exportedAt = options.exportedAt ?? new Date();
-  const filename = buildAuditExportFilename({
-    talosId: filter.talosId,
-    format,
-    exportedAt,
-  });
-
-  const { logs, nextCursor } =
-    options.logs !== undefined
-      ? { logs: options.logs, nextCursor: options.nextCursor ?? null }
-      : await listAuditLogs(filter);
-  const data = serializeAuditLogExport(logs, {
-    format,
-    filters: filter,
-    exportedAt,
-  });
-
-  const contentType =
-    format === "csv"
-      ? "text/csv; charset=utf-8"
-      : "application/json; charset=utf-8";
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const latest = latestRows[0] ?? null;
 
   return {
-    filename,
-    contentType,
-    contentDisposition: `attachment; filename="${filename}"`,
-    data,
-    logs,
-    nextCursor,
+    auditReferences: page.map(toRecord),
+    nextCursor: hasMore ? page[page.length - 1]?.createdAt.toISOString() ?? null : null,
+    checkpoint: {
+      chainRoot: latest?.entryHash ?? null,
+      totalEntries: countRows[0]?.total ?? 0,
+      chainVersion: latest?.chainVersion ?? null,
+      createdAt: new Date().toISOString(),
+    },
   };
 }

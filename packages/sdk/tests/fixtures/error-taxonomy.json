@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "description": "Stable SDK error-code taxonomy fixtures: pins the canonical mapping from concrete thrown values to the stable (code, category, retryable) classification exposed by classifyError / toErrorContract in src/error-taxonomy.ts. Drift-checked against the runtime case table in tests/error-taxonomy.test.ts so a taxonomy change must update both. Privacy-safe: contains no secrets, credentials, or request payloads — only expected classification outputs.",
+  "cases": [
+    { "name": "validation_error", "expected": { "code": "validation_error", "category": "validation", "retryable": false } },
+    { "name": "authentication_error", "expected": { "code": "authentication_error", "category": "authentication", "retryable": false } },
+    { "name": "forbidden", "expected": { "code": "forbidden", "category": "authorization", "retryable": false } },
+    { "name": "not_found_error", "expected": { "code": "not_found_error", "category": "not_found", "retryable": false } },
+    { "name": "conflict_error", "expected": { "code": "conflict_error", "category": "conflict", "retryable": false } },
+    { "name": "payment_error", "expected": { "code": "payment_error", "category": "payment", "retryable": false } },
+    { "name": "rate_limit_error", "expected": { "code": "rate_limit_error", "category": "quota", "retryable": true } },
+    { "name": "server_error", "expected": { "code": "server_error", "category": "server", "retryable": false } },
+    { "name": "server_retryable", "expected": { "code": "server_error", "category": "server", "retryable": true } },
+    { "name": "transport_error", "expected": { "code": "transport_error", "category": "transport", "retryable": true } },
+    { "name": "timeout_error", "expected": { "code": "timeout_error", "category": "timeout", "retryable": true } },
+    { "name": "api_error_generic", "expected": { "code": "api_error", "category": "api", "retryable": false } },
+    { "name": "generic_error", "expected": { "code": "api_error", "category": "api", "retryable": false } },
+    { "name": "abort_error", "expected": { "code": "timeout_error", "category": "timeout", "retryable": true } }
+  ]
+}

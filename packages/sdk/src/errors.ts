@@ -32,6 +32,7 @@ export type TalosErrorCode =
   | "server_error"
   | "transport_error"
   | "timeout_error"
+  | "deadline_exceeded"
   | "api_error";
 
 /**
@@ -51,7 +52,7 @@ export const MAX_DATA_BYTES = 4096;
  * Names of fields whose values potentially contain credentials or other
  * sensitive material. We redact them in the surfaced error body and `data`.
  */
-export const SENSITIVE_FIELD_PATTERN = /^(token|authorization|secret|api[_-]?key|password|cookie|signature|message|nonce|hash)$/i;
+export const SENSITIVE_FIELD_PATTERN = /^(?:x-)?(token|authorization|secret|api[_-]?key|password|cookie|signature|message|nonce|hash|payment)$/i;
 
 /**
  * Options accepted by every TalosAPIError subclass via the 4th constructor
@@ -550,6 +551,34 @@ export class TalosTimeoutError extends TalosAPIError {
       isRetryable: true,
     });
     this.name = "TalosTimeoutError";
+  }
+}
+
+/** A retry cannot start before the caller's request deadline. */
+export class TalosDeadlineExceededError extends TalosAPIError {
+  public readonly retryDelayMs: number;
+  public readonly remainingMs: number;
+  public readonly lastError: TalosAPIError;
+
+  constructor(
+    lastError: TalosAPIError,
+    retryDelayMs: number,
+    remainingMs: number,
+  ) {
+    super(lastError.status, lastError.body, lastError.path, {
+      code: "deadline_exceeded",
+      isRetryable: false,
+      retryAfterMs: lastError.retryAfterMs,
+      headers: lastError.headers,
+      requestId: lastError.requestId,
+      data: lastError.data,
+      cause: lastError,
+      message: `Retry delay of ${retryDelayMs}ms exceeds the remaining request deadline of ${remainingMs}ms`,
+    });
+    this.name = "TalosDeadlineExceededError";
+    this.retryDelayMs = retryDelayMs;
+    this.remainingMs = remainingMs;
+    this.lastError = lastError;
   }
 }
 

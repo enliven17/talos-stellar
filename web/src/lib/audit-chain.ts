@@ -34,13 +34,36 @@ export interface AuditChainEntry {
 }
 
 /**
+ * Validate that all numeric fields in the canonical audit payload are finite.
+ * Rejects NaN, Infinity, and -Infinity before JSON serialization, which would
+ * otherwise silently coerce nonfinite numbers to null.
+ */
+function assertFiniteAuditNumbers(entry: AuditChainEntry): void {
+  if (typeof entry.sequenceNumber !== "number" || !Number.isFinite(entry.sequenceNumber)) {
+    throw new RangeError(
+      `Audit entry canonical payload contains nonfinite sequenceNumber: ${String(entry.sequenceNumber)}`,
+    );
+  }
+  if (typeof entry.statusCode !== "number" || !Number.isFinite(entry.statusCode)) {
+    throw new RangeError(
+      `Audit entry canonical payload contains nonfinite statusCode: ${String(entry.statusCode)}`,
+    );
+  }
+}
+
+/**
  * Deterministic JSON serialization with fixed property order.
  *
  * This produces the canonical form used for hashing. Every value is
  * stringified according to its type; no pretty-printing or key reordering
  * is allowed after this function runs.
+ *
+ * @throws {RangeError} If any numeric field in the canonical payload is nonfinite
+ *   (`NaN`, `Infinity`, or `-Infinity`).
  */
 export function canonicalize(entry: AuditChainEntry): string {
+  assertFiniteAuditNumbers(entry);
+
   return JSON.stringify({
     sequenceNumber: entry.sequenceNumber,
     talosId: entry.talosId,
@@ -57,6 +80,8 @@ export function canonicalize(entry: AuditChainEntry): string {
  * prefixed with the domain separator.
  *
  *   hash = SHA-256(domain:canonical_json)
+ *
+ * @throws {RangeError} If the entry's canonical payload contains nonfinite numbers.
  */
 export function computeEntryHash(entry: AuditChainEntry): string {
   const payload = `${AUDIT_CHAIN_DOMAIN}:${canonicalize(entry)}`;
@@ -95,140 +120,38 @@ export function verifyChainRootSeal(
 }
 
 export interface ChainVerificationResult {
+  /** True only when the chain is complete and every link verifies. */
   valid: boolean;
+  /**
+   * Distinct outcome classification:
+   *   - "valid":      all chained rows verified, no gaps.
+   *   - "incomplete": a predecessor is missing (gap in sequence numbers or
+   *                   the chain starts after GENESIS). Evidence is missing,
+   *                   not proven tampered.
+   *   - "mismatch":   contradictory evidence (hash/linkage does not match
+   *                   recomputed values). Indicates tampering.
+   */
+  status: "valid" | "incomplete" | "mismatch";
   totalEntries: number;
   verifiedEntries: number;
   brokenAtSequence: number | null;
+  /** Sequence number expected at the point a gap was detected. */
+  missingFromSequence: number | null;
   chainVersion: string | null;
 }
 
-export const AUDIT_EXPORT_FORMATS = ["json", "csv"] as const;
-export type AuditExportFormat = (typeof AUDIT_EXPORT_FORMATS)[number];
-
-/** Maximum character length for a validated raw identifier input. */
-export const MAX_AUDIT_IDENTIFIER_INPUT_LENGTH = 128;
-
-/** Maximum character length for a sanitized identifier segment in a filename. */
-export const MAX_AUDIT_FILENAME_SEGMENT_LENGTH = 32;
-
-/** Maximum character length for a complete audit export filename. */
-export const MAX_AUDIT_EXPORT_FILENAME_LENGTH = 96;
-
-/**
- * Strict allowlist pattern for safe audit export identifiers.
- * Only ASCII alphanumeric characters, hyphens, and underscores are accepted,
- * starting with an alphanumeric character and bounded in length.
- */
-const SAFE_AUDIT_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
-
-/**
- * Validate and normalize a trusted identifier segment for use in an audit
- * export filename.
- *
- * Returns `null` if the input is missing, exceeds bounds, contains path
- * separators, control characters, Unicode/non-ASCII actor text, or does not
- * match the strict ASCII identifier pattern (`[A-Za-z0-9][A-Za-z0-9_-]{0,31}`).
- */
-export function sanitizeAuditExportIdentifier(
-  rawIdentifier: string | null | undefined,
-): string | null {
-  if (typeof rawIdentifier !== "string") return null;
-  const trimmed = rawIdentifier.trim();
-  if (
-    !trimmed ||
-    trimmed.length > MAX_AUDIT_IDENTIFIER_INPUT_LENGTH ||
-    trimmed.length > MAX_AUDIT_FILENAME_SEGMENT_LENGTH
-  ) {
-    return null;
-  }
-  if (!SAFE_AUDIT_IDENTIFIER_PATTERN.test(trimmed)) {
-    return null;
-  }
-  return trimmed.toLowerCase();
-}
-
-export interface BuildAuditExportFilenameOptions {
-  /**
-   * Optional validated identifier (e.g. `talosId`). If untrusted actor text,
-   * Unicode, path traversal, or oversized strings are passed, the segment is
-   * rejected (or falls back to `"filtered"` when `allowFallback` is true).
-   */
-  talosId?: string | null;
-  /** Export file format (`"json"` or `"csv"`, defaults to `"json"`). */
-  format?: AuditExportFormat;
-  /** Optional export timestamp (Date or ISO-8601 string). */
-  exportedAt?: Date | string | null;
-  /**
-   * When false (default in strict mode if not set), invalid `talosId` values
-   * fall back to `"filtered"` so untrusted actor text never enters the filename.
-   * When `strict: true`, throws an Error on an invalid identifier or timestamp.
-   */
-  strict?: boolean;
-}
-
-function formatFilenameTimestamp(
-  value: Date | string | null | undefined,
-  strict: boolean,
-): string | null {
-  if (value === undefined || value === null) return null;
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    if (strict) {
-      throw new Error("Invalid audit export timestamp");
-    }
-    return null;
-  }
-  // Compact UTC timestamp: YYYYMMDDTHHMMSSZ (16 ASCII chars)
-  return date
-    .toISOString()
-    .replace(/[-:]/g, "")
-    .replace(/\.\d{3}Z$/, "Z");
-}
-
-/**
- * Generate a bounded, ASCII-only, Content-Disposition-safe filename for audit
- * log exports from validated identifiers.
- *
- * Untrusted actor text (free-form queries, paths, denial reasons, Unicode names,
- * or malformed IDs) is never interpolated into the filename.
- */
-export function buildAuditExportFilename(
-  options: BuildAuditExportFilenameOptions = {},
-): string {
-  const strict = options.strict ?? false;
-  const format: AuditExportFormat = options.format ?? "json";
-  if (!AUDIT_EXPORT_FORMATS.includes(format)) {
-    throw new Error(`Invalid audit export format: ${String(format)}`);
-  }
-
-  let scopeSegment = "all";
-  if (options.talosId !== undefined && options.talosId !== null && options.talosId !== "") {
-    const safeId = sanitizeAuditExportIdentifier(options.talosId);
-    if (!safeId) {
-      if (strict) {
-        throw new Error("Invalid audit export identifier");
-      }
-      scopeSegment = "filtered";
-    } else {
-      scopeSegment = safeId;
-    }
-  }
-
-  const tsSegment = formatFilenameTimestamp(options.exportedAt, strict);
-  const baseName = tsSegment
-    ? `audit-logs-${scopeSegment}-${tsSegment}`
-    : `audit-logs-${scopeSegment}`;
-  const filename = `${baseName}.${format}`;
-
-  if (
-    filename.length > MAX_AUDIT_EXPORT_FILENAME_LENGTH ||
-    !/^[a-z0-9][A-Za-z0-9_-]*\.(json|csv)$/.test(filename)
-  ) {
-    throw new Error("Generated audit export filename failed safety bounds");
-  }
-
-  return filename;
-}
+export type ChainRow = {
+  sequenceNumber: number | null;
+  entryHash: string | null;
+  previousHash: string | null;
+  chainVersion: string | null;
+  talosId: string;
+  method: string;
+  path: string;
+  statusCode: number;
+  ipAddress: string | null;
+  createdAt: Date;
+};
 
 /**
  * Verify a sequence of audit log entries against the hash chain.
@@ -237,27 +160,20 @@ export function buildAuditExportFilename(
  *   1. entryHash === computeEntryHash(entry)
  *   2. previousHash === entryHash of the preceding entry (or GENESIS for seq 0)
  *   3. sequenceNumber is sequential (0, 1, 2, ...)
+ *
+ * A missing predecessor (sequence gap, or chain not starting at 0) is reported
+ * as "incomplete" so operators can distinguish missing evidence from
+ * contradictory hashes, which are reported as "mismatch".
  */
-export function verifyChain(
-  rows: Array<{
-    sequenceNumber: number | null;
-    entryHash: string | null;
-    previousHash: string | null;
-    chainVersion: string | null;
-    talosId: string;
-    method: string;
-    path: string;
-    statusCode: number;
-    ipAddress: string | null;
-    createdAt: Date;
-  }>,
-): ChainVerificationResult {
+export function verifyChain(rows: ChainRow[]): ChainVerificationResult {
   if (rows.length === 0) {
     return {
       valid: true,
+      status: "valid",
       totalEntries: 0,
       verifiedEntries: 0,
       brokenAtSequence: null,
+      missingFromSequence: null,
       chainVersion: null,
     };
   }
@@ -265,6 +181,30 @@ export function verifyChain(
   let previousEntryHash: string | null = null;
   let chainIndex = 0;
   let verifiedCount = 0;
+
+  const mismatch = (seq: number, version: string | null): ChainVerificationResult => ({
+    valid: false,
+    status: "mismatch",
+    totalEntries: rows.length,
+    verifiedEntries: verifiedCount,
+    brokenAtSequence: seq,
+    missingFromSequence: null,
+    chainVersion: version,
+  });
+
+  const incomplete = (
+    missingFrom: number,
+    seq: number | null,
+    version: string | null,
+  ): ChainVerificationResult => ({
+    valid: false,
+    status: "incomplete",
+    totalEntries: rows.length,
+    verifiedEntries: verifiedCount,
+    brokenAtSequence: seq,
+    missingFromSequence: missingFrom,
+    chainVersion: version,
+  });
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -274,27 +214,23 @@ export function verifyChain(
       continue;
     }
 
-    // Validate sequence number is sequential within the chain
-    if (row.sequenceNumber !== chainIndex) {
-      return {
-        valid: false,
-        totalEntries: rows.length,
-        verifiedEntries: verifiedCount,
-        brokenAtSequence: row.sequenceNumber,
-        chainVersion: row.chainVersion,
-      };
+    // A sequence number ahead of the expected one means predecessor(s) are
+    // absent: incomplete evidence, not a contradiction. Reported as a gap at
+    // the first missing sequence number, never as tampering.
+    if (row.sequenceNumber > chainIndex) {
+      return incomplete(chainIndex, row.sequenceNumber, row.chainVersion);
+    }
+
+    // A sequence number behind the expected one is a duplicate/out-of-order
+    // row, which contradicts the chain.
+    if (row.sequenceNumber < chainIndex) {
+      return mismatch(row.sequenceNumber, row.chainVersion);
     }
 
     // Validate previousHash linkage
     const expectedPreviousHash = previousEntryHash ?? GENESIS_HASH;
     if (row.previousHash !== expectedPreviousHash) {
-      return {
-        valid: false,
-        totalEntries: rows.length,
-        verifiedEntries: verifiedCount,
-        brokenAtSequence: row.sequenceNumber,
-        chainVersion: row.chainVersion,
-      };
+      return mismatch(row.sequenceNumber, row.chainVersion);
     }
 
     // Validate entryHash integrity
@@ -310,13 +246,7 @@ export function verifyChain(
 
     const recomputed = computeEntryHash(entry);
     if (recomputed !== row.entryHash) {
-      return {
-        valid: false,
-        totalEntries: rows.length,
-        verifiedEntries: verifiedCount,
-        brokenAtSequence: row.sequenceNumber,
-        chainVersion: row.chainVersion,
-      };
+      return mismatch(row.sequenceNumber, row.chainVersion);
     }
 
     previousEntryHash = row.entryHash;
@@ -326,9 +256,11 @@ export function verifyChain(
 
   return {
     valid: true,
+    status: "valid",
     totalEntries: rows.length,
     verifiedEntries: verifiedCount,
     brokenAtSequence: null,
+    missingFromSequence: null,
     chainVersion: rows[rows.length - 1].chainVersion,
   };
 }
