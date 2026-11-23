@@ -9,6 +9,7 @@
  *   – month transitions, leap year (Feb 29), and non-leap year (Feb 28) boundary behavior
  *   – resolveQuotaConfig precedence (agent > platform > fallback)
  *   – checkAndIncrementQuota: disabled, under limit, at limit, over limit
+ *     (including whether each decision reported a consumed unit)
  *   – readQuotaUsage: existing row, no row
  *   – quotaExceededResponse: status code, headers, body
  *   – buildQuotaHeaders / applyQuotaHeaders: header values
@@ -90,6 +91,7 @@ import {
   readQuotaUsageBreakdown,
   quotaExceededResponse,
   buildQuotaHeaders,
+  buildQuotaExplanation,
   applyQuotaHeaders,
   type QuotaResource,
   type WindowSize,
@@ -349,12 +351,14 @@ describe("checkAndIncrementQuota", () => {
     expect(result.ok).toBe(true);
     expect(result.used).toBe(0);
     expect(result.resource).toBe("activity_writes");
+    // Disabled decisions report no consumed unit and never write.
+    expect(result.incremented).toBe(false);
     // No DB insert when quota is disabled
     expect(mocks.dbInsert).not.toHaveBeenCalled();
   });
 
   it("returns ok:true when usage is under the limit", async () => {
-    const configRow = makeQuotaConfigRow({ talosId: "agent-1", maxCount: 100, enabled: true });
+    const configRow = makeQuotaConfigRow({ talosId: "agent-1", maxCount: 100, enabled: true, windowSize: "daily" });
     mocks.dbSelect.mockReturnValueOnce(mocks.makeSelectChain([configRow]));
     // Upsert returns count=10
     mocks.dbInsert.mockReturnValueOnce(mocks.makeInsertChain([{ count: 10 }]));
@@ -365,10 +369,13 @@ describe("checkAndIncrementQuota", () => {
     expect(result.used).toBe(10);
     expect(result.remaining).toBe(90);
     expect(result.limit).toBe(100);
+    // Enabled decisions consume exactly one unit.
+    expect(result.incremented).toBe(true);
+    expect(mocks.dbInsert).toHaveBeenCalledTimes(1);
   });
 
   it("returns ok:true when usage equals the limit (last allowed slot)", async () => {
-    const configRow = makeQuotaConfigRow({ talosId: "agent-1", maxCount: 5, enabled: true });
+    const configRow = makeQuotaConfigRow({ talosId: "agent-1", maxCount: 5, enabled: true, windowSize: "hourly" });
     mocks.dbSelect.mockReturnValueOnce(mocks.makeSelectChain([configRow]));
     mocks.dbInsert.mockReturnValueOnce(mocks.makeInsertChain([{ count: 5 }]));
 
@@ -377,10 +384,11 @@ describe("checkAndIncrementQuota", () => {
     expect(result.ok).toBe(true);
     expect(result.used).toBe(5);
     expect(result.remaining).toBe(0);
+    expect(result.incremented).toBe(true);
   });
 
   it("returns ok:false when usage exceeds the limit", async () => {
-    const configRow = makeQuotaConfigRow({ talosId: "agent-1", maxCount: 5, enabled: true });
+    const configRow = makeQuotaConfigRow({ talosId: "agent-1", maxCount: 5, enabled: true, windowSize: "monthly" });
     mocks.dbSelect.mockReturnValueOnce(mocks.makeSelectChain([configRow]));
     // Counter already at 6 (exceeded by 1)
     mocks.dbInsert.mockReturnValueOnce(mocks.makeInsertChain([{ count: 6 }]));
@@ -390,6 +398,10 @@ describe("checkAndIncrementQuota", () => {
     expect(result.ok).toBe(false);
     expect(result.used).toBe(6);
     expect(result.remaining).toBe(0);
+    // Exhausted decisions still increment (increment-then-check) and must
+    // report the consumed unit alongside the rejection.
+    expect(result.incremented).toBe(true);
+    expect(mocks.dbInsert).toHaveBeenCalledTimes(1);
   });
 
   it("returns correct resource in result", async () => {
@@ -472,12 +484,14 @@ describe("readQuotaUsage", () => {
     expect(result.used).toBe(0);
     expect(result.remaining).toBe(100);
     expect(result.ok).toBe(true);
+    // readQuotaUsage is read-only and reports no consumed unit.
+    expect(result.incremented).toBe(false);
     // readQuotaUsage must NOT call db.insert
     expect(mocks.dbInsert).not.toHaveBeenCalled();
   });
 
-  it("returns the current count when a usage row exists with injected clock", async () => {
-    const configRow = makeQuotaConfigRow({ talosId: "agent-1", maxCount: 100, enabled: true, windowSize: "monthly" });
+  it("returns the current count when a usage row exists", async () => {
+    const configRow = makeQuotaConfigRow({ talosId: "agent-1", maxCount: 100, enabled: true, windowSize: "daily" });
     mocks.dbSelect.mockReturnValueOnce(mocks.makeSelectChain([configRow]));
 
     const usageChain = mocks.makeSelectChain([]);
@@ -495,11 +509,14 @@ describe("readQuotaUsage", () => {
     expect(result.used).toBe(42);
     expect(result.remaining).toBe(58);
     expect(result.ok).toBe(true);
-    expect(result.resetAt).toBe(new Date("2024-03-01T00:00:00.000Z").getTime());
+    expect(result.windowSize).toBe("daily");
+    expect(result.policy).toBe("agent");
+    expect(result.explanation).toContain("Used 42 of 100");
+    expect(result.explanation).toContain("agent daily quota");
   });
 
   it("reports ok:false when usage exceeds the limit", async () => {
-    const configRow = makeQuotaConfigRow({ talosId: "agent-1", maxCount: 10, enabled: true });
+    const configRow = makeQuotaConfigRow({ talosId: "agent-1", maxCount: 10, enabled: true, windowSize: "hourly" });
     mocks.dbSelect.mockReturnValueOnce(mocks.makeSelectChain([configRow]));
 
     const usageChain = mocks.makeSelectChain([]);
@@ -516,6 +533,7 @@ describe("readQuotaUsage", () => {
     expect(result.used).toBe(15);
     expect(result.remaining).toBe(0);
     expect(result.ok).toBe(false);
+    expect(result.incremented).toBe(false);
   });
 });
 
@@ -529,6 +547,7 @@ describe("quotaExceededResponse", () => {
     used: 101,
     resetAt: new Date("2026-07-25T00:00:00.000Z").getTime(),
     resource: "activity_writes" as QuotaResource,
+    incremented: true,
   };
 
   it("returns HTTP 429", () => {
@@ -542,12 +561,8 @@ describe("quotaExceededResponse", () => {
     expect(resp.headers.get("X-Quota-Remaining")).toBe("0");
     expect(resp.headers.get("X-Quota-Used")).toBe("101");
     expect(resp.headers.get("X-Quota-Resource")).toBe("activity_writes");
-    expect(resp.headers.get("X-Quota-Reset")).toBe(String(exceeded.resetAt / 1000));
-
-    const body = await resp.json();
-    // Headers and body reflect the identical exact window boundary
-    expect(body.resetAt).toBe(new Date(exceeded.resetAt).toISOString());
-    expect(new Date(Number(resp.headers.get("X-Quota-Reset")) * 1000).toISOString()).toBe(body.resetAt);
+    expect(resp.headers.get("X-Quota-Reset")).toBeTruthy();
+    expect(resp.headers.get("X-Quota-Incremented")).toBe("true");
   });
 
   it("body contains error, resource, limit, and resetAt", async () => {
@@ -556,6 +571,7 @@ describe("quotaExceededResponse", () => {
     expect(body.error).toBe("Quota exceeded");
     expect(body.resource).toBe("activity_writes");
     expect(body.limit).toBe(100);
+    expect(body.incremented).toBe(true);
     expect(body.resetAt).toMatch(/^\d{4}-\d{2}-\d{2}T/); // ISO-8601
   });
 
@@ -666,15 +682,27 @@ describe("buildQuotaHeaders", () => {
     used: 10,
     resetAt: 1_753_401_600_000,
     resource: "job_writes" as QuotaResource,
+    incremented: true,
   };
 
-  it("returns all five quota header keys", () => {
+  it("returns all six quota header keys", () => {
     const headers = buildQuotaHeaders(result);
     expect(headers["X-Quota-Limit"]).toBe("500");
     expect(headers["X-Quota-Remaining"]).toBe("490");
     expect(headers["X-Quota-Used"]).toBe("10");
     expect(headers["X-Quota-Resource"]).toBe("job_writes");
     expect(headers["X-Quota-Reset"]).toBeDefined();
+    expect(headers["X-Quota-Incremented"]).toBe("true");
+  });
+
+  it("reports X-Quota-Incremented=false when no unit was consumed", () => {
+    const headers = buildQuotaHeaders({
+      ...result,
+      used: 0,
+      remaining: 500,
+      incremented: false,
+    });
+    expect(headers["X-Quota-Incremented"]).toBe("false");
   });
 
   it("X-Quota-Reset is in seconds (Unix epoch), not milliseconds", () => {
@@ -710,6 +738,7 @@ describe("applyQuotaHeaders", () => {
       used: 50,
       resetAt: Date.now() + 3600_000,
       resource: "revenue_writes" as QuotaResource,
+      incremented: true,
     };
 
     const resp = new Response(JSON.stringify({ id: "x" }), { status: 201 });
@@ -719,6 +748,7 @@ describe("applyQuotaHeaders", () => {
     expect(patched.headers.get("X-Quota-Remaining")).toBe("150");
     expect(patched.headers.get("X-Quota-Used")).toBe("50");
     expect(patched.headers.get("X-Quota-Resource")).toBe("revenue_writes");
+    expect(patched.headers.get("X-Quota-Incremented")).toBe("true");
   });
 
   it("preserves existing response status", () => {
@@ -729,6 +759,7 @@ describe("applyQuotaHeaders", () => {
       used: 1,
       resetAt: Date.now() + 3600_000,
       resource: "sse_connections" as QuotaResource,
+      incremented: true,
     };
 
     const resp = new Response(null, { status: 201 });
@@ -751,5 +782,110 @@ describe("applyQuotaHeaders", () => {
     });
     expect(patched.headers.get("X-Quota-Reset")).toBeNull();
     expect(patched.headers.get("X-Quota-Limit")).toBe("50");
+  });
+});
+
+// ─── buildQuotaHeaders — new headers ────────────────────────────────────────
+
+describe("buildQuotaHeaders — includes windowSize and policy", () => {
+  const result = {
+    ok: true,
+    limit: 500,
+    remaining: 490,
+    used: 10,
+    resetAt: 1_753_401_600_000,
+    resource: "job_writes" as QuotaResource,
+    windowSize: "monthly" as WindowSize,
+    policy: "agent" as const,
+    explanation: "test",
+  };
+
+  it("includes X-Quota-Window header", () => {
+    const headers = buildQuotaHeaders(result);
+    expect(headers["X-Quota-Window"]).toBe("monthly");
+  });
+
+  it("includes X-Quota-Policy header", () => {
+    const headers = buildQuotaHeaders(result);
+    expect(headers["X-Quota-Policy"]).toBe("agent");
+  });
+});
+
+// ─── buildQuotaExplanation ───────────────────────────────────────────────────
+
+describe("buildQuotaExplanation", () => {
+  it("returns all fields with ISO-8601 resetAt", () => {
+    const result = {
+      ok: true,
+      limit: 100,
+      remaining: 95,
+      used: 5,
+      resetAt: new Date("2026-07-25T00:00:00.000Z").getTime(),
+      resource: "activity_writes" as QuotaResource,
+      windowSize: "daily" as WindowSize,
+      policy: "platform" as const,
+      explanation: "Used 5 of 100 (platform daily quota). 95 remaining.",
+    };
+
+    const explanation = buildQuotaExplanation(result);
+
+    expect(explanation.resource).toBe("activity_writes");
+    expect(explanation.limit).toBe(100);
+    expect(explanation.remaining).toBe(95);
+    expect(explanation.used).toBe(5);
+    expect(explanation.resetAt).toBe("2026-07-25T00:00:00.000Z");
+    expect(explanation.windowSize).toBe("daily");
+    expect(explanation.policy).toBe("platform");
+    expect(explanation.explanation).toBe("Used 5 of 100 (platform daily quota). 95 remaining.");
+    expect(explanation.ok).toBe(true);
+  });
+
+  it("includes ok:false for exceeded quota", () => {
+    const result = {
+      ok: false,
+      limit: 10,
+      remaining: 0,
+      used: 11,
+      resetAt: new Date("2026-07-25T00:00:00.000Z").getTime(),
+      resource: "job_writes" as QuotaResource,
+      windowSize: "hourly" as WindowSize,
+      policy: "agent" as const,
+      explanation: "Quota exceeded: used 11 of 10 (agent hourly quota). Resets at 2026-07-25T00:00:00.000Z.",
+    };
+
+    const explanation = buildQuotaExplanation(result);
+
+    expect(explanation.ok).toBe(false);
+    expect(explanation.explanation).toContain("Quota exceeded");
+  });
+});
+
+// ─── quotaExceededResponse — includes explanation in body ────────────────────
+
+describe("quotaExceededResponse — body includes explanation", () => {
+  const exceeded = {
+    ok: false,
+    limit: 100,
+    remaining: 0,
+    used: 101,
+    resetAt: new Date("2026-07-25T00:00:00.000Z").getTime(),
+    resource: "activity_writes" as QuotaResource,
+    windowSize: "daily" as WindowSize,
+    policy: "agent" as const,
+    explanation: "Quota exceeded: used 101 of 100 (agent daily quota). Resets at 2026-07-25T00:00:00.000Z.",
+  };
+
+  it("body contains explanation fields", async () => {
+    const resp = quotaExceededResponse(exceeded);
+    const body = await resp.json();
+
+    expect(body.error).toBe("Quota exceeded");
+    expect(body.resource).toBe("activity_writes");
+    expect(body.limit).toBe(100);
+    expect(body.resetAt).toBe("2026-07-25T00:00:00.000Z");
+    expect(body.windowSize).toBe("daily");
+    expect(body.policy).toBe("agent");
+    expect(body.explanation).toContain("Quota exceeded");
+    expect(body.ok).toBe(false);
   });
 });

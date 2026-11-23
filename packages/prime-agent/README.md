@@ -534,6 +534,15 @@ See the
 for the input → class mapping, privacy guarantees, compatibility notes, and
 how to consume the classification.
 
+## Scheduler cancellation vs. failed attempts
+
+Scheduled tasks (`polling`, `heartbeat`, `job_heartbeat`, `activity_flush` and `job_effect_dispatch`) distinguish intentional shutdown from a failed attempt:
+
+- If `shutdown_event` is set while an attempt is running, an exception from that attempt is logged as interrupted by shutdown. It does not call `DurableBackoff.failure()`, so it never consumes retry budget or advances `attempt_count`.
+- `asyncio.CancelledError` is always re-raised and never recorded as a failure.
+- A genuine failure while the agent is running still consumes retry budget as before, including the `max_attempts` terminal stop.
+
+Agent cycle summaries record the terminal state in `outcome`: `completed`, `shutdown`, `cancelled`, `max_iterations`, `provider_failure` or `error`. A cancelled cycle is reported with `outcome=cancelled`, `error_type=CancelledError` and `error_category=cancelled`, and is no longer reported as `completed`.
 ## Scheduler execution identities
 
 Financial scheduler cycles reserve a durable execution identity in the local
