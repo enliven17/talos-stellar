@@ -10,14 +10,14 @@
  */
 export {
   enqueue,
-  executeBulkRetry,
   getJob,
-  getJobRevision,
   listJobs,
-  previewBulkRetry,
   release,
   requestCancel,
   requeue,
+  StaleLeaseError,
+  verifyLease,
+  withLeaseFence,
 } from "./store";
 export { registerHandler } from "./registry";
 export { runOnce } from "./runner";
@@ -40,7 +40,7 @@ export type {
   JobHandler,
   JobRecord,
   JobStatus,
-  LeaseExtensionRejectionReason,
+  LeaseFence,
   RetryClass,
   RunOnceSummary,
 } from "./types";

@@ -1,7 +1,8 @@
 import * as store from "./store";
+import { StaleLeaseError } from "./store";
 import { getHandler, registeredQueues } from "./registry";
 import { jobsConfig } from "./config";
-import type { JobRecord, RunOnceSummary } from "./types";
+import type { JobRecord, LeaseFence, RunOnceSummary } from "./types";
 
 export interface RunOnceOptions {
   /** Which queues to drain. Defaults to every registered handler's queue. */
@@ -71,13 +72,21 @@ export async function runOnce(opts: RunOnceOptions = {}): Promise<RunOnceSummary
 
 async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnceSummary): Promise<void> {
   const leaseId = job.leaseId!; // guaranteed by leaseBatch()
+  const leaseGeneration = job.leaseGeneration;
+  const fence: LeaseFence = { jobId: job.id, leaseId, leaseGeneration };
   const handler = getHandler(job.queue);
 
   if (!handler) {
     // Stale row for a queue nothing handles anymore (e.g. a removed
     // feature) — dead-letter instead of retrying forever against nothing.
-    await store.fail(job.id, leaseId, new Error(`No handler registered for queue "${job.queue}"`));
-    summary.deadLettered += 1;
+    const failed = await store.fail(
+      job.id,
+      leaseId,
+      new Error(`No handler registered for queue "${job.queue}"`),
+      undefined,
+      leaseGeneration,
+    );
+    if (failed) summary.deadLettered += 1;
     return;
   }
 
@@ -87,77 +96,30 @@ async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnce
 
   let lostLease = false;
   let cancelled = false;
-  let currentLeaseExpiresAt: Date | null = job.leaseExpiresAt ? new Date(job.leaseExpiresAt) : null;
-  const defaultLeaseDurationMs = opts.leaseDurationMs ?? jobsConfig.leaseDurationMs;
-  const maxExtensionMs = opts.maxLeaseExtensionMs ?? jobsConfig.maxLeaseExtensionMs;
-  const maxHorizonMs = opts.maxLeaseHorizonMs ?? jobsConfig.maxLeaseHorizonMs;
-
-  const runHeartbeat = async (requestedDurationMs?: number) => {
-    if (requestedDurationMs !== undefined) {
-      if (
-        !Number.isFinite(requestedDurationMs) ||
-        requestedDurationMs <= 0 ||
-        requestedDurationMs > maxExtensionMs ||
-        requestedDurationMs > maxHorizonMs
-      ) {
-        // Contradictory extension request: reject without modifying or dropping the lease.
-        return { ok: false, cancelled };
-      }
-      if (
-        currentLeaseExpiresAt &&
-        Number.isFinite(currentLeaseExpiresAt.getTime()) &&
-        Date.now() + requestedDurationMs < currentLeaseExpiresAt.getTime()
-      ) {
-        // Reject request that would shorten the currently held lease expiry.
-        return { ok: false, cancelled };
-      }
-    }
-
-    const effectiveDurationMs = requestedDurationMs ?? defaultLeaseDurationMs;
-    const candidateExpiryMs = Date.now() + effectiveDurationMs;
-    const result = await store.heartbeat(job.id, leaseId, effectiveDurationMs);
-    if (!result.ok) {
-      lostLease = true;
-    } else if (
-      !currentLeaseExpiresAt ||
-      !Number.isFinite(currentLeaseExpiresAt.getTime()) ||
-      candidateExpiryMs > currentLeaseExpiresAt.getTime()
-    ) {
-      currentLeaseExpiresAt = new Date(candidateExpiryMs);
-    }
+  const runHeartbeat = async () => {
+    const result = await store.heartbeat(job.id, leaseId, opts.leaseDurationMs, leaseGeneration);
+    if (!result.ok) lostLease = true;
     if (result.cancelled) cancelled = true;
     if (!result.ok || result.cancelled) controller.abort();
     return result;
   };
 
-  const runExtendLease = async (extensionMs: number) => {
-    const result = await store.extendLease(job.id, leaseId, extensionMs, {
-      maxExtensionMs,
-      maxHorizonMs,
-    });
-    if (result.ok && result.leaseExpiresAt) {
-      currentLeaseExpiresAt = new Date(result.leaseExpiresAt);
+  const applyEffect = async <T>(effect: (activeFence: LeaseFence) => Promise<T>): Promise<T> => {
+    if (lostLease || cancelled) {
+      throw new StaleLeaseError(fence);
     }
-    if (result.cancelled) {
-      cancelled = true;
-      controller.abort();
-    } else if (
-      !result.ok &&
-      (result.reason === "not_found" ||
-        result.reason === "lease_mismatch" ||
-        result.reason === "no_active_lease" ||
-        result.reason === "lease_expired" ||
-        result.reason === "invalid_job_state")
-    ) {
-      lostLease = true;
-      controller.abort();
+    try {
+      return await store.withLeaseFence(fence, effect, job.queue);
+    } catch (err) {
+      if (err instanceof StaleLeaseError) {
+        lostLease = true;
+        controller.abort();
+      }
+      throw err;
     }
-    return result;
   };
 
-  const heartbeatTimer = setInterval(() => {
-    void runHeartbeat();
-  }, opts.heartbeatIntervalMs ?? jobsConfig.heartbeatIntervalMs);
+  const heartbeatTimer = setInterval(runHeartbeat, opts.heartbeatIntervalMs ?? jobsConfig.heartbeatIntervalMs);
   // Node timers keep the event loop alive; workers must be able to shut down
   // even if a heartbeat is pending.
   heartbeatTimer.unref?.();
@@ -170,6 +132,9 @@ async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnce
       attempts: job.attempts,
       maxAttempts: job.maxAttempts,
       payload: job.payload,
+      leaseId,
+      leaseGeneration,
+      applyEffect,
       signal: controller.signal,
       heartbeat: runHeartbeat,
       extendLease: runExtendLease,
@@ -190,15 +155,13 @@ async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnce
       return;
     }
 
-    const completed = await store.complete(job.id, leaseId, result, Date.now() - startedAt);
-    if (completed === "conflict_cancelled") {
-      // Cancellation raced with completion: the financial effect already ran,
-      // so report the conflict instead of claiming cancellation succeeded.
-      summary.completed += 1;
-    } else if (completed) {
-      summary.completed += 1;
-    }
+    const completed = await store.complete(job.id, leaseId, result, Date.now() - startedAt, leaseGeneration);
+    if (completed) summary.completed += 1;
   } catch (err) {
+    if (err instanceof StaleLeaseError) {
+      lostLease = true;
+    }
+
     if (lostLease || cancelled) {
       if (cancelled) {
         summary.cancelled += 1;
@@ -215,7 +178,7 @@ async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnce
       return;
     }
 
-    const failed = await store.fail(job.id, leaseId, err, Date.now() - startedAt);
+    const failed = await store.fail(job.id, leaseId, err, Date.now() - startedAt, leaseGeneration);
     if (failed?.status === "dead_letter") summary.deadLettered += 1;
     else if (failed?.status === "pending") summary.retried += 1;
   } finally {

@@ -37,6 +37,8 @@ export interface JobRecord<TPayload = unknown> {
   priority: number;
   runAt: Date;
   leaseId: string | null;
+  /** Monotonic fencing token incremented on every lease claim and never reset. */
+  leaseGeneration: number;
   leaseOwner: string | null;
   leaseExpiresAt: Date | null;
   heartbeatAt: Date | null;
@@ -69,26 +71,15 @@ export interface HeartbeatResult {
   cancelled: boolean;
 }
 
-/** Reason codes for a rejected lease extension request. */
-export type LeaseExtensionRejectionReason =
-  | "invalid_duration"
-  | "exceeds_max_extension"
-  | "exceeds_max_horizon"
-  | "would_shorten_lease"
-  | "not_found"
-  | "invalid_job_state"
-  | "cancellation_requested"
-  | "no_active_lease"
-  | "lease_expired"
-  | "lease_mismatch";
-
-/** Result returned by extendLease() calls. */
-export interface ExtendLeaseResult {
-  /** true when the lease was extended; false when rejected or lost. */
-  ok: boolean;
-  cancelled: boolean;
-  leaseExpiresAt: Date | null;
-  reason?: LeaseExtensionRejectionReason;
+/**
+ * Monotonic fencing token identifying a specific lease claim for a job.
+ * Carried into result-side effects so a worker whose lease was replaced
+ * cannot apply stale effects or overwrite a newer worker's state.
+ */
+export interface LeaseFence {
+  jobId: string;
+  leaseId: string;
+  leaseGeneration: number;
 }
 
 export interface JobContext<TPayload = unknown> {
@@ -97,6 +88,15 @@ export interface JobContext<TPayload = unknown> {
   attempts: number;
   maxAttempts: number;
   payload: TPayload;
+  /** Active lease token for this claim. */
+  leaseId: string;
+  /** Monotonic lease generation fencing token for this claim. */
+  leaseGeneration: number;
+  /**
+   * Executes a result-side effect only if this worker's lease generation is
+   * still active. Throws `StaleLeaseError` if the lease was replaced or lost.
+   */
+  applyEffect: <T>(effect: (fence: LeaseFence) => Promise<T>) => Promise<T>;
   /**
    * Extends the lease and checks for cooperative cancellation. Long-running
    * handlers should call this periodically and abort (via `signal`) when

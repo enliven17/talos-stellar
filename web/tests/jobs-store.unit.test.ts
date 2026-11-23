@@ -77,8 +77,8 @@ describe("jobs/store — leaseBatch", () => {
     expect(mockDb.execute).not.toHaveBeenCalled();
   });
 
-  it("claims rows via db.execute and maps them to JobRecords", async () => {
-    const row = { id: "job_1", queue: "q", leaseId: "lease-1", status: "leased", attempts: 1 };
+  it("claims rows via db.execute and maps them to JobRecords including leaseGeneration", async () => {
+    const row = { id: "job_1", queue: "q", leaseId: "lease-1", leaseGeneration: 3, status: "leased", attempts: 1 };
     mockDb.execute.mockResolvedValue({ rows: [row] });
 
     const rows = await store.leaseBatch(["q"], 5, "worker-1", 30_000);
@@ -87,6 +87,41 @@ describe("jobs/store — leaseBatch", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe("job_1");
     expect(rows[0].leaseId).toBe("lease-1");
+    expect(rows[0].leaseGeneration).toBe(3);
+  });
+});
+
+describe("jobs/store — lease fencing (verifyLease / withLeaseFence)", () => {
+  it("verifyLease returns true when (jobId, leaseId, leaseGeneration) matches an active lease", async () => {
+    mockDb.select.mockReturnValue(chainable([{ id: "job_1" }]));
+    const ok = await store.verifyLease({ jobId: "job_1", leaseId: "lease_1", leaseGeneration: 2 });
+    expect(ok).toBe(true);
+  });
+
+  it("verifyLease returns false when the lease generation was replaced", async () => {
+    mockDb.select.mockReturnValue(chainable([]));
+    const ok = await store.verifyLease({ jobId: "job_1", leaseId: "lease_1", leaseGeneration: 1 });
+    expect(ok).toBe(false);
+  });
+
+  it("withLeaseFence executes the effect and returns its value when the lease is active", async () => {
+    mockDb.select.mockReturnValue(chainable([{ id: "job_1" }]));
+    const fence = { jobId: "job_1", leaseId: "lease_2", leaseGeneration: 2 };
+    const effect = vi.fn().mockResolvedValue({ appliedGeneration: 2 });
+
+    const result = await store.withLeaseFence(fence, effect, "audit_log_write");
+
+    expect(effect).toHaveBeenCalledWith(fence);
+    expect(result).toEqual({ appliedGeneration: 2 });
+  });
+
+  it("withLeaseFence rejects with StaleLeaseError and skips the effect when the lease was replaced", async () => {
+    mockDb.select.mockReturnValue(chainable([]));
+    const fence = { jobId: "job_1", leaseId: "lease_1", leaseGeneration: 1 };
+    const effect = vi.fn().mockResolvedValue({ applied: true });
+
+    await expect(store.withLeaseFence(fence, effect, "audit_log_write")).rejects.toThrow(store.StaleLeaseError);
+    expect(effect).not.toHaveBeenCalled();
   });
 });
 
