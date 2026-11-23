@@ -24,12 +24,13 @@ and the Rust Wasm target. The optional Stellar CLI is reported as a warning;
 missing or outdated required tools make the command exit with a non-zero code.
 Run its mocked platform-independent checks with `pnpm doctor:test`.
 
-Run `pnpm paths:check` to verify the checkout has no tracked paths that differ
-only by case. Git stores paths case-sensitively, but Windows and default macOS
-volumes do not, so such a pair silently loses a file after checkout on those
-platforms. The check lists every conflicting path, sorted deterministically,
-and exits non-zero until one side is renamed. Its tests run with
-`pnpm test:path-collisions`.
+After building a publishable package, run `pnpm artifacts:check` to verify that
+every entry in its `exports`, `main`, `module`, `types`, `browser`, and `bin`
+fields resolves to a file inside the package directory. Missing targets,
+absolute paths, `..` escapes, and symlinks that leave the package fail before
+`npm pack`, so a broken entry point cannot reach a release. The check reads the
+built output, so build first (for example `pnpm --dir packages/sdk build`); its
+tests run without a build via `pnpm test:package-artifacts`.
 
 For the Rust contracts, also add the Wasm target:
 
