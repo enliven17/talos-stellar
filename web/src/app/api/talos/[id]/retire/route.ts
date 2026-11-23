@@ -1,8 +1,8 @@
 import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
-import { tlsApprovals, tlsCommerceJobs, tlsTalos } from "@/db/schema";
-import { and, eq, inArray } from "drizzle-orm";
+import { tlsTalos, tlsCommerceJobs, tlsRevenues, tlsDividends } from "@/db/schema";
+import { and, eq, notInArray, sql } from "drizzle-orm";
 import { retireAgentSchema, parseBody } from "@/lib/schemas";
 import { evaluateLifecycleChecklist, toLifecycleState } from "@/lib/governance/lifecycle";
 import { LIFECYCLE_EVENTS, emitLifecycleEvent } from "@/lib/governance/events";
@@ -140,9 +140,15 @@ async function _POST(
     const parsed = await parseBody(request, retireAgentSchema);
     if (parsed.error) return parsed.error;
 
-    const { reason, supersededBy, stellarPublicKey, signature, message, drainJobs } =
-      parsed.data;
-
+const {
+  reason,
+  supersededBy,
+  stellarPublicKey,
+  signature,
+  message,
+  expectedState,
+  drainJobs,
+} = parsed.data;
     // Verify the message contains the TALOS ID to prevent replay across TALOSes
     if (!message.includes(id)) {
       return Response.json(
@@ -162,6 +168,58 @@ async function _POST(
           { status: 400 }
         );
       }
+    }
+
+    // ── Readiness check — block if pending obligations exist ─────────────
+    const TERMINAL_JOB_STATUSES = ["completed", "failed", "cancelled"] as const;
+
+    const [[pendingJobsRow], [pendingPaymentsRow], [revenueRow], [dividendRow]] = await Promise.all(
+      [
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(tlsCommerceJobs)
+          .where(
+            and(
+              eq(tlsCommerceJobs.talosId, id),
+              notInArray(tlsCommerceJobs.status, [...TERMINAL_JOB_STATUSES]),
+            ),
+          ),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(tlsCommerceJobs)
+          .where(and(eq(tlsCommerceJobs.talosId, id), eq(tlsCommerceJobs.status, "pending"))),
+        db
+          .select({ total: sql<string>`coalesce(sum(${tlsRevenues.amount}), '0')` })
+          .from(tlsRevenues)
+          .where(eq(tlsRevenues.talosId, id)),
+        db
+          .select({ total: sql<string>`coalesce(sum(${tlsDividends.amount}), '0')` })
+          .from(tlsDividends)
+          .where(and(eq(tlsDividends.talosId, id), eq(tlsDividends.status, "completed"))),
+      ],
+    );
+
+    const totalRevenue = parseFloat(revenueRow?.total ?? "0");
+    const totalDistributed = parseFloat(dividendRow?.total ?? "0");
+    const undistributedRevenueUSDC = Math.max(0, totalRevenue - totalDistributed);
+
+    const readinessReport = buildRetirementReadinessReport({
+      agentId: id,
+      pendingJobs: pendingJobsRow?.count ?? 0,
+      pendingPayments: pendingPaymentsRow?.count ?? 0,
+      undistributedRevenueUSDC,
+      currentState: "active",
+    });
+
+    if (!readinessReport.ready) {
+      return Response.json(
+        {
+          error: "Agent has pending financial obligations and cannot be retired",
+          code: "LIFECYCLE_PREREQUISITE_FAILED",
+          report: readinessReport,
+        },
+        { status: 422 },
+      );
     }
 
     // Use transaction for atomic operation
@@ -209,26 +267,9 @@ async function _POST(
         return { error: "Invalid signature", status: 403 };
       }
 
-      // Check blocking obligations: in-flight jobs must be drained unless drainJobs is explicitly false
-      const inFlightJobs = await tx
-        .select({ id: tlsCommerceJobs.id })
-        .from(tlsCommerceJobs)
-        .where(
-          and(
-            eq(tlsCommerceJobs.talosId, id),
-            inArray(tlsCommerceJobs.status, ["pending", "in_progress"])
-          )
-        )
-        .limit(10);
-
-      const shouldDrain = drainJobs ?? true;
-      if (inFlightJobs.length > 0 && shouldDrain) {
-        return {
-          error: `Cannot retire agent with ${inFlightJobs.length} in-flight job(s). Drain pending work before retiring.`,
-          code: "LIFECYCLE_PREREQUISITE_FAILED",
-          status: 409,
-          details: { inFlightJobs: inFlightJobs.length },
-        };
+      const observedState = talos.status.toLowerCase();
+      if (expectedState && observedState !== expectedState) {
+        return { error: "Lifecycle state changed", status: 409 };
       }
 
       // Update agent with retirement status
@@ -242,7 +283,7 @@ async function _POST(
           agentOnline: false,
           updatedAt: new Date(),
         })
-        .where(eq(tlsTalos.id, id))
+        .where(and(eq(tlsTalos.id, id), eq(tlsTalos.status, talos.status), isNull(tlsTalos.retiredAt)))
         .returning();
 
       // Track the remaining cleanup in the same transaction. If this fails the
@@ -278,6 +319,22 @@ async function _POST(
         { status: result.status }
       );
     }
+
+    // Offline, read-only consistency report for the retired agent. This never
+    // mutates funded state; it only surfaces contradictions between lifecycle
+    // records, active services and unresolved jobs at the time of retirement.
+    const consistencyReport = buildConsistencyReport({
+      lifecycleRecords: [
+        {
+          talosId: result.data.id,
+          state: "retired",
+          onlineFlag: false,
+          hasRetiredTimestamp: Boolean(result.data.retiredAt),
+        },
+      ],
+      serviceRecords: [],
+      unresolvedJobs: [],
+    });
 
     return Response.json({
       id: result.data.id,

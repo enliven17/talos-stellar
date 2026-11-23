@@ -34,13 +34,36 @@ export interface AuditChainEntry {
 }
 
 /**
+ * Validate that all numeric fields in the canonical audit payload are finite.
+ * Rejects NaN, Infinity, and -Infinity before JSON serialization, which would
+ * otherwise silently coerce nonfinite numbers to null.
+ */
+function assertFiniteAuditNumbers(entry: AuditChainEntry): void {
+  if (typeof entry.sequenceNumber !== "number" || !Number.isFinite(entry.sequenceNumber)) {
+    throw new RangeError(
+      `Audit entry canonical payload contains nonfinite sequenceNumber: ${String(entry.sequenceNumber)}`,
+    );
+  }
+  if (typeof entry.statusCode !== "number" || !Number.isFinite(entry.statusCode)) {
+    throw new RangeError(
+      `Audit entry canonical payload contains nonfinite statusCode: ${String(entry.statusCode)}`,
+    );
+  }
+}
+
+/**
  * Deterministic JSON serialization with fixed property order.
  *
  * This produces the canonical form used for hashing. Every value is
  * stringified according to its type; no pretty-printing or key reordering
  * is allowed after this function runs.
+ *
+ * @throws {RangeError} If any numeric field in the canonical payload is nonfinite
+ *   (`NaN`, `Infinity`, or `-Infinity`).
  */
 export function canonicalize(entry: AuditChainEntry): string {
+  assertFiniteAuditNumbers(entry);
+
   return JSON.stringify({
     sequenceNumber: entry.sequenceNumber,
     talosId: entry.talosId,
@@ -57,6 +80,8 @@ export function canonicalize(entry: AuditChainEntry): string {
  * prefixed with the domain separator.
  *
  *   hash = SHA-256(domain:canonical_json)
+ *
+ * @throws {RangeError} If the entry's canonical payload contains nonfinite numbers.
  */
 export function computeEntryHash(entry: AuditChainEntry): string {
   const payload = `${AUDIT_CHAIN_DOMAIN}:${canonicalize(entry)}`;
@@ -94,6 +119,56 @@ export function verifyChainRootSeal(
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+export type ChainVerificationStatus = "valid" | "broken" | "incomplete";
+
+export type ChainFailureReason =
+  | "out_of_order_records"
+  | "missing_predecessor"
+  | "predecessor_mismatch"
+  | "unexpected_genesis"
+  | "sequence_gap"
+  | "previous_hash_mismatch"
+  | "entry_hash_mismatch"
+  | "truncated_range";
+
+export interface AuditChainRow {
+  sequenceNumber: number | null;
+  entryHash: string | null;
+  previousHash: string | null;
+  chainVersion: string | null;
+  talosId: string;
+  method: string;
+  path: string;
+  statusCode: number;
+  ipAddress: string | null;
+  createdAt: Date;
+}
+
+export interface AuditChainPredecessor {
+  sequenceNumber: number | null;
+  entryHash: string | null;
+  createdAt?: Date;
+}
+
+export interface VerifyChainRangeOptions {
+  /**
+   * The immediate chained predecessor before the selected time window,
+   * or null if no chained entries exist prior to the window (meaning the
+   * window starts at genesis). Omit (undefined) if the caller did not check
+   * or supply the predecessor when the range begins after sequence 0.
+   */
+  predecessor?: AuditChainPredecessor | null;
+  /** Inclusive lower bound of the selected time window. */
+  from?: Date | string | null;
+  /** Inclusive upper bound of the selected time window. */
+  to?: Date | string | null;
+  /**
+   * True when the fetched range was truncated by a query limit and more
+   * entries exist within the selected time window.
+   */
+  truncated?: boolean;
+}
+
 export interface ChainVerificationResult {
   /** True only when the chain is complete and every link verifies. */
   valid: boolean;
@@ -129,7 +204,7 @@ export type ChainRow = {
 };
 
 /**
- * Verify a sequence of audit log entries against the hash chain.
+ * Verify a sequence of audit log entries against the hash chain from genesis.
  *
  * Each entry must satisfy:
  *   1. entryHash === computeEntryHash(entry)

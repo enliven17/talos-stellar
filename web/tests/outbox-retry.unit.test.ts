@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { backoffMs, decideRetry } from "../src/lib/outbox/retry";
+import { backoffMs, boundRetryDelayMs, decideRetry, MAX_RETRY_DELAY_MS } from "../src/lib/outbox/retry";
 
 describe("outbox/retry — backoffMs", () => {
   it("grows exponentially and is capped at 5 minutes", () => {
@@ -32,5 +32,15 @@ describe("outbox/retry — decideRetry", () => {
 
   it("dead-letters once attempts exceed maxAttempts", () => {
     expect(decideRetry({ attempts: 9, maxAttempts: 8 })).toEqual({ action: "dead_letter" });
+  });
+});
+
+describe("outbox/retry — boundRetryDelayMs", () => {
+  it("clamps negative, non-finite, and oversized delays to [0, MAX_RETRY_DELAY_MS]", () => {
+    expect(boundRetryDelayMs(-500)).toBe(0);
+    expect(boundRetryDelayMs(Number.NaN)).toBe(0);
+    expect(boundRetryDelayMs(Number.POSITIVE_INFINITY)).toBe(0);
+    expect(boundRetryDelayMs(1234.9)).toBe(1234);
+    expect(boundRetryDelayMs(MAX_RETRY_DELAY_MS + 60_000)).toBe(MAX_RETRY_DELAY_MS);
   });
 });

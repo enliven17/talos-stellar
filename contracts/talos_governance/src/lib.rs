@@ -644,6 +644,85 @@ pub fn features_list() -> &'static [&'static str] {
     ]
 }
 
+// ── Governance role catalogue (#1375) ───────────────────────────────
+//
+// A "role" is the smallest unit of on-chain identity that maps to a
+// distinct permission boundary. Each variant corresponds to a signer
+// class recognised by this contract.
+//
+// - `Admin` — the address stored under `DataKey::Admin`. It is the
+//   only role that may call write entry-points that change contract
+//   configuration or administrative state.
+// - `Proposer` — any address with a non-zero token balance at the
+//   snapshot ledger. It may call `create_proposal`.
+// - `Voter` — any address with a positive cached/checkpointed balance
+//   at the snapshot ledger. It may call `vote` on an active proposal.
+// - `Anyone` — no on-chain authorisation required. Read-only entry-points
+//   that expose public state.
+//
+// The capability strings returned by `role_capabilities()` are the same
+// stable identifiers already listed in `features_list()` / the INTERFACE.md
+// capability catalogue. Extending a role's capabilities MUST add a new
+// string; removing one bumps `CONTRACT_VERSION` major.
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GovernanceRole {
+    Admin,
+    Proposer,
+    Voter,
+    Anyone,
+}
+
+/// Return the stable capability set for a given role.
+///
+/// Each string is an action tag matching the contract's capability
+/// catalogue (see `features_list` and `contracts/INTERFACE.md §4`).
+/// The list is exhaustive and ordered alphabetically for stable diffs.
+pub fn capabilities_for_role(role: &GovernanceRole) -> &'static [&'static str] {
+    match role {
+        GovernanceRole::Admin => &[
+            "cache_token_balance", // admin-only: seed per-address vote weights
+            "config_admin",        // update_config
+            "delegate",            // admin can also delegate like any user
+            "extend_ttl_batch",    // bounded TTL renewal
+            "pause_domain",        // pause / unpause any governance domain
+            "record_dividend_snapshot", // mint a new dividend epoch
+            "touch_all_ttl",       // unbounded TTL sweep
+            "unpause_domain",
+            "update_voting_power", // push a new voting-power checkpoint
+        ],
+        GovernanceRole::Proposer => &[
+            "create_proposal", // create_proposal requires proposer auth
+        ],
+        GovernanceRole::Voter => &[
+            "delegate", // redirect own voting power
+            "vote",     // cast a vote on an active proposal
+        ],
+        GovernanceRole::Anyone => &[
+            "dividend_epoch_count",    // read-only
+            "execute_proposal",        // execute an approved proposal (permissionless)
+            "finalize_proposal",       // finalize after voting period (permissionless)
+            "get_admin",               // read-only
+            "get_config",              // read-only
+            "get_dividend_snapshot",   // read-only
+            "get_dividend_snapshots_page", // read-only pagination
+            "get_domain_pause_status", // read-only
+            "get_past_votes",          // read-only
+            "get_proposal",            // read-only
+            "get_storage_health",      // read-only
+            "get_vote",                // read-only
+            "interface_features",      // interface query
+            "interface_id",            // interface query
+            "is_domain_paused",        // read-only
+            "next_proposal_id",        // read-only
+            "supports_version",        // interface query
+            "touch_proposal",          // permissionless single-entry TTL touch
+            "version",                 // interface query
+        ],
+    }
+}
+
 /// SemVer compatibility helper used by `supports_version`.
 pub fn version_supports(actual: (u32, u32, u32), required: (u32, u32, u32)) -> bool {
     if actual.0 != required.0 {
@@ -836,7 +915,9 @@ impl TalosGovernance {
             .unwrap_or(DEFAULT_SNAPSHOT_OFFSET_LEDGERS);
         let snapshot_ledger = current_ledger.saturating_sub(snapshot_offset);
         let proposal_id = Self::next_proposal_id(env.clone());
-        let end_ledger = current_ledger + config.voting_period_ledgers;
+        let end_ledger = current_ledger
+            .checked_add(config.voting_period_ledgers)
+            .expect("Voting deadline overflows ledger sequence");
 
         let proposal = Proposal {
             id: proposal_id,
@@ -1749,6 +1830,49 @@ impl TalosGovernance {
             out.push_back(Symbol::new(&e, cap));
         }
         out
+    }
+
+    // ── Role capability introspection (#1375) ───────────────────────
+    //
+    // These entry-points are read-only and do not modify ledger state.
+    // They are intentionally placed here, next to `interface_features`,
+    // so the contract's capability surface remains concentrated in one
+    // place and cannot diverge from `features_list` / INTERFACE.md.
+    //
+    // Authorization enforcement is NOT changed: write entry-points still
+    // call `require_admin`, `require_auth`, or the pause guard as before.
+
+    /// Return the action capability tags permitted for the given role.
+    ///
+    /// Each tag is an `Symbol` matching an entry in the contract's
+    /// capability catalogue (see `interface_features`). The returned list
+    /// is exhaustive for the role: a caller checking whether an action is
+    /// allowed for a role should look for the tag in this list.
+    ///
+    /// This entry-point is authorisation-free and read-only.
+    pub fn role_capabilities(e: Env, role: GovernanceRole) -> Vec<Symbol> {
+        let caps = capabilities_for_role(&role);
+        let mut out = Vec::new(&e);
+        for cap in caps {
+            out.push_back(Symbol::new(&e, cap));
+        }
+        out
+    }
+
+    /// Return `true` when the given role is permitted to perform `action`.
+    ///
+    /// `action` must be one of the stable action tags (e.g. `"vote"`,
+    /// `"create_proposal"`, `"update_config"`). Unknown tags return `false`.
+    ///
+    /// This entry-point is authorisation-free and read-only.
+    pub fn role_can(e: Env, role: GovernanceRole, action: Symbol) -> bool {
+        let caps = capabilities_for_role(&role);
+        for cap in caps {
+            if Symbol::new(&e, cap) == action {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn next_proposal_id(env: Env) -> u32 {

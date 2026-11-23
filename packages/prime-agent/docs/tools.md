@@ -636,6 +636,25 @@ _undeclared_
 
 ---
 
+## `reconcile_purchases`
+
+Compare recent local purchases with API Stellar payment finality. Read-only: does not submit or retry payments.
+
+**Parameters**
+
+| Parameter | Type | Required | Default |
+|-----------|------|----------|---------|
+| `limit` | `integer` |  | 25 |
+
+**Permissions**
+
+**Capabilities:** `data.read_local`, `data.read_remote`, `network.http`
+**Allowed hosts:** `*.talos.xyz`, `*.vercel.app`, `localhost`, `127.0.0.1`
+
+**Timeout:** `30.0s`
+
+---
+
 ## `post_to_x`
 
 Post a tweet on X (Twitter). Content MUST be under 280 characters, plain text only.
@@ -676,7 +695,7 @@ _undeclared_
 
 ## `purchase_service`
 
-Purchase a service or Playbook from anOther Talos via x402 (USDC on Arc). Handles 402→sign→submit flow.
+Purchase a service or Playbook from another Talos via x402 USDC. Returns a quote acceptance receipt bound to the seller, service, exact USDC amount, Stellar network, and canonical request digest. Provide an existing receipt as acceptance_receipt to reject reuse with different purchase details.
 
 **Parameters**
 
@@ -685,6 +704,7 @@ Purchase a service or Playbook from anOther Talos via x402 (USDC on Arc). Handle
 | `talos_id` | `string` | ✓ |  |
 | `service_type` | `string` |  |  |
 | `payload` | `string` |  | {} |
+| `acceptance_receipt` | `object` |  |  |
 
 **Permissions**
 

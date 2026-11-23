@@ -54,6 +54,8 @@ import {
   isWallClockExpired,
   isLedgerExpired,
   isTerminal,
+  normalizeNetworkPassphrase,
+  isMatchingNetwork,
 } from "../src/lib/reconciler/state-machine";
 import type { TxRecord, ReconcilerConfig, HorizonPollResult } from "../src/lib/reconciler/types";
 
@@ -94,6 +96,24 @@ const FAILED_POLL: HorizonPollResult = { outcome: "failed", ledger: 1010, succes
 const NOT_FOUND_POLL: HorizonPollResult = { outcome: "not_found" };
 const ERROR_POLL_RETRYABLE: HorizonPollResult = { outcome: "error", message: "503 Service Unavailable", retryable: true };
 const ERROR_POLL_PERMANENT: HorizonPollResult = { outcome: "error", message: "400 Bad Request", retryable: false };
+const ERROR_POLL_AUTH: HorizonPollResult = {
+  outcome: "error",
+  message: "401 Unauthorized",
+  retryable: false,
+  reasonCode: "UNAUTHORIZED",
+};
+const ERROR_POLL_THROTTLED: HorizonPollResult = {
+  outcome: "error",
+  message: "429 Too Many Requests",
+  retryable: true,
+  reasonCode: "RATE_LIMITED",
+};
+const ERROR_POLL_PROVIDER: HorizonPollResult = {
+  outcome: "error",
+  message: "503 Service Unavailable",
+  retryable: true,
+  reasonCode: "PROVIDER_UNAVAILABLE",
+};
 
 // ─── isTerminal ───────────────────────────────────────────────────────────────
 
@@ -138,6 +158,12 @@ describe("isWallClockExpired", () => {
     const rec = makeRecord({ expiresAt: now });
     expect(isWallClockExpired(rec, now)).toBe(true);
   });
+  it.each([new Date(Number.NaN), new Date(Number.POSITIVE_INFINITY)])(
+    "returns false for a nonfinite expiry timestamp",
+    (expiresAt) => {
+      expect(isWallClockExpired(makeRecord({ expiresAt }), new Date())).toBe(false);
+    },
+  );
 });
 
 // ─── isLedgerExpired ──────────────────────────────────────────────────────────
@@ -202,6 +228,7 @@ describe("transitionFromPending", () => {
     expect(update?.finalityStatus).toBeUndefined();
     expect(update?.lastError).toBe("503 Service Unavailable");
     expect(update?.pollCount).toBe(1);
+    expect(update?.reasonCode).toBeUndefined();
   });
 
   it("stays PENDING on non-retryable error, bumps pollCount", () => {
@@ -209,6 +236,29 @@ describe("transitionFromPending", () => {
     const update = transitionFromPending(rec, ERROR_POLL_PERMANENT, 1010, BASE_CONFIG);
     expect(update?.finalityStatus).toBeUndefined();
     expect(update?.pollCount).toBe(1);
+    expect(update?.reasonCode).toBeUndefined();
+  });
+
+  it("propagates reasonCode from error poll result while preserving lastError", () => {
+    const rec = makeRecord({ pollCount: 2 });
+
+    const authUpdate = transitionFromPending(rec, ERROR_POLL_AUTH, 1010, BASE_CONFIG);
+    expect(authUpdate?.finalityStatus).toBeUndefined();
+    expect(authUpdate?.pollCount).toBe(3);
+    expect(authUpdate?.lastError).toBe("401 Unauthorized");
+    expect(authUpdate?.reasonCode).toBe("UNAUTHORIZED");
+    expect(isAuthorizationFailure(authUpdate?.reasonCode)).toBe(true);
+    expect(getFailureCategory(authUpdate?.reasonCode)).toBe("authorization");
+
+    const throttleUpdate = transitionFromPending(rec, ERROR_POLL_THROTTLED, 1010, BASE_CONFIG);
+    expect(throttleUpdate?.reasonCode).toBe("RATE_LIMITED");
+    expect(isThrottlingFailure(throttleUpdate?.reasonCode)).toBe(true);
+    expect(getFailureCategory(throttleUpdate?.reasonCode)).toBe("throttling");
+
+    const providerUpdate = transitionFromPending(rec, ERROR_POLL_PROVIDER, 1010, BASE_CONFIG);
+    expect(providerUpdate?.reasonCode).toBe("PROVIDER_UNAVAILABLE");
+    expect(isProviderFailure(providerUpdate?.reasonCode)).toBe(true);
+    expect(getFailureCategory(providerUpdate?.reasonCode)).toBe("provider_failure");
   });
 
   it("transitions PENDING → EXPIRED when wall-clock expiry has passed", () => {
@@ -216,6 +266,11 @@ describe("transitionFromPending", () => {
     const update = transitionFromPending(rec, NOT_FOUND_POLL, 1010, BASE_CONFIG, new Date());
     expect(update?.finalityStatus).toBe("EXPIRED");
     expect(update?.lastError).toMatch(/expiry/i);
+  });
+
+  it("preserves PENDING when expiresAt is nonfinite", () => {
+    const rec = makeRecord({ expiresAt: new Date(Number.NaN) });
+    expect(transitionFromPending(rec, CONFIRMED_POLL, 1010, BASE_CONFIG)).toBeNull();
   });
 
   it("transitions PENDING → EXPIRED when ledger gap exceeded", () => {
@@ -277,6 +332,11 @@ describe("transitionFromConfirming", () => {
     });
     const update = transitionFromConfirming(rec, 1011, BASE_CONFIG, new Date());
     expect(update?.finalityStatus).toBe("EXPIRED");
+  });
+
+  it("preserves CONFIRMING when now is nonfinite", () => {
+    const rec = makeRecord({ finalityStatus: "CONFIRMING", confirmedLedger: 1010 });
+    expect(transitionFromConfirming(rec, 1012, BASE_CONFIG, new Date(Number.NaN))).toBeNull();
   });
 
   it("transitions CONFIRMING → EXPIRED on ledger gap (counted from ledgerSubmitted)", () => {
@@ -464,5 +524,165 @@ describe("State machine edge cases", () => {
     const rec = makeRecord({ pollCount: 0 });
     const update = transitionFromPending(rec, NOT_FOUND_POLL, 1010, config);
     expect(update?.finalityStatus).toBe("NOT_FOUND");
+  });
+});
+
+// ─── Network Identity Pinning & Observation Rejection ─────────────────────────
+
+describe("Network Identity Pinning & Observation Rejection", () => {
+  const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
+  const MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015";
+
+  describe("normalizeNetworkPassphrase", () => {
+    it("normalises 'testnet' shorthand to SDF testnet passphrase", () => {
+      expect(normalizeNetworkPassphrase("testnet")).toBe(TESTNET_PASSPHRASE);
+      expect(normalizeNetworkPassphrase("TESTNET")).toBe(TESTNET_PASSPHRASE);
+    });
+
+    it("normalises 'mainnet' and 'public' shorthand to SDF public passphrase", () => {
+      expect(normalizeNetworkPassphrase("mainnet")).toBe(MAINNET_PASSPHRASE);
+      expect(normalizeNetworkPassphrase("public")).toBe(MAINNET_PASSPHRASE);
+      expect(normalizeNetworkPassphrase("PUBLIC")).toBe(MAINNET_PASSPHRASE);
+    });
+
+    it("preserves custom passphrases as-is", () => {
+      const custom = "Private Standalone Network ; January 2026";
+      expect(normalizeNetworkPassphrase(custom)).toBe(custom);
+    });
+
+    it("handles null, undefined, or empty string safely", () => {
+      expect(normalizeNetworkPassphrase(null)).toBeNull();
+      expect(normalizeNetworkPassphrase(undefined)).toBeNull();
+      expect(normalizeNetworkPassphrase("")).toBeNull();
+    });
+  });
+
+  describe("isMatchingNetwork", () => {
+    it("returns true for matching passphrases", () => {
+      expect(isMatchingNetwork(TESTNET_PASSPHRASE, TESTNET_PASSPHRASE)).toBe(true);
+      expect(isMatchingNetwork("testnet", TESTNET_PASSPHRASE)).toBe(true);
+      expect(isMatchingNetwork(TESTNET_PASSPHRASE, "testnet")).toBe(true);
+      expect(isMatchingNetwork("mainnet", MAINNET_PASSPHRASE)).toBe(true);
+    });
+
+    it("returns false for mismatched passphrases", () => {
+      expect(isMatchingNetwork(TESTNET_PASSPHRASE, MAINNET_PASSPHRASE)).toBe(false);
+      expect(isMatchingNetwork("testnet", "mainnet")).toBe(false);
+    });
+
+    it("returns true for backward compatibility when either side is omitted", () => {
+      expect(isMatchingNetwork(null, TESTNET_PASSPHRASE)).toBe(true);
+      expect(isMatchingNetwork(TESTNET_PASSPHRASE, null)).toBe(true);
+      expect(isMatchingNetwork(undefined, undefined)).toBe(true);
+    });
+  });
+
+  describe("transitionFromPending with pinned network identity", () => {
+    const pinnedRecord = makeRecord({
+      finalityStatus: "PENDING",
+      networkPassphrase: TESTNET_PASSPHRASE,
+      pollCount: 2,
+    });
+
+    it("rejects confirmed observation from a foreign network without transitioning financial state", () => {
+      const foreignPoll: HorizonPollResult = {
+        outcome: "confirmed",
+        ledger: 1050,
+        successful: true,
+        networkPassphrase: MAINNET_PASSPHRASE,
+      };
+
+      const update = transitionFromPending(pinnedRecord, foreignPoll, 1050, BASE_CONFIG);
+      expect(update).not.toBeNull();
+      expect(update?.finalityStatus).toBeUndefined(); // Stays PENDING
+      expect(update?.confirmedLedger).toBeUndefined(); // No financial settlement recorded
+      expect(update?.pollCount).toBe(3); // Bumped poll attempt
+      expect(update?.lastError).toContain("Rejected observation from foreign network");
+      expect(update?.lastError).toContain(MAINNET_PASSPHRASE);
+    });
+
+    it("rejects failed observation from a foreign network without transitioning financial state", () => {
+      const foreignPoll: HorizonPollResult = {
+        outcome: "failed",
+        ledger: 1050,
+        successful: false,
+        detail: "tx_bad_auth",
+        networkPassphrase: MAINNET_PASSPHRASE,
+      };
+
+      const update = transitionFromPending(pinnedRecord, foreignPoll, 1050, BASE_CONFIG);
+      expect(update).not.toBeNull();
+      expect(update?.finalityStatus).toBeUndefined(); // Stays PENDING (does not transition to FAILED)
+      expect(update?.pollCount).toBe(3);
+      expect(update?.lastError).toContain("Rejected observation from foreign network");
+    });
+
+    it("rejects not_found observation from a foreign network and avoids NOT_FOUND terminal state", () => {
+      const config = { ...BASE_CONFIG, notFoundThreshold: 3 };
+      const foreignPoll: HorizonPollResult = {
+        outcome: "not_found",
+        networkPassphrase: MAINNET_PASSPHRASE,
+      };
+
+      const update = transitionFromPending(pinnedRecord, foreignPoll, 1050, config);
+      expect(update).not.toBeNull();
+      expect(update?.finalityStatus).toBeUndefined(); // Stays PENDING even though pollCount+1 >= threshold
+      expect(update?.lastError).toContain("Rejected observation from foreign network");
+    });
+
+    it("accepts observation from matching network and transitions normally", () => {
+      const matchingPoll: HorizonPollResult = {
+        outcome: "confirmed",
+        ledger: 1050,
+        successful: true,
+        networkPassphrase: TESTNET_PASSPHRASE,
+      };
+
+      const update = transitionFromPending(pinnedRecord, matchingPoll, 1050, BASE_CONFIG);
+      expect(update).not.toBeNull();
+      expect(update?.finalityStatus).toBe("CONFIRMING");
+      expect(update?.confirmedLedger).toBe(1050);
+      expect(update?.lastError).toBeNull();
+    });
+
+    it("falls back to config.networkPassphrase when record has no pinned passphrase", () => {
+      const unpinnedRecord = makeRecord({
+        finalityStatus: "PENDING",
+        networkPassphrase: null,
+        pollCount: 0,
+      });
+      const config = { ...BASE_CONFIG, networkPassphrase: TESTNET_PASSPHRASE };
+      const foreignPoll: HorizonPollResult = {
+        outcome: "confirmed",
+        ledger: 1050,
+        successful: true,
+        networkPassphrase: MAINNET_PASSPHRASE,
+      };
+
+      const update = transitionFromPending(unpinnedRecord, foreignPoll, 1050, config);
+      expect(update?.finalityStatus).toBeUndefined();
+      expect(update?.lastError).toContain("Rejected observation from foreign network");
+    });
+  });
+
+  describe("transitionFromConfirming with foreign observation", () => {
+    it("rejects foreign network observation in CONFIRMING state without confirming", () => {
+      const confirmingRecord = makeRecord({
+        finalityStatus: "CONFIRMING",
+        confirmedLedger: 1000,
+        networkPassphrase: TESTNET_PASSPHRASE,
+      });
+      const foreignPoll: HorizonPollResult = {
+        outcome: "confirmed",
+        ledger: 1010,
+        successful: true,
+        networkPassphrase: MAINNET_PASSPHRASE,
+      };
+
+      // Depth is satisfied (1010 >= 1000 + 2), but foreign observation must block transition
+      const update = transitionFromConfirming(confirmingRecord, 1010, BASE_CONFIG, new Date(), foreignPoll);
+      expect(update?.finalityStatus).toBeUndefined(); // Does NOT transition to CONFIRMED
+      expect(update?.lastError).toContain("Rejected observation from foreign network");
+    });
   });
 });

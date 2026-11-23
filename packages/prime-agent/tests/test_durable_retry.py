@@ -269,3 +269,48 @@ def test_durable_backoff_success_after_terminal_clears_state(db: LocalDB):
     assert b.terminal is False
     assert b.fail_count == 0
     assert db.get_retry_state("term_clear") is None
+
+
+def test_durable_backoff_cancel_clears_state_on_draining(db: LocalDB):
+    """cancel() clears retry state and marks terminal when agent enters draining."""
+    b = DurableBackoff("cancel_test", db, base_delay=10.0, max_attempts=5, jitter=0)
+    b.failure()
+    b.failure()
+    assert b.fail_count == 2
+    assert b.terminal is False
+    assert db.get_retry_state("cancel_test") is not None
+
+    # Simulate agent draining (shutdown initiated)
+    b.cancel()
+
+    # State should be cleared
+    assert b.fail_count == 0
+    assert b.terminal is True
+    assert b._next_attempt_at is None
+    assert db.get_retry_state("cancel_test") is None
+
+
+def test_durable_backoff_cancel_idempotent(db: LocalDB):
+    """Calling cancel() multiple times is a no-op after first call."""
+    b = DurableBackoff("cancel_idempotent", db, base_delay=10.0, jitter=0)
+    b.failure()
+
+    b.cancel()
+    b.cancel()  # second call must not raise
+
+    assert b.fail_count == 0
+    assert b.terminal is True
+    assert db.get_retry_state("cancel_idempotent") is None
+
+
+def test_durable_backoff_cancel_on_fresh_instance(db: LocalDB):
+    """cancel() on a fresh backoff (no failures) is a no-op and marks terminal."""
+    b = DurableBackoff("cancel_fresh", db, base_delay=10.0, jitter=0)
+    assert b.fail_count == 0
+    assert b.terminal is False
+
+    b.cancel()
+
+    assert b.fail_count == 0
+    assert b.terminal is True
+    assert db.get_retry_state("cancel_fresh") is None

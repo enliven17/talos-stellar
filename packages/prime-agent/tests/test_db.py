@@ -69,6 +69,16 @@ class TestCommerceLifecycle:
         ).fetchone()
         assert row["status"] == "completed"
 
+    def test_get_commerce_jobs_recent_first(self, mock_db: LocalDB):
+        mock_db.add_commerce_job("job-1", "talos-a", "research")
+        mock_db.add_commerce_job("job-2", "talos-b", "analysis")
+        mock_db.update_commerce_status("job-2", "completed")
+
+        jobs = mock_db.get_commerce_jobs(25)
+
+        assert [job["job_id"] for job in jobs] == ["job-2", "job-1"]
+        assert jobs[0]["status"] == "completed"
+        assert jobs[0]["talos_id"] == "talos-b"
     def test_duplicate_ignored(self, mock_db: LocalDB):
         mock_db.add_commerce_job("job-dup", "c1", "svc")
         mock_db.add_commerce_job("job-dup", "c2", "svc2")  # Should be ignored

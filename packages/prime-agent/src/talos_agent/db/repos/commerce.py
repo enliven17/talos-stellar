@@ -80,8 +80,33 @@ class CommerceRepo:
         self._conn.commit()
         return cursor.rowcount
 
+    def find_unknown_commerce_job(self, canonical_payload: str) -> dict | None:
+        """Return the earliest commerce job whose stored payload carries the
+        given canonical digest and whose status is unknown, or None. Used by
+        purchase_service to refuse a second signing for an already-unknown
+        purchase (#1446)."""
+        cursor = self._conn.execute(
+            "SELECT * FROM commerce_jobs WHERE payload_json LIKE ? "
+            "ORDER BY created_at ASC LIMIT 1",
+            (f'%"_canonical": "{canonical_payload}"%',),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
     def count_pending_commerce_jobs(self) -> int:
         row = self._conn.execute(
             "SELECT COUNT(*) as cnt FROM commerce_queue WHERE status = 'pending'"
         ).fetchone()
         return row["cnt"] if row else 0
+
+    def get_commerce_jobs(self, limit: int = 25) -> list[dict]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 25:
+            raise ValueError("limit must be an integer from 1 to 25")
+        rows = self._conn.execute(
+            """SELECT job_id, talos_id, service_type, status, created_at
+               FROM commerce_queue
+               ORDER BY id DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]

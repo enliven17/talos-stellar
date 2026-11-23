@@ -535,10 +535,7 @@ def status(talos_id: str | None, db_path: str | None, as_json: bool):
     """
     from pathlib import Path as _Path
 
-    from talos_agent.adapters.health import (
-        AdapterState,
-        _sanitize_health_detail,
-    )
+    from talos_agent.adapters.health import _sanitize_health_detail
     from talos_agent.circuit_breaker import CircuitState, cb_registry
     from talos_agent.db import LocalDB, get_db_path
     from talos_agent.job_effects import (
@@ -707,6 +704,41 @@ def status(talos_id: str | None, db_path: str | None, as_json: bool):
         db.close()
 
     sys.exit(1 if is_degraded else 0)
+
+
+# ─── Database doctor ────────────────────────────────────────────────
+
+
+@main.command()
+@click.option("--db-dir", default=None, type=click.Path(file_okay=False, path_type=Path), help="Directory containing talos-agent.db and agent-*.db.")
+@click.option("--json", "as_json", is_flag=True, help="Emit per-agent results as JSON.")
+def doctor(db_dir: Path | None, as_json: bool):
+    """Run read-only integrity and schema checks for every local agent DB."""
+    from talos_agent.db.integrity import check_agent_databases
+
+    directory = db_dir or APP_DIR
+    reports = check_agent_databases(directory)
+    overall = "healthy" if reports and all(report.status == "healthy" for report in reports) else "degraded"
+    payload = {
+        "directory": str(directory),
+        "overall": overall,
+        "agents": [report.to_dict() for report in reports],
+    }
+    if as_json:
+        console.print_json(json.dumps(payload))
+    else:
+        console.print(f"[bold]Agent Database Doctor:[/bold] {overall.upper()}")
+        if not reports:
+            console.print("  No agent databases found.")
+        for report in reports:
+            colour = "green" if report.status == "healthy" else "red"
+            console.print(f"  [{colour}]{report.agent_id}[/{colour}] {report.status} — {report.path}")
+            if report.error:
+                console.print(f"    {report.error}")
+            if report.missing_tables or report.missing_columns or report.foreign_key_errors:
+                console.print(f"    missing_tables={list(report.missing_tables)} missing_columns={list(report.missing_columns)} foreign_key_errors={report.foreign_key_errors}")
+    if overall != "healthy":
+        raise click.exceptions.Exit(1)
 
 
 # ─── Backup / Restore / Verify ──────────────────────────────────────

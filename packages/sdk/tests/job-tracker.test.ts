@@ -25,6 +25,7 @@ import {
   JobCancelledError,
   JobTrackAbortedError,
   JobTrackTimeoutError,
+  TalosCursorValidationError,
   InMemorySeenStore,
   type TrackJobEvent,
   type CommerceJob,
@@ -86,6 +87,53 @@ function makeJob(status: "pending" | "completed" | "failed" | "cancelled", progr
   };
 }
 
+describe("JobTracker backpressure", () => {
+  it("rejects a queue size below the supported positive-integer boundary", () => {
+    const client = new TalosClient({ baseUrl: "http://localhost" });
+    expect(
+      () => new JobTracker(client, "job-queue", { queueMaxSize: 0 }),
+    ).toThrow("queueMaxSize must be a positive integer");
+  });
+
+  it("pauses consumption and bounds drop-newest overflow", () => {
+    const client = new TalosClient({ baseUrl: "http://localhost" });
+    const tracker = new JobTracker(client, "job-queue", {
+      queueMaxSize: 2,
+      queueOverflow: "drop-newest",
+    });
+
+    tracker.pause();
+    expect(tracker.isPaused).toBe(true);
+
+    const event = (type: "snapshot" | "progress"): TrackJobEvent => ({
+      type,
+      jobId: "job-queue",
+      status: "pending",
+      progress: null,
+      percent: null,
+      stage: type,
+      message: null,
+      result: null,
+      source: "stream",
+      receivedAt: new Date(),
+      raw: {},
+    });
+
+    const queue = tracker as unknown as {
+      enqueue(entry: { kind: "value"; value: TrackJobEvent }): void;
+    };
+    queue.enqueue({ kind: "value", value: event("snapshot") });
+    queue.enqueue({ kind: "value", value: event("progress") });
+    queue.enqueue({ kind: "value", value: event("progress") });
+
+    expect(tracker.queuedEventCount).toBe(2);
+    expect(tracker.droppedEventCount).toBe(1);
+
+    tracker.resume();
+    expect(tracker.isPaused).toBe(false);
+  });
+});
+
 describe("TalosClient.trackJob (#1017)", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -94,6 +142,23 @@ describe("TalosClient.trackJob (#1017)", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it("rejects a cursor from another API origin before polling or streaming", () => {
+    const client = new TalosClient({
+      baseUrl: "https://api.example.com",
+      fetch: vi.fn(),
+    });
+    const cursor = JSON.stringify({
+      version: 1,
+      origin: "https://other.example.com",
+      stream: "/api/jobs/job-1017/progress",
+      eventId: "event-1",
+    });
+
+    expect(() =>
+      client.trackJob("job-1017", { cursor, preferSse: false }),
+    ).toThrowError(TalosCursorValidationError);
   });
 
   // ── 1. Happy path SSE Streaming ─────────────────────────────────────────────
@@ -843,6 +908,130 @@ describe("TalosClient.trackJob (#1017)", () => {
 
     it("throws TypeError if called with jobId string but no client option", () => {
       expect(() => trackJob("job-1017" as any)).toThrow(TypeError);
+    });
+  });
+
+  // ── 9. Progress revisions across reconnects (#1412) ─────────────────────────
+
+  describe("Progress revisions across a reconnect (#1412)", () => {
+    it("ignores replayed and out-of-order revisions, keeping the highest accepted revision", async () => {
+      // First connection: revisions 1 and 3.
+      const firstConnection = sseStream(
+        'event: snapshot\ndata: {"id":"job-1017","status":"pending","progress":{"percent":10,"stage":"start","updatedAt":"2026-01-01T00:00:01Z","revision":1}}\n\n',
+        'event: progress\ndata: {"id":"job-1017","status":"pending","progress":{"percent":30,"stage":"working","updatedAt":"2026-01-01T00:00:03Z","revision":3}}\n\n',
+      );
+      // Reconnect: the server replays revisions 2 and 3 before delivering 4 and 5.
+      const secondConnection = sseStream(
+        'event: snapshot\ndata: {"id":"job-1017","status":"pending","progress":{"percent":20,"stage":"replayed","updatedAt":"2026-01-01T00:00:02Z","revision":2}}\n\n',
+        'id: replay-3\nevent: progress\ndata: {"id":"job-1017","status":"pending","progress":{"percent":30,"stage":"working","updatedAt":"2026-01-01T00:00:03Z","revision":3}}\n\n',
+        'event: progress\ndata: {"id":"job-1017","status":"pending","progress":{"percent":40,"stage":"step4","updatedAt":"2026-01-01T00:00:04Z","revision":4}}\n\n',
+        'event: progress\ndata: {"id":"job-1017","status":"pending","progress":{"percent":50,"stage":"step5","updatedAt":"2026-01-01T00:00:05Z","revision":5}}\n\n',
+        'event: done\ndata: {"id":"job-1017","status":"completed","result":{"ok":true}}\n\n',
+      );
+
+      let progressCalls = 0;
+      const mockFetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/progress")) {
+          progressCalls += 1;
+          return Promise.resolve(
+            sseResponse(progressCalls === 1 ? firstConnection : secondConnection),
+          );
+        }
+        // Polling fallback engages while the stream reconnects; it only ever
+        // returns an already-accepted revision.
+        return Promise.resolve(
+          jsonResponse(
+            makeJob("pending", {
+              percent: 10,
+              stage: "start",
+              updatedAt: "2026-01-01T00:00:01Z",
+              revision: 1,
+            }),
+          ),
+        );
+      });
+
+      const client = new TalosClient({
+        baseUrl: "https://api.example.com",
+        fetch: mockFetch,
+      });
+
+      const events: TrackJobEvent[] = [];
+      const tracker = client.trackJob("job-1017", {
+        intervalMs: 100,
+        maxIntervalMs: 200,
+        maxStreamReconnectAttempts: 2,
+      });
+
+      const iteratePromise = (async () => {
+        for await (const evt of tracker) {
+          events.push(evt);
+        }
+      })();
+
+      await vi.runAllTimersAsync();
+      await iteratePromise;
+
+      expect(progressCalls).toBeGreaterThanOrEqual(2);
+      // Revisions 2 and 3 are replayed and must not repeat a user callback.
+      expect(events.map((e) => e.percent)).toEqual([10, 30, 40, 50, 100]);
+      expect(events.map((e) => e.revision)).toEqual([1, 3, 4, 5, 5]);
+      expect(tracker.highestAcceptedRevision).toBe(5);
+      expect(events[events.length - 1].type).toBe("result");
+    });
+
+    it("treats an explicit revision as authoritative over a changed updatedAt", async () => {
+      const sseBody = sseStream(
+        'event: snapshot\ndata: {"id":"job-1017","status":"pending","progress":{"percent":70,"stage":"working","updatedAt":"2026-01-01T00:00:01Z","revision":7}}\n\n',
+      );
+
+      let pollCall = 0;
+      const mockFetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/progress")) {
+          return Promise.resolve(sseResponse(sseBody));
+        }
+        pollCall += 1;
+        if (pollCall === 1) {
+          // Same revision, different updatedAt: must not produce a second callback.
+          return Promise.resolve(
+            jsonResponse(
+              makeJob("pending", {
+                percent: 70,
+                stage: "working",
+                updatedAt: "2026-01-01T00:00:09Z",
+                revision: 7,
+              }),
+            ),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(makeJob("completed", undefined, { done: true })),
+        );
+      });
+
+      const client = new TalosClient({
+        baseUrl: "https://api.example.com",
+        fetch: mockFetch,
+      });
+
+      const events: TrackJobEvent[] = [];
+      const tracker = client.trackJob("job-1017", {
+        intervalMs: 100,
+        maxIntervalMs: 200,
+      });
+
+      const iteratePromise = (async () => {
+        for await (const evt of tracker) {
+          events.push(evt);
+        }
+      })();
+
+      await vi.runAllTimersAsync();
+      await iteratePromise;
+
+      expect(events.map((e) => e.type)).toEqual(["snapshot", "result"]);
+      expect(events[1].type).toBe("result");
+      expect(tracker.highestAcceptedRevision).toBe(7);
     });
   });
 });

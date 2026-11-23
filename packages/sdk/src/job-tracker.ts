@@ -8,8 +8,11 @@
  * 2. If SSE disconnects or encounters transport errors (e.g. network drops, timeouts),
  *    automatically falls back to backoff polling via `getJobResult`.
  * 3. Bidirectionally deduplicates progress updates across SSE and polling using {@link SeenStore}.
- * 4. Yields ordered, deduplicated progress events and ends with the final result.
- * 5. Cleans up all streams and active timers on abort, completion, or error.
+ * 4. Keeps only the highest accepted progress revision: replayed updates from a
+ *    reconnect, or updates that arrive out of order, are dropped so emitted
+ *    revisions are strictly increasing and user callbacks never repeat an update.
+ * 5. Yields ordered, deduplicated progress events and ends with the final result.
+ * 6. Cleans up all streams and active timers on abort, completion, or error.
  *
  * @module job-tracker
  */
@@ -17,6 +20,8 @@
 import type { TalosClient } from "./client.js";
 import {
   TalosEventStream,
+  TalosCursorValidationError,
+  validateTalosEventCursor,
   type TalosStreamEvent,
   type SeenStore,
   InMemorySeenStore,
@@ -45,6 +50,11 @@ export interface JobProgressDetails {
   updatedAt?: string;
   /** Agent or worker ID that reported the progress. */
   reportedBy?: string;
+  /**
+   * Monotonic revision supplied by the server, when available. The tracker
+   * prefers this over `updatedAt` when deciding whether an update is stale.
+   */
+  revision?: number;
 }
 
 /**
@@ -70,6 +80,11 @@ export interface TrackJobEvent {
   stage: string | null;
   /** Convenience access for `progress?.message ?? null`. */
   message: string | null;
+  /**
+   * Monotonic progress revision for this update, or `null` when the payload
+   * carries no revision information. Emitted revisions never decrease.
+   */
+  revision: number | null;
   /** Result payload if completed. */
   result?: unknown;
   /** Delivery source: "stream" (SSE) or "poll" (HTTP polling fallback). */
@@ -260,8 +275,26 @@ export interface TrackJobOptions {
   /** Base URL override (used when trackJob is called standalone without a client). */
   baseUrl?: string;
 
+  /**
+   * Serialized cursor returned by {@link JobTracker.serializeCursor}. It must
+   * have been issued for this API origin and this job's progress stream.
+   */
+  cursor?: string;
+
   /** Auth header override (e.g. `"Bearer <token>"`). */
   authHeader?: string;
+
+  /**
+   * Maximum number of queued iterator events retained while consumption is
+   * paused or not keeping up. Default: 1000.
+   */
+  queueMaxSize?: number;
+
+  /**
+   * Behavior when queueMaxSize is reached. Default: "drop-oldest".
+   * "drop-newest" rejects the incoming event; "error" aborts tracking.
+   */
+  queueOverflow?: "drop-oldest" | "drop-newest" | "error";
 }
 
 /** Observable lifecycle states emitted by a {@link JobTracker}. */
@@ -289,6 +322,42 @@ type QueueEntry<T, R> =
   | { kind: "value"; value: T }
   | { kind: "return"; value: R }
   | { kind: "error"; error: unknown };
+
+/** A resolved progress revision and where it came from. */
+interface ProgressRevision {
+  value: number;
+  source: "explicit" | "updatedAt";
+}
+
+/**
+ * Resolve the monotonic revision for a progress update.
+ *
+ * An explicit numeric `revision` (on the progress object or the payload root)
+ * wins; otherwise the server-issued `progress.updatedAt` timestamp doubles as
+ * the revision so replayed snapshots after a reconnect are recognised without
+ * requiring a server change. Returns `null` when the update carries neither.
+ *
+ * `source` is tracked so the two scales are never compared against each other.
+ */
+function resolveProgressRevision(
+  payload: unknown,
+  progress: unknown,
+): ProgressRevision | null {
+  const p = progress as { revision?: unknown; updatedAt?: unknown } | null;
+  const root = payload as { revision?: unknown } | null;
+
+  const explicit = p?.revision ?? root?.revision;
+  if (typeof explicit === "number" && Number.isFinite(explicit)) {
+    return { value: explicit, source: "explicit" };
+  }
+
+  if (typeof p?.updatedAt === "string") {
+    const parsed = Date.parse(p.updatedAt);
+    if (!Number.isNaN(parsed)) return { value: parsed, source: "updatedAt" };
+  }
+
+  return null;
+}
 
 /**
  * Deterministic fingerprint for a progress update to ensure de-duplication
@@ -350,6 +419,11 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
 
   // Iterator queue
   private readonly queue: QueueEntry<TrackJobEvent, CommerceJob>[] = [];
+  private readonly queueMaxSize: number;
+  private readonly queueOverflow: "drop-oldest" | "drop-newest" | "error";
+  private readonly pauseResolvers: Array<() => void> = [];
+  private paused = false;
+  private droppedEventCount = 0;
   private readonly waitingResolvers: Array<
     (entry: QueueEntry<TrackJobEvent, CommerceJob>) => void
   > = [];
@@ -368,6 +442,8 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
   private staleTimer?: ReturnType<typeof setTimeout>;
   private lastSeenResult?: unknown;
   private lastSeenJob?: unknown;
+  /** Highest progress revision accepted so far; lower/equal revisions are stale. */
+  private highestRevision: ProgressRevision | null = null;
 
   constructor(client: TalosClient, jobId: string, options: TrackJobOptions = {}) {
     if (
@@ -385,10 +461,22 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
     // Resolve connection config from client or options
     const clientAny = client as any;
     this.baseUrl = (options.baseUrl ?? clientAny.getBaseUrl?.() ?? clientAny.baseUrl ?? "https://talos-stellar.vercel.app").replace(/\/$/, "");
+    if (options.cursor !== undefined) {
+      validateTalosEventCursor(
+        options.cursor,
+        this.baseUrl,
+        options.path ?? `/api/jobs/${encodeURIComponent(this.jobId)}/progress`,
+      );
+    }
     this.authHeader = options.authHeader ?? clientAny.getAuthHeader?.() ?? clientAny.headers?.["Authorization"];
     this.fetchFn = options.fetch ?? clientAny.getFetch?.() ?? clientAny.fetchOverride ?? globalThis.fetch;
 
     this.seenStore = options.seenStore ?? new InMemorySeenStore();
+    this.queueMaxSize = options.queueMaxSize ?? 1_000;
+    this.queueOverflow = options.queueOverflow ?? "drop-oldest";
+    if (!Number.isInteger(this.queueMaxSize) || this.queueMaxSize < 1) {
+      throw new RangeError("queueMaxSize must be a positive integer");
+    }
 
     // Setup result promise
     this.result = new Promise<CommerceJob>((resolve, reject) => {
@@ -434,9 +522,62 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
     return this.isFallbackEngaged;
   }
 
-  /** Current observable tracking state. */
-  get state(): JobTrackerState {
-    return this.trackerState;
+  /**
+   * Highest progress revision accepted so far, or `null` if no update carried
+   * revision information. Useful for observability and assertions.
+   */
+  get highestAcceptedRevision(): number | null {
+    return this.highestRevision?.value ?? null;
+  }
+
+  /**
+   * Decide whether a non-terminal progress update should be delivered.
+   *
+   * Drops (a) revisions at or below the highest accepted revision, which covers
+   * updates replayed after a reconnect and updates delivered out of order, and
+   * (b) updates already present in the {@link SeenStore}.
+   */
+  private async acceptProgressUpdate(
+    payload: unknown,
+    progress: unknown,
+    dedupKey: string,
+  ): Promise<{ accepted: boolean; revision: ProgressRevision | null }> {
+    const revision = resolveProgressRevision(payload, progress);
+
+    if (
+      revision !== null &&
+      this.highestRevision !== null &&
+      revision.source === this.highestRevision.source &&
+      revision.value <= this.highestRevision.value
+    ) {
+      this.logger?.info("track_job:stale_revision_ignored", {
+        jobId: this.jobId,
+        revision: revision.value,
+        revisionSource: revision.source,
+        highestAcceptedRevision: this.highestRevision.value,
+      });
+      return { accepted: false, revision };
+    }
+
+    const revisionKey =
+      revision !== null
+        ? `${this.jobId}:rev:${revision.source}:${revision.value}`
+        : null;
+
+    if (revisionKey && (await this.seenStore.has(revisionKey))) {
+      return { accepted: false, revision };
+    }
+    if (await this.seenStore.has(dedupKey)) {
+      return { accepted: false, revision };
+    }
+
+    await this.seenStore.add(dedupKey);
+    if (revisionKey) {
+      await this.seenStore.add(revisionKey);
+      this.highestRevision = revision;
+    }
+
+    return { accepted: true, revision };
   }
 
   // ── AsyncIterator Protocol ──────────────────────────────────────────────────
@@ -475,11 +616,57 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
     this.handleAbort(err);
   }
 
+  /** Pause consumption without allowing the iterator queue to grow unbounded. */
+  pause(): void {
+    this.paused = true;
+  }
+
+  /** Resume consumption of queued events. */
+  resume(): void {
+    this.paused = false;
+    for (const resolve of this.pauseResolvers.splice(0)) resolve();
+  }
+
+  get isPaused(): boolean {
+    return this.paused;
+  }
+
+  get queuedEventCount(): number {
+    return this.queue.filter((entry) => entry.kind === "value").length;
+  }
+
+  get droppedEventCount(): number {
+    return this.droppedEventCount;
+  }
+
   // ── Queue Management ────────────────────────────────────────────────────────
 
   private enqueue(entry: QueueEntry<TrackJobEvent, CommerceJob>): void {
     if (this.isClosed && entry.kind !== "error") {
       return;
+    }
+    if (entry.kind === "value") {
+      if (this.queue.filter((queued) => queued.kind === "value").length >= this.queueMaxSize) {
+        if (this.queueOverflow === "drop-newest") {
+          this.droppedEventCount += 1;
+          return;
+        }
+        if (this.queueOverflow === "error") {
+          this.droppedEventCount += 1;
+          this.handleAbort(
+            new JobTrackAbortedError(
+              this.jobId,
+              `event queue exceeded ${this.queueMaxSize} entries`,
+            ),
+          );
+          return;
+        }
+        const oldest = this.queue.findIndex((queued) => queued.kind === "value");
+        if (oldest >= 0) {
+          this.queue.splice(oldest, 1);
+          this.droppedEventCount += 1;
+        }
+      }
     }
     const resolver = this.waitingResolvers.shift();
     if (resolver) {
@@ -490,6 +677,13 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
   }
 
   private dequeue(): Promise<QueueEntry<TrackJobEvent, CommerceJob>> {
+    if (this.paused) {
+      return new Promise((resolve) => {
+        this.pauseResolvers.push(() => {
+          void this.dequeue().then(resolve);
+        });
+      });
+    }
     const entry = this.queue.shift();
     if (entry) {
       return Promise.resolve(entry);
@@ -523,25 +717,12 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
         logger: this.logger,
         maxReconnectAttempts: this.options.maxStreamReconnectAttempts ?? 5,
         seenStore: this.seenStore,
+        cursor: this.options.cursor,
       });
 
-      this.stream.on("event", (evt) => {
-        void this.handleStreamEvent(evt).catch((error: unknown) => {
-          this.handleTrackingError(error);
-        });
-      });
-
-      this.stream.on("state", (state) => {
-        if (this.isTerminal || this.isClosed) return;
-        if (state === "open") {
-          this.setState("streaming");
-        } else if (
-          (state === "connecting" || state === "reconnecting") &&
-          !this.isPolling
-        ) {
-          this.setState("connecting");
-        }
-      });
+      // Return the promise so the stream dispatches events sequentially; the
+      // revision gate relies on updates being processed in arrival order.
+      this.stream.on("event", (evt) => this.handleStreamEvent(evt));
 
       this.stream.on("error", (err, attempt) => {
         this.logger?.warn("track_job:stream_error", {
@@ -564,6 +745,7 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
 
       this.stream.connect();
     } catch (err) {
+      if (err instanceof TalosCursorValidationError) throw err;
       this.logger?.warn("track_job:stream_connect_failed", {
         jobId: this.jobId,
         error: err instanceof Error ? err.message : String(err),
@@ -611,6 +793,25 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
     }
     this.lastSeenJob = payload;
 
+    if (status === "completed") {
+      await this.completeJob({
+        status: "completed",
+        result: result ?? payload?.result,
+        job: payload,
+        source: "stream",
+        percent: percent ?? 100,
+        stage: stage ?? "completed",
+        message,
+        revision: resolveProgressRevision(payload, progressDetails),
+      });
+      return;
+    }
+
+    if (status === "failed" || status === "cancelled") {
+      await this.failJob(status, payload);
+      return;
+    }
+
     const dedupKey = computeEventFingerprint(this.jobId, {
       id: evt.id,
       status,
@@ -621,31 +822,12 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
       hasResult: result !== undefined && result !== null,
     });
 
-    if (await this.seenStore.has(dedupKey)) {
-      return;
-    }
-    await this.seenStore.add(dedupKey);
-    if (evt.id) {
-      await this.seenStore.add(`${this.jobId}:id:${evt.id}`);
-    }
-
-    if (status === "completed") {
-      await this.completeJob({
-        status: "completed",
-        result: result ?? payload?.result,
-        job: payload,
-        source: "stream",
-        percent: percent ?? 100,
-        stage: stage ?? "completed",
-        message,
-      });
-      return;
-    }
-
-    if (status === "failed" || status === "cancelled") {
-      await this.failJob(status, payload);
-      return;
-    }
+    const { accepted, revision } = await this.acceptProgressUpdate(
+      payload,
+      progressDetails,
+      dedupKey,
+    );
+    if (!accepted) return;
 
     const event: TrackJobEvent = {
       type: evt.type === "snapshot" ? "snapshot" : "progress",
@@ -657,10 +839,12 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
         message,
         updatedAt: progressDetails.updatedAt,
         reportedBy: progressDetails.reportedBy,
+        revision: progressDetails.revision,
       } : null,
       percent,
       stage,
       message,
+      revision: revision?.value ?? null,
       source: "stream",
       receivedAt: evt.receivedAt ?? new Date(),
       raw: payload,
@@ -755,6 +939,7 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
         percent: percent ?? 100,
         stage: stage ?? "completed",
         message,
+        revision: resolveProgressRevision(job, progressDetails),
       });
       return;
     }
@@ -764,10 +949,12 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
       return;
     }
 
-    if (await this.seenStore.has(dedupKey)) {
-      return;
-    }
-    await this.seenStore.add(dedupKey);
+    const { accepted, revision } = await this.acceptProgressUpdate(
+      job,
+      progressDetails,
+      dedupKey,
+    );
+    if (!accepted) return;
 
     const event: TrackJobEvent = {
       type: "poll",
@@ -779,10 +966,12 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
         message,
         updatedAt: progressDetails.updatedAt,
         reportedBy: progressDetails.reportedBy,
+        revision: progressDetails.revision,
       } : null,
       percent,
       stage,
       message,
+      revision: revision?.value ?? null,
       source: "poll",
       receivedAt: new Date(),
       raw: job,
@@ -802,10 +991,20 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
     percent?: number | null;
     stage?: string | null;
     message?: string | null;
+    revision?: ProgressRevision | null;
   }): Promise<void> {
     if (this.isTerminal) return;
     this.isTerminal = true;
     this.cleanup();
+
+    if (
+      details.revision != null &&
+      (this.highestRevision === null ||
+        details.revision.source !== this.highestRevision.source ||
+        details.revision.value > this.highestRevision.value)
+    ) {
+      this.highestRevision = details.revision;
+    }
 
     let finalJob: CommerceJob;
     if (details.job && details.job.id && details.result !== undefined) {
@@ -857,7 +1056,8 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
       percent: details.percent ?? 100,
       stage: details.stage ?? "completed",
       message: details.message ?? null,
-      result: finalJob.result !== undefined ? finalJob.result : details.result,
+      revision: this.highestRevision?.value ?? null,
+      result: finalJob.result ?? details.result,
       source: details.source,
       receivedAt: new Date(),
       raw: finalJob,
@@ -903,6 +1103,7 @@ export class JobTracker implements AsyncIterableIterator<TrackJobEvent, Commerce
         percent: null,
         stage: status,
         message: null,
+        revision: this.highestRevision?.value ?? null,
         result: commerceJob.result,
         source: "stream",
         receivedAt: new Date(),

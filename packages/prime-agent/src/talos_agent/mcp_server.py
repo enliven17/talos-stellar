@@ -65,6 +65,7 @@ DEFAULT_ALLOWLIST: frozenset[str] = frozenset(
         "check_x_mentions",
         "check_post_performance",
         "poll_service_result",
+        "reconcile_purchases",
         # Planning (read-only, no side effects)
         "plan_purchase",
         "normalize_providers",
