@@ -15,6 +15,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from talos_agent.policy.patterns import PolicyPatternError, compile_glob
+
 
 # ── Enums ─────────────────────────────────────────────────────────────────────
 
@@ -109,6 +111,15 @@ class MatchCondition:
     operator: str = "eq"
     value: Any = None
 
+    def __post_init__(self) -> None:
+        if self.operator == "glob":
+            try:
+                compile_glob(self.value)
+            except PolicyPatternError as exc:
+                raise PolicyPatternError(
+                    f"Invalid glob pattern for condition field {self.field!r}: {exc}"
+                ) from exc
+
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> MatchCondition:
         return cls(
@@ -153,6 +164,54 @@ class PolicyRule:
 
 
 @dataclass(frozen=True)
+class PolicyException:
+    """A narrowly scoped, time-bounded exception for one policy rule.
+
+    Exceptions are deliberately attached to a policy and rule identifier so
+    they cannot accidentally broaden permissions for other rules.  Both
+    ``actor`` and ``reason`` are required for auditability, and expiry must be
+    an explicit timezone-aware instant.
+    """
+
+    rule_id: str
+    actor: str
+    reason: str
+    expires_at: datetime
+
+    def __post_init__(self) -> None:
+        if not self.rule_id.strip():
+            raise ValueError("policy exception rule_id is required")
+        if not self.actor.strip():
+            raise ValueError("policy exception actor is required")
+        if not self.reason.strip():
+            raise ValueError("policy exception reason is required")
+        if self.expires_at.tzinfo is None or self.expires_at.utcoffset() is None:
+            raise ValueError("policy exception expires_at must be timezone-aware")
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> PolicyException:
+        raw_expiry = d.get("expires_at")
+        if not isinstance(raw_expiry, str) or not raw_expiry.strip():
+            raise ValueError("policy exception expires_at is required")
+        try:
+            expires_at = datetime.fromisoformat(raw_expiry.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("policy exception expires_at must be ISO-8601") from exc
+        return cls(
+            rule_id=str(d.get("rule_id", "")),
+            actor=str(d.get("actor", "")),
+            reason=str(d.get("reason", "")),
+            expires_at=expires_at,
+        )
+
+    def is_active(self, now: datetime) -> bool:
+        """Return whether the exception is active at *now* (expiry is exclusive)."""
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("policy exception comparisons require timezone-aware now")
+        return now < self.expires_at
+
+
+@dataclass(frozen=True)
 class Policy:
     """A named collection of policy rules with metadata.
 
@@ -168,6 +227,7 @@ class Policy:
     version: str = "1.0.0"
     description: str = ""
     rules: tuple[PolicyRule, ...] = ()
+    exceptions: tuple[PolicyException, ...] = ()
     priority: int = 0
     enabled: bool = True
 
@@ -178,6 +238,9 @@ class Policy:
             version=d.get("version", "1.0.0"),
             description=d.get("description", ""),
             rules=tuple(PolicyRule.from_dict(r) for r in d.get("rules", [])),
+            exceptions=tuple(
+                PolicyException.from_dict(e) for e in d.get("exceptions", [])
+            ),
             priority=int(d.get("priority", 0)),
             enabled=bool(d.get("enabled", True)),
         )

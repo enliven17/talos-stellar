@@ -2,6 +2,7 @@
 
 from talos_agent.adapters.base import BaseSocialAdapter, ChannelCapabilities, PublishResult
 from talos_agent.adapters.capability import (
+    AdapterHTTPClient,
     AdapterCapabilityManifest,
     AdapterResourceLimits,
     AdapterSandbox,
@@ -52,6 +53,7 @@ __all__ = [
     "PublishResult",
     "AdapterCapabilityConflictError",
     "AdapterRegistry",
+    "AdapterHTTPClient",
     "AdapterCapabilityManifest",
     "AdapterResourceLimits",
     "AdapterSandbox",
@@ -95,4 +97,3 @@ __all__ = [
     "StorageVerificationError",
     "StorageProviderError",
 ]
-

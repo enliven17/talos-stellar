@@ -83,6 +83,19 @@ You can inspect command-line options and subcommands with:
 talos-agent --help
 ```
 
+Preview the upcoming nominal scheduler executions without starting the agent:
+
+```bash
+talos-agent scheduler-preview --count 20
+talos-agent scheduler-preview --count 20 --json
+```
+
+The preview uses the configured recurring intervals and a UTC clock. It does
+not initialize the browser, API client, database, or payment/publishing
+integrations. Persisted retry deadlines, retry backoff, and runtime conditions
+are not included, so the output is a cadence preview rather than a guarantee
+that a task will execute.
+
 ## Configuration Reference
 
 The agent is configured via environment variables and/or `~/.talos-agent/config.json`. Every setting defined in `src/talos_agent/config.py` and `.env.example` is listed below:
@@ -149,6 +162,9 @@ The agent is configured via environment variables and/or `~/.talos-agent/config.
 | `agent_cycle_interval` | `AGENT_CYCLE_INTERVAL` | `30` | No | Seconds between agent cycles |
 | `polling_interval` | `POLLING_INTERVAL` | `10` | No | Seconds between API polls |
 | `heartbeat_interval` | `HEARTBEAT_INTERVAL` | `60` | No | Seconds between heartbeats |
+| `scheduler_missed_run_policy` | `SCHEDULER_MISSED_RUN_POLICY` | `coalesce` | No | Dividend interval misfires: `skip` drops all work when multiple intervals are due (one due interval still runs), `coalesce` runs once for any backlog, or `catch_up` runs once per due interval up to the configured cap. |
+| `scheduler_max_catch_up_runs` | `SCHEDULER_MAX_CATCH_UP_RUNS` | `3` | No | Maximum dividend catch-up executions per scheduler pass (1–10). |
+| `scheduler_max_concurrent_tasks` | `SCHEDULER_MAX_CONCURRENT_TASKS` | `4` | No | Maximum active non-critical scheduler work units per agent (1–16). Heartbeats and the independently paced Telegram queue are excluded; periodic waits do not occupy slots. |
 | `max_iterations` | `MAX_ITERATIONS` | `20` | No | Max tool-call iterations per cycle |
 | `approval_threshold` | `APPROVAL_THRESHOLD` | `10` | No | USD threshold for auto-approval |
 | `browser_headless` | `BROWSER_HEADLESS` | `false` | No | Run browser in headless mode |
@@ -185,6 +201,8 @@ Additional architectural, configuration, and operational guides:
 - **Package Documentation (`packages/prime-agent/docs/`)**:
   - [A2A Composition](./docs/a2a_composition.md) — Agent-to-Agent communication protocols and timeouts.
   - [Adapter Diagnostics](./docs/adapter-diagnostics.md) — Adapter health checks, status reporting, and troubleshooting.
+  - `talos-agent doctor` — read-only integrity and schema checks for every local agent database.
+  - [Adapter HTTP Testing](./docs/adapter-http-testing.md) — Fake transport contract for isolated communication-adapter tests.
   - [Adapter Health Snapshots](./docs/adapter-health-snapshots.md) — Runtime health snapshot captures and telemetry.
   - [Adapter Registration](./docs/adapter-registration.md) — Idempotent registration and conflicting-capability handling.
   - [Discord Reconnect Policy](./docs/discord-reconnect-policy.md) — Connection lifecycle and reconnect backoff behavior for Discord.
@@ -516,3 +534,32 @@ See the
 [Stellar retry failure runbook](../../docs/prime-agent-stellar-retry-failures.md)
 for the input → class mapping, privacy guarantees, compatibility notes, and
 how to consume the classification.
+
+## Scheduler cancellation vs. failed attempts
+
+Scheduled tasks (`polling`, `heartbeat`, `job_heartbeat`, `activity_flush` and `job_effect_dispatch`) distinguish intentional shutdown from a failed attempt:
+
+- If `shutdown_event` is set while an attempt is running, an exception from that attempt is logged as interrupted by shutdown. It does not call `DurableBackoff.failure()`, so it never consumes retry budget or advances `attempt_count`.
+- `asyncio.CancelledError` is always re-raised and never recorded as a failure.
+- A genuine failure while the agent is running still consumes retry budget as before, including the `max_attempts` terminal stop.
+
+Agent cycle summaries record the terminal state in `outcome`: `completed`, `shutdown`, `cancelled`, `max_iterations`, `provider_failure` or `error`. A cancelled cycle is reported with `outcome=cancelled`, `error_type=CancelledError` and `error_category=cancelled`, and is no longer reported as `completed`.
+## Scheduler execution identities
+
+Financial scheduler cycles reserve a durable execution identity in the local
+SQLite state before checking balances or sending work to the Web API. The
+identity is reused as the API idempotency key for the resulting write. A
+cycle that is interrupted before its outcome is recorded is marked
+`uncertain` after restart and is not automatically retried; reconcile the
+external operation and resolve the execution before clearing that state.
+Explicit API failures are
+recorded as `retryable` and may run again on a later scheduler cycle.
+## Purchased commerce result retention
+
+When a purchased commerce job reaches `completed`, the local database records
+its payload retention deadline as 30 days after completion and performs one
+cleanup pass. Each pass removes at most 100 expired payloads; later completed
+jobs continue draining any backlog. Cleanup retains the job, status, retention
+deadline, and spending records while clearing only the private result payload.
+Repeated completion polls do not extend the original deadline. Existing
+completed rows receive deadlines during the database migration.
