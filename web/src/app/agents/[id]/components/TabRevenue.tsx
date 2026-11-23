@@ -3,6 +3,7 @@
 import type { TalosDetail, DistPreview, BuybackPreview } from "./types";
 import { AgentEmptyState } from "@/components/agent-view-states";
 import { FinancialSnapshotBadge, FinancialMetricValue } from "@/components/financial-state";
+import { summarizeMonthlyRevenue } from "@/lib/revenue-observations";
 
 interface TabRevenueProps {
   talos: TalosDetail;
@@ -41,6 +42,39 @@ export function TabRevenue({
 }: TabRevenueProps) {
   const REVENUE_HISTORY = talos.revenueHistory ?? [];
   const maxRevenue = Math.max(...REVENUE_HISTORY.map((r) => r.amount), 1);
+  const monthlyRevenue = summarizeMonthlyRevenue(REVENUE_HISTORY);
+
+  // Missing observations render as "—"; a present zero renders as "$0".
+  const summaryMetrics = [
+    {
+      label: "Total Revenue",
+      testId: "revenue-total",
+      value: talos.revenue?.trim() ? talos.revenue : null,
+    },
+    {
+      label: "This Month",
+      testId: "revenue-this-month",
+      value:
+        monthlyRevenue.thisMonth != null
+          ? `$${monthlyRevenue.thisMonth.toLocaleString()}`
+          : null,
+    },
+    {
+      label: "Avg Monthly",
+      testId: "revenue-average-monthly",
+      value:
+        monthlyRevenue.averageMonthly != null
+          ? `$${monthlyRevenue.averageMonthly.toLocaleString()}`
+          : null,
+    },
+    {
+      label: "From Jobs",
+      testId: "revenue-from-jobs",
+      value: Number.isFinite(talos.jobStats?.totalRevenue)
+        ? `$${talos.jobStats.totalRevenue.toLocaleString()}`
+        : null,
+    },
+  ];
 
   return (
     <div className="space-y-6">
@@ -51,32 +85,19 @@ export function TabRevenue({
           <FinancialSnapshotBadge observedAt={talos.observedAt} />
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          {[
-            { label: "Total Revenue", value: talos.revenue },
-            {
-              label: "This Month",
-              value: `$${(REVENUE_HISTORY[REVENUE_HISTORY.length - 1]?.amount ?? 0).toLocaleString()}`,
-            },
-            {
-              label: "Avg Monthly",
-              value: `$${Math.round(
-                REVENUE_HISTORY.length > 0
-                  ? REVENUE_HISTORY.reduce((s, r) => s + r.amount, 0) /
-                      REVENUE_HISTORY.length
-                  : 0,
-              ).toLocaleString()}`,
-            },
-            {
-              label: "From Jobs",
-              value: `$${talos.jobStats.totalRevenue.toLocaleString()}`,
-            },
-          ].map((s) => (
+          {summaryMetrics.map((metric) => (
             <div
-              key={s.label}
+              key={metric.label}
               className="bg-surface border border-border p-4 text-center"
             >
-              <div className="text-xl font-bold text-accent">{s.value}</div>
-              <div className="text-xs text-muted">{s.label}</div>
+              <div className="text-xl font-bold text-accent">
+                <FinancialMetricValue
+                  value={metric.value}
+                  state={metric.value != null ? "live" : "unavailable"}
+                  testId={metric.testId}
+                />
+              </div>
+              <div className="text-xs text-muted">{metric.label}</div>
             </div>
           ))}
         </div>
