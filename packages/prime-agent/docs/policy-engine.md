@@ -76,6 +76,14 @@ Policies are JSON files or Python dataclasses. Example:
           "severity": "blocker",
           "reason": "Transfers over 1000 XLM blocked on weekends."
         }
+      ],
+      "exceptions": [
+        {
+          "rule_id": "no-large-weekend-transfers",
+          "actor": "operator@example.test",
+          "reason": "Approved testnet settlement window",
+          "expires_at": "2030-01-01T00:00:00Z"
+        }
       ]
     }
   ]
@@ -83,6 +91,20 @@ Policies are JSON files or Python dataclasses. Example:
 ```
 
 Save to `~/.talos-agent/policies.json`.  The engine hot-reloads on file change.
+
+### Time-bounded exceptions
+
+An exception is scoped to the containing policy and an exact `rule_id`. It
+must include a non-empty `actor`, a non-empty `reason`, and an explicit
+timezone-aware `expires_at` ISO-8601 timestamp. While active, it suppresses
+only that matching rule. At the expiry instant the exception is inactive and
+the original rule is enforced again; it never grants unrelated permissions.
+Expiry is exclusive, so an exception at exactly `expires_at` is already
+expired. Invalid exception metadata is rejected when the policy file loads.
+
+Each `rule_id` must be non-empty and unique across the complete loaded policy
+set. Duplicate or empty identifiers are rejected before policies are installed;
+rule IDs remain the stable link between decision traces and policy overrides.
 
 ### Supported operators
 
@@ -93,6 +115,16 @@ Save to `~/.talos-agent/policies.json`.  The engine hot-reloads on file change.
 | `in`, `not_in` | Set membership |
 | `exists` | Field is present and non-null |
 | `regex` | Field matches the pattern in `value` |
+| `glob` | Field matches `*`, `?`, and character-class wildcards in `value` |
+
+Glob patterns support `*` (zero or more characters other than `/`), `?`
+(exactly one character other than `/`), `[abc]` and `[a-z]` (character
+classes), and `[!abc]` (negated character classes). Character classes match
+their explicit members, including `/`; `[[]` matches a literal `[`. Repeated
+`*` characters have the same behavior as `*` and do not match `/`. Empty,
+unclosed, or malformed character classes are rejected while policies are
+loaded; the agent will not silently ignore the invalid policy or fall back to
+built-in defaults.
 
 ### Field paths
 

@@ -636,6 +636,25 @@ _undeclared_
 
 ---
 
+## `reconcile_purchases`
+
+Compare recent local purchases with API Stellar payment finality. Read-only: does not submit or retry payments.
+
+**Parameters**
+
+| Parameter | Type | Required | Default |
+|-----------|------|----------|---------|
+| `limit` | `integer` |  | 25 |
+
+**Permissions**
+
+**Capabilities:** `data.read_local`, `data.read_remote`, `network.http`
+**Allowed hosts:** `*.talos.xyz`, `*.vercel.app`, `localhost`, `127.0.0.1`
+
+**Timeout:** `30.0s`
+
+---
+
 ## `post_to_x`
 
 Post a tweet on X (Twitter). Content MUST be under 280 characters, plain text only.

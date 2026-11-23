@@ -2,8 +2,12 @@
 
 export {
   TalosClient,
+  DEFAULT_BASE_URL,
+  resolveBaseUrl,
   resolveRetryPolicy,
   resolveRetryOptions,
+  ETAG_CACHE_VERSION,
+  BoundedETagStore,
 } from "./client.js";
 export type {
   TalosClientOptions,
@@ -18,7 +22,33 @@ export type {
   TalosResponseEvent,
   ReadOptions,
   WriteOptions,
+  ETagCacheEntry,
+  ETagStore,
+  ETagCacheOptions,
+  DedupeInFlightGetsOptions,
 } from "./client.js";
+
+// ── HTTP Transcript (support cases & deterministic replay) ─────────
+
+export {
+  TranscriptRecorder,
+  TranscriptReplayer,
+  createTranscriptRecorder,
+  createTranscriptReplayer,
+  sanitizeTranscriptPath,
+  sanitizeTranscriptHeaders,
+  sanitizeTranscriptResponseBody,
+  parseTranscript,
+} from "./transcript.js";
+export type {
+  HttpTranscript,
+  TranscriptEntry,
+  TranscriptRequest,
+  TranscriptResponse,
+  TranscriptTiming,
+  TranscriptRecorderOptions,
+  TranscriptReplayOptions,
+} from "./transcript.js";
 
 // ── Pagination ─────────────────────────────────────────────────────
 
@@ -87,6 +117,21 @@ export {
 } from "./errors.js";
 export type { RateLimitInfo, HeaderSource } from "./errors.js";
 
+// ── Stable error-code taxonomy (versioned) ────────────────────────────────────
+export {
+  ERROR_TAXONOMY_VERSION,
+  classifyError,
+  codeToCategory,
+  toErrorContract,
+  buildCauseChain,
+} from "./error-taxonomy.js";
+export type {
+  TalosErrorCategory,
+  ErrorClassification,
+  ErrorContract,
+  RedactedCauseFrame,
+} from "./error-taxonomy.js";
+
 // ── Domain types ──────────────────────────────────────────────────
 
 export * from "./types.js";
@@ -127,6 +172,8 @@ export {
   SCHEMA_VERSION_REQUEST_HEADER,
   SCHEMA_VERSION_RESPONSE_HEADER,
   SchemaVersionMismatchError,
+  TalosCursorValidationError,
+  validateTalosEventCursor,
   negotiateSchemaVersion,
   SSE_MAX_FIELD_BYTES,
   SSE_MAX_DATA_LINES,
@@ -140,6 +187,7 @@ export type {
   TalosStreamState,
   TalosStreamStateHandler,
   TalosEventStreamOptions,
+  TalosCursorValidationReason,
   SeenStore,
   SchemaVersionNegotiationResult,
 } from "./events.js";

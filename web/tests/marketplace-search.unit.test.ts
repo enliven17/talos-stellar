@@ -237,4 +237,40 @@ describe("Marketplace Search API & Service", () => {
       expect(response.results[0].title).toBe("Stellar Arbitrage Bot");
     });
   });
+
+  describe("Price range validation (exact USDC units)", () => {
+    it("rejects contradictory minPrice > maxPrice with 400 and field-level errors before querying DB", async () => {
+      const request = req({ q: "Arbitrage", minPrice: "25.0000001", maxPrice: "25.0000000" });
+      const response = await GET(request);
+
+      expect(response.status).toBe(400);
+      const data = await response.json();
+      expect(data.field).toBe("minPrice");
+      expect(data.fieldErrors).toBeDefined();
+      expect(data.fieldErrors.minPrice).toContain("25.0000001");
+      expect(data.fieldErrors.maxPrice).toContain("25.0000000");
+      expect(mocks.mockDb.select).not.toHaveBeenCalled();
+    });
+
+    it("rejects price with more than 7 decimal places before querying DB", async () => {
+      const request = req({ minPrice: "1.00000001" });
+      const response = await GET(request);
+
+      expect(response.status).toBe(400);
+      const data = await response.json();
+      expect(data.field).toBe("minPrice");
+      expect(data.fieldErrors?.minPrice).toMatch(/7 decimal places/i);
+      expect(mocks.mockDb.select).not.toHaveBeenCalled();
+    });
+
+    it("allows valid exact USDC price range and queries services", async () => {
+      mockDbResponses([[mockItem], [{ count: 1 }], [mockCapability]]);
+
+      const request = req({ q: "Arbitrage", minPrice: "10.5000000", maxPrice: "100.0000000" });
+      const response = await GET(request);
+
+      expect(response.status).toBe(200);
+      expect(mocks.mockDb.select).toHaveBeenCalled();
+    });
+  });
 });

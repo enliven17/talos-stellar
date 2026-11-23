@@ -6,6 +6,7 @@ Covers: schema, engine evaluation, loader, middleware, and simulator.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -16,10 +17,12 @@ from talos_agent.policy.middleware import (
     PolicyMiddleware,
     PolicyViolationError,
 )
+from talos_agent.policy.patterns import PolicyPatternError
 from talos_agent.policy.schema import (
     ActionSpec,
     MatchCondition,
     Policy,
+    PolicyException,
     PolicyDecision,
     PolicyResult,
     PolicyRule,
@@ -85,6 +88,28 @@ class TestMatchCondition:
         spec = ActionSpec("test", {"email": "not-an-email"})
         cond = MatchCondition("email", "regex", r".+@.+")
         assert _evaluate_condition(cond, spec) is False
+
+    @pytest.mark.parametrize("pattern", ["[", "[]", "[!]", "[z-a]"])
+    def test_invalid_glob_patterns_are_rejected(self, pattern):
+        with pytest.raises(PolicyPatternError, match="Invalid glob pattern"):
+            MatchCondition("action", "glob", pattern)
+
+    @pytest.mark.parametrize(
+        ("pattern", "value", "expected"),
+        [
+            ("purchase_*", "purchase_service", True),
+            ("purchase_?", "purchase_a", True),
+            ("purchase_[ab]", "purchase_b", True),
+            ("purchase_[!a]", "purchase_b", True),
+            ("purchase_*", "purchase/service", False),
+            ("[/]", "/", True),
+            ("[[]", "[", True),
+        ],
+    )
+    def test_glob_wildcard_semantics(self, pattern, value, expected):
+        spec = ActionSpec("test", {"action_name": value})
+        cond = MatchCondition("action_name", "glob", pattern)
+        assert _evaluate_condition(cond, spec) is expected
 
     def test_context_field_resolution(self):
         spec = ActionSpec(
@@ -265,6 +290,22 @@ class TestPolicyEngine:
         assert engine._policies[0].name == "a-policy"
         assert engine._policies[1].name == "z-policy"
 
+    def test_load_rejects_duplicate_rule_ids_before_installing(self, engine):
+        original = Policy(name="original", rules=(PolicyRule("stable-id", "first"),))
+        duplicate = Policy(name="override", rules=(PolicyRule("stable-id", "second"),))
+        engine.load([original])
+
+        with pytest.raises(ValueError, match="Duplicate rule identifier 'stable-id'"):
+            engine.load([original, duplicate])
+
+        assert tuple(p.name for p in engine.policies) == ("original",)
+
+    def test_load_rejects_empty_rule_id(self, engine):
+        policy = Policy(name="invalid", rules=(PolicyRule("", "missing"),))
+
+        with pytest.raises(ValueError, match="empty rule identifier"):
+            engine.load([policy])
+
     def test_blocker_triggers_deny(self, engine, sample_policies):
         engine.enabled = True
         engine.load(sample_policies)
@@ -381,6 +422,97 @@ class TestPolicyEngine:
         assert r1.decision == r2.decision
         assert r1.result_digest == r2.result_digest
 
+    def test_active_exception_requires_auditable_metadata_and_suppresses_only_target(self):
+        engine = PolicyEngine()
+        engine.enabled = True
+        engine.load([
+            Policy(
+                name="transfer-guard",
+                rules=(
+                    PolicyRule(
+                        rule_id="large-transfer",
+                        description="Block large transfers",
+                        conditions=(MatchCondition("action", "eq", "transfer_xlm"),),
+                        severity=Severity.BLOCKER,
+                        reason="Large transfer requires review",
+                    ),
+                    PolicyRule(
+                        rule_id="always-deny",
+                        description="Unrelated safety rule",
+                        conditions=(MatchCondition("action", "eq", "transfer_xlm"),),
+                        severity=Severity.BLOCKER,
+                        reason="Unrelated rule remains enforced",
+                    ),
+                ),
+                exceptions=(PolicyException(
+                    rule_id="large-transfer",
+                    actor="ops@example.test",
+                    reason="Approved testnet settlement window",
+                    expires_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
+                ),),
+            )
+        ])
+
+        result = engine.evaluate(
+            ActionSpec("transfer_xlm"),
+            now=datetime(2029, 12, 31, tzinfo=timezone.utc),
+        )
+
+        assert result.decision == PolicyDecision.DENY
+        assert [rule.rule_id for rule in result.violated_rules] == ["always-deny"]
+        assert any(step.effect == "exception_applied" for step in result.trace.steps)
+
+    def test_expired_exception_enforces_original_rule_at_boundary(self):
+        exception = PolicyException(
+            rule_id="large-transfer",
+            actor="ops@example.test",
+            reason="Temporary testnet allowance",
+            expires_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
+        )
+        engine = PolicyEngine()
+        engine.enabled = True
+        engine.load([Policy(
+            name="transfer-guard",
+            rules=(PolicyRule(
+                rule_id="large-transfer",
+                description="Block large transfers",
+                conditions=(MatchCondition("action", "eq", "transfer_xlm"),),
+                severity=Severity.BLOCKER,
+                reason="Large transfer requires review",
+            ),),
+            exceptions=(exception,),
+        )])
+
+        result = engine.evaluate(
+            ActionSpec("transfer_xlm"),
+            now=exception.expires_at,
+        )
+
+        assert result.decision == PolicyDecision.DENY
+        assert result.violated_rules[0].rule_id == "large-transfer"
+        assert any("exception expired" in line for line in result.evidence)
+
+    @pytest.mark.parametrize("field", ["actor", "reason"])
+    def test_exception_requires_actor_and_reason(self, field):
+        values = {
+            "rule_id": "rule",
+            "actor": "operator",
+            "reason": "approved window",
+            "expires_at": datetime(2030, 1, 1, tzinfo=timezone.utc),
+        }
+        values[field] = " "
+        with pytest.raises(ValueError, match=f"policy exception {field} is required"):
+            PolicyException(**values)
+
+    def test_exception_requires_timezone_aware_expiry(self):
+        with pytest.raises(ValueError, match="timezone-aware"):
+            PolicyException(
+                rule_id="rule",
+                actor="operator",
+                reason="approved window",
+                expires_at=datetime(2030, 1, 1),
+            )
+
 
 # ── PolicyLoader tests ────────────────────────────────────────────────────────
 
@@ -452,6 +584,25 @@ class TestPolicyLoader:
         assert len(result) == 1
         assert result[0].name == "test-policy"
         assert len(result[0].rules) == 1
+
+    def test_load_from_file_rejects_invalid_glob(self, tmp_path: Path):
+        path = tmp_path / "invalid-glob.json"
+        path.write_text(json.dumps({
+            "policies": [{
+                "name": "invalid-policy",
+                "rules": [{
+                    "rule_id": "invalid-glob",
+                    "conditions": [{
+                        "field": "action",
+                        "operator": "glob",
+                        "value": "purchase_[",
+                    }],
+                }],
+            }]
+        }))
+
+        with pytest.raises(PolicyPatternError, match="Invalid glob pattern"):
+            _load_from_file(path)
 
 
 # ── PolicyMiddleware tests ────────────────────────────────────────────────────

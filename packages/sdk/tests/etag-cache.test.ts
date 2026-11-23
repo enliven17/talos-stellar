@@ -3,7 +3,8 @@
  * Issue: #982 feat(sdk): support conditional GETs with ETags for agent detail reads
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { TalosClient, type ETagStore, type ETagCacheEntry } from "../src/index.js";
+import { TalosClient, type ETagStore, type ETagCacheEntry, ETAG_CACHE_VERSION } from "../src/index.js";
+import { BoundedETagStore } from "../src/client.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -25,6 +26,12 @@ function notModified304(): Response {
     headers: new Headers(),
     text: async () => "",
   } as unknown as Response;
+}
+
+/** Build the expected cache key for a given baseUrl and path. */
+function cacheKey(baseUrl: string, path: string, auth = ""): string {
+  const origin = new URL(baseUrl).origin;
+  return `${origin}\n${baseUrl.replace(/\/$/, "")}${path}\n${auth}`;
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -69,10 +76,11 @@ describe("ETag conditional-GET cache", () => {
     await client.getTalos("1");
 
     const store = client.getETagStore()!;
-    const entry = store.get(`http://localhost:3000/api/talos/1\n`);
+    const entry = store.get(cacheKey("http://localhost:3000", "/api/talos/1"));
     expect(entry).toBeDefined();
     expect(entry?.etag).toBe('"abc"');
     expect(entry?.body).toEqual({ id: "1", name: "Talos" });
+    expect(entry?.version).toBe(ETAG_CACHE_VERSION);
   });
 
   it("sends If-None-Match on subsequent GET after cache is populated", async () => {
@@ -181,9 +189,10 @@ describe("ETag conditional-GET cache", () => {
 
     // Cache is now updated to v2's etag
     const store = client.getETagStore()!;
-    const entry = store.get(`http://localhost:3000/api/talos/1\n`);
+    const entry = store.get(cacheKey("http://localhost:3000", "/api/talos/1"));
     expect(entry?.etag).toBe('"etag-v2"');
     expect(entry?.body).toEqual(v2);
+    expect(entry?.version).toBe(ETAG_CACHE_VERSION);
   });
 
   // ── 200 with no ETag — no caching ──────────────────────────
@@ -204,7 +213,7 @@ describe("ETag conditional-GET cache", () => {
     await client.getTalos("1");
 
     const store = client.getETagStore()!;
-    const entry = store.get(`http://localhost:3000/api/talos/1\n`);
+    const entry = store.get(cacheKey("http://localhost:3000", "/api/talos/1"));
     expect(entry).toBeUndefined();
   });
 
@@ -231,7 +240,7 @@ describe("ETag conditional-GET cache", () => {
 
     // Nothing cached for POST
     const store = client.getETagStore()!;
-    expect(store.get(`http://localhost:3000/api/talos\n`)).toBeUndefined();
+    expect(store.get(cacheKey("http://localhost:3000", "/api/talos"))).toBeUndefined();
   });
 
   // ── Different API keys have isolated caches ──────────────────
@@ -274,10 +283,10 @@ describe("ETag conditional-GET cache", () => {
 
     const store = client.getETagStore()!;
     // "a" should be evicted
-    expect(store.get(`http://localhost:3000/api/talos/a\n`)).toBeUndefined();
+    expect(store.get(cacheKey("http://localhost:3000", "/api/talos/a"))).toBeUndefined();
     // "b" and "c" should remain
-    expect(store.get(`http://localhost:3000/api/talos/b\n`)).toBeDefined();
-    expect(store.get(`http://localhost:3000/api/talos/c\n`)).toBeDefined();
+    expect(store.get(cacheKey("http://localhost:3000", "/api/talos/b"))).toBeDefined();
+    expect(store.get(cacheKey("http://localhost:3000", "/api/talos/c"))).toBeDefined();
   });
 
   // ── Pluggable store ─────────────────────────────────────────
@@ -345,12 +354,12 @@ describe("ETag conditional-GET cache", () => {
     await client.getTalos("1");
 
     const store = client.getETagStore()!;
-    expect(store.get(`http://localhost:3000/api/talos/1\n`)).toBeDefined();
+    expect(store.get(cacheKey("http://localhost:3000", "/api/talos/1"))).toBeDefined();
 
     await expect(client.getTalos("1")).rejects.toMatchObject({ status: 404 });
 
     // Entry should be evicted after the 404
-    expect(store.get(`http://localhost:3000/api/talos/1\n`)).toBeUndefined();
+    expect(store.get(cacheKey("http://localhost:3000", "/api/talos/1"))).toBeUndefined();
   });
 
   // ── Constructor validation ────────────────────────────────────
@@ -383,5 +392,126 @@ describe("ETag conditional-GET cache", () => {
           etagCache: { store: { get: "bad" } as unknown as ETagStore },
         }),
     ).toThrow(TypeError);
+  });
+
+  // ── Versioned serialization ────────────────────────────────────
+
+  it("cache entries include the current schema version", async () => {
+    const client = new TalosClient({
+      baseUrl: "http://localhost:3000",
+      etagCache: true,
+    });
+
+    vi.mocked(fetch).mockResolvedValue(ok200({ id: "1" }, '"v1"'));
+
+    await client.getTalos("1");
+
+    const store = client.getETagStore()!;
+    const entry = store.get(cacheKey("http://localhost:3000", "/api/talos/1"));
+    expect(entry?.version).toBe(ETAG_CACHE_VERSION);
+  });
+
+  it("BoundedETagStore serialize/deserialize round-trips entries", () => {
+    const store = new BoundedETagStore(10);
+    const key = cacheKey("http://localhost:3000", "/api/talos/1");
+    const entry: ETagCacheEntry = { etag: '"test"', body: { id: "1" }, version: ETAG_CACHE_VERSION };
+
+    store.set(key, entry);
+
+    const serialized = store.serialize();
+    expect(serialized).toContain('"version":1');
+    expect(serialized).toContain('"etag":"\\"test\\""');
+
+    // Create a new store and deserialize
+    const store2 = new BoundedETagStore(10);
+    store2.deserialize(serialized);
+
+    const restored = store2.get(key);
+    expect(restored).toBeDefined();
+    expect(restored?.etag).toBe('"test"');
+    expect(restored?.body).toEqual({ id: "1" });
+    expect(restored?.version).toBe(ETAG_CACHE_VERSION);
+  });
+
+  it("deserialize ignores entries with unknown version", () => {
+    const store = new BoundedETagStore(10);
+    // Manually create serialized data with a future version
+    const futureData = JSON.stringify({
+      version: ETAG_CACHE_VERSION + 1,
+      entries: [[cacheKey("http://localhost:3000", "/api/talos/1"), { etag: '"future"', body: { id: "1" }, version: ETAG_CACHE_VERSION + 1 }]],
+    });
+
+    store.deserialize(futureData);
+
+    const entry = store.get(cacheKey("http://localhost:3000", "/api/talos/1"));
+    expect(entry).toBeUndefined();
+  });
+
+  it("deserialize handles malformed JSON gracefully", () => {
+    const store = new BoundedETagStore(10);
+    store.deserialize("not valid json");
+    store.deserialize('{"version":1,"entries":"not an array"}');
+    store.deserialize('{"version":1,"entries":[[1,2,3]]}');
+    // Should not throw, store remains empty
+    expect(store.size).toBe(0);
+  });
+
+  it("get() returns undefined for entries with unsupported version", () => {
+    const store = new BoundedETagStore(10);
+    const key = cacheKey("http://localhost:3000", "/api/talos/1");
+    // Manually insert an entry with a future version (bypassing set())
+    (store as { map: Map<string, ETagCacheEntry> }).map.set(key, { etag: '"future"', body: { id: "1" }, version: ETAG_CACHE_VERSION + 1 });
+
+    const entry = store.get(key);
+    expect(entry).toBeUndefined();
+  });
+
+  // ── Cross-origin cache isolation ──────────────────────────────
+
+  it("different base URLs do not share cached entries", async () => {
+    const c1 = new TalosClient({ baseUrl: "http://api.example.com", etagCache: true });
+    const c2 = new TalosClient({ baseUrl: "http://api.other.com", etagCache: true });
+
+    const body = { id: "1" };
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(ok200(body, '"etag-a"'))
+      .mockResolvedValueOnce(ok200(body, '"etag-b"'));
+
+    await c1.getTalos("1");
+    await c2.getTalos("1");
+
+    // Neither client sent If-None-Match on its first call (different origins = isolated caches).
+    const c1Headers = vi.mocked(fetch).mock.calls[0][1]?.headers as Record<string, string>;
+    const c2Headers = vi.mocked(fetch).mock.calls[1][1]?.headers as Record<string, string>;
+    expect(c1Headers["If-None-Match"]).toBeUndefined();
+    expect(c2Headers["If-None-Match"]).toBeUndefined();
+
+    // Verify cache keys are different
+    const store1 = c1.getETagStore()!;
+    const store2 = c2.getETagStore()!;
+    expect(store1.get(cacheKey("http://api.example.com", "/api/talos/1"))).toBeDefined();
+    expect(store2.get(cacheKey("http://api.other.com", "/api/talos/1"))).toBeDefined();
+    // Cross-origin keys should not exist in the other store
+    expect(store1.get(cacheKey("http://api.other.com", "/api/talos/1"))).toBeUndefined();
+    expect(store2.get(cacheKey("http://api.example.com", "/api/talos/1"))).toBeUndefined();
+  });
+
+  it("same origin with different API keys have isolated caches", async () => {
+    const c1 = new TalosClient({ baseUrl: "http://localhost:3000", apiKey: "key-a", etagCache: true });
+    const c2 = new TalosClient({ baseUrl: "http://localhost:3000", apiKey: "key-b", etagCache: true });
+
+    const body = { id: "1" };
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(ok200(body, '"etag-a"'))
+      .mockResolvedValueOnce(ok200(body, '"etag-b"'));
+
+    await c1.getTalos("1");
+    await c2.getTalos("1");
+
+    const store1 = c1.getETagStore()!;
+    const store2 = c2.getETagStore()!;
+    // Each has its own cache key (includes auth header)
+    expect(store1.get(cacheKey("http://localhost:3000", "/api/talos/1", "Bearer key-a"))).toBeDefined();
+    expect(store2.get(cacheKey("http://localhost:3000", "/api/talos/1", "Bearer key-b"))).toBeDefined();
   });
 });

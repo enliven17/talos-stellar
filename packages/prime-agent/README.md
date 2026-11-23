@@ -201,6 +201,7 @@ Additional architectural, configuration, and operational guides:
 - **Package Documentation (`packages/prime-agent/docs/`)**:
   - [A2A Composition](./docs/a2a_composition.md) — Agent-to-Agent communication protocols and timeouts.
   - [Adapter Diagnostics](./docs/adapter-diagnostics.md) — Adapter health checks, status reporting, and troubleshooting.
+  - `talos-agent doctor` — read-only integrity and schema checks for every local agent database.
   - [Adapter HTTP Testing](./docs/adapter-http-testing.md) — Fake transport contract for isolated communication-adapter tests.
   - [Adapter Health Snapshots](./docs/adapter-health-snapshots.md) — Runtime health snapshot captures and telemetry.
   - [Discord Reconnect Policy](./docs/discord-reconnect-policy.md) — Connection lifecycle and reconnect backoff behavior for Discord.
@@ -533,6 +534,16 @@ See the
 for the input → class mapping, privacy guarantees, compatibility notes, and
 how to consume the classification.
 
+## Scheduler execution identities
+
+Financial scheduler cycles reserve a durable execution identity in the local
+SQLite state before checking balances or sending work to the Web API. The
+identity is reused as the API idempotency key for the resulting write. A
+cycle that is interrupted before its outcome is recorded is marked
+`uncertain` after restart and is not automatically retried; reconcile the
+external operation and resolve the execution before clearing that state.
+Explicit API failures are
+recorded as `retryable` and may run again on a later scheduler cycle.
 ## Purchased commerce result retention
 
 When a purchased commerce job reaches `completed`, the local database records

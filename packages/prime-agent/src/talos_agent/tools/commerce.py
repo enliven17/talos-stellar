@@ -35,6 +35,7 @@ from talos_agent.tools.permissions import (
     ToolPermissions,
 )
 from talos_agent.tools.registry import tool
+from talos_agent.response_bounds import bounded_error_body
 
 if TYPE_CHECKING:
     from talos_agent.api_client import TalosAPIClient
@@ -147,7 +148,7 @@ async def purchase_service(
     response = await _deps().api.get_service(talos_id, service_type=service_type or None)
 
     if response.status_code != 402:
-        return {"error": f"Expected 402, got {response.status_code}", "body": response.text[:200]}
+        return {"error": f"Expected 402, got {response.status_code}", "body": bounded_error_body(response.content, 200)}
 
     # Parse 402 response
     payment_details = response.json()
@@ -191,6 +192,9 @@ async def purchase_service(
 
     try:
         amount_units = price_to_usdc_units(price_str)
+    # Convert price to USDC smallest units before reserving or signing.
+    try:
+        amount_units = price_to_usdc_units(str(price))
     except ValueError:
         return {
             "error": f"Commerce quote price is malformed: {price}",
@@ -259,18 +263,20 @@ async def purchase_service(
 
     # Check if purchase would exceed GTM budget
     if spent_month + float(price) > gtm_budget:
+    reserved, gtm_budget_units, aggregate_units = await _reserve_budget_units(amount_units)
+    if not reserved:
         return {
             "error": f"Purchase of ${price} would exceed GTM budget",
-            "budget": gtm_budget,
-            "spent": spent_month,
-            "remaining": gtm_budget - spent_month,
+            "budget": gtm_budget_units / USDC_UNIT_SCALE,
+            "spent": aggregate_units / USDC_UNIT_SCALE,
+            "remaining": max(0, gtm_budget_units - aggregate_units) / USDC_UNIT_SCALE,
             "price": price,
             "suggestion": "Request approval to exceed budget or wait for next period",
         }
 
-    # Check approval threshold
     threshold = float(_deps().settings.approval_threshold)
     if float(price) > threshold:
+        await _release_budget_units(amount_units)
         result = await _deps().api.create_approval(
             _deps().settings.talos_id,
             type_="transaction",
@@ -296,22 +302,40 @@ async def purchase_service(
         asset_code="USDC",
         asset_issuer=USDC_TESTNET_ISSUER,
     )
+    try:
+        await signer.initialize()
+        sign_result = await signer.sign_payment(
+            payee=payee,
+            amount=amount_units,
+            asset_code="USDC",
+            asset_issuer=USDC_TESTNET_ISSUER,
+        )
+    except Exception as e:
+        await _release_budget_units(amount_units)
+        return {"error": "Signing failed", "details": str(e)}
 
     if "error" in sign_result:
+        await _release_budget_units(amount_units)
         return sign_result
 
     # Step 3: POST with X-PAYMENT header
-    submit_result = await _deps().api.submit_commerce(
-        talos_id,
-        payment_header=sign_result["payment_header"],
-        payload=payload_dict,
-    )
+    try:
+        submit_result = await _deps().api.submit_commerce(
+            talos_id,
+            payment_header=sign_result["payment_header"],
+            payload=payload_dict,
+        )
+    except Exception:
+        await _release_budget_units(amount_units)
+        raise
 
     if not submit_result:
+        await _release_budget_units(amount_units)
         return {"error": "Commerce submission failed"}
 
     # Server returns error JSON if payment verification failed
     if "error" in submit_result:
+        await _release_budget_units(amount_units)
         return {"error": submit_result["error"], "details": submit_result.get("details", "")}
 
     job_id = submit_result.get("jobId") or submit_result.get("id", "")
@@ -324,12 +348,8 @@ async def purchase_service(
     tracked_payload["_quote_acceptance_receipt"] = receipt
     _deps().db.add_commerce_job(job_id, talos_id, service_type, tracked_payload)
 
-    # Record spending against GTM budget
-    _deps().db.record_spending(
-        amount=float(price),
-        category="x402_purchase",
-        description=f"Service from Talos {talos_id}: {service_type}",
-    )
+    # Commit budget reservation (release reserved units, persist actual spending)
+    await _commit_budget_units(amount_units, price, talos_id, service_type)
 
     # Instant fulfillment: result is already in the response
     if submit_result.get("status") == "completed" and submit_result.get("result"):
@@ -724,6 +744,104 @@ async def poll_service_result(job_id: str) -> dict:
         return {"status": "completed", "result": job_result}
 
     return {"status": status, "job_id": job_id}
+
+
+@tool(
+    "reconcile_purchases",
+    "Compare recent local purchases with API Stellar payment finality. "
+    "Read-only: does not submit or retry payments.",
+    permissions=ToolPermissions(
+        data=(DataScope.READ_LOCAL, DataScope.READ_REMOTE),
+        network=(NetworkScope.HTTP,),
+        hosts=("*.talos.xyz", "*.vercel.app", "localhost", "127.0.0.1"),
+    ),
+)
+async def reconcile_purchases(limit: int = 25) -> dict:
+    """Classify local purchases against their remote payment finality status."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 25:
+        return {"error": "limit must be an integer from 1 to 25"}
+
+    purchases = _deps().db.get_commerce_jobs(limit)
+    reconciled: list[dict] = []
+    for purchase in purchases:
+        job_id = purchase.get("job_id")
+        local_status = purchase["status"]
+        record = {
+            "job_id": job_id,
+            "talos_id": purchase["talos_id"],
+            "service_type": purchase["service_type"],
+            "local_status": local_status,
+            "payment_status": None,
+        }
+
+        if not job_id:
+            record.update(
+                classification="incomplete",
+                detail="Local purchase record has no job ID",
+            )
+        elif not purchase.get("talos_id"):
+            record.update(
+                classification="incomplete",
+                detail="Local purchase record has no Talos ID",
+            )
+        else:
+            try:
+                remote = await _deps().api.get_commerce_payment_status(
+                    purchase["talos_id"], job_id
+                )
+            except Exception:
+                remote = {"error": "Payment status query failed"}
+            payment_status = remote.get("finalityStatus")
+            record["payment_status"] = payment_status
+
+            if remote.get("error"):
+                if remote.get("http_status") == 404:
+                    classification = "contradictory"
+                    detail = "The API has no matching purchase"
+                else:
+                    classification = "unavailable"
+                    detail = "The API payment status could not be read"
+            elif payment_status is None and remote.get("registered") is False:
+                classification = "incomplete"
+                detail = "The API has no registered finality record"
+            elif local_status == "completed" and payment_status == "CONFIRMED":
+                classification = "consistent"
+                detail = "Local completion matches confirmed payment"
+            elif local_status == "failed" and payment_status in {"FAILED", "EXPIRED"}:
+                classification = "consistent"
+                detail = "Local failure matches terminal payment status"
+            elif local_status == "completed" or (
+                local_status == "failed" and payment_status == "CONFIRMED"
+            ):
+                classification = "contradictory"
+                detail = "Local purchase status conflicts with payment finality"
+            elif payment_status in {
+                "PENDING",
+                "CONFIRMING",
+                "CONFIRMED",
+                "FAILED",
+                "EXPIRED",
+            }:
+                classification = "incomplete"
+                detail = "Local purchase has not reached a matching terminal status"
+            else:
+                classification = "contradictory"
+                detail = "The API returned an unknown payment status"
+
+            record.update(classification=classification, detail=detail)
+
+        reconciled.append(record)
+
+    counts = {
+        classification: sum(
+            record["classification"] == classification for record in reconciled
+        )
+        for classification in ("consistent", "incomplete", "contradictory", "unavailable")
+    }
+    return {
+        "purchases": reconciled,
+        "summary": {"total": len(reconciled), **counts},
+    }
 
 
 @tool(
@@ -1212,3 +1330,50 @@ async def evaluate_marketplace_bid(
             "remaining": budget_remaining,
         },
     }
+
+_budget_reserved_units = 0
+_budget_reservation_lock: asyncio.Lock | None = None
+
+
+def _get_budget_reservation_lock() -> asyncio.Lock:
+    deps = _deps()
+    if deps.budget_reservation_lock is None:
+        deps.budget_reservation_lock = asyncio.Lock()
+    return deps.budget_reservation_lock
+
+
+async def _reserve_budget_units(amount_units: int) -> tuple[bool, int, int]:
+    async with _get_budget_reservation_lock():
+        deps = _deps()
+        talos_config = deps.db.get_talos_config()
+        try:
+            gtm_budget_units = price_to_usdc_units(str((talos_config or {}).get("gtmBudget", 200)))
+        except ValueError:
+            gtm_budget_units = price_to_usdc_units("200")
+        spent_units = price_to_usdc_units(str(deps.db.get_spending_period(30)))
+        aggregate_units = spent_units + deps.budget_reserved_units
+        if aggregate_units + amount_units > gtm_budget_units:
+            return False, gtm_budget_units, aggregate_units
+        deps.budget_reserved_units += amount_units
+        return True, gtm_budget_units, aggregate_units
+
+
+async def _release_budget_units(amount_units: int) -> None:
+    async with _get_budget_reservation_lock():
+        deps = _deps()
+        deps.budget_reserved_units = max(0, deps.budget_reserved_units - amount_units)
+
+
+async def _commit_budget_units(amount_units: int, price: float, talos_id: str, service_type: str) -> None:
+    async with _get_budget_reservation_lock():
+        deps = _deps()
+        try:
+            deps.db.record_spending(
+                amount=price,
+                category="x402_purchase",
+                description=f"Service from Talos {talos_id}: {service_type}",
+            )
+        except Exception:
+            deps.budget_reserved_units = max(0, deps.budget_reserved_units - amount_units)
+            raise
+        deps.budget_reserved_units = max(0, deps.budget_reserved_units - amount_units)

@@ -23,6 +23,7 @@ import {
 } from "@/db/schema";
 import { signPayload } from "./signing";
 import { resolveSigningSecrets } from "./rotation";
+import { isSubscriptionDestinationVerified } from "./verification";
 import {
   BACKOFF_BASE_MS,
   BACKOFF_MAX_MS,
@@ -86,6 +87,9 @@ export async function emitWebhookEvent(event: WebhookEvent): Promise<void> {
       .select({
         id: tlsWebhookSubscriptions.id,
         eventTypes: tlsWebhookSubscriptions.eventTypes,
+        destinationVerificationStatus: tlsWebhookSubscriptions.destinationVerificationStatus,
+        destinationVerifiedAt: tlsWebhookSubscriptions.destinationVerifiedAt,
+        destinationVerificationExpiresAt: tlsWebhookSubscriptions.destinationVerificationExpiresAt,
       })
       .from(tlsWebhookSubscriptions)
       .where(
@@ -97,14 +101,15 @@ export async function emitWebhookEvent(event: WebhookEvent): Promise<void> {
         ),
       );
 
-    if (subscriptions.length === 0) return;
+    const eligibleSubscriptions = subscriptions.filter(isSubscriptionDestinationVerified);
+    if (eligibleSubscriptions.length === 0) return;
 
     const payloadHash = createHash("sha256")
       .update(payloadJson)
       .digest("hex");
 
     // Create delivery records
-    const deliveries = subscriptions.map((sub) => ({
+    const deliveries = eligibleSubscriptions.map((sub) => ({
       subscriptionId: sub.id,
       eventType: event.type,
       // Store hash + event type and talos ID as reference for retry reconstruction

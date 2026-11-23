@@ -10,6 +10,12 @@ export interface RunOnceOptions {
   workerId?: string;
   leaseDurationMs?: number;
   heartbeatIntervalMs?: number;
+  /**
+   * Maximum jobs any single queue may contribute to one drain batch.
+   * Default 0 (unlimited). When set, the batch is assembled by claiming at
+   * most this many jobs per queue in priority/runAt order.
+   */
+  fairBatchPerQueue?: number;
   /** Aborts in-flight handlers (e.g. from graceful shutdown). */
   signal?: AbortSignal;
   /**
@@ -47,7 +53,7 @@ export async function runOnce(opts: RunOnceOptions = {}): Promise<RunOnceSummary
 
   if (queues.length === 0) return summary;
 
-  const batch = await store.leaseBatch(queues, opts.batchSize ?? jobsConfig.batchSize, opts.workerId, opts.leaseDurationMs);
+  const batch = await store.leaseBatch(queues, opts.batchSize ?? jobsConfig.batchSize, opts.workerId, opts.leaseDurationMs, opts.fairBatchPerQueue);
   summary.leased = batch.length;
   opts.onLeased?.(batch);
 
@@ -100,7 +106,17 @@ async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnce
     });
 
     if (lostLease || cancelled) {
-      if (cancelled) summary.cancelled += 1;
+      if (cancelled) {
+        summary.cancelled += 1;
+        await store.recordAttempt({
+          jobId: job.id,
+          attemptNumber: job.attempts,
+          workerId: opts.workerId ?? job.leaseOwner,
+          leaseId,
+          durationMs: Date.now() - startedAt,
+          terminalReason: "cancelled",
+        });
+      }
       return;
     }
 
@@ -114,7 +130,18 @@ async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnce
     }
   } catch (err) {
     if (lostLease || cancelled) {
-      if (cancelled) summary.cancelled += 1;
+      if (cancelled) {
+        summary.cancelled += 1;
+        await store.recordAttempt({
+          jobId: job.id,
+          attemptNumber: job.attempts,
+          workerId: opts.workerId ?? job.leaseOwner,
+          leaseId,
+          durationMs: Date.now() - startedAt,
+          terminalReason: "cancelled",
+          error: err,
+        });
+      }
       return;
     }
 

@@ -26,6 +26,7 @@ from talos_agent.db.repos import (
     ReplayRepo,
     RetryRepo,
     SpendingRepo,
+    TaskExecutionRepo,
 )
 
 
@@ -73,6 +74,7 @@ class LocalDB:
         self._retry = RetryRepo(self._conn)
         self._replay = ReplayRepo(self._conn)
         self._cycles = CyclesRepo(self._conn)
+        self._executions = TaskExecutionRepo(self._conn)
 
     # ── Legacy migration runner (kept for tests that monkeypatch it) ──────
 
@@ -87,6 +89,20 @@ class LocalDB:
 
     def update_schedule(self, task_name: str) -> None:
         self._config.update_schedule(task_name)
+
+    # ── Scheduler execution identities ───────────────────────────────────
+
+    def reserve_task_execution(self, task_name: str, owner_id: str | None = None) -> dict | None:
+        return self._executions.reserve(task_name, owner_id)
+
+    def finish_task_execution(self, execution_id: str, status: str) -> None:
+        self._executions.finish(execution_id, status)
+
+    def resolve_task_execution(self, execution_id: str, status: str) -> None:
+        self._executions.resolve_uncertain(execution_id, status)
+
+    def get_task_execution(self, execution_id: str) -> dict | None:
+        return self._executions.get(execution_id)
 
     # ── Activity Log ──────────────────────────────────────────────────────
 
@@ -132,6 +148,9 @@ class LocalDB:
 
     def count_pending_commerce_jobs(self) -> int:
         return self._commerce.count_pending_commerce_jobs()
+
+    def get_commerce_jobs(self, limit: int = 25) -> list[dict]:
+        return self._commerce.get_commerce_jobs(limit)
 
     def prune_completed_commerce_payloads(self, retention_days: int = 30) -> int:
         return self._commerce.prune_completed_payloads(retention_days)
