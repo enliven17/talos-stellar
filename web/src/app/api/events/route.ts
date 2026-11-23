@@ -205,7 +205,7 @@ async function _GET(request: NextRequest) {
       // breaking the SSE stream for legitimate clients.
       if (talosIds.length > 0) {
         try {
-          const quotaResult = await checkAndIncrementQuota(db, talosIds[0], "sse_connections");
+          const quotaResult = await checkAndIncrementQuota(db, talosIds[0], "sse_connections", "commerce:read");
           if (!quotaResult.ok) {
             cleanup();
             // We cannot easily return an HTTP response from inside the ReadableStream

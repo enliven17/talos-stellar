@@ -11,8 +11,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-from talos_agent.policy.engine import PolicyEngine
-from talos_agent.policy.loader import PolicyLoader
+from talos_agent.policy.engine import PolicyEngine, PolicyReloadError
+from talos_agent.policy.loader import PolicyLoadError, PolicyLoader
 from talos_agent.policy.schema import ActionSpec, PolicyDecision, PolicyResult
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,7 @@ _BYPASS_ACTIONS: frozenset[str] = frozenset(
         "check_x_mentions",
         "check_post_performance",
         "poll_service_result",
+        "reconcile_purchases",
         "evaluate_marketplace_bid",
     }
 )
@@ -258,11 +259,20 @@ class PolicyMiddleware:
         """
         if self._loader is None:
             return False
-        fresh = self._loader.reload_if_stale()
-        if fresh is not None:
-            self._engine.load(fresh)
+        try:
+            fresh = self._loader.reload_if_stale()
+            if fresh is None:
+                return False
+            self._engine.reload(fresh)
+            self._loader.mark_reload_succeeded(fresh)
             return True
-        return False
+        except (OSError, PolicyLoadError, PolicyReloadError) as exc:
+            self._loader.mark_reload_failed()
+            logger.error(
+                "Policy reload failed; retaining last-known-good policy snapshot: %s",
+                exc,
+            )
+            return False
 
 
 # ── Convenience: single global middleware instance ────────────────────────────

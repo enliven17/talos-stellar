@@ -7,6 +7,7 @@ import os
 import re
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -377,6 +378,26 @@ class Settings(BaseSettings):
     agent_cycle_interval: int = Field(default=30, description="Seconds between agent cycles")
     polling_interval: int = Field(default=10, description="Seconds between API polls")
     heartbeat_interval: int = Field(default=60, description="Seconds between heartbeats")
+    scheduler_missed_run_policy: Literal["skip", "coalesce", "catch_up"] = Field(
+        default="coalesce",
+        description="How dividend scheduling handles missed intervals.",
+    )
+    scheduler_max_catch_up_runs: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Maximum dividend catch-up runs after an outage.",
+    )
+    scheduler_max_concurrent_tasks: int = Field(
+        default=4,
+        ge=1,
+        le=16,
+        validation_alias="SCHEDULER_MAX_CONCURRENT_TASKS",
+        description=(
+            "Maximum concurrent non-critical scheduler work units per agent. "
+            "Agent/job heartbeats and the independently paced Telegram queue are excluded."
+        ),
+    )
     max_iterations: int = Field(default=20, description="Max tool-call iterations per cycle")
     approval_threshold: Decimal = Field(default=Decimal(10), description="USD threshold for auto-approval")
     browser_headless: bool = Field(default=False, description="Run browser in headless mode")
@@ -469,7 +490,11 @@ class Settings(BaseSettings):
     )
 
     # Dividend distribution
-    dividend_distribution_interval: int = Field(default=3600, description="Seconds between dividend distribution checks")
+    dividend_distribution_interval: int = Field(
+        default=3600,
+        ge=1,
+        description="Seconds between dividend distribution checks (minimum 1)",
+    )
     dividend_usdc_threshold: Decimal = Field(default=Decimal(100), description="USDC threshold to trigger dividend distribution")
 
     # Deterministic replay (disabled by default for safe rollout)

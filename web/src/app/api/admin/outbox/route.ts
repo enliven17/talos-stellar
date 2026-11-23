@@ -4,7 +4,7 @@ import { verifyAdminKey } from "@/lib/admin-auth";
 import { listEvents } from "@/lib/outbox";
 import type { OutboxStatus } from "@/lib/outbox";
 
-const VALID_STATUSES: OutboxStatus[] = ["pending", "leased", "dispatched", "dead_letter"];
+const VALID_STATUSES: OutboxStatus[] = ["pending", "leased", "dispatched", "dead_letter", "quarantined"];
 
 // GET /api/admin/outbox — list/inspect outbox events. Filter by status
 // and/or eventType, cursor-paginated by createdAt descending (same

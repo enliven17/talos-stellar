@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import Link from "next/link";
 import { redactPayload } from "@/lib/redact";
-import type { JobStatus, RetryClass } from "@/lib/jobs";
+import type { JobAttemptRecord, JobStatus, RetryClass } from "@/lib/jobs";
 
 const STORAGE_KEY = "talos_admin_api_key";
 const PAGE_SIZE = 25;
@@ -38,6 +38,7 @@ export interface JobRecordView {
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
+  attemptsHistory?: JobAttemptRecord[];
 }
 
 export type ActionStatus =
@@ -97,6 +98,40 @@ export function JobsClient({ initialAdminKey = "" }: JobsClientProps) {
 
   // Drawer inspection state
   const [selectedJob, setSelectedJob] = useState<JobRecordView | null>(null);
+  const [attempts, setAttempts] = useState<JobAttemptRecord[]>([]);
+  const [loadingAttempts, setLoadingAttempts] = useState(false);
+
+  useEffect(() => {
+    if (!selectedJob) {
+      setAttempts([]);
+      return;
+    }
+
+    if (selectedJob.attemptsHistory) {
+      setAttempts(selectedJob.attemptsHistory);
+      return;
+    }
+
+    let active = true;
+    setLoadingAttempts(true);
+    fetch(`/api/admin/jobs/${selectedJob.id}/attempts`, {
+      headers: { Authorization: `Bearer ${adminKey}` },
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (active && data?.attempts) {
+          setAttempts(data.attempts);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (active) setLoadingAttempts(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [selectedJob?.id, selectedJob?.attemptsHistory, adminKey]);
 
   // Confirmation dialog state
   const [confirmAction, setConfirmAction] = useState<{
@@ -674,6 +709,59 @@ export function JobsClient({ initialAdminKey = "" }: JobsClientProps) {
                     <p className="text-muted font-mono" data-testid="jobs-drawer-last-error">
                       None
                     </p>
+                  )}
+                </div>
+
+                {/* Immutable Attempt History */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="font-semibold text-foreground text-sm">Attempt History</h3>
+                    <span className="text-[11px] text-muted">Immutable execution audit</span>
+                  </div>
+                  {loadingAttempts ? (
+                    <p className="text-xs text-muted font-mono">Loading attempts...</p>
+                  ) : attempts.length === 0 ? (
+                    <p className="text-xs text-muted font-mono" data-testid="jobs-drawer-attempts-empty">
+                      No attempts recorded yet
+                    </p>
+                  ) : (
+                    <div
+                      className="border border-border rounded divide-y divide-border overflow-hidden text-xs font-mono"
+                      data-testid="jobs-drawer-attempts-list"
+                    >
+                      {attempts.map((att) => (
+                        <div key={att.id} className="p-2.5 bg-background space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span className="font-semibold text-foreground">
+                              Attempt #{att.attemptNumber}
+                            </span>
+                            <span
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-medium border ${
+                                att.terminalReason === "completed"
+                                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
+                                  : att.terminalReason === "dead_letter"
+                                    ? "border-red-500/40 bg-red-500/10 text-red-500"
+                                    : "border-amber-500/40 bg-amber-500/10 text-amber-500"
+                              }`}
+                            >
+                              {att.terminalReason}
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-x-4 text-muted text-[11px]">
+                            {att.workerId && <span>Worker: {att.workerId}</span>}
+                            {att.durationMs !== null && att.durationMs !== undefined && (
+                              <span>Duration: {att.durationMs}ms</span>
+                            )}
+                            <span>{formatTime(att.startedAt)}</span>
+                          </div>
+                          {att.error && (
+                            <p className="text-red-400 text-[11px] break-all bg-red-500/5 p-1 rounded border border-red-500/20">
+                              {att.error}
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </div>
 

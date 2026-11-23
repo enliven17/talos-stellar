@@ -11,6 +11,24 @@ export type JobStatus = "pending" | "leased" | "completed" | "dead_letter" | "ca
  */
 export type RetryClass = "transient" | "rate_limited" | "fatal";
 
+/** Terminal reason for an execution attempt */
+export type AttemptTerminalReason = "completed" | "retry_scheduled" | "dead_letter" | "cancelled";
+
+/** Bounded attempt execution record stored in tls_job_attempts */
+export interface JobAttemptRecord {
+  id: string;
+  jobId: string;
+  attemptNumber: number;
+  workerId: string | null;
+  leaseId: string | null;
+  startedAt: Date;
+  completedAt: Date | null;
+  durationMs: number | null;
+  terminalReason: AttemptTerminalReason;
+  error: string | null;
+  createdAt: Date;
+}
+
 export interface JobRecord<TPayload = unknown> {
   id: string;
   queue: string;
@@ -46,9 +64,31 @@ export interface EnqueueOptions {
 
 /** Result returned by heartbeat() calls inside a running handler. */
 export interface HeartbeatResult {
-  /** false when the lease was lost (reaped/re-leased elsewhere) or cancellation was requested. */
+  /** false when the lease was lost (reaped/re-leased elsewhere, or lease deadline elapsed) or cancellation was requested. */
   ok: boolean;
   cancelled: boolean;
+}
+
+/** Reason codes for a rejected lease extension request. */
+export type LeaseExtensionRejectionReason =
+  | "invalid_duration"
+  | "exceeds_max_extension"
+  | "exceeds_max_horizon"
+  | "would_shorten_lease"
+  | "not_found"
+  | "invalid_job_state"
+  | "cancellation_requested"
+  | "no_active_lease"
+  | "lease_expired"
+  | "lease_mismatch";
+
+/** Result returned by extendLease() calls. */
+export interface ExtendLeaseResult {
+  /** true when the lease was extended; false when rejected or lost. */
+  ok: boolean;
+  cancelled: boolean;
+  leaseExpiresAt: Date | null;
+  reason?: LeaseExtensionRejectionReason;
 }
 
 export interface JobContext<TPayload = unknown> {
@@ -62,7 +102,13 @@ export interface JobContext<TPayload = unknown> {
    * handlers should call this periodically and abort (via `signal`) when
    * `cancelled` is true or `ok` is false.
    */
-  heartbeat: () => Promise<HeartbeatResult>;
+  heartbeat: (leaseDurationMs?: number) => Promise<HeartbeatResult>;
+  /**
+   * Additively extends the current lease expiry by `extensionMs` after
+   * validating extension limits against current expiry and job state.
+   * Rejects contradictory requests without modifying the held lease.
+   */
+  extendLease: (extensionMs: number) => Promise<ExtendLeaseResult>;
   /** Aborts when cancellation is requested or the process is shutting down. */
   signal: AbortSignal;
 }
@@ -78,6 +124,37 @@ export interface RunOnceSummary {
   deadLettered: number;
   cancelled: number;
   reaped: number;
+  /** Pending jobs expired by queue-age deadline (never ran; attempts unchanged). */
+  agedOut: number;
+}
+
+/**
+ * Bounded diagnostic envelope stored in `tls_jobs.result` when a handler's
+ * return value exceeds `jobsConfig.maxResultBytes` or cannot be serialized
+ * to JSON. Prevents unbounded database writes while retaining a stable,
+ * machine-readable diagnostic for operators.
+ */
+export interface BoundedResultDiagnostic {
+  truncated: true;
+  reason: "result_exceeds_max_bytes" | "result_unserializable";
+  maxBytes: number;
+  actualBytes: number | null;
+  diagnostic: string;
+}
+
+export interface BoundResultOutcome {
+  value: unknown;
+  truncated: boolean;
+  reason?: "result_exceeds_max_bytes" | "result_unserializable";
+  actualBytes?: number;
+  maxBytes: number;
+}
+
+export interface BoundErrorOutcome {
+  value: string;
+  truncated: boolean;
+  actualBytes: number;
+  maxBytes: number;
 }
 
 export type BulkRetryReason =

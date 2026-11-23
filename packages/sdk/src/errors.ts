@@ -32,6 +32,7 @@ export type TalosErrorCode =
   | "server_error"
   | "transport_error"
   | "timeout_error"
+  | "capability_error"
   | "api_error";
 
 /**
@@ -51,7 +52,7 @@ export const MAX_DATA_BYTES = 4096;
  * Names of fields whose values potentially contain credentials or other
  * sensitive material. We redact them in the surfaced error body and `data`.
  */
-export const SENSITIVE_FIELD_PATTERN = /^(token|authorization|secret|api[_-]?key|password|cookie|signature|message|nonce|hash)$/i;
+export const SENSITIVE_FIELD_PATTERN = /^(?:x-)?(token|authorization|secret|api[_-]?key|password|cookie|signature|message|nonce|hash|payment)$/i;
 
 /**
  * Options accepted by every TalosAPIError subclass via the 4th constructor
@@ -553,6 +554,141 @@ export class TalosTimeoutError extends TalosAPIError {
   }
 }
 
+// ── Endpoint capability negotiation ──────────────────────────────────────────
+
+/** Maximum length of a single advertised API version string (bytes). */
+const MAX_API_VERSION_BYTES = 64;
+/** Maximum number of advertised feature flags retained. */
+const MAX_FEATURE_FLAGS = 64;
+/** Maximum length of a single advertised feature flag (bytes). */
+const MAX_FEATURE_FLAG_BYTES = 64;
+
+/**
+ * Read a bounded {@link EndpointCapabilities} snapshot off a response's
+ * headers. Looks at `x-talos-api-version` (a single version string) and
+ * `x-talos-features` (a comma-separated list of feature flags). Both fields
+ * are trimmed; feature flags are deduplicated and bounded in count/length so
+ * a hostile or misconfigured endpoint cannot exhaust memory.
+ *
+ * Pure function — never throws. Missing headers yield an empty capability set
+ * (`{ features: [] }` with no `apiVersion`), which fails any non-empty
+ * {@link RequiredCapabilities}. The returned object is frozen.
+ */
+export function parseEndpointCapabilities(
+  headers: Headers | Record<string, string> | undefined | null,
+): EndpointCapabilities {
+  const out: EndpointCapabilities = { features: [] };
+  if (!headers) return Object.freeze(out);
+  const get = (key: string): string | null => {
+    if (typeof (headers as Headers).get === "function") {
+      return (headers as Headers).get(key);
+    }
+    const rec = headers as Record<string, string>;
+    return rec[key.toLowerCase()] ?? rec[key] ?? null;
+  };
+
+  const rawVersion = get("x-talos-api-version");
+  if (rawVersion) {
+    const version = rawVersion.trim().slice(0, MAX_API_VERSION_BYTES);
+    if (version) out.apiVersion = version;
+  }
+
+  const rawFeatures = get("x-talos-features");
+  if (rawFeatures) {
+    const seen = new Set<string>();
+    const features: string[] = [];
+    for (const part of rawFeatures.split(",")) {
+      if (features.length >= MAX_FEATURE_FLAGS) break;
+      const flag = part.trim().slice(0, MAX_FEATURE_FLAG_BYTES);
+      if (!flag || seen.has(flag)) continue;
+      seen.add(flag);
+      features.push(flag);
+    }
+    out.features = Object.freeze(features);
+  }
+  return Object.freeze(out);
+}
+
+/** Format a short, privacy-safe list of capability identifiers for messages. */
+function formatCapabilityList(items: string[]): string {
+  if (items.length === 1) return JSON.stringify(items[0]);
+  return items.map((i) => JSON.stringify(i)).join(", ");
+}
+
+/**
+ * Return `null` when `available` satisfies every constraint in `required`,
+ * otherwise a human-readable, privacy-safe reason string explaining the first
+ * mismatch. Matching is exact and case-sensitive after trimming whitespace.
+ *
+ * Used by {@link satisfiesCapabilities} and by {@link TalosCapabilityError} to
+ * build a deterministic message without echoing request payloads.
+ */
+export function describeCapabilityMismatch(
+  required: RequiredCapabilities,
+  available: EndpointCapabilities,
+): string | null {
+  if (required.apiVersion !== undefined) {
+    const wanted = Array.isArray(required.apiVersion) ? required.apiVersion : [required.apiVersion];
+    const trimmed = wanted
+      .map((v) => (typeof v === "string" ? v.trim() : v))
+      .filter((v): v is string => typeof v === "string" && v.length > 0);
+    if (trimmed.length > 0) {
+      if (!available.apiVersion || !trimmed.includes(available.apiVersion)) {
+        return `required API version ${formatCapabilityList(trimmed)} not matched (endpoint advertises ${JSON.stringify(available.apiVersion ?? null)})`;
+      }
+    }
+  }
+  if (required.features !== undefined && required.features.length > 0) {
+    const missing = required.features
+      .map((f) => (typeof f === "string" ? f.trim() : f))
+      .filter(
+        (f): f is string => typeof f === "string" && f.length > 0 && !available.features.includes(f),
+      );
+    if (missing.length > 0) {
+      return `required feature ${formatCapabilityList(missing)} not advertised by endpoint`;
+    }
+  }
+  return null;
+}
+
+/**
+ * True when `available` satisfies every constraint in `required`. Convenience
+ * wrapper around {@link describeCapabilityMismatch} for boolean checks.
+ */
+export function satisfiesCapabilities(
+  required: RequiredCapabilities,
+  available: EndpointCapabilities,
+): boolean {
+  return describeCapabilityMismatch(required, available) === null;
+}
+
+/**
+ * Capability negotiation failed — the endpoint did not advertise a capability
+ * the caller required for this request. Not retryable: a missing capability is
+ * a deterministic endpoint state, not a transient failure.
+ *
+ * Carries the {@link RequiredCapabilities} the caller asked for and the
+ * bounded {@link EndpointCapabilities} the endpoint actually advertised so
+ * callers can branch on the specific gap.
+ */
+export class TalosCapabilityError extends TalosAPIError {
+  public readonly required: RequiredCapabilities;
+  public readonly available: EndpointCapabilities;
+  constructor(
+    status: number,
+    body: string,
+    path: string,
+    required: RequiredCapabilities,
+    available: EndpointCapabilities,
+    options: TalosAPIErrorOptions = {},
+  ) {
+    super(status, body, path, { ...options, code: "capability_error", isRetryable: false });
+    this.name = "TalosCapabilityError";
+    this.required = required;
+    this.available = available;
+  }
+}
+
 /**
  * Sanitize an `options.data` value into a privacy-safe shape:
  *   - `undefined`/`null` pass through as `undefined`.
@@ -638,6 +774,8 @@ export function redactEventPath(rawPath: string): string {
 import type {
   BuyerProofDiagnostics,
   X402ProofStage,
+  EndpointCapabilities,
+  RequiredCapabilities,
 } from "./types.js";
 
 /**
