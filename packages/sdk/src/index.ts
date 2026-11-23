@@ -2,27 +2,85 @@
 
 export {
   TalosClient,
+  DEFAULT_BASE_URL,
+  resolveBaseUrl,
   resolveRetryPolicy,
   resolveRetryOptions,
+  ETAG_CACHE_VERSION,
+  BoundedETagStore,
 } from "./client.js";
 export type {
   TalosClientOptions,
-  RetryOptions,
   RetryPolicyOptions,
+  RetryOptions,
   ResolvedRetryPolicy,
   ResolvedRetryOptions,
+  RetryDecisionReason,
+  RetryDecisionEvent,
+  RedactedRetryMetadata,
   TalosErrorEvent,
-  WriteOptions,
+  TalosResponseEvent,
   ReadOptions,
+  WriteOptions,
+  ETagCacheEntry,
+  ETagStore,
+  ETagCacheOptions,
+  DedupeInFlightGetsOptions,
 } from "./client.js";
+
+// ── HTTP Transcript (support cases & deterministic replay) ─────────
+
+export {
+  TranscriptRecorder,
+  TranscriptReplayer,
+  createTranscriptRecorder,
+  createTranscriptReplayer,
+  sanitizeTranscriptPath,
+  sanitizeTranscriptHeaders,
+  sanitizeTranscriptResponseBody,
+  parseTranscript,
+} from "./transcript.js";
+export type {
+  HttpTranscript,
+  TranscriptEntry,
+  TranscriptRequest,
+  TranscriptResponse,
+  TranscriptTiming,
+  TranscriptRecorderOptions,
+  TranscriptReplayOptions,
+} from "./transcript.js";
+
+// ── Pagination ─────────────────────────────────────────────────────
+
+export {
+  AsyncPaginationIterator,
+  createPaginationIterator,
+  PaginationAbortedError,
+  PaginationLimitExceededError,
+} from "./pagination.js";
+export type { AsyncPaginationIteratorOptions } from "./pagination.js";
 
 // ── Idempotency ───────────────────────────────────────────────────
 export {
   generateIdempotencyKey,
   validateIdempotencyKey,
+  validateIdempotencyKeyConflict,
+  readIdempotencyKeyHeader,
   IdempotencyConflictError,
   isUuidV4,
+  isPayloadConflict,
   IDEMPOTENCY_KEY_MAX_BYTES,
+  // Client-side idempotency helpers
+  InMemoryIdempotencyStore,
+  createIdempotencyStore,
+  withIdempotency,
+  IdempotencyError,
+} from "./idempotency.js";
+export type {
+  IdempotencyRecord,
+  IdempotencyStore,
+  WithIdempotencyOptions,
+  IdempotencyErrorCode,
 } from "./idempotency.js";
 
 // ── Errors (typed hierarchy) ──────────────────────────────────────
@@ -44,21 +102,47 @@ export {
   TalosServerRetryableError,
   TalosTransportError,
   TalosTimeoutError,
+  TalosDeadlineExceededError,
   errorFromResponse,
   classifyTransportError,
   sanitizeBody,
   redactSecrets,
   snapshotHeaders,
+  parseRateLimit,
   parseRetryAfter,
   parseX402Challenge,
   redactEventPath,
   diagnoseBuyerProof,
   MAX_BODY_BYTES,
 } from "./errors.js";
+export type { RateLimitInfo, HeaderSource } from "./errors.js";
+
+// ── Stable error-code taxonomy (versioned) ────────────────────────────────────
+export {
+  ERROR_TAXONOMY_VERSION,
+  classifyError,
+  codeToCategory,
+  toErrorContract,
+  buildCauseChain,
+} from "./error-taxonomy.js";
+export type {
+  TalosErrorCategory,
+  ErrorClassification,
+  ErrorContract,
+  RedactedCauseFrame,
+} from "./error-taxonomy.js";
 
 // ── Domain types ──────────────────────────────────────────────────
 
 export * from "./types.js";
+
+// ── Name validation ────────────────────────────────────────────────
+
+export {
+  validateName,
+  canonicalizeName,
+  validateAndCanonicalizeName,
+} from "./name-validation.js";
 
 // ── Stellar helpers ───────────────────────────────────────────────
 
@@ -84,6 +168,15 @@ export {
   TalosEventStream,
   TalosStreamError,
   InMemorySeenStore,
+  TALOS_EVENT_SCHEMA_VERSION,
+  SCHEMA_VERSION_REQUEST_HEADER,
+  SCHEMA_VERSION_RESPONSE_HEADER,
+  SchemaVersionMismatchError,
+  TalosCursorValidationError,
+  validateTalosEventCursor,
+  negotiateSchemaVersion,
+  SSE_MAX_FIELD_BYTES,
+  SSE_MAX_DATA_LINES,
 } from "./events.js";
 export type {
   TalosEventType,
@@ -91,9 +184,73 @@ export type {
   TalosEventHandler,
   TalosStreamErrorHandler,
   TalosStreamCloseHandler,
+  TalosStreamState,
+  TalosStreamStateHandler,
   TalosEventStreamOptions,
+  TalosCursorValidationReason,
   SeenStore,
+  SchemaVersionNegotiationResult,
 } from "./events.js";
+
+// ── Job Tracker ───────────────────────────────────────────────────
+
+export {
+  JobTracker,
+  trackJob,
+  JobTerminalError,
+  JobFailedError,
+  JobCancelledError,
+  JobTrackAbortedError,
+  JobTrackTimeoutError,
+} from "./job-tracker.js";
+export type {
+  JobProgressDetails,
+  TrackJobEventType,
+  TrackJobEvent,
+  JobTerminalStatus,
+  JobTerminalOutcome,
+  JobTrackerState,
+  JobTrackerStateChange,
+  TrackJobOptions,
+} from "./job-tracker.js";
+
+// ── Contract event decoding ───────────────────────────────────────────────────
+
+export {
+  decodeContractEvent,
+  decodeContractEvents,
+  isContractEvent,
+  isContractEventFamily,
+  compareEventCursors,
+  ContractEventError,
+  UnknownContractEventError,
+  MalformedContractEventError,
+  UnsupportedContractVersionError,
+  BUILTIN_EVENT_CATALOG,
+  CATALOG_SPEC_VERSION,
+} from "./contract-events.js";
+export type {
+  ScVal,
+  CatalogFieldDescriptor,
+  CatalogEventDescriptor,
+  ContractEventFamily,
+  EventCatalog,
+  RawContractEvent,
+  EventCursor,
+  DecodedContractEventBase,
+  TalosCrtEvent,
+  TalosCrt2Event,
+  PatUpdEvent,
+  RegUpdEvent,
+  PropCrtEvent,
+  VoteEvent,
+  PropStatEvent,
+  EpCmtEvent,
+  DivClmEvent,
+  DecodedContractEvent,
+  DecodeContractEventOptions,
+  BatchDecodeResult,
+} from "./contract-events.js";
 export {
   FaultType,
   ChaosInjector,
@@ -128,6 +285,50 @@ export type {
   ChaosFixtureBundle,
 } from "./chaos-fixtures.js";
 
+// ── Synthetic event-stream fault fixtures ─────────────────────────────────────
+
+export {
+  EVENT_STREAM_FAULT_FIXTURES,
+  getEventStreamFaultFixture,
+  encodeSyntheticSSEFrame,
+  createSyntheticEventStreamTransport,
+} from "./event-stream-fixtures.js";
+export type {
+  EventStreamFaultKind,
+  SyntheticSSEFrame,
+  EventStreamFaultFixture,
+  SyntheticEventStreamTransport,
+} from "./event-stream-fixtures.js";
+
+// ── Contract readers ──────────────────────────────────────────────────────
+
+export {
+  RegistryReader,
+  NameServiceReader,
+  TESTNET_RPC_URL,
+  TESTNET_REGISTRY_CONTRACT_ID,
+  TESTNET_NAME_SERVICE_CONTRACT_ID,
+  TESTNET_NETWORK_PASSPHRASE,
+} from "./contracts.js";
+export type {
+  OnChainTalos,
+  ContractPatron,
+  ContractKernel,
+  ContractPulse,
+  ContractVersion,
+  ContractReaderOptions,
+  RegistryReaderOptions,
+  NameServiceReaderOptions,
+} from "./contracts.js";
+
+// ── Contract reader errors ────────────────────────────────────────────────
+
+export {
+  TalosContractError,
+  TalosContractNotFoundError,
+  TalosContractSimulateError,
+} from "./errors.js";
+
 // ── Runtime compatibility matrix ──────────────────────────────────────────────
 
 export {
@@ -144,6 +345,22 @@ export type {
   RuntimeMatrixEntry,
   CompatibilityReport,
 } from "./compat.js";
+
+// ── Persistent SeenStore (SQLite-backed) ────────────────────────────────────
+//
+// Node-only (requires node:sqlite ≥22 or better-sqlite3).  Browser consumers
+// should continue using InMemorySeenStore.
+export {
+  SqliteSeenStore,
+  SqliteSeenStoreError,
+  resolveSqliteAdapter,
+} from "./seen-store-sqlite.js";
+export type {
+  SqliteAdapter,
+  SqliteStatement,
+  SqliteSeenStoreOptions,
+  SqliteSeenStoreErrorCode,
+} from "./seen-store-sqlite.js";
 
 // Request signing
 export {
@@ -168,3 +385,22 @@ export type {
   SignerCapabilities,
   StellarKeypairSignerOptions,
 } from "./signing.js";
+
+// ── Generated types provenance ────────────────────────────────────────────────
+export {
+  GENERATED_TYPES_PROVENANCE,
+  GENERATED_TYPES_TOOL,
+  GENERATED_TYPES_TOOL_VERSION,
+  GENERATED_TYPES_SOURCE,
+  GENERATED_TYPES_PACKAGE,
+} from "./provenance.js";
+export type { GeneratedTypesProvenance } from "./provenance.js";
+
+// ── Drift detection ──────────────────────────────────────────────────────────
+export { DriftDetector, DriftError } from "./drift.js";
+export type {
+  DriftMode,
+  UnknownFieldPolicy,
+  DriftViolation,
+  DriftDetectorOptions,
+} from "./drift.js";

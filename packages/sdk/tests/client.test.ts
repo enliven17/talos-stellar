@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   TalosClient,
+  DEFAULT_BASE_URL,
+  resolveBaseUrl,
   TalosAPIError,
   TalosValidationError,
   TalosAuthenticationError,
@@ -13,6 +15,7 @@ import {
   TalosServerRetryableError,
   TalosTransportError,
   TalosTimeoutError,
+  TalosDeadlineExceededError,
   errorFromResponse,
   classifyTransportError,
   sanitizeBody,
@@ -25,6 +28,8 @@ import {
   resolveNetworkConfig,
   normalizeNetworkId,
   NETWORK_PASSPHRASES,
+  PROPOSAL_STATUSES,
+  isValidProposalStatus,
 } from "../src/index.js";
 
 describe("TalosClient - Request/Response Behavior", () => {
@@ -193,6 +198,269 @@ describe("TalosClient - Request/Response Behavior", () => {
       expect(fetch).toHaveBeenCalledWith(
         "http://localhost:3000/api/talos/id-with/slash",
         expect.any(Object)
+      );
+    });
+  });
+
+  describe("Governance Proposals (listProposals)", () => {
+    it("should list all proposals with no params", async () => {
+      const mockProposals = [
+        {
+          id: "prop-1",
+          talosId: "talos-1",
+          talosName: "Alpha",
+          type: "policy",
+          title: "Update policy",
+          description: "Policy update description",
+          amount: "100.5",
+          status: "pending",
+          decidedBy: null,
+          decidedAt: null,
+          txHash: null,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      ];
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => mockProposals,
+      } as Response);
+
+      const result = await client.listProposals();
+
+      expect(fetch).toHaveBeenCalledWith("http://localhost:3000/api/proposals", expect.any(Object));
+      expect(result).toEqual(mockProposals);
+    });
+
+    it("should list proposals with empty params object", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => [],
+      } as Response);
+
+      await client.listProposals({});
+
+      expect(fetch).toHaveBeenCalledWith("http://localhost:3000/api/proposals", expect.any(Object));
+    });
+
+    it("should build correct query string for status=pending", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => [],
+      } as Response);
+
+      await client.listProposals({ status: "pending" });
+
+      expect(fetch).toHaveBeenCalledWith("http://localhost:3000/api/proposals?status=pending", expect.any(Object));
+    });
+
+    it("should build correct query string for status=approved", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => [],
+      } as Response);
+
+      await client.listProposals({ status: "approved" });
+
+      expect(fetch).toHaveBeenCalledWith("http://localhost:3000/api/proposals?status=approved", expect.any(Object));
+    });
+
+    it("should build correct query string for status=rejected", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => [],
+      } as Response);
+
+      await client.listProposals({ status: "rejected" });
+
+      expect(fetch).toHaveBeenCalledWith("http://localhost:3000/api/proposals?status=rejected", expect.any(Object));
+    });
+
+    it("should build correct query string for limit only", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => [],
+      } as Response);
+
+      await client.listProposals({ limit: 20 });
+
+      expect(fetch).toHaveBeenCalledWith("http://localhost:3000/api/proposals?limit=20", expect.any(Object));
+    });
+
+    it("should build correct query string for both status and limit", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => [],
+      } as Response);
+
+      await client.listProposals({ status: "pending", limit: 25 });
+
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/proposals?status=pending&limit=25",
+        expect.any(Object),
+      );
+    });
+
+    it("should throw RangeError before sending a request when status is invalid", async () => {
+      await expect(client.listProposals({ status: "invalid_status" as any })).rejects.toThrow(RangeError);
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("should throw RangeError for case mismatch without sending a request", async () => {
+      await expect(client.listProposals({ status: "PENDING" as any })).rejects.toThrow(RangeError);
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("should throw RangeError for empty string status without sending a request", async () => {
+      await expect(client.listProposals({ status: "" as any })).rejects.toThrow(RangeError);
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("should throw RangeError for non-string status values without sending a request", async () => {
+      await expect(client.listProposals({ status: 123 as any })).rejects.toThrow(RangeError);
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("should validate all documented values via isValidProposalStatus", () => {
+      expect(PROPOSAL_STATUSES).toEqual(["pending", "approved", "rejected"]);
+      expect(isValidProposalStatus("pending")).toBe(true);
+      expect(isValidProposalStatus("approved")).toBe(true);
+      expect(isValidProposalStatus("rejected")).toBe(true);
+      expect(isValidProposalStatus("other")).toBe(false);
+      expect(isValidProposalStatus("")).toBe(false);
+      expect(isValidProposalStatus(null)).toBe(false);
+      expect(isValidProposalStatus(undefined)).toBe(false);
+    });
+  });
+
+  describe("Marketplace Search (searchMarketplace)", () => {
+    it("should build correct query string with q parameter", async () => {
+      const mockResponse = {
+        results: [
+          {
+            id: "item-1",
+            title: "Data Analyzer",
+            description: "Analyzes on-chain data",
+            capabilities: ["analysis", "stellar"],
+            price: 50,
+            currency: "USDC",
+            provider: "talos-1",
+            rating: 4.8,
+            createdAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        total: 1,
+        page: 1,
+        limit: 20,
+        filters: {
+          capabilities: [
+            { id: "analysis", name: "Analysis", description: "Data", category: "analytics", isActive: true },
+          ],
+        },
+      };
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => mockResponse,
+      } as Response);
+
+      const result = await client.searchMarketplace({ q: "analyzer" });
+
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/marketplace/search?q=analyzer",
+        expect.any(Object),
+      );
+      expect(result).toEqual(mockResponse);
+    });
+
+    it("should build correct query string with q and limit", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({ results: [], total: 0, page: 1, limit: 10, filters: { capabilities: [] } }),
+      } as Response);
+
+      await client.searchMarketplace({ q: "trading", limit: 10 });
+
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/marketplace/search?q=trading&limit=10",
+        expect.any(Object),
+      );
+    });
+
+    it("should encode capabilities as JSON in query string", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({ results: [], total: 0, page: 1, limit: 20, filters: { capabilities: [] } }),
+      } as Response);
+
+      await client.searchMarketplace({ q: "bot", capabilities: ["trading", "arbitrage"] });
+
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/marketplace/search?q=bot&capabilities=%5B%22trading%22%2C%22arbitrage%22%5D",
+        expect.any(Object),
+      );
+
+      // Verify server decodes it back to original array
+      const requestedUrl = new URL(vi.mocked(fetch).mock.calls[0][0] as string);
+      expect(JSON.parse(requestedUrl.searchParams.get("capabilities")!)).toEqual(["trading", "arbitrage"]);
+    });
+
+    it("should handle empty capabilities array", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({ results: [], total: 0, page: 1, limit: 20, filters: { capabilities: [] } }),
+      } as Response);
+
+      await client.searchMarketplace({ q: "bot", capabilities: [] });
+
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/marketplace/search?q=bot&capabilities=%5B%5D",
+        expect.any(Object),
+      );
+    });
+
+    it("should encode special characters and spaces in q parameter", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({ results: [], total: 0, page: 1, limit: 20, filters: { capabilities: [] } }),
+      } as Response);
+
+      await client.searchMarketplace({ q: "ai & ml services" });
+
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringContaining("q=ai+%26+ml+services"),
+        expect.any(Object),
+      );
+    });
+
+    it("should build query string with all options: q, capabilities, limit, page", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({ results: [], total: 0, page: 2, limit: 15, filters: { capabilities: [] } }),
+      } as Response);
+
+      await client.searchMarketplace({
+        q: "defi",
+        capabilities: ["swap"],
+        limit: 15,
+        page: 2,
+      });
+
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/marketplace/search?q=defi&capabilities=%5B%22swap%22%5D&limit=15&page=2",
+        expect.any(Object),
+      );
+    });
+
+    it("should handle searchMarketplace without q when omitted", async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({ results: [], total: 0, page: 1, limit: 20, filters: { capabilities: [] } }),
+      } as Response);
+
+      await client.searchMarketplace({ capabilities: ["swap"] });
+
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/marketplace/search?capabilities=%5B%22swap%22%5D",
+        expect.any(Object),
       );
     });
   });
@@ -487,6 +755,78 @@ it("should fetch one activity page with typed cursor response", async () => {
   });
 
   describe("Request and Retry Policy", () => {
+    it("rejects a retry delay that exceeds the remaining deadline and preserves response metadata", async () => {
+      const deadlineClient = new TalosClient({
+        baseUrl: "http://localhost:3000",
+        timeoutMs: 100,
+        retry: {
+          maxAttempts: 2,
+          baseDelayMs: 1000,
+          maxDelayMs: 1000,
+          jitter: 0,
+        },
+      });
+      vi.mocked(fetch).mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        headers: new Headers({
+          "Retry-After": "1",
+          "x-request-id": "request-123",
+        }),
+        text: async () => JSON.stringify({ error: "temporarily unavailable" }),
+      } as Response);
+
+      const error = await deadlineClient.getTalos("1").catch((value) => value);
+
+      expect(error).toBeInstanceOf(TalosDeadlineExceededError);
+      expect(error).toMatchObject({
+        code: "deadline_exceeded",
+        status: 503,
+        path: "/api/talos/1",
+        requestId: "request-123",
+        retryAfterMs: 1000,
+        headers: {
+          "retry-after": "1",
+          "x-request-id": "request-123",
+        },
+        retryDelayMs: 1000,
+        body: JSON.stringify({ error: "temporarily unavailable" }),
+        data: { error: "temporarily unavailable" },
+      });
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects a retry delay equal to the remaining deadline", async () => {
+      const deadlineClient = new TalosClient({
+        baseUrl: "http://localhost:3000",
+        timeoutMs: 1000,
+        retry: {
+          maxAttempts: 2,
+          baseDelayMs: 1000,
+          maxDelayMs: 1000,
+          jitter: 0,
+        },
+      });
+      vi.mocked(fetch).mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        headers: new Headers({ "Retry-After": "1" }),
+        text: async () => "temporarily unavailable",
+      } as Response);
+
+      vi.useFakeTimers();
+      const request = deadlineClient.getTalos("1");
+      const error = await request.catch((value) => value);
+      vi.useRealTimers();
+
+      expect(error).toBeInstanceOf(TalosDeadlineExceededError);
+      expect(error).toMatchObject({
+        retryDelayMs: 1000,
+        remainingMs: 1000,
+      });
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
     it("should fetch one activity page with typed cursor response", async () => {
       const mockPage = {
         stats: {
@@ -726,6 +1066,112 @@ it("should fetch one activity page with typed cursor response", async () => {
         expect.any(Object)
       );
     });
+
+    it("preserves credential-free local HTTP and HTTPS base URLs", () => {
+      const validUrls = [
+        { input: "https://talos-stellar.vercel.app", expected: "https://talos-stellar.vercel.app" },
+        { input: "https://api.example.com/v1/", expected: "https://api.example.com/v1" },
+        { input: "http://localhost:3000", expected: "http://localhost:3000" },
+        { input: "http://127.0.0.1:8080/", expected: "http://127.0.0.1:8080" },
+        { input: "http://[::1]:3000", expected: "http://[::1]:3000" },
+        { input: "https://example.com/@org", expected: "https://example.com/@org" },
+      ];
+
+      for (const { input, expected } of validUrls) {
+        const c = new TalosClient({ baseUrl: input });
+        expect(c.getBaseUrl()).toBe(expected);
+      }
+    });
+
+    it("rejects base URLs with embedded credentials before any fetch and without leaking secrets", () => {
+      const fetchSpy = vi.fn();
+      const credentialCases = [
+        { url: "https://alice:supersecret123@example.com", secrets: ["alice", "supersecret123"] },
+        { url: "https://alice@example.com", secrets: ["alice"] },
+        { url: "https://:supersecret123@example.com", secrets: ["supersecret123"] },
+        { url: "http://localuser:localpass@localhost:3000", secrets: ["localuser", "localpass"] },
+        { url: "http://admin:pw123@127.0.0.1:3000", secrets: ["admin", "pw123"] },
+        { url: "https://user%40name:s3cr3t%21@example.com", secrets: ["user%40name", "s3cr3t%21"] },
+        { url: "https://:@example.com", secrets: [] },
+        { url: "https:////:@api.example.com", secrets: ["api.example.com"] },
+        { url: "https://///:@api.example.com/v1", secrets: ["api.example.com"] },
+        { url: "https:\\\\:@api.example.com", secrets: ["api.example.com"] },
+      ];
+
+      for (const { url, secrets } of credentialCases) {
+        let thrown: unknown;
+        try {
+          new TalosClient({ baseUrl: url, fetch: fetchSpy });
+        } catch (err) {
+          thrown = err;
+        }
+        expect(thrown).toBeInstanceOf(Error);
+        const msg = (thrown as Error).message;
+        for (const secret of secrets) {
+          expect(msg).not.toContain(secret);
+        }
+        expect(msg).not.toContain(url);
+      }
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("rejects malformed, non-HTTP(S), or query/fragment base URLs (including bare delimiters) at construction", () => {
+      const fetchSpy = vi.fn();
+      const invalidCases = [
+        "",
+        "   ",
+        "not-a-url",
+        "/api/v1",
+        "localhost:3000",
+        "ftp://example.com",
+        "javascript:alert(1)",
+        "https://example.com?apiKey=secret_val",
+        "https://example.com/#frag",
+        "https://api.example.com/?",
+        "https://api.example.com/#",
+        "https://api.example.com?",
+        "https://api.example.com#",
+        "https://api.example.com/v1?#",
+        "https://example.com\n/path",
+        123 as unknown as string,
+      ];
+
+      for (const bad of invalidCases) {
+        let thrown: unknown;
+        try {
+          new TalosClient({ baseUrl: bad, fetch: fetchSpy });
+        } catch (err) {
+          thrown = err;
+        }
+        expect(thrown).toBeInstanceOf(Error);
+        const msg = (thrown as Error).message;
+        expect(msg).not.toContain("secret_val");
+        expect(msg).not.toContain("example.com");
+        if (typeof bad === "string" && bad.length > 0) {
+          expect(msg).not.toContain(bad);
+        }
+      }
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("resolveBaseUrl normalizes defaults, trailing slashes, and rejects unsafe inputs", () => {
+      expect(resolveBaseUrl()).toBe(DEFAULT_BASE_URL);
+      expect(resolveBaseUrl("https://api.example.com///")).toBe("https://api.example.com");
+      expect(resolveBaseUrl("  http://localhost:3000/  ")).toBe("http://localhost:3000");
+
+      expect(() => resolveBaseUrl("https://user:pass@example.com")).toThrow(RangeError);
+      expect(() => resolveBaseUrl("http://user@localhost:3000")).toThrow(RangeError);
+      expect(() => resolveBaseUrl("https:////:@api.example.com")).toThrow(RangeError);
+      expect(() => resolveBaseUrl("https://api.example.com/?")).toThrow(RangeError);
+      expect(() => resolveBaseUrl("https://api.example.com/#")).toThrow(RangeError);
+      expect(() => resolveBaseUrl("ftp://example.com")).toThrow(RangeError);
+      expect(() => resolveBaseUrl("not-a-url")).toThrow(TypeError);
+      expect(() => resolveBaseUrl(42 as unknown as string)).toThrow(TypeError);
+    });
   });
 });
 
@@ -767,6 +1213,56 @@ describe("Typed SDK Error Hierarchy", () => {
         expect(v.data).toMatchObject({ error: "Validation failed" });
         expect(v.isRetryable).toBe(false);
       }
+    });
+
+    it("exposes the documented API envelope as typed fields", () => {
+      const error = errorFromResponse(
+        400,
+        "/api/talos",
+        JSON.stringify({
+          code: "VALIDATION_ERROR",
+          message: "Rejected Bearer private-token",
+          requestId: "body-request-id",
+          issues: ["name: required"],
+          token: "must-not-leak",
+        }),
+        new Headers({ "x-request-id": "header-request-id", "retry-after": "2" }),
+      );
+
+      expect(error.status).toBe(400);
+      expect(error.code).toBe("validation_error");
+      expect(error.apiCode).toBe("VALIDATION_ERROR");
+      expect(error.apiMessage).toBe("Rejected Bearer [REDACTED]");
+      expect(error.requestId).toBe("header-request-id");
+      expect(error.headers["retry-after"]).toBe("2");
+      expect(error.retryAfterMs).toBe(2_000);
+      expect(error.validationDetails).toEqual(["name: required"]);
+      expect(error.message).not.toContain("must-not-leak");
+      expect(error.apiMessage).not.toContain("must-not-leak");
+      expect(error.apiMessage).not.toContain("private-token");
+    });
+
+    it("uses a safe fallback for malformed and non-JSON responses", () => {
+      const malformed = errorFromResponse(502, "/api/talos", "{not-json", new Headers());
+      const nonJson = errorFromResponse(503, "/api/talos", "<html>upstream failed</html>", new Headers());
+
+      expect(malformed.apiMessage).toBe("Request failed with status 502");
+      expect(nonJson.apiMessage).toBe("Request failed with status 503");
+      expect(malformed.apiCode).toBeUndefined();
+      expect(malformed.validationDetails).toEqual([]);
+    });
+
+    it("maps HTTP 422 responses to typed validation details", () => {
+      const error = errorFromResponse(
+        422,
+        "/api/talos",
+        JSON.stringify({ code: "INVALID_INPUT", message: "Invalid input", issues: ["name: too short"] }),
+        new Headers(),
+      );
+
+      expect(error).toBeInstanceOf(TalosValidationError);
+      expect((error as TalosValidationError).issues).toEqual(["name: too short"]);
+      expect(error.validationDetails).toEqual(["name: too short"]);
     });
   });
 
@@ -1318,6 +1814,65 @@ describe("Typed SDK Error Hierarchy", () => {
         method: "GET",
         attempt: 2,
       });
+    });
+
+    it("reports redacted structured retry decisions for status and typed retries", async () => {
+      vi.mocked(fetch)
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          headers: new Headers({
+            "Retry-After": "0",
+            "Set-Cookie": "payment-secret=do-not-expose",
+          }),
+          text: async () => "Authorization: Bearer payment-secret",
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ id: "1" }),
+        } as Response);
+
+      const statusHook = vi.fn();
+      const typedHook = vi.fn();
+      const c = new TalosClient({
+        baseUrl: "http://localhost:3000",
+        retryPolicy: {
+          maxAttempts: 2,
+          baseDelayMs: 0,
+          maxDelayMs: 0,
+          jitter: false,
+          onRetry: statusHook,
+        },
+        retry: {
+          maxAttempts: 2,
+          baseDelayMs: 0,
+          maxDelayMs: 0,
+          jitter: 0,
+          onRetry: typedHook,
+        },
+      });
+
+      await expect(c.getTalos("1")).resolves.toEqual({ id: "1" });
+      expect(statusHook).toHaveBeenCalledTimes(1);
+      expect(typedHook).toHaveBeenCalledTimes(1);
+
+      const statusEvent = statusHook.mock.calls[0]?.[0];
+      expect(statusEvent).toMatchObject({
+        attempt: 1,
+        reason: "retry-after",
+        nextDelayMs: 0,
+        delayMs: 0,
+        metadata: {
+          code: "server_retryable_error",
+          status: 503,
+          isRetryable: true,
+        },
+      });
+      expect(statusEvent.error.body).toBe("");
+      expect(statusEvent.error.headers).toEqual({});
+      expect(statusEvent.error.data).toBeUndefined();
+      expect(statusEvent.error.cause).toBeUndefined();
+      expect(JSON.stringify(statusEvent)).not.toContain("payment-secret");
     });
 
     it("caps maxAttempts at 8 even if user requests more", async () => {

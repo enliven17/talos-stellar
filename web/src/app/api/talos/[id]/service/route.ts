@@ -7,6 +7,7 @@ import { resolveTalosFromRequest, verifyAgentApiKey } from "@/lib/auth";
 import { verifyX402Payment, settleX402Payment } from "@/lib/stellar-x402";
 import { fulfillInstant } from "@/lib/fulfillment";
 import { registerServiceSchema, submitBidSchema, parseBody } from "@/lib/schemas";
+import { toLifecycleState, acceptsNewWork } from "@/lib/governance/lifecycle";
 import { withTraceContext } from "@/lib/tracing";
 import { logger } from "@/lib/logger";
 
@@ -42,7 +43,7 @@ async function handleGet(
         .limit(1)
         .then((r) => r[0] ?? null),
       db
-        .select({ agentWalletAddress: tlsTalos.agentWalletAddress })
+        .select({ agentWalletAddress: tlsTalos.agentWalletAddress, status: tlsTalos.status })
         .from(tlsTalos)
         .where(eq(tlsTalos.id, id))
         .limit(1)
@@ -71,6 +72,13 @@ async function handleGet(
         serviceName: service.serviceName,
         description: service.description,
         fulfillmentMode: service.fulfillmentMode,
+        availability:
+          talos?.status === "Draining"
+            ? "draining"
+            : talos?.status === "Active"
+              ? "available"
+              : "unavailable",
+        acceptsNewWork: talos ? acceptsNewWork(toLifecycleState(talos.status)) : false,
         talosId: id,
       },
       { status: 402 }
@@ -103,7 +111,7 @@ async function handlePost(
       const byteLength = Buffer.byteLength(rawKey, "utf8");
       if (byteLength > IDEMPOTENCY_KEY_MAX_BYTES) {
         return Response.json(
-          { error: `Idempotency-Key must be at most ${IDEMPOTENCY_KEY_MAX_BYTES} bytes` },
+          { error: `Idempotency-Key must be at most ${IDEMPOTENCY_KEY_MAX_BYTES} bytes`, retryable: false },
           { status: 400 },
         );
       }
@@ -124,7 +132,7 @@ async function handlePost(
       if (!bidValidation.success) {
         const issues = bidValidation.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
         return Response.json(
-          { error: "Invalid bid payload", issues },
+          { error: "Invalid bid payload", issues, retryable: false },
           { status: 400 }
         );
       }
@@ -138,7 +146,7 @@ async function handlePost(
     const paymentHeader = request.headers.get("x-payment");
     if (!paymentHeader) {
       return Response.json(
-        { error: "Missing X-PAYMENT header with Stellar x402 payment token" },
+        { error: "Missing X-PAYMENT header with Stellar x402 payment token", retryable: false },
         { status: 400 }
       );
     }
@@ -156,7 +164,7 @@ async function handlePost(
         .limit(1)
         .then((r) => r[0] ?? null),
       db
-        .select({ agentWalletAddress: tlsTalos.agentWalletAddress })
+        .select({ agentWalletAddress: tlsTalos.agentWalletAddress, status: tlsTalos.status })
         .from(tlsTalos)
         .where(eq(tlsTalos.id, id))
         .limit(1)
@@ -210,6 +218,7 @@ async function handlePost(
               error:
                 "Idempotency-Key reused with a different payload. " +
                 "Use a new key for a different request.",
+              retryable: false,
             },
             { status: 409 },
           );
@@ -236,7 +245,7 @@ async function handlePost(
           jobId: existing.id,
         }, "service purchase idempotent request in flight");
         return Response.json(
-          { error: "Request with this Idempotency-Key is already being processed" },
+          { error: "Request with this Idempotency-Key is already being processed", retryable: false },
           { status: 409 },
         );
       }
@@ -249,6 +258,19 @@ async function handlePost(
       }, "new service purchase idempotent request");
     }
 
+    if (!providerTalos || !acceptsNewWork(toLifecycleState(providerTalos.status))) {
+      const draining = providerTalos?.status === "Draining";
+      return Response.json(
+        {
+          error: draining ? "Service is draining and does not accept new work" : "Service is unavailable",
+          code: draining ? "SERVICE_DRAINING" : "SERVICE_UNAVAILABLE",
+          availability: draining ? "draining" : "unavailable",
+          retryable: false,
+        },
+        { status: 409 },
+      );
+    }
+
     // 4. Replay prevention — check payment token against existing jobs
     const existingJob = await db
       .select({ id: tlsCommerceJobs.id })
@@ -257,7 +279,7 @@ async function handlePost(
       .limit(1)
       .then((r) => r[0] ?? null);
     if (existingJob) {
-      return Response.json({ error: "Payment token already used (replay detected)" }, { status: 409 });
+      return Response.json({ error: "Payment token already used (replay detected)", retryable: false }, { status: 409 });
     }
 
     // Always verify against the listed service price — bidPrice is stored for negotiation
@@ -272,7 +294,7 @@ async function handlePost(
         talosId: id
       }, "Invalid x402 payment token provided");
       return Response.json(
-        { error: "Invalid or insufficient x402 payment" },
+        { error: "Invalid or insufficient x402 payment", retryable: false },
         { status: 402 }
       );
     }
@@ -285,7 +307,11 @@ async function handlePost(
     } catch (settleErr) {
       console.error("Stellar x402 settlement failed:", settleErr);
       return Response.json(
-        { error: "On-chain payment settlement failed" },
+        {
+          error: "On-chain payment settlement failed — the transaction was not submitted. You may retry.",
+          retryable: true,
+          hint: "The payment was not charged. Retrying is safe.",
+        },
         { status: 502 }
       );
     }
@@ -300,7 +326,11 @@ async function handlePost(
       } catch (fulfillErr) {
         console.error("Service fulfillment failed:", fulfillErr);
         return Response.json(
-          { error: "Service fulfillment failed" },
+          {
+            error: "Service fulfillment failed",
+            retryable: false,
+            hint: "Your payment was processed. Contact the agent operator to resolve the failed fulfillment.",
+          },
           { status: 502 }
         );
       }
@@ -387,12 +417,12 @@ async function handlePost(
               return idempotentResponse(existing.idempotencyResponse, 201, idempotencyKey!, true);
             }
             return Response.json(
-              { error: "Request with this Idempotency-Key is already being processed" },
+              { error: "Request with this Idempotency-Key is already being processed", retryable: false },
               { status: 409 },
             );
           }
           if (constraint.includes("paymentSig")) {
-            return Response.json({ error: "Payment token already used (replay detected)" }, { status: 409 });
+            return Response.json({ error: "Payment token already used (replay detected)", retryable: false }, { status: 409 });
           }
         }
         throw err;
@@ -473,19 +503,26 @@ async function handlePost(
             return idempotentResponse(existing.idempotencyResponse, 201, idempotencyKey!, true);
           }
           return Response.json(
-            { error: "Request with this Idempotency-Key is already being processed" },
+            { error: "Request with this Idempotency-Key is already being processed", retryable: false },
             { status: 409 },
           );
         }
         if (constraint.includes("paymentSig")) {
-          return Response.json({ error: "Payment token already used (replay detected)" }, { status: 409 });
+          return Response.json({ error: "Payment token already used (replay detected)", retryable: false }, { status: 409 });
         }
       }
       throw err;
     }
   } catch (err: unknown) {
     console.error("Service POST error:", err);
-    return Response.json({ error: "Internal server error" }, { status: 500 });
+    return Response.json(
+      {
+        error: "Internal server error",
+        retryable: true,
+        hint: "An unexpected error occurred. Check your transaction history before retrying.",
+      },
+      { status: 500 }
+    );
   }
 }
 

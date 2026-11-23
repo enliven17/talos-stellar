@@ -6,10 +6,11 @@ import { verifyAgentApiKey } from "@/lib/auth";
 import { emitWebhookEvent } from "@/lib/webhooks/delivery";
 import { parseAnalyticsLimit } from "@/lib/analytics-limits";
 import { withTraceContext } from "@/lib/tracing";
+import { withRequestId } from "@/lib/with-request-id";
 import { checkAndIncrementQuota, quotaExceededResponse } from "@/lib/quota";
 
 // GET /api/talos/:id/revenue — Get revenue history
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -54,6 +55,8 @@ export async function GET(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const GET = withRequestId(_GET);
 
 // POST /api/talos/:id/revenue — Report revenue (from Local Agent)
 // All revenue stays in Agent Treasury. No distribution to external wallets.
@@ -102,7 +105,7 @@ async function handlePost(
     }
 
     // Record revenue in DB — all revenue stays in Agent Treasury
-    const quotaResult = await checkAndIncrementQuota(db, id, "revenue_writes");
+    const quotaResult = await checkAndIncrementQuota(db, id, "revenue_writes", "revenue:write");
     if (!quotaResult.ok) return quotaExceededResponse(quotaResult);
 
     const [revenue] = await db

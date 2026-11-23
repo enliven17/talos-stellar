@@ -1,0 +1,43 @@
+name: SDK CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packages/sdk/**'
+      - '.github/workflows/sdk-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/sdk/**'
+      - '.github/workflows/sdk-ci.yml'
+
+jobs:
+  sdk-typecheck-and-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/sdk
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: packages/sdk/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check src
+        run: npx tsc --noEmit
+
+      - name: Type-check examples
+        run: npm run typecheck:examples
+
+      - name: Run tests (including example smoke tests)
+        run: npm test

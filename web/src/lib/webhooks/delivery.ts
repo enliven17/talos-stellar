@@ -23,6 +23,7 @@ import {
 } from "@/db/schema";
 import { signPayload } from "./signing";
 import { resolveSigningSecrets } from "./rotation";
+import { isSubscriptionDestinationVerified } from "./verification";
 import {
   BACKOFF_BASE_MS,
   BACKOFF_MAX_MS,
@@ -32,6 +33,7 @@ import {
   MAX_PAYLOAD_BYTES,
 } from "./config";
 import { isWebhookDeliveryEnabled } from "./config";
+import { safeFetch } from "@/lib/security/ssrf";
 
 // ─── Types ───────────────────────────────────────────────────────
 
@@ -85,24 +87,29 @@ export async function emitWebhookEvent(event: WebhookEvent): Promise<void> {
       .select({
         id: tlsWebhookSubscriptions.id,
         eventTypes: tlsWebhookSubscriptions.eventTypes,
+        destinationVerificationStatus: tlsWebhookSubscriptions.destinationVerificationStatus,
+        destinationVerifiedAt: tlsWebhookSubscriptions.destinationVerifiedAt,
+        destinationVerificationExpiresAt: tlsWebhookSubscriptions.destinationVerificationExpiresAt,
       })
       .from(tlsWebhookSubscriptions)
       .where(
         and(
           eq(tlsWebhookSubscriptions.talosId, event.talosId),
           eq(tlsWebhookSubscriptions.active, true),
+          eq(tlsWebhookSubscriptions.paused, false),
           sql`${event.type} = ANY(${tlsWebhookSubscriptions.eventTypes})`,
         ),
       );
 
-    if (subscriptions.length === 0) return;
+    const eligibleSubscriptions = subscriptions.filter(isSubscriptionDestinationVerified);
+    if (eligibleSubscriptions.length === 0) return;
 
     const payloadHash = createHash("sha256")
       .update(payloadJson)
       .digest("hex");
 
     // Create delivery records
-    const deliveries = subscriptions.map((sub) => ({
+    const deliveries = eligibleSubscriptions.map((sub) => ({
       subscriptionId: sub.id,
       eventType: event.type,
       // Store hash + event type and talos ID as reference for retry reconstruction
@@ -209,6 +216,11 @@ export async function attemptDelivery(
     return null;
   }
 
+  if (subscription.paused) {
+    await markDeliveryFailed(deliveryId, "subscription_paused", claimed.fencingToken);
+    return null;
+  }
+
   // For retries, we reconstruct the event payload from the stored payload
   // hash prefix. The full event payload is not persisted in the delivery
   // record (by design — no sensitive data in the delivery history).
@@ -239,7 +251,7 @@ export async function attemptDelivery(
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), DELIVERY_TIMEOUT_MS);
 
-    const response = await fetch(subscription.url, {
+    const response = await safeFetch(subscription.url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

@@ -9,6 +9,7 @@
  * actions additionally require an explicit `confirmed: true` in the payload, so
  * a replayed or CSRF-shaped request cannot retire an agent by accident.
  */
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { and, desc, eq, inArray } from "drizzle-orm";
 
@@ -19,6 +20,7 @@ import { LIFECYCLE_EVENTS, emitLifecycleEvent, readLifecycleEvents } from "@/lib
 import {
   LifecycleError,
   allowedActions,
+  evaluateLifecycleChecklist,
   evaluateTransition,
   toLegacyStatus,
   toLifecycleState,
@@ -106,7 +108,7 @@ async function loadAgent(id: string) {
 
 // ── GET ──────────────────────────────────────────────────────────────
 
-export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+async function _GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
 
   try {
@@ -166,6 +168,17 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         .limit(100),
     ]);
 
+    const checklist = evaluateLifecycleChecklist({
+      talosId: id,
+      state,
+      actor: { id: viewer || "anonymous", roles: viewerRoles },
+      agentOnline: Boolean(agent.agentOnline),
+      inFlightJobs: inFlightJobs.length,
+      pendingProposalsCount: pendingProposals.length,
+      hasWallet: Boolean(agent.agentWalletId),
+      retiredAt: agent.status === "Retired" ? agent.updatedAt : null,
+    });
+
     return Response.json(
       {
         talosId: id,
@@ -183,6 +196,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         viewerRoles,
         inFlightJobs: inFlightJobs.length,
         pendingProposals,
+        checklist,
         run,
         events,
         nextCursor,
@@ -196,7 +210,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
 // ── POST ─────────────────────────────────────────────────────────────
 
-export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+async function _POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
 
   try {
@@ -248,6 +262,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       from,
       actor,
       governanceApproved,
+      expectedState:
+        "expectedState" in parsed.payload ? parsed.payload.expectedState : undefined,
     });
 
     const inFlight = await db
@@ -277,6 +293,17 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // Durable actions hand off to the provisioning worker and return 202 —
     // the client polls GET for progress rather than holding a request open.
     if (decision.durable) {
+      const [claimed] = await db
+        .update(tlsTalos)
+        .set({ status: toLegacyStatus(decision.to) })
+        .where(and(eq(tlsTalos.id, id), eq(tlsTalos.status, toLegacyStatus(from))))
+        .returning({ id: tlsTalos.id });
+      if (!claimed) {
+        throw new LifecycleError("LIFECYCLE_CONFLICT", "Lifecycle state changed before transition", {
+          expectedState: from,
+        });
+      }
+
       const workflow = workflowFor(parsed.action, databaseEffects);
       const { jobId, created } = await submitProvisioningJob({
         talosId: id,
@@ -301,11 +328,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         idempotencyKey: `${jobId}:requested`,
       });
 
-      await db
-        .update(tlsTalos)
-        .set({ status: toLegacyStatus(decision.to) })
-        .where(eq(tlsTalos.id, id));
-
+await db
+  .update(tlsTalos)
+  .set({ status: decision.to === "retiring" ? "Draining" : toLegacyStatus(decision.to) })
+  .where(eq(tlsTalos.id, id));
       return Response.json(
         { talosId: id, state: decision.to, jobId, created, action: parsed.action },
         { status: 202 },
@@ -320,14 +346,20 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         .where(and(eq(tlsCommerceJobs.talosId, id), eq(tlsCommerceJobs.status, "pending")));
     }
 
-    await db
+    const [updated] = await db
       .update(tlsTalos)
       .set({
         status: toLegacyStatus(decision.to),
         agentOnline: decision.to === "active",
         agentLastSeen: new Date(),
       })
-      .where(eq(tlsTalos.id, id));
+      .where(and(eq(tlsTalos.id, id), eq(tlsTalos.status, toLegacyStatus(from))))
+      .returning({ id: tlsTalos.id });
+    if (!updated) {
+      throw new LifecycleError("LIFECYCLE_CONFLICT", "Lifecycle state changed before transition", {
+        expectedState: from,
+      });
+    }
 
     const eventType =
       decision.to === "active"
@@ -384,3 +416,6 @@ async function hasApprovedProposal(
 
   return row.length > 0;
 }
+
+export const GET = withRequestId(_GET);
+export const POST = withRequestId(_POST);

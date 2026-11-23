@@ -1,13 +1,22 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
-import { tlsTalos, tlsQuotaConfigs } from "@/db/schema";
+import { tlsTalos, tlsQuotaConfigs, tlsQuotaAdjustments } from "@/db/schema";
+import {
+  actorForAgent,
+  normalizeReason,
+  snapshotPolicy,
+} from "@/lib/quota-audit";
 import { eq, isNull, or, and } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
 import {
   readQuotaUsage,
+  readQuotaUsageBreakdown,
   resolveQuotaConfig,
+  exportQuotaWindowStatement,
   ALL_QUOTA_RESOURCES,
   type QuotaResource,
+  type WindowSize,
 } from "@/lib/quota";
 
 /**
@@ -47,7 +56,7 @@ import {
  * The response intentionally includes disabled resources so operators can
  * see all available quota slots even before they are enabled.
  */
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -56,6 +65,26 @@ export async function GET(
   // Agent must authenticate with its own API key
   const auth = await verifyAgentApiKey(request, id);
   if (!auth.ok) return auth.response;
+
+  // GET ?view=adjustments → quota adjustment audit trail (newest first)
+  if (request.nextUrl.searchParams.get("view") === "adjustments") {
+    const rows = await db
+      .select()
+      .from(tlsQuotaAdjustments)
+      .where(eq(tlsQuotaAdjustments.talosId, id));
+    const adjustments = rows
+      .map((r) => ({
+        id: r.id,
+        resource: r.resource,
+        actor: r.actor,
+        reason: r.reason,
+        priorPolicy: r.priorPolicy,
+        newPolicy: r.newPolicy,
+        createdAt: new Date(r.createdAt).toISOString(),
+      }))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return Response.json({ talosId: id, adjustments });
+  }
 
   // Confirm the TALOS exists (auth already does this, but keep it explicit)
   const talos = await db
@@ -67,6 +96,31 @@ export async function GET(
 
   if (!talos) {
     return Response.json({ error: "TALOS not found" }, { status: 404 });
+  }
+
+  // Optional reproducible quota-window usage statement export
+  const format = request.nextUrl.searchParams.get("format");
+  if (format === "statement") {
+    const asOfParam = request.nextUrl.searchParams.get("asOf");
+    let asOf: Date | undefined;
+    if (asOfParam !== null) {
+      const parsed = new Date(asOfParam);
+      if (Number.isNaN(parsed.getTime())) {
+        return Response.json(
+          { error: "Invalid asOf timestamp; expected ISO-8601 date string" },
+          { status: 400 },
+        );
+      }
+      asOf = parsed;
+    }
+
+    const statement = await exportQuotaWindowStatement(db, id, { asOf });
+    return Response.json(statement, {
+      headers: {
+        "Cache-Control": "no-store",
+        "X-Quota-Statement-Digest": statement.digest,
+      },
+    });
   }
 
   // Fetch all quota config rows for this agent and the platform defaults in
@@ -84,14 +138,17 @@ export async function GET(
   // Build the response for each resource in parallel
   const quotaEntries = await Promise.all(
     ALL_QUOTA_RESOURCES.map(async (resource: QuotaResource) => {
-      const [config, usage] = await Promise.all([
+      const [config, usage, byScope] = await Promise.all([
         resolveQuotaConfig(db, id, resource),
         readQuotaUsage(db, id, resource),
+        readQuotaUsageBreakdown(db, id, resource),
       ]);
 
       const isAgentOverride = configRows.some(
         (r) => r.talosId === id && r.resource === resource,
       );
+
+      const explanation = buildQuotaExplanation(usage);
 
       return [
         resource,
@@ -109,7 +166,9 @@ export async function GET(
             limit: usage.limit,
             resetAt: new Date(usage.resetAt).toISOString(),
             ok: usage.ok,
+            byScope,
           },
+          explanation,
         },
       ] as const;
     }),
@@ -134,9 +193,13 @@ export async function GET(
  *   windowSize?: WindowSize, // "hourly" | "daily" | "monthly"
  *   enabled?: boolean,       // Enable or disable enforcement
  *   notes?: string,          // Admin notes
+ *   reason?: string,         // Audit reason (credentials are redacted)
  * }
+ *
+ * Every successful adjustment appends an audit record (actor, reason, prior
+ * policy, new policy). Read it with GET /api/talos/:id/quota?view=adjustments.
  */
-export async function PATCH(
+async function _PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -205,6 +268,14 @@ export async function PATCH(
   const newEnabled = typeof enabled === "boolean" ? enabled : current.enabled;
   const newNotes = typeof notes === "string" ? notes : current.notes;
 
+  const bearer = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "";
+  const knownSecrets = bearer ? [bearer] : [];
+  const priorPolicy = snapshotPolicy(current, knownSecrets);
+  const newPolicy = snapshotPolicy(
+    { maxCount: newMaxCount, windowSize: newWindowSize as WindowSize, enabled: newEnabled, notes: newNotes ?? null },
+    knownSecrets,
+  );
+
   // Upsert the agent-specific config row
   await db
     .insert(tlsQuotaConfigs)
@@ -226,10 +297,22 @@ export async function PATCH(
       },
     });
 
+  // Append-only audit record: actor, reason, prior and new policy.
+  await db.insert(tlsQuotaAdjustments).values({
+    talosId: id,
+    resource: resource as string,
+    actor: actorForAgent(id),
+    reason: normalizeReason(body && (body as Record<string, unknown>).reason, knownSecrets),
+    priorPolicy,
+    newPolicy,
+  });
+
   const [updatedConfig, usage] = await Promise.all([
     resolveQuotaConfig(db, id, resource as QuotaResource),
     readQuotaUsage(db, id, resource as QuotaResource),
   ]);
+
+  const explanation = buildQuotaExplanation(usage);
 
   return Response.json({
     talosId: id,
@@ -248,5 +331,9 @@ export async function PATCH(
       resetAt: new Date(usage.resetAt).toISOString(),
       ok: usage.ok,
     },
+    explanation,
   });
 }
+
+export const GET = withRequestId(_GET);
+export const PATCH = withRequestId(_PATCH);

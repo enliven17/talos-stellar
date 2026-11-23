@@ -351,4 +351,51 @@ describe("Abortable request timeouts (#569)", () => {
     const promise = client.getTalos("talos-1", { timeoutMs: 50 });
     await expectTimeoutRejection(promise, 100);
   });
+
+  it("uses one timeout budget across backoff and does not issue a late mutating retry", async () => {
+    const fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      headers: new Headers(),
+      text: async () => "temporarily unavailable",
+    } as Response) as unknown as typeof globalThis.fetch;
+    const client = new TalosClient({
+      baseUrl: "http://example.test",
+      fetch,
+      retryPolicy: {
+        maxAttempts: 3,
+        baseDelayMs: 100,
+        maxDelayMs: 100,
+        jitter: false,
+      },
+    });
+
+    const promise = client.submitJobResult(
+      "job-1",
+      { done: true },
+      { idempotencyKey: "deadline-test", timeoutMs: 50 },
+    );
+    await expectTimeoutRejection(promise, 60);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("applies the timeout budget while request signing is still pending", async () => {
+    const fetch = vi.fn() as unknown as typeof globalThis.fetch;
+    const client = new TalosClient({
+      baseUrl: "http://example.test",
+      fetch,
+      timeoutMs: 50,
+      signer: {
+        getCapabilities: () => ({
+          capabilities: ["http-request-v1"],
+          algorithms: ["test-ed25519"],
+        }),
+        sign: () => new Promise<never>(() => undefined),
+      },
+    });
+
+    const promise = client.getTalos("talos-1");
+    await expectTimeoutRejection(promise, 60);
+    expect(fetch).not.toHaveBeenCalled();
+  });
 });

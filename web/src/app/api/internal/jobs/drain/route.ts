@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { verifyInternalJobsSecret } from "@/lib/admin-auth";
 import { jobsConfig, runOnce } from "@/lib/jobs";
@@ -22,7 +23,7 @@ import "@/lib/jobs/handlers";
  * but nothing drains it until an operator opts in, so wiring this endpoint
  * into a scheduler ahead of enabling the flag is safe.
  */
-export async function POST(request: NextRequest) {
+async function _POST(request: NextRequest) {
   const auth = verifyInternalJobsSecret(request);
   if (!auth.ok) return auth.response;
 
@@ -38,3 +39,5 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);

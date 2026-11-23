@@ -16,6 +16,12 @@
 
 import { getRateLimitStore } from "@/lib/rate-limit-store";
 import { logger } from "@/lib/logger";
+import {
+  computeRetryAfterSeconds,
+  formatResetEpochSeconds,
+  isValidResetAt,
+  type RetryAfterOptions,
+} from "@/lib/retry-after";
 
 export interface RateLimitOptions {
   /** Max requests allowed per window */
@@ -28,8 +34,15 @@ export interface RateLimitResult {
   ok: boolean;
   limit: number;
   remaining: number;
-  /** Unix milliseconds when the window resets */
-  resetAt: number;
+  /** Unix milliseconds when the window resets, or `null` when unknown */
+  resetAt: number | null;
+  /**
+   * Human-readable policy bucket that produced this result.
+   * One of: "auth" | "read" | "write-key" | "write-ip"
+   * Exposed as the `X-RateLimit-Policy` response header so contributors
+   * and operators can identify which quota applies to their request.
+   */
+  policy?: string;
 }
 
 /**
@@ -44,7 +57,7 @@ export async function rateLimit(
   const store = getRateLimitStore();
 
   let count: number;
-  let resetAt: number;
+  let resetAt: number | null;
 
   try {
     ({ count, resetAt } = await store.increment(key, windowMs));
@@ -53,47 +66,71 @@ export async function rateLimit(
     // log the error and allow the request through (fail-open).
     logger.error({ err, key }, "rate-limit: store.increment threw unexpectedly, allowing request");
     const now = Date.now();
-    return { ok: true, limit, remaining: 1, resetAt: now + windowMs };
+    const candidate =
+      typeof windowMs === "number" && Number.isFinite(windowMs) && windowMs > 0
+        ? now + windowMs
+        : null;
+    return {
+      ok: true,
+      limit,
+      remaining: 1,
+      resetAt: isValidResetAt(candidate) ? candidate : null,
+    };
   }
 
   return {
     ok: count <= limit,
     limit,
     remaining: Math.max(0, limit - count),
-    resetAt,
+    resetAt: isValidResetAt(resetAt) ? resetAt : null,
   };
 }
 
-/** Build a 429 Response with standard rate-limit and Retry-After headers. */
-export function rateLimitResponse(result: RateLimitResult): Response {
-  const retryAfterSec = Math.max(1, Math.ceil((result.resetAt - Date.now()) / 1_000));
+/** Build a 429 Response with standard rate-limit and bounded Retry-After headers. */
+export function rateLimitResponse(
+  result: RateLimitResult,
+  options?: RetryAfterOptions,
+): Response {
+  const retryAfterSec = computeRetryAfterSeconds(result.resetAt, options);
+  const resetHeader = formatResetEpochSeconds(result.resetAt);
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-RateLimit-Limit": String(result.limit),
+    "X-RateLimit-Remaining": String(result.remaining),
+    "Retry-After": String(retryAfterSec),
+  };
+
+  if (resetHeader !== null) {
+    headers["X-RateLimit-Reset"] = resetHeader;
+  }
+
+  if (result.policy) {
+    headers["X-RateLimit-Policy"] = result.policy;
+  }
 
   return new Response(
     JSON.stringify({ error: "Too many requests" }),
-    {
-      status: 429,
-      headers: {
-        "Content-Type": "application/json",
-        "X-RateLimit-Limit": String(result.limit),
-        "X-RateLimit-Remaining": String(result.remaining),
-        "X-RateLimit-Reset": String(Math.ceil(result.resetAt / 1_000)),
-        "Retry-After": String(retryAfterSec),
-      },
-    },
+    { status: 429, headers },
   );
 }
 
-/** Attach rate-limit headers to an existing Response (non-mutating). */
+/** Attach rate-limit headers to an existing Response (mutates headers). */
 export function applyRateLimitHeaders(
   response: Response,
   result: RateLimitResult,
 ): Response {
   response.headers.set("X-RateLimit-Limit", String(result.limit));
   response.headers.set("X-RateLimit-Remaining", String(result.remaining));
-  response.headers.set(
-    "X-RateLimit-Reset",
-    String(Math.ceil(result.resetAt / 1_000)),
-  );
+  const resetHeader = formatResetEpochSeconds(result.resetAt);
+  if (resetHeader !== null) {
+    response.headers.set("X-RateLimit-Reset", resetHeader);
+  } else {
+    response.headers.delete("X-RateLimit-Reset");
+  }
+  if (result.policy) {
+    response.headers.set("X-RateLimit-Policy", result.policy);
+  }
   return response;
 }
 
@@ -105,6 +142,11 @@ export function applyRateLimitHeaders(
 export interface EndpointPolicy {
   /** Bucket key prefix written to the shared store */
   keyPrefix: string;
+  /**
+   * Human-readable policy name surfaced as `X-RateLimit-Policy`.
+   * Stable string clients can key off to detect bucket changes.
+   */
+  name: string;
   limit: number;
   windowMs: number;
 }
@@ -112,33 +154,50 @@ export interface EndpointPolicy {
 function envInt(name: string, fallback: number): number {
   const v = process.env[name];
   if (!v) return fallback;
-  const n = parseInt(v, 10);
-  return isNaN(n) ? fallback : n;
+  const trimmed = v.trim();
+  if (!/^\d+$/.test(trimmed)) return fallback;
+  const n = Number(trimmed);
+  return Number.isSafeInteger(n) && n > 0 ? n : fallback;
 }
 
 export const RATE_LIMIT_POLICIES = {
   /** Sensitive auth / account-management endpoints */
   auth: {
     keyPrefix: "auth",
+    name: "auth",
     limit: envInt("RATE_LIMIT_AUTH_LIMIT", 20),
     windowMs: envInt("RATE_LIMIT_AUTH_WINDOW_MS", 60_000),
   },
   /** Read (GET) endpoints per IP */
   read: {
     keyPrefix: "read",
+    name: "read",
     limit: envInt("RATE_LIMIT_READ_LIMIT", 100),
     windowMs: envInt("RATE_LIMIT_READ_WINDOW_MS", 60_000),
   },
   /** Write endpoints keyed by API key */
   writeKey: {
     keyPrefix: "write_key",
+    name: "write-key",
     limit: envInt("RATE_LIMIT_WRITE_KEY_LIMIT", 30),
     windowMs: envInt("RATE_LIMIT_WRITE_WINDOW_MS", 60_000),
   },
   /** Write endpoints keyed by IP (unauthenticated) */
   writeIp: {
     keyPrefix: "write_ip",
+    name: "write-ip",
     limit: envInt("RATE_LIMIT_WRITE_IP_LIMIT", 30),
     windowMs: envInt("RATE_LIMIT_WRITE_WINDOW_MS", 60_000),
+  },
+  /**
+   * CSP violation reports (src/app/api/csp-report).  Fire-and-forget
+   * telemetry, so it gets its own bucket: a report-only rollout must never
+   * consume the budget of real client writes coming from the same IP.
+   */
+  cspReport: {
+    keyPrefix: "csp_report",
+    name: "csp-report",
+    limit: envInt("RATE_LIMIT_CSP_REPORT_LIMIT", 120),
+    windowMs: envInt("RATE_LIMIT_CSP_REPORT_WINDOW_MS", 60_000),
   },
 } satisfies Record<string, EndpointPolicy>;

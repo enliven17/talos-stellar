@@ -5,6 +5,7 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { verifyAgentApiKey } from "@/lib/auth";
 import { parseLimit } from "@/lib/parse-limit";
 import { withTraceContext } from "@/lib/tracing";
+import { withRequestId } from "@/lib/with-request-id";
 import { checkAndIncrementQuota, quotaExceededResponse } from "@/lib/quota";
 import { emitWebhookEvent } from "@/lib/webhooks/delivery";
 
@@ -53,7 +54,7 @@ export function encodeAgentActivityCursor(cursor: AgentActivityCursor): string {
 }
 
 // ─── GET /api/talos/:id/activity ─────────────────────────────────────────────
-export async function GET(
+async function _GET(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
@@ -129,6 +130,8 @@ export async function GET(
   }
 }
 
+export const GET = withRequestId(_GET);
+
 // POST /api/talos/:id/activity — Report activity (from Local Agent)
 async function handlePost(
   request: NextRequest,
@@ -169,7 +172,7 @@ async function handlePost(
 
     // Check quota BEFORE writing to DB so we never persist a record that
     // would be rejected.  This also avoids orphaned rows when quota is exceeded.
-    const quotaResult = await checkAndIncrementQuota(db, id, "activity_writes");
+    const quotaResult = await checkAndIncrementQuota(db, id, "activity_writes", "activity:write");
     if (!quotaResult.ok) return quotaExceededResponse(quotaResult);
 
     const [activity] = await db

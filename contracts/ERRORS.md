@@ -1,8 +1,17 @@
-﻿# Soroban contract errors
+# Soroban contract errors
 
 This page documents errors exposed by the contract sources in this workspace. Numeric values are the `#[contracterror]` discriminants in Rust. Pair a code with its contract address and method when diagnosing a failed invocation. Codes are contract-specific: code `2` means different things in `TalosNameService` and `TalosDividends`.
 
 ## Typed contract errors
+
+### TalosRegistry (`ContractError`)
+
+| Code | Variant | Meaning / caller action |
+|---:|---|---|
+| 1 | `InvalidPatronShares` | Patron shares do not sum to 100; correct the three share values. |
+| 2 | `TalosNotFound` | Requested Talos ID has no storage record; verify the ID and registry state. Added in v1.5.0. |
+| 3 | `MetadataFieldTooLong` | A caller-supplied field in `update_creator_metadata` exceeds its byte limit (`name` > 64, `category` > 32, `description` > 512); shorten the field and retry. Added in v1.5.0. |
+| 4 | `GovernanceTitleTooLong` | TalosGovernance proposal title exceeds the byte limit; shorten the title and retry. No partial proposal is persisted. Added with governance metadata validation. |
 
 ### TalosNameService (`ContractError`)
 
@@ -36,6 +45,35 @@ This page documents errors exposed by the contract sources in this workspace. Nu
 | 13 | `TalosNotFound` | Registry has no Talos for the supplied ID; verify ID and registry state. |
 | 14 | `AccountingOverflow` | Claim would make claimed amount exceed epoch total; resolve accounting state before retrying. |
 | 15 | `AlreadyRecovered` | Epoch has already been recovered. |
+| 16 | `InvalidPatronShares` | Supplied patron shares do not sum to 100%. |
+| 17 | `InconsistentShareData` | Rounding dust calculation conflicts with existing epoch claim data. |
+| 18 | `NoPendingAdmin` | No pending administrator nomination exists to accept or cancel. |
+
+### TalosGovernance (`GovernanceError`)
+
+| Code | Variant | Meaning / caller action |
+|---:|---|---|
+| 1 | `AlreadyInitialized` | `initialize` already completed; do not retry initialization. |
+| 2 | `NotInitialized` | Required state is absent; initialize before calling this method. |
+| 3 | `UnauthorizedAdmin` | Caller is not the configured administrator. |
+| 4 | `InvalidQuorum` | Quorum must be positive; submit a positive value. |
+| 5 | `InvalidConsensusThreshold` | Consensus threshold must be 1..10000 bps; submit an in-range value. |
+| 6 | `InvalidVotingPeriod` | Voting period must be positive; submit a positive value. |
+| 7 | `EmptyTitle` | Proposal title is empty; supply a non-empty title. |
+| 8 | `EmptyDescription` | Proposal description is empty; supply a non-empty description. |
+| 9 | `ProposalNotFound` | Requested proposal does not exist; verify the proposal ID. |
+| 10 | `ProposalNotActive` | Proposal is not active; check proposal state before retrying. |
+| 11 | `VotingPeriodEnded` | Voting period has ended; voting is no longer accepted. |
+| 12 | `VotingPeriodNotEnded` | Voting period has not ended; wait until it closes. |
+| 13 | `ProposalNotApproved` | Proposal is not approved; the operation requires an approved proposal. |
+| 14 | `AlreadyVoted` | This voter has already voted on this proposal. |
+| 15 | `NoVotingPower` | Voter has no eligible voting weight. |
+| 16 | `NegativeBalance` | Cached balance cannot be negative; review balance state. |
+| 17 | `DomainPaused` | Write operation is blocked by pause state; retry after unpause. |
+| 18 | `InvalidTtlBounds` | `extend_ttl_batch` bounds were rejected by the shared `ttl-manager` validator. |
+| 19 | `InvalidProposalThreshold` | Proposal threshold must be non-negative; submit a value >= 0. |
+| 20 | `InsufficientVotingPower` | Proposer's voting power at the snapshot ledger is below the configured `proposal_threshold`; acquire more voting power before proposing. |
+| 21 | `GovernanceSummaryTooLong` | Proposal summary exceeds the byte limit; shorten the summary and retry. No partial proposal is persisted. Validation runs before any persistent write. |
 
 ### Storage migration helper (`MigrationError`)
 
@@ -48,6 +86,7 @@ These are returned by the `storage_migration` library used by the registry, not 
 | 3 | `MigrationInProgress` | Another migration holds the lock; wait for it to finish. |
 | 4 | `RollbackNotAllowed` | Rollback target is not below current version. |
 | 5 | `RollbackTooDeep` | Rollback exceeds the supported depth. |
+| 6 | `TargetExceedsMax` | Target version exceeds the maximum supported schema version. |
 
 ## String panic diagnostics
 
@@ -68,17 +107,14 @@ These are returned by the `storage_migration` library used by the registry, not 
 | Registry | `Unsupported event schema major version` | Requested event schema major version is unsupported. |
 | Registry | `Name cannot be empty`; `Name exceeds maximum byte length` | Caller-supplied Talos name is missing or exceeds 64 bytes. |
 | Registry | `Category exceeds maximum byte length`; `Description exceeds maximum byte length` | Talos category (> 32 bytes) or description (> 512 bytes) metadata is too long. |
+| Registry | `Name cannot be empty` (in `update_creator_metadata`) | Name field supplied to `update_creator_metadata` is empty; use a non-empty name. |
+| Governance | Proposal title/summary byte-limit rejections | Title or summary exceeds its byte limit; metadata is validated before any persistent write so no partial proposal is created. Prefer the typed `GovernanceTitleTooLong` / `GovernanceSummaryTooLong` codes. |
 | Registry | `Token symbol cannot be empty`; `Token symbol exceeds maximum byte length` | Pulse `token_symbol` is missing or exceeds 12 bytes. |
-| Registry | Migration/rollback rejection diagnostics | Migration helper rejected version ordering, range, or in-progress state. |
+| Registry | `Migration target must be greater than or equal to current version`; `Migration target exceeds supported schema version`; Migration/rollback rejection diagnostics | Explicit migration target is below current version, exceeds latest supported schema version, or migration helper rejected ordering/lock state. |
 | Registry, Governance, Name service | `Domain is paused` | The write path's pause domain is active (or was paused indefinitely). |
 | Registry, Governance, Name service | `ttl bounds: min_age exceeds max_age`; `ttl bounds: max_keys must be greater than zero`; `ttl bounds: max_keys exceeds MAX_BATCH_KEYS` | `extend_ttl_batch` bounds were rejected by the shared `ttl-manager` validator before any storage read or write. |
-| Governance | `Already initialized` | Initialization already completed. |
-| Governance | `Quorum must be positive`; `Consensus threshold must be 1..10000 bps`; `Voting period must be positive` | Initial or updated configuration is outside bounds. |
-| Governance | `Title cannot be empty`; `Description cannot be empty` | Proposal metadata is missing. |
-| Governance | `Proposal is not active`; `Voting period has ended`; `Voting period has not ended`; `Proposal is not approved` | Proposal state or timing disallows the operation. |
-| Governance | `Already voted on this proposal`; `No voting power` | Voter already voted or has no eligible weight. |
-| Governance | `Balance cannot be negative`; `Unauthorized admin` | Invalid cached balance or caller is not admin. |
 | Name service | `Invalid name...`; `Name already taken` | Name validation failed or name is registered already. |
+| Name service | `Name cannot be empty after canonicalization`; `Name exceeds maximum input length for canonicalization`; `Name exceeds maximum byte length after canonicalization` | `register_name` or `canonicalize` received a name that is empty after trimming, longer than 64 bytes, or longer than 32 bytes after trimming. `resolve_name` and `is_name_available` never fail for such input: they return `None` and `false`. |
 | Name service | `name_fee must be non-negative`; `Asset not in registry allowlist...` | Invalid fee configuration or payment asset. |
 | Name service | Registry interface/version diagnostics | Configured registry is incompatible or below required version. |
 | Name service | Timelock configuration/schedule/lifecycle diagnostics (see Registry rows) | Timelock bounds, schedule timing, or proposal lifecycle check failed. |
@@ -91,3 +127,7 @@ Soroban authorization failures, missing entry points, invalid XDR/value types, r
 ## Maintaining this reference
 
 Update this page when adding or changing a `#[contracterror]` variant, and preserve existing discriminants for deployed contracts. Document new panic diagnostics as non-stable text; do not assign numeric codes to panic strings unless the contract exposes a typed error.
+
+## Budget regression gates (#610)
+
+Budget regression gates are host-side (non-WASM) test assertions that verify each entry-point stays within CPU-instruction and memory-byte ceilings measured by `env.budget()`. Each gate records the baseline instruction count and fails the test if a change regresses beyond the configured tolerance.

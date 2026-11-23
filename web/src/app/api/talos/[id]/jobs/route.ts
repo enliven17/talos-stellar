@@ -1,3 +1,4 @@
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { logger } from "@/lib/logger";
 import { db } from "@/db";
@@ -8,6 +9,9 @@ import { fulfillInstant } from "@/lib/fulfillment";
 import { OPERATOR_PUBLIC_KEY, USDC_ISSUER } from "@/lib/stellar-config";
 import { ingestJobToLedger } from "@/lib/reputation-ledger";
 import { applyQuotaHeaders, checkAndIncrementQuota, quotaExceededResponse } from "@/lib/quota";
+import { registerTx } from "@/lib/reconciler";
+import { currentStateFromLog } from "@/lib/governance/events";
+import { toLifecycleState } from "@/lib/governance/lifecycle";
 
 const IDEMPOTENCY_KEY_MAX_BYTES = 128;
 
@@ -71,6 +75,20 @@ function idempotentResponse(
   return res;
 }
 
+/**
+ * Thrown when a transaction was submitted to the Stellar network but its
+ * operations do not satisfy the expected payment terms (wrong amount, wrong
+ * payee, or wrong asset).  The user's funds have been transferred — this is
+ * NOT retryable.
+ */
+class PaymentVerificationError extends Error {
+  readonly retryable = false as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "PaymentVerificationError";
+  }
+}
+
 async function submitAndVerifyPayment(
   signedXdr: string,
   expectedAmount: string,
@@ -79,10 +97,17 @@ async function submitAndVerifyPayment(
   const { TransactionBuilder, Horizon, Networks, Asset } = await import("@stellar/stellar-sdk");
   const server = new Horizon.Server("https://horizon-testnet.stellar.org");
   const tx = TransactionBuilder.fromXDR(signedXdr, Networks.TESTNET);
+
+  // Any error thrown here (network outage, node error, XDR parse failure)
+  // means the transaction has NOT landed on-chain — the user was NOT charged
+  // and the caller may safely retry with the same signed XDR.
   const result = await server.submitTransaction(tx);
   const txHash = result.hash;
 
-  // Verify at least one operation is a USDC payment to the expected recipient
+  // The payment has now been submitted on-chain.  Verification checks that
+  // the submitted operations match what the service expects.  A mismatch
+  // (wrong payee, wrong asset, insufficient amount) means the user's funds
+  // have already been transferred — this is NOT retryable.
   const USDC_ISSUER_VAL = USDC_ISSUER;
   const usdc = new Asset("USDC", USDC_ISSUER_VAL);
   const ops = tx.operations as unknown as Array<{
@@ -100,13 +125,15 @@ async function submitAndVerifyPayment(
       parseFloat(op.amount ?? "0") >= parseFloat(expectedAmount),
   );
   if (!valid) {
-    throw new Error("Payment TX does not include required USDC payment to service recipient");
+    throw new PaymentVerificationError(
+      "Payment was submitted but did not match the expected amount or recipient",
+    );
   }
 
   return { txHash };
 }
 
-export async function POST(
+async function _POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -155,11 +182,21 @@ export async function POST(
 
     if (!talos) return Response.json({ error: "TALOS not found" }, { status: 404 });
     if (!service) return Response.json({ error: "This agent offers no services" }, { status: 404 });
-    if (talos.status === "Paused") {
-      return Response.json({ error: "This agent is paused and cannot accept new work" }, { status: 409 });
-    }
-    if (talos.status === "Retired") {
-      return Response.json({ error: "This agent is retired and cannot accept new work" }, { status: 409 });
+    const lifecycleTip = await currentStateFromLog(id);
+    const legacyState = toLifecycleState(talos.status);
+    const lifecycleState = legacyState === "retired" ||
+      (legacyState === "paused" && lifecycleTip?.state === "active")
+      ? legacyState
+      : lifecycleTip?.state ?? legacyState;
+    if (lifecycleState !== "active") {
+      const restriction = lifecycleState === "paused"
+        ? { code: "AGENT_PAUSED", state: "paused", error: "This agent is paused and cannot accept new work" }
+        : lifecycleState === "retiring"
+          ? { code: "AGENT_DRAINING", state: "draining", error: "This agent is draining and cannot accept new work" }
+          : lifecycleState === "retired"
+            ? { code: "AGENT_RETIRED", state: "retired", error: "This agent is retired and cannot accept new work" }
+            : { code: "AGENT_UNAVAILABLE", state: lifecycleState, error: "This agent is not available to accept new work" };
+      return Response.json(restriction, { status: 409 });
     }
 
     // ── Idempotency check ─────────────────────────────────────────────
@@ -243,7 +280,7 @@ export async function POST(
 
     // Submit + verify payment if signedXdr provided; otherwise use legacy txHash
     // Check quota before doing expensive payment work.
-    const quotaResult = await checkAndIncrementQuota(db, id, "job_writes");
+    const quotaResult = await checkAndIncrementQuota(db, id, "job_writes", "commerce:write");
     if (!quotaResult.ok) return quotaExceededResponse(quotaResult);
 
     let txHash: string;
@@ -253,7 +290,30 @@ export async function POST(
       try {
         ({ txHash } = await submitAndVerifyPayment(signedXdr, String(service.price), recipient));
       } catch (err: unknown) {
-        return Response.json({ error: err instanceof Error ? err.message : "Payment submission failed" }, { status: 402 });
+        // PaymentVerificationError: the TX was submitted and funds were
+        // transferred, but the operations did not match the expected payment
+        // terms.  The user's payment cannot be undone — NOT retryable.
+        if (err instanceof PaymentVerificationError) {
+          return Response.json(
+            {
+              error: err.message,
+              retryable: false,
+            },
+            { status: 402 },
+          );
+        }
+        // All other errors (network outage, Horizon node error, XDR parse
+        // failure, etc.) mean the transaction has NOT landed on-chain.
+        // The user has NOT been charged and may safely retry.
+        return Response.json(
+          {
+            error: err instanceof Error ? err.message : "Payment submission failed",
+            retryable: true,
+            retryAfterMs: 5000,
+            hint: "The Stellar network may be temporarily busy. Wait a few seconds and retry.",
+          },
+          { status: 402 },
+        );
       }
     } else {
       txHash = legacyTxHash!;
@@ -277,8 +337,13 @@ export async function POST(
       try {
         result = await fulfillInstant(service.serviceName, payload ?? {});
       } catch (err: unknown) {
+        // Fulfillment failed after payment was confirmed — payment was charged.
+        // NOT retryable: the user should contact support.
         return Response.json(
-          { error: `Fulfillment failed: ${err instanceof Error ? err.message : "unknown error"}` },
+          {
+            error: `Fulfillment failed: ${err instanceof Error ? err.message : "unknown error"}`,
+            retryable: false,
+          },
           { status: 502 },
         );
       }
@@ -374,6 +439,20 @@ export async function POST(
     );
 
     const finalBody = { ...responseBody, jobId: job.id };
+
+    // Register the payment txHash with the finality reconciler so it can
+    // track on-chain settlement and apply repair if the tx is later found to
+    // be failed or expired.  Fire-and-forget: a registration failure never
+    // blocks the caller.
+    registerTx({
+      txHash,
+      sourceType: "commerce_job",
+      sourceId: job.id,           // tls_commerce_jobs.id is the repair target
+      expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000), // 2 h window
+    }).catch((err) =>
+      logger.error({ err, txHash, jobId: job.id, talosId: id }, "reconciler_register_tx_failed"),
+    );
+
     return applyQuotaHeaders(Response.json(finalBody, { status: 201 }), quotaResult);
   } catch (err: unknown) {
     const e = err as Record<string, unknown>;
@@ -397,7 +476,7 @@ export async function POST(
  * GET /api/talos/:id/jobs?txHash=xxx  or  ?jobId=xxx
  * Poll job status
  */
-export async function GET(
+async function _GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -433,3 +512,6 @@ export async function GET(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);
+export const GET = withRequestId(_GET);

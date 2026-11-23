@@ -5,6 +5,7 @@
  * Uses the same fencing-token pattern as commerce jobs.
  */
 
+import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
 import { tlsTalos, tlsWebhookDeliveries } from "@/db/schema";
@@ -32,9 +33,10 @@ const submitResultSchema = z.object({
   error: z.string().max(2000).nullable().optional(),
   responseBody: z.string().max(1024).nullable().optional(),
   fencingToken: z.number().int().nonnegative(),
+  attempt: z.number().int().nonnegative().optional(),
 });
 
-export async function POST(
+async function _POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -53,7 +55,7 @@ export async function POST(
       return Response.json({ error: "Invalid request body" }, { status: 400 });
     }
 
-    const { statusCode, error, responseBody, fencingToken } = body;
+    const { statusCode, error, responseBody, fencingToken, attempt } = body;
 
     // Fetch the current delivery
     const delivery = await db
@@ -80,6 +82,21 @@ export async function POST(
       );
     }
 
+    if (attempt !== undefined && attempt !== delivery.attempts) {
+      const isStale = attempt < delivery.attempts;
+      logger.warn(
+        { deliveryId: id, attempt, currentAttempts: delivery.attempts },
+        isStale ? "stale_attempt_acknowledgement_rejected" : "attempt_mismatch_acknowledgement_rejected",
+      );
+      return Response.json(
+        {
+          error: isStale ? "Stale attempt acknowledgement" : "Attempt mismatch",
+          detail: `Acknowledgement is for attempt ${attempt}, but delivery is currently at attempt ${delivery.attempts}`,
+        },
+        { status: 409 },
+      );
+    }
+
     const sc = statusCode ?? 0;
     const isSuccess = sc >= 200 && sc < 500;
     const newAttempts = delivery.attempts + 1;
@@ -91,7 +108,7 @@ export async function POST(
 
     const nextAttemptAt = newStatus === "failed" ? calculateBackoff(newAttempts) : null;
 
-    await db
+    const [updated] = await db
       .update(tlsWebhookDeliveries)
       .set({
         status: newStatus,
@@ -111,8 +128,24 @@ export async function POST(
         and(
           eq(tlsWebhookDeliveries.id, id),
           eq(tlsWebhookDeliveries.fencingToken, fencingToken),
+          eq(tlsWebhookDeliveries.attempts, delivery.attempts),
         ),
+      )
+      .returning({ id: tlsWebhookDeliveries.id });
+
+    if (!updated) {
+      logger.warn(
+        { deliveryId: id, fencingToken, attempt, currentAttempts: delivery.attempts },
+        "stale_attempt_acknowledgement_race_rejected",
       );
+      return Response.json(
+        {
+          error: "Stale attempt acknowledgement",
+          detail: "Delivery lease or attempt advanced before acknowledgement could be applied",
+        },
+        { status: 409 },
+      );
+    }
 
     const logLevel = newStatus === "dead_letter" ? "error" : newStatus === "delivered" ? "info" : "warn";
     logger[logLevel](
@@ -131,3 +164,5 @@ export async function POST(
     return Response.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+export const POST = withRequestId(_POST);
