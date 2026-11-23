@@ -23,14 +23,16 @@ export interface AuditLogWritePayload {
 }
 
 registerHandler<AuditLogWritePayload, { inserted: true }>(AUDIT_LOG_WRITE_QUEUE, async (ctx) => {
-  await db.insert(tlsApiAuditLogs).values({
-    talosId: ctx.payload.talosId,
-    method: ctx.payload.method,
-    path: ctx.payload.path,
-    statusCode: ctx.payload.statusCode,
-    ipAddress: ctx.payload.ipAddress,
-    denialReason: ctx.payload.denialReason ?? null,
-    scopesRequired: ctx.payload.scopesRequired ?? null,
+  await ctx.applyEffect(async () => {
+    await db.insert(tlsApiAuditLogs).values({
+      talosId: ctx.payload.talosId,
+      method: ctx.payload.method,
+      path: ctx.payload.path,
+      statusCode: ctx.payload.statusCode,
+      ipAddress: ctx.payload.ipAddress,
+      denialReason: ctx.payload.denialReason ?? null,
+      scopesRequired: ctx.payload.scopesRequired ?? null,
+    });
   });
   return { inserted: true };
 });

@@ -8,9 +8,11 @@
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
+import { PgDialect } from "drizzle-orm/pg-core";
 import {
   DIRECTORY_SORT_FIELDS,
   DIRECTORY_STATUS_FILTER,
+  parseDirectoryAddressFilter,
   parseDirectoryCategoryFilter,
   parseDirectoryStatusFilter,
   parseMarketplaceSort,
@@ -28,7 +30,12 @@ const mocks = vi.hoisted(() => {
       "innerJoin", "groupBy", "as",
     ];
     for (const m of methods) {
-      obj[m] = vi.fn(() => obj);
+      obj[m] = m === "where"
+        ? vi.fn((condition: unknown) => {
+            mocks.whereConditions.push(condition);
+            return obj;
+          })
+        : vi.fn(() => obj);
     }
     // .then() resolves with an empty array by default
     obj.then = vi.fn((cb: (v: unknown[]) => unknown) => Promise.resolve(cb([])));
@@ -36,6 +43,7 @@ const mocks = vi.hoisted(() => {
   };
 
   return {
+    whereConditions: [] as unknown[],
     mockDb: {
       select: vi.fn(() => chain()),
       insert: vi.fn(),
@@ -67,7 +75,12 @@ function buildChain(results: unknown[]): Record<string, unknown> {
     "innerJoin", "groupBy", "as",
   ];
   for (const m of methods) {
-    obj[m] = vi.fn(() => obj);
+    obj[m] = m === "where"
+      ? vi.fn((condition: unknown) => {
+          mocks.whereConditions.push(condition);
+          return obj;
+        })
+      : vi.fn(() => obj);
   }
   obj.then = vi.fn((cb: (v: unknown[]) => unknown) => Promise.resolve(cb(results)));
   return obj;
@@ -135,6 +148,25 @@ describe("parseDirectoryStatusFilter", () => {
 // ---------------------------------------------------------------------------
 // 2. parseDirectoryCategoryFilter — pure parser
 // ---------------------------------------------------------------------------
+
+describe("parseDirectoryAddressFilter", () => {
+  it("leaves Stellar address casing unchanged", () => {
+    const address = "GAbCDef0123456789";
+    expect(parseDirectoryAddressFilter(address)).toEqual({ ok: true, address });
+  });
+
+  it("trims surrounding whitespace without changing address casing", () => {
+    expect(parseDirectoryAddressFilter("  GAbCDef0123456789  ")).toEqual({
+      ok: true,
+      address: "GAbCDef0123456789",
+    });
+  });
+
+  it("rejects empty and oversized account identifiers", () => {
+    expect(parseDirectoryAddressFilter("   ").ok).toBe(false);
+    expect(parseDirectoryAddressFilter("G".repeat(65)).ok).toBe(false);
+  });
+});
 
 describe("parseDirectoryCategoryFilter", () => {
   it("returns ok:true with null when raw is null (absent)", () => {
@@ -270,6 +302,21 @@ describe("GET /api/talos — sort validation", () => {
     mocks.mockDb.select.mockReturnValue(buildChain([]));
     const res = await talosGET(req("/api/talos"));
     expect(res.status).toBe(200);
+  });
+
+  it("compares an address filter using its original case", async () => {
+    mocks.whereConditions.length = 0;
+    mocks.mockDb.select.mockReturnValue(buildChain([]));
+    const address = "GAbCDef0123456789";
+    const res = await talosGET(req("/api/talos", { address }));
+    expect(res.status).toBe(200);
+
+    const dialect = new PgDialect();
+    const queries = mocks.whereConditions
+      .filter((condition): condition is import("drizzle-orm").SQL => Boolean(condition))
+      .map((condition) => dialect.sqlToQuery(condition));
+    expect(queries.some((query) => query.params.includes(address))).toBe(true);
+    expect(queries.some((query) => query.params.includes(address.toLowerCase()))).toBe(false);
   });
 
   it("returns 200 with valid sort=createdAt direction=asc", async () => {

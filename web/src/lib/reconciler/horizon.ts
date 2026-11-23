@@ -12,12 +12,16 @@
  * logic.  It can be fully mocked in unit tests.
  */
 
-import type { HorizonPollResult } from "./types";
+import type {
+  HorizonPollResult,
+  HorizonProviderFailureReasonCode,
+  HorizonFailureCategory,
+} from "./types";
 
 // ─── Horizon error type helpers ───────────────────────────────────────────────
 
 /** Horizon SDK throws objects with a `response.status` field for HTTP errors. */
-function extractHttpStatus(err: unknown): number | null {
+export function extractHttpStatus(err: unknown): number | null {
   if (
     err &&
     typeof err === "object" &&
@@ -32,12 +36,44 @@ function extractHttpStatus(err: unknown): number | null {
   return null;
 }
 
-function extractErrorMessage(err: unknown): string {
+export function extractErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (err && typeof err === "object" && "message" in err) {
     return String((err as { message: unknown }).message);
   }
   return String(err);
+}
+
+// ─── Network identity cache ───────────────────────────────────────────────────
+
+const horizonPassphraseCache = new Map<string, string>();
+
+/**
+ * Fetch and cache the network passphrase from Horizon's root endpoint.
+ */
+export async function fetchHorizonNetworkPassphrase(
+  horizonUrl: string,
+): Promise<string | null> {
+  const cached = horizonPassphraseCache.get(horizonUrl);
+  if (cached) return cached;
+
+  try {
+    const { Horizon } = await import("@stellar/stellar-sdk");
+    const server = new Horizon.Server(horizonUrl);
+    const root = await server.root();
+    if (root && typeof root.network_passphrase === "string") {
+      horizonPassphraseCache.set(horizonUrl, root.network_passphrase);
+      return root.network_passphrase;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Clear cached network passphrases (used in tests). */
+export function clearHorizonNetworkPassphraseCache(): void {
+  horizonPassphraseCache.clear();
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -53,6 +89,8 @@ export async function pollTransaction(
   txHash: string,
   horizonUrl: string,
 ): Promise<HorizonPollResult> {
+  const networkPassphrase = (await fetchHorizonNetworkPassphrase(horizonUrl)) ?? undefined;
+
   try {
     const { Horizon } = await import("@stellar/stellar-sdk");
     const server = new Horizon.Server(horizonUrl);
@@ -63,32 +101,61 @@ export async function pollTransaction(
         ? tx.ledger
         : parseInt(String(tx.ledger), 10);
 
+    const observedAt =
+      typeof (tx as { created_at?: unknown }).created_at === "string"
+        ? new Date((tx as { created_at: string }).created_at)
+        : new Date();
+
     if (tx.successful) {
-      return { outcome: "confirmed", ledger, successful: true };
+      return {
+        outcome: "confirmed",
+        ledger,
+        successful: true,
+        networkPassphrase,
+      };
     } else {
       // Transaction was included in a ledger but the operation set failed
       // (e.g. insufficient balance, bad sequence number already applied).
       const detail = extractResultCode(tx);
-      return { outcome: "failed", ledger, successful: false, detail };
+      return {
+        outcome: "failed",
+        ledger,
+        successful: false,
+        detail,
+        networkPassphrase,
+      };
     }
   } catch (err) {
     const httpStatus = extractHttpStatus(err);
 
     if (httpStatus === 404) {
       // Transaction not yet on chain (or was never submitted)
-      return { outcome: "not_found" };
+      return { outcome: "not_found", networkPassphrase };
     }
 
     // 429 rate-limit or 5xx transient: retryable
     const retryable =
       httpStatus === null || httpStatus === 429 || httpStatus >= 500;
 
+    const reasonCode = classifyHorizonError(err, httpStatus);
+
     return {
       outcome: "error",
       message: extractErrorMessage(err),
       retryable,
+      networkPassphrase,
     };
   }
+}
+
+/**
+ * Extract observation source from a Horizon poll result, defaulting to "horizon".
+ */
+export function extractObservationSource(pollResult?: HorizonPollResult | null): string {
+  if (pollResult && "source" in pollResult && typeof pollResult.source === "string" && pollResult.source) {
+    return pollResult.source;
+  }
+  return "horizon";
 }
 
 /**
@@ -111,6 +178,29 @@ export async function fetchCurrentLedger(horizonUrl: string): Promise<number | n
   } catch {
     return null;
   }
+}
+
+/**
+ * Returns true if a poll result represents a trusted observation of the payment on-chain.
+ * Only "confirmed" and "failed" outcomes with a valid positive ledger sequence are trusted.
+ * "not_found" and "error" are not trusted observations.
+ */
+export function isTrustedObservation(
+  pollResult: HorizonPollResult | null | undefined,
+): pollResult is {
+  outcome: "confirmed" | "failed";
+  ledger: number;
+  successful: boolean;
+  observedAt?: Date;
+  detail?: string;
+} {
+  if (!pollResult) return false;
+  return (
+    (pollResult.outcome === "confirmed" || pollResult.outcome === "failed") &&
+    typeof pollResult.ledger === "number" &&
+    Number.isFinite(pollResult.ledger) &&
+    pollResult.ledger > 0
+  );
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────

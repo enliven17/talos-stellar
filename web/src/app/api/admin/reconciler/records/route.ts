@@ -20,6 +20,7 @@ type AllowedStatus = (typeof ALLOWED_STATUSES)[number];
 export type ReconcilerRecordDTO = {
   id: string;
   txHashTruncated: string;
+  networkPassphrase?: string | null;
   sourceType: string;
   sourceId: string;
   finalityStatus: string;
@@ -119,6 +120,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     .select({
       id: tlsStellarTxRecords.id,
       txHash: tlsStellarTxRecords.txHash,
+      networkPassphrase: tlsStellarTxRecords.networkPassphrase,
       sourceType: tlsStellarTxRecords.sourceType,
       sourceId: tlsStellarTxRecords.sourceId,
       finalityStatus: tlsStellarTxRecords.finalityStatus,
@@ -141,6 +143,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const records: ReconcilerRecordDTO[] = page.map((row) => ({
     id: row.id,
     txHashTruncated: truncateHash(row.txHash),
+    networkPassphrase: row.networkPassphrase ?? null,
     sourceType: row.sourceType,
     sourceId: row.sourceId,
     finalityStatus: row.finalityStatus,

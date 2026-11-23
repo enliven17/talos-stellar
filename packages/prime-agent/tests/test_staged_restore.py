@@ -208,7 +208,7 @@ class TestCheckpointCLIRestore:
     def test_cli_restore_success(self, tmp_path: Path, valid_checkpoint_file: Path):
         runner = CliRunner()
 
-        with patch("talos_agent.db.APP_DIR", tmp_path):
+        with patch("talos_agent.db.migrations.APP_DIR", tmp_path):
             result = runner.invoke(
                 checkpoint,
                 ["restore", "--input", str(valid_checkpoint_file), "--agent", "test_agent", "--json"],

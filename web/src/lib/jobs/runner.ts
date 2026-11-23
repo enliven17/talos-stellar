@@ -1,7 +1,8 @@
 import * as store from "./store";
+import { StaleLeaseError } from "./store";
 import { getHandler, registeredQueues } from "./registry";
 import { jobsConfig } from "./config";
-import type { JobRecord, RunOnceSummary } from "./types";
+import type { JobRecord, LeaseFence, RunOnceSummary } from "./types";
 
 export interface RunOnceOptions {
   /** Which queues to drain. Defaults to every registered handler's queue. */
@@ -9,7 +10,15 @@ export interface RunOnceOptions {
   batchSize?: number;
   workerId?: string;
   leaseDurationMs?: number;
+  maxLeaseExtensionMs?: number;
+  maxLeaseHorizonMs?: number;
   heartbeatIntervalMs?: number;
+  /**
+   * Maximum jobs any single queue may contribute to one drain batch.
+   * Default 0 (unlimited). When set, the batch is assembled by claiming at
+   * most this many jobs per queue in priority/runAt order.
+   */
+  fairBatchPerQueue?: number;
   /** Aborts in-flight handlers (e.g. from graceful shutdown). */
   signal?: AbortSignal;
   /**
@@ -38,6 +47,7 @@ export async function runOnce(opts: RunOnceOptions = {}): Promise<RunOnceSummary
     deadLettered: 0,
     cancelled: 0,
     reaped: 0,
+    agedOut: 0,
   };
 
   // Recover jobs whose worker died mid-lease before claiming new work, so a
@@ -45,9 +55,13 @@ export async function runOnce(opts: RunOnceOptions = {}): Promise<RunOnceSummary
   const reaped = await store.reapExpiredLeases();
   summary.reaped = reaped.requeued + reaped.deadLettered;
 
+  // Expire pending jobs that have waited past the queue-age deadline without
+  // ever being claimed. These never ran, so no retry attempt is consumed.
+  summary.agedOut = await store.expireAgedPendingJobs();
+
   if (queues.length === 0) return summary;
 
-  const batch = await store.leaseBatch(queues, opts.batchSize ?? jobsConfig.batchSize, opts.workerId, opts.leaseDurationMs);
+  const batch = await store.leaseBatch(queues, opts.batchSize ?? jobsConfig.batchSize, opts.workerId, opts.leaseDurationMs, opts.fairBatchPerQueue);
   summary.leased = batch.length;
   opts.onLeased?.(batch);
 
@@ -58,13 +72,21 @@ export async function runOnce(opts: RunOnceOptions = {}): Promise<RunOnceSummary
 
 async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnceSummary): Promise<void> {
   const leaseId = job.leaseId!; // guaranteed by leaseBatch()
+  const leaseGeneration = job.leaseGeneration;
+  const fence: LeaseFence = { jobId: job.id, leaseId, leaseGeneration };
   const handler = getHandler(job.queue);
 
   if (!handler) {
     // Stale row for a queue nothing handles anymore (e.g. a removed
     // feature) — dead-letter instead of retrying forever against nothing.
-    await store.fail(job.id, leaseId, new Error(`No handler registered for queue "${job.queue}"`));
-    summary.deadLettered += 1;
+    const failed = await store.fail(
+      job.id,
+      leaseId,
+      new Error(`No handler registered for queue "${job.queue}"`),
+      undefined,
+      leaseGeneration,
+    );
+    if (failed) summary.deadLettered += 1;
     return;
   }
 
@@ -75,11 +97,26 @@ async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnce
   let lostLease = false;
   let cancelled = false;
   const runHeartbeat = async () => {
-    const result = await store.heartbeat(job.id, leaseId, opts.leaseDurationMs);
+    const result = await store.heartbeat(job.id, leaseId, opts.leaseDurationMs, leaseGeneration);
     if (!result.ok) lostLease = true;
     if (result.cancelled) cancelled = true;
     if (!result.ok || result.cancelled) controller.abort();
     return result;
+  };
+
+  const applyEffect = async <T>(effect: (activeFence: LeaseFence) => Promise<T>): Promise<T> => {
+    if (lostLease || cancelled) {
+      throw new StaleLeaseError(fence);
+    }
+    try {
+      return await store.withLeaseFence(fence, effect, job.queue);
+    } catch (err) {
+      if (err instanceof StaleLeaseError) {
+        lostLease = true;
+        controller.abort();
+      }
+      throw err;
+    }
   };
 
   const heartbeatTimer = setInterval(runHeartbeat, opts.heartbeatIntervalMs ?? jobsConfig.heartbeatIntervalMs);
@@ -95,24 +132,53 @@ async function processJob(job: JobRecord, opts: RunOnceOptions, summary: RunOnce
       attempts: job.attempts,
       maxAttempts: job.maxAttempts,
       payload: job.payload,
+      leaseId,
+      leaseGeneration,
+      applyEffect,
       signal: controller.signal,
       heartbeat: runHeartbeat,
+      extendLease: runExtendLease,
     });
 
     if (lostLease || cancelled) {
-      if (cancelled) summary.cancelled += 1;
+      if (cancelled) {
+        summary.cancelled += 1;
+        await store.recordAttempt({
+          jobId: job.id,
+          attemptNumber: job.attempts,
+          workerId: opts.workerId ?? job.leaseOwner,
+          leaseId,
+          durationMs: Date.now() - startedAt,
+          terminalReason: "cancelled",
+        });
+      }
       return;
     }
 
-    const completed = await store.complete(job.id, leaseId, result, Date.now() - startedAt);
+    const completed = await store.complete(job.id, leaseId, result, Date.now() - startedAt, leaseGeneration);
     if (completed) summary.completed += 1;
   } catch (err) {
+    if (err instanceof StaleLeaseError) {
+      lostLease = true;
+    }
+
     if (lostLease || cancelled) {
-      if (cancelled) summary.cancelled += 1;
+      if (cancelled) {
+        summary.cancelled += 1;
+        await store.recordAttempt({
+          jobId: job.id,
+          attemptNumber: job.attempts,
+          workerId: opts.workerId ?? job.leaseOwner,
+          leaseId,
+          durationMs: Date.now() - startedAt,
+          terminalReason: "cancelled",
+          error: err,
+        });
+      }
       return;
     }
 
-    const failed = await store.fail(job.id, leaseId, err, Date.now() - startedAt);
+    const failed = await store.fail(job.id, leaseId, err, Date.now() - startedAt, leaseGeneration);
     if (failed?.status === "dead_letter") summary.deadLettered += 1;
     else if (failed?.status === "pending") summary.retried += 1;
   } finally {
