@@ -34,10 +34,7 @@ export interface OutboxEvent<TPayload = unknown> {
   maxAttempts: number;
   dedupeKey: string | null;
   lastError: string | null;
-  /** Declared payload schema version the event was validated against (null = no schema registered). */
-  schemaVersion?: number | null;
-  /** Bounded validation summary; set only when the event was quarantined. */
-  validationSummary?: PayloadValidationSummary | null;
+  originalEventId: string | null;
   createdAt: Date;
   updatedAt: Date;
   dispatchedAt: Date | null;
@@ -48,6 +45,7 @@ export interface WriteEventInput<TPayload = unknown> {
   aggregateId: string;
   eventType: string;
   payload: TPayload;
+  payloadVersion?: number;
   maxAttempts?: number;
   dedupeKey?: string;
 }
