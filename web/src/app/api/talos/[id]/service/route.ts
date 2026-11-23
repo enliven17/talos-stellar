@@ -7,6 +7,7 @@ import { resolveTalosFromRequest, verifyAgentApiKey } from "@/lib/auth";
 import { verifyX402Payment, settleX402Payment } from "@/lib/stellar-x402";
 import { fulfillInstant } from "@/lib/fulfillment";
 import { registerServiceSchema, submitBidSchema, parseBody } from "@/lib/schemas";
+import { toLifecycleState, acceptsNewWork } from "@/lib/governance/lifecycle";
 import { withTraceContext } from "@/lib/tracing";
 import { logger } from "@/lib/logger";
 
@@ -42,7 +43,7 @@ async function handleGet(
         .limit(1)
         .then((r) => r[0] ?? null),
       db
-        .select({ agentWalletAddress: tlsTalos.agentWalletAddress })
+        .select({ agentWalletAddress: tlsTalos.agentWalletAddress, status: tlsTalos.status })
         .from(tlsTalos)
         .where(eq(tlsTalos.id, id))
         .limit(1)
@@ -71,6 +72,13 @@ async function handleGet(
         serviceName: service.serviceName,
         description: service.description,
         fulfillmentMode: service.fulfillmentMode,
+        availability:
+          talos?.status === "Draining"
+            ? "draining"
+            : talos?.status === "Active"
+              ? "available"
+              : "unavailable",
+        acceptsNewWork: talos ? acceptsNewWork(toLifecycleState(talos.status)) : false,
         talosId: id,
       },
       { status: 402 }
@@ -156,7 +164,7 @@ async function handlePost(
         .limit(1)
         .then((r) => r[0] ?? null),
       db
-        .select({ agentWalletAddress: tlsTalos.agentWalletAddress })
+        .select({ agentWalletAddress: tlsTalos.agentWalletAddress, status: tlsTalos.status })
         .from(tlsTalos)
         .where(eq(tlsTalos.id, id))
         .limit(1)
@@ -248,6 +256,19 @@ async function handlePost(
         talosId: id,
         requesterTalosId: requester.id,
       }, "new service purchase idempotent request");
+    }
+
+    if (!providerTalos || !acceptsNewWork(toLifecycleState(providerTalos.status))) {
+      const draining = providerTalos?.status === "Draining";
+      return Response.json(
+        {
+          error: draining ? "Service is draining and does not accept new work" : "Service is unavailable",
+          code: draining ? "SERVICE_DRAINING" : "SERVICE_UNAVAILABLE",
+          availability: draining ? "draining" : "unavailable",
+          retryable: false,
+        },
+        { status: 409 },
+      );
     }
 
     // 4. Replay prevention — check payment token against existing jobs

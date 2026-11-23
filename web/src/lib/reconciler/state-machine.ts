@@ -29,6 +29,38 @@ import { TERMINAL_STATES } from "./types";
 
 // ─── Guard ───────────────────────────────────────────────────────────────────
 
+/**
+ * Normalise a Stellar network passphrase or shorthand network name into
+ * its canonical network passphrase.
+ */
+export function normalizeNetworkPassphrase(
+  networkOrPassphrase?: string | null,
+): string | null {
+  if (!networkOrPassphrase) return null;
+  const trimmed = networkOrPassphrase.trim();
+  const lower = trimmed.toLowerCase();
+  if (lower === "testnet") {
+    return "Test SDF Network ; September 2015";
+  }
+  if (lower === "mainnet" || lower === "public") {
+    return "Public Global Stellar Network ; September 2015";
+  }
+  return trimmed;
+}
+
+/**
+ * Returns true if the observed network matches the expected/pinned network.
+ * If either network is unknown or omitted, returns true to preserve backward
+ * compatibility for unpinned records or legacy fixtures.
+ */
+export function isMatchingNetwork(
+  expected?: string | null,
+  observed?: string | null,
+): boolean {
+  if (!expected || !observed) return true;
+  return normalizeNetworkPassphrase(expected) === normalizeNetworkPassphrase(observed);
+}
+
 /** Returns true if the record is already in a terminal state. */
 export function isTerminal(record: TxRecord): boolean {
   return TERMINAL_STATES.has(record.finalityStatus);
@@ -109,6 +141,21 @@ export function transitionFromPending(
     };
   }
 
+  // Network identity check: reject observations from a foreign network without transitioning financial state
+  const pinnedNetwork = record.networkPassphrase ?? config.networkPassphrase;
+  if (
+    pinnedNetwork &&
+    pollResult.networkPassphrase &&
+    !isMatchingNetwork(pinnedNetwork, pollResult.networkPassphrase)
+  ) {
+    return {
+      lastLedgerChecked: currentLedger,
+      lastError: `Rejected observation from foreign network "${pollResult.networkPassphrase}" (pinned to "${pinnedNetwork}")`,
+      pollCount: record.pollCount + 1,
+      updatedAt: now,
+    };
+  }
+
   switch (pollResult.outcome) {
     case "confirmed":
       return {
@@ -171,6 +218,7 @@ export function transitionFromConfirming(
   currentLedger: number,
   config: ReconcilerConfig,
   now: Date = new Date(),
+  pollResult?: HorizonPollResult | null,
 ): TxRecordUpdate | null {
   if (record.finalityStatus !== "CONFIRMING") return null;
   if (!hasValidExpiryTimestamps(record, now)) return null;
@@ -181,6 +229,21 @@ export function transitionFromConfirming(
       finalityStatus: "EXPIRED",
       lastLedgerChecked: currentLedger,
       lastError: "Confirmation window expired (wall-clock)",
+      updatedAt: now,
+    };
+  }
+
+  // Network identity check: reject observations from a foreign network without transitioning financial state
+  const pinnedNetwork = record.networkPassphrase ?? config.networkPassphrase;
+  if (
+    pinnedNetwork &&
+    pollResult &&
+    pollResult.networkPassphrase &&
+    !isMatchingNetwork(pinnedNetwork, pollResult.networkPassphrase)
+  ) {
+    return {
+      lastLedgerChecked: currentLedger,
+      lastError: `Rejected observation from foreign network "${pollResult.networkPassphrase}" (pinned to "${pinnedNetwork}")`,
       updatedAt: now,
     };
   }
@@ -233,13 +296,22 @@ export function computeTransition(
 ): TxRecordUpdate | null {
   if (isTerminal(record)) return null;
 
+  // Ledger regression check: reject observations from older ledgers than
+  // previously seen to prevent re-processing stale Horizon data.
+  if (record.lastLedgerChecked !== null && currentLedger < record.lastLedgerChecked) {
+    return {
+      lastError: `Ledger regression detected: current=${currentLedger} < last=${record.lastLedgerChecked}`,
+      updatedAt: now,
+    };
+  }
+
   switch (record.finalityStatus) {
     case "PENDING":
       if (!pollResult) return null;
       return transitionFromPending(record, pollResult, currentLedger, config, now);
 
     case "CONFIRMING":
-      return transitionFromConfirming(record, currentLedger, config, now);
+      return transitionFromConfirming(record, currentLedger, config, now, pollResult);
 
     default:
       return null;
