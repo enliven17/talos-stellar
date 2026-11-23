@@ -111,6 +111,17 @@ cargo test -p talos-registry --lib test::registry_schema_compat -- --nocapture
 
 Tests use `Env::default()` synthetic `Address::generate(&env)` (like `web/tests` factories), `soroban_sdk::TryFromVal` where needed, and the `registry_schema_fixtures` parser. No `HORIZON_URL`.
 
+## Migration compatibility manifest
+
+`registry_schema/migration_manifest/` publishes the old → new `DataKey`
+mapping for the v1 → v2 storage upgrade (`manifest.json` plus synthetic v1 and
+v2 key sets). Only `TimelockConfig` changes (implicit default → explicitly
+persisted); every other key is byte-identical, so ownership (`CreatorOf`) and
+name-bearing records (`Talos`) are preserved. The contract publishes the
+manifest version it implements via the read-only
+`TalosRegistry::migration_key_manifest_version()` entry-point. Focused tests
+live in `contracts/talos_registry/src/registry_migration_manifest.rs`.
+
 ## References
 
 - `contracts/storage_migration/src/lib.rs` – versioned migration framework

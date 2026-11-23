@@ -42,6 +42,9 @@ import type {
   RotateWebhookSecretParams,
   RotateWebhookSecretResult,
   FinalizeWebhookSecretRotationResult,
+  WebhookDelivery,
+  ListWebhookDeliveriesParams,
+  WebhookDeliveryPage,
 } from "./types.js";
 
 import {
@@ -71,10 +74,20 @@ import {
   type RateLimitInfo,
 } from "./errors.js";
 import {
+  TranscriptRecorder,
+  TranscriptReplayer,
+  type HttpTranscript,
+  type TranscriptEntry,
+  type TranscriptRecorderOptions,
+  type TranscriptReplayOptions,
+} from "./transcript.js";
+import {
   generateIdempotencyKey,
   validateIdempotencyKey,
   isPayloadConflict,
   IdempotencyConflictError,
+  validateIdempotencyKeyConflict,
+  readIdempotencyKeyHeader,
 } from "./idempotency.js";
 import type { ChaosInjector } from "./chaos.js";
 import { FaultType } from "./chaos.js";
@@ -96,6 +109,8 @@ import {
   type TrackJobOptions,
   type TrackJobEvent,
   type TrackJobEventType,
+  type JobTrackerState,
+  type JobTrackerStateChange,
   type JobTerminalStatus,
   type JobTerminalOutcome,
   JobTerminalError,
@@ -107,7 +122,12 @@ import {
 
 // Legacy import path: `import { TalosAPIError } from "./client.js"`.
 export { TalosAPIError };
-export { generateIdempotencyKey, validateIdempotencyKey, IdempotencyConflictError };
+export {
+  generateIdempotencyKey,
+  validateIdempotencyKey,
+  validateIdempotencyKeyConflict,
+  IdempotencyConflictError,
+};
 export {
   JobTracker,
   trackJob,
@@ -121,6 +141,8 @@ export type {
   TrackJobOptions,
   TrackJobEvent,
   TrackJobEventType,
+  JobTrackerState,
+  JobTrackerStateChange,
   JobTerminalStatus,
   JobTerminalOutcome,
 };
@@ -161,6 +183,8 @@ export interface RetryPolicyOptions {
   jitter?: boolean;
   /** Injectable RNG for deterministic tests. Defaults to `Math.random`. */
   random?: () => number;
+  /** Observer invoked before each status-code retry. Must not throw. */
+  onRetry?: (event: RetryDecisionEvent) => void;
 }
 
 /** Bounded retry configuration based on typed error retryability. See {@link TalosClientOptions.retry}. */
@@ -178,7 +202,41 @@ export interface RetryOptions {
   /** Jitter factor in `[0, 1]`. Default 0.25. */
   jitter?: number;
   /** Observer invoked before each delayed retry. Must not throw. */
-  onRetry?: (event: { attempt: number; error: TalosAPIError; delayMs: number }) => void;
+  onRetry?: (event: RetryDecisionEvent) => void;
+}
+
+/** Why a retry decision was made. */
+export type RetryDecisionReason =
+  | "retry-after"
+  | "status-code"
+  | "exponential-backoff"
+  | "retryable-error"
+  | "transport"
+  | "timeout";
+
+/** Secret-free metadata delivered to retry observer hooks. */
+export interface RedactedRetryMetadata {
+  code: TalosAPIError["code"];
+  status: number;
+  isRetryable: boolean;
+  retryAfterMs?: number;
+}
+
+/**
+ * Structured retry decision delivered to `retryPolicy.onRetry` and
+ * `retry.onRetry`. `error` is a redacted `TalosAPIError` clone; it contains
+ * no response body, parsed data, headers, cause, authorization, or payment
+ * payload. `delayMs` is retained as a compatibility alias for
+ * `nextDelayMs`.
+ */
+export interface RetryDecisionEvent {
+  attempt: number;
+  reason: RetryDecisionReason;
+  nextDelayMs: number;
+  /** Deprecated compatibility alias for `nextDelayMs`. */
+  delayMs: number;
+  metadata: RedactedRetryMetadata;
+  error: TalosAPIError;
 }
 
 /** Frozen snapshot of the effective status-code retry policy. */
@@ -199,7 +257,12 @@ export interface ETagCacheEntry<T = unknown> {
   etag: string;
   /** The cached response body. */
   body: T;
+  /** Schema version of this cache entry. Increment when the serialization format changes. */
+  version: number;
 }
+
+/** Current ETag cache entry schema version. */
+export const ETAG_CACHE_VERSION = 1;
 
 /**
  * Pluggable ETag store interface.
@@ -214,6 +277,16 @@ export interface ETagStore {
   set(key: string, entry: ETagCacheEntry): void;
   /** Remove a cache entry (called when the server returns a non-304 / non-2xx on a conditional request). */
   delete(key: string): void;
+  /**
+   * Optional: serialize the entire store for persistence.
+   * Returned data should be opaque to callers; use {@link deserialize} to restore.
+   */
+  serialize?(): string;
+  /**
+   * Optional: restore the store from a previously serialized string.
+   * Implementations should ignore entries with unknown/unsupported versions.
+   */
+  deserialize?(data: string): void;
 }
 
 /**
@@ -252,15 +325,18 @@ export interface ETagCacheOptions {
 
 /**
  * A simple insertion-order LRU map bounded to `maxEntries`.
- *
- * @internal
  */
-class BoundedETagStore implements ETagStore {
+export class BoundedETagStore implements ETagStore {
   private readonly map = new Map<string, ETagCacheEntry>();
   constructor(private readonly maxEntries: number) {}
 
   get(key: string): ETagCacheEntry | undefined {
-    return this.map.get(key);
+    const entry = this.map.get(key);
+    // Skip entries with unsupported versions (future-proofing).
+    if (entry && entry.version > ETAG_CACHE_VERSION) {
+      return undefined;
+    }
+    return entry;
   }
 
   set(key: string, entry: ETagCacheEntry): void {
@@ -271,7 +347,8 @@ class BoundedETagStore implements ETagStore {
       const oldest = this.map.keys().next().value;
       if (oldest !== undefined) this.map.delete(oldest);
     }
-    this.map.set(key, entry);
+    // Ensure the entry has the current version.
+    this.map.set(key, { ...entry, version: ETAG_CACHE_VERSION });
   }
 
   delete(key: string): void {
@@ -281,6 +358,45 @@ class BoundedETagStore implements ETagStore {
   /** Number of entries currently in the store (for tests/observability). */
   get size(): number {
     return this.map.size;
+  }
+
+  /** Serialize the store to a JSON string for persistence. */
+  serialize(): string {
+    const entries: Array<[string, ETagCacheEntry]> = [];
+    for (const [key, value] of this.map.entries()) {
+      entries.push([key, value]);
+    }
+    return JSON.stringify({ version: ETAG_CACHE_VERSION, entries });
+  }
+
+  /** Restore the store from a previously serialized string. */
+  deserialize(data: string): void {
+    try {
+      const parsed = JSON.parse(data);
+      if (!parsed || typeof parsed !== "object") return;
+      if (parsed.version !== ETAG_CACHE_VERSION) {
+        // Unknown version — ignore the entire payload.
+        return;
+      }
+      if (!Array.isArray(parsed.entries)) return;
+      this.map.clear();
+      for (const entry of parsed.entries) {
+        if (!Array.isArray(entry) || entry.length !== 2) continue;
+        const [key, value] = entry;
+        if (typeof key !== "string") continue;
+        if (!value || typeof value !== "object") continue;
+        if (typeof value.etag !== "string" || value.version !== ETAG_CACHE_VERSION) continue;
+        // Only restore entries with the current supported version.
+        this.map.set(key, value as ETagCacheEntry);
+      }
+      // Enforce capacity limit after restore.
+      while (this.map.size > this.maxEntries) {
+        const oldest = this.map.keys().next().value;
+        if (oldest !== undefined) this.map.delete(oldest);
+      }
+    } catch {
+      // Malformed data — ignore and start fresh.
+    }
   }
 }
 
@@ -321,7 +437,14 @@ export interface DedupeInFlightGetsOptions {
  * behavior for backward compatibility.
  */
 export interface TalosClientOptions {
-  /** Base URL of the Talos API. Defaults to `https://talos-stellar.vercel.app`. */
+  /**
+   * Base URL of the Talos API. Defaults to `https://talos-stellar.vercel.app`.
+   *
+   * Validated at construction via {@link resolveBaseUrl}: must be a valid
+   * `http:` or `https:` URL without embedded credentials (`user:pass@`),
+   * query parameters, or fragments. Credential-free local HTTP endpoints
+   * (e.g. `http://localhost:3000`, `http://127.0.0.1:3000`) are supported.
+   */
   baseUrl?: string;
   /** Bearer token (TALOS API key). Adds `Authorization: Bearer <key>` header. */
   apiKey?: string;
@@ -382,6 +505,22 @@ export interface TalosClientOptions {
   dedupeInFlightGets?: boolean | DedupeInFlightGetsOptions;
   /** Opt-in ETag conditional-GET caching. */
   etagCache?: boolean | ETagCacheOptions;
+  /**
+   * Enable deterministic HTTP transcript recording for support cases.
+   * - `true`: Records requests with default options.
+   * - `TranscriptRecorder`: Uses an existing recorder instance.
+   * - `TranscriptRecorderOptions`: Configures a new recorder.
+   */
+  recorder?: boolean | TranscriptRecorder | TranscriptRecorderOptions;
+  /**
+   * Replay synthetic responses from a recorded HTTP transcript without
+   * making real network calls. Request bodies are never required or recorded.
+   */
+  replayTranscript?: HttpTranscript | readonly TranscriptEntry[] | TranscriptReplayer;
+  /**
+   * Optional listener invoked whenever an entry is recorded to the transcript.
+   */
+  onTranscriptEntry?: (entry: TranscriptEntry) => void;
 }
 
 
@@ -521,6 +660,9 @@ const DEFAULT_RETRY_POLICY: Required<RetryPolicyOptions> = {
   retryStatusCodes: [429, 500, 502, 503, 504],
   jitter: true,
   random: Math.random,
+  onRetry: () => {
+    /* default: no-op observer */
+  },
 };
 
 /** Hard upper bound on attempts for both retry policies. */
@@ -637,6 +779,10 @@ export function resolveRetryPolicy(
   if (typeof random !== "function") {
     throw new TypeError("retryPolicy.random must be a function");
   }
+  const onRetry = src.onRetry ?? DEFAULT_RETRY_POLICY.onRetry;
+  if (typeof onRetry !== "function") {
+    throw new TypeError("retryPolicy.onRetry must be a function");
+  }
 
   return Object.freeze({
     maxAttempts,
@@ -646,6 +792,7 @@ export function resolveRetryPolicy(
     retryStatusCodes: Object.freeze([...retryStatusCodes]) as number[],
     jitter,
     random,
+    onRetry,
   });
 }
 
@@ -714,6 +861,74 @@ function applyJitter(delay: number, jitter: number): number {
   return Math.max(0, Math.round(delay * factor));
 }
 
+function redactedRetryError(err: TalosAPIError): TalosAPIError {
+  return new TalosAPIError(err.status, "", redactEventPath(err.path), {
+    code: err.code,
+    isRetryable: err.isRetryable,
+    retryAfterMs: err.retryAfterMs,
+  });
+}
+
+/** Default base URL for the hosted Talos Protocol API. */
+export const DEFAULT_BASE_URL = "https://talos-stellar.vercel.app";
+
+/**
+ * Validate and normalize {@link TalosClientOptions.baseUrl}.
+ *
+ * - Omitted (`undefined`) falls back to {@link DEFAULT_BASE_URL}.
+ * - Accepts credential-free `https:` and `http:` URLs (preserving local HTTP
+ *   development/test targets such as `http://localhost:3000` and `http://127.0.0.1:...`).
+ * - Rejects malformed URLs, non-HTTP(S) schemes, query strings / fragments, and
+ *   embedded credentials (`username` / `password` / `userinfo@`) with privacy-safe
+ *   `TypeError` / `RangeError` messages that never echo the URL or secrets.
+ */
+export function resolveBaseUrl(baseUrl?: string): string {
+  if (baseUrl === undefined) {
+    return DEFAULT_BASE_URL;
+  }
+  if (typeof baseUrl !== "string") {
+    throw new TypeError("baseUrl must be a string");
+  }
+  const trimmed = baseUrl.trim();
+  if (trimmed === "") {
+    throw new RangeError("baseUrl must be a non-empty URL");
+  }
+  if (/[\u0000-\u001f\u007f]/.test(trimmed)) {
+    throw new TypeError("baseUrl must be a valid absolute URL");
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new TypeError("baseUrl must be a valid absolute URL");
+  }
+
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new RangeError("baseUrl must use the http: or https: protocol");
+  }
+
+  // Reject any embedded credentials (including empty `:@` and non-canonical
+  // extra-slash userinfo such as `https:////:@host`) before any request is
+  // issued, without echoing URL contents.
+  const afterScheme = trimmed.slice(parsed.protocol.length).replace(/^[/\\]+/, "");
+  const authority = afterScheme.split(/[/?#\\]/, 1)[0];
+  if (parsed.username !== "" || parsed.password !== "" || authority.includes("@")) {
+    throw new RangeError("baseUrl must not contain embedded credentials");
+  }
+
+  if (
+    parsed.search !== "" ||
+    parsed.hash !== "" ||
+    trimmed.includes("?") ||
+    trimmed.includes("#")
+  ) {
+    throw new RangeError("baseUrl must not contain query parameters or fragments");
+  }
+
+  return parsed.toString().replace(/\/+$/, "");
+}
+
 /**
  * Talos Protocol API client. Wraps `fetch` with typed errors, optional
  * timeout, idempotency keys, request signing, chaos injection and bounded
@@ -723,7 +938,7 @@ function applyJitter(delay: number, jitter: number): number {
 const DEFAULT_MAX_IN_FLIGHT = 256;
 
 export class TalosClient {
-  private baseUrl: string;
+  private readonly baseUrl: string;
   private headers: Record<string, string>;
   private readonly retryPolicy: Required<RetryPolicyOptions>;
   private readonly retry: Required<RetryOptions>;
@@ -746,6 +961,9 @@ export class TalosClient {
   private signer?: SigningController;
   private readonly etagStore: ETagStore | null = null;
   private readonly onCacheHit?: (event: { url: string; etag: string }) => void;
+  private readonly recorder?: TranscriptRecorder;
+  private readonly replayer?: TranscriptReplayer;
+  private readonly onTranscriptEntry?: (entry: TranscriptEntry) => void;
 
   // ── In-flight GET deduplication ────────────────────────────
   /**
@@ -779,9 +997,7 @@ export class TalosClient {
     this.onResponse = options.onResponse;
     this.fetchOverride = options.fetch;
     this.chaosInjector = options.chaosInjector;
-    this.baseUrl = (
-      options.baseUrl ?? "https://talos-stellar.vercel.app"
-    ).replace(/\/$/, "");
+    this.baseUrl = resolveBaseUrl(options.baseUrl);
     this.headers = { "Content-Type": "application/json" };
     if (options.apiKey) {
       this.headers["Authorization"] = `Bearer ${options.apiKey}`;
@@ -815,14 +1031,39 @@ export class TalosClient {
       if (!Number.isInteger(maxEntries) || maxEntries < 1) {
         throw new RangeError("etagCache.maxEntries must be a positive integer");
       }
-      if (raw.store !== undefined && typeof raw.store !== "object") {
-        throw new TypeError("etagCache.store must be an object");
+      if (raw.onCacheHit !== undefined && typeof raw.onCacheHit !== "function") {
+        throw new TypeError("etagCache.onCacheHit must be a function");
+      }
+      if (raw.store !== undefined) {
+        if (typeof raw.store !== "object" || raw.store === null) {
+          throw new TypeError("etagCache.store must be an object");
+        }
+        const store = raw.store as { get: unknown; set: unknown; delete: unknown; serialize?: unknown; deserialize?: unknown };
+        if (typeof store.get !== "function" || typeof store.set !== "function" || typeof store.delete !== "function") {
+          throw new TypeError("etagCache.store must implement get, set, and delete methods");
+        }
       }
       this.etagStore = raw.store ?? new BoundedETagStore(maxEntries);
       this.onCacheHit = raw.onCacheHit;
     } else {
       this.etagStore = null;
     }
+
+    if (options.replayTranscript) {
+      this.replayer =
+        options.replayTranscript instanceof TranscriptReplayer
+          ? options.replayTranscript
+          : new TranscriptReplayer(options.replayTranscript, { baseUrl: this.baseUrl });
+    }
+
+    if (options.recorder === true) {
+      this.recorder = new TranscriptRecorder();
+    } else if (options.recorder instanceof TranscriptRecorder) {
+      this.recorder = options.recorder;
+    } else if (typeof options.recorder === "object" && options.recorder !== null) {
+      this.recorder = new TranscriptRecorder(options.recorder);
+    }
+    this.onTranscriptEntry = options.onTranscriptEntry;
   }
 
   /**
@@ -834,7 +1075,11 @@ export class TalosClient {
 
   private etagCacheKey(method: string, url: string): string | null {
     if (method.toUpperCase() !== "GET" || !this.etagStore) return null;
-    return `${url}\n${this.headers["Authorization"] ?? ""}`;
+    // Include the origin (baseUrl) explicitly in the cache key to prevent
+    // cross-origin cache reuse when a persistent store is shared across clients
+    // with different base URLs.
+    const origin = new URL(this.baseUrl).origin;
+    return `${origin}\n${url}\n${this.headers["Authorization"] ?? ""}`;
   }
 
 
@@ -943,9 +1188,13 @@ export class TalosClient {
     return this.toJSON();
   }
 
-  /** Resolve the fetch implementation per request. Prefer override; fall back to global. */
+  /** Resolve the fetch implementation per request. Prefer override; fall back to replayer; fall back to global. */
   private resolveFetch(): typeof fetch {
-    const fetchFn = this.fetchOverride ?? globalThis.fetch;
+    const fetchFn =
+      this.fetchOverride ??
+      (this.replayer
+        ? (input: RequestInfo | URL, init?: RequestInit) => this.replayer!.fetch(input, init)
+        : globalThis.fetch);
     if (typeof fetchFn !== "function") {
       throw new TalosTransportError(0, "Fetch implementation is unavailable", "", {
         message: "Fetch implementation is unavailable",
@@ -990,13 +1239,22 @@ export class TalosClient {
    */
   private mergeHeaders(init?: HeadersInit, extra?: Record<string, string>): Record<string, string> {
     const headers: Record<string, string> = { ...this.headers };
+    for (const name of Object.keys(headers)) {
+      if (name.toLowerCase() === "idempotency-key") delete headers[name];
+    }
     if (init) {
       const provided = init instanceof Headers
         ? Object.fromEntries(init.entries())
         : Array.isArray(init)
           ? Object.fromEntries(init)
           : init;
-      Object.assign(headers, provided as Record<string, string>);
+      for (const [name, value] of Object.entries(provided as Record<string, string>)) {
+        if (name.toLowerCase() !== "idempotency-key") {
+          headers[name] = value;
+        }
+      }
+      const headerKey = readIdempotencyKeyHeader(init);
+      if (headerKey !== undefined) headers["Idempotency-Key"] = headerKey;
     }
     if (extra) Object.assign(headers, extra);
     return headers;
@@ -1104,6 +1362,18 @@ export class TalosClient {
       }
     }
 
+    if (this.typedRetryEnabled) {
+      const delay = Math.min(
+        this.retryOptions.baseDelayMs * Math.pow(2, attempt - 1),
+        this.retryOptions.maxDelayMs,
+      );
+      const jitter = this.retryOptions.jitter;
+      return Math.max(
+        0,
+        Math.round(delay * (1 - jitter + 2 * jitter * Math.random())),
+      );
+    }
+
     const exponent = Math.pow(2, attempt - 1);
     const delay = Math.min(
       this.retryPolicy.baseDelayMs * exponent,
@@ -1185,15 +1455,28 @@ export class TalosClient {
    * at `maxRetryAfterMs`), otherwise exponential backoff capped at
    * `maxDelayMs`, with jitter.
    */
-  private computeBackoffDelay(err: TalosAPIError, attempt: number): number {
+  private computeBackoffDecision(
+    err: TalosAPIError,
+    attempt: number,
+  ): { delayMs: number; reason: RetryDecisionReason } {
     const retryAfterMs = err.retryAfterMs ?? parseRetryAfterHeader(err.headers["retry-after"]);
     if (retryAfterMs != null) {
       const capped = Math.min(retryAfterMs, this.retry.maxRetryAfterMs);
       const jittered = applyJitter(capped, this.retry.jitter);
-      return Math.min(jittered, this.retry.maxDelayMs);
+      return {
+        delayMs: Math.min(jittered, this.retry.maxDelayMs),
+        reason: "retry-after",
+      };
     }
     const exp = Math.min(this.retry.maxDelayMs, this.retry.baseDelayMs * Math.pow(2, attempt - 1));
-    return applyJitter(exp, this.retry.jitter);
+    return {
+      delayMs: applyJitter(exp, this.retry.jitter),
+      reason: err.code === "transport_error"
+        ? "transport"
+        : err.code === "timeout_error"
+          ? "timeout"
+          : "exponential-backoff",
+    };
   }
 
   /**
@@ -1211,20 +1494,29 @@ export class TalosClient {
       retryMethodsForCall?: string[];
       typedMaxAttempts: number;
     },
-  ): number | null {
+  ): { delayMs: number; reason: RetryDecisionReason; source: "status-code" | "typed" } | null {
     if (
       ctx.attempt < this.retryPolicy.maxAttempts &&
       err.status > 0 &&
       this.shouldRetry(ctx.method, err.status, ctx.retryMethodsForCall)
     ) {
-      return this.getRetryDelay(ctx.attempt, err.headers["retry-after"] ?? null);
+      const header = err.headers["retry-after"] ?? null;
+      const retryAfter = header ? parseRetryAfterHeader(header) : undefined;
+      return {
+        delayMs: this.getRetryDelay(ctx.attempt, header),
+        reason: retryAfter !== undefined ? "retry-after" : "status-code",
+        source: "status-code",
+      };
     }
     if (
       ctx.attempt < ctx.typedMaxAttempts &&
       err.isRetryable &&
       (ctx.idempotent || !this.retry.idempotentOnly)
     ) {
-      return this.computeBackoffDelay(err, ctx.attempt);
+      return {
+        ...this.computeBackoffDecision(err, ctx.attempt),
+        source: "typed",
+      };
     }
     return null;
   }
@@ -1304,6 +1596,7 @@ export class TalosClient {
 
     const extraHeaders: Record<string, string> = {};
     if (idempotencyKey !== undefined) {
+      validateIdempotencyKeyConflict(idempotencyKey, this.headers, requestInit.headers);
       extraHeaders["Idempotency-Key"] = validateIdempotencyKey(idempotencyKey);
     }
 
@@ -1351,12 +1644,55 @@ export class TalosClient {
             ...(effectiveSignal ? { signal: effectiveSignal } : {}),
           });
         } catch (cause) {
+          if (this.recorder) {
+            const entry = this.recorder.record({
+              method,
+              path: url,
+              status: 0,
+              statusText: "Transport Failure",
+              durationMs: Date.now() - attemptStartedAt,
+              startedAt: new Date(attemptStartedAt).toISOString(),
+              attempt,
+              requestHeaders: headers,
+            });
+            this.onTranscriptEntry?.(entry);
+          }
           throw classifyTransportError(cause, path);
         }
 
         // Surface rate-limit counters for every response, including the
         // attempts that are about to fail and be retried.
         this.observeResponse(path, method, res.status, attempt, Date.now() - attemptStartedAt, res.headers);
+
+        if (this.recorder) {
+          let responsePayload: unknown;
+          try {
+            const clone = res.clone();
+            const text = await clone.text().catch(() => "");
+            if (text) {
+              try {
+                responsePayload = JSON.parse(text);
+              } catch {
+                responsePayload = text;
+              }
+            }
+          } catch {
+            // body stream already locked or not cloneable
+          }
+          const entry = this.recorder.record({
+            method,
+            path: url,
+            status: res.status,
+            statusText: res.statusText,
+            durationMs: Date.now() - attemptStartedAt,
+            startedAt: new Date(attemptStartedAt).toISOString(),
+            attempt,
+            requestHeaders: headers,
+            responseHeaders: res.headers,
+            responseBody: responsePayload,
+          });
+          this.onTranscriptEntry?.(entry);
+        }
 
         if (res.status === 304 && cachedEntry) {
           this.onCacheHit?.({ url, etag: cachedEntry.etag });
@@ -1372,7 +1708,7 @@ export class TalosClient {
           if (cacheKey !== null && this.etagStore) {
             const etag = res.headers.get("ETag") ?? res.headers.get("etag");
             if (etag) {
-              this.etagStore.set(cacheKey, { etag, body });
+              this.etagStore.set(cacheKey, { etag, body, version: ETAG_CACHE_VERSION });
             }
           }
 
@@ -1392,16 +1728,37 @@ export class TalosClient {
       } catch (err) {
         if (!(err instanceof TalosAPIError)) throw err;
         lastError = err;
-        delayMs = this.nextRetryDelay(err, {
+        const decision = this.nextRetryDelay(err, {
           method,
           attempt,
           idempotent,
           retryMethodsForCall,
           typedMaxAttempts,
         });
-        if (delayMs === null) break;
+        if (decision === null) break;
+        delayMs = decision.delayMs;
+        const event: RetryDecisionEvent = {
+          attempt,
+          reason: decision.reason,
+          nextDelayMs: decision.delayMs,
+          delayMs: decision.delayMs,
+          metadata: {
+            code: err.code,
+            status: err.status,
+            isRetryable: err.isRetryable,
+            ...(err.retryAfterMs !== undefined ? { retryAfterMs: err.retryAfterMs } : {}),
+          },
+          error: redactedRetryError(err),
+        };
+        if (decision.source === "status-code") {
+          try {
+            this.retryPolicy.onRetry(event);
+          } catch {
+            // A misbehaving observer must not break the bounded retry loop.
+          }
+        }
         try {
-          this.retry.onRetry({ attempt, error: err, delayMs });
+          this.retry.onRetry(event);
         } catch {
           // A misbehaving observer must not break the bounded retry loop.
         }
@@ -1478,10 +1835,16 @@ export class TalosClient {
     });
   }
 
-  async createTalos(params: CreateTalosParams): Promise<TalosCreated> {
+  async createTalos(
+    params: CreateTalosParams,
+    options?: WriteOptions,
+  ): Promise<TalosCreated> {
     return this.request("/api/talos", {
       method: "POST",
       body: JSON.stringify(params),
+      idempotencyKey: options?.idempotencyKey,
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
@@ -1699,7 +2062,49 @@ export class TalosClient {
         Date.now() - challengeAttemptStartedAt,
         res.headers,
       );
+      if (this.recorder) {
+        let responsePayload: unknown;
+        try {
+          const clone = res.clone();
+          const text = await clone.text().catch(() => "");
+          if (text) {
+            try {
+              responsePayload = JSON.parse(text);
+            } catch {
+              responsePayload = text;
+            }
+          }
+        } catch {
+          // ignore clone error
+        }
+        const entry = this.recorder.record({
+          method: "POST",
+          path: url,
+          status: res.status,
+          statusText: res.statusText,
+          durationMs: Date.now() - challengeAttemptStartedAt,
+          startedAt: new Date(challengeAttemptStartedAt).toISOString(),
+          attempt: 1,
+          requestHeaders: initialHeaders,
+          responseHeaders: res.headers,
+          responseBody: responsePayload,
+        });
+        this.onTranscriptEntry?.(entry);
+      }
     } catch (cause) {
+      if (this.recorder) {
+        const entry = this.recorder.record({
+          method: "POST",
+          path: url,
+          status: 0,
+          statusText: "Transport Failure",
+          durationMs: Date.now() - challengeAttemptStartedAt,
+          startedAt: new Date(challengeAttemptStartedAt).toISOString(),
+          attempt: 1,
+          requestHeaders: initialHeaders,
+        });
+        this.onTranscriptEntry?.(entry);
+      }
       throw classifyTransportError(cause, path);
     } finally {
       timeout?.dispose();
@@ -2266,6 +2671,35 @@ export class TalosClient {
       timeoutMs: options?.timeoutMs,
     });
   }
-}
 
+  // ── HTTP Transcript ─────────────────────────────────────────────
+
+  /**
+   * Return the recorded HTTP transcript, or undefined if recording is disabled.
+   */
+  getTranscript(): HttpTranscript | undefined {
+    return this.recorder?.getTranscript();
+  }
+
+  /**
+   * Return the configured TranscriptRecorder instance, or undefined if recording is disabled.
+   */
+  getTranscriptRecorder(): TranscriptRecorder | undefined {
+    return this.recorder;
+  }
+
+  /**
+   * Export the recorded HTTP transcript as a JSON string, or undefined if recording is disabled.
+   */
+  exportTranscript(indent = 2): string | undefined {
+    return this.recorder?.export(indent);
+  }
+
+  /**
+   * Return the configured TranscriptReplayer instance, or undefined if replay is disabled.
+   */
+  getTranscriptReplayer(): TranscriptReplayer | undefined {
+    return this.replayer;
+  }
+}
 

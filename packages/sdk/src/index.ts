@@ -2,8 +2,12 @@
 
 export {
   TalosClient,
+  DEFAULT_BASE_URL,
+  resolveBaseUrl,
   resolveRetryPolicy,
   resolveRetryOptions,
+  ETAG_CACHE_VERSION,
+  BoundedETagStore,
 } from "./client.js";
 export type {
   TalosClientOptions,
@@ -11,11 +15,40 @@ export type {
   RetryOptions,
   ResolvedRetryPolicy,
   ResolvedRetryOptions,
+  RetryDecisionReason,
+  RetryDecisionEvent,
+  RedactedRetryMetadata,
   TalosErrorEvent,
   TalosResponseEvent,
   ReadOptions,
   WriteOptions,
+  ETagCacheEntry,
+  ETagStore,
+  ETagCacheOptions,
+  DedupeInFlightGetsOptions,
 } from "./client.js";
+
+// ── HTTP Transcript (support cases & deterministic replay) ─────────
+
+export {
+  TranscriptRecorder,
+  TranscriptReplayer,
+  createTranscriptRecorder,
+  createTranscriptReplayer,
+  sanitizeTranscriptPath,
+  sanitizeTranscriptHeaders,
+  sanitizeTranscriptResponseBody,
+  parseTranscript,
+} from "./transcript.js";
+export type {
+  HttpTranscript,
+  TranscriptEntry,
+  TranscriptRequest,
+  TranscriptResponse,
+  TranscriptTiming,
+  TranscriptRecorderOptions,
+  TranscriptReplayOptions,
+} from "./transcript.js";
 
 // ── Pagination ─────────────────────────────────────────────────────
 
@@ -31,6 +64,8 @@ export type { AsyncPaginationIteratorOptions } from "./pagination.js";
 export {
   generateIdempotencyKey,
   validateIdempotencyKey,
+  validateIdempotencyKeyConflict,
+  readIdempotencyKeyHeader,
   IdempotencyConflictError,
   isUuidV4,
   isPayloadConflict,
@@ -67,6 +102,7 @@ export {
   TalosServerRetryableError,
   TalosTransportError,
   TalosTimeoutError,
+  TalosDeadlineExceededError,
   errorFromResponse,
   classifyTransportError,
   sanitizeBody,
@@ -80,6 +116,21 @@ export {
   MAX_BODY_BYTES,
 } from "./errors.js";
 export type { RateLimitInfo, HeaderSource } from "./errors.js";
+
+// ── Stable error-code taxonomy (versioned) ────────────────────────────────────
+export {
+  ERROR_TAXONOMY_VERSION,
+  classifyError,
+  codeToCategory,
+  toErrorContract,
+  buildCauseChain,
+} from "./error-taxonomy.js";
+export type {
+  TalosErrorCategory,
+  ErrorClassification,
+  ErrorContract,
+  RedactedCauseFrame,
+} from "./error-taxonomy.js";
 
 // ── Domain types ──────────────────────────────────────────────────
 
@@ -121,6 +172,8 @@ export {
   SCHEMA_VERSION_REQUEST_HEADER,
   SCHEMA_VERSION_RESPONSE_HEADER,
   SchemaVersionMismatchError,
+  TalosCursorValidationError,
+  validateTalosEventCursor,
   negotiateSchemaVersion,
   validateEventPayloadVersion,
   UnsupportedEventPayloadVersionError,
@@ -134,7 +187,10 @@ export type {
   TalosEventHandler,
   TalosStreamErrorHandler,
   TalosStreamCloseHandler,
+  TalosStreamState,
+  TalosStreamStateHandler,
   TalosEventStreamOptions,
+  TalosCursorValidationReason,
   SeenStore,
   SchemaVersionNegotiationResult,
 } from "./events.js";
@@ -156,6 +212,8 @@ export type {
   TrackJobEvent,
   JobTerminalStatus,
   JobTerminalOutcome,
+  JobTrackerState,
+  JobTrackerStateChange,
   TrackJobOptions,
 } from "./job-tracker.js";
 
@@ -229,6 +287,21 @@ export type {
   SerializedChaosScenario,
   ChaosFixtureBundle,
 } from "./chaos-fixtures.js";
+
+// ── Synthetic event-stream fault fixtures ─────────────────────────────────────
+
+export {
+  EVENT_STREAM_FAULT_FIXTURES,
+  getEventStreamFaultFixture,
+  encodeSyntheticSSEFrame,
+  createSyntheticEventStreamTransport,
+} from "./event-stream-fixtures.js";
+export type {
+  EventStreamFaultKind,
+  SyntheticSSEFrame,
+  EventStreamFaultFixture,
+  SyntheticEventStreamTransport,
+} from "./event-stream-fixtures.js";
 
 // ── Contract readers ──────────────────────────────────────────────────────
 
