@@ -12,12 +12,16 @@
  * logic.  It can be fully mocked in unit tests.
  */
 
-import type { HorizonPollResult } from "./types";
+import type {
+  HorizonPollResult,
+  HorizonProviderFailureReasonCode,
+  HorizonFailureCategory,
+} from "./types";
 
 // ─── Horizon error type helpers ───────────────────────────────────────────────
 
 /** Horizon SDK throws objects with a `response.status` field for HTTP errors. */
-function extractHttpStatus(err: unknown): number | null {
+export function extractHttpStatus(err: unknown): number | null {
   if (
     err &&
     typeof err === "object" &&
@@ -32,7 +36,7 @@ function extractHttpStatus(err: unknown): number | null {
   return null;
 }
 
-function extractErrorMessage(err: unknown): string {
+export function extractErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (err && typeof err === "object" && "message" in err) {
     return String((err as { message: unknown }).message);
@@ -127,6 +131,8 @@ export async function pollTransaction(
     // 429 rate-limit or 5xx transient: retryable
     const retryable =
       httpStatus === null || httpStatus === 429 || httpStatus >= 500;
+
+    const reasonCode = classifyHorizonError(err, httpStatus);
 
     return {
       outcome: "error",

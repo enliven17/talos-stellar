@@ -200,6 +200,7 @@ export function transitionFromPending(
       return {
         lastLedgerChecked: currentLedger,
         lastError: pollResult.message,
+        reasonCode: pollResult.reasonCode,
         pollCount: record.pollCount + 1,
         updatedAt: now,
       };
@@ -356,3 +357,13 @@ export function validateTransition(
   }
   return null;
 }
+
+// ─── Provider Failure Reason Code Helpers ─────────────────────────────────────
+
+export {
+  classifyHorizonError,
+  getFailureCategory,
+  isAuthorizationFailure,
+  isThrottlingFailure,
+  isProviderFailure,
+} from "./horizon";
