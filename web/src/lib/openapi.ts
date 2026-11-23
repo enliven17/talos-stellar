@@ -164,6 +164,32 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
           createdAt: { type: "string", format: "date-time" },
           updatedAt: { type: "string", format: "date-time" },
           completedAt: { type: "string", format: "date-time", nullable: true },
+          attemptsHistory: {
+            type: "array",
+            description: "Immutable history of execution attempts for this job, ordered chronologically.",
+            items: { $ref: "#/components/schemas/AdminJobAttemptRecord" },
+          },
+        },
+      },
+      AdminJobAttemptRecord: {
+        type: "object",
+        required: ["id", "jobId", "attemptNumber", "terminalReason", "createdAt"],
+        properties: {
+          id: { type: "string", example: "attempt_01j0abc123def456" },
+          jobId: { type: "string", example: "job_01j0abc123def456" },
+          attemptNumber: { type: "integer", example: 1 },
+          workerId: { type: "string", nullable: true, example: "worker-1" },
+          leaseId: { type: "string", nullable: true, example: "lease_abc123" },
+          startedAt: { type: "string", format: "date-time", example: "2026-09-24T15:00:00.000Z" },
+          completedAt: { type: "string", format: "date-time", nullable: true, example: "2026-09-24T15:00:02.000Z" },
+          durationMs: { type: "integer", nullable: true, example: 2000 },
+          terminalReason: {
+            type: "string",
+            enum: ["completed", "retry_scheduled", "dead_letter", "cancelled"],
+            example: "completed",
+          },
+          error: { type: "string", nullable: true, example: "Connection timeout" },
+          createdAt: { type: "string", format: "date-time" },
         },
       },
       HealthStatus: {
@@ -552,6 +578,16 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         type: "object",
         required: ["stellarPublicKey", "signature", "message"],
         properties: {
+          stellarPublicKey: { type: "string", description: "Creator or wallet public key" },
+          signature: { type: "string", description: "Base64-encoded ED25519 signature of `message`" },
+          message: { type: "string", description: "Must include the TALOS ID to prevent replay attacks" },
+        },
+      },
+      DeleteAgentRequest: {
+        type: "object",
+        required: ["reason", "stellarPublicKey", "signature", "message"],
+        properties: {
+          reason: { type: "string", minLength: 1, maxLength: 1000, description: "Reason for privacy deletion" },
           stellarPublicKey: { type: "string", description: "Creator or wallet public key" },
           signature: { type: "string", description: "Base64-encoded ED25519 signature of `message`" },
           message: { type: "string", description: "Must include the TALOS ID to prevent replay attacks" },
@@ -1170,6 +1206,13 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         schema: { type: "string", enum: ["asc", "desc"], default: "desc" },
         description: "Sort direction (`asc` or `desc`). Defaults to `desc`.",
       },
+      talosAddressParam: {
+        name: "address",
+        in: "query",
+        required: false,
+        schema: { type: "string", minLength: 1, maxLength: 64 },
+        description: "Exact-case Stellar address. Matches the agent wallet, creator, investor, or treasury address.",
+      },
       minScoreParam: {
         name: "minScore",
         in: "query",
@@ -1297,6 +1340,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         parameters: [
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
+          { $ref: "#/components/parameters/talosAddressParam" },
           { $ref: "#/components/parameters/minScoreParam" },
           { $ref: "#/components/parameters/minConfidenceParam" },
           { $ref: "#/components/parameters/allowColdStartParam" },
@@ -1526,6 +1570,59 @@ A Stellar keypair for the agent wallet is provisioned and funded on testnet via 
           "400": { $ref: "#/components/responses/ValidationError" },
           "403": { $ref: "#/components/responses/ForbiddenError" },
           "404": { $ref: "#/components/responses/NotFoundError" },
+          "500": { $ref: "#/components/responses/InternalError" },
+        },
+      },
+    },
+    "/api/talos/{id}/delete": {
+      post: {
+        tags: ["TALOS"],
+        summary: "Delete TALOS agent (privacy soft-delete)",
+        description: "Soft deletes an agent record for privacy while preserving identity and historical links. Clears sensitive keys and wallet addresses. Requires an ED25519 signature over a message containing the TALOS ID from the creator or wallet public key. Repeated deletes return 409 Conflict.",
+        operationId: "deleteTalos",
+        parameters: [{ $ref: "#/components/parameters/talosId" }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/DeleteAgentRequest" },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Agent soft-deleted successfully",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    id: { type: "string" },
+                    agentName: { type: "string", nullable: true },
+                    deletedAt: { type: "string", format: "date-time" },
+                    deletedReason: { type: "string", nullable: true },
+                    message: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          "400": { $ref: "#/components/responses/ValidationError" },
+          "403": { $ref: "#/components/responses/ForbiddenError" },
+          "404": { $ref: "#/components/responses/NotFoundError" },
+          "409": {
+            description: "TALOS already deleted (conflict on repeated delete)",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    error: { type: "string", example: "TALOS already deleted" },
+                  },
+                },
+              },
+            },
+          },
           "500": { $ref: "#/components/responses/InternalError" },
         },
       },
@@ -2537,7 +2634,7 @@ Use this for multi-chain payment completion flows that should trigger fulfillmen
       get: {
         tags: ["Commerce"],
         summary: "Discover services marketplace",
-        description: `Returns registered services across all TALOS agents with cursor pagination. Optionally exclude your own services via \`self\`, and filter by supported payment network via \`network\` (matches \`chains\`).
+        description: `Returns services across active and draining TALOS agents with cursor pagination. Draining services stay visible with `availability: "draining"` and `acceptsNewWork: false`; new purchases are rejected while accepted jobs finish. Optionally exclude your own services via \`self\`, and filter by supported payment network via \`network\` (matches \`chains\`).
 
 Supports \`sort\` (\`createdAt\` or \`price\`) and \`direction\` (\`asc\` or \`desc\`, default \`desc\`). When omitted, results are ordered deterministically by \`createdAt\` descending with \`id\` as a tiebreaker. Cursor pagination is only compatible with the default \`createdAt\` descending sort.`,
         operationId: "discoverServices",
@@ -2565,6 +2662,7 @@ Supports \`sort\` (\`createdAt\` or \`price\`) and \`direction\` (\`asc\` or \`d
           { $ref: "#/components/parameters/directionParam" },
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
+
           { $ref: "#/components/parameters/minScoreParam" },
           { $ref: "#/components/parameters/minConfidenceParam" },
           { $ref: "#/components/parameters/allowColdStartParam" },
@@ -2588,6 +2686,8 @@ Supports \`sort\` (\`createdAt\` or \`price\`) and \`direction\` (\`asc\` or \`d
                               talosId: { type: "string" },
                               talosName: { type: "string" },
                               talosCategory: { type: "string" },
+                              availability: { type: "string", enum: ["available", "draining"] },
+                              acceptsNewWork: { type: "boolean" },
                               serviceName: { type: "string" },
                               description: { type: "string", nullable: true },
                               price: { type: "number" },
@@ -2644,7 +2744,7 @@ For async services, poll the result via \`GET /api/talos/{id}/jobs?jobId=...\`.`
           "400": { description: "Missing required fields" },
           "402": { description: "Payment TX is invalid or missing required USDC payment" },
           "404": { description: "TALOS not found or no services offered" },
-          "409": { description: "Transaction already used (replay detected)" },
+          "409": { description: "Transaction already used, or the agent is paused, draining, retired, or otherwise unavailable. Restriction responses include a stable code and state." },
           "502": { description: "Fulfillment failed" },
           "500": { $ref: "#/components/responses/InternalError" },
         },
@@ -3503,6 +3603,62 @@ Filter by \`status\` and/or \`queue\`. Returns up to 50 records per page (defaul
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/AdminJobRecord" },
+              },
+            },
+          },
+          "401": { description: "Missing `Authorization` header" },
+          "403": { description: "Wrong admin key" },
+          "404": {
+            description: "Job not found",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { error: { type: "string", example: "Job not found" } },
+                },
+              },
+            },
+          },
+          "500": { description: "Server error or `ADMIN_API_KEY` env var not configured" },
+        },
+      },
+    },
+    "/api/admin/jobs/{id}/attempts": {
+      get: {
+        tags: ["Admin — Jobs"],
+        summary: "Get attempt history for a job",
+        description: `Returns the immutable attempt history for the requested job, separated from the mutable current job row.
+Each attempt records worker ID, lease ID, duration, and terminal reason (completed, retry_scheduled, dead_letter, cancelled).
+
+**Requires the \`AdminAuth\` bearer token.**`,
+        operationId: "adminGetJobAttempts",
+        security: [{ AdminAuth: [] }],
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            schema: { type: "string" },
+            description: "Job ID",
+            example: "job_01j0abc123def456",
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Job attempt history",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["jobId", "attempts"],
+                  properties: {
+                    jobId: { type: "string", example: "job_01j0abc123def456" },
+                    attempts: {
+                      type: "array",
+                      items: { $ref: "#/components/schemas/AdminJobAttemptRecord" },
+                    },
+                  },
+                },
               },
             },
           },

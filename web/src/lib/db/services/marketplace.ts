@@ -1,6 +1,6 @@
 import { eq, and, ilike, inArray, count } from 'drizzle-orm';
-import { db } from '../db';
-import { capabilities, marketplaceItems, itemCapabilities } from '../schema/marketplace';
+import { db } from '@/db';
+import { capabilities, marketplaceItems, itemCapabilities } from '@/db/schema';
 import type { CapabilityFilter, MarketplaceSearchResult, MarketplaceSearchResponse } from '@/app/api/marketplace/search/types';
 
 export async function getCapabilityFilters(): Promise<CapabilityFilter[]> {
@@ -14,6 +14,7 @@ export async function getCapabilityFilters(): Promise<CapabilityFilter[]> {
     return filters.map((cap) => ({
       id: cap.id,
       name: cap.name,
+      version: cap.version,
       description: cap.description,
       category: cap.category,
       isActive: cap.isActive,
@@ -34,7 +35,7 @@ export async function searchMarketplaceItems(
     const offset = (page - 1) * limit;
     const safeQuery = `%${query}%`;
 
-    let results = [];
+    let results: (typeof marketplaceItems.$inferSelect)[] = [];
     let totalCount = 0;
 
     if (capabilityIds.length > 0) {
@@ -65,7 +66,7 @@ export async function searchMarketplaceItems(
           .from(marketplaceItems)
           .where(inArray(marketplaceItems.id, ids));
 
-        totalCount = countResult[0].count;
+        totalCount = Number(countResult[0]?.count ?? 0);
       }
     } else {
       results = await db
@@ -80,7 +81,7 @@ export async function searchMarketplaceItems(
         .from(marketplaceItems)
         .where(ilike(marketplaceItems.title, safeQuery));
 
-      totalCount = countResult[0].count;
+      totalCount = Number(countResult[0]?.count ?? 0);
     }
 
     const capabilitiesList = await getCapabilityFilters();
@@ -94,7 +95,7 @@ export async function searchMarketplaceItems(
       currency: item.currency,
       provider: item.provider,
       rating: item.rating,
-      createdAt: item.createdAt.toISOString(),
+      createdAt: (item.createdAt instanceof Date ? item.createdAt : new Date(item.createdAt)).toISOString(),
     }));
 
     return {

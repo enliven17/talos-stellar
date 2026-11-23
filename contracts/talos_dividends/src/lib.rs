@@ -24,17 +24,25 @@
 //!    write time.
 //! 5. **Idempotent operations** — `commit_epoch` is a no-op if the epoch already
 //!    exists (same talos_id + epoch_id); duplicate calls are safe.
+//! 6. **Auditable round manifests** — manifest-backed epochs commit the funded
+//!    amount and a canonical digest of the recipient entitlement set before
+//!    any claim is accepted.  The manifest also records claimed amount and
+//!    rounding dust, so an indexer can audit `funded = claimed + dust +
+//!    recoverable` without reconstructing claimant input.
 //!
 //! ## Storage layout
 //!
 //! | Key                         | Value            | TTL policy  |
 //! |-----------------------------|------------------|-------------|
 //! | `Admin`                     | `Address`        | persistent  |
+//! | `PendingAdmin`              | `Address`        | persistent  |
 //! | `RegistryContract`          | `Address`        | persistent  |
 //! | `Epoch(talos_id, epoch_id)` | `EpochRecord`    | persistent  |
 //! | `Claimed(epoch_id, patron)` | `bool`           | persistent  |
 //! | `RoundingDust(talos_id, epoch_id)` | `i128`     | persistent  |
+//! | `RoundManifest(talos_id, epoch_id)` | `DistributionRoundManifest` | persistent |
 //! | `NextEpochId(talos_id)`     | `u64`            | persistent  |
+//! | `PendingAdmin`              | `Address`        | persistent  |
 //!
 //! ## Events (topics → data)
 //!
@@ -44,6 +52,10 @@
 //! | `div_clm`  | `(symbol, epoch_id: u64, patron: Address)`| `(talos_id: u32, amount: i128, role: PatronRole)`  |
 //! | `div_dst`  | `(symbol, epoch_id: u64)`                  | `(talos_id: u32, dust: i128)`                      |
 //! | `ep_rcv`   | `(symbol, epoch_id: u64)`                 | `(talos_id: u32, recovered: i128, admin: Address)` |
+//! | `adm_prp`  | `(symbol,)`                               | `(current: Address, proposed: Address)`            |
+//! | `adm_acc`  | `(symbol,)`                               | `(new_admin: Address,)`                            |
+//! | `adm_cnl`  | `(symbol,)`                               | `(cancelled: Address,)`                            |
+//! | `reg_upd`  | `(symbol,)`                               | `(old_registry: Address, new_registry: Address)`   |
 //!
 //! ## Compatibility / rollout notes
 //!
@@ -57,7 +69,7 @@
 //!
 //! ## Version
 //!
-//! `CONTRACT_VERSION = (1, 1, 0)`
+//! `CONTRACT_VERSION = (1, 3, 0)`
 
 #![no_std]
 
@@ -65,7 +77,8 @@
 extern crate std;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env,
+    contract, contracterror, contractimpl, contracttype, symbol_short, xdr::ToXdr, Address, BytesN,
+    Env, Symbol, Vec,
 };
 
 // ── Error types ─────────────────────────────────────────────────────────────
@@ -109,6 +122,16 @@ pub enum ContractError {
     AlreadyRecovered = 15,
     /// Supplied patron shares do not sum to 100%.
     InvalidPatronShares = 16,
+    /// Supplied patron shares differ from previously recorded shares for this epoch.
+    InconsistentShareData = 17,
+    /// No pending admin transfer exists to accept or cancel.
+    NoPendingAdmin = 18,
+    /// The new registry contract does not expose the expected TalosRegistry interface.
+    IncompatibleRegistry = 19,
+    /// A manifest-backed claim did not match its committed entitlement digest.
+    InvalidEntitlementDigest = 20,
+    /// A manifest and epoch record disagree about the funded amount.
+    FundingMismatch = 21,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
@@ -124,6 +147,20 @@ pub enum PatronRole {
     Creator,
     Investor,
     Treasury,
+}
+
+/// Read-only outcome of evaluating whether a patron can claim an epoch.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClaimEligibility {
+    /// The claim is currently valid; includes the calculated amount and role.
+    Eligible(i128, PatronRole),
+    /// This patron has already claimed for the epoch.
+    AlreadyClaimed,
+    /// The epoch is no longer accepting claims.
+    Expired,
+    /// The patron's share rounds down to zero.
+    ZeroAllocation,
 }
 
 /// Lifecycle state of a distribution epoch.
@@ -163,6 +200,34 @@ pub struct EpochRecord {
     pub status: EpochStatus,
 }
 
+/// Per-epoch unclaimed liability snapshot returned by
+/// [`TalosDividends::get_epoch_liability`].
+///
+/// All amount fields use the same unit as `EpochRecord::total_amount`
+/// (stroops or equivalent atomic units).  The `exists` field lets
+/// callers distinguish a missing epoch from an epoch with zero claims,
+/// without a separate round-trip.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EpochLiability {
+    /// Total amount committed for this epoch (0 if epoch does not exist).
+    pub total_amount: i128,
+    /// Amount already claimed by patrons (0 if epoch does not exist).
+    pub claimed_amount: i128,
+    /// Remaining unclaimed amount: `total_amount - claimed_amount`.
+    pub unclaimed_amount: i128,
+    /// `true` when the epoch exists in storage.
+    pub exists: bool,
+    /// `true` when the epoch exists and no patron has claimed yet
+    /// (`claimed_amount == 0`).
+    pub is_empty_round: bool,
+    /// `true` when every distributable unit has been claimed
+    /// (`claimed_amount == total_amount`).
+    pub is_fully_claimed: bool,
+    /// Current lifecycle status of the epoch.
+    pub status: EpochStatus,
+}
+
 /// Persistent storage key enumeration.
 #[contracttype]
 #[derive(Clone)]
@@ -180,6 +245,17 @@ pub enum DataKey {
     /// Rounding remainder derived from the epoch's validated patron split.
     /// Appended to preserve existing key discriminants.
     RoundingDust(u32, u64),
+    /// Auditable funding and recipient-entitlement commitment.
+    RoundManifest(u32, u64),
+    /// Pending admin address nominated for transfer.
+    PendingAdmin,
+    /// Ledger sequence when an epoch's persistent records were last refreshed: `(talos_id: u32, epoch_id: u64)`.
+    LastTouched(u32, u64),
+    /// Bounded claim history entry: `(patron: Address, index: u32)`.
+    /// Index is 0-based, capped at [`MAX_CLAIM_HISTORY`].
+    ClaimHistory(Address, u32),
+    /// Count of claim history entries recorded for a patron.
+    ClaimCount(Address),
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -193,13 +269,73 @@ const MAX_EXPIRY_SECS: u64 = 31_536_000;
 /// Minimum total_amount per epoch (1 stroops-equivalent unit).
 const MIN_EPOCH_AMOUNT: i128 = 1;
 
+/// Maximum claim history entries stored per patron address.
+///
+/// When a patron's recorded claim count reaches this limit, subsequent
+/// successful claims are still processed normally — the history ring is
+/// simply not extended.  Callers that need a complete history should
+/// index the `div_clm` events emitted on each successful claim.
+pub const MAX_CLAIM_HISTORY: u32 = 100;
+
 /// Compile-time interface version of TalosDividends.
 ///
 /// Format: `(major, minor, patch)` following Semantic Versioning.
 /// - **major** — incompatible ABI change
 /// - **minor** — backwards-compatible new entry-point or field
 /// - **patch** — bug-fix with no observable ABI change
-pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 1, 0);
+pub const CONTRACT_VERSION: (u32, u32, u32) = (1, 3, 0);
+
+/// Expected `INTERFACE_ID` of the configured `RegistryContract`, mirroring
+/// the bytes published by `talos_registry::INTERFACE_ID` (namespace
+/// `"TalosRegistry"`, version `(1, 4, 0)`). Kept as an inline copy rather
+/// than a crate dependency so this contract's ABI check has no build-time
+/// coupling to the Registry crate.
+pub const EXPECTED_REGISTRY_INTERFACE_ID: [u8; 32] = [
+    0x54, 0x61, 0x6C, 0x6F, 0x73, 0x52, 0x65, 0x67, // "TalosReg"
+    0x69, 0x73, 0x74, 0x72, 0x79, 0x00, 0x00, 0x00, // "istry" + zero pads
+    // (major, minor, patch) big-endian u32s
+    0x00, 0x00, 0x00, 0x01, // major = 1
+    0x00, 0x00, 0x00, 0x04, // minor = 4
+    0x00, 0x00, 0x00, 0x00, // patch = 0
+    // reserved
+    0x00, 0x00, 0x00, 0x00,
+];
+
+pub const INTERFACE_NAMESPACE: &str = "TalosDividends";
+
+pub const INTERFACE_ID: [u8; 32] = [
+    0x54, 0x61, 0x6C, 0x6F, 0x73, 0x44, 0x69, 0x76, // "TalosDiv"
+    0x69, 0x64, 0x65, 0x6E, 0x64, 0x73, 0x00, 0x00, // "idends" + zero pad
+    0x00, 0x00, 0x00, 0x01, // major = 1
+    0x00, 0x00, 0x00, 0x03, // minor = 3
+    0x00, 0x00, 0x00, 0x00, // patch = 0
+    0x00, 0x00, 0x00, 0x00, // reserved
+];
+
+pub fn features_list() -> &'static [&'static str] {
+    &[
+        "epoch_commitment",
+        "pull_claims",
+        "expiry_recovery",
+        "rounding_dust",
+        "round_manifest",
+        "interface_query",
+        "unclaimed_liabilities",
+    ]
+}
+
+pub fn version_supports(actual: (u32, u32, u32), required: (u32, u32, u32)) -> bool {
+    if actual.0 != required.0 {
+        return false;
+    }
+    if actual.1 > required.1 {
+        return true;
+    }
+    if actual.1 < required.1 {
+        return false;
+    }
+    actual.2 >= required.2
+}
 
 // ── Events ───────────────────────────────────────────────────────────────────
 //
@@ -236,6 +372,26 @@ fn emit_epoch_recovered(env: &Env, epoch_id: u64, talos_id: u32, recovered: i128
         (symbol_short!("ep_rcv"), epoch_id),
         (talos_id, recovered, admin),
     );
+}
+
+fn emit_admin_proposed(env: &Env, current: Address, proposed: Address) {
+    let topics = (symbol_short!("adm_prp"),);
+    env.events().publish(topics, (current, proposed));
+}
+
+fn emit_admin_accepted(env: &Env, new_admin: Address) {
+    let topics = (symbol_short!("adm_acc"),);
+    env.events().publish(topics, (new_admin,));
+}
+
+fn emit_admin_cancelled(env: &Env, cancelled: Address) {
+    let topics = (symbol_short!("adm_cnl"),);
+    env.events().publish(topics, (cancelled,));
+}
+
+fn emit_registry_updated(env: &Env, old_registry: Address, new_registry: Address) {
+    let topics = (symbol_short!("reg_upd"),);
+    env.events().publish(topics, (old_registry, new_registry));
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -300,6 +456,94 @@ fn compute_rounding_dust(
     total_amount
         .checked_sub(distributed)
         .ok_or(ContractError::Overflow)
+}
+
+/// Hash the exact recipient entitlement tuple used by manifest-backed claims.
+/// `ToXdr` gives the tuple a deterministic Soroban XDR encoding,
+/// avoiding ad-hoc string concatenation and delimiter ambiguities.
+#[allow(clippy::too_many_arguments)]
+fn compute_entitlement_digest(
+    env: &Env,
+    talos_id: u32,
+    epoch_id: u64,
+    funded_amount: i128,
+    patron_creator: &Address,
+    patron_investor: &Address,
+    patron_treasury: &Address,
+    creator_share: u32,
+    investor_share: u32,
+    treasury_share: u32,
+) -> BytesN<32> {
+    let payload = (
+        talos_id,
+        epoch_id,
+        funded_amount,
+        patron_creator.clone(),
+        patron_investor.clone(),
+        patron_treasury.clone(),
+        creator_share,
+        investor_share,
+        treasury_share,
+    )
+        .to_xdr(env);
+    env.crypto().sha256(&payload).to_bytes()
+}
+
+/// Compatibility helper: returns true if `actual` semver satisfies `required`.
+///
+/// Mirrors `TalosRegistry::version_supports` so callers in both modules
+/// get identical answers even though no shared crate is imported:
+///
+/// - `major` must match exactly.
+/// - `actual.minor > required.minor`        → supported.
+/// - `actual.minor == required.minor` and `actual.patch >= required.patch`
+///                                          → supported.
+/// - `actual.minor < required.minor`        → not supported.
+fn registry_version_supports(actual: (u32, u32, u32), required: (u32, u32, u32)) -> bool {
+    if actual.0 != required.0 {
+        return false;
+    }
+    if actual.1 > required.1 {
+        return true;
+    }
+    if actual.1 < required.1 {
+        return false;
+    }
+    actual.2 >= required.2
+}
+
+/// Cross-contract compatibility helper.
+///
+/// Verifies that a contract registered as a `TalosRegistry` actually
+/// publishes the expected `INTERFACE_ID`. Returns `true` on success,
+/// `Err(IncompatibleRegistry)` on failure.
+fn check_registry_compatible(
+    env: &Env,
+    registry: &Address,
+) -> Result<(), ContractError> {
+    // Single atomic cross-contract read: interface ID + version tuple.
+    let registry_id: BytesN<32> = env.invoke_contract(
+        registry,
+        &Symbol::new(env, "interface_id"),
+        soroban_sdk::vec![env],
+    );
+
+    if registry_id != BytesN::from_array(env, &EXPECTED_REGISTRY_INTERFACE_ID) {
+        return Err(ContractError::IncompatibleRegistry);
+    }
+
+    let version: (u32, u32, u32) = env.invoke_contract(
+        registry,
+        &Symbol::new(env, "version"),
+        soroban_sdk::vec![env],
+    );
+
+    // Require the registry at major=1, minor >= 1.
+    if !registry_version_supports(version, (1, 1, 0)) {
+        return Err(ContractError::IncompatibleRegistry);
+    }
+
+    Ok(())
 }
 
 // ── Contract ─────────────────────────────────────────────────────────────────
@@ -367,21 +611,54 @@ impl TalosDividends {
         expiry_secs: u64,
     ) -> Result<u64, ContractError> {
         require_admin(&env, &admin)?;
+        Self::create_epoch(&env, talos_id, total_amount, expiry_secs)
+    }
 
-        if total_amount < MIN_EPOCH_AMOUNT {
+    /// Commit a distribution epoch together with its funding and entitlement
+    /// manifest.  The supplied `funded_amount` becomes the epoch's immutable
+    /// total; later claims must reproduce `entitlement_digest` using the
+    /// recipient addresses and percentage shares they submit.
+    pub fn commit_epoch_manifest(
+        env: Env,
+        admin: Address,
+        talos_id: u32,
+        funded_amount: i128,
+        entitlement_digest: BytesN<32>,
+        expiry_secs: u64,
+    ) -> Result<u64, ContractError> {
+        require_admin(&env, &admin)?;
+        let epoch_id = Self::create_epoch(&env, talos_id, funded_amount, expiry_secs)?;
+        let manifest = DistributionRoundManifest {
+            talos_id,
+            epoch_id,
+            funded_amount,
+            entitlement_digest,
+            claimed_amount: 0,
+            rounding_dust: 0,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::RoundManifest(talos_id, epoch_id), &manifest);
+        Ok(epoch_id)
+    }
+
+    fn create_epoch(
+        env: &Env,
+        talos_id: u32,
+        total_amount: i128,
+        expiry_secs: u64,
+    ) -> Result<u64, ContractError> {
+        if total_amount < MIN_EPOCH_AMOUNT
+            || expiry_secs < MIN_EXPIRY_SECS
+            || expiry_secs > MAX_EXPIRY_SECS
+        {
             return Err(ContractError::InvalidEpochParams);
         }
-        if expiry_secs < MIN_EXPIRY_SECS || expiry_secs > MAX_EXPIRY_SECS {
-            return Err(ContractError::InvalidEpochParams);
-        }
-
         let epoch_id: u64 = env
             .storage()
             .persistent()
             .get(&DataKey::NextEpochId(talos_id))
             .unwrap_or(1u64);
-
-        // Idempotency guard: if the epoch already exists, return early.
         if env
             .storage()
             .persistent()
@@ -389,7 +666,6 @@ impl TalosDividends {
         {
             return Err(ContractError::EpochAlreadyExists);
         }
-
         let record = EpochRecord {
             epoch_id,
             talos_id,
@@ -399,16 +675,17 @@ impl TalosDividends {
             expiry_secs,
             status: EpochStatus::Active,
         };
-
+        let current_ledger = env.ledger().sequence();
         env.storage()
             .persistent()
             .set(&DataKey::Epoch(talos_id, epoch_id), &record);
         env.storage()
             .persistent()
             .set(&DataKey::NextEpochId(talos_id), &(epoch_id + 1));
-
-        emit_epoch_committed(&env, talos_id, epoch_id, total_amount, expiry_secs);
-
+        env.storage()
+            .persistent()
+            .set(&DataKey::LastTouched(talos_id, epoch_id), &current_ledger);
+        emit_epoch_committed(env, talos_id, epoch_id, total_amount, expiry_secs);
         Ok(epoch_id)
     }
 
@@ -468,7 +745,12 @@ impl TalosDividends {
             return Err(ContractError::EpochExpired);
         }
 
-        // Enforce claim window.
+        // Enforce claim window. Inclusive of `deadline` itself — claims are
+        // accepted for `now <= deadline`, so this is the exact complement of
+        // `recover_expired`'s `now <= deadline` rejection below: the two
+        // windows meet at `deadline` but never overlap. See the boundary
+        // tests in `mod tests` (`claim_succeeds_exactly_at_deadline`,
+        // `recover_fails_exactly_at_deadline`, etc.) for the pinned behavior.
         let now = env.ledger().timestamp();
         let deadline = record
             .created_at
@@ -485,6 +767,32 @@ impl TalosDividends {
             .ok_or(ContractError::Overflow)?;
         if share_sum != 100 {
             return Err(ContractError::InvalidPatronShares);
+        }
+
+        let manifest_key = DataKey::RoundManifest(talos_id, epoch_id);
+        let mut manifest: Option<DistributionRoundManifest> = env
+            .storage()
+            .persistent()
+            .get(&manifest_key);
+        if let Some(ref committed) = manifest {
+            if committed.funded_amount != record.total_amount {
+                return Err(ContractError::FundingMismatch);
+            }
+            let digest = compute_entitlement_digest(
+                &env,
+                talos_id,
+                epoch_id,
+                committed.funded_amount,
+                &patron_creator,
+                &patron_investor,
+                &patron_treasury,
+                creator_share,
+                investor_share,
+                treasury_share,
+            );
+            if digest != committed.entitlement_digest {
+                return Err(ContractError::InvalidEntitlementDigest);
+            }
         }
 
         // Resolve claimant role from supplied patron addresses.
@@ -514,7 +822,8 @@ impl TalosDividends {
             treasury_share,
         )?;
         let dust_key = DataKey::RoundingDust(talos_id, epoch_id);
-        if let Some(recorded_dust) = env.storage().persistent().get(&dust_key) {
+        let recorded_dust_opt: Option<i128> = env.storage().persistent().get(&dust_key);
+        if let Some(recorded_dust) = recorded_dust_opt {
             if recorded_dust != dust {
                 return Err(ContractError::InconsistentShareData);
             }
@@ -535,15 +844,82 @@ impl TalosDividends {
         }
 
         // Persist claim and update running total atomically.
+        let current_ledger = env.ledger().sequence();
         env.storage().persistent().set(&claim_key, &true);
         record.claimed_amount = new_claimed;
         env.storage()
             .persistent()
             .set(&DataKey::Epoch(talos_id, epoch_id), &record);
+        if let Some(ref mut committed) = manifest {
+            committed.claimed_amount = new_claimed;
+            committed.rounding_dust = dust;
+            env.storage()
+                .persistent()
+                .set(&manifest_key, committed);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::LastTouched(talos_id, epoch_id), &current_ledger);
 
-        emit_dividend_claimed(&env, epoch_id, claimant, talos_id, allocation, role);
+        emit_dividend_claimed(&env, epoch_id, claimant.clone(), talos_id, allocation, role.clone());
+
+        // Append a ClaimRecord to the patron's bounded claim history.
+        let count_key = DataKey::ClaimCount(claimant.clone());
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&count_key)
+            .unwrap_or(0u32);
+        if count < MAX_CLAIM_HISTORY {
+            let record = ClaimRecord {
+                epoch_id,
+                talos_id,
+                amount: allocation,
+                role,
+                ledger_sequence: env.ledger().sequence(),
+            };
+            env.storage()
+                .persistent()
+                .set(&DataKey::ClaimHistory(claimant.clone(), count), &record);
+            env.storage()
+                .persistent()
+                .set(&count_key, &(count + 1));
+        }
 
         Ok(allocation)
+    }
+
+    /// Explain whether a patron can claim, without requiring authorization or
+    /// modifying storage or emitting events.
+    ///
+    /// Missing epochs, invalid patron data, and arithmetic overflow are returned
+    /// as `ContractError`. Claim-specific ineligibility is returned as a bounded
+    /// `ClaimEligibility` variant.
+    pub fn claim_eligibility(
+        env: Env,
+        claimant: Address,
+        talos_id: u32,
+        epoch_id: u64,
+        patron_creator: Address,
+        patron_investor: Address,
+        patron_treasury: Address,
+        creator_share: u32,
+        investor_share: u32,
+        treasury_share: u32,
+    ) -> Result<ClaimEligibility, ContractError> {
+        let assessment = assess_claim(
+            &env,
+            &claimant,
+            talos_id,
+            epoch_id,
+            &patron_creator,
+            &patron_investor,
+            &patron_treasury,
+            creator_share,
+            investor_share,
+            treasury_share,
+        )?;
+        Ok(assessment.eligibility)
     }
 
     // ── Recovery ─────────────────────────────────────────────────────────────
@@ -580,6 +956,11 @@ impl TalosDividends {
             return Err(ContractError::AlreadyRecovered);
         }
 
+        // Strictly after `deadline` — recovery is only accepted once `now >
+        // deadline`, i.e. the exact complement of `claim_dividend`'s
+        // inclusive `now <= deadline` acceptance above. At `now == deadline`
+        // the claim window still owns the instant, so recovery correctly
+        // rejects here; see the boundary tests in `mod tests`.
         let now = env.ledger().timestamp();
         let deadline = record
             .created_at
@@ -602,6 +983,45 @@ impl TalosDividends {
         emit_epoch_recovered(&env, epoch_id, talos_id, unclaimed, admin);
 
         Ok(unclaimed)
+    }
+
+    // ── Registry management ───────────────────────────────────────────────────
+
+    /// Update the registered TalosRegistry contract address.
+    ///
+    /// Requires admin authorization and verifies that the new registry
+    /// exposes the expected TalosRegistry interface (v1.1.0 or higher).
+    ///
+    /// # Authorization
+    /// Requires the configured admin to sign the transaction.
+    ///
+    /// # Panics / Errors
+    /// - [`ContractError::Unauthorized`]        — caller is not admin.
+    /// - [`ContractError::IncompatibleRegistry`] — new registry does not expose
+    ///                                            the expected interface.
+    pub fn set_registry_contract(
+        env: Env,
+        admin: Address,
+        new_registry: Address,
+    ) -> Result<(), ContractError> {
+        require_admin(&env, &admin)?;
+
+        // Verify the new registry is compatible before updating.
+        check_registry_compatible(&env, &new_registry)?;
+
+        let old: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RegistryContract)
+            .ok_or(ContractError::NotInitialized)?;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::RegistryContract, &new_registry);
+
+        emit_registry_updated(&env, old, new_registry);
+
+        Ok(())
     }
 
     // ── Read-only queries ────────────────────────────────────────────────────
@@ -628,6 +1048,75 @@ impl TalosDividends {
             .get(&DataKey::RoundingDust(talos_id, epoch_id))
     }
 
+    /// Return the unclaimed liability snapshot for a single epoch.
+    ///
+    /// This is an O(1) read independent of the number of recipients.
+    /// If the epoch does not exist, `exists` is `false` and all amounts
+    /// are zero.  When `is_empty_round` is `true` the epoch is live but
+    /// no patron has claimed yet; when `is_fully_claimed` is `true` every
+    /// distributable unit has been claimed.
+    pub fn get_epoch_liability(env: Env, talos_id: u32, epoch_id: u64) -> EpochLiability {
+        match env
+            .storage()
+            .persistent()
+            .get::<_, EpochRecord>(&DataKey::Epoch(talos_id, epoch_id))
+        {
+            None => EpochLiability {
+                total_amount: 0,
+                claimed_amount: 0,
+                unclaimed_amount: 0,
+                exists: false,
+                is_empty_round: false,
+                is_fully_claimed: false,
+                status: EpochStatus::Active,
+            },
+            Some(record) => {
+                let unclaimed = record.total_amount - record.claimed_amount;
+                EpochLiability {
+                    total_amount: record.total_amount,
+                    claimed_amount: record.claimed_amount,
+                    unclaimed_amount: unclaimed,
+                    exists: true,
+                    is_empty_round: record.claimed_amount == 0,
+                    is_fully_claimed: record.claimed_amount == record.total_amount,
+                    status: record.status,
+                }
+            }
+        }
+    }
+
+    /// Return the total unclaimed liability across all active epochs for
+    /// `talos_id`.
+    ///
+    /// Iterates from epoch 1 to `next_epoch_id - 1`, summing the unclaimed
+    /// amounts of epochs whose status is [`EpochStatus::Active`].
+    /// Recovered epochs are excluded because their unclaimed funds have
+    /// already been swept back to the admin.  The iteration is bounded by
+    /// the sequential epoch counter stored on-chain.
+    pub fn get_total_unclaimed(env: Env, talos_id: u32) -> i128 {
+        let next_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextEpochId(talos_id))
+            .unwrap_or(1u64);
+
+        let mut total: i128 = 0;
+        let mut eid: u64 = 1;
+        while eid < next_id {
+            if let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<_, EpochRecord>(&DataKey::Epoch(talos_id, eid))
+            {
+                if record.status == EpochStatus::Active {
+                    total += record.total_amount - record.claimed_amount;
+                }
+            }
+            eid += 1;
+        }
+        total
+    }
+
     /// Return the next epoch ID that would be assigned for `talos_id`.
     pub fn next_epoch_id(env: Env, talos_id: u32) -> u64 {
         env.storage()
@@ -652,6 +1141,288 @@ impl TalosDividends {
     /// cannot be altered by any post-deployment state write.
     pub fn version(_env: Env) -> (u32, u32, u32) {
         CONTRACT_VERSION
+    }
+
+    pub fn interface_id(env: Env) -> BytesN<32> {
+        BytesN::from_array(&env, &INTERFACE_ID)
+    }
+
+    pub fn supports_version(env: Env, major: u32, minor: u32, patch: u32) -> bool {
+        let _ = env;
+        version_supports(CONTRACT_VERSION, (major, minor, patch))
+    }
+
+    pub fn interface_features(env: Env) -> Vec<Symbol> {
+        let mut features = Vec::new(&env);
+        for feature in features_list() {
+            features.push_back(Symbol::new(&env, feature));
+        }
+        features
+    }
+
+    /// Return the versioned arithmetic bounds descriptor for this contract.
+    ///
+    /// The descriptor is a compile-time constant derived entirely from the
+    /// named constants in this module.  It is read-only, requires no
+    /// authorization, and does not modify ledger state.
+    ///
+    /// Callers can use the returned values to validate inputs before
+    /// submitting a `commit_epoch` or `claim_dividend` transaction, without
+    /// needing to hard-code the bounds themselves.
+    pub fn arithmetic_bounds(_env: Env) -> ArithmeticBounds {
+        ArithmeticBounds {
+            min_epoch_amount: MIN_EPOCH_AMOUNT,
+            max_share_pct: 100u32,
+            min_expiry_secs: MIN_EXPIRY_SECS,
+            max_expiry_secs: MAX_EXPIRY_SECS,
+            descriptor_version: 1u32,
+        }
+    }
+
+    // ── Two-step admin transfer ──────────────────────────────────────
+
+    /// Nominate `new_admin` as the next administrator.
+    ///
+    /// The transfer is not immediate. The nominated address must call
+    /// `accept_admin` to confirm and complete the handover. Until then the
+    /// current admin retains all privileges.
+    ///
+    /// Calling `propose_admin` while a transfer is already pending replaces
+    /// the old nomination with the new one.
+    ///
+    /// # Authorization
+    /// Requires the current admin to sign the transaction.
+    ///
+    /// # Panics / Errors
+    /// - [`ContractError::NotInitialized`] — if `initialize` has not been called.
+    /// - [`ContractError::Unauthorized`] — caller is not the configured administrator.
+    pub fn propose_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
+        let current: Address = require_admin_addr(&env)?;
+        current.require_auth();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingAdmin, &new_admin);
+
+        emit_admin_proposed(&env, current, new_admin);
+        Ok(())
+    }
+
+    /// Complete the pending admin transfer.
+    ///
+    /// The nominated address (stored under `PendingAdmin`) must call this
+    /// method and authorize it. On success:
+    ///   1. `Admin` is updated to the caller's address.
+    ///   2. The `PendingAdmin` storage entry is removed.
+    ///   3. An `adm_acc` event is emitted.
+    ///
+    /// # Authorization
+    /// Requires the pending admin to sign the transaction.
+    ///
+    /// # Panics / Errors
+    /// - [`ContractError::NoPendingAdmin`] — if `propose_admin` has not been called.
+    pub fn accept_admin(env: Env) -> Result<(), ContractError> {
+        let pending: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(ContractError::NoPendingAdmin)?;
+
+        pending.require_auth();
+
+        env.storage().persistent().set(&DataKey::Admin, &pending);
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
+
+        emit_admin_accepted(&env, pending);
+        Ok(())
+    }
+
+    /// Cancel an in-progress admin transfer.
+    ///
+    /// Removes the `PendingAdmin` entry and revokes the nomination without
+    /// changing the current admin.
+    ///
+    /// # Authorization
+    /// Requires the current admin to sign the transaction.
+    ///
+    /// # Panics / Errors
+    /// - [`ContractError::NotInitialized`] — if `initialize` has not been called.
+    /// - [`ContractError::NoPendingAdmin`] — if there is nothing to cancel.
+    pub fn cancel_admin_transfer(env: Env) -> Result<(), ContractError> {
+        let current: Address = require_admin_addr(&env)?;
+        current.require_auth();
+
+        let pending: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(ContractError::NoPendingAdmin)?;
+
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
+
+        emit_admin_cancelled(&env, pending);
+        Ok(())
+    }
+
+    /// Return the pending admin address, if any.
+    pub fn pending_admin(env: Env) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::PendingAdmin)
+    }
+
+    // ── Storage TTL Management ───────────────────────────────────
+
+    /// Touch an epoch record to reset its Soroban persistent storage TTL.
+    ///
+    /// Since every `set()` call on persistent storage resets the TTL to the maximum,
+    /// this function re-reads the `EpochRecord` and writes it back unchanged along
+    /// with updating `LastTouched(talos_id, epoch_id)`.
+    /// It only writes when the entry has not been touched recently (within
+    /// the renewal threshold) to save gas.
+    ///
+    /// Returns `true` if a touch was performed, `false` if skipped.
+    pub fn touch_epoch(env: Env, talos_id: u32, epoch_id: u64) -> Result<bool, ContractError> {
+        let key = DataKey::Epoch(talos_id, epoch_id);
+        let record: EpochRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::EpochNotFound)?;
+
+        let current_ledger = env.ledger().sequence();
+        let last_touched: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LastTouched(talos_id, epoch_id))
+            .unwrap_or(0);
+
+        if ttl_manager::needs_touch(last_touched, current_ledger) {
+            env.storage().persistent().set(&key, &record);
+            env.storage()
+                .persistent()
+                .set(&DataKey::LastTouched(talos_id, epoch_id), &current_ledger);
+            ttl_manager::emit_ttl_touched(&env, "epoch", 1);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Batched TTL extension for epoch records with explicit age and work bounds.
+    ///
+    /// Sweeps epochs `[start_epoch_id, min(next_epoch_id, start_epoch_id + limit))`,
+    /// clipped to [`ttl_manager::DEFAULT_MAX_BATCH_KEYS`] ids per call, and re-writes
+    /// only entries whose age in ledgers falls inside `[min_age, max_age]`.
+    /// Records outside the window are reported as `skipped`; ids without an epoch record are ignored.
+    ///
+    /// Returns `(touched, skipped)`.
+    ///
+    /// # Authorization
+    /// Requires the configured admin to sign.
+    ///
+    /// # Panics / Errors
+    /// - [`ContractError::Unauthorized`] — caller is not admin.
+    /// - Static panic if bounds are invalid (`min_age > max_age`, `max_keys` 0 or > `MAX_BATCH_KEYS`).
+    pub fn extend_ttl_batch(
+        env: Env,
+        admin: Address,
+        talos_id: u32,
+        start_epoch_id: u64,
+        limit: u32,
+        min_age: u32,
+        max_age: u32,
+    ) -> Result<(u32, u32), ContractError> {
+        require_admin(&env, &admin)?;
+
+        let bounds =
+            ttl_manager::TtlBounds::new(min_age, max_age, ttl_manager::DEFAULT_MAX_BATCH_KEYS);
+        bounds.validate().unwrap_or_else(|err| panic!("{}", err.message()));
+
+        let capped_limit = bounds
+            .clamp_limit(limit)
+            .unwrap_or_else(|err| panic!("{}", err.message()));
+
+        let next_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextEpochId(talos_id))
+            .unwrap_or(1u64);
+
+        let end_id = next_id.min(start_epoch_id.saturating_add(capped_limit as u64));
+
+        let current_ledger = env.ledger().sequence();
+        let mut sweep = ttl_manager::BatchSweep::empty();
+
+        for eid in start_epoch_id..end_id {
+            let key = DataKey::Epoch(talos_id, eid);
+            let record: EpochRecord = match env.storage().persistent().get(&key) {
+                Some(r) => r,
+                None => {
+                    sweep.record(ttl_manager::EntryOutcome::Absent);
+                    continue;
+                }
+            };
+
+            let last_touched: u32 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::LastTouched(talos_id, eid))
+                .unwrap_or(0);
+
+            if ttl_manager::should_extend(last_touched, current_ledger, &bounds) {
+                env.storage().persistent().set(&key, &record);
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::LastTouched(talos_id, eid), &current_ledger);
+                sweep.record(ttl_manager::EntryOutcome::Touched);
+            } else {
+                sweep.record(ttl_manager::EntryOutcome::Skipped);
+            }
+        }
+
+        sweep.emit(&env);
+        Ok((sweep.touched, sweep.skipped))
+    }
+
+    /// Query storage health for tracked epoch records of `talos_id`.
+    ///
+    /// Returns `(min_age, max_age, keys_below_warn, keys_below_crit, total)`.
+    /// Emits `ttl_warn` if any entry is at risk.
+    pub fn get_storage_health(env: Env, talos_id: u32) -> (u32, u32, u32, u32, u32) {
+        let mut health = ttl_manager::KeyHealth::empty();
+        let current_ledger = env.ledger().sequence();
+
+        let next_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextEpochId(talos_id))
+            .unwrap_or(1u64);
+
+        for eid in 1..next_id {
+            if env.storage().persistent().has(&DataKey::Epoch(talos_id, eid)) {
+                let last_touched: u32 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::LastTouched(talos_id, eid))
+                    .unwrap_or(0);
+                health.observe(ttl_manager::age_ledgers(last_touched, current_ledger));
+            }
+        }
+
+        if health.needs_immediate_attention() {
+            ttl_manager::emit_ttl_warning(&env, "dividends_epoch", health.keys_below_crit, health.max_age);
+        }
+
+        if health.is_empty() {
+            (0, 0, 0, 0, 0)
+        } else {
+            (
+                health.min_age,
+                health.max_age,
+                health.keys_below_warn,
+                health.keys_below_crit,
+                health.total_keys,
+            )
+        }
     }
 }
 
@@ -720,7 +1491,6 @@ mod tests {
                 },
             }])
             .commit_epoch(admin, &talos_id, &total_amount, &expiry_secs)
-            .unwrap()
     }
 
     /// Helper: commit a default epoch (total=10_000, expiry=7_200s).
@@ -744,9 +1514,36 @@ mod tests {
             .commit_epoch(admin, &talos_id, &10_000_i128, &7_200_u64)
     }
 
+    /// Helper: perform a claim with provided patron addresses and default 60/25/15 shares.
+    #[allow(clippy::too_many_arguments)]
+    fn do_claim(
+        env: &Env,
+        contract_id: &Address,
+        client: &TalosDividendsClient<'static>,
+        claimant: &Address,
+        talos_id: u32,
+        epoch_id: u64,
+        creator: &Address,
+        investor: &Address,
+        treasury: &Address,
+    ) -> i128 {
+        do_claim_with_shares(
+            env,
+            contract_id,
+            client,
+            claimant,
+            talos_id,
+            epoch_id,
+            creator,
+            investor,
+            treasury,
+            60,
+            25,
+            15,
+        )
+    }
+
     /// Helper: perform a claim with provided patron addresses and shares.
-    /// Returns the allocation on success; panics if the contract returns an error.
-    /// For negative-path tests, call `try_claim_dividend` directly.
     #[allow(clippy::too_many_arguments)]
     fn do_claim_with_shares(
         env: &Env,
@@ -758,6 +1555,9 @@ mod tests {
         creator: &Address,
         investor: &Address,
         treasury: &Address,
+        creator_share: u32,
+        investor_share: u32,
+        treasury_share: u32,
     ) -> i128 {
         client
             .mock_auths(&[MockAuth {
@@ -781,17 +1581,26 @@ mod tests {
                 },
             }])
             .claim_dividend(
-                claimant, &talos_id, &epoch_id, creator, investor, treasury, &creator_share,
-                &investor_share, &treasury_share,
+                claimant,
+                &talos_id,
+                &epoch_id,
+                creator,
+                investor,
+                treasury,
+                &creator_share,
+                &investor_share,
+                &treasury_share,
             )
+        {
+            Ok(Ok(allocation)) => Ok(allocation),
+            Ok(Err(error)) => panic!("claim invocation failed: {:?}", error),
+            Err(Ok(error)) => Err(error),
+            Err(Err(error)) => panic!("claim invocation failed: {:?}", error),
+        }
     }
 
-    /// Like `do_claim` but uses `try_claim_dividend` to surface errors.
-    /// Returns the raw soroban-sdk 21 result: `Ok(Ok(allocation))` on success,
-    /// `Ok(Err(_))` when the contract returns an error, `Err(_)` on host error.
-    /// Assertions should use the `Err(Ok(ContractError::...))` pattern.
     #[allow(clippy::too_many_arguments)]
-    fn try_do_claim(
+    fn try_do_claim_with_shares(
         env: &Env,
         contract_id: &Address,
         client: &TalosDividendsClient<'static>,
@@ -801,6 +1610,38 @@ mod tests {
         creator: &Address,
         investor: &Address,
         treasury: &Address,
+    ) -> Result<Result<i128, soroban_sdk::Error>, Result<ContractError, soroban_sdk::InvokeError>>
+    {
+        try_do_claim_with_explicit_shares(
+            env,
+            contract_id,
+            client,
+            claimant,
+            talos_id,
+            epoch_id,
+            creator,
+            investor,
+            treasury,
+            60,
+            25,
+            15,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_do_claim_with_explicit_shares(
+        env: &Env,
+        contract_id: &Address,
+        client: &TalosDividendsClient<'static>,
+        claimant: &Address,
+        talos_id: u32,
+        epoch_id: u64,
+        creator: &Address,
+        investor: &Address,
+        treasury: &Address,
+        creator_share: u32,
+        investor_share: u32,
+        treasury_share: u32,
     ) -> Result<Result<i128, soroban_sdk::Error>, Result<ContractError, soroban_sdk::InvokeError>>
     {
         client
@@ -816,18 +1657,93 @@ mod tests {
                         creator.clone(),
                         investor.clone(),
                         treasury.clone(),
-                        60_u32,
-                        25_u32,
-                        15_u32,
+                        creator_share,
+                        investor_share,
+                        treasury_share,
                     )
                         .into_val(env),
                     sub_invokes: &[],
                 },
             }])
             .try_claim_dividend(
-                claimant, &talos_id, &epoch_id, creator, investor, treasury, &60_u32, &25_u32,
-                &15_u32,
+                claimant, &talos_id, &epoch_id, creator, investor, treasury, &creator_share,
+                &investor_share, &treasury_share,
             )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_do_claim(
+        env: &Env,
+        contract_id: &Address,
+        client: &TalosDividendsClient<'static>,
+        claimant: &Address,
+        talos_id: u32,
+        epoch_id: u64,
+        creator: &Address,
+        investor: &Address,
+        treasury: &Address,
+    ) -> Result<Result<i128, soroban_sdk::Error>, Result<ContractError, soroban_sdk::InvokeError>> {
+        try_do_claim_with_shares(
+            env, contract_id, client, claimant, talos_id, epoch_id, creator, investor, treasury,
+        )
+    }
+
+    fn mock_propose(
+        env: &Env,
+        client: &TalosDividendsClient,
+        contract_id: &Address,
+        admin: &Address,
+        new_admin: &Address,
+    ) {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "propose_admin",
+                    args: (new_admin.clone(),).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .propose_admin(new_admin);
+    }
+
+    fn mock_accept(
+        env: &Env,
+        client: &TalosDividendsClient,
+        contract_id: &Address,
+        new_admin: &Address,
+    ) {
+        client
+            .mock_auths(&[MockAuth {
+                address: new_admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .accept_admin();
+    }
+
+    fn mock_cancel(
+        env: &Env,
+        client: &TalosDividendsClient,
+        contract_id: &Address,
+        admin: &Address,
+    ) {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "cancel_admin_transfer",
+                    args: ().into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .cancel_admin_transfer();
     }
 
     // ── version() ────────────────────────────────────────────────────────────
@@ -835,7 +1751,7 @@ mod tests {
     #[test]
     fn version_returns_compile_time_constant() {
         let (env, contract_id, _, _, client) = setup();
-        assert_eq!(client.version(), (1u32, 1u32, 0u32));
+        assert_eq!(client.version(), (1u32, 3u32, 0u32));
         let _ = (env, contract_id);
     }
 
@@ -844,6 +1760,40 @@ mod tests {
         let (env, contract_id, _, _, client) = setup();
         assert_eq!(client.version(), CONTRACT_VERSION);
         let _ = (env, contract_id);
+    }
+
+    #[test]
+    fn interface_id_matches_pinned_golden_vector() {
+        let (_, _, _, _, client) = setup();
+        let expected = [
+            0x54, 0x61, 0x6C, 0x6F, 0x73, 0x44, 0x69, 0x76, 0x69, 0x64, 0x65, 0x6E, 0x64, 0x73,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(INTERFACE_NAMESPACE, "TalosDividends");
+        assert_eq!(INTERFACE_ID, expected);
+        assert_eq!(client.interface_id().to_array(), expected);
+    }
+
+    #[test]
+    fn supports_version_checks_major_minor_and_patch() {
+        let (_, _, _, _, client) = setup();
+        assert!(client.supports_version(&1, &0, &0));
+        assert!(client.supports_version(&1, &1, &0));
+        assert!(client.supports_version(&1, &2, &0));
+        assert!(!client.supports_version(&1, &1, &1));
+        assert!(!client.supports_version(&1, &3, &0));
+        assert!(!client.supports_version(&2, &0, &0));
+    }
+
+    #[test]
+    fn interface_features_lists_dividends_capabilities() {
+        let (env, _, _, _, client) = setup();
+        let features = client.interface_features();
+        for feature in features_list() {
+            assert!(features.contains(&Symbol::new(&env, feature)));
+        }
+        assert_eq!(features.len(), features_list().len() as u32);
     }
 
     // ── initialize() ─────────────────────────────────────────────────────────
@@ -1086,8 +2036,7 @@ mod tests {
         do_claim_with_shares(
             &env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor,
             &treasury, 60, 25, 15,
-        )
-        .unwrap();
+        );
 
         assert_eq!(client.get_rounding_dust(&talos_id, &epoch_id), Some(1));
         let events = env.events().all();
@@ -1114,13 +2063,12 @@ mod tests {
         let treasury = Address::generate(&env);
         let epoch_id = commit_epoch(&env, &contract_id, &client, &admin, talos_id, 101, 7_200);
 
-        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury)
-            .unwrap();
-        let result = do_claim_with_shares(
+        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
+        let result = try_do_claim_with_explicit_shares(
             &env, &contract_id, &client, &investor, talos_id, epoch_id, &creator, &investor,
             &treasury, 61, 24, 15,
         );
-        assert_eq!(result, Err(ContractError::InconsistentShareData));
+        assert_eq!(result, Err(Ok(ContractError::InconsistentShareData)));
         assert!(!client.has_claimed(&epoch_id, &investor));
     }
 
@@ -1133,8 +2081,7 @@ mod tests {
         let treasury = Address::generate(&env);
         let epoch_id = commit_epoch(&env, &contract_id, &client, &admin, talos_id, 101, 7_200);
 
-        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury)
-            .unwrap();
+        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
         env.ledger().with_mut(|li| li.timestamp = 9_000);
 
         let recovered = client
@@ -1147,8 +2094,7 @@ mod tests {
                     sub_invokes: &[],
                 },
             }])
-            .recover_expired(&admin, &talos_id, &epoch_id)
-            .unwrap();
+            .recover_expired(&admin, &talos_id, &epoch_id);
 
         assert_eq!(recovered, 41); // 101 - floor(101 * 60 / 100)
     }
@@ -1346,6 +2292,152 @@ mod tests {
     }
 
     #[test]
+    fn claim_eligibility_reports_allocation_without_mutating_state() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+        let record_before = client.get_epoch(&talos_id, &epoch_id).unwrap();
+        let event_count = env.events().all().len();
+
+        assert_eq!(
+            client
+                .claim_eligibility(
+                    &creator,
+                    &talos_id,
+                    &epoch_id,
+                    &creator,
+                    &investor,
+                    &treasury,
+                    &60,
+                    &25,
+                    &15,
+                ),
+            ClaimEligibility::Eligible(6_000, PatronRole::Creator)
+        );
+        assert_eq!(client.get_epoch(&talos_id, &epoch_id), Some(record_before));
+        assert!(!client.has_claimed(&epoch_id, &creator));
+        assert_eq!(env.events().all().len(), event_count);
+    }
+
+    #[test]
+    fn claim_eligibility_reports_already_claimed_without_mutating_state() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+        do_claim(
+            &env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury,
+        )
+        .unwrap();
+        let record_before = client.get_epoch(&talos_id, &epoch_id).unwrap();
+        let event_count = env.events().all().len();
+
+        assert_eq!(
+            client
+                .claim_eligibility(
+                    &creator,
+                    &talos_id,
+                    &epoch_id,
+                    &creator,
+                    &investor,
+                    &treasury,
+                    &60,
+                    &25,
+                    &15,
+                ),
+            ClaimEligibility::AlreadyClaimed
+        );
+        assert_eq!(client.get_epoch(&talos_id, &epoch_id), Some(record_before));
+        assert!(client.has_claimed(&epoch_id, &creator));
+        assert_eq!(env.events().all().len(), event_count);
+    }
+
+    #[test]
+    fn claim_eligibility_reports_zero_allocation_without_mutating_state() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+        let record_before = client.get_epoch(&talos_id, &epoch_id).unwrap();
+        let event_count = env.events().all().len();
+
+        assert_eq!(
+            client
+                .claim_eligibility(
+                    &creator,
+                    &talos_id,
+                    &epoch_id,
+                    &creator,
+                    &investor,
+                    &treasury,
+                    &0,
+                    &100,
+                    &0,
+                ),
+            ClaimEligibility::ZeroAllocation
+        );
+        assert_eq!(client.get_epoch(&talos_id, &epoch_id), Some(record_before));
+        assert!(!client.has_claimed(&epoch_id, &creator));
+        assert_eq!(env.events().all().len(), event_count);
+    }
+
+    #[test]
+    fn claim_eligibility_keeps_claim_window_open_at_deadline() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+        env.ledger().with_mut(|li| li.timestamp = 8_200);
+
+        assert_eq!(
+            client
+                .claim_eligibility(
+                    &creator,
+                    &talos_id,
+                    &epoch_id,
+                    &creator,
+                    &investor,
+                    &treasury,
+                    &60,
+                    &25,
+                    &15,
+                ),
+            ClaimEligibility::Eligible(6_000, PatronRole::Creator)
+        );
+
+        env.ledger().with_mut(|li| li.timestamp = 8_201);
+        let record_before = client.get_epoch(&talos_id, &epoch_id).unwrap();
+        let event_count = env.events().all().len();
+        assert_eq!(
+            client
+                .claim_eligibility(
+                    &creator,
+                    &talos_id,
+                    &epoch_id,
+                    &creator,
+                    &investor,
+                    &treasury,
+                    &60,
+                    &25,
+                    &15,
+                ),
+            ClaimEligibility::Expired
+        );
+        assert_eq!(client.get_epoch(&talos_id, &epoch_id), Some(record_before));
+        assert!(!client.has_claimed(&epoch_id, &creator));
+        assert_eq!(env.events().all().len(), event_count);
+    }
+
+    #[test]
     fn claim_emits_div_clm_event() {
         let (env, contract_id, admin, _, client) = setup();
         let talos_id = 1u32;
@@ -1485,6 +2577,186 @@ mod tests {
             }])
             .try_recover_expired(&admin, &talos_id, &epoch_id);
         assert_eq!(res, Err(Ok(ContractError::EpochNotExpired)));
+    }
+
+    // ── Boundary semantics: claim_dividend vs. recover_expired ─────────────────
+    //
+    // `claim_dividend` rejects when `now > deadline` (so it ACCEPTS exactly at
+    // `deadline`), while `recover_expired` rejects when `now <= deadline` (so
+    // it ACCEPTS only strictly after `deadline`). The two conditions are
+    // complements of each other around the same `deadline` value, so the
+    // claim window and the recovery window never overlap: for every `now`,
+    // at most one of {claim, recover} can succeed. These tests pin that
+    // invariant down at `deadline - 1`, `deadline`, and `deadline + 1` so a
+    // future edit to either boundary check trips a test instead of silently
+    // opening a window where both (or neither) succeed.
+    //
+    // With `created_at = 1_000` and `expiry_secs = 7_200` (the defaults from
+    // `commit_default_epoch`), `deadline = 8_200`.
+
+    /// Helper: `try_recover_expired` with the admin auth already mocked.
+    /// Mirrors `try_do_claim`'s result shape so both boundary checks compare
+    /// the same way: `Ok(Ok(amount))` on success, `Err(Ok(ContractError::X))`
+    /// on a contract-level rejection.
+    fn try_recover(
+        env: &Env,
+        contract_id: &Address,
+        client: &TalosDividendsClient<'static>,
+        admin: &Address,
+        talos_id: u32,
+        epoch_id: u64,
+    ) -> Result<Result<i128, soroban_sdk::Error>, Result<ContractError, soroban_sdk::InvokeError>>
+    {
+        client
+            .mock_auths(&[MockAuth {
+                address: admin,
+                invoke: &MockAuthInvoke {
+                    contract: contract_id,
+                    fn_name: "recover_expired",
+                    args: (admin.clone(), talos_id, epoch_id).into_val(env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_recover_expired(admin, &talos_id, &epoch_id)
+    }
+
+    #[test]
+    fn claim_succeeds_at_deadline_minus_one() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 8_199; // deadline (8_200) - 1
+        });
+
+        let res = try_do_claim(
+            &env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor,
+            &treasury,
+        );
+        assert!(res.is_ok() && res.unwrap().is_ok());
+    }
+
+    #[test]
+    fn claim_succeeds_exactly_at_deadline() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 8_200; // == deadline — claim window is inclusive
+        });
+
+        let res = try_do_claim(
+            &env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor,
+            &treasury,
+        );
+        assert!(res.is_ok() && res.unwrap().is_ok());
+    }
+
+    #[test]
+    fn claim_fails_at_deadline_plus_one() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 8_201; // deadline (8_200) + 1
+        });
+
+        let res = try_do_claim(
+            &env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor,
+            &treasury,
+        );
+        assert_eq!(res, Err(Ok(ContractError::EpochExpired)));
+    }
+
+    #[test]
+    fn recover_fails_at_deadline_minus_one() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 8_199; // deadline (8_200) - 1
+        });
+
+        let res = try_recover(&env, &contract_id, &client, &admin, talos_id, epoch_id);
+        assert_eq!(res, Err(Ok(ContractError::EpochNotExpired)));
+    }
+
+    #[test]
+    fn recover_fails_exactly_at_deadline() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 8_200; // == deadline — claim window still owns this instant
+        });
+
+        let res = try_recover(&env, &contract_id, &client, &admin, talos_id, epoch_id);
+        assert_eq!(res, Err(Ok(ContractError::EpochNotExpired)));
+    }
+
+    #[test]
+    fn recover_succeeds_at_deadline_plus_one() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 8_201; // deadline (8_200) + 1
+        });
+
+        let res = try_recover(&env, &contract_id, &client, &admin, talos_id, epoch_id);
+        assert_eq!(res, Ok(Ok(10_000)));
+    }
+
+    #[test]
+    fn claim_and_recover_never_both_succeed_at_any_boundary() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        // deadline = created_at (1_000) + expiry_secs (7_200) = 8_200.
+        for &ts in &[8_199u64, 8_200u64, 8_201u64] {
+            // Fresh epoch per timestamp so a successful claim/recover in one
+            // iteration can't influence the next.
+            env.ledger().with_mut(|li| {
+                li.timestamp = 1_000;
+            });
+            let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+            env.ledger().with_mut(|li| {
+                li.timestamp = ts;
+            });
+
+            let claim_res = try_do_claim(
+                &env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor,
+                &treasury,
+            );
+            let claim_ok = matches!(claim_res, Ok(Ok(_)));
+
+            let recover_res = try_recover(&env, &contract_id, &client, &admin, talos_id, epoch_id);
+            let recover_ok = matches!(recover_res, Ok(Ok(_)));
+
+            assert!(
+                !(claim_ok && recover_ok),
+                "claim and recover both succeeded at ts={ts} (deadline=8_200)"
+            );
+        }
     }
 
     #[test]
@@ -2470,6 +3742,65 @@ mod tests {
         assert_eq!(recovered, 1, "1 unit of truncation dust is recovered");
     }
 
+    #[test]
+    fn conservation_is_independent_of_claim_order() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1397u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        let first_epoch = commit_epoch(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            talos_id,
+            103,
+            7_200,
+        );
+        let first_claimed = do_claim_with_shares(
+            &env, &contract_id, &client, &creator, talos_id, first_epoch, &creator, &investor,
+            &treasury, 50, 30, 20,
+        ) + do_claim_with_shares(
+            &env, &contract_id, &client, &investor, talos_id, first_epoch, &creator, &investor,
+            &treasury, 50, 30, 20,
+        ) + do_claim_with_shares(
+            &env, &contract_id, &client, &treasury, talos_id, first_epoch, &creator, &investor,
+            &treasury, 50, 30, 20,
+        );
+
+        let second_epoch = commit_epoch(
+            &env,
+            &contract_id,
+            &client,
+            &admin,
+            talos_id,
+            103,
+            7_200,
+        );
+        let second_claimed = do_claim_with_shares(
+            &env, &contract_id, &client, &treasury, talos_id, second_epoch, &creator, &investor,
+            &treasury, 50, 30, 20,
+        ) + do_claim_with_shares(
+            &env, &contract_id, &client, &investor, talos_id, second_epoch, &creator, &investor,
+            &treasury, 50, 30, 20,
+        ) + do_claim_with_shares(
+            &env, &contract_id, &client, &creator, talos_id, second_epoch, &creator, &investor,
+            &treasury, 50, 30, 20,
+        );
+
+        assert_eq!(first_claimed, 101);
+        assert_eq!(second_claimed, first_claimed);
+        assert_eq!(client.get_rounding_dust(&talos_id, &first_epoch), Some(2));
+        assert_eq!(client.get_rounding_dust(&talos_id, &second_epoch), Some(2));
+        assert_eq!(
+            client.get_epoch(&talos_id, &first_epoch).unwrap().claimed_amount
+                + client.get_rounding_dust(&talos_id, &first_epoch).unwrap(),
+            103
+        );
+    }
+
     // ── Budget regression gates (#610) ───────────────────────────────────────
     //
     // These tests assert that key entry-points stay within CPU-instruction and
@@ -2709,4 +4040,879 @@ mod tests {
             BUDGET_MEM_COMMIT_EPOCH,
         );
     }
+
+    // ── Admin rotation tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn admin_rotation_happy_path() {
+        let (env, contract_id, admin, _, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(client.get_admin(), Some(admin.clone()));
+        assert_eq!(client.pending_admin(), None);
+
+        // Propose new admin
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        assert_eq!(client.pending_admin(), Some(new_admin.clone()));
+        assert_eq!(client.get_admin(), Some(admin.clone()));
+
+        // Check adm_prp event
+        let events = env.events().all();
+        let prop_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(addr, topics, _)| {
+                if *addr != contract_id || topics.is_empty() {
+                    return false;
+                }
+                let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &topics.get(0).unwrap());
+                sym.map(|s| s == symbol_short!("adm_prp")).unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(prop_events.len(), 1);
+        let (_, _, prop_data) = prop_events[0].clone();
+        let (got_curr, got_prop): (Address, Address) = TryFromVal::try_from_val(&env, &prop_data).unwrap();
+        assert_eq!(got_curr, admin);
+        assert_eq!(got_prop, new_admin);
+
+        // Accept new admin
+        mock_accept(&env, &client, &contract_id, &new_admin);
+        assert_eq!(client.get_admin(), Some(new_admin.clone()));
+        assert_eq!(client.pending_admin(), None);
+
+        // Check adm_acc event
+        let events = env.events().all();
+        let acc_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(addr, topics, _)| {
+                if *addr != contract_id || topics.is_empty() {
+                    return false;
+                }
+                let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &topics.get(0).unwrap());
+                sym.map(|s| s == symbol_short!("adm_acc")).unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(acc_events.len(), 1);
+        let (_, _, acc_data) = acc_events[0].clone();
+        let (got_acc_admin,): (Address,) = TryFromVal::try_from_val(&env, &acc_data).unwrap();
+        assert_eq!(got_acc_admin, new_admin);
+
+        // Old admin loses rights: commit_epoch with old admin is rejected
+        let res_old = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch",
+                    args: (admin.clone(), 1u32, 10_000_i128, 7_200_u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_commit_epoch(&admin, &1u32, &10_000_i128, &7_200_u64);
+        assert_eq!(res_old, Err(Ok(ContractError::Unauthorized)));
+
+        // New admin has rights: commit_epoch with new admin succeeds
+        let res_new = client
+            .mock_auths(&[MockAuth {
+                address: &new_admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch",
+                    args: (new_admin.clone(), 1u32, 10_000_i128, 7_200_u64).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .commit_epoch(&new_admin, &1u32, &10_000_i128, &7_200_u64);
+        assert_eq!(res_new, 1u64);
+    }
+
+    #[test]
+    fn admin_rotation_wrong_signer() {
+        let (env, contract_id, admin, _, client) = setup();
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+
+        // 1. Propose with impostor fails
+        let res_prop = client
+            .mock_auths(&[MockAuth {
+                address: &impostor,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "propose_admin",
+                    args: (new_admin.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_propose_admin(&new_admin);
+        assert!(res_prop.is_err());
+
+        // Now propose with real admin
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+
+        // 2. Accept with impostor (not pending admin) fails
+        let res_acc_impostor = client
+            .mock_auths(&[MockAuth {
+                address: &impostor,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_accept_admin();
+        assert!(res_acc_impostor.is_err());
+
+        // 3. Accept with current admin (not pending admin) also fails
+        let res_acc_admin = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_accept_admin();
+        assert!(res_acc_admin.is_err());
+
+        // 4. Cancel with impostor (not current admin) fails
+        let res_cnl_impostor = client
+            .mock_auths(&[MockAuth {
+                address: &impostor,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "cancel_admin_transfer",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_cancel_admin_transfer();
+        assert!(res_cnl_impostor.is_err());
+
+        // 5. Cancel with pending admin (not current admin) fails
+        let res_cnl_pending = client
+            .mock_auths(&[MockAuth {
+                address: &new_admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "cancel_admin_transfer",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_cancel_admin_transfer();
+        assert!(res_cnl_pending.is_err());
+    }
+
+    #[test]
+    fn admin_rotation_cancel() {
+        let (env, contract_id, admin, _, client) = setup();
+        let new_admin = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &new_admin);
+        assert_eq!(client.pending_admin(), Some(new_admin.clone()));
+
+        // Cancel
+        mock_cancel(&env, &client, &contract_id, &admin);
+        assert_eq!(client.pending_admin(), None);
+        assert_eq!(client.get_admin(), Some(admin.clone()));
+
+        // Check adm_cnl event
+        let events = env.events().all();
+        let cnl_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(addr, topics, _)| {
+                if *addr != contract_id || topics.is_empty() {
+                    return false;
+                }
+                let sym: Result<Symbol, _> = TryFromVal::try_from_val(&env, &topics.get(0).unwrap());
+                sym.map(|s| s == symbol_short!("adm_cnl")).unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(cnl_events.len(), 1);
+        let (_, _, cnl_data) = cnl_events[0].clone();
+        let (got_cnl_admin,): (Address,) = TryFromVal::try_from_val(&env, &cnl_data).unwrap();
+        assert_eq!(got_cnl_admin, new_admin);
+
+        // Nominee can no longer accept
+        let res_acc = client
+            .mock_auths(&[MockAuth {
+                address: &new_admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_accept_admin();
+        assert_eq!(res_acc, Err(Ok(ContractError::NoPendingAdmin)));
+    }
+
+    #[test]
+    fn admin_rotation_accept_without_pending_admin() {
+        let (env, contract_id, admin, _, client) = setup();
+        let any_addr = Address::generate(&env);
+
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &any_addr,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_accept_admin();
+        assert_eq!(res, Err(Ok(ContractError::NoPendingAdmin)));
+
+        // Also cancel without pending returns NoPendingAdmin
+        let res_cnl = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "cancel_admin_transfer",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_cancel_admin_transfer();
+        assert_eq!(res_cnl, Err(Ok(ContractError::NoPendingAdmin)));
+    }
+
+    #[test]
+    fn admin_rotation_propose_replaces_existing_pending() {
+        let (env, contract_id, admin, _, client) = setup();
+        let nominee1 = Address::generate(&env);
+        let nominee2 = Address::generate(&env);
+
+        mock_propose(&env, &client, &contract_id, &admin, &nominee1);
+        assert_eq!(client.pending_admin(), Some(nominee1.clone()));
+
+        // Replace nomination
+        mock_propose(&env, &client, &contract_id, &admin, &nominee2);
+        assert_eq!(client.pending_admin(), Some(nominee2.clone()));
+
+        // Nominee 1 can no longer accept
+        let res1 = client
+            .mock_auths(&[MockAuth {
+                address: &nominee1,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "accept_admin",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_accept_admin();
+        assert!(res1.is_err());
+
+        // Nominee 2 can accept
+        mock_accept(&env, &client, &contract_id, &nominee2);
+        assert_eq!(client.get_admin(), Some(nominee2.clone()));
+        assert_eq!(client.pending_admin(), None);
+    }
+
+    #[test]
+    fn admin_rotation_uninitialized_rejected() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, TalosDividends);
+        let client = TalosDividendsClient::new(&env, &contract_id);
+        let any_addr = Address::generate(&env);
+
+        let res_prop = client
+            .mock_auths(&[MockAuth {
+                address: &any_addr,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "propose_admin",
+                    args: (any_addr.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_propose_admin(&any_addr);
+        assert_eq!(res_prop, Err(Ok(ContractError::NotInitialized)));
+
+        let res_cnl = client
+            .mock_auths(&[MockAuth {
+                address: &any_addr,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "cancel_admin_transfer",
+                    args: ().into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_cancel_admin_transfer();
+        assert_eq!(res_cnl, Err(Ok(ContractError::NotInitialized)));
+    }
+
+    // ── Storage TTL Management Tests ─────────────────────────────
+
+    #[test]
+    fn commit_epoch_and_claim_dividend_set_last_touched() {
+        let (env, contract_id, admin, _registry, client) = setup();
+        let talos_id = 1u32;
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 100;
+        });
+
+        let epoch_id = commit_epoch(&env, &contract_id, &client, &admin, talos_id, 10_000, 86_400);
+        let key = DataKey::LastTouched(talos_id, epoch_id);
+        let last: u32 = env.as_contract(&contract_id, || {
+            env.storage().persistent().get(&key).unwrap()
+        });
+        assert_eq!(last, 100);
+
+        // Advance ledger and claim dividend
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 250;
+            li.timestamp = 2_000;
+        });
+
+        let patron_creator = Address::generate(&env);
+        let patron_investor = Address::generate(&env);
+        let patron_treasury = Address::generate(&env);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &patron_creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "claim_dividend",
+                    args: (
+                        patron_creator.clone(),
+                        talos_id,
+                        epoch_id,
+                        patron_creator.clone(),
+                        patron_investor.clone(),
+                        patron_treasury.clone(),
+                        50u32,
+                        30u32,
+                        20u32,
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .claim_dividend(
+                &patron_creator,
+                &talos_id,
+                &epoch_id,
+                &patron_creator,
+                &patron_investor,
+                &patron_treasury,
+                &50u32,
+                &30u32,
+                &20u32,
+            );
+
+        let last_after_claim: u32 = env.as_contract(&contract_id, || {
+            env.storage().persistent().get(&key).unwrap()
+        });
+        assert_eq!(last_after_claim, 250);
+    }
+
+    #[test]
+    fn touch_epoch_behaviour_and_events() {
+        let (env, contract_id, admin, _registry, client) = setup();
+        let talos_id = 1u32;
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 10;
+        });
+
+        let epoch_id = commit_epoch(&env, &contract_id, &client, &admin, talos_id, 10_000, 86_400);
+
+        // Near touch (below threshold) -> skipped
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 10 + ttl_manager::RENEWAL_THRESHOLD - 1;
+        });
+        let touched = client.touch_epoch(&talos_id, &epoch_id);
+        assert!(!touched);
+
+        // At or above threshold -> touched
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 10 + ttl_manager::RENEWAL_THRESHOLD;
+        });
+        let touched2 = client.touch_epoch(&talos_id, &epoch_id);
+        assert!(touched2);
+
+        let key = DataKey::LastTouched(talos_id, epoch_id);
+        let last: u32 = env.as_contract(&contract_id, || {
+            env.storage().persistent().get(&key).unwrap()
+        });
+        assert_eq!(last, 10 + ttl_manager::RENEWAL_THRESHOLD);
+
+        // Assert record still intact and readable
+        let record = client.get_epoch(&talos_id, &epoch_id).unwrap();
+        assert_eq!(record.total_amount, 10_000);
+    }
+
+    #[test]
+    fn extend_ttl_batch_respects_bounds_and_auth() {
+        let (env, contract_id, admin, _registry, client) = setup();
+        let talos_id = 1u32;
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 100;
+        });
+
+        let ep1 = commit_epoch(&env, &contract_id, &client, &admin, talos_id, 1_000, 86_400);
+        let ep2 = commit_epoch(&env, &contract_id, &client, &admin, talos_id, 2_000, 86_400);
+        let ep3 = commit_epoch(&env, &contract_id, &client, &admin, talos_id, 3_000, 86_400);
+
+        // Set LastTouched for ep1 to age 300, ep2 to age 150, ep3 to age 50
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 1000;
+        });
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(&DataKey::LastTouched(talos_id, ep1), &700u32); // age = 300
+            env.storage().persistent().set(&DataKey::LastTouched(talos_id, ep2), &850u32); // age = 150
+            env.storage().persistent().set(&DataKey::LastTouched(talos_id, ep3), &950u32); // age = 50
+        });
+
+        // Extend with min_age = 100, max_age = 200 -> only ep2 qualifies
+        let (touched, skipped) = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "extend_ttl_batch",
+                    args: (admin.clone(), talos_id, 1u64, 10u32, 100u32, 200u32).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .extend_ttl_batch(&admin, &talos_id, &1u64, &10u32, &100u32, &200u32);
+
+        assert_eq!(touched, 1);
+        assert_eq!(skipped, 2);
+
+        // Non-admin auth fails
+        let non_admin = Address::generate(&env);
+        let res_unauth = client
+            .mock_auths(&[MockAuth {
+                address: &non_admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "extend_ttl_batch",
+                    args: (non_admin.clone(), talos_id, 1u64, 10u32, 100u32, 200u32).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_extend_ttl_batch(&non_admin, &talos_id, &1u64, &10u32, &100u32, &200u32);
+        assert_eq!(res_unauth, Err(Ok(ContractError::Unauthorized)));
+    }
+
+    #[test]
+    fn epoch_remains_readable_across_full_claim_window() {
+        let (env, contract_id, admin, _registry, client) = setup();
+        let talos_id = 1u32;
+        let expiry_secs = MAX_EXPIRY_SECS; // 365 days (~6.3 million ledgers at 5s/ledger)
+
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 1_000;
+            li.timestamp = 10_000;
+        });
+
+        let epoch_id = commit_epoch(&env, &contract_id, &client, &admin, talos_id, 100_000, expiry_secs);
+
+        // Advance ledger by 2_500_000 ledgers (~145 days, within expiry)
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 1_000 + 2_500_000;
+            li.timestamp = 10_000 + (2_500_000 * 5);
+        });
+
+        // Touch epoch before archival
+        let touched = client.touch_epoch(&talos_id, &epoch_id);
+        assert!(touched);
+
+        // Advance ledger another 2_500_000 ledgers (~290 days total, still within MAX_EXPIRY_SECS)
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 1_000 + 5_000_000;
+            li.timestamp = 10_000 + (5_000_000 * 5);
+        });
+
+        let touched2 = client.touch_epoch(&talos_id, &epoch_id);
+        assert!(touched2);
+
+        // Verify epoch is readable and can be claimed
+        let record = client.get_epoch(&talos_id, &epoch_id).expect("epoch must remain readable");
+        assert_eq!(record.status, EpochStatus::Active);
+
+        let patron_creator = Address::generate(&env);
+        let patron_investor = Address::generate(&env);
+        let patron_treasury = Address::generate(&env);
+
+        let claimed = client
+            .mock_auths(&[MockAuth {
+                address: &patron_creator,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "claim_dividend",
+                    args: (
+                        patron_creator.clone(),
+                        talos_id,
+                        epoch_id,
+                        patron_creator.clone(),
+                        patron_investor.clone(),
+                        patron_treasury.clone(),
+                        50u32,
+                        30u32,
+                        20u32,
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .claim_dividend(
+                &patron_creator,
+                &talos_id,
+                &epoch_id,
+                &patron_creator,
+                &patron_investor,
+                &patron_treasury,
+                &50u32,
+                &30u32,
+                &20u32,
+            );
+        assert_eq!(claimed, 50_000);
+    }
+
+    #[test]
+    fn get_storage_health_reports_and_warns() {
+        let (env, contract_id, admin, _registry, client) = setup();
+        let talos_id = 1u32;
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 100;
+        });
+
+        let ep = commit_epoch(&env, &contract_id, &client, &admin, talos_id, 10_000, 86_400);
+
+        // Advance sequence near critical threshold
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 100 + ttl_manager::CRITICAL_THRESHOLD + 10;
+        });
+
+        let (min_age, max_age, warn, crit, total) = client.get_storage_health(&talos_id);
+        assert_eq!(total, 1);
+        assert_eq!(warn, 1);
+        assert_eq!(crit, 1);
+        assert_eq!(min_age, ttl_manager::CRITICAL_THRESHOLD + 10);
+        assert_eq!(max_age, ttl_manager::CRITICAL_THRESHOLD + 10);
+
+        // After touch, health resets
+        client.touch_epoch(&talos_id, &ep);
+        let (min_age2, max_age2, warn2, crit2, total2) = client.get_storage_health(&talos_id);
+        assert_eq!(total2, 1);
+        assert_eq!(warn2, 0);
+        assert_eq!(crit2, 0);
+        assert_eq!(min_age2, 0);
+        assert_eq!(max_age2, 0);
+    }
+
+    // ── set_registry_contract() ───────────────────────────────────────────────
+
+    #[test]
+    fn set_registry_contract_unauthorized_update_fails() {
+        let (env, contract_id, _admin, _, client) = setup();
+        let impostor = Address::generate(&env);
+        let new_registry = Address::generate(&env);
+
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &impostor,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_registry_contract",
+                    args: (impostor.clone(), new_registry.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_set_registry_contract(&impostor, &new_registry);
+
+        assert_eq!(res, Err(Ok(ContractError::Unauthorized)));
+    }
+
+    /// Mock registry contract that returns compatible interface_id and version
+    #[contract]
+    struct MockCompatibleRegistry;
+
+    #[contractimpl]
+    impl MockCompatibleRegistry {
+        pub fn interface_id(_env: Env) -> BytesN<32> {
+            BytesN::from_array(&_env, &EXPECTED_REGISTRY_INTERFACE_ID)
+        }
+
+        pub fn version(_env: Env) -> (u32, u32, u32) {
+            (1, 4, 0)
+        }
+    }
+
+    #[test]
+    fn set_registry_contract_authorized_update_succeeds() {
+        let env = Env::default();
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1_000;
+        });
+        let contract_id = env.register_contract(None, TalosDividends);
+        let client = TalosDividendsClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let registry = Address::generate(&env);
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "initialize",
+                    args: (admin.clone(), registry.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .initialize(&admin, &registry);
+
+        // Register a mock compatible registry
+        let new_registry_id = env.register_contract(None, MockCompatibleRegistry);
+        let new_registry = new_registry_id.clone();
+
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_registry_contract",
+                    args: (admin.clone(), new_registry.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .set_registry_contract(&admin, &new_registry);
+
+        assert_eq!(client.get_registry(), Some(new_registry.clone()));
+
+        // Verify the event was emitted
+        let events = env.events().all();
+        let reg_upd_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(addr, topics, _)| {
+                if *addr != contract_id || topics.len() == 0 {
+                    return false;
+                }
+                let sym: Result<Symbol, _> =
+                    TryFromVal::try_from_val(&env, &topics.get(0).unwrap());
+                sym.map(|s| s == symbol_short!("reg_upd")).unwrap_or(false)
+            })
+            .collect();
+
+        assert_eq!(reg_upd_events.len(), 1);
+        let (_, _, data) = reg_upd_events[0].clone();
+        let (old, new): (Address, Address) = TryFromVal::try_from_val(&env, &data).unwrap();
+        assert_eq!(old, registry);
+        assert_eq!(new, new_registry);
+    }
+
+    #[test]
+    fn set_registry_contract_incompatible_registry_fails() {
+        let (env, contract_id, admin, _, client) = setup();
+        // Use an arbitrary address that doesn't implement the interface
+        let incompatible_registry = Address::generate(&env);
+
+        let res = client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "set_registry_contract",
+                    args: (admin.clone(), incompatible_registry.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_set_registry_contract(&admin, &incompatible_registry);
+
+        // The contract will fail when trying to invoke the interface_id method
+        // on a non-existent contract, which results in an error
+        assert!(res.is_err());
+    }
+
+    // ── get_epoch_liability() ────────────────────────────────────────────────
+
+    #[test]
+    fn get_epoch_liability_returns_not_exists_for_missing_epoch() {
+        let (env, _, _, _, client) = setup();
+        let liability = client.get_epoch_liability(&99u32, &999u64);
+        assert!(!liability.exists);
+        assert_eq!(liability.total_amount, 0);
+        assert_eq!(liability.claimed_amount, 0);
+        assert_eq!(liability.unclaimed_amount, 0);
+        assert!(!liability.is_empty_round);
+        assert!(!liability.is_fully_claimed);
+        let _ = env;
+    }
+
+    #[test]
+    fn get_epoch_liability_returns_full_unclaimed_before_any_claim() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        let liability = client.get_epoch_liability(&talos_id, &epoch_id);
+        assert!(liability.exists);
+        assert_eq!(liability.total_amount, 10_000);
+        assert_eq!(liability.claimed_amount, 0);
+        assert_eq!(liability.unclaimed_amount, 10_000);
+        assert!(liability.is_empty_round);
+        assert!(!liability.is_fully_claimed);
+        assert_eq!(liability.status, EpochStatus::Active);
+    }
+
+    #[test]
+    fn get_epoch_liability_returns_partial_unclaimed_after_one_claim() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
+
+        let liability = client.get_epoch_liability(&talos_id, &epoch_id);
+        assert!(liability.exists);
+        assert_eq!(liability.total_amount, 10_000);
+        assert_eq!(liability.claimed_amount, 6_000); // creator: 60%
+        assert_eq!(liability.unclaimed_amount, 4_000);
+        assert!(!liability.is_empty_round);
+        assert!(!liability.is_fully_claimed);
+    }
+
+    #[test]
+    fn get_epoch_liability_is_fully_claimed_after_all_three_claim() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
+        do_claim(&env, &contract_id, &client, &investor, talos_id, epoch_id, &creator, &investor, &treasury);
+        do_claim(&env, &contract_id, &client, &treasury, talos_id, epoch_id, &creator, &investor, &treasury);
+
+        let liability = client.get_epoch_liability(&talos_id, &epoch_id);
+        assert!(liability.exists);
+        assert_eq!(liability.unclaimed_amount, 0);
+        assert!(!liability.is_empty_round);
+        assert!(liability.is_fully_claimed);
+    }
+
+    #[test]
+    fn get_epoch_liability_distinguishes_empty_round_from_fully_claimed() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        // Before any claim: empty round.
+        let before = client.get_epoch_liability(&talos_id, &epoch_id);
+        assert!(before.is_empty_round);
+        assert!(!before.is_fully_claimed);
+
+        // After all claims: fully claimed, not empty.
+        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
+        do_claim(&env, &contract_id, &client, &investor, talos_id, epoch_id, &creator, &investor, &treasury);
+        do_claim(&env, &contract_id, &client, &treasury, talos_id, epoch_id, &creator, &investor, &treasury);
+
+        let after = client.get_epoch_liability(&talos_id, &epoch_id);
+        assert!(!after.is_empty_round);
+        assert!(after.is_fully_claimed);
+    }
+
+    #[test]
+    fn get_epoch_liability_recovered_epoch_has_recovered_status() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        env.ledger().with_mut(|li| li.timestamp = 9_000);
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "recover_expired",
+                    args: (admin.clone(), talos_id, epoch_id).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .recover_expired(&admin, &talos_id, &epoch_id);
+
+        let liability = client.get_epoch_liability(&talos_id, &epoch_id);
+        assert!(liability.exists);
+        assert_eq!(liability.status, EpochStatus::Recovered);
+    }
+
+    // ── get_total_unclaimed() ────────────────────────────────────────────────
+
+    #[test]
+    fn get_total_unclaimed_returns_zero_before_any_epochs() {
+        let (env, _, _, _, client) = setup();
+        assert_eq!(client.get_total_unclaimed(&1u32), 0);
+        let _ = env;
+    }
+
+    #[test]
+    fn get_total_unclaimed_sums_across_multiple_epochs() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        // Commit two epochs.
+        commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+        commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        // No claims yet: total unclaimed = 10_000 + 10_000 = 20_000.
+        assert_eq!(client.get_total_unclaimed(&talos_id), 20_000);
+    }
+
+    #[test]
+    fn get_total_unclaimed_excludes_recovered_epochs() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+        commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        // Recover first epoch.
+        env.ledger().with_mut(|li| li.timestamp = 9_000);
+        client
+            .mock_auths(&[MockAuth {
+                address: &admin,
+                invoke: &MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "recover_expired",
+                    args: (admin.clone(), talos_id, epoch_id).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .recover_expired(&admin, &talos_id, &epoch_id);
+
+        // Only the second active epoch counts.
+        assert_eq!(client.get_total_unclaimed(&talos_id), 10_000);
+    }
+
+    #[test]
+    fn interface_features_includes_unclaimed_liabilities() {
+        let (env, _, _, _, client) = setup();
+        let features = client.interface_features();
+        let target = soroban_sdk::Symbol::new(&env, "unclaimed_liabilities");
+        let mut found = false;
+        for i in 0..features.len() {
+            if features.get(i).unwrap() == target {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "expected 'unclaimed_liabilities' in interface_features");
+    }
 }
+

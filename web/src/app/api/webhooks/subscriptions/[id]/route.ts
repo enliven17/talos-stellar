@@ -13,8 +13,9 @@ import { tlsTalos, tlsWebhookSubscriptions } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { logger } from "@/lib/logger";
 import { z } from "zod/v4";
-import { parseBody } from "@/lib/schemas";
+import { parseJsonBody as parseBody } from "@/lib/webhooks/verification";
 import { rotateWebhookSecret } from "@/lib/webhooks/rotation";
+import { validateUrl } from "@/lib/security/ssrf";
 
 // ─── Auth helper ─────────────────────────────────────────────────
 
@@ -40,6 +41,7 @@ const updateSubscriptionSchema = z
     eventTypes: z.array(z.string().min(1)).min(1).optional(),
     description: z.string().max(500).nullable().optional(),
     active: z.boolean().optional(),
+    paused: z.boolean().optional(),
   })
   .refine((data) => Object.keys(data).length > 0, {
     message: "At least one field must be provided",
@@ -69,6 +71,9 @@ async function _GET(
         signatureVersion: tlsWebhookSubscriptions.signatureVersion,
         secretRotatedAt: tlsWebhookSubscriptions.secretRotatedAt,
         previousSecretExpiresAt: tlsWebhookSubscriptions.previousSecretExpiresAt,
+        destinationVerificationStatus: tlsWebhookSubscriptions.destinationVerificationStatus,
+        destinationVerifiedAt: tlsWebhookSubscriptions.destinationVerifiedAt,
+        destinationVerificationExpiresAt: tlsWebhookSubscriptions.destinationVerificationExpiresAt,
         createdAt: tlsWebhookSubscriptions.createdAt,
         updatedAt: tlsWebhookSubscriptions.updatedAt,
       })
@@ -116,13 +121,32 @@ async function _PATCH(
     const { data, error } = await parseBody(request, updateSubscriptionSchema);
     if (error) return error;
 
+    if (data.url !== undefined) {
+      try {
+        await validateUrl(data.url);
+      } catch (err) {
+        return Response.json(
+          { error: "Validation failed", issues: [`url: ${err instanceof Error ? err.message : "Invalid URL"}`] },
+          { status: 400 }
+        );
+      }
+    }
+
     // Build update payload
     const updateData: Partial<typeof tlsWebhookSubscriptions.$inferInsert> = {};
 
-    if (data.url !== undefined) updateData.url = data.url;
+    if (data.url !== undefined) {
+      updateData.url = data.url;
+      // A new destination must re-prove control before deliveries resume.
+      updateData.destinationVerificationStatus = "pending";
+      updateData.destinationVerifiedAt = null;
+      updateData.destinationVerificationExpiresAt = null;
+      updateData.destinationVerificationToken = null;
+    }
     if (data.eventTypes !== undefined) updateData.eventTypes = data.eventTypes;
     if (data.description !== undefined) updateData.description = data.description;
     if (data.active !== undefined) updateData.active = data.active;
+    if (data.paused !== undefined) updateData.paused = data.paused;
 
     // Secret changes use zero-downtime rotation (retain previous during grace).
     if (data.secret !== undefined) {
@@ -132,7 +156,10 @@ async function _PATCH(
         newSecret: data.secret,
       });
       if ("error" in rotated) {
-        return Response.json({ error: rotated.error }, { status: rotated.status });
+        return Response.json(
+          rotated.code ? { error: rotated.error, code: rotated.code } : { error: rotated.error },
+          { status: rotated.status },
+        );
       }
       // Drop secret from field list so we don't double-apply below.
       delete (data as { secret?: string }).secret;
@@ -147,9 +174,13 @@ async function _PATCH(
           eventTypes: tlsWebhookSubscriptions.eventTypes,
           description: tlsWebhookSubscriptions.description,
           active: tlsWebhookSubscriptions.active,
+          paused: tlsWebhookSubscriptions.paused,
           signatureVersion: tlsWebhookSubscriptions.signatureVersion,
           secretRotatedAt: tlsWebhookSubscriptions.secretRotatedAt,
           previousSecretExpiresAt: tlsWebhookSubscriptions.previousSecretExpiresAt,
+          destinationVerificationStatus: tlsWebhookSubscriptions.destinationVerificationStatus,
+          destinationVerifiedAt: tlsWebhookSubscriptions.destinationVerifiedAt,
+          destinationVerificationExpiresAt: tlsWebhookSubscriptions.destinationVerificationExpiresAt,
           createdAt: tlsWebhookSubscriptions.createdAt,
           updatedAt: tlsWebhookSubscriptions.updatedAt,
         })
@@ -195,9 +226,13 @@ async function _PATCH(
         eventTypes: tlsWebhookSubscriptions.eventTypes,
         description: tlsWebhookSubscriptions.description,
         active: tlsWebhookSubscriptions.active,
+        paused: tlsWebhookSubscriptions.paused,
         signatureVersion: tlsWebhookSubscriptions.signatureVersion,
         secretRotatedAt: tlsWebhookSubscriptions.secretRotatedAt,
         previousSecretExpiresAt: tlsWebhookSubscriptions.previousSecretExpiresAt,
+        destinationVerificationStatus: tlsWebhookSubscriptions.destinationVerificationStatus,
+        destinationVerifiedAt: tlsWebhookSubscriptions.destinationVerifiedAt,
+        destinationVerificationExpiresAt: tlsWebhookSubscriptions.destinationVerificationExpiresAt,
         createdAt: tlsWebhookSubscriptions.createdAt,
         updatedAt: tlsWebhookSubscriptions.updatedAt,
       });

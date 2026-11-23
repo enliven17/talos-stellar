@@ -141,6 +141,27 @@ export type DirectorySortField = (typeof DIRECTORY_SORT_FIELDS)[number];
 export const DIRECTORY_STATUS_FILTER = ["Active", "Retired"] as const;
 export type DirectoryStatusFilter = (typeof DIRECTORY_STATUS_FILTER)[number];
 
+/** Parse an address filter without case folding the Stellar account identifier. */
+export function parseDirectoryAddressFilter(
+  raw: string | null,
+): { ok: true; address: string | null } | { ok: false; response: Response } {
+  if (raw === null) return { ok: true, address: null };
+  const address = raw.trim();
+  if (address.length === 0) {
+    return {
+      ok: false,
+      response: Response.json({ error: "address must be a non-empty string" }, { status: 400 }),
+    };
+  }
+  if (address.length > 64) {
+    return {
+      ok: false,
+      response: Response.json({ error: "address must be 64 characters or fewer" }, { status: 400 }),
+    };
+  }
+  return { ok: true, address };
+}
+
 /**
  * Parse and validate the `status` filter for the talos directory.
  *

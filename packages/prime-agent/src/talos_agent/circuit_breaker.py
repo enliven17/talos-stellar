@@ -181,6 +181,7 @@ CircuitBreakerConfig.PROVIDER_DEFAULTS["talos_web_api"] = CircuitBreakerConfig(
     success_threshold=2,
     window_size=60.0,
 )
+CircuitBreakerConfig.PROVIDER_DEFAULTS["stellar_horizon"] = CircuitBreakerConfig()
 CircuitBreakerConfig.PROVIDER_DEFAULTS["discord"] = CircuitBreakerConfig(
     failure_threshold=3,
     recovery_timeout=60.0,
@@ -223,6 +224,8 @@ def _resolve_provider_from_url(url: str) -> str:
         return "telegram"
     if "x.com" in lower or "twitter.com" in lower:
         return "x"
+    if "horizon" in lower and "stellar.org" in lower:
+        return "stellar_horizon"
     # Fallback — anything not recognised goes through the talos_web_api breaker.
     return "talos_web_api"
 

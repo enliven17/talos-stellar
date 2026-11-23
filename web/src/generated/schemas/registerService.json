@@ -1,3 +1,50 @@
 {
-  "type": "string"
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "serviceName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "description": {
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 2000
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "price": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "stellarPublicKey": {
+      "type": "string"
+    },
+    "chains": {
+      "default": [
+        "stellar"
+      ],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "fulfillmentMode": {
+      "default": "async",
+      "type": "string",
+      "enum": [
+        "instant",
+        "async"
+      ]
+    }
+  },
+  "required": [
+    "serviceName",
+    "price"
+  ]
 }

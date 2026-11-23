@@ -3,8 +3,6 @@ from __future__ import annotations
 import base64
 import os
 import struct
-import time
-from typing import Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import hashes

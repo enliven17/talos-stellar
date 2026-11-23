@@ -1,0 +1,132 @@
+name: Web Playwright CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'docker-compose.yml'
+      - 'scripts/mock-stellar-server.mjs'
+      - '.github/workflows/web-playwright-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'docker-compose.yml'
+      - 'scripts/mock-stellar-server.mjs'
+      - '.github/workflows/web-playwright-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  playwright-e2e:
+    name: Playwright E2E · Local Stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      NODE_ENV: test
+      CI: "true"
+      NEXT_TELEMETRY_DISABLED: "1"
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/talos
+      DIRECT_URL: postgresql://postgres:postgres@127.0.0.1:5432/talos
+      STELLAR_NETWORK: testnet
+      STELLAR_HORIZON_URL: http://127.0.0.1:4010
+      STELLAR_RPC_URL: http://127.0.0.1:4010
+      NEXT_PUBLIC_STELLAR_NETWORK: testnet
+      NEXT_PUBLIC_STELLAR_RPC_URL: http://127.0.0.1:4010
+      NEXT_PUBLIC_STELLAR_WALLET_NETWORK: testnet
+      NEXT_PUBLIC_STELLAR_OPERATOR_PUBLIC_KEY: GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL
+      STELLAR_OPERATOR_PUBLIC_KEY: GCEFRNTKTNYOS7QFQ7USU57N3NZZA65FXAVGA2WKFYJGKQZSM5WNAKRL
+      NEXT_PUBLIC_TALOS_REGISTRY_CONTRACT: CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+      NEXT_PUBLIC_TALOS_NAME_SERVICE_CONTRACT: CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+      NEXT_PUBLIC_TALOS_CREATION_XLM: "20"
+      X402_FACILITATOR_URL: http://127.0.0.1:4010
+      X402_API_KEY: local-dev
+      X402_SETTLEMENT_NETWORK: stellar-testnet
+      CROSS_CHAIN_WEBHOOK_SECRET: local-stack-secret
+      OPENAI_API_KEY: dummy
+      TAVILY_API_KEY: dummy
+      PORT: 3000
+      PLAYWRIGHT_TEST_BASE_URL: http://127.0.0.1:3000
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Start local stack (Postgres & Mock Stellar)
+        run: |
+          docker compose up -d postgres mock-stellar
+          echo "Waiting for Postgres to accept connections and queries..."
+          timeout 60 bash -c 'until docker compose exec -T postgres pg_isready -U postgres -d talos && docker compose exec -T postgres psql -U postgres -d talos -c "SELECT 1" > /dev/null 2>&1; do sleep 1; done'
+          echo "Waiting for Mock Stellar to become healthy..."
+          timeout 60 bash -c 'until curl -sf http://127.0.0.1:4010/health > /dev/null; do sleep 1; done'
+          echo "Local stack is ready."
+
+      - name: Apply database migrations and seed
+        run: |
+          docker compose exec -T postgres psql -U postgres -d talos < web/drizzle/bootstrap-roles.sql
+          pnpm --dir web db:migrate
+          docker compose exec -T postgres psql -U postgres -d talos < web/drizzle/0010_retired_agent_preservation.sql
+          pnpm --dir web db:seed
+
+      - name: Get Playwright version
+        id: playwright-version
+        working-directory: web
+        run: |
+          echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browser
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: Install Playwright browser and OS dependencies
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: pnpm --dir web exec playwright install --with-deps chromium
+
+      - name: Install Playwright OS dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: pnpm --dir web exec playwright install-deps chromium
+
+      - name: Build web application
+        run: pnpm --dir web build
+
+      - name: Run Playwright tests (headless)
+        run: pnpm --dir web test:browser
+
+      - name: Upload Playwright traces and screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-failure-artifacts
+          path: |
+            web/test-results/
+            web/playwright-report/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Teardown local stack
+        if: always()
+        run: docker compose down -v

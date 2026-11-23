@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { searchMarketplaceItems, getCapabilityFilters } from '@/lib/db/services/marketplace';
+import { parsePriceRange } from '@/lib/parse-price';
 import type { CapabilityFilter, MarketplaceSearchResponse } from './types';
 
 export async function GET(request: NextRequest) {
@@ -11,14 +12,26 @@ export async function GET(request: NextRequest) {
     const pageParam = searchParams.get('page');
     const limitParam = searchParams.get('limit');
 
+    const parsedPrice = parsePriceRange(
+      searchParams.get('minPrice'),
+      searchParams.get('maxPrice'),
+    );
+    if (!parsedPrice.ok) {
+      return parsedPrice.response;
+    }
+
     const page = Math.max(1, parseInt(pageParam || '1', 10));
     const limit = Math.min(100, Math.max(1, parseInt(limitParam || '20', 10)));
 
     let capabilityIds: string[] = [];
     if (capabilitiesParam) {
-      const parsed = JSON.parse(capabilitiesParam);
-      if (Array.isArray(parsed)) {
-        capabilityIds = parsed.filter((id: unknown) => typeof id === 'string' && id.length > 0);
+      try {
+        const parsed = JSON.parse(capabilitiesParam);
+        if (Array.isArray(parsed)) {
+          capabilityIds = parsed.filter((id: unknown): id is string => typeof id === 'string' && id.length > 0);
+        }
+      } catch {
+        capabilityIds = capabilitiesParam.split(',').map((id) => id.trim()).filter((id) => id.length > 0);
       }
     }
 

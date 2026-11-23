@@ -32,6 +32,7 @@ export type TalosErrorCode =
   | "server_error"
   | "transport_error"
   | "timeout_error"
+  | "capability_error"
   | "api_error";
 
 /**
@@ -51,7 +52,7 @@ export const MAX_DATA_BYTES = 4096;
  * Names of fields whose values potentially contain credentials or other
  * sensitive material. We redact them in the surfaced error body and `data`.
  */
-const SENSITIVE_FIELD_PATTERN = /^(token|authorization|secret|api[_-]?key|password|cookie|signature|message|nonce|hash)$/i;
+export const SENSITIVE_FIELD_PATTERN = /^(?:x-)?(token|authorization|secret|api[_-]?key|password|cookie|signature|message|nonce|hash|payment)$/i;
 
 /**
  * Options accepted by every TalosAPIError subclass via the 4th constructor
@@ -72,6 +73,8 @@ export interface TalosAPIErrorOptions {
   isRetryable?: boolean;
   /** Server-supplied retry hint (already normalized to milliseconds). */
   retryAfterMs?: number;
+  /** Explicitly supplied rate-limit counters (falls back to parsing `headers`). */
+  rateLimit?: RateLimitInfo;
   /** Snapshot of relevant response headers (lowercased keys). */
   headers?: Record<string, string>;
   /** `x-request-id` for correlation with server logs. */
@@ -157,17 +160,27 @@ function redactSecretsInternal(value: unknown, seen: WeakSet<object>): unknown {
   return out;
 }
 
+/**
+ * Header source accepted by the header helpers: a `Headers` instance or a
+ * plain lowercased record (as used by mocked fetch responses in tests).
+ */
+export type HeaderSource = Headers | Record<string, string> | undefined | null;
+
+/** Case-insensitive header read that works for `Headers` and plain records. */
+function readHeader(headers: HeaderSource, key: string): string | null {
+  if (!headers) return null;
+  if (typeof (headers as Headers).get === "function") {
+    return (headers as Headers).get(key);
+  }
+  const rec = headers as Record<string, string>;
+  return rec[key.toLowerCase()] ?? rec[key] ?? null;
+}
+
 /** Pull a small, safe set of headers off a `Headers` object. */
-export function snapshotHeaders(headers: Headers | Record<string, string> | undefined | null): Record<string, string> {
+export function snapshotHeaders(headers: HeaderSource): Record<string, string> {
   const out: Record<string, string> = {};
   if (!headers) return out;
-  const get = (key: string): string | null => {
-    if (typeof (headers as Headers).get === "function") {
-      return (headers as Headers).get(key);
-    }
-    const rec = headers as Record<string, string>;
-    return rec[key.toLowerCase()] ?? rec[key] ?? null;
-  };
+  const get = (key: string): string | null => readHeader(headers, key);
   const SAFE_HEADER_KEYS = [
     "x-request-id",
     "retry-after",
@@ -202,6 +215,60 @@ export function parseRetryAfter(value: string | undefined | null, nowMs: number 
     return Math.max(0, date - nowMs);
   }
   return undefined;
+}
+
+/**
+ * Structured `X-RateLimit-*` counters parsed from a response.
+ *
+ * Headers are optional on the wire, so every field is optional: a request
+ * that only carries some of the counters still yields the subset that was
+ * present. When none of the counters can be parsed, {@link parseRateLimit}
+ * returns `undefined` rather than throwing.
+ */
+export interface RateLimitInfo {
+  /** Quota for the current bucket (`X-RateLimit-Limit`). */
+  limit?: number;
+  /** Requests left in the current window (`X-RateLimit-Remaining`). */
+  remaining?: number;
+  /**
+   * Unix epoch **milliseconds** at which the window resets
+   * (`X-RateLimit-Reset`, which the API sends in seconds).
+   */
+  resetAt?: number;
+}
+
+/** Parse a non-negative integer header value; returns `undefined` when absent or malformed. */
+function parseRateLimitCounter(value: string | null): number | undefined {
+  if (value == null) return undefined;
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+/**
+ * Parse the `X-RateLimit-Limit` / `X-RateLimit-Remaining` / `X-RateLimit-Reset`
+ * response headers into a typed {@link RateLimitInfo}.
+ *
+ * Accepts a `Headers` instance (case-insensitive per the fetch spec) or a
+ * plain record (use lowercased keys). Malformed or missing headers are simply
+ * omitted, and a response that carries none of them returns `undefined` —
+ * this never throws, so it is safe to call on every response.
+ */
+export function parseRateLimit(headers: HeaderSource): RateLimitInfo | undefined {
+  const limit = parseRateLimitCounter(readHeader(headers, "x-ratelimit-limit"));
+  const remaining = parseRateLimitCounter(readHeader(headers, "x-ratelimit-remaining"));
+  const resetSeconds = parseRateLimitCounter(readHeader(headers, "x-ratelimit-reset"));
+
+  if (limit === undefined && remaining === undefined && resetSeconds === undefined) {
+    return undefined;
+  }
+
+  const info: RateLimitInfo = {};
+  if (limit !== undefined) info.limit = limit;
+  if (remaining !== undefined) info.remaining = remaining;
+  if (resetSeconds !== undefined) info.resetAt = resetSeconds * 1000;
+  return info;
 }
 
 /**
@@ -255,6 +322,8 @@ export class TalosAPIError extends Error {
   public readonly apiMessage: string;
   public readonly validationDetails: string[];
   public readonly retryAfterMs?: number;
+  /** Parsed `X-RateLimit-*` counters from the response, or `undefined` when absent. */
+  public readonly rateLimit?: RateLimitInfo;
   public readonly requestId?: string;
   public readonly headers: Record<string, string>;
   public readonly data?: unknown;
@@ -276,6 +345,7 @@ export class TalosAPIError extends Error {
     this.apiMessage = options.apiMessage ?? `Request failed with status ${status}`;
     this.validationDetails = options.validationDetails?.slice() ?? [];
     this.retryAfterMs = options.retryAfterMs;
+    this.rateLimit = options.rateLimit ?? parseRateLimit(options.headers);
     this.requestId = options.requestId;
     this.headers = options.headers ?? {};
     // Apply the same redaction + size cap to `data` that `body` already
@@ -302,6 +372,7 @@ export class TalosAPIError extends Error {
       path: this.path,
       isRetryable: this.isRetryable,
       retryAfterMs: this.retryAfterMs,
+      rateLimit: this.rateLimit,
       requestId: this.requestId,
       timestamp: this.timestamp,
     };
@@ -397,8 +468,11 @@ export class TalosPaymentError extends TalosAPIError {
 
 /** 429 — rate limited. */
 export class TalosRateLimitError extends TalosAPIError {
+  /** Convenience projection of {@link TalosAPIError.rateLimit}.limit. */
   public readonly limit?: number;
+  /** Convenience projection of {@link TalosAPIError.rateLimit}.remaining. */
   public readonly remaining?: number;
+  /** Convenience projection of {@link TalosAPIError.rateLimit}.resetAt (epoch ms). */
   public readonly resetAt?: number;
   constructor(
     status: number,
@@ -412,12 +486,11 @@ export class TalosRateLimitError extends TalosAPIError {
       isRetryable: true,
     });
     this.name = "TalosRateLimitError";
-    const limitHeader = options.headers?.["x-ratelimit-limit"];
-    const remainingHeader = options.headers?.["x-ratelimit-remaining"];
-    const resetHeader = options.headers?.["x-ratelimit-reset"];
-    if (limitHeader != null) this.limit = Number(limitHeader);
-    if (remainingHeader != null) this.remaining = Number(remainingHeader);
-    if (resetHeader != null) this.resetAt = Number(resetHeader) * 1000; // server emits seconds
+    // Parsed once by the base class from the same headers, so the typed
+    // `rateLimit` object and these legacy fields can never disagree.
+    this.limit = this.rateLimit?.limit;
+    this.remaining = this.rateLimit?.remaining;
+    this.resetAt = this.rateLimit?.resetAt;
   }
 }
 
@@ -478,6 +551,141 @@ export class TalosTimeoutError extends TalosAPIError {
       isRetryable: true,
     });
     this.name = "TalosTimeoutError";
+  }
+}
+
+// ── Endpoint capability negotiation ──────────────────────────────────────────
+
+/** Maximum length of a single advertised API version string (bytes). */
+const MAX_API_VERSION_BYTES = 64;
+/** Maximum number of advertised feature flags retained. */
+const MAX_FEATURE_FLAGS = 64;
+/** Maximum length of a single advertised feature flag (bytes). */
+const MAX_FEATURE_FLAG_BYTES = 64;
+
+/**
+ * Read a bounded {@link EndpointCapabilities} snapshot off a response's
+ * headers. Looks at `x-talos-api-version` (a single version string) and
+ * `x-talos-features` (a comma-separated list of feature flags). Both fields
+ * are trimmed; feature flags are deduplicated and bounded in count/length so
+ * a hostile or misconfigured endpoint cannot exhaust memory.
+ *
+ * Pure function — never throws. Missing headers yield an empty capability set
+ * (`{ features: [] }` with no `apiVersion`), which fails any non-empty
+ * {@link RequiredCapabilities}. The returned object is frozen.
+ */
+export function parseEndpointCapabilities(
+  headers: Headers | Record<string, string> | undefined | null,
+): EndpointCapabilities {
+  const out: EndpointCapabilities = { features: [] };
+  if (!headers) return Object.freeze(out);
+  const get = (key: string): string | null => {
+    if (typeof (headers as Headers).get === "function") {
+      return (headers as Headers).get(key);
+    }
+    const rec = headers as Record<string, string>;
+    return rec[key.toLowerCase()] ?? rec[key] ?? null;
+  };
+
+  const rawVersion = get("x-talos-api-version");
+  if (rawVersion) {
+    const version = rawVersion.trim().slice(0, MAX_API_VERSION_BYTES);
+    if (version) out.apiVersion = version;
+  }
+
+  const rawFeatures = get("x-talos-features");
+  if (rawFeatures) {
+    const seen = new Set<string>();
+    const features: string[] = [];
+    for (const part of rawFeatures.split(",")) {
+      if (features.length >= MAX_FEATURE_FLAGS) break;
+      const flag = part.trim().slice(0, MAX_FEATURE_FLAG_BYTES);
+      if (!flag || seen.has(flag)) continue;
+      seen.add(flag);
+      features.push(flag);
+    }
+    out.features = Object.freeze(features);
+  }
+  return Object.freeze(out);
+}
+
+/** Format a short, privacy-safe list of capability identifiers for messages. */
+function formatCapabilityList(items: string[]): string {
+  if (items.length === 1) return JSON.stringify(items[0]);
+  return items.map((i) => JSON.stringify(i)).join(", ");
+}
+
+/**
+ * Return `null` when `available` satisfies every constraint in `required`,
+ * otherwise a human-readable, privacy-safe reason string explaining the first
+ * mismatch. Matching is exact and case-sensitive after trimming whitespace.
+ *
+ * Used by {@link satisfiesCapabilities} and by {@link TalosCapabilityError} to
+ * build a deterministic message without echoing request payloads.
+ */
+export function describeCapabilityMismatch(
+  required: RequiredCapabilities,
+  available: EndpointCapabilities,
+): string | null {
+  if (required.apiVersion !== undefined) {
+    const wanted = Array.isArray(required.apiVersion) ? required.apiVersion : [required.apiVersion];
+    const trimmed = wanted
+      .map((v) => (typeof v === "string" ? v.trim() : v))
+      .filter((v): v is string => typeof v === "string" && v.length > 0);
+    if (trimmed.length > 0) {
+      if (!available.apiVersion || !trimmed.includes(available.apiVersion)) {
+        return `required API version ${formatCapabilityList(trimmed)} not matched (endpoint advertises ${JSON.stringify(available.apiVersion ?? null)})`;
+      }
+    }
+  }
+  if (required.features !== undefined && required.features.length > 0) {
+    const missing = required.features
+      .map((f) => (typeof f === "string" ? f.trim() : f))
+      .filter(
+        (f): f is string => typeof f === "string" && f.length > 0 && !available.features.includes(f),
+      );
+    if (missing.length > 0) {
+      return `required feature ${formatCapabilityList(missing)} not advertised by endpoint`;
+    }
+  }
+  return null;
+}
+
+/**
+ * True when `available` satisfies every constraint in `required`. Convenience
+ * wrapper around {@link describeCapabilityMismatch} for boolean checks.
+ */
+export function satisfiesCapabilities(
+  required: RequiredCapabilities,
+  available: EndpointCapabilities,
+): boolean {
+  return describeCapabilityMismatch(required, available) === null;
+}
+
+/**
+ * Capability negotiation failed — the endpoint did not advertise a capability
+ * the caller required for this request. Not retryable: a missing capability is
+ * a deterministic endpoint state, not a transient failure.
+ *
+ * Carries the {@link RequiredCapabilities} the caller asked for and the
+ * bounded {@link EndpointCapabilities} the endpoint actually advertised so
+ * callers can branch on the specific gap.
+ */
+export class TalosCapabilityError extends TalosAPIError {
+  public readonly required: RequiredCapabilities;
+  public readonly available: EndpointCapabilities;
+  constructor(
+    status: number,
+    body: string,
+    path: string,
+    required: RequiredCapabilities,
+    available: EndpointCapabilities,
+    options: TalosAPIErrorOptions = {},
+  ) {
+    super(status, body, path, { ...options, code: "capability_error", isRetryable: false });
+    this.name = "TalosCapabilityError";
+    this.required = required;
+    this.available = available;
   }
 }
 
@@ -566,6 +774,8 @@ export function redactEventPath(rawPath: string): string {
 import type {
   BuyerProofDiagnostics,
   X402ProofStage,
+  EndpointCapabilities,
+  RequiredCapabilities,
 } from "./types.js";
 
 /**
@@ -682,7 +892,7 @@ export function errorFromResponse(
   status: number,
   path: string,
   rawBody: string,
-  headers: Headers | Record<string, string>,
+  headers: HeaderSource,
 ): TalosAPIError {
   const { body, data } = sanitizeBody(rawBody);
   const envelope = parseErrorEnvelope(rawBody);
@@ -793,4 +1003,40 @@ export function classifyTransportError(
   }
   const safeBody = truncate(message.replace(/\s+/g, " ").trim());
   return new TalosTransportError(0, safeBody, path, { message, cause });
+}
+
+// ── Contract reader errors ─────────────────────────────────────────────────
+
+/**
+ * Base class for errors surfaced by {@link RegistryReader} and
+ * {@link NameServiceReader}. Extends {@link TalosAPIError} so existing
+ * `instanceof TalosAPIError` guards continue to work.
+ */
+export class TalosContractError extends TalosAPIError {
+  constructor(message: string, options: TalosAPIErrorOptions = {}) {
+    super(0, message, "soroban", { ...options, code: "api_error" });
+    this.name = "TalosContractError";
+  }
+}
+
+/**
+ * A requested on-chain resource (Talos ID, name, etc.) was not found.
+ * Maps to a `not_found_error` code for consistent switch-style handling.
+ */
+export class TalosContractNotFoundError extends TalosContractError {
+  constructor(message: string, options: TalosAPIErrorOptions = {}) {
+    super(message, { ...options, code: "not_found_error" });
+    this.name = "TalosContractNotFoundError";
+  }
+}
+
+/**
+ * The Soroban `simulateTransaction` call returned a contract or RPC-level
+ * error. Inspect `cause` for the raw RPC error object.
+ */
+export class TalosContractSimulateError extends TalosContractError {
+  constructor(message: string, options: TalosAPIErrorOptions = {}) {
+    super(message, options);
+    this.name = "TalosContractSimulateError";
+  }
 }

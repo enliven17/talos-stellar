@@ -61,9 +61,9 @@ Every API response includes:
 |---|---|
 | `X-RateLimit-Limit` | Quota for this bucket |
 | `X-RateLimit-Remaining` | Remaining requests in the current window |
-| `X-RateLimit-Reset` | Unix timestamp (seconds) when the window resets |
+| `X-RateLimit-Reset` | Unix timestamp (seconds) when the window resets (omitted when reset time is unknown or invalid) |
 | `X-RateLimit-Policy` | Which bucket applies to this request: `auth`, `read`, `write-key`, or `write-ip` |
-| `Retry-After` | Seconds until the client may retry (429 responses only) |
+| `Retry-After` | Finite positive integer seconds until the client may retry (429 responses only; capped at `QUOTA_MAX_RETRY_AFTER_SECONDS`, default `3600`; falls back to `QUOTA_UNKNOWN_RESET_RETRY_AFTER_SECONDS`, default `60`, when reset time is unknown) |
 
 ### Policy values
 
@@ -105,6 +105,10 @@ RATE_LIMIT_READ_WINDOW_MS=60000
 RATE_LIMIT_WRITE_KEY_LIMIT=30
 RATE_LIMIT_WRITE_IP_LIMIT=30
 RATE_LIMIT_WRITE_WINDOW_MS=60000
+
+# Retry-After cap & unknown-reset fallback (seconds, range 1–86400)
+QUOTA_MAX_RETRY_AFTER_SECONDS=3600
+QUOTA_UNKNOWN_RESET_RETRY_AFTER_SECONDS=60
 ```
 
 ### Trusted proxy depth
@@ -130,7 +134,7 @@ No additional setup needed. Omit `REDIS_URL` from your `.env.local`:
 
 ```bash
 cd web
-cp env.example .env.local   # remove or leave blank REDIS_URL
+cp .env.example .env.local   # remove or leave blank REDIS_URL
 npm run dev
 ```
 
@@ -199,7 +203,7 @@ Rate-limit events are emitted via `pino` at the `warn` level:
 { "level": "warn", "key": "read:1.2.3.4", "err": { "message": "..." }, "msg": "rate-limit: Redis unavailable, falling back to memory store" }
 ```
 
-On fail-closed denial (no Redis), the process logs at `error` level and returns `{ count: MAX_SAFE_INTEGER }` so any quota is immediately exceeded.
+On fail-closed denial (no Redis), the process logs at `warn`/`error` level and returns `{ count: MAX_SAFE_INTEGER, resetAt: null }` so any quota is immediately exceeded, `Retry-After` uses the documented finite fallback (`QUOTA_UNKNOWN_RESET_RETRY_AFTER_SECONDS`, default `60`s), and `X-RateLimit-Reset` is omitted.
 
 Alert recommendations (Sentry / log drain):
 - `msg = "rate-limit: Redis unavailable"` — Redis connectivity issue

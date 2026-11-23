@@ -3,7 +3,7 @@ import { openApiSpec } from "@/lib/openapi";
 
 export const dynamic = "force-static";
 
-async function _GET(_req: import("next/server").NextRequest) {
+function _GET(_req?: import("next/server").NextRequest) {
   return Response.json(openApiSpec, {
     headers: {
       "Access-Control-Allow-Origin": "*",
@@ -11,4 +11,11 @@ async function _GET(_req: import("next/server").NextRequest) {
   });
 }
 
-export const GET = withRequestId(_GET);
+const wrappedGet = withRequestId(_GET);
+
+export function GET(): Response;
+export function GET(request: import("next/server").NextRequest): Response;
+export function GET(request?: import("next/server").NextRequest): Response {
+  return wrappedGet(request);
+}
+

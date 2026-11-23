@@ -1,27 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAgentById } from '@/lib/db/agents';
 import { generateETag, isETagMatch } from '@/lib/etag';
+import { badRequest, notFound } from '@/lib/api-response';
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> | { id: string } }
 ) {
-  const { id } = params;
+  const resolvedParams = await params;
+  const id = resolvedParams?.id;
 
-  if (!id || typeof id !== 'string') {
-    return NextResponse.json(
-      { error: 'Invalid agent ID' },
-      { status: 400 }
-    );
+  if (!id || typeof id !== 'string' || id.trim().length === 0 || /\s/.test(id)) {
+    return badRequest(request, 'Invalid agent ID');
   }
 
   const agent = await getAgentById(id);
 
   if (!agent) {
-    return NextResponse.json(
-      { error: 'Agent not found' },
-      { status: 404 }
-    );
+    return notFound(request, 'Agent not found');
   }
 
   const responseBody = JSON.stringify(agent);
