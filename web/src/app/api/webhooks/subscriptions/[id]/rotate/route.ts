@@ -90,7 +90,10 @@ async function _POST(
     });
 
     if ("error" in result) {
-      return Response.json({ error: result.error }, { status: result.status });
+      return Response.json(
+        result.code ? { error: result.error, code: result.code } : { error: result.error },
+        { status: result.status },
+      );
     }
 
     return Response.json(result, { status: 200 });

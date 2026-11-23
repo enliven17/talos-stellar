@@ -44,144 +44,36 @@ export function extractErrorMessage(err: unknown): string {
   return String(err);
 }
 
-/**
- * Classify a Horizon error into a bounded, stable provider failure reason code.
- *
- * Mappings:
- * - 401 -> UNAUTHORIZED (authorization)
- * - 403 -> FORBIDDEN (authorization)
- * - 429 -> RATE_LIMITED (throttling)
- * - 503 -> PROVIDER_UNAVAILABLE (provider failure)
- * - 502 -> BAD_GATEWAY (provider failure)
- * - 504 -> GATEWAY_TIMEOUT (provider failure)
- * - 500 / other 5xx -> PROVIDER_ERROR (provider failure)
- * - 400 -> BAD_REQUEST (client error)
- * - null (network failure, connection reset, timeout) -> NETWORK_ERROR (provider failure)
- * - fallback -> UNKNOWN
- */
-export function classifyHorizonError(
-  err: unknown,
-  httpStatus?: number | null,
-): HorizonProviderFailureReasonCode {
-  const status = httpStatus !== undefined ? httpStatus : extractHttpStatus(err);
+// ─── Network identity cache ───────────────────────────────────────────────────
 
-  if (status === 401) return "UNAUTHORIZED";
-  if (status === 403) return "FORBIDDEN";
-  if (status === 429) return "RATE_LIMITED";
-  if (status === 503) return "PROVIDER_UNAVAILABLE";
-  if (status === 502) return "BAD_GATEWAY";
-  if (status === 504) return "GATEWAY_TIMEOUT";
-  if (typeof status === "number" && status >= 500 && status < 600) return "PROVIDER_ERROR";
-  if (status === 400) return "BAD_REQUEST";
-
-  const message = extractErrorMessage(err).toLowerCase();
-  if (message.includes("401") || message.includes("unauthorized")) {
-    return "UNAUTHORIZED";
-  }
-  if (message.includes("403") || message.includes("forbidden")) {
-    return "FORBIDDEN";
-  }
-  if (
-    message.includes("429") ||
-    message.includes("rate limit") ||
-    message.includes("too many requests") ||
-    message.includes("throttl")
-  ) {
-    return "RATE_LIMITED";
-  }
-  if (message.includes("503") || message.includes("service unavailable")) {
-    return "PROVIDER_UNAVAILABLE";
-  }
-  if (message.includes("504") || message.includes("gateway timeout")) {
-    return "GATEWAY_TIMEOUT";
-  }
-  if (message.includes("502") || message.includes("bad gateway")) {
-    return "BAD_GATEWAY";
-  }
-  if (message.includes("500") || message.includes("internal server error")) {
-    return "PROVIDER_ERROR";
-  }
-  if (
-    status === null ||
-    message.includes("econnrefused") ||
-    message.includes("etimedout") ||
-    message.includes("econnreset") ||
-    message.includes("network") ||
-    message.includes("fetch failed") ||
-    message.includes("timeout") ||
-    message.includes("abort")
-  ) {
-    return "NETWORK_ERROR";
-  }
-
-  return "UNKNOWN";
-}
+const horizonPassphraseCache = new Map<string, string>();
 
 /**
- * Return the broad category for a provider failure reason code.
+ * Fetch and cache the network passphrase from Horizon's root endpoint.
  */
-export function getFailureCategory(
-  reasonCode: HorizonProviderFailureReasonCode | string | undefined | null,
-): HorizonFailureCategory {
-  if (!reasonCode) return "unknown";
-  switch (reasonCode) {
-    case "UNAUTHORIZED":
-    case "FORBIDDEN":
-    case "AUTHORIZATION_FAILURE":
-      return "authorization";
-    case "RATE_LIMITED":
-    case "THROTTLED":
-      return "throttling";
-    case "PROVIDER_UNAVAILABLE":
-    case "PROVIDER_ERROR":
-    case "PROVIDER_FAILURE":
-    case "SERVER_ERROR":
-    case "BAD_GATEWAY":
-    case "GATEWAY_TIMEOUT":
-    case "NETWORK_ERROR":
-      return "provider_failure";
-    default:
-      return "unknown";
+export async function fetchHorizonNetworkPassphrase(
+  horizonUrl: string,
+): Promise<string | null> {
+  const cached = horizonPassphraseCache.get(horizonUrl);
+  if (cached) return cached;
+
+  try {
+    const { Horizon } = await import("@stellar/stellar-sdk");
+    const server = new Horizon.Server(horizonUrl);
+    const root = await server.root();
+    if (root && typeof root.network_passphrase === "string") {
+      horizonPassphraseCache.set(horizonUrl, root.network_passphrase);
+      return root.network_passphrase;
+    }
+    return null;
+  } catch {
+    return null;
   }
 }
 
-/**
- * Returns true if the reason code or poll result represents an authorization failure.
- */
-export function isAuthorizationFailure(
-  reasonCodeOrPoll: HorizonProviderFailureReasonCode | HorizonPollResult | string | undefined | null,
-): boolean {
-  const code =
-    typeof reasonCodeOrPoll === "object" && reasonCodeOrPoll !== null
-      ? (reasonCodeOrPoll.outcome === "error" ? reasonCodeOrPoll.reasonCode : undefined)
-      : reasonCodeOrPoll;
-  return getFailureCategory(code) === "authorization";
-}
-
-/**
- * Returns true if the reason code or poll result represents a throttling / rate limit failure.
- */
-export function isThrottlingFailure(
-  reasonCodeOrPoll: HorizonProviderFailureReasonCode | HorizonPollResult | string | undefined | null,
-): boolean {
-  const code =
-    typeof reasonCodeOrPoll === "object" && reasonCodeOrPoll !== null
-      ? (reasonCodeOrPoll.outcome === "error" ? reasonCodeOrPoll.reasonCode : undefined)
-      : reasonCodeOrPoll;
-  return getFailureCategory(code) === "throttling";
-}
-
-/**
- * Returns true if the reason code or poll result represents an upstream provider or network failure.
- */
-export function isProviderFailure(
-  reasonCodeOrPoll: HorizonProviderFailureReasonCode | HorizonPollResult | string | undefined | null,
-): boolean {
-  const code =
-    typeof reasonCodeOrPoll === "object" && reasonCodeOrPoll !== null
-      ? (reasonCodeOrPoll.outcome === "error" ? reasonCodeOrPoll.reasonCode : undefined)
-      : reasonCodeOrPoll;
-  return getFailureCategory(code) === "provider_failure";
+/** Clear cached network passphrases (used in tests). */
+export function clearHorizonNetworkPassphraseCache(): void {
+  horizonPassphraseCache.clear();
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -197,6 +89,8 @@ export async function pollTransaction(
   txHash: string,
   horizonUrl: string,
 ): Promise<HorizonPollResult> {
+  const networkPassphrase = (await fetchHorizonNetworkPassphrase(horizonUrl)) ?? undefined;
+
   try {
     const { Horizon } = await import("@stellar/stellar-sdk");
     const server = new Horizon.Server(horizonUrl);
@@ -208,19 +102,30 @@ export async function pollTransaction(
         : parseInt(String(tx.ledger), 10);
 
     if (tx.successful) {
-      return { outcome: "confirmed", ledger, successful: true };
+      return {
+        outcome: "confirmed",
+        ledger,
+        successful: true,
+        networkPassphrase,
+      };
     } else {
       // Transaction was included in a ledger but the operation set failed
       // (e.g. insufficient balance, bad sequence number already applied).
       const detail = extractResultCode(tx);
-      return { outcome: "failed", ledger, successful: false, detail };
+      return {
+        outcome: "failed",
+        ledger,
+        successful: false,
+        detail,
+        networkPassphrase,
+      };
     }
   } catch (err) {
     const httpStatus = extractHttpStatus(err);
 
     if (httpStatus === 404) {
       // Transaction not yet on chain (or was never submitted)
-      return { outcome: "not_found" };
+      return { outcome: "not_found", networkPassphrase };
     }
 
     // 429 rate-limit or 5xx transient: retryable
@@ -233,7 +138,7 @@ export async function pollTransaction(
       outcome: "error",
       message: extractErrorMessage(err),
       retryable,
-      reasonCode,
+      networkPassphrase,
     };
   }
 }

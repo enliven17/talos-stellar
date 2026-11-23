@@ -461,6 +461,13 @@ class ScopedSecretProvider:
 
 
 class AdapterHTTPClient(Protocol):
+    """HTTP boundary injected into HTTP-backed adapters.
+
+    Implementations provide deterministic ``get`` and ``post`` methods; test
+    clients should fail on unconfigured requests rather than falling through
+    to the network.
+    """
+
     async def get(self, url: str, **kwargs: Any) -> httpx.Response: ...
     async def post(self, url: str, **kwargs: Any) -> httpx.Response: ...
 
@@ -971,8 +978,23 @@ class SandboxedAdapter(BaseSocialAdapter):
         operation_id = kwargs.pop("operation_id", None)
         if operation_id is not None and not isinstance(operation_id, str):
             raise InvocationConflictError("operation ID must be a string")
-        if write and operation_id is None:
-            operation_id = str(uuid.uuid4())
+        if write:
+            # Issue #1464: write operations must carry a caller-supplied
+            # stable idempotency identity. Fabricating a fresh UUID here would
+            # make every retry a distinct invocation, defeating
+            # AdapterInvocationStore.admit() dedup and allowing duplicate
+            # publication on transport retry.
+            if operation_id is None:
+                raise InvocationConflictError(
+                    "operation_id is required for write operations "
+                    "(stable idempotency identity)"
+                )
+            if not operation_id.strip():
+                raise InvocationConflictError(
+                    "operation_id must be a non-empty stable idempotency identity"
+                )
+            if not _OPERATION_ID_RE.fullmatch(operation_id):
+                raise InvocationConflictError("operation ID is invalid")
         payload = _safe_json_bytes(
             {"operation": operation, "args": args, "kwargs": kwargs}
         )
