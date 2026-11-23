@@ -43,8 +43,8 @@
     "env:template:check": "node scripts/check-env-template.mjs",
     "test:env-template": "node --test scripts/check-env-template.test.mjs",
     "devcontainer:check": "node --test scripts/verify-devcontainer.test.mjs",
-    "smoke:plan": "node scripts/local-smoke-plan.mjs",
-    "test:smoke-plan": "node --test scripts/local-smoke-plan.test.mjs"
+    "docs:scripts:check": "node scripts/check-documented-scripts.mjs",
+    "test:docs-scripts": "node --test scripts/check-documented-scripts.test.mjs"
   },
   "dependencies": {
     "next": "16.4.2"

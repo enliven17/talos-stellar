@@ -331,10 +331,10 @@ cargo test --target wasm32-unknown-unknown
 
 Run the smallest test set that covers the files you touched before falling back to a full suite. The commands below avoid database resets and hidden local state. Run them after installing dependencies with `pnpm install` at the repository root, `uv sync --extra dev` in `packages/prime-agent/`, or the Rust setup from the prerequisites. In this section, commands that call package scripts use `pnpm run <script>` so the script name can be checked directly in the package's `package.json`.
 
-To generate the commands for your current change set, run
-`pnpm run smoke:plan --base origin/main`. The plan only prints commands and
-never reads environment files or contacts remote services. See
-[`docs/local-smoke-plan.md`](docs/local-smoke-plan.md).
+If you change a documented `npm` or `pnpm` command, run
+`pnpm run docs:scripts:check` to confirm it still matches the target
+`package.json`. See
+[`docs/documented-scripts.md`](docs/documented-scripts.md).
 
 ### Web changes
 
