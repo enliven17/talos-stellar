@@ -1,8 +1,8 @@
 import { and, count, desc, eq, gt, isNotNull, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { tlsOutboxEvents } from "@/db/schema";
-import type { OutboxEvent, OutboxStatus, WriteEventInput } from "./types";
-import { boundRetryDelayMs, decideRetry } from "./retry";
+import { tlsOutboxDeliveries, tlsOutboxEvents } from "@/db/schema";
+import type { OutboxConsumerDelivery, OutboxEvent, OutboxStatus, WriteEventInput } from "./types";
+import { decideRetry } from "./retry";
 import { outboxConfig } from "./config";
 import { logOutboxEvent, truncateError } from "./metrics";
 
@@ -11,6 +11,10 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 function toEvent(row: typeof tlsOutboxEvents.$inferSelect): OutboxEvent {
   return row as unknown as OutboxEvent;
+}
+
+function toConsumerDelivery(row: typeof tlsOutboxDeliveries.$inferSelect): OutboxConsumerDelivery {
+  return row as unknown as OutboxConsumerDelivery;
 }
 
 /**
@@ -170,34 +174,205 @@ export async function fail(
   return toEvent(row);
 }
 
+// ─── Per-consumer delivery tracking ────────────────────────────────
+
+/** Loads all persisted per-consumer delivery records for an outbox event. */
+export async function getConsumerDeliveries(eventId: string): Promise<OutboxConsumerDelivery[]> {
+  const rows = await db
+    .select()
+    .from(tlsOutboxDeliveries)
+    .where(eq(tlsOutboxDeliveries.eventId, eventId));
+  return rows.map(toConsumerDelivery);
+}
+
+async function getLeasedEvent(eventId: string, leaseId: string): Promise<typeof tlsOutboxEvents.$inferSelect | null> {
+  return db
+    .select()
+    .from(tlsOutboxEvents)
+    .where(and(eq(tlsOutboxEvents.id, eventId), eq(tlsOutboxEvents.leaseId, leaseId), eq(tlsOutboxEvents.status, "leased")))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+}
+
 /**
- * Releases a prematurely-leased event back to pending for a bounded relative
- * duration without consuming an attempt. Used when the dispatcher's monotonic
- * retry guard detects that a backward system-clock jump made a backed-off
- * event appear due early. No-ops (returns null) if the lease was lost.
+ * Persists a consumer acknowledgement for a leased event.
+ * No-ops (returns null) if the lease was lost.
  */
-export async function deferRetry(eventId: string, leaseId: string, delayMs: number): Promise<OutboxEvent | null> {
-  const boundedDelayMs = boundRetryDelayMs(delayMs);
-  const runAt = sql`now() + (${boundedDelayMs}::text || ' milliseconds')::interval`;
+export async function ackConsumer(
+  eventId: string,
+  consumerId: string,
+  leaseId: string,
+): Promise<OutboxConsumerDelivery | null> {
+  const leased = await getLeasedEvent(eventId, leaseId);
+  if (!leased) return null;
+
+  const existing = await db
+    .select()
+    .from(tlsOutboxDeliveries)
+    .where(and(eq(tlsOutboxDeliveries.eventId, eventId), eq(tlsOutboxDeliveries.consumerId, consumerId)))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+
+  let row: typeof tlsOutboxDeliveries.$inferSelect | undefined;
+  if (existing) {
+    [row] = await db
+      .update(tlsOutboxDeliveries)
+      .set({
+        status: "acked",
+        attempts: existing.attempts + 1,
+        lastError: null,
+        ackedAt: sql`now()`,
+      })
+      .where(eq(tlsOutboxDeliveries.id, existing.id))
+      .returning();
+  } else {
+    [row] = await db
+      .insert(tlsOutboxDeliveries)
+      .values({
+        eventId,
+        consumerId,
+        status: "acked",
+        attempts: 1,
+        maxAttempts: leased.maxAttempts,
+        lastError: null,
+        ackedAt: new Date(),
+      })
+      .returning();
+  }
+
+  if (!row) return null;
+  logOutboxEvent("outbox_consumer_acked", { eventId, eventType: leased.eventType, consumerId, attempts: row.attempts });
+  return toConsumerDelivery(row);
+}
+
+/**
+ * Persists a consumer failure and either schedules a per-consumer retry or
+ * dead-letters that consumer. No-ops (returns null) if the lease was lost.
+ */
+export async function failConsumer(
+  eventId: string,
+  consumerId: string,
+  leaseId: string,
+  error: unknown,
+): Promise<OutboxConsumerDelivery | null> {
+  const leased = await getLeasedEvent(eventId, leaseId);
+  if (!leased) return null;
+
+  const existing = await db
+    .select()
+    .from(tlsOutboxDeliveries)
+    .where(and(eq(tlsOutboxDeliveries.eventId, eventId), eq(tlsOutboxDeliveries.consumerId, consumerId)))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+
+  const nextAttempts = (existing?.attempts ?? 0) + 1;
+  const maxAttempts = existing?.maxAttempts ?? leased.maxAttempts;
+  const lastError = truncateError(error);
+  const decision = decideRetry({ attempts: nextAttempts, maxAttempts });
+  const nextStatus = decision.action === "dead_letter" ? "dead_letter" : "pending";
+  const nextRetryAt = decision.action === "retry" ? new Date(Date.now() + decision.delayMs) : new Date();
+
+  let row: typeof tlsOutboxDeliveries.$inferSelect | undefined;
+  if (existing) {
+    [row] = await db
+      .update(tlsOutboxDeliveries)
+      .set({
+        status: nextStatus,
+        attempts: nextAttempts,
+        nextRetryAt,
+        lastError,
+      })
+      .where(eq(tlsOutboxDeliveries.id, existing.id))
+      .returning();
+  } else {
+    [row] = await db
+      .insert(tlsOutboxDeliveries)
+      .values({
+        eventId,
+        consumerId,
+        status: nextStatus,
+        attempts: nextAttempts,
+        maxAttempts,
+        nextRetryAt,
+        lastError,
+      })
+      .returning();
+  }
+
+  if (!row) return null;
+  if (decision.action === "dead_letter") {
+    logOutboxEvent("outbox_consumer_dead_letter", {
+      eventId,
+      eventType: leased.eventType,
+      consumerId,
+      attempts: row.attempts,
+      maxAttempts: row.maxAttempts,
+    });
+  } else {
+    logOutboxEvent("outbox_consumer_retry_scheduled", {
+      eventId,
+      eventType: leased.eventType,
+      consumerId,
+      attempts: row.attempts,
+      delayMs: decision.delayMs,
+    });
+  }
+  return toConsumerDelivery(row);
+}
+
+/**
+ * Releases a leased event back to `pending` at the given `runAt` so remaining
+ * unacknowledged consumers can be retried without re-running acked consumers.
+ * No-ops (returns null) if the lease was lost.
+ */
+export async function rescheduleForRetry(
+  eventId: string,
+  leaseId: string,
+  runAt: Date,
+  error: unknown,
+): Promise<OutboxEvent | null> {
+  const lastError = truncateError(error);
   const [row] = await db
     .update(tlsOutboxEvents)
-    .set({
-      status: "pending",
-      runAt,
-      attempts: sql`GREATEST(${tlsOutboxEvents.attempts} - 1, 0)`,
-      leaseId: null,
-      leaseOwner: null,
-      leaseExpiresAt: null,
-      updatedAt: sql`now()`,
-    })
+    .set({ status: "pending", runAt, lastError, leaseId: null, leaseOwner: null, leaseExpiresAt: null })
     .where(and(eq(tlsOutboxEvents.id, eventId), eq(tlsOutboxEvents.leaseId, leaseId), eq(tlsOutboxEvents.status, "leased")))
     .returning();
   if (!row) return null;
-  logOutboxEvent("outbox_event_retry_scheduled", { eventId, eventType: row.eventType, attempts: row.attempts, delayMs: boundedDelayMs });
+  logOutboxEvent("outbox_event_retry_scheduled", {
+    eventId,
+    eventType: row.eventType,
+    attempts: row.attempts,
+    delayMs: Math.max(0, runAt.getTime() - Date.now()),
+  });
   return toEvent(row);
 }
 
-/** Admin action: requeue a dead_letter event (resets attempts, clears lastError, runAt = now, preserves original failure identity via originalEventId). */
+/**
+ * Transitions a leased event directly to `dead_letter` (used when all remaining
+ * consumers have exhausted their retry budgets). No-ops if the lease was lost.
+ */
+export async function deadLetter(eventId: string, leaseId: string, error: unknown): Promise<OutboxEvent | null> {
+  const lastError = truncateError(error);
+  const [row] = await db
+    .update(tlsOutboxEvents)
+    .set({ status: "dead_letter", lastError, leaseId: null, leaseOwner: null, leaseExpiresAt: null })
+    .where(and(eq(tlsOutboxEvents.id, eventId), eq(tlsOutboxEvents.leaseId, leaseId), eq(tlsOutboxEvents.status, "leased")))
+    .returning();
+  if (!row) return null;
+  logOutboxEvent("outbox_event_dead_letter", {
+    eventId,
+    eventType: row.eventType,
+    attempts: row.attempts,
+    maxAttempts: row.maxAttempts,
+  });
+  return toEvent(row);
+}
+
+/**
+ * Admin action: requeue a dead_letter event (resets attempts, clears lastError, runAt = now).
+ * Also resets dead-lettered consumer deliveries to pending while preserving already-acked
+ * consumers so they are not redispatched.
+ */
 export async function requeue(eventId: string): Promise<OutboxEvent | null> {
   const [row] = await db
     .update(tlsOutboxEvents)
@@ -210,7 +385,14 @@ export async function requeue(eventId: string): Promise<OutboxEvent | null> {
     })
     .where(and(eq(tlsOutboxEvents.id, eventId), eq(tlsOutboxEvents.status, "dead_letter")))
     .returning();
-  return row ? toEvent(row) : null;
+  if (!row) return null;
+
+  await db
+    .update(tlsOutboxDeliveries)
+    .set({ status: "pending", attempts: 0, lastError: null, nextRetryAt: sql`now()` })
+    .where(and(eq(tlsOutboxDeliveries.eventId, eventId), eq(tlsOutboxDeliveries.status, "dead_letter")));
+
+  return toEvent(row);
 }
 
 /**

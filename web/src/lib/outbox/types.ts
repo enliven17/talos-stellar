@@ -19,6 +19,22 @@ export interface PayloadValidationSummary {
   truncated: boolean;
 }
 
+export type OutboxConsumerStatus = "pending" | "acked" | "dead_letter";
+
+export interface OutboxConsumerDelivery {
+  id: string;
+  eventId: string;
+  consumerId: string;
+  status: OutboxConsumerStatus;
+  attempts: number;
+  maxAttempts: number;
+  nextRetryAt: Date;
+  lastError: string | null;
+  ackedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export interface OutboxEvent<TPayload = unknown> {
   id: string;
   aggregateType: string;
@@ -51,6 +67,15 @@ export interface WriteEventInput<TPayload = unknown> {
 }
 
 export type Consumer<TPayload = unknown> = (event: OutboxEvent<TPayload>) => Promise<void>;
+
+export interface RegisterConsumerOptions {
+  id?: string;
+}
+
+export interface RegisteredConsumer<TPayload = unknown> {
+  id: string;
+  handler: Consumer<TPayload>;
+}
 
 export interface DispatchSummary {
   leased: number;

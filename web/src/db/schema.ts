@@ -1005,6 +1005,41 @@ export const tlsOutboxEvents = pgTable(
   ],
 );
 
+// Per-consumer delivery tracking for outbox events.
+//
+// Each registered consumer for an eventType gets its own delivery row
+// keyed by (eventId, consumerId). Successful consumers are marked `acked`
+// and skipped on subsequent retries when another consumer fails.
+//
+// Status lifecycle: pending -> acked
+//                           -> pending     (retry — nextRetryAt pushed out by backoff)
+//                           -> dead_letter (consumer retries exhausted)
+export const tlsOutboxDeliveries = pgTable(
+  "tls_outbox_deliveries",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    eventId: text("eventId")
+      .notNull()
+      .references(() => tlsOutboxEvents.id, { onDelete: "cascade" }),
+    consumerId: text("consumerId").notNull(),
+
+    // pending | acked | dead_letter
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("maxAttempts").notNull().default(8),
+    nextRetryAt: timestamp("nextRetryAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    lastError: text("lastError"),
+    ackedAt: timestamp("ackedAt", { mode: "date", precision: 3 }),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("tls_outbox_deliveries_eventId_consumerId_unique").on(t.eventId, t.consumerId),
+    index("tls_outbox_deliveries_eventId_status_idx").on(t.eventId, t.status),
+  ],
+);
+
 // ─── Quota Configuration ─────────────────────────────────────────
 //
 // One row per (talosId, resource) defining the limit and reset window.

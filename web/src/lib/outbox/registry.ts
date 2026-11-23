@@ -1,79 +1,62 @@
-import type { Consumer } from "./types";
+import type { Consumer, RegisterConsumerOptions, RegisteredConsumer } from "./types";
 
-export interface ConsumerRegistrationOptions {
-  id?: string;
-  name?: string;
-}
+/** eventType → registered consumers. Multiple consumers may subscribe to the same event type. */
+const consumers = new Map<string, RegisteredConsumer<unknown>[]>();
 
-interface RegisteredConsumer {
-  id?: string;
-  handler: Consumer<unknown>;
-}
-
-/** eventType → consumers. Multiple consumers may subscribe to the same event type. */
-const consumers = new Map<string, RegisteredConsumer[]>();
-
-/**
- * Registers a consumer handler for an event type.
- *
- * Registration behavior:
- * - Supports multiple distinct consumers subscribing to the same event type.
- * - Idempotent: Re-registering the same handler function instance (or same ID
- *   with the same handler) is a no-op and does not duplicate dispatch.
- * - Conflict detection at startup: If a consumer with the same ID or name is
- *   already registered for this event type with a conflicting (different)
- *   handler function, an Error is thrown to catch misconfiguration early.
- */
 export function registerConsumer<TPayload = unknown>(
   eventType: string,
   consumer: Consumer<TPayload>,
-  idOrOptions?: string | ConsumerRegistrationOptions,
+  options?: RegisterConsumerOptions,
+): void;
+export function registerConsumer<TPayload = unknown>(
+  eventType: string,
+  consumerId: string,
+  consumer: Consumer<TPayload>,
+): void;
+export function registerConsumer<TPayload = unknown>(
+  eventType: string,
+  consumerOrId: Consumer<TPayload> | string,
+  consumerOrOptions?: Consumer<TPayload> | RegisterConsumerOptions,
 ): void {
+  let explicitId: string | undefined;
+  let handler: Consumer<TPayload>;
+
+  if (typeof consumerOrId === "string") {
+    explicitId = consumerOrId;
+    handler = consumerOrOptions as Consumer<TPayload>;
+  } else {
+    handler = consumerOrId;
+    explicitId = (consumerOrOptions as RegisterConsumerOptions | undefined)?.id;
+  }
+
   const list = consumers.get(eventType) ?? [];
+  let id: string;
 
-  const explicitId =
-    typeof idOrOptions === "string"
-      ? idOrOptions
-      : idOrOptions?.id ?? idOrOptions?.name;
-
-  // Infer ID from function name if meaningful (exclude anonymous/spy/mock names)
-  const inferredId =
-    consumer.name && !["", "anonymous", "spy", "mockConstructor"].includes(consumer.name)
-      ? consumer.name
-      : undefined;
-
-  const consumerId = explicitId ?? inferredId;
-
-  // Check if the exact same handler is already registered (idempotent registration)
-  const existingByHandler = list.find((entry) => entry.handler === (consumer as Consumer<unknown>));
-  if (existingByHandler) {
-    if (consumerId && existingByHandler.id && existingByHandler.id !== consumerId) {
-      throw new Error(
-        `Consumer handler already registered for event type "${eventType}" under ID "${existingByHandler.id}", cannot re-register under conflicting ID "${consumerId}"`,
-      );
+  if (explicitId !== undefined) {
+    const trimmed = explicitId.trim();
+    if (!trimmed) {
+      throw new Error(`Consumer id for event type "${eventType}" must be a non-empty string`);
     }
-    if (consumerId && !existingByHandler.id) {
-      existingByHandler.id = consumerId;
+    if (list.some((entry) => entry.id === trimmed)) {
+      throw new Error(`Consumer "${trimmed}" is already registered for event type "${eventType}"`);
     }
-    return;
+    id = trimmed;
+  } else {
+    const fnName = handler.name?.trim();
+    const canUseFnName = Boolean(fnName && fnName !== "spy" && !list.some((entry) => entry.id === fnName));
+    id = canUseFnName ? fnName! : `consumer#${list.length}`;
   }
 
-  // Check if this ID is already registered for this event type with a conflicting handler
-  if (consumerId) {
-    const existingById = list.find((entry) => entry.id === consumerId);
-    if (existingById) {
-      throw new Error(
-        `Consumer "${consumerId}" already registered for event type "${eventType}" with a conflicting handler`,
-      );
-    }
-  }
-
-  list.push({ id: consumerId, handler: consumer as Consumer<unknown> });
+  list.push({ id, handler: handler as Consumer<unknown> });
   consumers.set(eventType, list);
 }
 
+export function getRegisteredConsumers(eventType: string): RegisteredConsumer<unknown>[] {
+  return consumers.get(eventType) ?? [];
+}
+
 export function getConsumers(eventType: string): Consumer<unknown>[] {
-  return (consumers.get(eventType) ?? []).map((entry) => entry.handler);
+  return getRegisteredConsumers(eventType).map((entry) => entry.handler);
 }
 
 /** Test-only: clears the registry between test files. */

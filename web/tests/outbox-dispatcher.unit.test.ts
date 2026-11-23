@@ -7,14 +7,18 @@ const mocks = vi.hoisted(() => ({
     leaseBatch: vi.fn(),
     ack: vi.fn(),
     fail: vi.fn(),
-    deferRetry: vi.fn(),
+    getConsumerDeliveries: vi.fn(),
+    ackConsumer: vi.fn(),
+    failConsumer: vi.fn(),
+    rescheduleForRetry: vi.fn(),
+    deadLetter: vi.fn(),
   },
 }));
 vi.mock("../src/lib/outbox/store", () => mocks.store);
 
-import { dispatchOnce, __resetMonotonicRetryStateForTests } from "../src/lib/outbox/dispatcher";
-import { registerConsumer, __resetRegistryForTests } from "../src/lib/outbox/registry";
-import type { OutboxEvent } from "../src/lib/outbox/types";
+import { dispatchOnce } from "../src/lib/outbox/dispatcher";
+import { registerConsumer, getRegisteredConsumers, __resetRegistryForTests } from "../src/lib/outbox/registry";
+import type { OutboxConsumerDelivery, OutboxEvent } from "../src/lib/outbox/types";
 
 function makeEvent(overrides: Partial<OutboxEvent> = {}): OutboxEvent {
   return {
@@ -39,12 +43,45 @@ function makeEvent(overrides: Partial<OutboxEvent> = {}): OutboxEvent {
   };
 }
 
+function makeDelivery(overrides: Partial<OutboxConsumerDelivery> = {}): OutboxConsumerDelivery {
+  return {
+    id: "del_1",
+    eventId: "evt_1",
+    consumerId: "consumer#0",
+    status: "acked",
+    attempts: 1,
+    maxAttempts: 8,
+    nextRetryAt: new Date(),
+    lastError: null,
+    ackedAt: new Date(),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   __resetRegistryForTests();
   __resetMonotonicRetryStateForTests();
   mocks.store.reapExpiredLeases.mockResolvedValue({ requeued: 0, deadLettered: 0 });
   mocks.store.pruneDispatched.mockResolvedValue(0);
+  mocks.store.getConsumerDeliveries.mockResolvedValue([]);
+  mocks.store.ackConsumer.mockImplementation(async (eventId: string, consumerId: string) =>
+    makeDelivery({ eventId, consumerId, status: "acked" }),
+  );
+  mocks.store.failConsumer.mockImplementation(async (eventId: string, consumerId: string) =>
+    makeDelivery({
+      eventId,
+      consumerId,
+      status: "pending",
+      nextRetryAt: new Date(Date.now() + 5_000),
+      ackedAt: null,
+      lastError: "downstream error",
+    }),
+  );
+  mocks.store.rescheduleForRetry.mockResolvedValue(makeEvent({ status: "pending" }));
+  mocks.store.deadLetter.mockResolvedValue(makeEvent({ status: "dead_letter" }));
 });
 
 describe("outbox/dispatcher — dispatchOnce", () => {
@@ -96,25 +133,128 @@ describe("outbox/dispatcher — dispatchOnce", () => {
   });
 
   it("retries when a consumer throws and attempts remain", async () => {
-    registerConsumer("test.event", vi.fn().mockRejectedValue(new Error("downstream 500")));
+    registerConsumer("test.event", "failing-consumer", vi.fn().mockRejectedValue(new Error("downstream 500")));
     mocks.store.leaseBatch.mockResolvedValue([makeEvent()]);
-    mocks.store.fail.mockResolvedValue(makeEvent({ status: "pending" }));
 
     const summary = await dispatchOnce();
 
+    expect(mocks.store.failConsumer).toHaveBeenCalledWith("evt_1", "failing-consumer", "lease_1", expect.any(Error));
+    expect(mocks.store.rescheduleForRetry).toHaveBeenCalledWith("evt_1", "lease_1", expect.any(Date), expect.any(Error));
     expect(summary.retried).toBe(1);
     expect(summary.deadLettered).toBe(0);
     expect(mocks.store.ack).not.toHaveBeenCalled();
   });
 
-  it("counts a dead-lettered event when fail() exhausts retries", async () => {
-    registerConsumer("test.event", vi.fn().mockRejectedValue(new Error("fatal")));
+  it("counts a dead-lettered event when consumer retries are exhausted", async () => {
+    registerConsumer("test.event", "fatal-consumer", vi.fn().mockRejectedValue(new Error("fatal")));
     mocks.store.leaseBatch.mockResolvedValue([makeEvent()]);
-    mocks.store.fail.mockResolvedValue(makeEvent({ status: "dead_letter" }));
+    mocks.store.failConsumer.mockResolvedValue(
+      makeDelivery({ consumerId: "fatal-consumer", status: "dead_letter", attempts: 8, ackedAt: null, lastError: "fatal" }),
+    );
 
     const summary = await dispatchOnce();
 
+    expect(mocks.store.deadLetter).toHaveBeenCalledWith("evt_1", "lease_1", expect.any(Error));
     expect(summary.deadLettered).toBe(1);
+  });
+
+  it("avoids redispatching successful consumers when another consumer fails and retries", async () => {
+    const delivered = new Map<string, OutboxConsumerDelivery>();
+    const consumerA = vi.fn().mockResolvedValue(undefined);
+    let bShouldFail = true;
+    const consumerB = vi.fn().mockImplementation(async () => {
+      if (bShouldFail) throw new Error("temporary failure");
+    });
+
+    registerConsumer("test.event", "consumer-a", consumerA);
+    registerConsumer("test.event", "consumer-b", consumerB);
+
+    mocks.store.getConsumerDeliveries.mockImplementation(async () => Array.from(delivered.values()));
+    mocks.store.ackConsumer.mockImplementation(async (eventId: string, consumerId: string) => {
+      const row = makeDelivery({ eventId, consumerId, status: "acked" });
+      delivered.set(consumerId, row);
+      return row;
+    });
+    mocks.store.failConsumer.mockImplementation(async (eventId: string, consumerId: string) => {
+      const row = makeDelivery({
+        eventId,
+        consumerId,
+        status: "pending",
+        nextRetryAt: new Date(Date.now() - 1_000),
+        ackedAt: null,
+        lastError: "temporary failure",
+      });
+      delivered.set(consumerId, row);
+      return row;
+    });
+
+    // Attempt 1: consumer-a succeeds, consumer-b fails -> event rescheduled
+    mocks.store.leaseBatch.mockResolvedValue([makeEvent({ leaseId: "lease_1" })]);
+    const first = await dispatchOnce();
+
+    expect(consumerA).toHaveBeenCalledTimes(1);
+    expect(consumerB).toHaveBeenCalledTimes(1);
+    expect(first.retried).toBe(1);
+    expect(first.dispatched).toBe(0);
+    expect(mocks.store.ack).not.toHaveBeenCalled();
+
+    // Attempt 2: consumer-b recovers -> consumer-a is NOT redispatched, only consumer-b runs
+    bShouldFail = false;
+    mocks.store.leaseBatch.mockResolvedValue([makeEvent({ leaseId: "lease_2", attempts: 2 })]);
+    mocks.store.ack.mockResolvedValue(makeEvent({ status: "dispatched" }));
+
+    const second = await dispatchOnce();
+
+    expect(consumerA).toHaveBeenCalledTimes(1);
+    expect(consumerB).toHaveBeenCalledTimes(2);
+    expect(second.dispatched).toBe(1);
+    expect(mocks.store.ack).toHaveBeenCalledWith("evt_1", "lease_2");
+  });
+
+  it("skips pending consumers whose nextRetryAt is still in the future", async () => {
+    const consumerA = vi.fn().mockResolvedValue(undefined);
+    const consumerB = vi.fn().mockResolvedValue(undefined);
+    registerConsumer("test.event", "consumer-a", consumerA);
+    registerConsumer("test.event", "consumer-b", consumerB);
+
+    const futureRetry = new Date(Date.now() + 60_000);
+    mocks.store.getConsumerDeliveries.mockResolvedValue([
+      makeDelivery({ consumerId: "consumer-a", status: "acked" }),
+      makeDelivery({ consumerId: "consumer-b", status: "pending", nextRetryAt: futureRetry, ackedAt: null, lastError: "wait" }),
+    ]);
+    mocks.store.leaseBatch.mockResolvedValue([makeEvent()]);
+
+    const summary = await dispatchOnce();
+
+    expect(consumerA).not.toHaveBeenCalled();
+    expect(consumerB).not.toHaveBeenCalled();
+    expect(mocks.store.rescheduleForRetry).toHaveBeenCalledWith("evt_1", "lease_1", futureRetry, "wait");
+    expect(summary.retried).toBe(1);
+  });
+
+  it("stops cleanly if the lease is lost while persisting a consumer ack", async () => {
+    const consumerA = vi.fn().mockResolvedValue(undefined);
+    const consumerB = vi.fn().mockResolvedValue(undefined);
+    registerConsumer("test.event", "consumer-a", consumerA);
+    registerConsumer("test.event", "consumer-b", consumerB);
+
+    mocks.store.leaseBatch.mockResolvedValue([makeEvent()]);
+    mocks.store.ackConsumer.mockResolvedValueOnce(null);
+
+    const summary = await dispatchOnce();
+
+    expect(consumerA).toHaveBeenCalledTimes(1);
+    expect(consumerB).not.toHaveBeenCalled();
+    expect(mocks.store.ack).not.toHaveBeenCalled();
+    expect(summary).toEqual({ leased: 1, dispatched: 0, retried: 0, deadLettered: 0, reaped: 0, pruned: 0 });
+  });
+
+  it("rejects duplicate explicit consumer ids for the same event type", () => {
+    registerConsumer("test.event", "billing", vi.fn().mockResolvedValue(undefined));
+    expect(() => registerConsumer("test.event", "billing", vi.fn().mockResolvedValue(undefined))).toThrow(
+      /already registered/,
+    );
+    expect(getRegisteredConsumers("test.event").map((c) => c.id)).toEqual(["billing"]);
   });
 
   it("processes a batch concurrently", async () => {

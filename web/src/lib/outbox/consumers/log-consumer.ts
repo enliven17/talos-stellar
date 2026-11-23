@@ -7,6 +7,6 @@ import { registerConsumer } from "../registry";
  * a consumer here stands in for a real integration, e.g. publishing to an
  * external event bus, and shouldn't set a precedent of logging payloads).
  */
-registerConsumer("commerce_job.completed", async (event) => {
+registerConsumer("commerce_job.completed", "log-consumer", async (event) => {
   logger.info({ event: "outbox_consumer_log", eventId: event.id, aggregateId: event.aggregateId }, "commerce_job.completed observed");
 });

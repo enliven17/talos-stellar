@@ -9,8 +9,7 @@
  *
  * See web/OUTBOX.md for configuration, operational signals, and rollback.
  */
-export { writeOutboxEvent, getEvent, listEvents, requeue, summarizeDeadLetters, getLagDiagnostics } from "./store";
-export type { ConsumerLagStats, LagDiagnostics } from "./store";
+export { writeOutboxEvent, getEvent, getConsumerDeliveries, listEvents, requeue, summarizeDeadLetters } from "./store";
 export {
   toDeadLetterView,
   sanitizeOutboxError,
@@ -19,9 +18,7 @@ export {
   DEAD_LETTER_MAX_LIMIT,
 } from "./dead-letter";
 export type { DeadLetterView, DeadLetterSummary, DeadLetterQuery } from "./dead-letter";
-export { registerConsumer } from "./registry";
-export { registerPayloadSchema, validatePayload, MAX_VALIDATION_ISSUES } from "./payload-schema";
-export type { PayloadSchemaDeclaration, PayloadValidationResult } from "./payload-schema";
+export { registerConsumer, getRegisteredConsumers } from "./registry";
 export { dispatchOnce } from "./dispatcher";
 export { runOutboxReplay } from "./replay-harness";
 export type {
@@ -36,9 +33,11 @@ export { outboxConfig, OUTBOX_ENABLED } from "./config";
 export type {
   Consumer,
   DispatchSummary,
+  OutboxConsumerDelivery,
+  OutboxConsumerStatus,
   OutboxEvent,
   OutboxStatus,
-  PayloadValidationIssue,
-  PayloadValidationSummary,
+  RegisterConsumerOptions,
+  RegisteredConsumer,
   WriteEventInput,
 } from "./types";
