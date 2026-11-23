@@ -24,6 +24,12 @@ function getNetwork(): Networks {
     : Networks.TESTNET;
 }
 
+function getNetworkName(): "testnet" | "mainnet" {
+  return process.env.NEXT_PUBLIC_STELLAR_NETWORK === "mainnet"
+    ? "mainnet"
+    : "testnet";
+}
+
 if (typeof window !== "undefined") {
   StellarWalletsKit.init({
     modules: [
@@ -41,9 +47,11 @@ if (typeof window !== "undefined") {
 interface WalletContextValue {
   kit: typeof StellarWalletsKit;
   publicKey: string | null;
+  network: "testnet" | "mainnet";
   isConnected: boolean;
   connect: () => Promise<void>;
   disconnect: () => void;
+  refreshAddress: () => Promise<string | null>;
   signTransaction: (xdr: string) => Promise<string>;
   /** Sign an arbitrary UTF-8 message; returns a base64 ED25519 signature. */
   signMessage: (message: string) => Promise<string>;
@@ -55,9 +63,11 @@ interface WalletContextValue {
 const WalletContext = createContext<WalletContextValue>({
   kit: StellarWalletsKit,
   publicKey: null,
+  network: getNetworkName(),
   isConnected: false,
   connect: async () => {},
   disconnect: () => {},
+  refreshAddress: async () => null,
   signTransaction: async () => "",
   signMessage: async () => "",
   showWalletModal: false,
@@ -109,6 +119,26 @@ export function Providers({
     setPublicKey(null);
   }, []);
 
+  const refreshAddress = useCallback(async (): Promise<string | null> => {
+    const { address } = await StellarWalletsKit.fetchAddress();
+    const refreshedAddress = address || null;
+    setPublicKey(refreshedAddress);
+    return refreshedAddress;
+  }, []);
+
+  useEffect(() => {
+    if (!publicKey) return;
+
+    const refreshConnectedAddress = () => {
+      StellarWalletsKit.getAddress()
+        .then(({ address }) => setPublicKey(address || null))
+        .catch((err) => console.error("[wallet] Address refresh failed:", err));
+    };
+
+    window.addEventListener("focus", refreshConnectedAddress);
+    return () => window.removeEventListener("focus", refreshConnectedAddress);
+  }, [publicKey]);
+
   const signTransaction = useCallback(async (xdr: string): Promise<string> => {
     const { signedTxXdr } = await StellarWalletsKit.signTransaction(xdr, {
       networkPassphrase: getNetwork(),
@@ -145,9 +175,11 @@ export function Providers({
         value={{
           kit: StellarWalletsKit,
           publicKey,
+          network: getNetworkName(),
           isConnected: !!publicKey,
           connect,
           disconnect,
+          refreshAddress,
           signTransaction,
           signMessage,
           showWalletModal,
