@@ -220,21 +220,25 @@ Traces include per-rule and per-condition steps.  Secret-shaped fields
 `[redacted]` and never logged or returned in cleartext.  BLOCKER
 short-circuits still emit the full trace up to the denying rule.
 
-### Dry-run policy coverage
-
-Simulation traces can be aggregated without exposing action parameters:
+To export one simulated action's explanation as JSON:
 
 ```python
-report = sim.coverage_report(simulate_batch_results)
-print(report.to_dict())
+sim.export_decision(
+  "transfer_xlm",
+  "decision.json",
+  params={"amount": 500, "beneficiary_note": "..."},
+  private_arguments={"beneficiary_note"},
+)
 ```
 
-Coverage is based only on rule steps present in the redacted traces. Each
-observed rule reports its `matched` and `not_matched` branches as exercised or
-unexercised. A rule omitted from every trace, including a rule after a blocker
-short-circuit, is listed under `unobserved_rules` and is not counted as tested.
-This prevents a partial dry-run cycle from falsely claiming coverage for
-rules it never reached.
+The export includes the decision, matched policy/rule IDs, bounded reasons,
+condition trace steps, and bounded arguments. Built-in sensitive field names
+are redacted automatically; pass `private_arguments` for tool arguments whose
+privacy classification comes from the tool schema or caller. Nested arguments
+can be classified with dotted paths; classified values are also redacted if a
+policy condition references them. The export is a simulation and does not
+enforce or execute the action. Existing `export_scenarios` batch exports and
+`PolicyResult` interfaces are unchanged.
 
 ## Observability
 
