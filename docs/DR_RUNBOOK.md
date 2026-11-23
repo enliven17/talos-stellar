@@ -295,5 +295,5 @@ Set up an alert on `metrics.failures > 0` over a 24h window.
 | Concurrency / retry / timeout / partial failure | `test_backup_service.py` + Vitest unit tests |
 | Sensitive data handling | `sanitizeErrorMessage` regression tests; audit log review |
 | Backward-compatible migration | `0013_add_backup_runs.sql` is additive only |
-| Existing lint / tests / builds green | `pnpm lint && pnpm test && cargo test` |
+| Existing lint / tests / builds green | `pnpm lint && pnpm --dir web test && cargo test` |
 | Documentation covers setup, ops, rollback | This file + `MIGRATIONS.md`, `OBSERVABILITY.md`, `CONTRIBUTING.md`, `README.md` |
