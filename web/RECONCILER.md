@@ -69,17 +69,18 @@ Transitions are purely functional and validated (`validateTransition`) before an
 9. **Network Identity Pinning & Rejection**: Transactions are pinned to a specific Stellar network identity (passphrase). Any Horizon observation whose network passphrase does not match the pinned network is rejected: the record remains active (in `PENDING` or `CONFIRMING`), `pollCount` is incremented, and `lastError` logs the rejection (`Rejected observation from foreign network...`) without altering financial settlement state or triggering downstream repair.
 10. **Terminal Immutability**: Any attempt to transition out of a terminal state is rejected with an illegal transition error (`Illegal transition: cannot leave terminal state "<state>"`).
 
-### Payment Observation Age & Staleness
+### Payment Finality Evidence Trail
 
-The reconciler exposes the age and freshness of the last trusted payment observation:
-
-- **Trusted Observations**: A payment observation is trusted only when Horizon confirms or fails a transaction within a verified closed ledger (`isTrustedObservation`). 404 (`NOT_FOUND`) and network/server errors (`error`) do not constitute trusted observations.
-- **Distinguishing Zero Age from Unknown Age**:
-  - **Zero age (`0`)**: The payment was observed in the *current* ledger (`currentLedger === confirmedLedger`).
-  - **Unknown age (`null`)**: No trusted observation exists yet (e.g., transaction is `PENDING` before first on-chain detection, or current ledger is unavailable). `0` and `null` are strictly distinguished.
-- **Stale Observation Visibility without Mutating Terminal Records**:
-  - When the ledger gap between `currentLedger` and `confirmedLedger` exceeds `staleObservationThreshold`, `getPaymentObservation` reports `status: "stale"` and `isStale: true`.
-  - Terminal records (`CONFIRMED`, `FAILED`, `EXPIRED`, `NOT_FOUND`) remain immutable (`computeTransition` returns `null`). Stale observation status is visible for telemetry, monitoring, and operator review without regressing or altering settled terminal records.
+Whenever the reconciler computes a finality transition decision, it captures an immutable evidence record:
+- **`ledger`**: The closed ledger sequence number at which the observation or decision occurred (e.g. `pollResult.ledger` or `currentLedger`).
+- **`observationSource`**: The source subsystem yielding the decision:
+  - `"horizon"`: On-chain transaction observation via Horizon API.
+  - `"wall_clock"`: System clock comparison against configured `expiresAt`.
+  - `"ledger_gap"`: Stellar ledger progression exceeding `maxLedgerGap`.
+  - `"reconciler"`: Internal finality state machine rule.
+- **`transitionReason`**: Human-readable, deterministic explanation of the decision rationale (e.g. `"Transaction confirmed on-chain in closed ledger"`, `"NOT_FOUND after 10 polls"`, `"Confirmation depth reached: current=1235, confirmed=1234, depth=1"`).
+- **Bounded Retention**: Evidence records are stored in a bounded FIFO ring buffer (`RECONCILER_MAX_EVIDENCE_ENTRIES`, default 500) to prevent unbounded memory growth while retaining full operational traceability.
+- **Privacy Invariants**: Evidence records never contain private keys, secret seeds, customer payloads, or transaction signing credentials.
 
 ---
 
@@ -98,7 +99,7 @@ All configuration is loaded from environment variables at startup in `src/lib/re
 | `STELLAR_NETWORK_PASSPHRASE` | `Test SDF Network ; September 2015` | Pinned Stellar network identity (passphrase) to reconcile against. If unset, derives from `STELLAR_NETWORK` (`"mainnet"` vs `"testnet"`). |
 | `RECONCILER_CONFIRMATION_DEPTH` | `1` | Number of closed ledgers required after first-seen before transitioning from `CONFIRMING` to `CONFIRMED`. |
 | `RECONCILER_CONCURRENCY_LIMIT` | `5` | Maximum number of concurrent Horizon/DB operations allowed during tick queue draining. |
-| `RECONCILER_STALE_OBSERVATION_THRESHOLD` | `120` | Maximum ledger sequence difference before a payment observation is considered stale. |
+| `RECONCILER_MAX_EVIDENCE_ENTRIES` | `500` | Maximum number of payment finality evidence trail entries retained in bounded memory. |
 | `ADMIN_API_KEY` | — | Bearer token required for administrative endpoints (`/api/admin/reconciler/*`). |
 
 ---
@@ -314,7 +315,60 @@ If Horizon cannot be contacted, the tick returns HTTP 503 along with the partial
 
 ---
 
-### 3. Public Payment Status Endpoint
+### 3. Payment Finality Evidence Trail (Admin Only)
+
+Inspect the bounded audit trail of payment finality transition decisions:
+
+```http
+GET /api/admin/reconciler/evidence
+Authorization: Bearer <ADMIN_API_KEY>
+```
+
+#### Query Parameters
+
+- `txHash` *(optional)*: Filter evidence entries for a specific transaction hash.
+- `status` *(optional)*: Filter by finality status (e.g. `CONFIRMED`, `FAILED`, `EXPIRED`, `NOT_FOUND`, `CONFIRMING`).
+- `source` *(optional)*: Filter by observation source (e.g. `horizon`, `wall_clock`, `ledger_gap`, `reconciler`).
+- `limit` *(optional)*: Number of entries to return (default: `50`, maximum: `200`).
+
+#### Example Request
+
+```bash
+curl -X GET "http://localhost:3000/api/admin/reconciler/evidence?limit=10" \
+  -H "Authorization: Bearer dev-admin-key"
+```
+
+#### Example Response (200 OK)
+
+```json
+{
+  "evidence": [
+    {
+      "txHash": "68b49e7978648174780650123512341234123412341234123412341234123412",
+      "txHashTruncated": "68b49e79...12341234",
+      "ledger": 1234567,
+      "observationSource": "horizon",
+      "transitionReason": "Transaction confirmed on-chain in closed ledger",
+      "fromStatus": "PENDING",
+      "toStatus": "CONFIRMING",
+      "decidedAt": "2026-10-17T05:10:00.000Z"
+    }
+  ],
+  "total": 1,
+  "limit": 10
+}
+```
+
+#### Status Codes
+- `200 OK`: Evidence trail returned.
+- `400 Bad Request`: Invalid query parameter (e.g., negative or non-integer limit).
+- `401 Unauthorized`: Missing `Authorization` header.
+- `403 Forbidden`: Invalid bearer token.
+- `500 Internal Server Error`: `ADMIN_API_KEY` not configured on the server.
+
+---
+
+### 4. Public Payment Status Endpoint
 
 Contributors and clients can inspect payment finality for a specific commerce job without an admin API key:
 

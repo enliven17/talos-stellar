@@ -149,6 +149,16 @@ export async function pollTransaction(
 }
 
 /**
+ * Extract observation source from a Horizon poll result, defaulting to "horizon".
+ */
+export function extractObservationSource(pollResult?: HorizonPollResult | null): string {
+  if (pollResult && "source" in pollResult && typeof pollResult.source === "string" && pollResult.source) {
+    return pollResult.source;
+  }
+  return "horizon";
+}
+
+/**
  * Fetch the current ledger sequence number from Horizon.
  *
  * Returns null on any error so callers can decide whether to skip the tick.

@@ -75,53 +75,32 @@ export interface TxRecord {
   updatedAt: Date;
 }
 
-// ─── Provider Failure Reason Codes ──────────────────────────────────────────
+// ─── Evidence Trail ─────────────────────────────────────────────────────────
+
+/** Observation sources recognized during payment finality reconciliation. */
+export type ObservationSource =
+  | "horizon"
+  | "wall_clock"
+  | "ledger_gap"
+  | "reconciler";
 
 /**
- * Stable, machine-readable reason codes for Horizon provider failures.
- * Bounded cardinality prevents metric explosion and enables deterministic error handling.
+ * Immutable evidence record capturing a payment finality decision:
+ *   - The closed ledger sequence number observed or evaluated
+ *   - The observation source (e.g., horizon, wall_clock, ledger_gap, reconciler)
+ *   - The transition reason explaining the state machine decision
  */
-export const HORIZON_PROVIDER_FAILURE_REASONS = [
-  // Authorization failures (e.g. HTTP 401, HTTP 403)
-  "UNAUTHORIZED",
-  "FORBIDDEN",
-  "AUTHORIZATION_FAILURE",
-
-  // Throttling / rate-limiting (e.g. HTTP 429)
-  "RATE_LIMITED",
-  "THROTTLED",
-
-  // Upstream provider / server failures (e.g. HTTP 500, 502, 503, 504)
-  "PROVIDER_UNAVAILABLE",
-  "PROVIDER_ERROR",
-  "PROVIDER_FAILURE",
-  "SERVER_ERROR",
-  "BAD_GATEWAY",
-  "GATEWAY_TIMEOUT",
-
-  // Transport / network failures (e.g. connection refused, timeout, network blip)
-  "NETWORK_ERROR",
-
-  // Client errors (e.g. HTTP 400 Bad Request)
-  "BAD_REQUEST",
-
-  // Unclassified / unknown errors
-  "UNKNOWN",
-] as const;
-
-export type HorizonProviderFailureReasonCode =
-  (typeof HORIZON_PROVIDER_FAILURE_REASONS)[number];
-
-/** Aliases for forward and backward compatibility. */
-export type ProviderFailureReasonCode = HorizonProviderFailureReasonCode;
-export type HorizonFailureReasonCode = HorizonProviderFailureReasonCode;
-
-/** Broad category classification for provider failure reasons. */
-export type HorizonFailureCategory =
-  | "authorization"
-  | "throttling"
-  | "provider_failure"
-  | "unknown";
+export interface FinalityEvidence {
+  txHash?: string;
+  txHashTruncated?: string;
+  ledger: number | null;
+  observationSource: string;
+  transitionReason: string;
+  fromStatus: FinalityStatus;
+  toStatus: FinalityStatus;
+  decidedAt: Date;
+  metadata?: Record<string, unknown>;
+}
 
 // ─── Horizon Poll Result ──────────────────────────────────────────────────────
 
@@ -165,6 +144,9 @@ export interface TxRecordUpdate {
   reasonCode?: HorizonProviderFailureReasonCode;
   repairApplied?: boolean;
   updatedAt?: Date;
+  evidence?: FinalityEvidence;
+  observationSource?: string;
+  transitionReason?: string;
 }
 
 // ─── Repair Result ────────────────────────────────────────────────────────────

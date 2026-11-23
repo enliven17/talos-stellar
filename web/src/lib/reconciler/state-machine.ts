@@ -27,10 +27,37 @@ import type {
   JobCreditDecision,
   HorizonPollResult,
   ReconcilerConfig,
-  PaymentObservation,
+  FinalityEvidence,
 } from "./types";
 import { TERMINAL_STATES } from "./types";
 import { isTrustedObservation } from "./horizon";
+
+// ─── Evidence Builder ─────────────────────────────────────────────────────────
+
+/**
+ * Construct a standardized FinalityEvidence object for a state transition.
+ */
+export function buildFinalityEvidence(params: {
+  record: TxRecord;
+  fromStatus: FinalityStatus;
+  toStatus: FinalityStatus;
+  ledger: number | null;
+  observationSource: string;
+  transitionReason: string;
+  now?: Date;
+  metadata?: Record<string, unknown>;
+}): FinalityEvidence {
+  return {
+    txHash: params.record.txHash,
+    ledger: params.ledger,
+    observationSource: params.observationSource,
+    transitionReason: params.transitionReason,
+    fromStatus: params.fromStatus,
+    toStatus: params.toStatus,
+    decidedAt: params.now ?? new Date(),
+    metadata: params.metadata,
+  };
+}
 
 // ─── Guard ───────────────────────────────────────────────────────────────────
 
@@ -126,23 +153,49 @@ export function transitionFromPending(
 
   // Wall-clock expiry takes precedence over all other checks
   if (isWallClockExpired(record, now)) {
+    const reason = "Wall-clock expiry exceeded";
+    const source = "wall_clock";
     return {
       finalityStatus: "EXPIRED",
       lastLedgerChecked: currentLedger,
-      lastError: "Wall-clock expiry exceeded",
+      lastError: reason,
       pollCount: record.pollCount + 1,
       updatedAt: now,
+      observationSource: source,
+      transitionReason: reason,
+      evidence: buildFinalityEvidence({
+        record,
+        fromStatus: "PENDING",
+        toStatus: "EXPIRED",
+        ledger: currentLedger,
+        observationSource: source,
+        transitionReason: reason,
+        now,
+      }),
     };
   }
 
   // Ledger gap expiry
   if (isLedgerExpired(record, currentLedger, config.maxLedgerGap)) {
+    const reason = `Ledger gap exceeded: current=${currentLedger}, submitted=${record.ledgerSubmitted}, max=${config.maxLedgerGap}`;
+    const source = "ledger_gap";
     return {
       finalityStatus: "EXPIRED",
       lastLedgerChecked: currentLedger,
-      lastError: `Ledger gap exceeded: current=${currentLedger}, submitted=${record.ledgerSubmitted}, max=${config.maxLedgerGap}`,
+      lastError: reason,
       pollCount: record.pollCount + 1,
       updatedAt: now,
+      observationSource: source,
+      transitionReason: reason,
+      evidence: buildFinalityEvidence({
+        record,
+        fromStatus: "PENDING",
+        toStatus: "EXPIRED",
+        ledger: currentLedger,
+        observationSource: source,
+        transitionReason: reason,
+        now,
+      }),
     };
   }
 
@@ -162,7 +215,9 @@ export function transitionFromPending(
   }
 
   switch (pollResult.outcome) {
-    case "confirmed":
+    case "confirmed": {
+      const reason = "Transaction confirmed on-chain in closed ledger";
+      const source = pollResult.source ?? "horizon";
       return {
         finalityStatus: "CONFIRMING",
         lastLedgerChecked: currentLedger,
@@ -170,27 +225,68 @@ export function transitionFromPending(
         lastError: null,
         pollCount: record.pollCount + 1,
         updatedAt: now,
+        observationSource: source,
+        transitionReason: reason,
+        evidence: buildFinalityEvidence({
+          record,
+          fromStatus: "PENDING",
+          toStatus: "CONFIRMING",
+          ledger: pollResult.ledger,
+          observationSource: source,
+          transitionReason: reason,
+          now,
+        }),
       };
+    }
 
-    case "failed":
+    case "failed": {
+      const reason = pollResult.detail ?? "Transaction unsuccessful on-chain";
+      const source = pollResult.source ?? "horizon";
       return {
         finalityStatus: "FAILED",
         lastLedgerChecked: currentLedger,
         confirmedLedger: pollResult.ledger,
-        lastError: pollResult.detail ?? "Transaction unsuccessful on-chain",
+        lastError: reason,
         pollCount: record.pollCount + 1,
         updatedAt: now,
+        observationSource: source,
+        transitionReason: reason,
+        evidence: buildFinalityEvidence({
+          record,
+          fromStatus: "PENDING",
+          toStatus: "FAILED",
+          ledger: pollResult.ledger,
+          observationSource: source,
+          transitionReason: reason,
+          now,
+          metadata: pollResult.detail ? { resultCode: pollResult.detail } : undefined,
+        }),
       };
+    }
 
     case "not_found": {
       const newPollCount = record.pollCount + 1;
       if (newPollCount >= config.notFoundThreshold) {
+        const reason = `NOT_FOUND after ${newPollCount} polls`;
+        const source = pollResult.source ?? "horizon";
         return {
           finalityStatus: "NOT_FOUND",
           lastLedgerChecked: currentLedger,
-          lastError: `NOT_FOUND after ${newPollCount} polls`,
+          lastError: reason,
           pollCount: newPollCount,
           updatedAt: now,
+          observationSource: source,
+          transitionReason: reason,
+          evidence: buildFinalityEvidence({
+            record,
+            fromStatus: "PENDING",
+            toStatus: "NOT_FOUND",
+            ledger: currentLedger,
+            observationSource: source,
+            transitionReason: reason,
+            now,
+            metadata: { pollCount: newPollCount, threshold: config.notFoundThreshold },
+          }),
         };
       }
       return {
@@ -231,11 +327,24 @@ export function transitionFromConfirming(
 
   // Wall-clock expiry
   if (isWallClockExpired(record, now)) {
+    const reason = "Confirmation window expired (wall-clock)";
+    const source = "wall_clock";
     return {
       finalityStatus: "EXPIRED",
       lastLedgerChecked: currentLedger,
-      lastError: "Confirmation window expired (wall-clock)",
+      lastError: reason,
       updatedAt: now,
+      observationSource: source,
+      transitionReason: reason,
+      evidence: buildFinalityEvidence({
+        record,
+        fromStatus: "CONFIRMING",
+        toStatus: "EXPIRED",
+        ledger: currentLedger,
+        observationSource: source,
+        transitionReason: reason,
+        now,
+      }),
     };
   }
 
@@ -259,11 +368,24 @@ export function transitionFromConfirming(
     record.ledgerSubmitted &&
     isLedgerExpired(record, currentLedger, config.maxLedgerGap)
   ) {
+    const reason = `Confirmation ledger gap exceeded: current=${currentLedger}`;
+    const source = "ledger_gap";
     return {
       finalityStatus: "EXPIRED",
       lastLedgerChecked: currentLedger,
-      lastError: `Confirmation ledger gap exceeded: current=${currentLedger}`,
+      lastError: reason,
       updatedAt: now,
+      observationSource: source,
+      transitionReason: reason,
+      evidence: buildFinalityEvidence({
+        record,
+        fromStatus: "CONFIRMING",
+        toStatus: "EXPIRED",
+        ledger: currentLedger,
+        observationSource: source,
+        transitionReason: reason,
+        now,
+      }),
     };
   }
 
@@ -273,11 +395,28 @@ export function transitionFromConfirming(
     record.confirmedLedger !== undefined &&
     currentLedger >= record.confirmedLedger + config.confirmationDepth
   ) {
+    const reason = `Confirmation depth reached: current=${currentLedger}, confirmed=${record.confirmedLedger}, depth=${config.confirmationDepth}`;
+    const source = "horizon";
     return {
       finalityStatus: "CONFIRMED",
       lastLedgerChecked: currentLedger,
       lastError: null,
       updatedAt: now,
+      observationSource: source,
+      transitionReason: reason,
+      evidence: buildFinalityEvidence({
+        record,
+        fromStatus: "CONFIRMING",
+        toStatus: "CONFIRMED",
+        ledger: currentLedger,
+        observationSource: source,
+        transitionReason: reason,
+        now,
+        metadata: {
+          confirmedLedger: record.confirmedLedger,
+          confirmationDepth: config.confirmationDepth,
+        },
+      }),
     };
   }
 

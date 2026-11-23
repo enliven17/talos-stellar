@@ -52,6 +52,7 @@ import {
 } from "./state-machine";
 import { pollTransaction, fetchCurrentLedger } from "./horizon";
 import { applyRepair } from "./repair";
+import { recordEvidence } from "./evidence";
 import type {
   TxRecord,
   ReconcilerConfig,
@@ -435,6 +436,11 @@ async function processRecord(
         return;
       }
 
+      // Record evidence in the bounded audit trail
+      if (update.evidence) {
+        recordEvidence(update.evidence, config.maxEvidenceEntries);
+      }
+
       logger.info(
         {
           txHash: record.txHash,
@@ -444,6 +450,9 @@ async function processRecord(
           to: update.finalityStatus,
           currentLedger,
           confirmedLedger: update.confirmedLedger ?? record.confirmedLedger,
+          observationSource: update.observationSource,
+          transitionReason: update.transitionReason,
+          ledger: update.evidence?.ledger,
         },
         "reconciler_state_transition",
       );
