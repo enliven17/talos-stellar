@@ -7,6 +7,9 @@ here so it can be unit-tested without starting the full scheduler loop.
 
 from __future__ import annotations
 
+import math
+
+from dataclasses import dataclass
 from datetime import datetime, time, timezone
 from typing import TYPE_CHECKING
 
@@ -17,6 +20,23 @@ except ImportError:
 
 if TYPE_CHECKING:
     from talos_agent.clock import ClockProtocol
+
+
+MIN_RECURRING_INTERVAL_SECONDS = 1.0
+MIN_RECURRING_TASK_INTERVAL_SECONDS = MIN_RECURRING_INTERVAL_SECONDS
+
+
+def validate_recurring_task_interval(task_name: str, interval_seconds: float) -> None:
+    """Validate a recurring task interval before it is used for a timer."""
+    if (
+        not isinstance(interval_seconds, (int, float))
+        or isinstance(interval_seconds, bool)
+        or interval_seconds < MIN_RECURRING_TASK_INTERVAL_SECONDS
+    ):
+        raise ValueError(
+            f"Recurring task '{task_name}' interval must be at least "
+            f"{MIN_RECURRING_TASK_INTERVAL_SECONDS:g} seconds"
+        )
 
 
 def check_should_run(
@@ -59,6 +79,9 @@ def check_should_run(
     clock:
         Unused; accepted for API symmetry with call sites that pass a clock.
     """
+    if interval_seconds is not None:
+        validate_recurring_task_interval("scheduler", interval_seconds)
+
     if last_run is None:
         return True
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 from talos_agent.metrics import (
+    _ALLOWED_MISSED_RUN_POLICIES,
     _ALLOWED_MODELS,
     _ALLOWED_OUTCOMES,
     _ALLOWED_RETRY_COUNTS,
@@ -20,6 +21,7 @@ from talos_agent.metrics import (
     _ALLOWED_TASKS,
     _ALLOWED_TOOLS,
     _normalize_model,
+    _normalize_missed_run_policy,
     _normalize_outcome,
     _normalize_retry_count,
     _normalize_status_code,
@@ -28,6 +30,7 @@ from talos_agent.metrics import (
     record_cycle,
     record_http_call,
     record_llm_call,
+    record_schedule_lateness,
     record_tool_call,
 )
 from talos_agent.telemetry import (
@@ -127,6 +130,15 @@ class TestNormalizeOutcome:
 
     def test_sentinel_is_in_allowlist(self) -> None:
         assert _normalize_outcome("other") == "other"
+
+
+class TestNormalizeMissedRunPolicy:
+    @pytest.mark.parametrize("policy", sorted(_ALLOWED_MISSED_RUN_POLICIES))
+    def test_known_policies_pass_through(self, policy: str) -> None:
+        assert _normalize_missed_run_policy(policy) == policy
+
+    def test_unknown_policy_returns_other(self) -> None:
+        assert _normalize_missed_run_policy("unbounded_replay") == "other"
 
 
 # ── _normalize_status_code ────────────────────────────────────────────────────
@@ -244,6 +256,15 @@ class TestRecordFunctionsApplyNormalisation:
         assert h[0][1]["agent.task"] == "polling"
         assert h[0][1]["outcome"] == "error"
 
+    def test_record_schedule_lateness_normalises_policy(self, monkeypatch) -> None:
+        h, _c = self._capture_attrs(monkeypatch)
+        record_schedule_lateness("dividend_distribution", "unknown", 30.0)
+        assert h[0][0] == "schedule_lateness"
+        assert h[0][1] == {
+            "agent.task": "dividend_distribution",
+            "scheduler.missed_run.policy": "other",
+        }
+
     def test_record_tool_call_normalises_dynamic_tool_name(self, monkeypatch) -> None:
         h, c = self._capture_attrs(monkeypatch)
         record_tool_call("job_abc123_dynamic", "error", 0.2)
@@ -306,6 +327,9 @@ class TestAllowlistConsistency:
     def test_outcome_allowlist_contains_sentinel(self) -> None:
         assert "other" in _ALLOWED_OUTCOMES
 
+    def test_missed_run_policy_allowlist_contains_sentinel(self) -> None:
+        assert "other" in _ALLOWED_MISSED_RUN_POLICIES
+
     def test_status_code_allowlist_contains_sentinel(self) -> None:
         assert "other" in _ALLOWED_STATUS_CODES
 
@@ -324,6 +348,7 @@ class TestAllowlistConsistency:
             ("_ALLOWED_TOOLS", _ALLOWED_TOOLS),
             ("_ALLOWED_MODELS", _ALLOWED_MODELS),
             ("_ALLOWED_OUTCOMES", _ALLOWED_OUTCOMES),
+            ("_ALLOWED_MISSED_RUN_POLICIES", _ALLOWED_MISSED_RUN_POLICIES),
             ("_ALLOWED_STATUS_CODES", _ALLOWED_STATUS_CODES),
             ("_ALLOWED_RETRY_COUNTS", _ALLOWED_RETRY_COUNTS),
             ("_ALLOWED_CIRCUIT_BREAKER_PROVIDERS", _ALLOWED_CIRCUIT_BREAKER_PROVIDERS),
