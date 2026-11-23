@@ -335,6 +335,15 @@ Response:
 }
 ```
 
+**Export a reproducible quota-window usage statement:**
+
+```
+GET /api/talos/:id/quota?format=statement&asOf=2026-07-24T12:30:00Z
+Authorization: Bearer <api_key>
+```
+
+Returns a canonical, integer-unit usage statement for the authorized agent with stable UTC window boundaries (`windowStart`/`windowEnd` and integer ms), `sourcePolicyVersion`, per-resource `policySource`, aggregate `totals`, and a deterministic SHA-256 `digest` (also exposed in the `X-Quota-Statement-Digest` header). Private request payloads and operator `notes` are omitted. The `asOf` query parameter is optional (defaults to the current UTC time) and returns `400` if not a valid ISO-8601 timestamp.
+
 **Override a quota for a specific agent:**
 
 ```

@@ -38,6 +38,7 @@
  * "monthly" → windowStart = UTC month start    (e.g. 2026-07-01 00:00:00)
  */
 
+import { createHash } from "node:crypto";
 import { and, eq, isNull, or, sql } from "drizzle-orm";
 import { tlsQuotaConfigs, tlsQuotaScopeUsage, tlsQuotaUsage } from "@/db/schema";
 import { VALID_SCOPES, type Scope } from "@/lib/api-scopes";
@@ -590,214 +591,261 @@ export const ALL_QUOTA_RESOURCES: QuotaResource[] = [
   "sse_connections",
 ];
 
-// ─── Reservation / Commit / Release ──────────────────────────────────────────
-//
-// Reserve-commit-release semantics let callers pre-claim capacity before doing
-// billable work, then either commit (charge) or release (refund) the reservation.
-//
-// In-flight reservations are tracked in a module-level Map so no additional
-// DB columns or migrations are required.  The map is keyed by reservationId
-// (a UUID) and stores enough metadata to validate the commit/release, detect
-// window expiry, and account for concurrent reservations when checking headroom.
-//
-// Concurrency contract:
-//   • reserveQuota reads committed usage + all pending reservations for the
-//     same (talosId, resource, windowStart) before granting, so two parallel
-//     callers cannot both succeed if only one slot remains.
-//   • commitReservation calls checkAndIncrementQuota which performs an atomic
-//     DB upsert — the increment is durable even if the in-process map is lost.
-//   • releaseReservation simply removes the in-flight entry; the committed
-//     counter in the DB is unaffected.
-//
-// Limitations:
-//   • The map is process-local, so reservations made on one instance are
-//     invisible to another.  For multi-region deployments, replace the map
-//     with a Redis SETNX reservation key.
-//   • A reservation that is never committed or released is an orphan.  Call
-//     _pruneExpiredReservations() on a periodic tick (or in tests via
-//     _resetReservationsForTests()) to reclaim stale headroom.
+// ─── Reproducible Quota-Window Usage Statement ───────────────────────────────
 
-import { randomUUID } from "crypto";
+/** Schema version for exported quota-window usage statements. */
+export const QUOTA_STATEMENT_SCHEMA_VERSION = "1.0.0";
 
-/** An in-flight (uncommitted, unreleased) reservation. */
-export interface ReservationEntry {
-  reservationId: string;
-  talosId: string;
+/** Default source policy version stamped onto exported usage statements. */
+export const QUOTA_POLICY_VERSION = "quota-policy/v1";
+
+/** Origin of the effective quota policy applied to a resource. */
+export type QuotaPolicySource = "agent_override" | "platform_default" | "fallback";
+
+/** One resource row in a reproducible quota-window usage statement. */
+export interface QuotaWindowStatementEntry {
   resource: QuotaResource;
-  count: number;
-  windowStart: Date;
-  createdAt: Date;
-}
-
-/** Result returned by reserveQuota. */
-export interface ReservationResult {
-  /** false when the limit would be exceeded by this reservation. */
-  ok: boolean;
-  reservationId: string;
+  windowSize: WindowSize;
+  windowStart: string;
+  windowEnd: string;
+  windowStartMs: number;
+  windowEndMs: number;
+  enabled: boolean;
+  policySource: QuotaPolicySource;
   limit: number;
+  used: number;
   remaining: number;
-  resetAt: number;
+  overage: number;
+  withinQuota: boolean;
+  unit: "requests";
+}
+
+/** Reproducible, integer-unit quota-window usage statement for one agent. */
+export interface QuotaWindowUsageStatement {
+  schemaVersion: string;
+  sourcePolicyVersion: string;
+  talosId: string;
+  entries: QuotaWindowStatementEntry[];
+  totals: {
+    resources: number;
+    limit: number;
+    used: number;
+    remaining: number;
+    overage: number;
+  };
+  /** SHA-256 hex digest of the canonical statement payload (excluding digest). */
+  digest: string;
+}
+
+/** Input record for a single resource when building a statement. */
+export interface QuotaWindowStatementResourceInput {
   resource: QuotaResource;
+  windowSize: WindowSize;
+  enabled: boolean;
+  policySource: QuotaPolicySource;
+  limit: number;
+  used: number;
 }
 
-/** Result returned by commitReservation and releaseReservation. */
-export interface ReservationActionResult {
-  /** false when the reservationId was not found (already committed/released). */
-  ok: boolean;
-  reservationId: string;
+/** Input parameters for `buildQuotaWindowStatement`. */
+export interface BuildQuotaWindowStatementInput {
+  talosId: string;
+  asOf: Date;
+  sourcePolicyVersion?: string;
+  resources: readonly QuotaWindowStatementResourceInput[];
 }
 
-// Module-level store for in-flight reservations.
-const _reservations = new Map<string, ReservationEntry>();
+function assertNonNegativeSafeInteger(value: number, fieldName: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${fieldName} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+function assertValidWindowSize(windowSize: string): WindowSize {
+  if (windowSize !== "hourly" && windowSize !== "daily" && windowSize !== "monthly") {
+    throw new Error(`Unsupported windowSize: ${windowSize}`);
+  }
+  return windowSize;
+}
 
 /**
- * Reserve `count` units of capacity for (talosId, resource) in the current
- * window.  Returns ok:false without modifying the DB if the reservation would
- * push committed + reserved usage over the configured limit.
+ * Build a reproducible quota-window usage statement for one authorized agent.
  *
- * @param db       Drizzle DB instance (used to read config and committed usage)
- * @param talosId  Agent requesting the reservation
- * @param resource Resource being reserved
- * @param count    Number of units to reserve (default 1)
+ * Guarantees:
+ * - Stable UTC window boundaries (`floorToWindow` / `nextWindowStart`)
+ * - Strict non-negative integer units for all counts and epoch timestamps
+ * - Includes `sourcePolicyVersion` and per-resource `policySource`
+ * - Strictly allowlists structural fields so private request payloads and
+ *   free-form notes are never included in the exported statement
+ * - Canonical resource ordering and deterministic SHA-256 `digest`
  */
-export async function reserveQuota(
-  db: Db,
-  talosId: string,
-  resource: QuotaResource,
-  count = 1,
-): Promise<ReservationResult> {
-  const config = await resolveQuotaConfig(db, talosId, resource);
-
-  const now = new Date();
-  const windowStart = floorToWindow(now, config.windowSize);
-  const resetAt = nextWindowStart(windowStart, config.windowSize).getTime();
-
-  // When enforcement is off, every reservation succeeds without DB work.
-  if (!config.enabled) {
-    const reservationId = randomUUID();
-    _reservations.set(reservationId, { reservationId, talosId, resource, count, windowStart, createdAt: now });
-    return { ok: true, reservationId, limit: config.maxCount, remaining: config.maxCount, resetAt, resource };
+export function buildQuotaWindowStatement(
+  input: BuildQuotaWindowStatementInput,
+): QuotaWindowUsageStatement {
+  const talosId = typeof input.talosId === "string" ? input.talosId.trim() : "";
+  if (!talosId) {
+    throw new Error("talosId must be a non-empty string");
   }
 
-  // Read committed usage for the current window.
-  const usageRow = await db
-    .select({ count: tlsQuotaUsage.count })
-    .from(tlsQuotaUsage)
-    .where(
-      and(
-        eq(tlsQuotaUsage.talosId, talosId),
-        eq(tlsQuotaUsage.resource, resource),
-        eq(tlsQuotaUsage.windowStart, windowStart),
-      ),
-    )
-    .limit(1)
-    .then((r: { count: number }[]) => r[0] ?? null);
+  if (!(input.asOf instanceof Date) || Number.isNaN(input.asOf.getTime())) {
+    throw new Error("asOf must be a valid Date");
+  }
 
-  const committed = usageRow?.count ?? 0;
+  const sourcePolicyVersion = (input.sourcePolicyVersion ?? QUOTA_POLICY_VERSION).trim();
+  if (!sourcePolicyVersion) {
+    throw new Error("sourcePolicyVersion must be a non-empty string");
+  }
 
-  // Sum up all in-flight reservations for this (talosId, resource, window).
-  const windowKey = windowStart.toISOString();
-  let pending = 0;
-  for (const r of _reservations.values()) {
-    if (
-      r.talosId === talosId &&
-      r.resource === resource &&
-      r.windowStart.toISOString() === windowKey
-    ) {
-      pending += r.count;
+  const seenResources = new Set<QuotaResource>();
+  const entryMap = new Map<QuotaResource, QuotaWindowStatementEntry>();
+
+  for (const item of input.resources) {
+    if (!ALL_QUOTA_RESOURCES.includes(item.resource)) {
+      throw new Error(`Unsupported quota resource: ${String(item.resource)}`);
+    }
+    if (seenResources.has(item.resource)) {
+      throw new Error(`Duplicate quota resource in statement: ${item.resource}`);
+    }
+    seenResources.add(item.resource);
+
+    const windowSize = assertValidWindowSize(item.windowSize);
+    const limit = assertNonNegativeSafeInteger(item.limit, `${item.resource}.limit`);
+    const used = assertNonNegativeSafeInteger(item.used, `${item.resource}.used`);
+    const remaining = Math.max(0, limit - used);
+    const overage = Math.max(0, used - limit);
+
+    const windowStartDate = floorToWindow(input.asOf, windowSize);
+    const windowEndDate = nextWindowStart(windowStartDate, windowSize);
+    const windowStartMs = assertNonNegativeSafeInteger(
+      windowStartDate.getTime(),
+      `${item.resource}.windowStartMs`,
+    );
+    const windowEndMs = assertNonNegativeSafeInteger(
+      windowEndDate.getTime(),
+      `${item.resource}.windowEndMs`,
+    );
+
+    const policySource: QuotaPolicySource =
+      item.policySource === "agent_override" ||
+      item.policySource === "platform_default" ||
+      item.policySource === "fallback"
+        ? item.policySource
+        : "fallback";
+
+    entryMap.set(item.resource, {
+      resource: item.resource,
+      windowSize,
+      windowStart: windowStartDate.toISOString(),
+      windowEnd: windowEndDate.toISOString(),
+      windowStartMs,
+      windowEndMs,
+      enabled: Boolean(item.enabled),
+      policySource,
+      limit,
+      used,
+      remaining,
+      overage,
+      withinQuota: used <= limit,
+      unit: "requests",
+    });
+  }
+
+  // Canonical ordering by ALL_QUOTA_RESOURCES so the statement is always reproducible.
+  const entries: QuotaWindowStatementEntry[] = [];
+  for (const resource of ALL_QUOTA_RESOURCES) {
+    const entry = entryMap.get(resource);
+    if (entry) {
+      entries.push(entry);
     }
   }
 
-  const projected = committed + pending + count;
-  if (projected > config.maxCount) {
-    return {
-      ok: false,
-      reservationId: "",
-      limit: config.maxCount,
-      remaining: Math.max(0, config.maxCount - committed - pending),
-      resetAt,
-      resource,
-    };
-  }
+  const totals = {
+    resources: entries.length,
+    limit: entries.reduce((sum, e) => sum + e.limit, 0),
+    used: entries.reduce((sum, e) => sum + e.used, 0),
+    remaining: entries.reduce((sum, e) => sum + e.remaining, 0),
+    overage: entries.reduce((sum, e) => sum + e.overage, 0),
+  };
 
-  const reservationId = randomUUID();
-  _reservations.set(reservationId, { reservationId, talosId, resource, count, windowStart, createdAt: now });
+  const canonicalPayload = {
+    schemaVersion: QUOTA_STATEMENT_SCHEMA_VERSION,
+    sourcePolicyVersion,
+    talosId,
+    entries,
+    totals,
+  };
+
+  const digest = createHash("sha256")
+    .update(JSON.stringify(canonicalPayload))
+    .digest("hex");
 
   return {
-    ok: true,
-    reservationId,
-    limit: config.maxCount,
-    remaining: Math.max(0, config.maxCount - projected),
-    resetAt,
-    resource,
+    ...canonicalPayload,
+    digest,
   };
 }
 
 /**
- * Commit a previously reserved reservation, converting it to actual (durable)
- * usage by calling checkAndIncrementQuota.  Returns ok:false when the
- * reservationId is unknown (already committed or released).
+ * Export a reproducible quota-window usage statement for one authorized agent
+ * by reading its effective quota configs and usage counters for the window
+ * containing `asOf` (defaults to current UTC time).
  */
-export async function commitReservation(
+export async function exportQuotaWindowStatement(
   db: Db,
   talosId: string,
-  resource: QuotaResource,
-  reservationId: string,
-): Promise<ReservationActionResult> {
-  const entry = _reservations.get(reservationId);
-  if (!entry || entry.talosId !== talosId || entry.resource !== resource) {
-    return { ok: false, reservationId };
+  options?: { asOf?: Date; sourcePolicyVersion?: string },
+): Promise<QuotaWindowUsageStatement> {
+  const asOf = options?.asOf ?? new Date();
+  if (!(asOf instanceof Date) || Number.isNaN(asOf.getTime())) {
+    throw new Error("asOf must be a valid Date");
   }
 
-  // Remove the reservation before committing so a concurrent caller cannot
-  // double-count this slot if checkAndIncrementQuota is slow.
-  _reservations.delete(reservationId);
+  const configRows = await db
+    .select()
+    .from(tlsQuotaConfigs)
+    .where(
+      or(
+        eq(tlsQuotaConfigs.talosId, talosId),
+        isNull(tlsQuotaConfigs.talosId),
+      ),
+    );
 
-  // Persist the usage increment for each unit reserved.
-  for (let i = 0; i < entry.count; i++) {
-    await checkAndIncrementQuota(db, talosId, resource);
-  }
+  const resources = await Promise.all(
+    ALL_QUOTA_RESOURCES.map(async (resource): Promise<QuotaWindowStatementResourceInput> => {
+      const [config, usage] = await Promise.all([
+        resolveQuotaConfig(db, talosId, resource),
+        readQuotaUsage(db, talosId, resource, asOf),
+      ]);
 
-  return { ok: true, reservationId };
-}
+      const hasAgentOverride = configRows.some(
+        (r) => r.talosId === talosId && r.resource === resource,
+      );
+      const hasPlatformDefault = configRows.some(
+        (r) => r.talosId === null && r.resource === resource,
+      );
 
-/**
- * Release (cancel) a previously reserved reservation without recording any
- * usage.  Idempotent: returns ok:true whether or not the entry existed.
- */
-export async function releaseReservation(
-  talosId: string,
-  resource: QuotaResource,
-  reservationId: string,
-): Promise<ReservationActionResult> {
-  const entry = _reservations.get(reservationId);
-  if (!entry || entry.talosId !== talosId || entry.resource !== resource) {
-    // Already released or committed — treat as success (idempotent).
-    return { ok: true, reservationId };
-  }
-  _reservations.delete(reservationId);
-  return { ok: true, reservationId };
-}
+      const policySource: QuotaPolicySource = hasAgentOverride
+        ? "agent_override"
+        : hasPlatformDefault
+          ? "platform_default"
+          : "fallback";
 
-/**
- * Remove reservations created in a window that has since expired.
- * Call on a periodic tick in long-running services to prevent orphaned
- * entries from blocking capacity in the next window.
- */
-export function _pruneExpiredReservations(): number {
-  const now = new Date();
-  let pruned = 0;
-  for (const [id, entry] of _reservations) {
-    const windowEnd = nextWindowStart(entry.windowStart, "hourly"); // conservative 1-hour TTL
-    if (windowEnd < now) {
-      _reservations.delete(id);
-      pruned++;
-    }
-  }
-  return pruned;
-}
+      return {
+        resource,
+        windowSize: config.windowSize,
+        enabled: config.enabled,
+        policySource,
+        limit: usage.limit,
+        used: usage.used,
+      };
+    }),
+  );
 
-/** Test-only: clear all in-flight reservations between test cases. */
-export function _resetReservationsForTests(): void {
-  _reservations.clear();
+  return buildQuotaWindowStatement({
+    talosId,
+    asOf,
+    sourcePolicyVersion: options?.sourcePolicyVersion,
+    resources,
+  });
 }
