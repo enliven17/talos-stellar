@@ -309,6 +309,25 @@ async def polling_task(
                             job.get("payload"),
                         )
 
+                jobs = await api.get_pending_jobs()
+                for job in jobs:
+                    if job_effect_store is not None:
+                        try:
+                            job_effect_store.ingest(job)
+                        except Exception as exc:
+                            from talos_agent.job_effects import JobEffectError
+                            if isinstance(exc, JobEffectError):
+                                log.warning("job_inbox_rejected", error_code=exc.code)
+                                continue
+                            raise
+                    else:
+                        db.add_commerce_job(
+                            job["id"],
+                            job["talosId"],
+                            job.get("serviceName", ""),
+                            job.get("payload"),
+                        )
+
             backoff.success()
         except asyncio.CancelledError:
             # Cancellation is not a failed attempt — never consume retry budget.
@@ -333,6 +352,10 @@ async def polling_task(
             break
         except asyncio.TimeoutError:
             pass
+
+    # Cancel retry timer on draining to avoid resurrecting work after retirement.
+    if shutdown_event.is_set() and not backoff.terminal:
+        backoff.cancel()
 
 
 async def heartbeat_task(
@@ -376,6 +399,10 @@ async def heartbeat_task(
             break
         except asyncio.TimeoutError:
             pass
+
+    # Cancel retry timer on draining to avoid resurrecting work after retirement.
+    if shutdown_event.is_set() and not backoff.terminal:
+        backoff.cancel()
 
 
 async def job_heartbeat_task(
@@ -435,6 +462,10 @@ async def job_heartbeat_task(
             )
         except asyncio.TimeoutError:
             pass
+
+    # Cancel retry timer on draining to avoid resurrecting work after retirement.
+    if shutdown_event.is_set() and not backoff.terminal:
+        backoff.cancel()
 
 
 async def activity_flush_task(
@@ -506,6 +537,10 @@ async def activity_flush_task(
             break
         except asyncio.TimeoutError:
             pass
+
+    # Cancel retry timer on draining to avoid resurrecting work after retirement.
+    if shutdown_event.is_set() and not backoff.terminal:
+        backoff.cancel()
 
 
 async def learning_cycle_task(
@@ -908,6 +943,10 @@ async def job_effect_dispatch_task(
             break
         except asyncio.TimeoutError:
             pass
+
+    # Cancel retry timer on draining to avoid resurrecting work after retirement.
+    if shutdown_event.is_set() and not backoff.terminal:
+        backoff.cancel()
 
 
 async def telegram_queue_task(
