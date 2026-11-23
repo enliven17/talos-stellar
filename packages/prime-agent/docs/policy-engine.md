@@ -90,7 +90,12 @@ Policies are JSON files or Python dataclasses. Example:
 }
 ```
 
-Save to `~/.talos-agent/policies.json`.  The engine hot-reloads on file change.
+Save to `~/.talos-agent/policies.json`. The engine hot-reloads on file change
+after validating and dry-run simulating the candidate policy set. If the file
+cannot be parsed, a rule is invalid, or the simulation fails, the active
+last-known-good policy snapshot remains in effect. The failed reload is logged
+and retried on the next hot-reload check; invalid policy data is not treated as
+an empty override set.
 
 ### Time-bounded exceptions
 
@@ -165,7 +170,7 @@ from talos_agent.policy import PolicySimulator, PolicyEngine
 
 engine = PolicyEngine()
 engine.enabled = True
-engine.load(loader.load())
+engine.reload(loader.load())
 
 sim = PolicySimulator(engine)
 result = sim.simulate("transfer_xlm", {"amount": 500}, {"budget_remaining": 1000})
