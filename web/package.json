@@ -17,7 +17,7 @@
     "test:load": "vitest run tests/load/",
     "test:openapi": "vitest run tests/openapi-snapshot.test.ts",
     "test:a11y": "tsx scripts/a11y-check.ts",
-    "test:bench": "vitest run src/area/devx/__tests__/",
+    "test:bench": "vitest run --environment=node src/area/devx/__tests__/",
     "bench:suite": "tsx src/area/devx/run-benchmarks.ts",
     "openapi:snapshot": "tsx scripts/write-openapi-snapshot.ts",
     "schemas:generate": "tsx scripts/generate-schemas.ts",

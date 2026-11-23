@@ -197,7 +197,8 @@ await registerTx({
 });
 ```
 
-- **Idempotent**: Re-registering an existing `txHash` returns the existing record ID without duplicating rows or throwing.
+- **Idempotent**: Re-registering an existing `txHash` with the same `(sourceType, sourceId)` returns the existing record ID without duplicating rows or throwing.
+- **Conflicting Association Detection**: If an existing `txHash` is re-registered with an incompatible `sourceType` or `sourceId`, `registerTx()` records the conflict in `last_error` (`ASSOCIATION_CONFLICT: ...`), emits `reconciler_tx_association_conflict`, does not duplicate any row or financial effect, and throws `TxAssociationConflictError`. Likewise, before crediting a `CONFIRMED` commerce job, `applyRepair()` validates associations with `canCreditJob()` and rejects conflicting payment-to-job bindings.
 - **Fire-and-Forget Safe**: In routes such as `buy-token` and `jobs`, `registerTx` is called after the main database transaction commits, ensuring route responses are not blocked or failed if registration encounters an issue.
 
 ---
@@ -390,6 +391,7 @@ curl -X GET http://localhost:3000/api/talos/talos_123/jobs/job_456/payment-statu
   "finalityStatus": "CONFIRMED",
   "confirmedLedger": 1234567,
   "lastLedgerChecked": 1234568,
+  "observationAge": 1,
   "pollCount": 2,
   "lastError": null,
   "repairApplied": true,

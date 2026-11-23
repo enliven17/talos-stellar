@@ -399,7 +399,16 @@ class Settings(BaseSettings):
         ),
     )
     max_iterations: int = Field(default=20, description="Max tool-call iterations per cycle")
-    approval_threshold: Decimal = Field(default=Decimal(10), description="USD threshold for auto-approval")
+    approval_threshold: Decimal = Field(default=Decimal("10"), description="USD threshold for auto-approval")
+    purchase_seller_allowlist: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Allowlist of canonical seller identifiers (Stellar payee G-addresses) "
+            "permitted for autonomous purchases. Empty means no allowlist "
+            "enforced (legacy behavior). Non-allowlisted sellers require "
+            "explicit operator approval via the existing approval flow."
+        ),
+    )
     browser_headless: bool = Field(default=False, description="Run browser in headless mode")
     auto_repay_loans: bool = Field(default=False, description="Enable automatic loan repayment from treasury")
     tool_timeout_seconds: int = Field(
@@ -490,7 +499,11 @@ class Settings(BaseSettings):
     )
 
     # Dividend distribution
-    dividend_distribution_interval: int = Field(default=3600, description="Seconds between dividend distribution checks")
+    dividend_distribution_interval: int = Field(
+        default=3600,
+        ge=1,
+        description="Seconds between dividend distribution checks (minimum 1)",
+    )
     dividend_usdc_threshold: Decimal = Field(default=Decimal(100), description="USDC threshold to trigger dividend distribution")
 
     # Deterministic replay (disabled by default for safe rollout)

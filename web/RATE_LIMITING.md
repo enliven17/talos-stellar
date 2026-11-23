@@ -30,11 +30,13 @@ Request
 
 The Redis backend uses `INCR` followed by `PEXPIREAT` in a single pipelined send. `INCR` is atomic in Redis, so concurrent requests across any number of instances increment the same counter without races or double-counting.
 
-### Fail-open / Fail-closed
+### Fail-open / Fail-closed & Bounded Grace Policy
 
-By default (`RATE_LIMIT_FAIL_CLOSED=false`), if Redis is unreachable the store silently falls back to in-memory. This keeps traffic flowing during a Redis blip but means quotas are temporarily process-local.
-
-Set `RATE_LIMIT_FAIL_CLOSED=true` to deny all traffic when Redis is unavailable (strict shared-quota enforcement).
+Store outage handling distinguishes between operation classes and enforces bounded grace:
+- **Payment paths** (`/buy-token`, `/jobs`, `/revenue/distribute`, `/purchase`): Strictly **fail-closed** during store outages to prevent unmetered financial operations and double-spend abuse.
+- **Privileged/Auth paths** (auth routes, `/admin`, `/ops`, `/internal`): Strictly **fail-closed** during store outages.
+- **Standard / Read paths**: Fail-open with temporary fallback to the process-local in-memory store for a bounded grace duration (`RATE_LIMIT_GRACE_TTL_MS`, default: 60s). Once the grace ceiling is exceeded, all traffic fails closed until the store recovers.
+- Set `RATE_LIMIT_FAIL_CLOSED=true` to invert standard paths and deny all requests immediately when Redis is unreachable.
 
 ---
 

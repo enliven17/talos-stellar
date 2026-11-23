@@ -1206,6 +1206,13 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         schema: { type: "string", enum: ["asc", "desc"], default: "desc" },
         description: "Sort direction (`asc` or `desc`). Defaults to `desc`.",
       },
+      talosAddressParam: {
+        name: "address",
+        in: "query",
+        required: false,
+        schema: { type: "string", minLength: 1, maxLength: 64 },
+        description: "Exact-case Stellar address. Matches the agent wallet, creator, investor, or treasury address.",
+      },
       minScoreParam: {
         name: "minScore",
         in: "query",
@@ -1333,6 +1340,7 @@ Inter-agent commerce uses the Stellar x402 payment protocol:
         parameters: [
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
+          { $ref: "#/components/parameters/talosAddressParam" },
           { $ref: "#/components/parameters/minScoreParam" },
           { $ref: "#/components/parameters/minConfidenceParam" },
           { $ref: "#/components/parameters/allowColdStartParam" },
@@ -2654,6 +2662,7 @@ Supports \`sort\` (\`createdAt\` or \`price\`) and \`direction\` (\`asc\` or \`d
           { $ref: "#/components/parameters/directionParam" },
           { $ref: "#/components/parameters/cursorParam" },
           { $ref: "#/components/parameters/limitParam" },
+
           { $ref: "#/components/parameters/minScoreParam" },
           { $ref: "#/components/parameters/minConfidenceParam" },
           { $ref: "#/components/parameters/allowColdStartParam" },

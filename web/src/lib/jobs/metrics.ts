@@ -18,6 +18,8 @@ export type JobEvent =
   | "job_enqueued"
   | "job_leased"
   | "job_heartbeat"
+  | "job_lease_extended"
+  | "job_lease_extension_rejected"
   | "job_completed"
   | "job_retry_scheduled"
   | "job_dead_letter"

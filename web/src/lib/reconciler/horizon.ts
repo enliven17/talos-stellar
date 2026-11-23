@@ -12,12 +12,16 @@
  * logic.  It can be fully mocked in unit tests.
  */
 
-import type { HorizonPollResult } from "./types";
+import type {
+  HorizonPollResult,
+  HorizonProviderFailureReasonCode,
+  HorizonFailureCategory,
+} from "./types";
 
 // ─── Horizon error type helpers ───────────────────────────────────────────────
 
 /** Horizon SDK throws objects with a `response.status` field for HTTP errors. */
-function extractHttpStatus(err: unknown): number | null {
+export function extractHttpStatus(err: unknown): number | null {
   if (
     err &&
     typeof err === "object" &&
@@ -32,7 +36,7 @@ function extractHttpStatus(err: unknown): number | null {
   return null;
 }
 
-function extractErrorMessage(err: unknown): string {
+export function extractErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (err && typeof err === "object" && "message" in err) {
     return String((err as { message: unknown }).message);
@@ -97,6 +101,11 @@ export async function pollTransaction(
         ? tx.ledger
         : parseInt(String(tx.ledger), 10);
 
+    const observedAt =
+      typeof (tx as { created_at?: unknown }).created_at === "string"
+        ? new Date((tx as { created_at: string }).created_at)
+        : new Date();
+
     if (tx.successful) {
       return {
         outcome: "confirmed",
@@ -127,6 +136,8 @@ export async function pollTransaction(
     // 429 rate-limit or 5xx transient: retryable
     const retryable =
       httpStatus === null || httpStatus === 429 || httpStatus >= 500;
+
+    const reasonCode = classifyHorizonError(err, httpStatus);
 
     return {
       outcome: "error",
@@ -167,6 +178,29 @@ export async function fetchCurrentLedger(horizonUrl: string): Promise<number | n
   } catch {
     return null;
   }
+}
+
+/**
+ * Returns true if a poll result represents a trusted observation of the payment on-chain.
+ * Only "confirmed" and "failed" outcomes with a valid positive ledger sequence are trusted.
+ * "not_found" and "error" are not trusted observations.
+ */
+export function isTrustedObservation(
+  pollResult: HorizonPollResult | null | undefined,
+): pollResult is {
+  outcome: "confirmed" | "failed";
+  ledger: number;
+  successful: boolean;
+  observedAt?: Date;
+  detail?: string;
+} {
+  if (!pollResult) return false;
+  return (
+    (pollResult.outcome === "confirmed" || pollResult.outcome === "failed") &&
+    typeof pollResult.ledger === "number" &&
+    Number.isFinite(pollResult.ledger) &&
+    pollResult.ledger > 0
+  );
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────

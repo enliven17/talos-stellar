@@ -26,10 +26,30 @@ export async function validateUrl(inputUrl: string): Promise<URL> {
   }
 
   if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+  throw new Error('Protocol not allowed');
+}
+
+if (url.username || url.password) {
+  throw new Error('User info not allowed in URL');
+}
+
+if (url.port && url.port !== '80' && url.port !== '443') {
+  throw new Error('Port not allowed');
+}
     throw new Error('Protocol not allowed');
   }
 
-  if (url.port && url.port !== '80' && url.port !== '443') {
+  if (url.username || url.password) {
+  throw new Error('User info not allowed in URL');
+}
+if (url.port && url.port !== '80' && url.port !== '443') {
+  throw new Error('Port not allowed');
+}
+  // Reject URLs that embed user credentials (username:password@host)
+  if (url.username || url.password) {
+    throw new Error('User info not allowed in URL');
+  }
+}
     throw new Error('Port not allowed');
   }
 
