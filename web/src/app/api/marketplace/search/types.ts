@@ -1,6 +1,7 @@
 export interface CapabilityFilter {
   id: string;
   name: string;
+  version: number;
   description: string;
   category: string;
   isActive: boolean;

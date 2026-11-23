@@ -37,11 +37,20 @@ await db.transaction(async (tx) => {
 ## Dispatch
 
 `dispatchOnce()` (`src/lib/outbox/dispatcher.ts`) leases a bounded batch,
-runs every consumer registered for each event's `eventType`
-(`registerConsumer`, `src/lib/outbox/registry.ts`), and acks or retries the
-event as a whole. **All consumers for an event type re-run on retry** — an
+validates that each event's payload version is supported, runs every consumer
+registered for each event's `eventType` (`registerConsumer`,
+`src/lib/outbox/registry.ts`), and acks or retries the event as a whole.
+Events whose payload versions are unsupported (or unparseable/invalid) are
+immediately routed to `dead_letter` without consumer invocation or retries.
+Unversioned payloads default to version `1` for backward compatibility.
+**All consumers for an event type re-run on retry** — an
 event type has no per-consumer cursor, so consumers must be idempotent. An
 event type with zero registered consumers dead-letters immediately.
+
+Acknowledgements succeed only while the matching lease ID is still active
+and its deadline is in the future. A late consumer therefore cannot dispatch
+an expired lease or clear a newer worker's lease; its acknowledgement is
+ignored and the next dispatcher can recover or retry the event.
 
 Two ways to drive it, same trade-off as the jobs framework:
 - **Serverless**: `POST /api/internal/outbox/drain`, header
@@ -64,6 +73,15 @@ exhausted ones go to `dead_letter`. No separate recovery path.
 One retry class: full-jitter exponential backoff, 1s base, 5 min cap
 (`src/lib/outbox/retry.ts`), up to `maxAttempts` (default
 `OUTBOX_DEFAULT_MAX_ATTEMPTS`, 8), then `dead_letter`.
+
+Retry delays are clamped to a bounded non-negative duration (`[0, 5 min]`) and
+scheduled in Postgres as a relative interval (`now() + interval`) rather than
+from the application host's wall clock (`Date.now()`). `dispatchOnce()` also
+tracks an in-process monotonic cooldown (`performance.now()`, overridable via
+`DispatchOnceOptions.monotonicNowMs` in tests) so that if the system clock
+moves backward and a backed-off event is leased early, it is deferred via
+`deferRetry()` without consuming an attempt or immediately retrying the failed
+backlog.
 
 `dedupeKey` (scoped per `eventType`, partial unique index) makes
 `writeOutboxEvent` a no-op on a repeat call with the same key — use it
@@ -89,6 +107,7 @@ logical mutation (e.g. a route already guarded by its own idempotency key).
 | `OUTBOX_DEFAULT_MAX_ATTEMPTS` | `8` | Default retry ceiling. |
 | `OUTBOX_POLL_INTERVAL_MS` | `2000` | Worker poll interval when idle. |
 | `OUTBOX_RETENTION_DAYS` | `7` | How long dispatched rows are kept. |
+| `OUTBOX_SUPPORTED_PAYLOAD_VERSIONS` | `1` | Comma-separated list of supported event payload versions. |
 
 ## Admin inspection
 
@@ -111,6 +130,7 @@ page through, and **Retry** a row via `POST /api/admin/outbox/:id/retry`).
     "aggregateType": "commerce_job", "aggregateId": "…",
     "attempts": 8, "maxAttempts": 8,
     "lastError": "consumer failed: [redacted]",
+    "originalEventId": null,
     "createdAt": "…", "deadLetteredAt": "…"
   }],
   "nextCursor": "2026-09-01T00:00:00.000Z",
@@ -123,6 +143,8 @@ page through, and **Retry** a row via `POST /api/admin/outbox/:id/retry`).
   TALOS API keys, bearer tokens, long hex and base64 blobs replaced by
   `[redacted]`. Use `GET /api/admin/outbox/:id` when the full record is
   genuinely needed.
+- `originalEventId` links back to the original failure attempt when an event
+  was requeued from dead-letter; it is `null` for initial business events.
 - **Validation** (400, nothing queried): `limit` must be an integer 1–100
   (default 25; not clamped), `cursor` must be a `nextCursor` value
   (ISO-8601), `eventType` ≤128 chars of `[A-Za-z0-9_.:-]`.
@@ -150,6 +172,25 @@ same rationale as `web/JOBS.md`).
 - No per-consumer delivery tracking — an event type's consumers all re-run together on retry.
 - No priority/ordering guarantee across different aggregates; within one lease batch, order is `runAt` only.
 - The serverless drain endpoint needs an external scheduler wired up per-deployment (no Vercel Cron config checked in yet).
+
+## Deterministic replay harness
+
+`runOutboxReplay(sequence, opts)` (`src/lib/outbox/replay-harness.ts`) runs
+recorded synthetic event sequences through registered consumers using a virtual
+clock, seeded retry backoff PRNG, and in-memory lease ownership — without
+contacting Postgres, Stellar, or any live service.
+
+- **Duplicate effect reporting**: records each consumer invocation under a
+  logical effect key (customizable via `effectKeyFor`; defaults to
+  `${eventType}:${aggregateType}:${aggregateId}:consumer#${consumerIndex}`) and
+  surfaces any key executed more than once in `report.duplicateEffects`
+  (including partial-consumer retry re-runs, simulated mid-lease expiry
+  redeliveries via `simulateLeaseExpiryOnAttempts`, and non-deduplicated
+  duplicate events).
+- **Deduplication**: mirrors `writeOutboxEvent`'s `(eventType, dedupeKey)`
+  collapse and reports the count in `report.deduplicatedWrites`.
+- **Focused verification**:
+  `pnpm --dir web exec vitest run tests/outbox-replay-harness.unit.test.ts`
 
 ## Local verification
 
