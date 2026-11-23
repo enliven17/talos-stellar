@@ -18,6 +18,7 @@ registered yet.
 The allowlists are intentionally conservative:
 
 * ``agent.task`` — the eight scheduled task names known at compile time.
+* ``scheduler.missed_run.policy`` — skip, coalesce, catch_up, or other.
 * ``tool.name``  — the primary tool categories; unknown tools collapse to
   ``"other_tool"``.
 * ``llm.model``  — known Groq model identifiers; unknown models collapse to
@@ -130,6 +131,11 @@ def _build_instruments() -> None:
         "talos_agent_cycle_total",
         description="Count of scheduled agent task runs by outcome.",
     )
+    _instruments["schedule_lateness"] = meter.create_histogram(
+        "talos_agent_schedule_lateness_seconds",
+        unit="s",
+        description="Time between the earliest due interval slot and scheduler evaluation.",
+    )
     _instruments["tool_call_duration"] = meter.create_histogram(
         "talos_agent_tool_call_duration_seconds",
         unit="s",
@@ -225,6 +231,11 @@ _ALLOWED_MODELS: frozenset[str] = frozenset(
 #: Allowed outcome values.
 _ALLOWED_OUTCOMES: frozenset[str] = frozenset({"success", "error", "other"})
 
+#: Allowed values emitted as ``scheduler.missed_run.policy``.
+_ALLOWED_MISSED_RUN_POLICIES: frozenset[str] = frozenset(
+    {"skip", "coalesce", "catch_up", "other"}
+)
+
 #: HTTP status-code classes (string representation) allowed as
 #: ``http.response.status_code``.
 _ALLOWED_STATUS_CODES: frozenset[str] = frozenset(
@@ -270,6 +281,11 @@ def _normalize_outcome(value: str) -> str:
     return value if value in _ALLOWED_OUTCOMES else "other"
 
 
+def _normalize_missed_run_policy(value: str) -> str:
+    """Return *value* if it is a known missed-run policy, else ``"other"``."""
+    return value if value in _ALLOWED_MISSED_RUN_POLICIES else "other"
+
+
 def _normalize_status_code(value: str) -> str:
     """Return *value* if it is a known HTTP status code string, else ``"other"``."""
     return value if value in _ALLOWED_STATUS_CODES else "other"
@@ -313,6 +329,17 @@ def record_cycle(task: str, outcome: str, duration_seconds: float) -> None:
     }
     _record_histogram("cycle_duration", duration_seconds, attrs)
     _record_counter("cycle_total", attrs)
+
+
+def record_schedule_lateness(task: str, policy: str, lateness_seconds: float) -> None:
+    _record_histogram(
+        "schedule_lateness",
+        lateness_seconds,
+        {
+            "agent.task": _normalize_task(task),
+            "scheduler.missed_run.policy": _normalize_missed_run_policy(policy),
+        },
+    )
 
 
 def record_tool_call(tool_name: str, outcome: str, duration_seconds: float) -> None:

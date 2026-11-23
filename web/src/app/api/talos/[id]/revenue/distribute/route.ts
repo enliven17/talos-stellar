@@ -264,6 +264,7 @@ async function handleGet(
       investorSharePercent: investorShare,
       treasuryRetained: totalRevenue - distributableAmount,
       breakdown,
+      observedAt: new Date().toISOString(),
     });
   } catch {
     return Response.json({ error: "Internal server error" }, { status: 500 });

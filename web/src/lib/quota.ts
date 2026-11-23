@@ -39,8 +39,55 @@
  */
 
 import { and, eq, isNull, or, sql } from "drizzle-orm";
-import { tlsQuotaConfigs, tlsQuotaUsage } from "@/db/schema";
+import { tlsQuotaConfigs, tlsQuotaScopeUsage, tlsQuotaUsage } from "@/db/schema";
+import { VALID_SCOPES, type Scope } from "@/lib/api-scopes";
 import type { db as appDb } from "@/db";
+import {
+  computeRetryAfterSeconds,
+  formatResetEpochSeconds,
+  formatResetIsoString,
+  type RetryAfterOptions,
+} from "@/lib/retry-after";
+
+export {
+  ABSOLUTE_MAX_RETRY_AFTER_SECONDS,
+  DEFAULT_MAX_RETRY_AFTER_SECONDS,
+  DEFAULT_UNKNOWN_RESET_RETRY_AFTER_SECONDS,
+  MIN_RETRY_AFTER_SECONDS,
+  computeRetryAfterSeconds,
+  isValidResetAt,
+  resolveMaxRetryAfterSeconds,
+  resolveUnknownResetRetryAfterSeconds,
+  type RetryAfterOptions,
+} from "@/lib/retry-after";
+
+// ─── Limit validation ─────────────────────────────────────────────────────────
+
+/**
+ * Typed error returned when a quota configuration row contains an unsafe limit.
+ * Callers can distinguish this from a normal QuotaResult via the `type` discriminant.
+ */
+export class QuotaConfigError extends Error {
+  readonly type = "QuotaConfigError" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "QuotaConfigError";
+  }
+}
+
+/**
+ * Returns true when `value` is a finite, positive integer within JS safe-integer
+ * range.  Values outside this range corrupt quota arithmetic — e.g. floats produce
+ * fractional remaining counts, and values above Number.MAX_SAFE_INTEGER lose
+ * precision when incremented.
+ */
+export function validateQuotaLimit(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value > 0
+  );
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -53,6 +100,24 @@ export type QuotaResource =
 
 /** Window granularity options. */
 export type WindowSize = "hourly" | "daily" | "monthly";
+
+/** API scopes that can appear in usage breakdowns. `admin` is an authorization
+ * grant, not a resource scope, so it is intentionally not a usage bucket. */
+export type QuotaScope = Exclude<Scope, "admin">;
+export const QUOTA_SCOPES: readonly QuotaScope[] = VALID_SCOPES.filter(
+  (scope): scope is QuotaScope => scope !== "admin",
+);
+
+const DEFAULT_SCOPE_BY_RESOURCE: Record<QuotaResource, QuotaScope> = {
+  activity_writes: "activity:write",
+  job_writes: "commerce:write",
+  revenue_writes: "revenue:write",
+  sse_connections: "commerce:read",
+};
+
+export function quotaScopeForResource(resource: QuotaResource): QuotaScope {
+  return DEFAULT_SCOPE_BY_RESOURCE[resource];
+}
 
 /** The effective quota configuration for a (talosId, resource) pair. */
 export interface QuotaConfig {
@@ -90,6 +155,11 @@ export interface QuotaResult {
    */
   incremented: boolean;
 }
+
+/** Input accepted by response and header helpers, including unknown/null reset times. */
+export type QuotaHeaderInput = Omit<QuotaResult, "resetAt"> & {
+  resetAt?: number | null;
+};
 
 // ─── DB type alias (Drizzle's inferred type) ─────────────────────────────────
 
@@ -135,9 +205,47 @@ export function nextWindowStart(windowStart: Date, windowSize: WindowSize): Date
   } else if (windowSize === "daily") {
     d.setUTCDate(d.getUTCDate() + 1);
   } else {
+    d.setUTCDate(1);
     d.setUTCMonth(d.getUTCMonth() + 1);
   }
   return d;
+}
+
+export interface WindowBoundaries {
+  /** UTC timestamp (Date) for start of the current window. */
+  windowStart: Date;
+  /** Unix epoch milliseconds when the current window resets (start of the next window). */
+  resetAt: number;
+  /** ISO-8601 string representation of resetAt, used in JSON response bodies. */
+  resetAtIso: string;
+  /** Unix epoch seconds string representation of resetAt, used in X-Quota-Reset headers. */
+  resetAtHeader: string;
+}
+
+/**
+ * Canonical calculation of quota window boundaries and reset representations.
+ * Ensures consistent reset time calculation across response bodies and HTTP headers,
+ * accepting an optional injected clock (Date or Unix epoch ms) for predictable testing
+ * across month transitions, leap days, and exact window boundaries.
+ *
+ * @param now        Current time or injected clock (Date or timestamp in ms)
+ * @param windowSize Granularity of quota window ("hourly" | "daily" | "monthly")
+ */
+export function computeQuotaWindow(
+  now: Date | number = new Date(),
+  windowSize: WindowSize,
+): WindowBoundaries {
+  const clockDate = typeof now === "number" ? new Date(now) : new Date(now);
+  const windowStart = floorToWindow(clockDate, windowSize);
+  const nextStart = nextWindowStart(windowStart, windowSize);
+  const resetAt = nextStart.getTime();
+
+  return {
+    windowStart,
+    resetAt,
+    resetAtIso: new Date(resetAt).toISOString(),
+    resetAtHeader: String(Math.ceil(resetAt / 1000)),
+  };
 }
 
 // ─── Config resolution ────────────────────────────────────────────────────────
@@ -169,6 +277,11 @@ export async function resolveQuotaConfig(
   // Agent-specific override takes precedence
   const agentRow = rows.find((r) => r.talosId === talosId);
   if (agentRow) {
+    if (!validateQuotaLimit(agentRow.maxCount)) {
+      throw new QuotaConfigError(
+        `Unsafe quota limit for agent "${talosId}" resource "${resource}": maxCount=${agentRow.maxCount}`,
+      );
+    }
     return {
       talosId: agentRow.talosId,
       resource: agentRow.resource as QuotaResource,
@@ -182,6 +295,11 @@ export async function resolveQuotaConfig(
   // Platform default
   const platformRow = rows.find((r) => r.talosId === null);
   if (platformRow) {
+    if (!validateQuotaLimit(platformRow.maxCount)) {
+      throw new QuotaConfigError(
+        `Unsafe platform quota limit for resource "${resource}": maxCount=${platformRow.maxCount}`,
+      );
+    }
     return {
       talosId: null,
       resource: platformRow.resource as QuotaResource,
@@ -217,18 +335,23 @@ export async function resolveQuotaConfig(
  * @param db       Drizzle DB instance
  * @param talosId  Agent being checked
  * @param resource Resource being consumed
+ * @param scopeOrClock Optional per-scope label, or an injected clock
+ * @param clock       Optional injected clock when a scope is provided
  * @returns        QuotaResult describing the outcome
  */
 export async function checkAndIncrementQuota(
   db: Db,
   talosId: string,
   resource: QuotaResource,
+  scopeOrClock: QuotaScope | Date | number = quotaScopeForResource(resource),
+  clock?: Date | number,
 ): Promise<QuotaResult> {
   const config = await resolveQuotaConfig(db, talosId, resource);
 
   const now = new Date();
   const windowStart = floorToWindow(now, config.windowSize);
   const resetAt = nextWindowStart(windowStart, config.windowSize).getTime();
+  const policy = config.talosId === talosId ? "agent" : "platform";
 
   if (!config.enabled) {
     // No-write path: disabled quotas must not touch tls_quota_usage.
@@ -237,7 +360,7 @@ export async function checkAndIncrementQuota(
       limit: config.maxCount,
       remaining: config.maxCount,
       used: 0,
-      resetAt,
+      resetAt: boundaries.resetAt,
       resource,
       incremented: false,
     };
@@ -249,7 +372,7 @@ export async function checkAndIncrementQuota(
     .values({
       talosId,
       resource,
-      windowStart,
+      windowStart: boundaries.windowStart,
       count: 1,
       updatedAt: now,
     })
@@ -263,6 +386,35 @@ export async function checkAndIncrementQuota(
     .returning({ count: tlsQuotaUsage.count });
 
   const used = row?.count ?? 1;
+
+  // The total row above remains authoritative for enforcement. A breakdown
+  // write must never turn a successful quota check into a failed request.
+  try {
+    await db
+      .insert(tlsQuotaScopeUsage)
+      .values({
+        talosId,
+        resource,
+        scope: breakdownScope,
+        windowStart: boundaries.windowStart,
+        count: 1,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [
+          tlsQuotaScopeUsage.talosId,
+          tlsQuotaScopeUsage.resource,
+          tlsQuotaScopeUsage.scope,
+          tlsQuotaScopeUsage.windowStart,
+        ],
+        set: {
+          count: sql`${tlsQuotaScopeUsage.count} + 1`,
+          updatedAt: sql`now()`,
+        },
+      });
+  } catch {
+    // Keep the established total quota policy fail-open for observability.
+  }
   const remaining = Math.max(0, config.maxCount - used);
   const ok = used <= config.maxCount;
 
@@ -282,17 +434,24 @@ export async function checkAndIncrementQuota(
 /**
  * Read the current usage for (talosId, resource) in the current window WITHOUT
  * incrementing the counter.  Used by the admin quota route.
+ *
+ * @param db       Drizzle DB instance
+ * @param talosId  Agent being checked
+ * @param resource Resource being consumed
+ * @param clock    Optional injected clock (Date or timestamp in ms)
  */
 export async function readQuotaUsage(
   db: Db,
   talosId: string,
   resource: QuotaResource,
+  clock?: Date | number,
 ): Promise<QuotaResult> {
   const config = await resolveQuotaConfig(db, talosId, resource);
 
   const now = new Date();
   const windowStart = floorToWindow(now, config.windowSize);
   const resetAt = nextWindowStart(windowStart, config.windowSize).getTime();
+  const policy = config.talosId === talosId ? "agent" : "platform";
 
   const row = await db
     .select({ count: tlsQuotaUsage.count })
@@ -301,7 +460,7 @@ export async function readQuotaUsage(
       and(
         eq(tlsQuotaUsage.talosId, talosId),
         eq(tlsQuotaUsage.resource, resource),
-        eq(tlsQuotaUsage.windowStart, windowStart),
+        eq(tlsQuotaUsage.windowStart, boundaries.windowStart),
       ),
     )
     .limit(1)
@@ -326,9 +485,16 @@ export async function readQuotaUsage(
 // ─── Response helpers ────────────────────────────────────────────────────────
 
 /**
- * Build a 429 Response with X-Quota-* headers when a quota is exceeded.
+ * Build a 429 Response with bounded `Retry-After` and `X-Quota-*` headers
+ * when a quota is exceeded.
  */
-export function quotaExceededResponse(result: QuotaResult): Response {
+export function quotaExceededResponse(
+  result: QuotaHeaderInput,
+  options?: RetryAfterOptions,
+): Response {
+  const retryAfterSec = computeRetryAfterSeconds(result.resetAt, options);
+  const resetIso = formatResetIsoString(result.resetAt);
+
   return new Response(
     JSON.stringify({
       error: "Quota exceeded",
@@ -341,6 +507,7 @@ export function quotaExceededResponse(result: QuotaResult): Response {
       status: 429,
       headers: {
         "Content-Type": "application/json",
+        "Retry-After": String(retryAfterSec),
         ...buildQuotaHeaders(result),
       },
     },
@@ -352,24 +519,65 @@ export function quotaExceededResponse(result: QuotaResult): Response {
  * Attach these to 200/201 responses so clients can monitor their usage.
  * X-Quota-Incremented reports whether the paired decision consumed a unit.
  */
-export function buildQuotaHeaders(result: QuotaResult): Record<string, string> {
-  return {
+export function buildQuotaHeaders(result: QuotaHeaderInput): Record<string, string> {
+  const headers: Record<string, string> = {
     "X-Quota-Limit": String(result.limit),
     "X-Quota-Remaining": String(result.remaining),
     "X-Quota-Used": String(result.used),
-    "X-Quota-Reset": String(Math.ceil(result.resetAt / 1000)),
     "X-Quota-Resource": result.resource,
     "X-Quota-Incremented": String(result.incremented),
   };
+  const resetSeconds = formatResetEpochSeconds(result.resetAt);
+  if (resetSeconds !== null) {
+    headers["X-Quota-Reset"] = resetSeconds;
+  }
+  return headers;
+}
+
+/**
+ * Build a detailed quota explanation object for response bodies.
+ * Includes the human-readable explanation and all relevant quota metadata.
+ * Safe to include in responses to authenticated owners — excludes other agents
+ * and internal administrative secrets.
+ */
+export function buildQuotaExplanation(result: QuotaResult): QuotaExplanation {
+  return {
+    resource: result.resource,
+    limit: result.limit,
+    remaining: result.remaining,
+    used: result.used,
+    resetAt: new Date(result.resetAt).toISOString(),
+    windowSize: result.windowSize,
+    policy: result.policy,
+    explanation: result.explanation,
+    ok: result.ok,
+  };
+}
+
+/** Detailed quota explanation for response bodies. */
+export interface QuotaExplanation {
+  resource: QuotaResource;
+  limit: number;
+  remaining: number;
+  used: number;
+  resetAt: string; // ISO-8601
+  windowSize: WindowSize;
+  policy: "agent" | "platform";
+  explanation: string;
+  ok: boolean;
 }
 
 /**
  * Apply X-Quota-* headers to an existing Response object (mutates headers).
+ * Removes any stale `X-Quota-Reset` header when the reset timestamp is unknown.
  */
-export function applyQuotaHeaders(response: Response, result: QuotaResult): Response {
+export function applyQuotaHeaders(response: Response, result: QuotaHeaderInput): Response {
   const headers = buildQuotaHeaders(result);
   for (const [key, value] of Object.entries(headers)) {
     response.headers.set(key, value);
+  }
+  if (headers["X-Quota-Reset"] === undefined) {
+    response.headers.delete("X-Quota-Reset");
   }
   return response;
 }
@@ -381,3 +589,215 @@ export const ALL_QUOTA_RESOURCES: QuotaResource[] = [
   "revenue_writes",
   "sse_connections",
 ];
+
+// ─── Reservation / Commit / Release ──────────────────────────────────────────
+//
+// Reserve-commit-release semantics let callers pre-claim capacity before doing
+// billable work, then either commit (charge) or release (refund) the reservation.
+//
+// In-flight reservations are tracked in a module-level Map so no additional
+// DB columns or migrations are required.  The map is keyed by reservationId
+// (a UUID) and stores enough metadata to validate the commit/release, detect
+// window expiry, and account for concurrent reservations when checking headroom.
+//
+// Concurrency contract:
+//   • reserveQuota reads committed usage + all pending reservations for the
+//     same (talosId, resource, windowStart) before granting, so two parallel
+//     callers cannot both succeed if only one slot remains.
+//   • commitReservation calls checkAndIncrementQuota which performs an atomic
+//     DB upsert — the increment is durable even if the in-process map is lost.
+//   • releaseReservation simply removes the in-flight entry; the committed
+//     counter in the DB is unaffected.
+//
+// Limitations:
+//   • The map is process-local, so reservations made on one instance are
+//     invisible to another.  For multi-region deployments, replace the map
+//     with a Redis SETNX reservation key.
+//   • A reservation that is never committed or released is an orphan.  Call
+//     _pruneExpiredReservations() on a periodic tick (or in tests via
+//     _resetReservationsForTests()) to reclaim stale headroom.
+
+import { randomUUID } from "crypto";
+
+/** An in-flight (uncommitted, unreleased) reservation. */
+export interface ReservationEntry {
+  reservationId: string;
+  talosId: string;
+  resource: QuotaResource;
+  count: number;
+  windowStart: Date;
+  createdAt: Date;
+}
+
+/** Result returned by reserveQuota. */
+export interface ReservationResult {
+  /** false when the limit would be exceeded by this reservation. */
+  ok: boolean;
+  reservationId: string;
+  limit: number;
+  remaining: number;
+  resetAt: number;
+  resource: QuotaResource;
+}
+
+/** Result returned by commitReservation and releaseReservation. */
+export interface ReservationActionResult {
+  /** false when the reservationId was not found (already committed/released). */
+  ok: boolean;
+  reservationId: string;
+}
+
+// Module-level store for in-flight reservations.
+const _reservations = new Map<string, ReservationEntry>();
+
+/**
+ * Reserve `count` units of capacity for (talosId, resource) in the current
+ * window.  Returns ok:false without modifying the DB if the reservation would
+ * push committed + reserved usage over the configured limit.
+ *
+ * @param db       Drizzle DB instance (used to read config and committed usage)
+ * @param talosId  Agent requesting the reservation
+ * @param resource Resource being reserved
+ * @param count    Number of units to reserve (default 1)
+ */
+export async function reserveQuota(
+  db: Db,
+  talosId: string,
+  resource: QuotaResource,
+  count = 1,
+): Promise<ReservationResult> {
+  const config = await resolveQuotaConfig(db, talosId, resource);
+
+  const now = new Date();
+  const windowStart = floorToWindow(now, config.windowSize);
+  const resetAt = nextWindowStart(windowStart, config.windowSize).getTime();
+
+  // When enforcement is off, every reservation succeeds without DB work.
+  if (!config.enabled) {
+    const reservationId = randomUUID();
+    _reservations.set(reservationId, { reservationId, talosId, resource, count, windowStart, createdAt: now });
+    return { ok: true, reservationId, limit: config.maxCount, remaining: config.maxCount, resetAt, resource };
+  }
+
+  // Read committed usage for the current window.
+  const usageRow = await db
+    .select({ count: tlsQuotaUsage.count })
+    .from(tlsQuotaUsage)
+    .where(
+      and(
+        eq(tlsQuotaUsage.talosId, talosId),
+        eq(tlsQuotaUsage.resource, resource),
+        eq(tlsQuotaUsage.windowStart, windowStart),
+      ),
+    )
+    .limit(1)
+    .then((r: { count: number }[]) => r[0] ?? null);
+
+  const committed = usageRow?.count ?? 0;
+
+  // Sum up all in-flight reservations for this (talosId, resource, window).
+  const windowKey = windowStart.toISOString();
+  let pending = 0;
+  for (const r of _reservations.values()) {
+    if (
+      r.talosId === talosId &&
+      r.resource === resource &&
+      r.windowStart.toISOString() === windowKey
+    ) {
+      pending += r.count;
+    }
+  }
+
+  const projected = committed + pending + count;
+  if (projected > config.maxCount) {
+    return {
+      ok: false,
+      reservationId: "",
+      limit: config.maxCount,
+      remaining: Math.max(0, config.maxCount - committed - pending),
+      resetAt,
+      resource,
+    };
+  }
+
+  const reservationId = randomUUID();
+  _reservations.set(reservationId, { reservationId, talosId, resource, count, windowStart, createdAt: now });
+
+  return {
+    ok: true,
+    reservationId,
+    limit: config.maxCount,
+    remaining: Math.max(0, config.maxCount - projected),
+    resetAt,
+    resource,
+  };
+}
+
+/**
+ * Commit a previously reserved reservation, converting it to actual (durable)
+ * usage by calling checkAndIncrementQuota.  Returns ok:false when the
+ * reservationId is unknown (already committed or released).
+ */
+export async function commitReservation(
+  db: Db,
+  talosId: string,
+  resource: QuotaResource,
+  reservationId: string,
+): Promise<ReservationActionResult> {
+  const entry = _reservations.get(reservationId);
+  if (!entry || entry.talosId !== talosId || entry.resource !== resource) {
+    return { ok: false, reservationId };
+  }
+
+  // Remove the reservation before committing so a concurrent caller cannot
+  // double-count this slot if checkAndIncrementQuota is slow.
+  _reservations.delete(reservationId);
+
+  // Persist the usage increment for each unit reserved.
+  for (let i = 0; i < entry.count; i++) {
+    await checkAndIncrementQuota(db, talosId, resource);
+  }
+
+  return { ok: true, reservationId };
+}
+
+/**
+ * Release (cancel) a previously reserved reservation without recording any
+ * usage.  Idempotent: returns ok:true whether or not the entry existed.
+ */
+export async function releaseReservation(
+  talosId: string,
+  resource: QuotaResource,
+  reservationId: string,
+): Promise<ReservationActionResult> {
+  const entry = _reservations.get(reservationId);
+  if (!entry || entry.talosId !== talosId || entry.resource !== resource) {
+    // Already released or committed — treat as success (idempotent).
+    return { ok: true, reservationId };
+  }
+  _reservations.delete(reservationId);
+  return { ok: true, reservationId };
+}
+
+/**
+ * Remove reservations created in a window that has since expired.
+ * Call on a periodic tick in long-running services to prevent orphaned
+ * entries from blocking capacity in the next window.
+ */
+export function _pruneExpiredReservations(): number {
+  const now = new Date();
+  let pruned = 0;
+  for (const [id, entry] of _reservations) {
+    const windowEnd = nextWindowStart(entry.windowStart, "hourly"); // conservative 1-hour TTL
+    if (windowEnd < now) {
+      _reservations.delete(id);
+      pruned++;
+    }
+  }
+  return pruned;
+}
+
+/** Test-only: clear all in-flight reservations between test cases. */
+export function _resetReservationsForTests(): void {
+  _reservations.clear();
+}
