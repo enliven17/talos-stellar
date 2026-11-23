@@ -74,6 +74,13 @@ export interface DiscoverServicesParams {
    * regardless of the client default. Surfaces as `TalosTimeoutError`.
    */
   timeoutMs?: number;
+  /**
+   * Per-request required endpoint capabilities. After a 2xx response, the
+   * client reads a bounded capability snapshot from the response headers and
+   * throws {@link TalosCapabilityError} when a required API version or feature
+   * flag is not advertised. Omit to skip negotiation.
+   */
+  requireCapabilities?: RequiredCapabilities;
 }
 
 export interface PurchaseServiceParams {
@@ -94,6 +101,13 @@ export interface CursorRequestOptions extends CursorPageParams {
    * regardless of the client default. Surfaces as `TalosTimeoutError`.
    */
   timeoutMs?: number;
+  /**
+   * Per-request required endpoint capabilities. After a 2xx response, the
+   * client reads a bounded capability snapshot from the response headers and
+   * throws {@link TalosCapabilityError} when a required API version or feature
+   * flag is not advertised. Omit to skip negotiation.
+   */
+  requireCapabilities?: RequiredCapabilities;
 }
 
 export interface ActivityPageOptions extends CursorRequestOptions {
