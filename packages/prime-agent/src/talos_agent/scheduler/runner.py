@@ -378,6 +378,29 @@ def _build_task_list(
     adapter_health_reporter,
 ) -> list:
     """Create and return all asyncio Tasks for the agent run loop."""
+    from talos_agent.scheduler.policy import validate_recurring_task_interval
+
+    validate_recurring_task_interval(
+        "dividend_distribution",
+        settings.dividend_distribution_interval,
+    )
+    validate_recurring_task_interval(
+        "agent_cycle",
+        settings.agent_cycle_interval,
+    )
+    validate_recurring_task_interval(
+        "polling",
+        settings.polling_interval,
+    )
+    validate_recurring_task_interval(
+        "heartbeat",
+        settings.heartbeat_interval,
+    )
+    validate_recurring_task_interval(
+        "job_heartbeat",
+        settings.job_heartbeat_interval,
+    )
+
     from talos_agent.scheduler.tasks import (
         activity_flush_task,
         agent_cycle_task,
