@@ -27,6 +27,7 @@ from talos_agent.adapters.capability import (
 )
 from talos_agent.adapters.snapshots import MastodonHealthSnapshot
 from talos_agent.config import resolve_setting_secret
+from talos_agent.response_bounds import bounded_error_body
 
 if TYPE_CHECKING:
     from talos_agent.config import Settings
@@ -270,7 +271,7 @@ class MastodonAdapter(BaseSocialAdapter):
                 channel=self.channel_name,
                 content=original_content,
                 error=(
-                    f"Mastodon API error {response.status_code}: {response.text[:256]}"
+                    f"Mastodon API error {response.status_code}: {bounded_error_body(response.content, 256)}"
                 ),
             )
 

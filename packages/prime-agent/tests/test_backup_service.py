@@ -168,6 +168,44 @@ def test_verify_rejects_wrong_password(tmp_path: Path, monkeypatch):
     assert getattr(exc_info.value, "code", "BAD_INPUT") == "AUTH_FAILED"
 
 
+def test_build_rejects_output_path_aliasing_live_db(tmp_path: Path, monkeypatch):
+    """The backup should refuse to write to a path that is the live DB file.
+    This protects the running agent from accidental DB overwrite.
+    """
+    db_path = tmp_path / "talos-agent.db"
+    _seed_agent_db(db_path)
+    from talos_agent import backup_service as bs
+    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
+    monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)
+
+    # Attempt to use the same path as the backup output.
+    with pytest.raises(BackupError) as exc_info:
+        build_backup(password="strongpass123", out_path=db_path)
+    assert getattr(exc_info.value, "code", None) == "ALIAS_REJECTED"
+    # Ensure the DB still exists after the failed attempt.
+    assert db_path.exists()
+
+
+def test_build_rejects_symlink_aliasing_live_db(tmp_path: Path, monkeypatch):
+    """The backup should also refuse if out_path is a symlink pointing to the DB."""
+    db_path = tmp_path / "talos-agent.db"
+    _seed_agent_db(db_path)
+    from talos_agent import backup_service as bs
+    monkeypatch.setattr(bs, "APP_DIR", tmp_path)
+    monkeypatch.setattr("talos_agent.db.APP_DIR", tmp_path)
+
+    symlink_path = tmp_path / "symlink_to_db.enc"
+    try:
+        symlink_path.symlink_to(db_path)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlinks not supported in this environment")
+
+    with pytest.raises(BackupError) as exc_info:
+        build_backup(password="strongpass123", out_path=symlink_path)
+    assert getattr(exc_info.value, "code", None) == "ALIAS_REJECTED"
+    assert db_path.exists()
+
+
 def test_build_password_must_be_at_least_8_chars(tmp_path: Path, monkeypatch):
     from talos_agent import backup_service as bs
     monkeypatch.setattr(bs, "APP_DIR", tmp_path)
