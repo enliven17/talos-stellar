@@ -1,104 +1,10 @@
 import { withRequestId } from "@/lib/with-request-id";
 import { NextRequest } from "next/server";
 import { db } from "@/db";
-import { tlsApprovals, tlsCommerceJobs, tlsTalos } from "@/db/schema";
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { tlsTalos, tlsCommerceJobs, tlsRevenues, tlsDividends } from "@/db/schema";
+import { and, eq, notInArray, sql } from "drizzle-orm";
 import { retireAgentSchema, parseBody } from "@/lib/schemas";
-import { evaluateLifecycleChecklist, toLifecycleState } from "@/lib/governance/lifecycle";
-import { LIFECYCLE_EVENTS, emitLifecycleEvent } from "@/lib/governance/events";
-import { buildConsistencyReport } from "@/lib/governance/consistency-report";
-import { logger } from "@/lib/logger";
-
-export const dynamic = "force-dynamic";
-
-// GET /api/talos/:id/retire - Owner-facing lifecycle & retirement checklist
-// Returns blocking obligations and allowed next actions while preserving private financial details.
-async function _GET(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const { id } = await params;
-
-  try {
-    const viewer =
-      request.nextUrl.searchParams.get("viewer") ||
-      request.nextUrl.searchParams.get("address") ||
-      request.nextUrl.searchParams.get("stellarPublicKey");
-
-    const agent = await db.query.tlsTalos.findFirst({
-      where: eq(tlsTalos.id, id),
-    });
-
-    if (!agent) {
-      return Response.json({ error: "TALOS not found" }, { status: 404 });
-    }
-
-    // Require viewer address and verify owner authorization
-    if (!viewer) {
-      return Response.json(
-        { error: "Viewer address is required", code: "LIFECYCLE_UNAUTHORIZED" },
-        { status: 401 }
-      );
-    }
-
-    const isOwner =
-      viewer === agent.creatorPublicKey || viewer === agent.walletPublicKey;
-    if (!isOwner) {
-      return Response.json(
-        {
-          error: "Unauthorized: only agent owner can access retirement checklist",
-          code: "LIFECYCLE_UNAUTHORIZED",
-        },
-        { status: 403 }
-      );
-    }
-
-    // Query service availability & blocking obligations without exposing private details
-    const [inFlightJobs, pendingApprovals] = await Promise.all([
-      db
-        .select({ id: tlsCommerceJobs.id })
-        .from(tlsCommerceJobs)
-        .where(
-          and(
-            eq(tlsCommerceJobs.talosId, id),
-            inArray(tlsCommerceJobs.status, ["pending", "in_progress"])
-          )
-        )
-        .limit(100),
-      db
-        .select({ id: tlsApprovals.id })
-        .from(tlsApprovals)
-        .where(and(eq(tlsApprovals.talosId, id), eq(tlsApprovals.status, "pending")))
-        .limit(100),
-    ]);
-
-    const state = toLifecycleState(agent.status);
-    const checklist = evaluateLifecycleChecklist({
-      talosId: id,
-      state,
-      actor: { id: viewer, roles: ["creator", "operator"] },
-      agentOnline: Boolean(agent.agentOnline),
-      inFlightJobs: inFlightJobs.length,
-      pendingProposalsCount: pendingApprovals.length,
-      hasWallet: Boolean(agent.agentWalletId || agent.walletPublicKey),
-      retiredAt: agent.retiredAt,
-    });
-
-    return Response.json(
-      {
-        ...checklist,
-        agentName: agent.agentName,
-        retiredAt: agent.retiredAt,
-        retiredReason: agent.retiredReason,
-        supersededBy: agent.supersededBy,
-      },
-      { headers: { "Cache-Control": "no-store" } }
-    );
-  } catch (error) {
-    logger.error({ error, talosId: id }, "Error fetching retirement checklist");
-    return Response.json({ error: "Internal server error" }, { status: 500 });
-  }
-}
+import { buildRetirementReadinessReport } from "@/lib/governance/retirement-readiness";
 
 // POST /api/talos/:id/retire - Retire an agent (preserves history, prevents reuse)
 // Requires Stellar ED25519 signature proof of wallet ownership.
@@ -140,6 +46,58 @@ const {
           { status: 400 }
         );
       }
+    }
+
+    // ── Readiness check — block if pending obligations exist ─────────────
+    const TERMINAL_JOB_STATUSES = ["completed", "failed", "cancelled"] as const;
+
+    const [[pendingJobsRow], [pendingPaymentsRow], [revenueRow], [dividendRow]] = await Promise.all(
+      [
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(tlsCommerceJobs)
+          .where(
+            and(
+              eq(tlsCommerceJobs.talosId, id),
+              notInArray(tlsCommerceJobs.status, [...TERMINAL_JOB_STATUSES]),
+            ),
+          ),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(tlsCommerceJobs)
+          .where(and(eq(tlsCommerceJobs.talosId, id), eq(tlsCommerceJobs.status, "pending"))),
+        db
+          .select({ total: sql<string>`coalesce(sum(${tlsRevenues.amount}), '0')` })
+          .from(tlsRevenues)
+          .where(eq(tlsRevenues.talosId, id)),
+        db
+          .select({ total: sql<string>`coalesce(sum(${tlsDividends.amount}), '0')` })
+          .from(tlsDividends)
+          .where(and(eq(tlsDividends.talosId, id), eq(tlsDividends.status, "completed"))),
+      ],
+    );
+
+    const totalRevenue = parseFloat(revenueRow?.total ?? "0");
+    const totalDistributed = parseFloat(dividendRow?.total ?? "0");
+    const undistributedRevenueUSDC = Math.max(0, totalRevenue - totalDistributed);
+
+    const readinessReport = buildRetirementReadinessReport({
+      agentId: id,
+      pendingJobs: pendingJobsRow?.count ?? 0,
+      pendingPayments: pendingPaymentsRow?.count ?? 0,
+      undistributedRevenueUSDC,
+      currentState: "active",
+    });
+
+    if (!readinessReport.ready) {
+      return Response.json(
+        {
+          error: "Agent has pending financial obligations and cannot be retired",
+          code: "LIFECYCLE_PREREQUISITE_FAILED",
+          report: readinessReport,
+        },
+        { status: 422 },
+      );
     }
 
     // Use transaction for atomic operation

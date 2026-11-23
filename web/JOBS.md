@@ -107,6 +107,8 @@ All read from the environment at process start (see `.env.example`):
 | `ADMIN_API_KEY` | — | Bearer token for `/api/admin/jobs/*`. Required to use those routes. |
 | `INTERNAL_JOBS_SECRET` | — | Shared secret for `/api/internal/jobs/drain`. Required to use it. |
 | `JOBS_LEASE_DURATION_MS` | `30000` | How long a lease is held before it's reapable. |
+| `JOBS_MAX_LEASE_EXTENSION_MS` | `3600000` | Maximum duration a single lease extension request may add or set. |
+| `JOBS_MAX_LEASE_HORIZON_MS` | `86400000` | Maximum absolute future horizon a lease may be extended to from `now`. |
 | `JOBS_HEARTBEAT_INTERVAL_MS` | `10000` | How often a running handler heartbeats. |
 | `JOBS_BATCH_SIZE` | `10` | Jobs claimed per `runOnce()` call. |
 | `JOBS_DEFAULT_MAX_ATTEMPTS` | `8` | Default ceiling for jobs that don't specify one. |

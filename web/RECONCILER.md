@@ -69,6 +69,40 @@ Transitions are purely functional and validated (`validateTransition`) before an
 9. **Network Identity Pinning & Rejection**: Transactions are pinned to a specific Stellar network identity (passphrase). Any Horizon observation whose network passphrase does not match the pinned network is rejected: the record remains active (in `PENDING` or `CONFIRMING`), `pollCount` is incremented, and `lastError` logs the rejection (`Rejected observation from foreign network...`) without altering financial settlement state or triggering downstream repair.
 10. **Terminal Immutability**: Any attempt to transition out of a terminal state is rejected with an illegal transition error (`Illegal transition: cannot leave terminal state "<state>"`).
 
+### Provider Failure Reason Codes & Horizon Error Classification
+
+When Horizon polling encounters an error, the polling layer maps the failure to a bounded, stable machine-readable reason code (`reasonCode`) exposed on `HorizonPollResult` when `outcome === "error"`. Bounded cardinality prevents metric and log dimension explosion while preserving existing retryability and missing-transaction semantics.
+
+#### Reason Code Mappings
+
+| Category | HTTP / Transport Trigger | Stable Reason Code | Retryable | Description |
+|---|---|---|---|---|
+| `authorization` | HTTP 401 | `UNAUTHORIZED` | `false` | Missing, expired, or invalid credentials/API key. |
+| `authorization` | HTTP 403 | `FORBIDDEN` | `false` | Permission denied or IP/origin blocked. |
+| `throttling` | HTTP 429 | `RATE_LIMITED` | `true` | Horizon rate limit exceeded; requests throttled. |
+| `provider_failure` | HTTP 503 | `PROVIDER_UNAVAILABLE` | `true` | Horizon service temporarily unavailable. |
+| `provider_failure` | HTTP 502 | `BAD_GATEWAY` | `true` | Upstream gateway or reverse proxy error. |
+| `provider_failure` | HTTP 504 | `GATEWAY_TIMEOUT` | `true` | Upstream gateway timed out contacting Horizon. |
+| `provider_failure` | HTTP 500 / 5xx | `PROVIDER_ERROR` | `true` | Internal Horizon server error. |
+| `provider_failure` | Connection reset, timeout, refused | `NETWORK_ERROR` | `true` | Network transport blip or unreachable host (`httpStatus === null`). |
+| `client_error` | HTTP 400 | `BAD_REQUEST` | `false` | Malformed Horizon query parameter. |
+| `unknown` | Other unclassified status | `UNKNOWN` | `false` | Fallback unclassified error. |
+
+#### Invariants & Semantic Guarantees
+
+- **Missing-Transaction Semantics**: HTTP 404 responses are preserved as `{ outcome: "not_found" }`. They do not produce an `error` outcome and follow the normal `notFoundThreshold` state machine progression to `NOT_FOUND`.
+- **Retryability Semantics**: Transient failures (429, 5xx, and network transport drops) are consistently flagged `retryable: true`. Authentication and client misconfigurations (401, 403, 400) are flagged `retryable: false`.
+- **Diagnostic Safety**: `lastError` continues to carry safe, sanitized diagnostic strings without exposing secrets or credentials.
+
+#### Classification Utilities
+
+The module exports helper utilities to inspect and categorize reason codes:
+- `classifyHorizonError(err, httpStatus)`: Normalizes any thrown error or status code into a stable `HorizonProviderFailureReasonCode`.
+- `getFailureCategory(reasonCode)`: Maps reason codes to broad categories (`"authorization" | "throttling" | "provider_failure" | "unknown"`).
+- `isAuthorizationFailure(reasonCodeOrPoll)`: Guard for 401/403 authorization failures.
+- `isThrottlingFailure(reasonCodeOrPoll)`: Guard for 429 throttling / rate-limiting.
+- `isProviderFailure(reasonCodeOrPoll)`: Guard for upstream 5xx and network transport failures.
+
 ---
 
 ## Configuration

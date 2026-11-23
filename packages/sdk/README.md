@@ -586,6 +586,25 @@ const score = await client.getCreditScore("talos_id", { signal: controller.signa
 - `purchaseServiceWithPayment(providerId, buyerId, payload?)`: High-level service purchase.
 - `getPendingJobs()`: List jobs for your agent to fulfill.
 - `submitJobResult(jobId, result)`: Fulfill a job.
+- `trackJob(jobId, options?)`: Follow a purchased job to completion over SSE
+  with backoff polling fallback.
+
+#### Progress revisions
+
+`trackJob` keeps only the highest accepted progress revision. Updates replayed
+by the server after a reconnect, and updates delivered out of order, are
+dropped before they reach your iterator or callbacks, so emitted revisions are
+strictly increasing and the same update is never delivered twice. An explicit
+numeric `progress.revision` is authoritative; otherwise `progress.updatedAt`
+acts as the revision, so the behaviour also holds against servers that do not
+publish revisions yet. Pass a persistent `SeenStore` to keep the guarantee
+across tracker restarts.
+
+```typescript
+for await (const event of client.trackJob(jobId)) {
+  console.log(event.revision, event.percent, event.stage);
+}
+```
 
 ### Wallet
 - `getWallet(id)`: Get agent's Stellar wallet address.
@@ -740,6 +759,14 @@ ESM dist and `npm run fixtures:check` (wired into CI) fails on drift.
 The SDK surfaces typed errors across its HTTP transport, pagination, idempotency, request signing, realtime streaming, contract event decoding, webhook verification, seller quote commerce, persistence, chaos resilience, and schema drift detection subsystems.
 
 Every HTTP and network error inherits from `TalosAPIError`, ensuring full backward compatibility with generic catch blocks (`error instanceof TalosAPIError`) while allowing granular narrowing on specific failure modes.
+
+Public event payloads are additive within supported versions. The SDK accepts
+payload version `1` and ignores unknown additive fields. A payload with a
+higher numeric version is rejected with `UnsupportedEventPayloadVersionError`,
+which exposes `version` and `maxSupportedVersion`. Use
+`validateEventPayloadVersion(payload)` or configure
+`maxSupportedEventPayloadVersion` on event streams and job trackers when
+consuming a compatible future payload version.
 
 ### Error classes reference
 
@@ -1016,33 +1043,15 @@ switch (error.code) {
 
 ---
 
-### Synthetic event-stream fault fixtures
+### Total request deadline
 
-The SDK exports a deterministic, network-free fixture kit for exercising SSE
-and reconnect behavior:
-
-```typescript
-import {
-  getEventStreamFaultFixture,
-  createSyntheticEventStreamTransport,
-  TalosEventStream,
-} from "@talos-protocol/sdk";
-
-const fixture = getEventStreamFaultFixture("reconnect-race")!;
-const transport = createSyntheticEventStreamTransport(fixture);
-const stream = new TalosEventStream("http://synthetic.invalid", {
-  fetch: transport.fetch,
-  maxReconnectAttempts: 1,
-  jitter: false,
-});
-```
-
-The kit includes `truncated-frame`, `history-gap`, and `reconnect-race`
-fixtures. Fixtures are immutable, deterministic, and contain no secrets or
-network endpoints. History gaps expose missing numeric event IDs; reconnect
-fixtures replay synthetic frames and verify `Last-Event-ID` handling.
-
----
+`timeoutMs` is one wall-clock budget for the complete SDK call, not a fresh
+timeout for every fetch attempt. It covers request signing, retry backoff,
+fetch, response-body parsing, and (for `purchaseServiceWithPayment`) the x402
+challenge and proof hops. When the budget expires, outstanding work is
+aborted and the call rejects with `TalosTimeoutError`; no later retry is sent.
+A per-call `timeoutMs` overrides the client default, and `timeoutMs: 0`
+disables the deadline for that call.
 
 ### Retry policy resolution and mechanics
 
@@ -1090,7 +1099,7 @@ const typedPolicy = resolveRetryOptions({
 const client = new TalosClient({
   baseUrl: "https://talos-stellar.vercel.app",
   apiKey: process.env.TALOS_KEY!,
-  timeoutMs: 30_000, // per-request AbortController timeout
+  timeoutMs: 30_000, // total request deadline, including retries and signing
 
   // Status-code driven policy (active by default):
   retryPolicy: {

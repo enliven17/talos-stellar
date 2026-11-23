@@ -96,6 +96,24 @@ const FAILED_POLL: HorizonPollResult = { outcome: "failed", ledger: 1010, succes
 const NOT_FOUND_POLL: HorizonPollResult = { outcome: "not_found" };
 const ERROR_POLL_RETRYABLE: HorizonPollResult = { outcome: "error", message: "503 Service Unavailable", retryable: true };
 const ERROR_POLL_PERMANENT: HorizonPollResult = { outcome: "error", message: "400 Bad Request", retryable: false };
+const ERROR_POLL_AUTH: HorizonPollResult = {
+  outcome: "error",
+  message: "401 Unauthorized",
+  retryable: false,
+  reasonCode: "UNAUTHORIZED",
+};
+const ERROR_POLL_THROTTLED: HorizonPollResult = {
+  outcome: "error",
+  message: "429 Too Many Requests",
+  retryable: true,
+  reasonCode: "RATE_LIMITED",
+};
+const ERROR_POLL_PROVIDER: HorizonPollResult = {
+  outcome: "error",
+  message: "503 Service Unavailable",
+  retryable: true,
+  reasonCode: "PROVIDER_UNAVAILABLE",
+};
 
 // ─── isTerminal ───────────────────────────────────────────────────────────────
 
@@ -140,6 +158,12 @@ describe("isWallClockExpired", () => {
     const rec = makeRecord({ expiresAt: now });
     expect(isWallClockExpired(rec, now)).toBe(true);
   });
+  it.each([new Date(Number.NaN), new Date(Number.POSITIVE_INFINITY)])(
+    "returns false for a nonfinite expiry timestamp",
+    (expiresAt) => {
+      expect(isWallClockExpired(makeRecord({ expiresAt }), new Date())).toBe(false);
+    },
+  );
 });
 
 // ─── isLedgerExpired ──────────────────────────────────────────────────────────
@@ -204,6 +228,7 @@ describe("transitionFromPending", () => {
     expect(update?.finalityStatus).toBeUndefined();
     expect(update?.lastError).toBe("503 Service Unavailable");
     expect(update?.pollCount).toBe(1);
+    expect(update?.reasonCode).toBeUndefined();
   });
 
   it("stays PENDING on non-retryable error, bumps pollCount", () => {
@@ -211,6 +236,29 @@ describe("transitionFromPending", () => {
     const update = transitionFromPending(rec, ERROR_POLL_PERMANENT, 1010, BASE_CONFIG);
     expect(update?.finalityStatus).toBeUndefined();
     expect(update?.pollCount).toBe(1);
+    expect(update?.reasonCode).toBeUndefined();
+  });
+
+  it("propagates reasonCode from error poll result while preserving lastError", () => {
+    const rec = makeRecord({ pollCount: 2 });
+
+    const authUpdate = transitionFromPending(rec, ERROR_POLL_AUTH, 1010, BASE_CONFIG);
+    expect(authUpdate?.finalityStatus).toBeUndefined();
+    expect(authUpdate?.pollCount).toBe(3);
+    expect(authUpdate?.lastError).toBe("401 Unauthorized");
+    expect(authUpdate?.reasonCode).toBe("UNAUTHORIZED");
+    expect(isAuthorizationFailure(authUpdate?.reasonCode)).toBe(true);
+    expect(getFailureCategory(authUpdate?.reasonCode)).toBe("authorization");
+
+    const throttleUpdate = transitionFromPending(rec, ERROR_POLL_THROTTLED, 1010, BASE_CONFIG);
+    expect(throttleUpdate?.reasonCode).toBe("RATE_LIMITED");
+    expect(isThrottlingFailure(throttleUpdate?.reasonCode)).toBe(true);
+    expect(getFailureCategory(throttleUpdate?.reasonCode)).toBe("throttling");
+
+    const providerUpdate = transitionFromPending(rec, ERROR_POLL_PROVIDER, 1010, BASE_CONFIG);
+    expect(providerUpdate?.reasonCode).toBe("PROVIDER_UNAVAILABLE");
+    expect(isProviderFailure(providerUpdate?.reasonCode)).toBe(true);
+    expect(getFailureCategory(providerUpdate?.reasonCode)).toBe("provider_failure");
   });
 
   it("transitions PENDING → EXPIRED when wall-clock expiry has passed", () => {
@@ -218,6 +266,11 @@ describe("transitionFromPending", () => {
     const update = transitionFromPending(rec, NOT_FOUND_POLL, 1010, BASE_CONFIG, new Date());
     expect(update?.finalityStatus).toBe("EXPIRED");
     expect(update?.lastError).toMatch(/expiry/i);
+  });
+
+  it("preserves PENDING when expiresAt is nonfinite", () => {
+    const rec = makeRecord({ expiresAt: new Date(Number.NaN) });
+    expect(transitionFromPending(rec, CONFIRMED_POLL, 1010, BASE_CONFIG)).toBeNull();
   });
 
   it("transitions PENDING → EXPIRED when ledger gap exceeded", () => {
@@ -279,6 +332,11 @@ describe("transitionFromConfirming", () => {
     });
     const update = transitionFromConfirming(rec, 1011, BASE_CONFIG, new Date());
     expect(update?.finalityStatus).toBe("EXPIRED");
+  });
+
+  it("preserves CONFIRMING when now is nonfinite", () => {
+    const rec = makeRecord({ finalityStatus: "CONFIRMING", confirmedLedger: 1010 });
+    expect(transitionFromConfirming(rec, 1012, BASE_CONFIG, new Date(Number.NaN))).toBeNull();
   });
 
   it("transitions CONFIRMING → EXPIRED on ledger gap (counted from ledgerSubmitted)", () => {

@@ -70,7 +70,7 @@ async def _setup_policy(settings, db, talos_config):
     ).lower() in ("true", "1", "yes")
     policy_engine.enabled = policy_enabled
     if policy_enabled:
-        policy_engine.load(policy_loader.load())
+        policy_engine.reload(policy_loader.load())
 
     def _get_budget_context() -> dict[str, float]:
         cfg = db.get_talos_config()

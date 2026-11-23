@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
     reapExpiredLeases: vi.fn(),
     leaseBatch: vi.fn(),
     heartbeat: vi.fn(),
+    extendLease: vi.fn(),
     complete: vi.fn(),
     fail: vi.fn(),
   },
@@ -85,6 +86,7 @@ describe("jobs/runner — runOnce", () => {
     expect(ctx.attempts).toBe(3);
     expect(ctx.maxAttempts).toBe(5);
     expect(typeof ctx.heartbeat).toBe("function");
+    expect(typeof ctx.extendLease).toBe("function");
     expect(ctx.signal).toBeInstanceOf(AbortSignal);
   });
 
