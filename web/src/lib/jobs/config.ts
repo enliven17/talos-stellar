@@ -42,8 +42,24 @@ export const jobsConfig = {
   /** Grace period for in-flight jobs to finish during graceful shutdown, in ms. */
   shutdownGraceMs: envInt("JOBS_SHUTDOWN_GRACE_MS", 10_000),
 
+  /** Maximum serialized byte size of a persisted job `result` payload before truncation to a bounded diagnostic. */
+  maxResultBytes: envInt("JOBS_MAX_RESULT_BYTES", 65_536),
+
+  /** Maximum UTF-8 byte size of a persisted `lastError` diagnostic message before truncation. */
+  maxErrorBytes: envInt("JOBS_MAX_ERROR_BYTES", 500),
+
   /** Identifies this process in leaseOwner / logs. Stable per process lifetime. */
   workerId: process.env.JOBS_WORKER_ID || `${process.pid}-${randomUUID().slice(0, 8)}`,
+
+  /**
+   * Maximum number of jobs any single queue may contribute to one drain batch.
+   * Set via JOBS_FAIR_BATCH_PER_QUEUE. Default 0 (unlimited — existing behaviour).
+   *
+   * When > 0, leaseBatch() rotates through each eligible queue and claims at
+   * most this many jobs per queue, bounding one queue's share of the batch so
+   * slower queues are not starved by a high-volume one.
+   */
+  fairBatchPerQueue: envInt("JOBS_FAIR_BATCH_PER_QUEUE", 0),
 };
 
 /** Bearer token for /api/admin/jobs/* inspection endpoints. */

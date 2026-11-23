@@ -29,30 +29,32 @@ pending|leased → cancelled   (cooperative — see Cancellation below)
 - **dead_letter** — terminal, failure. `lastError` holds the last (truncated) error message.
 - **cancelled** — terminal, cooperative cancellation.
 
+## Immutable Attempt History
+
+Execution attempts are tracked in a dedicated `tls_job_attempts` table, completely separated from the mutable current job record in `tls_jobs`. Each attempt records:
+- `attemptNumber`: 1-based attempt sequence number.
+- `workerId`: Identifier of the worker claiming the lease.
+- `leaseId`: Unique lease token for the attempt.
+- `startedAt` / `completedAt`: Timestamps bounding attempt execution.
+- `durationMs`: Total execution time in milliseconds.
+- `terminalReason`: Terminal status of the attempt (`completed`, `retry_scheduled`, `dead_letter`, or `cancelled`).
+- `error`: Truncated error message if the attempt failed.
+
+Administrators can inspect attempt history via:
+- `GET /api/admin/jobs/:id` (includes `attemptsHistory` array)
+- `GET /api/admin/jobs/:id/attempts` (returns `{ jobId, attempts }`)
+- The Admin Jobs UI drawer at `/admin/jobs`.
+
 ## Leasing, heartbeats, and crash recovery
 
 `leaseBatch()` (`src/lib/jobs/store.ts`) atomically claims up to
 `JOBS_BATCH_SIZE` due jobs with `UPDATE ... WHERE id IN (SELECT ... FOR
 UPDATE SKIP LOCKED)`. A lease has an expiry (`JOBS_LEASE_DURATION_MS`); a
-running handler refreshes it by calling `ctx.heartbeat()` or additively
-extends it for long-running work via `ctx.extendLease(extensionMs)`, both of
-which also report back whether cancellation was requested.
-
-Lease extension requests are validated against extension limits, current
-expiry, and job state before writing:
-
-- Non-positive, non-finite, or oversized extensions (`> JOBS_MAX_LEASE_EXTENSION_MS`)
-  and extensions that would push `leaseExpiresAt` past the absolute future
-  horizon (`now + JOBS_MAX_LEASE_HORIZON_MS`) are rejected.
-- Extensions against non-leased jobs, mismatched `leaseId`, missing or
-  already-expired `leaseExpiresAt`, or jobs with `cancelRequested = true` are
-  rejected.
-- `heartbeat()` preserves any longer existing `leaseExpiresAt` (never
-  shrinking an already-extended lease) and rejects explicit duration overrides
-  that would shorten the held lease or exceed extension limits.
-- When an extension request is invalid (e.g. out-of-range duration or past the
-  horizon), the held lease is preserved unmodified so the in-flight worker can
-  continue or finish cleanly.
+running handler extends it by calling `ctx.heartbeat()`, which also reports
+back whether cancellation was requested. Heartbeats arriving after the lease
+deadline has elapsed (`leaseExpiresAt <= now()`) are rejected (`ok: false`)
+without modifying the row, leaving expired ownership eligible for the normal
+reaper.
 
 If a worker process dies mid-job (crash, OOM, deploy), it simply stops
 heartbeating and the lease expires. There is no separate crash-recovery
@@ -82,9 +84,10 @@ immediately.
 Cancellation is cooperative, not preemptive — there's no way to kill a
 running handler mid-execution, so a leased job's `cancelRequested` flag is
 only observed the next time the handler calls `ctx.heartbeat()` (or checks
-`ctx.signal`). Write handlers that heartbeat periodically during any
-long-running loop. A `pending` job is cancelled immediately since nothing
-is running yet.
+`ctx.signal`). Similarly, if the lease deadline elapses before a heartbeat
+call, `ctx.heartbeat()` returns `ok: false` and signals the abort controller.
+Write handlers that heartbeat periodically during any long-running loop. A
+`pending` job is cancelled immediately since nothing is running yet.
 
 ## Idempotency
 
@@ -111,6 +114,8 @@ All read from the environment at process start (see `.env.example`):
 | `JOBS_DEFAULT_MAX_ATTEMPTS` | `8` | Default ceiling for jobs that don't specify one. |
 | `JOBS_POLL_INTERVAL_MS` | `2000` | Continuous-worker poll interval when the queue is empty. |
 | `JOBS_SHUTDOWN_GRACE_MS` | `10000` | Grace period for in-flight jobs during graceful shutdown. |
+| `JOBS_MAX_RESULT_BYTES` | `65536` | Maximum UTF-8 JSON byte size of a persisted job `result` before replacement with a bounded diagnostic envelope. |
+| `JOBS_MAX_ERROR_BYTES` | `500` | Maximum UTF-8 byte size of a persisted `lastError` diagnostic message before truncation. |
 
 ## Running it
 
@@ -150,14 +155,15 @@ All under `Authorization: Bearer <ADMIN_API_KEY>`:
 ## Observability
 
 Every state transition is a structured `pino` log line via `src/lib/jobs/metrics.ts`
-(`job_enqueued`, `job_leased`, `job_heartbeat`, `job_lease_extended`,
-`job_lease_extension_rejected`, `job_completed`, `job_retry_scheduled`,
-`job_dead_letter`, `job_cancelled`, `job_lease_reaped`) with `jobId`, `queue`,
-`attempts`, `durationMs`, `reason`, etc.
-**Never** `payload`, `result`, or a raw error object — `lastError` on the
-row (and in logs) is `truncateError()`'d down to the error's `message`
-only, capped at 500 characters, no stack, no cause chain. If a job's
-payload might itself carry something sensitive, that's a property of the
+(`job_enqueued`, `job_leased`, `job_heartbeat`, `job_completed`,
+`job_retry_scheduled`, `job_dead_letter`, `job_cancelled`,
+`job_lease_reaped`, `job_result_truncated`, `job_error_truncated`) with `jobId`, `queue`, `attempts`, `durationMs`, etc.
+**Never** `payload`, `result`, or a raw error object — `lastError` and `result` on the
+row are bounded independently before persistence so neither field can trigger unbounded database writes:
+- `lastError` is bounded via `boundError()` / `truncateError()` down to the error's `message` only (no stack, no cause chain), capped at `JOBS_MAX_ERROR_BYTES` UTF-8 bytes (default 500) without splitting multi-byte UTF-8 code points, emitting `job_error_truncated` (`actualBytes`, `maxBytes`) when truncated.
+- `result` is bounded via `boundResult()` / `truncateResult()` against `JOBS_MAX_RESULT_BYTES` (default 65536 UTF-8 bytes of serialized JSON). Oversized or unserializable handler results are replaced with a stable diagnostic envelope (`{ truncated: true, reason, maxBytes, actualBytes, diagnostic }`) and emit `job_result_truncated` without failing the completed job.
+
+If a job's payload might itself carry something sensitive, that's a property of the
 specific handler/queue, not the framework — keep secrets out of job
 payloads the same way you'd keep them out of any other DB row a
 Bearer-token-gated endpoint (`/api/admin/jobs/:id`) can return.
