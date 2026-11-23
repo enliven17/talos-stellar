@@ -146,6 +146,19 @@ class TestToolsList:
         assert "transfer_xlm" not in names
 
     @pytest.mark.asyncio
+    async def test_default_allowlist_includes_reconciliation(self):
+        reconciliation = _make_tool("reconcile_purchases")
+        reg = _make_registry([reconciliation])
+        server = MCPServer(registry=reg)
+
+        resp = await server.handle_request_async(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        )
+
+        names = [tool["name"] for tool in resp["result"]["tools"]]
+        assert "reconcile_purchases" in names
+
+    @pytest.mark.asyncio
     async def test_list_empty_when_no_tools_match(self):
         reg = _make_registry([_make_tool("transfer_xlm")])
         server = MCPServer(registry=reg, allowlist=frozenset({"discover_services"}))

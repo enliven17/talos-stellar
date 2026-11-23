@@ -34,13 +34,36 @@ export interface AuditChainEntry {
 }
 
 /**
+ * Validate that all numeric fields in the canonical audit payload are finite.
+ * Rejects NaN, Infinity, and -Infinity before JSON serialization, which would
+ * otherwise silently coerce nonfinite numbers to null.
+ */
+function assertFiniteAuditNumbers(entry: AuditChainEntry): void {
+  if (typeof entry.sequenceNumber !== "number" || !Number.isFinite(entry.sequenceNumber)) {
+    throw new RangeError(
+      `Audit entry canonical payload contains nonfinite sequenceNumber: ${String(entry.sequenceNumber)}`,
+    );
+  }
+  if (typeof entry.statusCode !== "number" || !Number.isFinite(entry.statusCode)) {
+    throw new RangeError(
+      `Audit entry canonical payload contains nonfinite statusCode: ${String(entry.statusCode)}`,
+    );
+  }
+}
+
+/**
  * Deterministic JSON serialization with fixed property order.
  *
  * This produces the canonical form used for hashing. Every value is
  * stringified according to its type; no pretty-printing or key reordering
  * is allowed after this function runs.
+ *
+ * @throws {RangeError} If any numeric field in the canonical payload is nonfinite
+ *   (`NaN`, `Infinity`, or `-Infinity`).
  */
 export function canonicalize(entry: AuditChainEntry): string {
+  assertFiniteAuditNumbers(entry);
+
   return JSON.stringify({
     sequenceNumber: entry.sequenceNumber,
     talosId: entry.talosId,
@@ -57,6 +80,8 @@ export function canonicalize(entry: AuditChainEntry): string {
  * prefixed with the domain separator.
  *
  *   hash = SHA-256(domain:canonical_json)
+ *
+ * @throws {RangeError} If the entry's canonical payload contains nonfinite numbers.
  */
 export function computeEntryHash(entry: AuditChainEntry): string {
   const payload = `${AUDIT_CHAIN_DOMAIN}:${canonicalize(entry)}`;
@@ -94,42 +119,111 @@ export function verifyChainRootSeal(
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+export type ChainVerificationStatus = "valid" | "broken" | "incomplete";
+
+export type ChainFailureReason =
+  | "out_of_order_records"
+  | "missing_predecessor"
+  | "predecessor_mismatch"
+  | "unexpected_genesis"
+  | "sequence_gap"
+  | "previous_hash_mismatch"
+  | "entry_hash_mismatch"
+  | "truncated_range";
+
+export interface AuditChainRow {
+  sequenceNumber: number | null;
+  entryHash: string | null;
+  previousHash: string | null;
+  chainVersion: string | null;
+  talosId: string;
+  method: string;
+  path: string;
+  statusCode: number;
+  ipAddress: string | null;
+  createdAt: Date;
+}
+
+export interface AuditChainPredecessor {
+  sequenceNumber: number | null;
+  entryHash: string | null;
+  createdAt?: Date;
+}
+
+export interface VerifyChainRangeOptions {
+  /**
+   * The immediate chained predecessor before the selected time window,
+   * or null if no chained entries exist prior to the window (meaning the
+   * window starts at genesis). Omit (undefined) if the caller did not check
+   * or supply the predecessor when the range begins after sequence 0.
+   */
+  predecessor?: AuditChainPredecessor | null;
+  /** Inclusive lower bound of the selected time window. */
+  from?: Date | string | null;
+  /** Inclusive upper bound of the selected time window. */
+  to?: Date | string | null;
+  /**
+   * True when the fetched range was truncated by a query limit and more
+   * entries exist within the selected time window.
+   */
+  truncated?: boolean;
+}
+
 export interface ChainVerificationResult {
+  /** True only when the chain is complete and every link verifies. */
   valid: boolean;
+  /**
+   * Distinct outcome classification:
+   *   - "valid":      all chained rows verified, no gaps.
+   *   - "incomplete": a predecessor is missing (gap in sequence numbers or
+   *                   the chain starts after GENESIS). Evidence is missing,
+   *                   not proven tampered.
+   *   - "mismatch":   contradictory evidence (hash/linkage does not match
+   *                   recomputed values). Indicates tampering.
+   */
+  status: "valid" | "incomplete" | "mismatch";
   totalEntries: number;
   verifiedEntries: number;
   brokenAtSequence: number | null;
+  /** Sequence number expected at the point a gap was detected. */
+  missingFromSequence: number | null;
   chainVersion: string | null;
 }
 
+export type ChainRow = {
+  sequenceNumber: number | null;
+  entryHash: string | null;
+  previousHash: string | null;
+  chainVersion: string | null;
+  talosId: string;
+  method: string;
+  path: string;
+  statusCode: number;
+  ipAddress: string | null;
+  createdAt: Date;
+};
+
 /**
- * Verify a sequence of audit log entries against the hash chain.
+ * Verify a sequence of audit log entries against the hash chain from genesis.
  *
  * Each entry must satisfy:
  *   1. entryHash === computeEntryHash(entry)
  *   2. previousHash === entryHash of the preceding entry (or GENESIS for seq 0)
  *   3. sequenceNumber is sequential (0, 1, 2, ...)
+ *
+ * A missing predecessor (sequence gap, or chain not starting at 0) is reported
+ * as "incomplete" so operators can distinguish missing evidence from
+ * contradictory hashes, which are reported as "mismatch".
  */
-export function verifyChain(
-  rows: Array<{
-    sequenceNumber: number | null;
-    entryHash: string | null;
-    previousHash: string | null;
-    chainVersion: string | null;
-    talosId: string;
-    method: string;
-    path: string;
-    statusCode: number;
-    ipAddress: string | null;
-    createdAt: Date;
-  }>,
-): ChainVerificationResult {
+export function verifyChain(rows: ChainRow[]): ChainVerificationResult {
   if (rows.length === 0) {
     return {
       valid: true,
+      status: "valid",
       totalEntries: 0,
       verifiedEntries: 0,
       brokenAtSequence: null,
+      missingFromSequence: null,
       chainVersion: null,
     };
   }
@@ -137,6 +231,30 @@ export function verifyChain(
   let previousEntryHash: string | null = null;
   let chainIndex = 0;
   let verifiedCount = 0;
+
+  const mismatch = (seq: number, version: string | null): ChainVerificationResult => ({
+    valid: false,
+    status: "mismatch",
+    totalEntries: rows.length,
+    verifiedEntries: verifiedCount,
+    brokenAtSequence: seq,
+    missingFromSequence: null,
+    chainVersion: version,
+  });
+
+  const incomplete = (
+    missingFrom: number,
+    seq: number | null,
+    version: string | null,
+  ): ChainVerificationResult => ({
+    valid: false,
+    status: "incomplete",
+    totalEntries: rows.length,
+    verifiedEntries: verifiedCount,
+    brokenAtSequence: seq,
+    missingFromSequence: missingFrom,
+    chainVersion: version,
+  });
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -146,27 +264,23 @@ export function verifyChain(
       continue;
     }
 
-    // Validate sequence number is sequential within the chain
-    if (row.sequenceNumber !== chainIndex) {
-      return {
-        valid: false,
-        totalEntries: rows.length,
-        verifiedEntries: verifiedCount,
-        brokenAtSequence: row.sequenceNumber,
-        chainVersion: row.chainVersion,
-      };
+    // A sequence number ahead of the expected one means predecessor(s) are
+    // absent: incomplete evidence, not a contradiction. Reported as a gap at
+    // the first missing sequence number, never as tampering.
+    if (row.sequenceNumber > chainIndex) {
+      return incomplete(chainIndex, row.sequenceNumber, row.chainVersion);
+    }
+
+    // A sequence number behind the expected one is a duplicate/out-of-order
+    // row, which contradicts the chain.
+    if (row.sequenceNumber < chainIndex) {
+      return mismatch(row.sequenceNumber, row.chainVersion);
     }
 
     // Validate previousHash linkage
     const expectedPreviousHash = previousEntryHash ?? GENESIS_HASH;
     if (row.previousHash !== expectedPreviousHash) {
-      return {
-        valid: false,
-        totalEntries: rows.length,
-        verifiedEntries: verifiedCount,
-        brokenAtSequence: row.sequenceNumber,
-        chainVersion: row.chainVersion,
-      };
+      return mismatch(row.sequenceNumber, row.chainVersion);
     }
 
     // Validate entryHash integrity
@@ -182,13 +296,7 @@ export function verifyChain(
 
     const recomputed = computeEntryHash(entry);
     if (recomputed !== row.entryHash) {
-      return {
-        valid: false,
-        totalEntries: rows.length,
-        verifiedEntries: verifiedCount,
-        brokenAtSequence: row.sequenceNumber,
-        chainVersion: row.chainVersion,
-      };
+      return mismatch(row.sequenceNumber, row.chainVersion);
     }
 
     previousEntryHash = row.entryHash;
@@ -198,9 +306,11 @@ export function verifyChain(
 
   return {
     valid: true,
+    status: "valid",
     totalEntries: rows.length,
     verifiedEntries: verifiedCount,
     brokenAtSequence: null,
+    missingFromSequence: null,
     chainVersion: rows[rows.length - 1].chainVersion,
   };
 }

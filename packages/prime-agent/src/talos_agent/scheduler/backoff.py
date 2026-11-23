@@ -32,7 +32,12 @@ def _validate_jitter(jitter: float) -> None:
 
 
 class Backoff:
-    """Exponential backoff with jitter for task retries."""
+    """Exponential retry backoff with bounded, non-negative jitter.
+
+    A jitter value from 0 to 1 adds up to that fraction of the nominal delay;
+    it never reduces the delay below eligibility. Set ``jitter=0`` to disable
+    jitter for reproducible behavior.
+    """
 
     def __init__(
         self,
@@ -56,10 +61,11 @@ class Backoff:
         delay = self.initial_backoff * (2 ** (self.fail_count - 1))
         delay = min(delay, self.max_backoff)
 
-        # Add jitter (+- 20%)
+        # Jitter may extend the eligibility wait, but must never shorten it.
         if self.jitter > 0:
-            j = delay * self.jitter
-            delay = delay + random.uniform(-j, j)
+            jitter_offset = random.uniform(0.0, self.jitter)
+            jitter_offset = min(max(jitter_offset, 0.0), self.jitter)
+            delay *= 1.0 + jitter_offset
 
         actual_delay = max(delay, 0.1)  # floor at 100ms
         logger.debug(
@@ -87,7 +93,9 @@ class DurableBackoff:
 
     Retry jitter is stable for a task, agent identity, and failure count. The
     optional identity should be stable and non-sensitive; it is hashed in memory
-    and is not persisted or logged.
+    and is not persisted or logged. A jitter value from 0 to 1 adds up to that
+    fraction of the nominal delay without making the task eligible sooner.
+    Set ``jitter=0`` to disable jitter for reproducible behavior.
 
     ``max_attempts`` is enforced: once exceeded the task is marked *terminal*
     and ``is_terminal`` returns ``True`` so callers can stop scheduling it.
@@ -203,7 +211,8 @@ class DurableBackoff:
             sample = int.from_bytes(
                 hashlib.blake2b(material, digest_size=8).digest(), "big"
             ) / ((1 << 64) - 1)
-            delay *= 1 - self.jitter + 2 * self.jitter * sample
+            sample = min(max(sample, 0.0), 1.0)
+            delay *= 1.0 + self.jitter * sample
 
         actual_delay = max(delay, 0.1)
         logger.debug(
@@ -241,3 +250,28 @@ class DurableBackoff:
         delay = self.next_delay()
         self._next_attempt_at = self._clock.now() + timedelta(seconds=delay)
         self._persist()
+
+    def cancel(self) -> None:
+        """Cancel any pending retry: clear state and mark as terminal.
+
+        Called when the agent enters draining state (shutdown initiated).
+        This prevents the retry timer from being resurrected on restart
+        and stops any new retries from being scheduled.
+        """
+        if self.fail_count > 0 or self._next_attempt_at is not None:
+            logger.info(
+                "DurableBackoff cancelled on draining: task=%s fail_count=%d",
+                self.task_name,
+                self.fail_count,
+            )
+        self.fail_count = 0
+        self._next_attempt_at = None
+        self._terminal = True
+        try:
+            self._db.clear_retry_state(self.task_name)
+        except Exception as exc:
+            logger.warning(
+                "DurableBackoff: failed to clear state for %s on cancel: %s",
+                self.task_name,
+                exc,
+            )

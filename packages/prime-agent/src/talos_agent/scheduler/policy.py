@@ -7,6 +7,9 @@ here so it can be unit-tested without starting the full scheduler loop.
 
 from __future__ import annotations
 
+import math
+
+from dataclasses import dataclass
 from datetime import datetime, time, timezone
 from typing import TYPE_CHECKING
 
