@@ -429,6 +429,15 @@ class PolicyLoader:
                         }
                         for r in p.rules
                     ],
+                    "exceptions": [
+                        {
+                            "rule_id": exception.rule_id,
+                            "actor": exception.actor,
+                            "reason": exception.reason,
+                            "expires_at": exception.expires_at.isoformat(),
+                        }
+                        for exception in p.exceptions
+                    ],
                 }
                 for p in policies
             ]

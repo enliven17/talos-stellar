@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 from opentelemetry.trace import SpanKind
@@ -551,6 +551,31 @@ class TalosAPIClient:
             return r.json()
         except Exception:
             return {"error": f"Commerce submission failed with status {r.status_code}"}
+
+    async def get_commerce_payment_status(
+        self, talos_id: str, job_id: str
+    ) -> dict[str, Any]:
+        """Read the recorded Stellar finality status for a purchased job."""
+        path_talos_id = quote(talos_id, safe="")
+        path_job_id = quote(job_id, safe="")
+        try:
+            r = await self._get(
+                f"/api/talos/{path_talos_id}/jobs/{path_job_id}/payment-status"
+            )
+        except Exception:
+            return {"error": "Payment status query failed"}
+        if r.status_code != 200:
+            return {
+                "error": "Payment status query failed",
+                "http_status": r.status_code,
+            }
+        try:
+            data = r.json()
+        except Exception:
+            return {"error": "Malformed payment status response"}
+        if not isinstance(data, dict):
+            return {"error": "Malformed payment status response"}
+        return data
 
     async def discover_services_page(
         self,

@@ -154,6 +154,9 @@ class LocalDB:
     def count_pending_commerce_jobs(self) -> int:
         return self._commerce.count_pending_commerce_jobs()
 
+    def get_commerce_jobs(self, limit: int = 25) -> list[dict]:
+        return self._commerce.get_commerce_jobs(limit)
+
     def prune_completed_commerce_payloads(self, retention_days: int = 30) -> int:
         return self._commerce.prune_completed_payloads(retention_days)
 

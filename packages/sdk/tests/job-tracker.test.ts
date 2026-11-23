@@ -25,6 +25,7 @@ import {
   JobCancelledError,
   JobTrackAbortedError,
   JobTrackTimeoutError,
+  TalosCursorValidationError,
   InMemorySeenStore,
   type TrackJobEvent,
   type CommerceJob,
@@ -94,6 +95,23 @@ describe("TalosClient.trackJob (#1017)", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it("rejects a cursor from another API origin before polling or streaming", () => {
+    const client = new TalosClient({
+      baseUrl: "https://api.example.com",
+      fetch: vi.fn(),
+    });
+    const cursor = JSON.stringify({
+      version: 1,
+      origin: "https://other.example.com",
+      stream: "/api/jobs/job-1017/progress",
+      eventId: "event-1",
+    });
+
+    expect(() =>
+      client.trackJob("job-1017", { cursor, preferSse: false }),
+    ).toThrowError(TalosCursorValidationError);
   });
 
   // ── 1. Happy path SSE Streaming ─────────────────────────────────────────────

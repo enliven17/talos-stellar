@@ -11,6 +11,24 @@ export type JobStatus = "pending" | "leased" | "completed" | "dead_letter" | "ca
  */
 export type RetryClass = "transient" | "rate_limited" | "fatal";
 
+/** Terminal reason for an execution attempt */
+export type AttemptTerminalReason = "completed" | "retry_scheduled" | "dead_letter" | "cancelled";
+
+/** Bounded attempt execution record stored in tls_job_attempts */
+export interface JobAttemptRecord {
+  id: string;
+  jobId: string;
+  attemptNumber: number;
+  workerId: string | null;
+  leaseId: string | null;
+  startedAt: Date;
+  completedAt: Date | null;
+  durationMs: number | null;
+  terminalReason: AttemptTerminalReason;
+  error: string | null;
+  createdAt: Date;
+}
+
 export interface JobRecord<TPayload = unknown> {
   id: string;
   queue: string;

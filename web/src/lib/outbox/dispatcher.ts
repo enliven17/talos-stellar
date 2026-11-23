@@ -75,6 +75,8 @@ export async function dispatchOnce(opts: DispatchOnceOptions = {}): Promise<Disp
   const batch = await store.leaseBatch(opts.batchSize ?? outboxConfig.batchSize, opts.workerId, opts.leaseDurationMs);
   summary.leased = batch.length;
 
+  const supportedVersions = opts.supportedPayloadVersions ?? outboxConfig.supportedPayloadVersions ?? DEFAULT_SUPPORTED_PAYLOAD_VERSIONS;
+
   await Promise.all(
     batch.map(async (event) => {
       const leaseId = event.leaseId!; // guaranteed by leaseBatch()
