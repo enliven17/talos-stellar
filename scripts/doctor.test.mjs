@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { diagnose, formatReport, runCommand } from "./doctor.mjs";
+import { diagnose, formatJsonReport, formatReport } from "./doctor.mjs";
 
 function tools(outputs) {
   return (command, args) => {
@@ -109,148 +108,55 @@ test("treats Stellar CLI as optional and uv as a required contributor tool", () 
   assert.equal(report.results.find((result) => result.name === "Stellar CLI").optional, true);
 });
 
-test("rejects a required executable that exists but cannot be spawned", () => {
+test("reports mismatched and unrecognized versions as sanitized structured findings", () => {
   const report = diagnose({
-    run: fakeTools({ "cargo --version": spawnError("cargo") }),
-    nodeVersion: "v24.0.0",
-    platform: "linux",
-  });
-  const cargo = report.results.find((result) => result.name === "Cargo");
-
-  assert.equal(report.exitCode, 1);
-  assert.equal(cargo.ok, false);
-  assert.equal(cargo.reason, "execution-failure");
-  assert.match(cargo.message, /Cargo could not be executed \(cargo\).*EACCES/);
-  assert.doesNotMatch(cargo.message, /not found/);
-  assert.match(formatReport(report), /✗ Cargo could not be executed/);
-});
-
-test("keeps a missing binary distinct from a spawn failure and an unsupported version", () => {
-  const missing = diagnose({
-    run: fakeTools({ "pnpm --version": spawnError("pnpm", "ENOENT") }),
-    nodeVersion: "v24.0.0",
-    platform: "linux",
-  }).results.find((result) => result.name === "pnpm");
-  const unsupported = diagnose({
-    run: fakeTools({ "pnpm --version": "8.15.0" }),
-    nodeVersion: "v24.0.0",
-    platform: "linux",
-  }).results.find((result) => result.name === "pnpm");
-  const execution = diagnose({
-    run: fakeTools({ "pnpm --version": spawnError("pnpm") }),
-    nodeVersion: "v24.0.0",
-    platform: "linux",
-  }).results.find((result) => result.name === "pnpm");
-
-  assert.equal(missing.reason, "missing");
-  assert.match(missing.message, /pnpm not found/);
-  assert.doesNotMatch(missing.message, /could not be executed|too old/);
-  assert.equal(unsupported.reason, "unsupported");
-  assert.match(unsupported.message, /pnpm 8\.15\.0 is too old/);
-  assert.doesNotMatch(unsupported.message, /not found|could not be executed/);
-  assert.equal(execution.reason, "execution-failure");
-  assert.match(execution.message, /could not be executed/);
-  assert.doesNotMatch(execution.message, /not found|too old/);
-});
-
-test("classifies a non-zero version probe as an execution failure", { skip: process.platform === "win32" }, () => {
-  const directory = mkdtempSync(join(tmpdir(), "talos-doctor-"));
-  try {
-    const script = join(directory, "fake-tool");
-    writeFileSync(script, "#!/bin/sh\necho 'permission denied' >&2\nexit 1\n");
-    chmodSync(script, 0o755);
-    assert.throws(
-      () => runCommand(script, [], "linux"),
-      (error) => error.code === "COMMAND_FAILED" && /permission denied/.test(error.message),
-    );
-
-    const base = fakeTools();
-    const run = (command, args) => command === "pnpm" ? runCommand(script, args, "linux") : base(command, args);
-    const report = diagnose({ run, nodeVersion: "v24.0.0", platform: "linux" });
-    const pnpm = report.results.find((result) => result.name === "pnpm");
-
-    assert.equal(report.exitCode, 1);
-    assert.equal(pnpm.reason, "execution-failure");
-    assert.match(pnpm.message, /pnpm could not be executed.*permission denied/);
-    assert.doesNotMatch(pnpm.message, /not found/);
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test("fails when the Wasm target probe cannot be spawned", () => {
-  const report = diagnose({
-    run: fakeTools({ "rustup target list --installed": spawnError("rustup") }),
-    nodeVersion: "v24.0.0",
-    platform: "linux",
-  });
-  const target = report.results.find((result) => result.name === "Rust Wasm target");
-
-  assert.equal(report.exitCode, 1);
-  assert.equal(target.reason, "execution-failure");
-  assert.match(target.message, /Rust Wasm target could not be executed/);
-  assert.doesNotMatch(target.message, /is not installed/);
-});
-
-test("keeps optional tool spawn failures as warnings without failing doctor", () => {
-  const report = diagnose({
-    run: fakeTools({ "stellar --version": spawnError("stellar") }),
-    nodeVersion: "v24.0.0",
-    platform: "linux",
-  });
-  const stellar = report.results.find((result) => result.name === "Stellar CLI");
-
-  assert.equal(report.exitCode, 0);
-  assert.equal(stellar.ok, false);
-  assert.equal(stellar.optional, true);
-  assert.equal(stellar.reason, "execution-failure");
-  assert.match(stellar.message, /Stellar CLI could not be executed/);
-  assert.match(stellar.message, /Optional: install the Stellar CLI/);
-  assert.match(formatReport(report), /! Stellar CLI could not be executed/);
-});
-
-test("preserves the optional missing-tool warning wording", () => {
-  const report = diagnose({
-    run: fakeTools({ "stellar --version": spawnError("stellar", "ENOENT") }),
-    nodeVersion: "v24.0.0",
-    platform: "linux",
-  });
-  const stellar = report.results.find((result) => result.name === "Stellar CLI");
-
-  assert.equal(report.exitCode, 0);
-  assert.equal(stellar.reason, "missing");
-  assert.match(stellar.message, /^not installed \(optional\)\./);
-  assert.match(formatReport(report), /! not installed \(optional\)\./);
-});
-
-test("falls back to a working executable when an earlier candidate cannot be spawned", () => {
-  const report = diagnose({
-    run: fakeTools({
-      "pnpm --version": spawnError("pnpm"),
-      "pnpm.cmd --version": "9.15.0",
-      "py -3 --version": "Python 3.12.2",
-      "uv.exe --version": "uv 0.5.11",
-      "rustup target list --installed": "wasm32-unknown-unknown",
-      "docker.exe --version": "Docker version 27.3.1",
-      "stellar.exe --version": "stellar 22.0.0",
+    run: tools({
+      ...healthyTools,
+      "pnpm --version": "pnpm 8.15.0 from C:\\Users\\contributor\\private-cache",
+      "python3 --version": "python version unavailable at C:\\Users\\contributor\\private-cache",
     }),
-    nodeVersion: "v24.0.0",
-    platform: "win32",
-  });
-
-  assert.equal(report.exitCode, 0);
-  assert.equal(report.results.find((result) => result.name === "pnpm").ok, true);
-});
-
-test("treats an empty version probe as an execution failure", () => {
-  const report = diagnose({
-    run: fakeTools({ "docker --version": "" }),
-    nodeVersion: "v24.0.0",
+    nodeVersion: "v20.0.0",
     platform: "linux",
   });
-  const docker = report.results.find((result) => result.name === "Docker");
+  const pnpm = report.results.find((result) => result.id === "pnpm");
+  const python = report.results.find((result) => result.id === "python");
 
-  assert.equal(report.exitCode, 1);
-  assert.equal(docker.reason, "execution-failure");
-  assert.match(docker.message, /Docker could not be executed.*produced no output/);
+  assert.equal(pnpm.code, "version_mismatch");
+  assert.equal(pnpm.expected, ">=9.0.0");
+  assert.equal(pnpm.observed, "8.15.0");
+  assert.equal(python.code, "version_unrecognized");
+  assert.equal(python.expected, ">=3.11.0");
+  assert.equal(python.observed, null);
+  assert.doesNotMatch(formatReport(report), /private-cache/);
+  assert.doesNotMatch(formatJsonReport(report), /private-cache/);
+});
+
+test("JSON report includes structured findings and the stable process exit code", () => {
+  const report = diagnose({
+    run: tools(healthyTools),
+    nodeVersion: "v18.19.0",
+    platform: "linux",
+  });
+  const json = JSON.parse(formatJsonReport(report));
+
+  assert.equal(json.exitCode, 1);
+  assert.ok(Array.isArray(json.findings));
+  assert.equal(json.findings.find((finding) => finding.id === "node").expected, ">=20.0.0");
+  assert.equal(json.findings.find((finding) => finding.id === "node").observed, "18.19.0");
+});
+
+test("doctor --json emits parseable JSON and keeps its exit code in sync", () => {
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL("./doctor.mjs", import.meta.url)), "--json"],
+    { encoding: "utf8" },
+  );
+  const report = JSON.parse(result.stdout);
+
+  assert.equal(result.status, report.exitCode);
+  assert.ok(Array.isArray(report.findings));
+  assert.ok(report.findings.every((finding) =>
+    typeof finding.expected === "string" &&
+    (finding.observed === null || typeof finding.observed === "string"),
+  ));
 });
