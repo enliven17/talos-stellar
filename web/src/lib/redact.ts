@@ -1,5 +1,8 @@
 const REDACTED = "[REDACTED]";
 
+/** Stable identifier for the field-redaction rules used by exported data. */
+export const AUDIT_REDACTION_POLICY_VERSION = "talos.audit.redaction.v1";
+
 /**
  * Canonical sensitive field names (normalized: lowercased, `_`/`-` stripped).
  * Shared by payload redaction and public-URL query scrubbing so there is a
