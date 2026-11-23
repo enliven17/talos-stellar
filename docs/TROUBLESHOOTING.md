@@ -630,7 +630,7 @@ Talos local toolchain doctor
 ✗ Python 3.10.0 is too old; 3.11.0 or newer is required. Install Python 3.11 or newer from https://www.python.org/downloads/.
 ✗ uv not found. Install uv using the instructions at https://docs.astral.sh/uv/getting-started/installation/.
 ✓ Rust compiler 1.98.1
-✓ Cargo 1.98.1
+✗ Cargo could not be executed (cargo). spawn cargo EACCES: permission denied. Install the stable Rust toolchain with rustup: https://rustup.rs/.
 ✗ wasm32-unknown-unknown is not installed. Run `rustup target add wasm32-unknown-unknown`.
 ✗ Docker not found. Install Docker Desktop or Docker Engine: https://docs.docker.com/get-docker/.
 ! not installed (optional). Optional: install the Stellar CLI with `cargo install --locked stellar-cli --features opt`.
@@ -646,6 +646,13 @@ Talos local toolchain doctor
 - Rust target `wasm32-unknown-unknown` (for Soroban smart contracts in `contracts/`)
 - Docker (for the local stack)
 - Stellar CLI (optional)
+
+Doctor reports three distinct tool failures: `not found` means the executable is
+missing from `PATH`, `too old` means it runs but its version is unsupported, and
+`could not be executed` means it exists but cannot be spawned or its version
+probe fails. Any of these for a required tool exits with code 1. Optional tools
+keep the `!` warning marker and never change the exit code, even when they
+cannot be spawned.
 
 ### Diagnostic Commands
 

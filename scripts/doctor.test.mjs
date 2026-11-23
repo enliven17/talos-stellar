@@ -12,6 +12,25 @@ function tools(outputs) {
   };
 }
 
+function fakeTools(overrides = {}) {
+  return (command, args) => {
+    const key = `${command} ${args.join(" ")}`.trim();
+    if (key in overrides) {
+      const outcome = overrides[key];
+      if (outcome instanceof Error) throw outcome;
+      return outcome;
+    }
+    if (!(key in healthyTools)) {
+      throw Object.assign(new Error(`spawn ${command} ENOENT`), { code: "ENOENT" });
+    }
+    return healthyTools[key];
+  };
+}
+
+function spawnError(command, code = "EACCES") {
+  return Object.assign(new Error(`spawn ${command} ${code}: permission denied`), { code });
+}
+
 const healthyTools = {
   "pnpm --version": "9.15.0",
   "python3 --version": "Python 3.12.2",

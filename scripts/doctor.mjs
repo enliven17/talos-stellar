@@ -21,7 +21,30 @@ const INSTALL_HINTS = {
   stellar: "Optional: install the Stellar CLI with `cargo install --locked stellar-cli --features opt`.",
 };
 
-function runCommand(command, args, platform = process.platform) {
+export const FAILURE_REASONS = Object.freeze({
+  MISSING: "missing",
+  UNSUPPORTED: "unsupported",
+  EXECUTION_FAILURE: "execution-failure",
+});
+
+function sentence(...parts) {
+  return parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+}
+
+function detailSentence(message) {
+  return /[.!?]$/.test(message) ? message : `${message}.`;
+}
+
+function isMissingError(error) {
+  if (error?.code === "ENOENT") return true;
+  return /not found|not recognized as an internal or external command|\bENOENT\b/i.test(String(error?.message ?? ""));
+}
+
+function describeExecutionFailure(error) {
+  return String(error?.message ?? error ?? "").replace(/\s+/g, " ").trim() || "the executable could not be started";
+}
+
+export function runCommand(command, args, platform = process.platform) {
   const result = spawnSync(command, args, {
     encoding: "utf8",
     shell: platform === "win32",
@@ -30,7 +53,9 @@ function runCommand(command, args, platform = process.platform) {
 
   if (result.error) throw result.error;
   if (result.status !== 0) {
-    throw new Error(result.stderr?.trim() || `${command} exited with status ${result.status}`);
+    const error = new Error(result.stderr?.trim() || `${command} exited with status ${result.status}`);
+    error.code = result.status === 127 || result.status === 9009 ? "ENOENT" : "COMMAND_FAILED";
+    throw error;
   }
   return result.stdout.trim();
 }
@@ -48,16 +73,59 @@ function compareVersions(actual, minimum) {
   return 0;
 }
 
-function probe(run, candidates) {
+export function probe(run, candidates) {
+  let failure = null;
   for (const [command, args] of candidates) {
     try {
       const output = run(command, args);
       if (output) return { command, output };
-    } catch {
-      // Try another platform-specific executable name before reporting missing.
+      if (failure?.reason !== FAILURE_REASONS.EXECUTION_FAILURE) {
+        failure = {
+          command,
+          reason: FAILURE_REASONS.EXECUTION_FAILURE,
+          message: `${command} produced no output`,
+        };
+      }
+    } catch (error) {
+      const reason = isMissingError(error) ? FAILURE_REASONS.MISSING : FAILURE_REASONS.EXECUTION_FAILURE;
+      if (reason === FAILURE_REASONS.EXECUTION_FAILURE || failure?.reason !== FAILURE_REASONS.EXECUTION_FAILURE) {
+        failure = {
+          command,
+          reason,
+          message: describeExecutionFailure(error),
+        };
+      }
     }
   }
-  return null;
+  return failure;
+}
+
+function failureResult(name, probed, hint, missingMessage) {
+  if (probed?.reason === FAILURE_REASONS.EXECUTION_FAILURE) {
+    return {
+      name,
+      ok: false,
+      reason: FAILURE_REASONS.EXECUTION_FAILURE,
+      message: sentence(`${name} could not be executed (${probed.command}).`, detailSentence(probed.message), hint),
+    };
+  }
+  return {
+    name,
+    ok: false,
+    reason: FAILURE_REASONS.MISSING,
+    message: missingMessage ?? `${name} not found. ${hint}`,
+  };
+}
+
+function presenceResult(name, probed, { describe, hint, missingMessage, optional = false }) {
+  const optionalField = optional ? { optional: true } : {};
+  if (!probed || probed.reason === FAILURE_REASONS.MISSING) {
+    return { name, ok: false, reason: FAILURE_REASONS.MISSING, message: missingMessage, ...optionalField };
+  }
+  if (probed.reason === FAILURE_REASONS.EXECUTION_FAILURE) {
+    return { ...failureResult(name, probed, hint, missingMessage), ...optionalField };
+  }
+  return { name, ok: true, message: describe(probed), ...optionalField };
 }
 
 function versionResult(name, output, minimum, hint, id) {
@@ -113,6 +181,11 @@ function versionResult(name, output, minimum, hint, id) {
     observed: versionText,
     message: `${name} ${versionText}`,
   };
+}
+
+function probedVersionResult(name, probed, minimum, hint) {
+  if (!probed || probed.reason) return failureResult(name, probed, hint);
+  return versionResult(name, probed.output, minimum, hint);
 }
 
 export function diagnose({ run = runCommand, platform = process.platform, nodeVersion = process.version } = {}) {
@@ -202,10 +275,8 @@ export function diagnose({ run = runCommand, platform = process.platform, nodeVe
       : `not installed (optional). ${INSTALL_HINTS.stellar}`,
   });
 
-  return {
-    results,
-    exitCode: results.some((result) => !result.ok && !result.optional) ? 1 : 0,
-  };
+  const failedRequired = results.some((result) => !result.ok && !result.optional);
+  return { results, exitCode: failedRequired ? 1 : 0 };
 }
 
 export function formatReport({ results }) {

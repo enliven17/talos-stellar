@@ -3,6 +3,7 @@
 import type { TalosDetail, DistPreview, BuybackPreview } from "./types";
 import { AgentEmptyState } from "@/components/agent-view-states";
 import { FinancialSnapshotBadge, FinancialMetricValue } from "@/components/financial-state";
+import { FinancialStatementButton } from "@/components/financial-statement-button";
 import { summarizeMonthlyRevenue } from "@/lib/revenue-observations";
 
 interface TabRevenueProps {
@@ -82,7 +83,14 @@ export function TabRevenue({
       <div>
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs text-muted">[FINANCIAL OVERVIEW]</span>
-          <FinancialSnapshotBadge observedAt={talos.observedAt} />
+          <div className="flex items-center gap-3">
+            <FinancialStatementButton
+              talosId={talos.id}
+              ownerKeys={[talos.creatorPublicKey]}
+              address={address}
+            />
+            <FinancialSnapshotBadge observedAt={talos.observedAt} />
+          </div>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           {summaryMetrics.map((metric) => (
