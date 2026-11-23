@@ -105,7 +105,7 @@ async function handlePost(
     }
 
     // Record revenue in DB — all revenue stays in Agent Treasury
-    const quotaResult = await checkAndIncrementQuota(db, id, "revenue_writes");
+    const quotaResult = await checkAndIncrementQuota(db, id, "revenue_writes", "revenue:write");
     if (!quotaResult.ok) return quotaExceededResponse(quotaResult);
 
     const [revenue] = await db
