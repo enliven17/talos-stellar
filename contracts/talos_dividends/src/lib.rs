@@ -200,23 +200,34 @@ pub struct EpochRecord {
     pub status: EpochStatus,
 }
 
-/// Immutable funding and entitlement commitment for an auditable distribution
-/// round, plus the running accounting fields needed to reconcile claims.
+/// Versioned descriptor of the arithmetic bounds enforced by the dividend
+/// contract's checked arithmetic.
 ///
-/// `entitlement_digest` is the SHA-256 digest of the canonical tuple
-/// `(talos_id, epoch_id, funded_amount, creator, investor, treasury,
-/// creator_share, investor_share, treasury_share)`.  The contract recomputes
-/// it on every manifest-backed claim, so recipient and share substitutions are
-/// rejected even though claims remain pull-based.
+/// Returned by [`TalosDividends::arithmetic_bounds`].  The
+/// `descriptor_version` field lets the shape of this struct evolve in
+/// future minor releases: callers that only care about specific fields
+/// can safely ignore unknown ones.
+///
+/// All amount fields use the same atomic unit as
+/// `EpochRecord::total_amount` (stroops or equivalent).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DistributionRoundManifest {
-    pub talos_id: u32,
-    pub epoch_id: u64,
-    pub funded_amount: i128,
-    pub entitlement_digest: BytesN<32>,
-    pub claimed_amount: i128,
-    pub rounding_dust: i128,
+pub struct ArithmeticBounds {
+    /// Minimum `total_amount` accepted by `commit_epoch`
+    /// (= [`MIN_EPOCH_AMOUNT`]).
+    pub min_epoch_amount: i128,
+    /// Maximum share percentage any single patron role may hold (= 100).
+    /// The three role shares must sum to exactly this value.
+    pub max_share_pct: u32,
+    /// Minimum claim-window length in seconds accepted by `commit_epoch`
+    /// (= [`MIN_EXPIRY_SECS`]).
+    pub min_expiry_secs: u64,
+    /// Maximum claim-window length in seconds accepted by `commit_epoch`
+    /// (= [`MAX_EXPIRY_SECS`]).
+    pub max_expiry_secs: u64,
+    /// Shape version of this descriptor struct.
+    /// Currently `1`; will be incremented on any structural change.
+    pub descriptor_version: u32,
 }
 
 /// Persistent storage key enumeration.
@@ -298,6 +309,7 @@ pub fn features_list() -> &'static [&'static str] {
         "rounding_dust",
         "round_manifest",
         "interface_query",
+        "arithmetic_bounds",
     ]
 }
 
@@ -1054,6 +1066,25 @@ impl TalosDividends {
             features.push_back(Symbol::new(&env, feature));
         }
         features
+    }
+
+    /// Return the versioned arithmetic bounds descriptor for this contract.
+    ///
+    /// The descriptor is a compile-time constant derived entirely from the
+    /// named constants in this module.  It is read-only, requires no
+    /// authorization, and does not modify ledger state.
+    ///
+    /// Callers can use the returned values to validate inputs before
+    /// submitting a `commit_epoch` or `claim_dividend` transaction, without
+    /// needing to hard-code the bounds themselves.
+    pub fn arithmetic_bounds(_env: Env) -> ArithmeticBounds {
+        ArithmeticBounds {
+            min_epoch_amount: MIN_EPOCH_AMOUNT,
+            max_share_pct: 100u32,
+            min_expiry_secs: MIN_EXPIRY_SECS,
+            max_expiry_secs: MAX_EXPIRY_SECS,
+            descriptor_version: 1u32,
+        }
     }
 
     // ── Two-step admin transfer ──────────────────────────────────────
@@ -4551,6 +4582,132 @@ mod tests {
         // The contract will fail when trying to invoke the interface_id method
         // on a non-existent contract, which results in an error
         assert!(res.is_err());
+    }
+
+    // ── arithmetic_bounds() ──────────────────────────────────────────────────
+
+    #[test]
+    fn arithmetic_bounds_returns_correct_values() {
+        let (env, _, _, _, client) = setup();
+        let bounds = client.arithmetic_bounds();
+        assert_eq!(bounds.min_epoch_amount, 1_i128);
+        assert_eq!(bounds.max_share_pct, 100u32);
+        assert_eq!(bounds.min_expiry_secs, 3_600u64);
+        assert_eq!(bounds.max_expiry_secs, 31_536_000u64);
+        assert_eq!(bounds.descriptor_version, 1u32);
+        let _ = env;
+    }
+
+    #[test]
+    fn arithmetic_bounds_descriptor_version_is_one() {
+        let (env, _, _, _, client) = setup();
+        assert_eq!(client.arithmetic_bounds().descriptor_version, 1u32);
+        let _ = env;
+    }
+
+    #[test]
+    fn arithmetic_bounds_min_epoch_amount_is_positive() {
+        let (env, _, _, _, client) = setup();
+        assert!(client.arithmetic_bounds().min_epoch_amount >= 1);
+        let _ = env;
+    }
+
+    #[test]
+    fn arithmetic_bounds_max_share_pct_is_100() {
+        let (env, _, _, _, client) = setup();
+        assert_eq!(client.arithmetic_bounds().max_share_pct, 100u32);
+        let _ = env;
+    }
+
+    #[test]
+    fn arithmetic_bounds_expiry_range_is_ordered() {
+        let (env, _, _, _, client) = setup();
+        let bounds = client.arithmetic_bounds();
+        assert!(bounds.min_expiry_secs < bounds.max_expiry_secs);
+        let _ = env;
+    }
+
+    #[test]
+    fn interface_features_includes_arithmetic_bounds() {
+        let (env, _, _, _, client) = setup();
+        let features = client.interface_features();
+        let target = soroban_sdk::Symbol::new(&env, "arithmetic_bounds");
+        let mut found = false;
+        for i in 0..features.len() {
+            if features.get(i).unwrap() == target {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "expected 'arithmetic_bounds' in interface_features");
+    }
+
+    #[test]
+    fn version_returns_1_3_0() {
+        let (env, _, _, _, client) = setup();
+        assert_eq!(client.version(), (1u32, 3u32, 0u32));
+        let _ = env;
+    }
+
+    #[test]
+    fn interface_id_golden_vector_matches_1_3_0() {
+        let (env, _, _, _, client) = setup();
+        let id = client.interface_id();
+        // Build expected bytes using the §6 derivation rule:
+        // bytes[0..14]  = "TalosDividends"
+        // bytes[14..16] = 0x00 0x00 (zero-pad to 16)
+        // bytes[16..20] = major=1 big-endian
+        // bytes[20..24] = minor=3 big-endian
+        // bytes[24..28] = patch=0 big-endian
+        // bytes[28..32] = 0x00 0x00 0x00 0x00 reserved
+        let expected: [u8; 32] = [
+            0x54, 0x61, 0x6C, 0x6F, 0x73, 0x44, 0x69, 0x76,
+            0x69, 0x64, 0x65, 0x6E, 0x64, 0x73, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x03,
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(id, soroban_sdk::BytesN::from_array(&env, &expected));
+    }
+
+    #[test]
+    fn arithmetic_bounds_consistent_with_commit_epoch_validation() {
+        // Verify that the bounds descriptor aligns with what commit_epoch
+        // actually enforces: amounts below min and expiry outside range
+        // must be rejected.
+        let (env, contract_id, admin, _, client) = setup();
+        let bounds = client.arithmetic_bounds();
+
+        // amount below min_epoch_amount → InvalidEpochParams
+        let res = client
+            .mock_auths(&[soroban_sdk::testutils::MockAuth {
+                address: &admin,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch",
+                    args: (admin.clone(), 1u32, (bounds.min_epoch_amount - 1), 7_200_u64)
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_commit_epoch(&admin, &1u32, &(bounds.min_epoch_amount - 1), &7_200_u64);
+        assert_eq!(res, Err(Ok(ContractError::InvalidEpochParams)));
+
+        // expiry below min_expiry_secs → InvalidEpochParams
+        let res2 = client
+            .mock_auths(&[soroban_sdk::testutils::MockAuth {
+                address: &admin,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "commit_epoch",
+                    args: (admin.clone(), 1u32, 1_000_i128, (bounds.min_expiry_secs - 1))
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_commit_epoch(&admin, &1u32, &1_000_i128, &(bounds.min_expiry_secs - 1));
+        assert_eq!(res2, Err(Ok(ContractError::InvalidEpochParams)));
     }
 }
 
