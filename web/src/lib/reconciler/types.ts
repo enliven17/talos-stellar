@@ -6,6 +6,23 @@
  * discriminated unions — avoiding stringly-typed bugs across module boundaries.
  */
 
+// ─── Replayable Report Types ─────────────────────────────────────────────────
+
+export interface ReconcilerObservation {
+  pollResult: HorizonPollResult | null;
+  currentLedger: number;
+  now: Date;
+}
+
+export interface ReconcilerTransitionReport {
+  initialState: TxRecord;
+  steps: {
+    observation: ReconcilerObservation;
+    update: TxRecordUpdate | null;
+    resultingState: TxRecord;
+  }[];
+}
+
 // ─── Finality States ──────────────────────────────────────────────────────────
 
 /** All valid positions in the finality state machine. */
@@ -42,6 +59,8 @@ export type TxSourceType = "commerce_job" | "token_purchase" | "other";
 export interface TxRecord {
   id: string;
   txHash: string;
+  /** Pinned Stellar network identity (network passphrase) against which this payment is tracked. */
+  networkPassphrase?: string | null;
   sourceType: TxSourceType;
   sourceId: string | null;
   finalityStatus: FinalityStatus;
@@ -60,16 +79,17 @@ export interface TxRecord {
 
 /** Discriminated union returned by the Horizon polling layer. */
 export type HorizonPollResult =
-  | { outcome: "confirmed"; ledger: number; successful: true }
-  | { outcome: "failed";    ledger: number; successful: false; detail?: string }
-  | { outcome: "not_found" }
-  | { outcome: "error";     message: string; retryable: boolean };
+  | { outcome: "confirmed"; ledger: number; successful: true; networkPassphrase?: string }
+  | { outcome: "failed";    ledger: number; successful: false; detail?: string; networkPassphrase?: string }
+  | { outcome: "not_found"; networkPassphrase?: string }
+  | { outcome: "error";     message: string; retryable: boolean; networkPassphrase?: string };
 
 // ─── State Transition ─────────────────────────────────────────────────────────
 
 /** Fields that may be updated during a state transition. */
 export interface TxRecordUpdate {
   finalityStatus?: FinalityStatus;
+  networkPassphrase?: string | null;
   lastLedgerChecked?: number;
   confirmedLedger?: number;
   pollCount?: number;
@@ -83,7 +103,7 @@ export interface TxRecordUpdate {
 /** Outcome of applying downstream repair for a confirmed/failed/expired tx. */
 export type RepairOutcome =
   | { ok: true;  repaired: boolean; detail?: string }
-  | { ok: false; error: string };
+  | { ok: false; error: string; stale?: boolean };
 
 // ─── Reconciler Config ────────────────────────────────────────────────────────
 
@@ -129,6 +149,12 @@ export interface ReconcilerConfig {
    * Default: 5.
    */
   concurrencyLimit?: number;
+
+  /**
+   * Pinned Stellar network identity (passphrase) to reconcile against.
+   * Defaults to STELLAR_NETWORK_PASSPHRASE or network-derived passphrase.
+   */
+  networkPassphrase?: string;
 }
 
 // ─── Scheduler State (in-process singleton) ──────────────────────────────────

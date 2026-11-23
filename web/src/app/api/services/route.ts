@@ -14,6 +14,10 @@ import { parsePriceRange } from "@/lib/parse-price";
 import { fetchReputations } from "@/lib/reputation-ledger";
 import { withTraceContext } from "@/lib/tracing";
 import { internalError } from "@/lib/api-response";
+import {
+  deriveServiceAvailability,
+  type ServiceAvailabilityEvidence,
+} from "@/lib/marketplace-availability";
 
 export type ServiceCursor = {
   createdAt: string;
@@ -32,10 +36,13 @@ type ServiceRow = {
   currency: string;
   chains: string[];
   createdAt: Date;
+  agentOnline: boolean;
+  agentLastSeen: Date | null;
 };
 
-type ServiceResult = Omit<ServiceRow, "price" | "createdAt" | "id"> & {
+type ServiceResult = Omit<ServiceRow, "price" | "createdAt" | "id" | "agentOnline" | "agentLastSeen"> & {
   price: number;
+  availability: ServiceAvailabilityEvidence;
 };
 
 export function encodeServiceCursor(cursor: ServiceCursor): string {
@@ -301,6 +308,8 @@ function fetchServicesBatch(
       currency: tlsCommerceServices.currency,
       chains: tlsCommerceServices.chains,
       createdAt: tlsCommerceServices.createdAt,
+      agentOnline: tlsTalos.agentOnline,
+      agentLastSeen: tlsTalos.agentLastSeen,
     })
     .from(tlsCommerceServices)
     .innerJoin(tlsTalos, eq(tlsCommerceServices.talosId, tlsTalos.id))
@@ -362,6 +371,10 @@ function toServiceResult(service: ServiceRow): ServiceResult {
     price: Number(service.price),
     currency: service.currency,
     chains: service.chains,
+    availability: deriveServiceAvailability(
+      service.agentOnline,
+      service.agentLastSeen,
+    ),
   };
 }
 

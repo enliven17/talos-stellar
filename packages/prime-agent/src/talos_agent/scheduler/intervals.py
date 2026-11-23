@@ -1,0 +1,6 @@
+"""Fixed nominal intervals shared by scheduler tasks and schedule previews."""
+
+ACTIVITY_FLUSH_INTERVAL_SECONDS = 30
+LEARNING_CYCLE_INTERVAL_SECONDS = 6 * 60 * 60
+LOAN_REPAYMENT_INTERVAL_SECONDS = 24 * 60 * 60
+TELEMETRY_INTERVAL_SECONDS = 30 * 60

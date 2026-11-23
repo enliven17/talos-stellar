@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { parsePriceRange } from "@/lib/parse-price";
+import { parsePriceRange, parseUsdcUnits, USDC_DECIMALS } from "@/lib/parse-price";
 
 // ---------------------------------------------------------------------------
 // 1. Both absent
@@ -231,5 +231,75 @@ describe("Infinity and NaN strings → 400", () => {
     if (!result.ok) {
       expect(result.response.status).toBe(400);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10. Exact USDC unit validation & field-level error contract
+// ---------------------------------------------------------------------------
+
+describe("exact USDC units (7 decimal places) and field-level errors", () => {
+  it("converts valid USDC decimals to exact stroop units", () => {
+    expect(USDC_DECIMALS).toBe(7);
+    expect(parseUsdcUnits("0")).toBe(0n);
+    expect(parseUsdcUnits("1")).toBe(10_000_000n);
+    expect(parseUsdcUnits("1.0000001")).toBe(10_000_001n);
+    expect(parseUsdcUnits("9007199254740993")).toBe(90071992547409930000000n);
+    expect(parseUsdcUnits("1.00000001")).toBeNull();
+    expect(parseUsdcUnits("1e5")).toBeNull();
+    expect(parseUsdcUnits("-1")).toBeNull();
+  });
+
+  it("rejects minPrice with more than 7 decimal places with field-level error", async () => {
+    const result = parsePriceRange("1.00000001", "2");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.response.status).toBe(400);
+      const body = await result.response.json();
+      expect(body.field).toBe("minPrice");
+      expect(body.fieldErrors?.minPrice).toMatch(/7 decimal places/i);
+      expect(body.error).toMatch(/minPrice/);
+    }
+  });
+
+  it("rejects maxPrice with more than 7 decimal places with field-level error", async () => {
+    const result = parsePriceRange("1", "2.12345678");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.response.status).toBe(400);
+      const body = await result.response.json();
+      expect(body.field).toBe("maxPrice");
+      expect(body.fieldErrors?.maxPrice).toMatch(/7 decimal places/i);
+      expect(body.error).toMatch(/maxPrice/);
+    }
+  });
+
+  it("rejects contradictory range at 1-stroop precision (1.0000001 > 1.0000000)", async () => {
+    const result = parsePriceRange("1.0000001", "1.0000000");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.response.status).toBe(400);
+      const body = await result.response.json();
+      expect(body.field).toBe("minPrice");
+      expect(body.fieldErrors?.minPrice).toContain("1.0000001");
+      expect(body.fieldErrors?.maxPrice).toContain("1.0000000");
+    }
+  });
+
+  it("rejects contradictory range beyond Number.MAX_SAFE_INTEGER using exact BigInt units", async () => {
+    const result = parsePriceRange("9007199254740993", "9007199254740992");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.response.status).toBe(400);
+      const body = await result.response.json();
+      expect(body.field).toBe("minPrice");
+      expect(body.fieldErrors?.minPrice).toContain("9007199254740993");
+      expect(body.fieldErrors?.maxPrice).toContain("9007199254740992");
+    }
+  });
+
+  it("accepts equal exact USDC amounts with different trailing zeroes", () => {
+    const result = parsePriceRange("1.5", "1.5000000");
+    expect(result).toEqual({ ok: true, minPrice: 1.5, maxPrice: 1.5 });
   });
 });
