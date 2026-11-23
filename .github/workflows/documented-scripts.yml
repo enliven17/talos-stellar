@@ -1,0 +1,46 @@
+name: Documented scripts
+
+on:
+  pull_request:
+    paths:
+      - "**/*.md"
+      - "package.json"
+      - "web/package.json"
+      - "packages/*/package.json"
+      - "contracts/package.json"
+      - "scripts/check-documented-scripts.mjs"
+      - "scripts/check-documented-scripts.test.mjs"
+      - ".github/workflows/documented-scripts.yml"
+  push:
+    branches: [main]
+    paths:
+      - "**/*.md"
+      - "package.json"
+      - "web/package.json"
+      - "packages/*/package.json"
+      - "contracts/package.json"
+      - "scripts/check-documented-scripts.mjs"
+      - "scripts/check-documented-scripts.test.mjs"
+      - ".github/workflows/documented-scripts.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  documented-scripts:
+    name: Check documented npm/pnpm scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+
+      - name: Check documented scripts
+        run: node scripts/check-documented-scripts.mjs
+
+      - name: Test documented scripts checker
+        run: node --test scripts/check-documented-scripts.test.mjs

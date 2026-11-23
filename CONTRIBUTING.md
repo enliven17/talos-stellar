@@ -328,6 +328,11 @@ cargo test --target wasm32-unknown-unknown
 
 Run the smallest test set that covers the files you touched before falling back to a full suite. The commands below avoid database resets and hidden local state. Run them after installing dependencies with `pnpm install` at the repository root, `uv sync --extra dev` in `packages/prime-agent/`, or the Rust setup from the prerequisites. In this section, commands that call package scripts use `pnpm run <script>` so the script name can be checked directly in the package's `package.json`.
 
+If you change a documented `npm` or `pnpm` command, run
+`pnpm run docs:scripts:check` to confirm it still matches the target
+`package.json`. See
+[`docs/documented-scripts.md`](docs/documented-scripts.md).
+
 ### Web changes
 
 Use the web package scripts for Next.js, API, database, and DevX changes. The main test artifact is the Vitest report in stdout. Benchmark jobs also upload `.benchmarks/` as the `benchmark-artifacts` workflow artifact.
