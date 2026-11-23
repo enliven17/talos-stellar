@@ -17,6 +17,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from talos_agent.policy.patterns import PolicyPatternError
 from talos_agent.policy.schema import (
     MatchCondition,
     Policy,
@@ -29,6 +30,11 @@ if TYPE_CHECKING:
     from talos_agent.db import LocalDB
 
 logger = logging.getLogger(__name__)
+
+
+class PolicyLoadError(ValueError):
+    """Raised when policy overrides cannot be loaded safely."""
+
 
 # ── Default policies ──────────────────────────────────────────────────────────
 
@@ -266,6 +272,23 @@ def _load_from_file(path: Path) -> list[Policy]:
 
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.error("Failed to read or parse policies.json: %s", exc)
+        raise PolicyLoadError(f"Unable to load policy file '{path}'") from exc
+
+    if not isinstance(raw, dict):
+        raise PolicyLoadError("Policy file root must be a JSON object")
+    policies_data = raw.get("policies", [])
+    if not isinstance(policies_data, list):
+        raise PolicyLoadError("policies.json 'policies' key must be a list")
+    if any(not isinstance(policy, dict) for policy in policies_data):
+        raise PolicyLoadError("Each policy in policies.json must be an object")
+
+    try:
+        return [Policy.from_dict(policy) for policy in policies_data]
+    except (AttributeError, TypeError, ValueError) as exc:
+        logger.error("Invalid policy in policies.json: %s", exc)
+        raise PolicyLoadError("Policy file contains an invalid policy") from exc
         policies_data = raw.get("policies", [])
         if not isinstance(policies_data, list):
             logger.warning("policies.json 'policies' key must be a list")
@@ -274,6 +297,8 @@ def _load_from_file(path: Path) -> list[Policy]:
     except json.JSONDecodeError as exc:
         logger.error("Failed to parse policies.json: %s", exc)
         return []
+    except PolicyPatternError:
+        raise
     except Exception as exc:
         logger.error("Unexpected error loading policies.json: %s", exc)
         return []
@@ -298,8 +323,10 @@ class PolicyLoader:
 
     def __init__(self, db: LocalDB | None = None) -> None:
         self._db = db
-        self._last_file_mtime: float = 0.0
+        self._last_file_mtime: float | None = None
         self._cached: list[Policy] | None = None
+        self._reload_failed = False
+        self._pending_reload: tuple[list[Policy], float | None] | None = None
 
     # ── Loading ─────────────────────────────────────────────────────────
 
@@ -341,13 +368,8 @@ class PolicyLoader:
         Returns ``True`` if the file's ``mtime`` has changed.
         """
         path = _policies_file_path()
-        if not path.exists():
-            return False
-        mtime = path.stat().st_mtime
-        changed = mtime != self._last_file_mtime
-        if changed:
-            self._last_file_mtime = mtime
-        return changed
+        mtime = path.stat().st_mtime if path.exists() else None
+        return self._reload_failed or mtime != self._last_file_mtime
 
     def reload_if_stale(self) -> list[Policy] | None:
         """Return fresh policies if the file changed, otherwise ``None``.
@@ -356,14 +378,36 @@ class PolicyLoader:
         """
         if self.needs_reload():
             logger.info("Policy file changed — reloading policies")
-            self._cached = self.load()
-            return self._cached
+            path = _policies_file_path()
+            observed_mtime = path.stat().st_mtime if path.exists() else None
+            candidate = self.load()
+            self._pending_reload = (candidate, observed_mtime)
+            return candidate
         return None
+
+    def mark_reload_succeeded(self, policies: list[Policy]) -> None:
+        """Commit a candidate after the policy engine accepts its snapshot."""
+        self._cached = policies
+        if self._pending_reload is not None:
+            self._last_file_mtime = self._pending_reload[1]
+        self._pending_reload = None
+        self._reload_failed = False
+
+    def mark_reload_failed(self) -> None:
+        """Ensure the next hot-reload check retries the current file."""
+        self._pending_reload = None
+        self._reload_failed = True
 
     def reload(self) -> list[Policy]:
         """Force a reload of all policies (regardless of file mtime)."""
-        self._cached = self.load()
-        return self._cached
+        path = _policies_file_path()
+        observed_mtime = path.stat().st_mtime if path.exists() else None
+        candidate = self.load()
+        self._cached = candidate
+        self._last_file_mtime = observed_mtime
+        self._pending_reload = None
+        self._reload_failed = False
+        return candidate
 
     # ── Helpers ────────────────────────────────────────────────────────
 
@@ -377,6 +421,8 @@ class PolicyLoader:
         except AttributeError:
             # DB doesn't have list_policy_overrides yet; safe fallback
             return []
+        except PolicyPatternError:
+            raise
         except Exception as exc:
             logger.warning("Failed to load policies from DB: %s", exc)
             return []
@@ -409,6 +455,15 @@ class PolicyLoader:
                             "reason": r.reason,
                         }
                         for r in p.rules
+                    ],
+                    "exceptions": [
+                        {
+                            "rule_id": exception.rule_id,
+                            "actor": exception.actor,
+                            "reason": exception.reason,
+                            "expires_at": exception.expires_at.isoformat(),
+                        }
+                        for exception in p.exceptions
                     ],
                 }
                 for p in policies
