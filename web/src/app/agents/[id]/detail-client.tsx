@@ -109,6 +109,24 @@ const JOB_STATUS_STYLES: Record<string, string> = {
 };
 
 export function TalosDetailClient({ talos }: { talos: TalosDetail }) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const prevFocusedRef = useRef<HTMLElement | null>(null);
+
+  // Capture focus before talos updates
+  useEffect(() => {
+    const active = document.activeElement as HTMLElement;
+    if (active && panelRef.current?.contains(active) && active.tagName !== 'H1') {
+      prevFocusedRef.current = active;
+    }
+  }, [talos.id]); // assuming id changes on refresh
+
+  // Restore focus after render when talos changes
+  useEffect(() => {
+    if (prevFocusedRef.current && panelRef.current?.contains(prevFocusedRef.current)) {
+      prevFocusedRef.current.focus();
+    }
+    prevFocusedRef.current = null;
+  }, [talos]);
   const [tab, setTab] = useState<Tab>("Overview");
   const [reviewOpen, setReviewOpen] = useState<null | { kind: "buy" | "service"; payload: TransactionPayload }>(null);
   const [reviewOpen, setReviewOpen] = useState<null | { kind: "buy" | "service"; payload: TransactionPayload }>(null);

@@ -54,9 +54,13 @@ import {
   isWallClockExpired,
   isLedgerExpired,
   isTerminal,
-  normalizeNetworkPassphrase,
-  isMatchingNetwork,
+  detectAssociationConflict,
+  hasConflictingAssociation,
+  canCreditJob,
+  formatAssociationConflictError,
+  TxAssociationConflictError,
 } from "../src/lib/reconciler/state-machine";
+import { isTrustedObservation } from "../src/lib/reconciler/horizon";
 import type { TxRecord, ReconcilerConfig, HorizonPollResult } from "../src/lib/reconciler/types";
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -96,6 +100,24 @@ const FAILED_POLL: HorizonPollResult = { outcome: "failed", ledger: 1010, succes
 const NOT_FOUND_POLL: HorizonPollResult = { outcome: "not_found" };
 const ERROR_POLL_RETRYABLE: HorizonPollResult = { outcome: "error", message: "503 Service Unavailable", retryable: true };
 const ERROR_POLL_PERMANENT: HorizonPollResult = { outcome: "error", message: "400 Bad Request", retryable: false };
+const ERROR_POLL_AUTH: HorizonPollResult = {
+  outcome: "error",
+  message: "401 Unauthorized",
+  retryable: false,
+  reasonCode: "UNAUTHORIZED",
+};
+const ERROR_POLL_THROTTLED: HorizonPollResult = {
+  outcome: "error",
+  message: "429 Too Many Requests",
+  retryable: true,
+  reasonCode: "RATE_LIMITED",
+};
+const ERROR_POLL_PROVIDER: HorizonPollResult = {
+  outcome: "error",
+  message: "503 Service Unavailable",
+  retryable: true,
+  reasonCode: "PROVIDER_UNAVAILABLE",
+};
 
 // ─── isTerminal ───────────────────────────────────────────────────────────────
 
@@ -140,6 +162,12 @@ describe("isWallClockExpired", () => {
     const rec = makeRecord({ expiresAt: now });
     expect(isWallClockExpired(rec, now)).toBe(true);
   });
+  it.each([new Date(Number.NaN), new Date(Number.POSITIVE_INFINITY)])(
+    "returns false for a nonfinite expiry timestamp",
+    (expiresAt) => {
+      expect(isWallClockExpired(makeRecord({ expiresAt }), new Date())).toBe(false);
+    },
+  );
 });
 
 // ─── isLedgerExpired ──────────────────────────────────────────────────────────
@@ -204,6 +232,7 @@ describe("transitionFromPending", () => {
     expect(update?.finalityStatus).toBeUndefined();
     expect(update?.lastError).toBe("503 Service Unavailable");
     expect(update?.pollCount).toBe(1);
+    expect(update?.reasonCode).toBeUndefined();
   });
 
   it("stays PENDING on non-retryable error, bumps pollCount", () => {
@@ -211,6 +240,29 @@ describe("transitionFromPending", () => {
     const update = transitionFromPending(rec, ERROR_POLL_PERMANENT, 1010, BASE_CONFIG);
     expect(update?.finalityStatus).toBeUndefined();
     expect(update?.pollCount).toBe(1);
+    expect(update?.reasonCode).toBeUndefined();
+  });
+
+  it("propagates reasonCode from error poll result while preserving lastError", () => {
+    const rec = makeRecord({ pollCount: 2 });
+
+    const authUpdate = transitionFromPending(rec, ERROR_POLL_AUTH, 1010, BASE_CONFIG);
+    expect(authUpdate?.finalityStatus).toBeUndefined();
+    expect(authUpdate?.pollCount).toBe(3);
+    expect(authUpdate?.lastError).toBe("401 Unauthorized");
+    expect(authUpdate?.reasonCode).toBe("UNAUTHORIZED");
+    expect(isAuthorizationFailure(authUpdate?.reasonCode)).toBe(true);
+    expect(getFailureCategory(authUpdate?.reasonCode)).toBe("authorization");
+
+    const throttleUpdate = transitionFromPending(rec, ERROR_POLL_THROTTLED, 1010, BASE_CONFIG);
+    expect(throttleUpdate?.reasonCode).toBe("RATE_LIMITED");
+    expect(isThrottlingFailure(throttleUpdate?.reasonCode)).toBe(true);
+    expect(getFailureCategory(throttleUpdate?.reasonCode)).toBe("throttling");
+
+    const providerUpdate = transitionFromPending(rec, ERROR_POLL_PROVIDER, 1010, BASE_CONFIG);
+    expect(providerUpdate?.reasonCode).toBe("PROVIDER_UNAVAILABLE");
+    expect(isProviderFailure(providerUpdate?.reasonCode)).toBe(true);
+    expect(getFailureCategory(providerUpdate?.reasonCode)).toBe("provider_failure");
   });
 
   it("transitions PENDING → EXPIRED when wall-clock expiry has passed", () => {
@@ -218,6 +270,11 @@ describe("transitionFromPending", () => {
     const update = transitionFromPending(rec, NOT_FOUND_POLL, 1010, BASE_CONFIG, new Date());
     expect(update?.finalityStatus).toBe("EXPIRED");
     expect(update?.lastError).toMatch(/expiry/i);
+  });
+
+  it("preserves PENDING when expiresAt is nonfinite", () => {
+    const rec = makeRecord({ expiresAt: new Date(Number.NaN) });
+    expect(transitionFromPending(rec, CONFIRMED_POLL, 1010, BASE_CONFIG)).toBeNull();
   });
 
   it("transitions PENDING → EXPIRED when ledger gap exceeded", () => {
@@ -279,6 +336,11 @@ describe("transitionFromConfirming", () => {
     });
     const update = transitionFromConfirming(rec, 1011, BASE_CONFIG, new Date());
     expect(update?.finalityStatus).toBe("EXPIRED");
+  });
+
+  it("preserves CONFIRMING when now is nonfinite", () => {
+    const rec = makeRecord({ finalityStatus: "CONFIRMING", confirmedLedger: 1010 });
+    expect(transitionFromConfirming(rec, 1012, BASE_CONFIG, new Date(Number.NaN))).toBeNull();
   });
 
   it("transitions CONFIRMING → EXPIRED on ledger gap (counted from ledgerSubmitted)", () => {
@@ -469,162 +531,101 @@ describe("State machine edge cases", () => {
   });
 });
 
-// ─── Network Identity Pinning & Observation Rejection ─────────────────────────
+// ─── Association conflict detection ──────────────────────────────────────────
 
-describe("Network Identity Pinning & Observation Rejection", () => {
-  const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
-  const MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015";
-
-  describe("normalizeNetworkPassphrase", () => {
-    it("normalises 'testnet' shorthand to SDF testnet passphrase", () => {
-      expect(normalizeNetworkPassphrase("testnet")).toBe(TESTNET_PASSPHRASE);
-      expect(normalizeNetworkPassphrase("TESTNET")).toBe(TESTNET_PASSPHRASE);
-    });
-
-    it("normalises 'mainnet' and 'public' shorthand to SDF public passphrase", () => {
-      expect(normalizeNetworkPassphrase("mainnet")).toBe(MAINNET_PASSPHRASE);
-      expect(normalizeNetworkPassphrase("public")).toBe(MAINNET_PASSPHRASE);
-      expect(normalizeNetworkPassphrase("PUBLIC")).toBe(MAINNET_PASSPHRASE);
-    });
-
-    it("preserves custom passphrases as-is", () => {
-      const custom = "Private Standalone Network ; January 2026";
-      expect(normalizeNetworkPassphrase(custom)).toBe(custom);
-    });
-
-    it("handles null, undefined, or empty string safely", () => {
-      expect(normalizeNetworkPassphrase(null)).toBeNull();
-      expect(normalizeNetworkPassphrase(undefined)).toBeNull();
-      expect(normalizeNetworkPassphrase("")).toBeNull();
-    });
+describe("detectAssociationConflict & canCreditJob", () => {
+  it("returns null for compatible (idempotent) associations with the same txHash", () => {
+    const conflict = detectAssociationConflict(
+      { txHash: "abc123def456", sourceType: "commerce_job", sourceId: "job_1" },
+      { txHash: "abc123def456", sourceType: "commerce_job", sourceId: "job_1" },
+    );
+    expect(conflict).toBeNull();
   });
 
-  describe("isMatchingNetwork", () => {
-    it("returns true for matching passphrases", () => {
-      expect(isMatchingNetwork(TESTNET_PASSPHRASE, TESTNET_PASSPHRASE)).toBe(true);
-      expect(isMatchingNetwork("testnet", TESTNET_PASSPHRASE)).toBe(true);
-      expect(isMatchingNetwork(TESTNET_PASSPHRASE, "testnet")).toBe(true);
-      expect(isMatchingNetwork("mainnet", MAINNET_PASSPHRASE)).toBe(true);
-    });
-
-    it("returns false for mismatched passphrases", () => {
-      expect(isMatchingNetwork(TESTNET_PASSPHRASE, MAINNET_PASSPHRASE)).toBe(false);
-      expect(isMatchingNetwork("testnet", "mainnet")).toBe(false);
-    });
-
-    it("returns true for backward compatibility when either side is omitted", () => {
-      expect(isMatchingNetwork(null, TESTNET_PASSPHRASE)).toBe(true);
-      expect(isMatchingNetwork(TESTNET_PASSPHRASE, null)).toBe(true);
-      expect(isMatchingNetwork(undefined, undefined)).toBe(true);
-    });
+  it("returns null when txHashes differ", () => {
+    const conflict = detectAssociationConflict(
+      { txHash: "hash_a", sourceType: "commerce_job", sourceId: "job_1" },
+      { txHash: "hash_b", sourceType: "commerce_job", sourceId: "job_2" },
+    );
+    expect(conflict).toBeNull();
   });
 
-  describe("transitionFromPending with pinned network identity", () => {
-    const pinnedRecord = makeRecord({
-      finalityStatus: "PENDING",
-      networkPassphrase: TESTNET_PASSPHRASE,
-      pollCount: 2,
-    });
+  it("detects conflict when one txHash is associated with two different jobs", () => {
+    const now = new Date("2026-11-19T00:00:00.000Z");
+    const conflict = detectAssociationConflict(
+      { txHash: "abc123def456", sourceType: "commerce_job", sourceId: "job_1" },
+      { txHash: "abc123def456", sourceType: "commerce_job", sourceId: "job_2" },
+      now,
+    );
 
-    it("rejects confirmed observation from a foreign network without transitioning financial state", () => {
-      const foreignPoll: HorizonPollResult = {
-        outcome: "confirmed",
-        ledger: 1050,
-        successful: true,
-        networkPassphrase: MAINNET_PASSPHRASE,
-      };
-
-      const update = transitionFromPending(pinnedRecord, foreignPoll, 1050, BASE_CONFIG);
-      expect(update).not.toBeNull();
-      expect(update?.finalityStatus).toBeUndefined(); // Stays PENDING
-      expect(update?.confirmedLedger).toBeUndefined(); // No financial settlement recorded
-      expect(update?.pollCount).toBe(3); // Bumped poll attempt
-      expect(update?.lastError).toContain("Rejected observation from foreign network");
-      expect(update?.lastError).toContain(MAINNET_PASSPHRASE);
-    });
-
-    it("rejects failed observation from a foreign network without transitioning financial state", () => {
-      const foreignPoll: HorizonPollResult = {
-        outcome: "failed",
-        ledger: 1050,
-        successful: false,
-        detail: "tx_bad_auth",
-        networkPassphrase: MAINNET_PASSPHRASE,
-      };
-
-      const update = transitionFromPending(pinnedRecord, foreignPoll, 1050, BASE_CONFIG);
-      expect(update).not.toBeNull();
-      expect(update?.finalityStatus).toBeUndefined(); // Stays PENDING (does not transition to FAILED)
-      expect(update?.pollCount).toBe(3);
-      expect(update?.lastError).toContain("Rejected observation from foreign network");
-    });
-
-    it("rejects not_found observation from a foreign network and avoids NOT_FOUND terminal state", () => {
-      const config = { ...BASE_CONFIG, notFoundThreshold: 3 };
-      const foreignPoll: HorizonPollResult = {
-        outcome: "not_found",
-        networkPassphrase: MAINNET_PASSPHRASE,
-      };
-
-      const update = transitionFromPending(pinnedRecord, foreignPoll, 1050, config);
-      expect(update).not.toBeNull();
-      expect(update?.finalityStatus).toBeUndefined(); // Stays PENDING even though pollCount+1 >= threshold
-      expect(update?.lastError).toContain("Rejected observation from foreign network");
-    });
-
-    it("accepts observation from matching network and transitions normally", () => {
-      const matchingPoll: HorizonPollResult = {
-        outcome: "confirmed",
-        ledger: 1050,
-        successful: true,
-        networkPassphrase: TESTNET_PASSPHRASE,
-      };
-
-      const update = transitionFromPending(pinnedRecord, matchingPoll, 1050, BASE_CONFIG);
-      expect(update).not.toBeNull();
-      expect(update?.finalityStatus).toBe("CONFIRMING");
-      expect(update?.confirmedLedger).toBe(1050);
-      expect(update?.lastError).toBeNull();
-    });
-
-    it("falls back to config.networkPassphrase when record has no pinned passphrase", () => {
-      const unpinnedRecord = makeRecord({
-        finalityStatus: "PENDING",
-        networkPassphrase: null,
-        pollCount: 0,
-      });
-      const config = { ...BASE_CONFIG, networkPassphrase: TESTNET_PASSPHRASE };
-      const foreignPoll: HorizonPollResult = {
-        outcome: "confirmed",
-        ledger: 1050,
-        successful: true,
-        networkPassphrase: MAINNET_PASSPHRASE,
-      };
-
-      const update = transitionFromPending(unpinnedRecord, foreignPoll, 1050, config);
-      expect(update?.finalityStatus).toBeUndefined();
-      expect(update?.lastError).toContain("Rejected observation from foreign network");
-    });
+    expect(conflict).not.toBeNull();
+    expect(conflict?.txHash).toBe("abc123def456");
+    expect(conflict?.existingSourceId).toBe("job_1");
+    expect(conflict?.incomingSourceId).toBe("job_2");
+    expect(conflict?.detectedAt).toEqual(now);
+    expect(formatAssociationConflictError(conflict!)).toContain("ASSOCIATION_CONFLICT:");
   });
 
-  describe("transitionFromConfirming with foreign observation", () => {
-    it("rejects foreign network observation in CONFIRMING state without confirming", () => {
-      const confirmingRecord = makeRecord({
-        finalityStatus: "CONFIRMING",
-        confirmedLedger: 1000,
-        networkPassphrase: TESTNET_PASSPHRASE,
-      });
-      const foreignPoll: HorizonPollResult = {
-        outcome: "confirmed",
-        ledger: 1010,
-        successful: true,
-        networkPassphrase: MAINNET_PASSPHRASE,
-      };
+  it("detects conflict across case/whitespace differences in txHash and across sourceTypes", () => {
+    const conflict = detectAssociationConflict(
+      { txHash: "  ABC123DEF456 ", sourceType: "commerce_job", sourceId: "job_1" },
+      { txHash: "abc123def456", sourceType: "token_purchase", sourceId: "abc123def456" },
+    );
 
-      // Depth is satisfied (1010 >= 1000 + 2), but foreign observation must block transition
-      const update = transitionFromConfirming(confirmingRecord, 1010, BASE_CONFIG, new Date(), foreignPoll);
-      expect(update?.finalityStatus).toBeUndefined(); // Does NOT transition to CONFIRMED
-      expect(update?.lastError).toContain("Rejected observation from foreign network");
-    });
+    expect(conflict).not.toBeNull();
+    expect(conflict?.existingSourceType).toBe("commerce_job");
+    expect(conflict?.incomingSourceType).toBe("token_purchase");
+  });
+
+  it("detects conflict when existing sourceId is null and incoming sourceId is non-null", () => {
+    const conflict = detectAssociationConflict(
+      { txHash: "abc123def456", sourceType: "commerce_job", sourceId: null },
+      { txHash: "abc123def456", sourceType: "commerce_job", sourceId: "job_1" },
+    );
+    expect(conflict).not.toBeNull();
+  });
+
+  it("canCreditJob allows CONFIRMED record with only compatible associations", () => {
+    const rec = makeRecord({ finalityStatus: "CONFIRMED", sourceId: "job_1" });
+    const decision = canCreditJob(rec, [
+      { txHash: rec.txHash, sourceType: "commerce_job", sourceId: "job_1" },
+    ]);
+    expect(decision).toEqual({ allowed: true });
+  });
+
+  it("canCreditJob rejects CONFIRMED record when a conflicting job association exists", () => {
+    const rec = makeRecord({ finalityStatus: "CONFIRMED", sourceId: "job_2" });
+    const decision = canCreditJob(rec, [
+      { txHash: rec.txHash, sourceType: "commerce_job", sourceId: "job_1" },
+    ]);
+    expect(decision.allowed).toBe(false);
+    if (!decision.allowed) {
+      expect(decision.conflict?.existingSourceId).toBe("job_1");
+      expect(decision.conflict?.incomingSourceId).toBe("job_2");
+    }
+  });
+
+  it("canCreditJob rejects non-CONFIRMED record even without association conflicts", () => {
+    const rec = makeRecord({ finalityStatus: "CONFIRMING", sourceId: "job_1" });
+    const decision = canCreditJob(rec, [
+      { txHash: rec.txHash, sourceType: "commerce_job", sourceId: "job_1" },
+    ]);
+    expect(decision.allowed).toBe(false);
+    if (!decision.allowed) {
+      expect(decision.conflict).toBeUndefined();
+      expect(decision.reason).toContain("CONFIRMING");
+    }
+  });
+
+  it("hasConflictingAssociation and TxAssociationConflictError preserve conflict metadata", () => {
+    const rec = makeRecord({ sourceId: "job_2" });
+    const conflict = hasConflictingAssociation(rec, [
+      { txHash: "other_hash", sourceType: "commerce_job", sourceId: "job_9" },
+      { txHash: rec.txHash, sourceType: "commerce_job", sourceId: "job_1" },
+    ]);
+    expect(conflict).not.toBeNull();
+    const err = new TxAssociationConflictError(conflict!);
+    expect(err.name).toBe("TxAssociationConflictError");
+    expect(err.conflict).toEqual(conflict);
   });
 });

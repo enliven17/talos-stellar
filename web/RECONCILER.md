@@ -69,6 +69,18 @@ Transitions are purely functional and validated (`validateTransition`) before an
 9. **Network Identity Pinning & Rejection**: Transactions are pinned to a specific Stellar network identity (passphrase). Any Horizon observation whose network passphrase does not match the pinned network is rejected: the record remains active (in `PENDING` or `CONFIRMING`), `pollCount` is incremented, and `lastError` logs the rejection (`Rejected observation from foreign network...`) without altering financial settlement state or triggering downstream repair.
 10. **Terminal Immutability**: Any attempt to transition out of a terminal state is rejected with an illegal transition error (`Illegal transition: cannot leave terminal state "<state>"`).
 
+### Payment Observation Age & Staleness
+
+The reconciler exposes the age and freshness of the last trusted payment observation:
+
+- **Trusted Observations**: A payment observation is trusted only when Horizon confirms or fails a transaction within a verified closed ledger (`isTrustedObservation`). 404 (`NOT_FOUND`) and network/server errors (`error`) do not constitute trusted observations.
+- **Distinguishing Zero Age from Unknown Age**:
+  - **Zero age (`0`)**: The payment was observed in the *current* ledger (`currentLedger === confirmedLedger`).
+  - **Unknown age (`null`)**: No trusted observation exists yet (e.g., transaction is `PENDING` before first on-chain detection, or current ledger is unavailable). `0` and `null` are strictly distinguished.
+- **Stale Observation Visibility without Mutating Terminal Records**:
+  - When the ledger gap between `currentLedger` and `confirmedLedger` exceeds `staleObservationThreshold`, `getPaymentObservation` reports `status: "stale"` and `isStale: true`.
+  - Terminal records (`CONFIRMED`, `FAILED`, `EXPIRED`, `NOT_FOUND`) remain immutable (`computeTransition` returns `null`). Stale observation status is visible for telemetry, monitoring, and operator review without regressing or altering settled terminal records.
+
 ---
 
 ## Configuration
@@ -86,6 +98,7 @@ All configuration is loaded from environment variables at startup in `src/lib/re
 | `STELLAR_NETWORK_PASSPHRASE` | `Test SDF Network ; September 2015` | Pinned Stellar network identity (passphrase) to reconcile against. If unset, derives from `STELLAR_NETWORK` (`"mainnet"` vs `"testnet"`). |
 | `RECONCILER_CONFIRMATION_DEPTH` | `1` | Number of closed ledgers required after first-seen before transitioning from `CONFIRMING` to `CONFIRMED`. |
 | `RECONCILER_CONCURRENCY_LIMIT` | `5` | Maximum number of concurrent Horizon/DB operations allowed during tick queue draining. |
+| `RECONCILER_STALE_OBSERVATION_THRESHOLD` | `120` | Maximum ledger sequence difference before a payment observation is considered stale. |
 | `ADMIN_API_KEY` | — | Bearer token required for administrative endpoints (`/api/admin/reconciler/*`). |
 
 ---
@@ -183,7 +196,8 @@ await registerTx({
 });
 ```
 
-- **Idempotent**: Re-registering an existing `txHash` returns the existing record ID without duplicating rows or throwing.
+- **Idempotent**: Re-registering an existing `txHash` with the same `(sourceType, sourceId)` returns the existing record ID without duplicating rows or throwing.
+- **Conflicting Association Detection**: If an existing `txHash` is re-registered with an incompatible `sourceType` or `sourceId`, `registerTx()` records the conflict in `last_error` (`ASSOCIATION_CONFLICT: ...`), emits `reconciler_tx_association_conflict`, does not duplicate any row or financial effect, and throws `TxAssociationConflictError`. Likewise, before crediting a `CONFIRMED` commerce job, `applyRepair()` validates associations with `canCreditJob()` and rejects conflicting payment-to-job bindings.
 - **Fire-and-Forget Safe**: In routes such as `buy-token` and `jobs`, `registerTx` is called after the main database transaction commits, ensuring route responses are not blocked or failed if registration encounters an issue.
 
 ---
@@ -323,6 +337,7 @@ curl -X GET http://localhost:3000/api/talos/talos_123/jobs/job_456/payment-statu
   "finalityStatus": "CONFIRMED",
   "confirmedLedger": 1234567,
   "lastLedgerChecked": 1234568,
+  "observationAge": 1,
   "pollCount": 2,
   "lastError": null,
   "repairApplied": true,

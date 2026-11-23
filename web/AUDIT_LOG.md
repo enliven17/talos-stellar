@@ -7,6 +7,7 @@ Operator-facing searchable view of `tls_api_audit_logs` (API key auth events).
 | Method | Path | Auth |
 |--------|------|------|
 | `GET` | `/api/admin/audit-logs` | `Authorization: Bearer <ADMIN_API_KEY>` |
+| `GET` | `/api/talos/:id/audit/verify` | `Authorization: Bearer <AGENT_API_KEY>` |
 
 UI: `/admin/audit` (stores the admin key in `sessionStorage` only).
 
@@ -57,3 +58,13 @@ reproducible byte-for-byte artifact is required.
 ## Compatibility
 
 Additive only. Existing `writeAuditLog` / hash-chain / jobs paths are unchanged.
+
+## Independently Verifiable Audit Checkpoint Bundles
+
+Bounded, cryptographically signed audit checkpoint bundles can be exported and verified offline without database connectivity or administrator credentials.
+
+- **Export (`exportAuditCheckpointBundle` / `createAuditCheckpointBundle` / `GET /api/talos/:id/audit/checkpoint?bundle=true`)**:
+  - Produces a bounded bundle (`limit` defaults to `100`, clamped to `[1, 1000]`) with explicit chain boundaries (`startSequence`, `endSequence`, `startEntryHash`, `endEntryHash`, `previousChainHash`, `startTimestamp`, `endTimestamp`, `entryCount`, `limit`, `truncated`), `chainRoot`, and `entriesDigest`.
+  - Signs the canonical checkpoint payload under domain `talos.audit.checkpoint.v1` using Ed25519 (`AUDIT_CHECKPOINT_PRIVATE_KEY` / `AUDIT_CHECKPOINT_PUBLIC_KEY`) or HMAC-SHA256 (`AUDIT_HASH_CHAIN_SECRET`).
+- **Offline Verification (`verifyAuditCheckpointBundle`)**:
+  - Verifies bundle structure, domain separation, bounded size, boundary consistency, `entriesDigest`, per-entry SHA-256 hash chain linkage (`talos.audit.v1`), contiguous sequence numbers, `previousChainHash` anchoring, and the cryptographic signature purely in-memory without database or admin access.

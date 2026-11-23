@@ -1,5 +1,6 @@
 import * as store from "./store";
 import { getConsumers } from "./registry";
+import { validatePayload } from "./payload-schema";
 import { outboxConfig } from "./config";
 import { boundRetryDelayMs } from "./retry";
 import type { DispatchSummary } from "./types";
@@ -63,6 +64,11 @@ export interface DispatchOnceOptions {
  * dead-lettered per the retry policy — so consumers must be idempotent.
  * An event type with zero registered consumers dead-letters immediately
  * (nothing to retry against).
+ *
+ * If a payload schema is declared for the event type (registerPayloadSchema)
+ * and the payload violates it, the event is quarantined before any consumer
+ * runs: a structurally invalid payload can never succeed, so it is not
+ * retried and is excluded from leasing from then on.
  */
 export async function dispatchOnce(opts: DispatchOnceOptions = {}): Promise<DispatchSummary> {
   const summary: DispatchSummary = { leased: 0, dispatched: 0, retried: 0, deadLettered: 0, reaped: 0, pruned: 0 };

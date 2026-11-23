@@ -13,6 +13,7 @@ import {
   readQuotaUsage,
   readQuotaUsageBreakdown,
   resolveQuotaConfig,
+  exportQuotaWindowStatement,
   ALL_QUOTA_RESOURCES,
   type QuotaResource,
   type WindowSize,
@@ -97,6 +98,31 @@ async function _GET(
     return Response.json({ error: "TALOS not found" }, { status: 404 });
   }
 
+  // Optional reproducible quota-window usage statement export
+  const format = request.nextUrl.searchParams.get("format");
+  if (format === "statement") {
+    const asOfParam = request.nextUrl.searchParams.get("asOf");
+    let asOf: Date | undefined;
+    if (asOfParam !== null) {
+      const parsed = new Date(asOfParam);
+      if (Number.isNaN(parsed.getTime())) {
+        return Response.json(
+          { error: "Invalid asOf timestamp; expected ISO-8601 date string" },
+          { status: 400 },
+        );
+      }
+      asOf = parsed;
+    }
+
+    const statement = await exportQuotaWindowStatement(db, id, { asOf });
+    return Response.json(statement, {
+      headers: {
+        "Cache-Control": "no-store",
+        "X-Quota-Statement-Digest": statement.digest,
+      },
+    });
+  }
+
   // Fetch all quota config rows for this agent and the platform defaults in
   // one query to avoid N+1 database calls.
   const configRows = await db
@@ -122,6 +148,8 @@ async function _GET(
         (r) => r.talosId === id && r.resource === resource,
       );
 
+      const explanation = buildQuotaExplanation(usage);
+
       return [
         resource,
         {
@@ -140,6 +168,7 @@ async function _GET(
             ok: usage.ok,
             byScope,
           },
+          explanation,
         },
       ] as const;
     }),
@@ -283,6 +312,8 @@ async function _PATCH(
     readQuotaUsage(db, id, resource as QuotaResource),
   ]);
 
+  const explanation = buildQuotaExplanation(usage);
+
   return Response.json({
     talosId: id,
     resource,
@@ -300,6 +331,7 @@ async function _PATCH(
       resetAt: new Date(usage.resetAt).toISOString(),
       ok: usage.ok,
     },
+    explanation,
   });
 }
 

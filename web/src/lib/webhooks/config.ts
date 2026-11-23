@@ -150,6 +150,12 @@ export const CURRENT_SIGNATURE_VERSION = 1;
 /** Supported signature versions for verification. */
 export const SUPPORTED_SIGNATURE_VERSIONS = [1];
 
+/** HTTP header carrying the versioned HMAC signature(s) and timestamp. */
+export const WEBHOOK_SIGNATURE_HEADER = "X-Webhook-Signature";
+
+/** HTTP header carrying the comma-separated signing key identifier(s). */
+export const WEBHOOK_KEY_ID_HEADER = "X-Webhook-Key-Id";
+
 // ─── Secret rotation ─────────────────────────────────────────────
 
 /** Minimum allowed grace window (5 minutes). */

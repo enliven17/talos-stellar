@@ -21,6 +21,12 @@ export const jobsConfig = {
   /** How long a lease is held before it's eligible for reaping, in ms. */
   leaseDurationMs: envInt("JOBS_LEASE_DURATION_MS", 30_000),
 
+  /** Maximum duration a single lease extension request may add or set, in ms. */
+  maxLeaseExtensionMs: envInt("JOBS_MAX_LEASE_EXTENSION_MS", 3_600_000),
+
+  /** Maximum absolute future horizon a lease may be extended to from `now`, in ms. */
+  maxLeaseHorizonMs: envInt("JOBS_MAX_LEASE_HORIZON_MS", 86_400_000),
+
   /** How often a running handler should be expected to heartbeat, in ms. */
   heartbeatIntervalMs: envInt("JOBS_HEARTBEAT_INTERVAL_MS", 10_000),
 
@@ -46,14 +52,14 @@ export const jobsConfig = {
   workerId: process.env.JOBS_WORKER_ID || `${process.pid}-${randomUUID().slice(0, 8)}`,
 
   /**
-   * Maximum number of jobs any single queue may contribute to one drain batch.
-   * Set via JOBS_FAIR_BATCH_PER_QUEUE. Default 0 (unlimited — existing behaviour).
+   * Maximum age a pending job may wait before being transitioned to
+   * dead_letter without consuming a retry attempt. Set via
+   * JOBS_QUEUE_AGE_DEADLINE_MS. Default 0 (disabled).
    *
-   * When > 0, leaseBatch() rotates through each eligible queue and claims at
-   * most this many jobs per queue, bounding one queue's share of the batch so
-   * slower queues are not starved by a high-volume one.
+   * When 0, expireAgedPendingJobs() is a no-op and pending jobs are
+   * never expired by age alone — only by lease reaping or manual action.
    */
-  fairBatchPerQueue: envInt("JOBS_FAIR_BATCH_PER_QUEUE", 0),
+  queueAgeDeadlineMs: envInt("JOBS_QUEUE_AGE_DEADLINE_MS", 0),
 };
 
 /** Bearer token for /api/admin/jobs/* inspection endpoints. */

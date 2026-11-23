@@ -543,7 +543,9 @@ class ToolRegistry:
                 from talos_agent.policy.middleware import (
                     _GATED_ACTIONS,
                 )
-                if name in _GATED_ACTIONS:
+                from talos_agent.policy.actions import KNOWN_ACTIONS
+
+                if name in _GATED_ACTIONS or name not in KNOWN_ACTIONS:
                     result = self._middleware.evaluate_action(
                         name, validated_arguments
                     )

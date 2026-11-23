@@ -28,14 +28,12 @@ function parseStatus(rawStatus: string | null):
   };
 }
 
-// GET /api/proposals — Proposals across all Talos, newest first, cursor-paginated
-// Optional filters: ?status=pending|approved|rejected, ?talosId=<id>, ?type=<proposal type>
-// Optional paging:  ?limit=1..100 (default 50), ?cursor=<opaque nextCursor from previous page>
-// Response: { proposals, nextCursor, talos } — `talos` (id/name pairs for the
-// filter dropdown) is only included on the first page (no cursor).
+// GET /api/proposals — All proposals across all Talos, newest first
+// Optional ?status=pending|approved|rejected filter, optional ?limit=1..100 (default 50)
 async function _GET(request: NextRequest) {
   const searchParams = new URL(request.url).searchParams;
   const rawStatus = searchParams.get("status");
+  
   const parsedStatus = parseStatus(rawStatus);
   if (!parsedStatus.ok) {
     return Response.json(
@@ -43,16 +41,8 @@ async function _GET(request: NextRequest) {
       { status: 400 }
     );
   }
-  const status = parsedStatus.status;
-  const talosId = searchParams.get("talosId");
-  const type = searchParams.get("type");
-  const rawCursor = searchParams.get("cursor");
-
-  const parsedLimit = parseAnalyticsLimit(
-    searchParams.get("limit"),
-    PROPOSALS_DEFAULT_LIMIT,
-    PROPOSALS_MAX_LIMIT,
-  );
+  
+  const parsedLimit = parseAnalyticsLimit(searchParams.get("limit"), 50, 100);
   if (!parsedLimit.ok) return parsedLimit.response;
   const limit = parsedLimit.limit;
 
@@ -98,9 +88,9 @@ async function _GET(request: NextRequest) {
       })
       .from(tlsApprovals)
       .innerJoin(tlsTalos, eq(tlsApprovals.talosId, tlsTalos.id))
-      .where(conditions.length > 0 ? and(...conditions) : undefined)
-      .orderBy(desc(tlsApprovals.createdAt), desc(tlsApprovals.id))
-      .limit(limit + 1);
+      .where(parsedStatus.status ? eq(tlsApprovals.status, parsedStatus.status) : undefined)
+      .orderBy(desc(tlsApprovals.createdAt))
+      .limit(limit);
 
     const hasMore = rows.length > limit;
     const proposals = hasMore ? rows.slice(0, limit) : rows;

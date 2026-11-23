@@ -154,8 +154,7 @@ See [EVENTS.md](./EVENTS.md) for the full contract event indexing specification.
   - **Single claim guarantee**: `Claimed(epoch_id, claimant)` storage key prevents double-claims.
   - **Proportional role allocation**: Calculates payouts from on-chain patron shares (`creator_share`, `investor_share`, `treasury_share`), enforcing `creator_share + investor_share + treasury_share == 100`.
   - **Rounding dust tracking**: Computes and stores rounding remainder (`RoundingDust`) on first claim, ensuring exact conservation of funds. Emits `div_dst`.
-  - **Auditable round manifests**: `commit_epoch_manifest` binds the funded amount to a canonical recipient-entitlement digest; manifest claims retain claimed amount and rounding dust for reconciliation.
-    The digest is the Soroban XDR/SHA-256 commitment of `(talos_id, epoch_id, funded_amount, creator, investor, treasury, creator_share, investor_share, treasury_share)`. Reconciliation is `funded_amount = claimed_amount + rounding_dust + recoverable_amount`.
+  - **Cross-client conservation fixtures**: `fixtures/dividend_conservation.json` publishes canonical floor-allocation vectors, including reordered claims and indivisible remainders. Rust contract tests and TypeScript clients can verify the same final liabilities from this fixture format.
   - **Accounting invariant enforcement**: Tracks `claimed_amount <= total_amount` on every claim; prevents over-distribution (`AccountingOverflow`).
   - **Idempotent epoch commits**: `commit_epoch` prevents duplicate epoch creation with identical `(talos_id, epoch_id)` (`EpochAlreadyExists`).
   - **Expiry & unclaimed fund recovery**: Unclaimed allocations after epoch expiry can be swept back by the admin via `recover_expired`.
