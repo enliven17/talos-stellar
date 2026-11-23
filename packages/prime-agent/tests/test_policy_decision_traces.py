@@ -7,10 +7,13 @@ exposure of decision_trace payloads.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from talos_agent.policy.engine import PolicyEngine
 from talos_agent.policy.middleware import PolicyMiddleware
+from talos_agent.policy.simulator import PolicySimulator
 from talos_agent.policy.schema import (
     ActionSpec,
     MatchCondition,
@@ -277,6 +280,78 @@ class TestDecisionTracePrivacy:
         assert "trace" in d
         assert d["trace"]["decision"] == "approve"
         assert "steps" in d["trace"]
+
+    def test_single_decision_export_redacts_private_arguments_and_bounds_reasons(
+        self, tmp_path
+    ):
+        engine = PolicyEngine()
+        engine.enabled = True
+        engine.load(
+            [
+                Policy(
+                    name="private-data-guard",
+                    rules=(
+                        PolicyRule(
+                            rule_id="review-private-data",
+                            description="Escalate private data",
+                            conditions=(
+                                MatchCondition("amount", "gt", 0),
+                                MatchCondition("profile.ssn", "eq", "123-45-6789"),
+                            ),
+                            decision=PolicyDecision.ESCALATE,
+                            severity=Severity.HIGH,
+                            reason="api_key=sk-never-export " + "x" * 300,
+                        ),
+                    ),
+                )
+            ]
+        )
+        output = tmp_path / "decision.json"
+
+        PolicySimulator(engine).export_decision(
+            "submit_record",
+            str(output),
+            params={
+                "amount": 4,
+                "customer_note": "private note contents",
+                "profile": {"ssn": "123-45-6789"},
+                "api_key": "sk-never-export",
+            },
+            private_arguments={"customer_note", "profile.ssn"},
+        )
+
+        raw = output.read_text()
+        exported = json.loads(raw)
+        assert exported["simulation"] is True
+        assert exported["decision"] == "escalate"
+        assert [rule["rule_id"] for rule in exported["matched_rules"]] == [
+            "review-private-data"
+        ]
+        assert len(exported["matched_rules"][0]["reason"]) <= 256
+        assert "sk-never-export" not in raw
+        assert exported["arguments"]["customer_note"] == "[redacted]"
+        assert exported["arguments"]["profile"]["ssn"] == "[redacted]"
+        assert exported["arguments"]["amount"] == "4"
+        private_condition = next(
+            condition
+            for step in exported["steps"]
+            for condition in step["conditions"]
+            if condition["field"] == "profile.ssn"
+        )
+        assert private_condition["observed"] == "[redacted]"
+        assert private_condition["expected"] == "[redacted]"
+
+    def test_single_decision_export_without_matches_has_empty_rule_list(self, tmp_path):
+        engine = PolicyEngine()
+        engine.enabled = True
+        engine.load([])
+        output = tmp_path / "decision.json"
+
+        PolicySimulator(engine).export_decision("lookup", str(output))
+
+        exported = json.loads(output.read_text())
+        assert exported["decision"] == "approve"
+        assert exported["matched_rules"] == []
 
 
 class TestMiddlewareDecisionTrace:

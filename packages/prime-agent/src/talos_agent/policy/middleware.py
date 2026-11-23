@@ -237,11 +237,20 @@ class PolicyMiddleware:
         """
         if self._loader is None:
             return False
-        fresh = self._loader.reload_if_stale()
-        if fresh is not None:
-            self._engine.load(fresh)
+        try:
+            fresh = self._loader.reload_if_stale()
+            if fresh is None:
+                return False
+            self._engine.reload(fresh)
+            self._loader.mark_reload_succeeded(fresh)
             return True
-        return False
+        except (OSError, PolicyLoadError, PolicyReloadError) as exc:
+            self._loader.mark_reload_failed()
+            logger.error(
+                "Policy reload failed; retaining last-known-good policy snapshot: %s",
+                exc,
+            )
+            return False
 
 
 # ── Convenience: single global middleware instance ────────────────────────────
