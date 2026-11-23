@@ -184,12 +184,16 @@ describe("dead-letter view ↔ existing admin routes (regression)", () => {
     const listed = await (await deadLetterRoute(authed(PATH))).json();
     const id = listed.deadLetters[0].id;
 
-    mocks.outbox.requeue.mockResolvedValue(deadEvent({ id, status: "pending", attempts: 0, lastError: null }));
+    mocks.outbox.requeue.mockResolvedValue(
+      deadEvent({ id, status: "pending", attempts: 0, lastError: null, originalEventId: "evt_dead" }),
+    );
     const retried = await retryRoute(authed(`/api/admin/outbox/${id}/retry`, "POST"), {
       params: Promise.resolve({ id }),
     });
     expect(retried.status).toBe(200);
     expect(mocks.outbox.requeue).toHaveBeenCalledWith("evt_dead");
+    const retriedBody = await retried.json();
+    expect(retriedBody.originalEventId).toBe("evt_dead");
 
     // After a requeue the event is no longer dead_letter, so the view drops it.
     mocks.outbox.listEvents.mockResolvedValueOnce({ events: [], nextCursor: null });

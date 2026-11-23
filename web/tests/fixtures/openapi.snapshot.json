@@ -4729,7 +4729,7 @@
             "description": "TALOS not found or no services offered"
           },
           "409": {
-            "description": "Transaction already used (replay detected)"
+            "description": "Transaction already used, or the agent is paused, draining, retired, or otherwise unavailable. Restriction responses include a stable code and state."
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
