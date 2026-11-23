@@ -154,6 +154,31 @@ export type RepairOutcome =
   | { ok: true;  repaired: boolean; detail?: string }
   | { ok: false; error: string; stale?: boolean };
 
+// ─── Transaction Association Conflict Detection ───────────────────────────────
+
+/** Minimal association binding a Stellar payment identity (txHash) to a job/source. */
+export interface TxAssociation {
+  txHash: string;
+  sourceType: TxSourceType;
+  sourceId: string | null;
+}
+
+/** Structured record of a conflicting payment-to-job association. */
+export interface TxAssociationConflict {
+  txHash: string;
+  existingSourceType: TxSourceType;
+  existingSourceId: string | null;
+  incomingSourceType: TxSourceType;
+  incomingSourceId: string | null;
+  reason: string;
+  detectedAt: Date;
+}
+
+/** Result of checking whether a job may be credited for a transaction record. */
+export type JobCreditDecision =
+  | { allowed: true }
+  | { allowed: false; reason: string; conflict?: TxAssociationConflict };
+
 // ─── Reconciler Config ────────────────────────────────────────────────────────
 
 /** Runtime configuration, resolved once at startup from env vars. */

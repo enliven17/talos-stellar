@@ -22,6 +22,9 @@ import type {
   FinalityStatus,
   TxRecord,
   TxRecordUpdate,
+  TxAssociation,
+  TxAssociationConflict,
+  JobCreditDecision,
   HorizonPollResult,
   ReconcilerConfig,
 } from "./types";
@@ -358,12 +361,137 @@ export function validateTransition(
   return null;
 }
 
-// ─── Provider Failure Reason Code Helpers ─────────────────────────────────────
+// ─── Association conflict detection ──────────────────────────────────────────
 
-export {
-  classifyHorizonError,
-  getFailureCategory,
-  isAuthorizationFailure,
-  isThrottlingFailure,
-  isProviderFailure,
-} from "./horizon";
+/**
+ * Error thrown when a single payment identity (txHash) is associated with
+ * an incompatible job or source.
+ */
+export class TxAssociationConflictError extends Error {
+  readonly conflict: TxAssociationConflict;
+
+  constructor(conflict: TxAssociationConflict) {
+    super(conflict.reason);
+    this.name = "TxAssociationConflictError";
+    this.conflict = conflict;
+  }
+}
+
+/**
+ * Normalise a Stellar transaction hash so payment identity comparisons are
+ * case- and whitespace-insensitive.
+ */
+export function normalizePaymentIdentity(txHash: string): string {
+  return txHash.trim().toLowerCase();
+}
+
+/**
+ * Format a non-sensitive diagnostic string suitable for persisting in
+ * `tls_stellar_tx_records.last_error`.
+ */
+export function formatAssociationConflictError(
+  conflict: TxAssociationConflict,
+): string {
+  return `ASSOCIATION_CONFLICT: ${conflict.reason}`;
+}
+
+/**
+ * Detect whether two associations for the same payment identity (`txHash`)
+ * bind it to incompatible jobs/sources.
+ *
+ * Returns `null` when the payment identities differ or when both associations
+ * agree on `(sourceType, sourceId)`.  Returns a `TxAssociationConflict` when
+ * the same `txHash` is linked to a different `sourceType` or `sourceId`.
+ */
+export function detectAssociationConflict(
+  existing: TxAssociation,
+  incoming: TxAssociation,
+  now: Date = new Date(),
+): TxAssociationConflict | null {
+  const existingHash = normalizePaymentIdentity(existing.txHash);
+  const incomingHash = normalizePaymentIdentity(incoming.txHash);
+
+  if (!existingHash || existingHash !== incomingHash) {
+    return null;
+  }
+
+  const existingSourceId = existing.sourceId ?? null;
+  const incomingSourceId = incoming.sourceId ?? null;
+
+  if (
+    existing.sourceType === incoming.sourceType &&
+    existingSourceId === incomingSourceId
+  ) {
+    return null;
+  }
+
+  const reason =
+    `Conflicting transaction association for txHash=${existingHash}: ` +
+    `existing=${existing.sourceType}:${existingSourceId ?? "null"}, ` +
+    `incoming=${incoming.sourceType}:${incomingSourceId ?? "null"}`;
+
+  return {
+    txHash: existingHash,
+    existingSourceType: existing.sourceType,
+    existingSourceId,
+    incomingSourceType: incoming.sourceType,
+    incomingSourceId,
+    reason,
+    detectedAt: now,
+  };
+}
+
+/**
+ * Check a candidate `TxRecord` against a collection of existing associations.
+ * Returns the first detected conflict, or `null` if all associations are
+ * compatible.
+ */
+export function hasConflictingAssociation(
+  record: Pick<TxRecord, "txHash" | "sourceType" | "sourceId">,
+  existingAssociations: readonly TxAssociation[],
+  now: Date = new Date(),
+): TxAssociationConflict | null {
+  const incoming: TxAssociation = {
+    txHash: record.txHash,
+    sourceType: record.sourceType,
+    sourceId: record.sourceId ?? null,
+  };
+
+  for (const existing of existingAssociations) {
+    const conflict = detectAssociationConflict(existing, incoming, now);
+    if (conflict) return conflict;
+  }
+
+  return null;
+}
+
+/**
+ * Pure pre-credit gate for commerce jobs.
+ *
+ * Rejects crediting if:
+ *   1. The payment identity (`txHash`) has any conflicting association.
+ *   2. The transaction record has not reached `CONFIRMED` finality.
+ */
+export function canCreditJob(
+  record: Pick<TxRecord, "txHash" | "sourceType" | "sourceId" | "finalityStatus">,
+  existingAssociations: readonly TxAssociation[],
+  now: Date = new Date(),
+): JobCreditDecision {
+  const conflict = hasConflictingAssociation(record, existingAssociations, now);
+  if (conflict) {
+    return {
+      allowed: false,
+      reason: conflict.reason,
+      conflict,
+    };
+  }
+
+  if (record.finalityStatus !== "CONFIRMED") {
+    return {
+      allowed: false,
+      reason: `Cannot credit job while transaction finalityStatus is "${record.finalityStatus}"`,
+    };
+  }
+
+  return { allowed: true };
+}
