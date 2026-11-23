@@ -36,7 +36,11 @@ export function loadReconcilerConfig(): ReconcilerConfig {
 
     concurrencyLimit: parseIntEnv("RECONCILER_CONCURRENCY_LIMIT", 5),
 
-    maxEvidenceEntries: parseIntEnv("RECONCILER_MAX_EVIDENCE_ENTRIES", 500),
+    networkPassphrase:
+      process.env.STELLAR_NETWORK_PASSPHRASE ??
+      (process.env.STELLAR_NETWORK === "mainnet"
+        ? "Public Global Stellar Network ; September 2015"
+        : "Test SDF Network ; September 2015"),
   };
 }
 

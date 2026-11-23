@@ -40,6 +40,38 @@ function extractErrorMessage(err: unknown): string {
   return String(err);
 }
 
+// ─── Network identity cache ───────────────────────────────────────────────────
+
+const horizonPassphraseCache = new Map<string, string>();
+
+/**
+ * Fetch and cache the network passphrase from Horizon's root endpoint.
+ */
+export async function fetchHorizonNetworkPassphrase(
+  horizonUrl: string,
+): Promise<string | null> {
+  const cached = horizonPassphraseCache.get(horizonUrl);
+  if (cached) return cached;
+
+  try {
+    const { Horizon } = await import("@stellar/stellar-sdk");
+    const server = new Horizon.Server(horizonUrl);
+    const root = await server.root();
+    if (root && typeof root.network_passphrase === "string") {
+      horizonPassphraseCache.set(horizonUrl, root.network_passphrase);
+      return root.network_passphrase;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Clear cached network passphrases (used in tests). */
+export function clearHorizonNetworkPassphraseCache(): void {
+  horizonPassphraseCache.clear();
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -53,6 +85,8 @@ export async function pollTransaction(
   txHash: string,
   horizonUrl: string,
 ): Promise<HorizonPollResult> {
+  const networkPassphrase = (await fetchHorizonNetworkPassphrase(horizonUrl)) ?? undefined;
+
   try {
     const { Horizon } = await import("@stellar/stellar-sdk");
     const server = new Horizon.Server(horizonUrl);
@@ -64,19 +98,30 @@ export async function pollTransaction(
         : parseInt(String(tx.ledger), 10);
 
     if (tx.successful) {
-      return { outcome: "confirmed", ledger, successful: true, source: "horizon" };
+      return {
+        outcome: "confirmed",
+        ledger,
+        successful: true,
+        networkPassphrase,
+      };
     } else {
       // Transaction was included in a ledger but the operation set failed
       // (e.g. insufficient balance, bad sequence number already applied).
       const detail = extractResultCode(tx);
-      return { outcome: "failed", ledger, successful: false, detail, source: "horizon" };
+      return {
+        outcome: "failed",
+        ledger,
+        successful: false,
+        detail,
+        networkPassphrase,
+      };
     }
   } catch (err) {
     const httpStatus = extractHttpStatus(err);
 
     if (httpStatus === 404) {
       // Transaction not yet on chain (or was never submitted)
-      return { outcome: "not_found", source: "horizon" };
+      return { outcome: "not_found", networkPassphrase };
     }
 
     // 429 rate-limit or 5xx transient: retryable
@@ -87,7 +132,7 @@ export async function pollTransaction(
       outcome: "error",
       message: extractErrorMessage(err),
       retryable,
-      source: "horizon",
+      networkPassphrase,
     };
   }
 }

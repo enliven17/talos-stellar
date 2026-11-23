@@ -9,16 +9,15 @@ export { reconcilerConfig, loadReconcilerConfig } from "./config";
 export { pollTransaction, fetchCurrentLedger, extractObservationSource } from "./horizon";
 export { applyRepair } from "./repair";
 export {
-  recordEvidence,
-  getEvidenceTrail,
-  clearEvidenceTrail,
-  getEvidenceCount,
-  truncateTxHash,
-  sanitizeEvidenceMetadata,
-  DEFAULT_MAX_EVIDENCE_ENTRIES,
-  MAX_READ_LIMIT,
-  DEFAULT_READ_LIMIT,
-} from "./evidence";
+  buildPaymentRepairPlan,
+  createDryRunRepairPlan,
+  executeRepairPlan,
+  verifyRepairPlanSelection,
+  computePlanHash,
+  computeRecordFingerprint,
+  describeProposedRepair,
+} from "./plan";
+export type { DryRunPlanDeps, ExecutePlanDeps } from "./plan";
 export {
   computeTransition,
   transitionFromPending,
@@ -28,7 +27,8 @@ export {
   isTerminal,
   isWallClockExpired,
   isLedgerExpired,
-  buildFinalityEvidence,
+  normalizeNetworkPassphrase,
+  isMatchingNetwork,
 } from "./state-machine";
 export type {
   FinalityStatus,
@@ -39,7 +39,16 @@ export type {
   RepairOutcome,
   ReconcilerConfig,
   ReconcilerStats,
-  FinalityEvidence,
-  ObservationSource,
+  ProposedRepairAction,
+  ProposedDownstreamRepair,
+  RepairPlanObservation,
+  PlannedRecordSnapshot,
+  PlannedProposedState,
+  PlannedPaymentRepairItem,
+  PaymentRepairPlan,
+  RepairPlanSelection,
+  RepairPlanErrorCode,
+  RepairPlanExecutionItemResult,
+  RepairPlanExecutionResult,
 } from "./types";
 export { ACTIVE_STATES, TERMINAL_STATES } from "./types";

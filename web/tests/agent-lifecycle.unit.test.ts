@@ -1,5 +1,6 @@
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
+import { currentStateFromLog } from "@/lib/governance/events";
 
 const mocks = vi.hoisted(() => {
   const mockSelect = vi.fn();
@@ -15,6 +16,10 @@ const mocks = vi.hoisted(() => {
 
 vi.mock("@/db", () => ({
   db: mocks.mockDb,
+}));
+
+vi.mock("@/lib/governance/events", () => ({
+  currentStateFromLog: vi.fn(async () => null),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -52,9 +57,11 @@ function updateChain(result: any) {
 describe("Agent lifecycle workflows", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(currentStateFromLog).mockResolvedValue(null);
   });
 
   it("rejects new job intake when the TALOS is paused", async () => {
+    vi.mocked(currentStateFromLog).mockResolvedValue({ state: "active", sequence: 1 });
     const { POST } = await import("../src/app/api/talos/[id]/jobs/route");
 
     mocks.mockDb.select
@@ -72,6 +79,31 @@ describe("Agent lifecycle workflows", () => {
     expect(response.status).toBe(409);
     const body = await response.json();
     expect(body.error).toContain("paused");
+    expect(body.code).toBe("AGENT_PAUSED");
+    expect(body.state).toBe("paused");
+  });
+
+  it("returns an explicit draining restriction while retirement is in progress", async () => {
+    const { POST } = await import("../src/app/api/talos/[id]/jobs/route");
+    vi.mocked(currentStateFromLog).mockResolvedValue({ state: "retiring", sequence: 2 });
+
+    mocks.mockDb.select
+      .mockReturnValueOnce(selectChain([{ id: "svc_1", serviceName: "research", price: "10", currency: "USDC", fulfillmentMode: "async", stellarPublicKey: "GABC123" }]))
+      .mockReturnValueOnce(selectChain([{ id: "talos_1", name: "Test Agent", agentOnline: false, status: "Paused", agentWalletAddress: "GABC123" }]));
+
+    const request = new NextRequest("http://localhost:3000/api/talos/talos_1/jobs", {
+      method: "POST",
+      headers: { Authorization: "Bearer tok_talos_1" },
+      body: JSON.stringify({ buyerPublicKey: "GBUYER", signedXdr: "xdr" }),
+    });
+    const response = await POST(request, { params: Promise.resolve({ id: "talos_1" }) });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      code: "AGENT_DRAINING",
+      state: "draining",
+      error: expect.stringContaining("draining"),
+    });
   });
 
   it("marks pending jobs cancelled and clears leases when lifecycle is paused", async () => {
@@ -116,5 +148,7 @@ describe("Agent lifecycle workflows", () => {
     expect(response.status).toBe(409);
     const body = await response.json();
     expect(body.error).toContain("retired");
+    expect(body.code).toBe("AGENT_RETIRED");
+    expect(body.state).toBe("retired");
   });
 });
