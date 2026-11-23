@@ -1,4 +1,8 @@
-export { getAgentAuditReviewBundle, listAuditLogs } from "./store";
+export {
+  listAuditLogs,
+  exportAuditCheckpointBundle,
+  type ExportAuditCheckpointFilter,
+} from "./store";
 export {
   AuditLogFilterError,
   parseAuditLogFilters,

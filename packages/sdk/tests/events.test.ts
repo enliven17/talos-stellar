@@ -11,6 +11,8 @@ import {
   TalosStreamError,
   TalosCursorValidationError,
   InMemorySeenStore,
+  validateEventPayloadVersion,
+  UnsupportedEventPayloadVersionError,
 } from "../src/events.js";
 import type { TalosStreamEvent, SeenStore } from "../src/events.js";
 
@@ -65,6 +67,28 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe("public event payload versions", () => {
+  it("accepts supported payloads with additive fields", () => {
+    expect(() =>
+      validateEventPayloadVersion({
+        version: 1,
+        futureCompatibleField: "preserved",
+      }),
+    ).not.toThrow();
+  });
+
+  it("returns a typed failure for an unsupported payload version", () => {
+    try {
+      validateEventPayloadVersion({ version: 2 });
+      throw new Error("expected unsupported version failure");
+    } catch (err) {
+      expect(err).toBeInstanceOf(UnsupportedEventPayloadVersionError);
+      expect((err as UnsupportedEventPayloadVersionError).version).toBe(2);
+      expect((err as UnsupportedEventPayloadVersionError).maxSupportedVersion).toBe(1);
+    }
+  });
 });
 
 // ── Happy path ─────────────────────────────────────────────────────────────────

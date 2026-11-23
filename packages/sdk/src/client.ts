@@ -476,8 +476,9 @@ export interface TalosClientOptions {
    */
   retry?: RetryOptions;
   /**
-   * Per-request timeout in milliseconds, enforced via `AbortController`.
-   * Timeouts surface as `TalosTimeoutError`.
+   * Total per-request deadline in milliseconds, enforced via `AbortController`
+   * across signing, every retry, backoff delays, and response parsing. Timeouts
+   * surface as `TalosTimeoutError`.
    */
   timeoutMs?: number;
   /**
@@ -537,9 +538,10 @@ export interface WriteOptions {
   /** AbortSignal for cancellation. */
   signal?: AbortSignal;
   /**
-   * Per-request timeout in milliseconds. Overrides the client-level
-   * `timeoutMs` for this single call. `0` disables the timeout for this call
-   * regardless of the client default. Surfaces as `TalosTimeoutError`.
+   * Total per-request deadline in milliseconds. Overrides the client-level
+   * `timeoutMs` and spans signing, retries, backoff delays, and response
+   * parsing. `0` disables the deadline for this call regardless of the client
+   * default. Surfaces as `TalosTimeoutError`.
    */
   timeoutMs?: number;
   /**
@@ -551,6 +553,14 @@ export interface WriteOptions {
    * payment headers, or private keys appear in the diagnostic object.
    */
   onProofDiagnostic?: import("./types.js").BuyerProofDiagnosticCallback;
+  /**
+   * Per-request required endpoint capabilities. After a 2xx response, the
+   * client reads a bounded capability snapshot (`x-talos-api-version` and
+   * `x-talos-features` headers) and throws {@link TalosCapabilityError} when a
+   * required API version or feature flag is not advertised. Omit to skip
+   * negotiation and preserve the prior accept-any-2xx behavior.
+   */
+  requireCapabilities?: RequiredCapabilities;
 }
 
 /**
@@ -563,11 +573,20 @@ export interface ReadOptions {
   /** AbortSignal for cancellation. */
   signal?: AbortSignal;
   /**
-   * Per-request timeout in milliseconds. Overrides the client-level
-   * `timeoutMs` for this single call. `0` disables the timeout for this call
-   * regardless of the client default. Surfaces as `TalosTimeoutError`.
+   * Total per-request deadline in milliseconds. Overrides the client-level
+   * `timeoutMs` and spans signing, retries, backoff delays, and response
+   * parsing. `0` disables the deadline for this call regardless of the client
+   * default. Surfaces as `TalosTimeoutError`.
    */
   timeoutMs?: number;
+  /**
+   * Per-request required endpoint capabilities. After a 2xx response, the
+   * client reads a bounded capability snapshot (`x-talos-api-version` and
+   * `x-talos-features` headers) and throws {@link TalosCapabilityError} when a
+   * required API version or feature flag is not advertised. Omit to skip
+   * negotiation and preserve the prior accept-any-2xx behavior.
+   */
+  requireCapabilities?: RequiredCapabilities;
 }
 
 /**
@@ -634,8 +653,10 @@ type RequestParams = Record<string, string | number | boolean>;
 type RequestOptions = RequestInit & {
   params?: RequestParams;
   idempotencyKey?: string;
-  /** Per-call timeout override in ms. `0` disables; `undefined` falls back to client `timeoutMs`. */
+  /** Total per-call deadline override in ms. `0` disables; `undefined` falls back to client `timeoutMs`. */
   timeoutMs?: number;
+  /** Per-call required endpoint capabilities. Fails with TalosCapabilityError when unmet. */
+  requireCapabilities?: RequiredCapabilities;
 };
 
 /** Default typed-retry bounds. `maxAttempts: 1` = off. */
@@ -1305,7 +1326,8 @@ export class TalosClient {
   /**
    * Build a `{ signal, dispose }` pair for the per-request timeout, linked to
    * the caller's signal when present. Returns `null` when no timeout is set.
-   * `dispose()` MUST be called once the attempt settles.
+   * The returned controller must live for the complete request, including
+   * signing, retries, backoff, and response parsing.
    *
    * Resolution order (first non-`undefined` value wins):
    *   1. `callTimeoutMs` — per-call override passed via `WriteOptions` / `ReadOptions`.
@@ -1333,6 +1355,52 @@ export class TalosClient {
         callerSignal?.removeEventListener("abort", onCallerAbort);
       },
     };
+  }
+
+  private awaitRequestStage<T>(
+    operation: () => PromiseLike<T>,
+    signal: AbortSignal | undefined,
+    path: string,
+  ): Promise<T> {
+    if (!signal) {
+      try {
+        return Promise.resolve(operation());
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
+    if (signal.aborted) {
+      return Promise.reject(new TalosTimeoutError(0, "Request aborted or timed out", path));
+    }
+
+    let promise: PromiseLike<T>;
+    try {
+      promise = operation();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = () => {
+        signal.removeEventListener("abort", onAbort);
+        reject(new TalosTimeoutError(0, "Request aborted or timed out", path));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      Promise.resolve(promise).then(
+        (value) => {
+          signal.removeEventListener("abort", onAbort);
+          if (signal.aborted) {
+            reject(new TalosTimeoutError(0, "Request aborted or timed out", path));
+          } else {
+            resolve(value);
+          }
+        },
+        (error: unknown) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+      );
+    });
   }
 
   // ── Status-code retry policy (retryPolicy) ─────────────────
@@ -1581,7 +1649,7 @@ export class TalosClient {
    * synchronously so abort listeners attach before `abort()`.
    */
   private async request<T>(path: string, init?: RequestOptions): Promise<T> {
-    const { params, signal, idempotencyKey, timeoutMs: callTimeoutMs, ...requestInit } = init ?? {};
+    const { params, signal, idempotencyKey, timeoutMs: callTimeoutMs, requireCapabilities, ...requestInit } = init ?? {};
     const callerSignal = signal ?? undefined;
     const method = (requestInit.method ?? "GET").toUpperCase();
     const url = this.buildUrl(path, params);
@@ -1619,105 +1687,110 @@ export class TalosClient {
     const typedMaxAttempts = this.computeMaxAttempts(idempotent);
     const maxAttempts = Math.max(this.retryPolicy.maxAttempts, typedMaxAttempts);
     const startedAt = Date.now();
+    const timeout = this.acquireTimeoutController(callerSignal, callTimeoutMs);
+    const effectiveSignal = timeout?.signal ?? callerSignal;
 
     let lastError: TalosAPIError | undefined;
     let attempt = 1;
-    for (; attempt <= maxAttempts; attempt += 1) {
-      const attemptStartedAt = Date.now();
-      if (this.chaosInjector) await this.injectChaos();
-
-      const baseHeaders = this.mergeHeaders(requestInit.headers, extraHeaders);
-      const headers = this.signer
-        ? await this.applySignature(url, method, baseHeaders, requestInit.body, callerSignal)
-        : baseHeaders;
-
-      const timeout = this.acquireTimeoutController(callerSignal, callTimeoutMs);
-      const effectiveSignal = timeout?.signal ?? callerSignal;
-      let delayMs: number | null = null;
-      try {
-        let res: Response;
+    try {
+      for (; attempt <= maxAttempts; attempt += 1) {
+        const attemptStartedAt = Date.now();
+        let delayMs: number | null = null;
         try {
-          res = await this.resolveFetch()(url, {
-            ...requestInit,
-            method,
-            headers,
-            ...(effectiveSignal ? { signal: effectiveSignal } : {}),
-          });
-        } catch (cause) {
-          if (this.recorder) {
-            const entry = this.recorder.record({
-              method,
-              path: url,
-              status: 0,
-              statusText: "Transport Failure",
-              durationMs: Date.now() - attemptStartedAt,
-              startedAt: new Date(attemptStartedAt).toISOString(),
-              attempt,
-              requestHeaders: headers,
-            });
-            this.onTranscriptEntry?.(entry);
+          if (this.chaosInjector) {
+            await this.awaitRequestStage(() => this.injectChaos(), effectiveSignal, path);
           }
-          throw classifyTransportError(cause, path);
-        }
 
-        // Surface rate-limit counters for every response, including the
-        // attempts that are about to fail and be retried.
-        this.observeResponse(path, method, res.status, attempt, Date.now() - attemptStartedAt, res.headers);
+          const baseHeaders = this.mergeHeaders(requestInit.headers, extraHeaders);
+          const headers = this.signer
+            ? await this.awaitRequestStage(
+                () => this.applySignature(url, method, baseHeaders, requestInit.body, effectiveSignal),
+                effectiveSignal,
+                path,
+              )
+            : baseHeaders;
 
-        if (this.recorder) {
-          let responsePayload: unknown;
+          let res: Response;
           try {
-            const clone = res.clone();
-            const text = await clone.text().catch(() => "");
-            if (text) {
-              try {
-                responsePayload = JSON.parse(text);
-              } catch {
-                responsePayload = text;
+            res = await this.awaitRequestStage(
+              () => this.resolveFetch()(url, {
+                ...requestInit,
+                method,
+                headers,
+                ...(effectiveSignal ? { signal: effectiveSignal } : {}),
+              }),
+              effectiveSignal,
+              path,
+            );
+          } catch (cause) {
+            if (cause instanceof TalosAPIError) throw cause;
+            throw classifyTransportError(cause, path);
+          }
+
+          // Surface rate-limit counters for every response, including the
+          // attempts that are about to fail and be retried.
+          this.observeResponse(path, method, res.status, attempt, Date.now() - attemptStartedAt, res.headers);
+
+          if (res.status === 304 && cachedEntry) {
+            this.onCacheHit?.({ url, etag: cachedEntry.etag });
+            return cachedEntry.body as T;
+          }
+
+          if (res.ok) {
+            // Malformed JSON on a 2xx intentionally propagates the raw parse error.
+            const body = (await this.awaitRequestStage(() => res.json(), effectiveSignal, path)) as T;
+
+            // Update ETag cache if the server returned an ETag header.
+            if (cacheKey !== null && this.etagStore) {
+              const etag = res.headers.get("ETag") ?? res.headers.get("etag");
+              if (etag) {
+                this.etagStore.set(cacheKey, { etag, body });
               }
             }
-          } catch {
-            // body stream already locked or not cloneable
+
+            return body;
           }
-          const entry = this.recorder.record({
-            method,
-            path: url,
-            status: res.status,
-            statusText: res.statusText,
-            durationMs: Date.now() - attemptStartedAt,
-            startedAt: new Date(attemptStartedAt).toISOString(),
-            attempt,
-            requestHeaders: headers,
-            responseHeaders: res.headers,
-            responseBody: responsePayload,
-          });
-          this.onTranscriptEntry?.(entry);
-        }
 
-        if (res.status === 304 && cachedEntry) {
-          this.onCacheHit?.({ url, etag: cachedEntry.etag });
-          return cachedEntry.body as T;
-        }
-
-        if (res.ok) {
-
-          // Malformed JSON on a 2xx intentionally propagates the raw parse error.
-          const body = (await res.json()) as T;
-
-          // Update ETag cache if the server returned an ETag header.
+          // Non-2xx, non-304: evict stale cache entry if present.
           if (cacheKey !== null && this.etagStore) {
-            const etag = res.headers.get("ETag") ?? res.headers.get("etag");
-            if (etag) {
-              this.etagStore.set(cacheKey, { etag, body, version: ETAG_CACHE_VERSION });
-            }
+            this.etagStore.delete(cacheKey);
           }
 
-          return body;
+          const rawBody = await this.awaitRequestStage(() => res.text(), effectiveSignal, path).catch(
+            (error: unknown) => {
+              if (error instanceof TalosTimeoutError) throw error;
+              return "";
+            },
+          );
+          if (res.status === 409 && idempotencyKey !== undefined && isPayloadConflict(rawBody)) {
+            throw new IdempotencyConflictError(idempotencyKey, path, rawBody);
+          }
+          throw errorFromResponse(res.status, path, rawBody, res.headers);
+        } catch (err) {
+          if (!(err instanceof TalosAPIError)) throw err;
+          lastError = err;
+          if (effectiveSignal?.aborted) {
+            lastError = new TalosTimeoutError(0, "Request aborted or timed out", path);
+            break;
+          }
+          delayMs = this.nextRetryDelay(err, {
+            method,
+            attempt,
+            idempotent,
+            retryMethodsForCall,
+            typedMaxAttempts,
+          });
+          if (delayMs === null) break;
+          try {
+            this.retry.onRetry({ attempt, error: err, delayMs });
+          } catch {
+            // A misbehaving observer must not break the bounded retry loop.
+          }
         }
 
-        // Non-2xx, non-304: evict stale cache entry if present.
-        if (cacheKey !== null && this.etagStore) {
-          this.etagStore.delete(cacheKey);
+        if (effectiveSignal?.aborted) {
+          lastError = new TalosTimeoutError(0, "Request aborted or timed out", path);
+          break;
         }
 
         const rawBody = await res.text().catch(() => "");
@@ -1726,67 +1799,54 @@ export class TalosClient {
         }
         throw errorFromResponse(res.status, path, rawBody, res.headers);
       } catch (err) {
+        // Capability negotiation failures are deterministic client-side
+        // mismatches, not transient API errors: never retry, and never route
+        // to the onError observer (the endpoint returned a usable 2xx).
+        if (err instanceof TalosCapabilityError) throw err;
         if (!(err instanceof TalosAPIError)) throw err;
         lastError = err;
-        const decision = this.nextRetryDelay(err, {
+        delayMs = this.nextRetryDelay(err, {
           method,
           attempt,
           idempotent,
           retryMethodsForCall,
           typedMaxAttempts,
         });
-        if (decision === null) break;
-        delayMs = decision.delayMs;
-        const event: RetryDecisionEvent = {
-          attempt,
-          reason: decision.reason,
-          nextDelayMs: decision.delayMs,
-          delayMs: decision.delayMs,
-          metadata: {
-            code: err.code,
-            status: err.status,
-            isRetryable: err.isRetryable,
-            ...(err.retryAfterMs !== undefined ? { retryAfterMs: err.retryAfterMs } : {}),
-          },
-          error: redactedRetryError(err),
-        };
-        if (decision.source === "status-code") {
-          try {
-            this.retryPolicy.onRetry(event);
-          } catch {
-            // A misbehaving observer must not break the bounded retry loop.
-          }
-        }
+        if (delayMs === null) break;
         try {
-          this.retry.onRetry(event);
-        } catch {
-          // A misbehaving observer must not break the bounded retry loop.
+          await this.awaitRequestStage(
+            () => this.wait(delayMs ?? 0, effectiveSignal),
+            effectiveSignal,
+            path,
+          );
+        } catch (err) {
+          if (!(err instanceof TalosAPIError)) throw err;
+          lastError = err;
+          break;
         }
-      } finally {
-        timeout?.dispose();
       }
 
-      await this.wait(delayMs ?? 0, callerSignal);
+      const finalError = lastError ?? new TalosAPIError(0, "Retry attempts exhausted", path);
+      this.notifyError({
+        error: finalError,
+        path,
+        method,
+        attempt: Math.min(attempt, maxAttempts),
+        durationMs: Date.now() - startedAt,
+        ...(finalError.rateLimit !== undefined ? { rateLimit: finalError.rateLimit } : {}),
+      });
+      throw finalError;
+    } finally {
+      timeout?.dispose();
     }
-
-    const finalError = lastError ?? new TalosAPIError(0, "Retry attempts exhausted", path);
-    this.notifyError({
-      error: finalError,
-      path,
-      method,
-      attempt: Math.min(attempt, maxAttempts),
-      durationMs: Date.now() - startedAt,
-      ...(finalError.rateLimit !== undefined ? { rateLimit: finalError.rateLimit } : {}),
-    });
-    throw finalError;
   }
 
   private async requestPage<T>(
     path: string,
     options?: CursorRequestOptions,
   ): Promise<CursorPage<T>> {
-    const { signal, timeoutMs, ...params } = options ?? {};
-    return this.request(path, { params, signal, timeoutMs });
+    const { signal, timeoutMs, requireCapabilities, ...params } = options ?? {};
+    return this.request(path, { params, signal, timeoutMs, requireCapabilities });
   }
 
   // ── Talos CRUD ────────────────────────────────────────────
@@ -1814,11 +1874,11 @@ export class TalosClient {
   }
 
   async getTalos(id: string, options?: ReadOptions): Promise<TalosDetail> {
-    return this.request(`/api/talos/${id}`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
+    return this.request(`/api/talos/${id}`, { signal: options?.signal, timeoutMs: options?.timeoutMs, requireCapabilities: options?.requireCapabilities });
   }
 
   async getTalosMe(options?: ReadOptions): Promise<TalosDetail> {
-    return this.request("/api/talos/me", { signal: options?.signal, timeoutMs: options?.timeoutMs });
+    return this.request("/api/talos/me", { signal: options?.signal, timeoutMs: options?.timeoutMs, requireCapabilities: options?.requireCapabilities });
   }
 
   /**
@@ -1851,11 +1911,12 @@ export class TalosClient {
   // ── Activity ───────────────────────────────────────────────
 
   async listActivities(params?: ActivityPageOptions): Promise<ActivityPage> {
-    const { signal, timeoutMs, ...query } = params ?? {};
+    const { signal, timeoutMs, requireCapabilities, ...query } = params ?? {};
     return this.request<ActivityPage>("/api/activity", {
       params: query,
       signal,
       timeoutMs,
+      requireCapabilities,
     });
   }
 
@@ -1870,11 +1931,12 @@ export class TalosClient {
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
+      requireCapabilities: options?.requireCapabilities,
     });
   }
 
   async getTalosActivities(talosId: string, options?: ReadOptions): Promise<Activity[]> {
-    return this.request(`/api/talos/${talosId}/activity`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
+    return this.request(`/api/talos/${talosId}/activity`, { signal: options?.signal, timeoutMs: options?.timeoutMs, requireCapabilities: options?.requireCapabilities });
   }
 
   // ── Revenue ────────────────────────────────────────────────
@@ -1890,11 +1952,12 @@ export class TalosClient {
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
+      requireCapabilities: options?.requireCapabilities,
     });
   }
 
   async getTalosRevenues(talosId: string, options?: ReadOptions): Promise<Revenue[]> {
-    return this.request(`/api/talos/${talosId}/revenue`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
+    return this.request(`/api/talos/${talosId}/revenue`, { signal: options?.signal, timeoutMs: options?.timeoutMs, requireCapabilities: options?.requireCapabilities });
   }
 
   // ── Approvals ──────────────────────────────────────────────
@@ -1910,17 +1973,18 @@ export class TalosClient {
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
+      requireCapabilities: options?.requireCapabilities,
     });
   }
 
   async getApprovals(talosId: string, status?: string, options?: ReadOptions): Promise<Approval[]> {
     const params: Record<string, string> = {};
     if (status) params.status = status;
-    return this.request(`/api/talos/${talosId}/approvals`, { params, signal: options?.signal, timeoutMs: options?.timeoutMs });
+    return this.request(`/api/talos/${talosId}/approvals`, { params, signal: options?.signal, timeoutMs: options?.timeoutMs, requireCapabilities: options?.requireCapabilities });
   }
 
   async getApproval(talosId: string, approvalId: string, options?: ReadOptions): Promise<Approval> {
-    return this.request(`/api/talos/${talosId}/approvals/${approvalId}`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
+    return this.request(`/api/talos/${talosId}/approvals/${approvalId}`, { signal: options?.signal, timeoutMs: options?.timeoutMs, requireCapabilities: options?.requireCapabilities });
   }
 
   // ── Status ─────────────────────────────────────────────────
@@ -1947,8 +2011,8 @@ export class TalosClient {
   async discoverServices(
     params?: DiscoverServicesParams,
   ): Promise<CursorPage<CommerceService>> {
-    const { signal, timeoutMs, ...query } = params ?? {};
-    return this.requestPage("/api/services", { ...query, signal, timeoutMs });
+    const { signal, timeoutMs, requireCapabilities, ...query } = params ?? {};
+    return this.requestPage("/api/services", { ...query, signal, timeoutMs, requireCapabilities });
   }
 
   /**
@@ -1981,6 +2045,7 @@ export class TalosClient {
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
+      requireCapabilities: options?.requireCapabilities,
     });
   }
 
@@ -2009,11 +2074,31 @@ export class TalosClient {
     payload?: Record<string, unknown>,
     options?: WriteOptions,
   ): Promise<CommerceJob> {
+    const timeout = this.acquireTimeoutController(options?.signal, options?.timeoutMs);
+    const signal = timeout?.signal ?? options?.signal;
+    try {
+      return await this.purchaseServiceWithPaymentWithinDeadline(
+        talosId,
+        buyerTalosId,
+        payload,
+        options,
+        signal,
+      );
+    } finally {
+      timeout?.dispose();
+    }
+  }
+
+  private async purchaseServiceWithPaymentWithinDeadline(
+    talosId: string,
+    buyerTalosId: string,
+    payload: Record<string, unknown> | undefined,
+    options: WriteOptions | undefined,
+    signal?: AbortSignal,
+  ): Promise<CommerceJob> {
     const path = `/api/talos/${talosId}/service`;
     const url = `${this.baseUrl}${path}`;
     const body = JSON.stringify({ payload });
-    const signal = options?.signal;
-    const callTimeoutMs = options?.timeoutMs;
     const onProofDiagnostic = options?.onProofDiagnostic;
 
     /** Fire-and-forget diagnostic emitter — never throws. */
@@ -2034,24 +2119,32 @@ export class TalosClient {
       }
     };
 
-    if (this.chaosInjector) await this.injectChaos();
+    if (this.chaosInjector) {
+      await this.awaitRequestStage(() => this.injectChaos(), signal, path);
+    }
 
     // 1. Initial request — possibly hits a 402 challenge.
     const baseHeaders = this.mergeHeaders();
     const initialHeaders = this.signer
-      ? await this.applySignature(url, "POST", baseHeaders, body, signal)
+      ? await this.awaitRequestStage(
+          () => this.applySignature(url, "POST", baseHeaders, body, signal),
+          signal,
+          path,
+        )
       : baseHeaders;
-    const timeout = this.acquireTimeoutController(signal, callTimeoutMs);
-    const effectiveSignal = timeout?.signal ?? signal;
     const challengeAttemptStartedAt = Date.now();
     let res: Response;
     try {
-      res = await this.resolveFetch()(url, {
-        method: "POST",
-        headers: initialHeaders,
-        body,
-        ...(effectiveSignal ? { signal: effectiveSignal } : {}),
-      });
+      res = await this.awaitRequestStage(
+        () => this.resolveFetch()(url, {
+          method: "POST",
+          headers: initialHeaders,
+          body,
+          ...(signal ? { signal } : {}),
+        }),
+        signal,
+        path,
+      );
       // The challenge probe is a response too — surface its counters so a
       // caller throttling on quota sees every hop of the x402 flow.
       this.observeResponse(
@@ -2092,22 +2185,8 @@ export class TalosClient {
         this.onTranscriptEntry?.(entry);
       }
     } catch (cause) {
-      if (this.recorder) {
-        const entry = this.recorder.record({
-          method: "POST",
-          path: url,
-          status: 0,
-          statusText: "Transport Failure",
-          durationMs: Date.now() - challengeAttemptStartedAt,
-          startedAt: new Date(challengeAttemptStartedAt).toISOString(),
-          attempt: 1,
-          requestHeaders: initialHeaders,
-        });
-        this.onTranscriptEntry?.(entry);
-      }
+      if (cause instanceof TalosAPIError) throw cause;
       throw classifyTransportError(cause, path);
-    } finally {
-      timeout?.dispose();
     }
 
     if (res.status === 402) {
@@ -2168,11 +2247,19 @@ export class TalosClient {
 
       let signRes: import("./types.js").SignedPayment;
       try {
-        signRes = await this.signPayment(buyerTalosId, {
-          payee: challenge.payee,
-          amount,
-          assetCode: challenge.token,
-        });
+        signRes = await this.awaitRequestStage(
+          () => this.signPayment(
+            buyerTalosId,
+            {
+              payee: challenge.payee,
+              amount,
+              assetCode: challenge.token,
+            },
+            { signal, timeoutMs: 0 },
+          ),
+          signal,
+          path,
+        );
         emitDiag(challenge, "proof_submitted", { signingSucceeded: true });
       } catch (signErr) {
         const reason =
@@ -2194,7 +2281,7 @@ export class TalosClient {
         job = await this.purchaseService(talosId, {
           paymentHeader: signRes.paymentHeader,
           payload,
-        }, options);
+        }, { ...options, signal, timeoutMs: 0 });
         emitDiag(challenge, "proof_accepted", {
           signingSucceeded: true,
           proofResponseStatus: 200,
@@ -2212,8 +2299,27 @@ export class TalosClient {
 
     // Non-402 responses — wrap them through the typed dispatch.
     if (!res.ok) {
-      const rawBody = await res.text().catch(() => "");
+      const rawBody = await this.awaitRequestStage(() => res.text(), signal, path).catch(
+        (error: unknown) => {
+          if (error instanceof TalosTimeoutError) throw error;
+          return "";
+        },
+      );
       throw errorFromResponse(res.status, path, rawBody, res.headers);
+    }
+
+    // Apply the same per-request capability negotiation as request() so a
+    // capability requirement is never silently ignored on a direct 2xx path
+    // (e.g. a service that returns 200 without an x402 challenge).
+    if (options?.requireCapabilities) {
+      const available = parseEndpointCapabilities(res.headers);
+      const mismatch = describeCapabilityMismatch(options.requireCapabilities, available);
+      if (mismatch !== null) {
+        throw new TalosCapabilityError(res.status, mismatch, path, options.requireCapabilities, available, {
+          message: mismatch,
+          headers: snapshotHeaders(res.headers),
+        });
+      }
     }
 
     return (await res.json()) as CommerceJob;
@@ -2222,16 +2328,19 @@ export class TalosClient {
   // ── Wallet & Payments ──────────────────────────────────────
 
   async getWallet(talosId: string, options?: ReadOptions): Promise<Wallet> {
-    return this.request(`/api/talos/${talosId}/wallet`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
+    return this.request(`/api/talos/${talosId}/wallet`, { signal: options?.signal, timeoutMs: options?.timeoutMs, requireCapabilities: options?.requireCapabilities });
   }
 
   async signPayment(
     talosId: string,
     params: SignPaymentParams,
+    options?: Pick<WriteOptions, "signal" | "timeoutMs">,
   ): Promise<SignedPayment> {
     return this.request(`/api/talos/${talosId}/sign`, {
       method: "POST",
       body: JSON.stringify(params),
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
@@ -2246,13 +2355,14 @@ export class TalosClient {
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
+      requireCapabilities: options?.requireCapabilities,
     });
   }
 
   // ── Jobs ───────────────────────────────────────────────────
 
   async getPendingJobs(options?: ReadOptions): Promise<CommerceJob[]> {
-    return this.request("/api/jobs/pending", { signal: options?.signal, timeoutMs: options?.timeoutMs });
+    return this.request("/api/jobs/pending", { signal: options?.signal, timeoutMs: options?.timeoutMs, requireCapabilities: options?.requireCapabilities });
   }
 
   /**
@@ -2273,11 +2383,12 @@ export class TalosClient {
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
+      requireCapabilities: options?.requireCapabilities,
     });
   }
 
   async getJobResult(jobId: string, options?: ReadOptions): Promise<CommerceJob> {
-    return this.request(`/api/jobs/${jobId}/result`, { signal: options?.signal, timeoutMs: options?.timeoutMs });
+    return this.request(`/api/jobs/${jobId}/result`, { signal: options?.signal, timeoutMs: options?.timeoutMs, requireCapabilities: options?.requireCapabilities });
   }
 
   /**
@@ -2510,6 +2621,7 @@ export class TalosClient {
       idempotencyKey: options?.idempotencyKey,
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
+      requireCapabilities: options?.requireCapabilities,
     });
   }
 

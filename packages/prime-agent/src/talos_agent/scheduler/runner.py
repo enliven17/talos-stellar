@@ -74,7 +74,7 @@ async def _setup_policy(settings, db, talos_config):
     ).lower() in ("true", "1", "yes")
     policy_engine.enabled = policy_enabled
     if policy_enabled:
-        policy_engine.load(policy_loader.load())
+        policy_engine.reload(policy_loader.load())
 
     def _get_budget_context() -> dict[str, float]:
         cfg = db.get_talos_config()
@@ -434,6 +434,29 @@ def _build_task_list(
     adapter_health_reporter,
 ) -> list:
     """Create and return all asyncio Tasks for the agent run loop."""
+    from talos_agent.scheduler.policy import validate_recurring_task_interval
+
+    validate_recurring_task_interval(
+        "dividend_distribution",
+        settings.dividend_distribution_interval,
+    )
+    validate_recurring_task_interval(
+        "agent_cycle",
+        settings.agent_cycle_interval,
+    )
+    validate_recurring_task_interval(
+        "polling",
+        settings.polling_interval,
+    )
+    validate_recurring_task_interval(
+        "heartbeat",
+        settings.heartbeat_interval,
+    )
+    validate_recurring_task_interval(
+        "job_heartbeat",
+        settings.job_heartbeat_interval,
+    )
+
     from talos_agent.scheduler.tasks import (
         activity_flush_task,
         agent_cycle_task,

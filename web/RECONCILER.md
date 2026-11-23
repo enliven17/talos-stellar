@@ -69,6 +69,19 @@ Transitions are purely functional and validated (`validateTransition`) before an
 9. **Network Identity Pinning & Rejection**: Transactions are pinned to a specific Stellar network identity (passphrase). Any Horizon observation whose network passphrase does not match the pinned network is rejected: the record remains active (in `PENDING` or `CONFIRMING`), `pollCount` is incremented, and `lastError` logs the rejection (`Rejected observation from foreign network...`) without altering financial settlement state or triggering downstream repair.
 10. **Terminal Immutability**: Any attempt to transition out of a terminal state is rejected with an illegal transition error (`Illegal transition: cannot leave terminal state "<state>"`).
 
+### Payment Finality Evidence Trail
+
+Whenever the reconciler computes a finality transition decision, it captures an immutable evidence record:
+- **`ledger`**: The closed ledger sequence number at which the observation or decision occurred (e.g. `pollResult.ledger` or `currentLedger`).
+- **`observationSource`**: The source subsystem yielding the decision:
+  - `"horizon"`: On-chain transaction observation via Horizon API.
+  - `"wall_clock"`: System clock comparison against configured `expiresAt`.
+  - `"ledger_gap"`: Stellar ledger progression exceeding `maxLedgerGap`.
+  - `"reconciler"`: Internal finality state machine rule.
+- **`transitionReason`**: Human-readable, deterministic explanation of the decision rationale (e.g. `"Transaction confirmed on-chain in closed ledger"`, `"NOT_FOUND after 10 polls"`, `"Confirmation depth reached: current=1235, confirmed=1234, depth=1"`).
+- **Bounded Retention**: Evidence records are stored in a bounded FIFO ring buffer (`RECONCILER_MAX_EVIDENCE_ENTRIES`, default 500) to prevent unbounded memory growth while retaining full operational traceability.
+- **Privacy Invariants**: Evidence records never contain private keys, secret seeds, customer payloads, or transaction signing credentials.
+
 ---
 
 ## Configuration
@@ -86,6 +99,7 @@ All configuration is loaded from environment variables at startup in `src/lib/re
 | `STELLAR_NETWORK_PASSPHRASE` | `Test SDF Network ; September 2015` | Pinned Stellar network identity (passphrase) to reconcile against. If unset, derives from `STELLAR_NETWORK` (`"mainnet"` vs `"testnet"`). |
 | `RECONCILER_CONFIRMATION_DEPTH` | `1` | Number of closed ledgers required after first-seen before transitioning from `CONFIRMING` to `CONFIRMED`. |
 | `RECONCILER_CONCURRENCY_LIMIT` | `5` | Maximum number of concurrent Horizon/DB operations allowed during tick queue draining. |
+| `RECONCILER_MAX_EVIDENCE_ENTRIES` | `500` | Maximum number of payment finality evidence trail entries retained in bounded memory. |
 | `ADMIN_API_KEY` | — | Bearer token required for administrative endpoints (`/api/admin/reconciler/*`). |
 
 ---
@@ -183,7 +197,8 @@ await registerTx({
 });
 ```
 
-- **Idempotent**: Re-registering an existing `txHash` returns the existing record ID without duplicating rows or throwing.
+- **Idempotent**: Re-registering an existing `txHash` with the same `(sourceType, sourceId)` returns the existing record ID without duplicating rows or throwing.
+- **Conflicting Association Detection**: If an existing `txHash` is re-registered with an incompatible `sourceType` or `sourceId`, `registerTx()` records the conflict in `last_error` (`ASSOCIATION_CONFLICT: ...`), emits `reconciler_tx_association_conflict`, does not duplicate any row or financial effect, and throws `TxAssociationConflictError`. Likewise, before crediting a `CONFIRMED` commerce job, `applyRepair()` validates associations with `canCreditJob()` and rejects conflicting payment-to-job bindings.
 - **Fire-and-Forget Safe**: In routes such as `buy-token` and `jobs`, `registerTx` is called after the main database transaction commits, ensuring route responses are not blocked or failed if registration encounters an issue.
 
 ---
@@ -300,7 +315,60 @@ If Horizon cannot be contacted, the tick returns HTTP 503 along with the partial
 
 ---
 
-### 3. Public Payment Status Endpoint
+### 3. Payment Finality Evidence Trail (Admin Only)
+
+Inspect the bounded audit trail of payment finality transition decisions:
+
+```http
+GET /api/admin/reconciler/evidence
+Authorization: Bearer <ADMIN_API_KEY>
+```
+
+#### Query Parameters
+
+- `txHash` *(optional)*: Filter evidence entries for a specific transaction hash.
+- `status` *(optional)*: Filter by finality status (e.g. `CONFIRMED`, `FAILED`, `EXPIRED`, `NOT_FOUND`, `CONFIRMING`).
+- `source` *(optional)*: Filter by observation source (e.g. `horizon`, `wall_clock`, `ledger_gap`, `reconciler`).
+- `limit` *(optional)*: Number of entries to return (default: `50`, maximum: `200`).
+
+#### Example Request
+
+```bash
+curl -X GET "http://localhost:3000/api/admin/reconciler/evidence?limit=10" \
+  -H "Authorization: Bearer dev-admin-key"
+```
+
+#### Example Response (200 OK)
+
+```json
+{
+  "evidence": [
+    {
+      "txHash": "68b49e7978648174780650123512341234123412341234123412341234123412",
+      "txHashTruncated": "68b49e79...12341234",
+      "ledger": 1234567,
+      "observationSource": "horizon",
+      "transitionReason": "Transaction confirmed on-chain in closed ledger",
+      "fromStatus": "PENDING",
+      "toStatus": "CONFIRMING",
+      "decidedAt": "2026-10-17T05:10:00.000Z"
+    }
+  ],
+  "total": 1,
+  "limit": 10
+}
+```
+
+#### Status Codes
+- `200 OK`: Evidence trail returned.
+- `400 Bad Request`: Invalid query parameter (e.g., negative or non-integer limit).
+- `401 Unauthorized`: Missing `Authorization` header.
+- `403 Forbidden`: Invalid bearer token.
+- `500 Internal Server Error`: `ADMIN_API_KEY` not configured on the server.
+
+---
+
+### 4. Public Payment Status Endpoint
 
 Contributors and clients can inspect payment finality for a specific commerce job without an admin API key:
 
@@ -323,6 +391,7 @@ curl -X GET http://localhost:3000/api/talos/talos_123/jobs/job_456/payment-statu
   "finalityStatus": "CONFIRMED",
   "confirmedLedger": 1234567,
   "lastLedgerChecked": 1234568,
+  "observationAge": 1,
   "pollCount": 2,
   "lastError": null,
   "repairApplied": true,

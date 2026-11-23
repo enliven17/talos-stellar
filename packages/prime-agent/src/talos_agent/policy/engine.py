@@ -29,11 +29,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 from datetime import datetime, timezone
 from typing import Any
 
-from talos_agent.policy.patterns import compile_glob
+from talos_agent.policy.actions import KNOWN_ACTIONS
 from talos_agent.policy.schema import (
     ActionDigestMismatchError,
     ActionSpec,
@@ -330,6 +331,109 @@ class PolicyEngine:
             sum(1 for p in self._policies if p.enabled),
         )
 
+    def reload(self, policies: list[Policy]) -> None:
+        """Validate and simulate a candidate before replacing the active set.
+
+        A failed candidate leaves the current policy snapshot untouched.
+        """
+        try:
+            candidate = tuple(
+                sorted(policies, key=lambda p: (-p.priority, p.name))
+            )
+            self._validate_candidate(candidate)
+        except PolicyReloadError:
+            raise
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise PolicyReloadError(f"Invalid policy candidate: {exc}") from exc
+
+        staged_engine = PolicyEngine()
+        staged_engine.enabled = True
+        staged_engine._policies = candidate
+
+        try:
+            from talos_agent.policy.simulator import PolicySimulator
+
+            result = PolicySimulator(staged_engine).simulate(
+                "__policy_reload_validation__"
+            )
+        except Exception as exc:
+            raise PolicyReloadError("Policy candidate simulation failed") from exc
+
+        if not result.simulation:
+            raise PolicyReloadError("Policy candidate did not complete in simulation mode")
+
+        self._policies = candidate
+        logger.info(
+            "PolicyEngine reloaded %d policies (%d enabled)",
+            len(self._policies),
+            sum(1 for p in self._policies if p.enabled),
+        )
+
+    @staticmethod
+    def _validate_candidate(policies: tuple[Policy, ...]) -> None:
+        supported_operators = {
+            "eq", "neq", "gt", "gte", "lt", "lte", "in", "not_in",
+            "exists", "regex", "glob",
+        }
+        for policy in policies:
+            if not isinstance(policy, Policy):
+                raise PolicyReloadError("Candidate entries must be Policy instances")
+            if not isinstance(policy.name, str) or not policy.name.strip():
+                raise PolicyReloadError("Policy names must be non-empty strings")
+            if not isinstance(policy.rules, tuple):
+                raise PolicyReloadError(f"Policy '{policy.name}' rules must be a tuple")
+            for rule in policy.rules:
+                if not isinstance(rule, PolicyRule):
+                    raise PolicyReloadError(
+                        f"Policy '{policy.name}' rules must be PolicyRule instances"
+                    )
+                if not isinstance(rule.decision, PolicyDecision):
+                    raise PolicyReloadError(
+                        f"Rule '{rule.rule_id}' has an invalid decision"
+                    )
+                if not isinstance(rule.severity, Severity):
+                    raise PolicyReloadError(
+                        f"Rule '{rule.rule_id}' has an invalid severity"
+                    )
+                for condition in rule.conditions:
+                    if not isinstance(condition, MatchCondition):
+                        raise PolicyReloadError(
+                            f"Rule '{rule.rule_id}' conditions must be MatchCondition instances"
+                        )
+                    if not isinstance(condition.field, str) or not condition.field:
+                        raise PolicyReloadError(
+                            f"Rule '{rule.rule_id}' has an empty condition field"
+                        )
+                    if condition.operator not in supported_operators:
+                        raise PolicyReloadError(
+                            f"Rule '{rule.rule_id}' uses unsupported operator "
+                            f"'{condition.operator}'"
+                        )
+                    if condition.operator == "regex":
+                        try:
+                            re.compile(str(condition.value))
+                        except re.error as exc:
+                            raise PolicyReloadError(
+                                f"Rule '{rule.rule_id}' has an invalid regex condition"
+                            ) from exc
+                    elif condition.operator in {"gt", "gte", "lt", "lte"}:
+                        try:
+                            numeric_value = float(condition.value)
+                        except (TypeError, ValueError) as exc:
+                            raise PolicyReloadError(
+                                f"Rule '{rule.rule_id}' has an invalid numeric condition"
+                            ) from exc
+                        if not math.isfinite(numeric_value):
+                            raise PolicyReloadError(
+                                f"Rule '{rule.rule_id}' has a non-finite numeric condition"
+                            )
+                    elif condition.operator in {"in", "not_in"} and not isinstance(
+                        condition.value, (str, list, tuple, dict, set, frozenset)
+                    ):
+                        raise PolicyReloadError(
+                            f"Rule '{rule.rule_id}' has an invalid membership condition"
+                        )
+
     # ── Evaluation ────────────────────────────────────────────────────────
 
     def evaluate(
@@ -344,13 +448,31 @@ class PolicyEngine:
         digest of the decision payload for audit trail purposes and an
         explainable :class:`PolicyDecisionTrace`.
 
-        When the engine is **disabled**, this method always returns
-        ``APPROVE`` with an evidence note and a disabled-engine trace.
+        Unknown action categories are denied before policy evaluation, even
+        when the engine is disabled. Known actions are approved when disabled.
         """
         self._evaluation_count += 1
         evaluation_time = now or datetime.now(timezone.utc)
         if evaluation_time.tzinfo is None or evaluation_time.utcoffset() is None:
             raise ValueError("policy evaluation now must be timezone-aware")
+
+        if spec.action not in KNOWN_ACTIONS:
+            reason = (
+                f"Unknown policy action category: {spec.action or '<empty>'}; "
+                "action denied."
+            )
+            self._deny_count += 1
+            trace = PolicyDecisionTrace(
+                action=spec.action,
+                decision=PolicyDecision.DENY.value,
+                engine_enabled=self._enabled,
+                summary=reason,
+            )
+            return PolicyResult(
+                decision=PolicyDecision.DENY,
+                evidence=(reason,),
+                trace=trace,
+            )
 
         if not self._enabled:
             trace = PolicyDecisionTrace.disabled(spec.action)

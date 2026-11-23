@@ -3,16 +3,26 @@ import { vi, describe, it, expect, beforeEach } from "vitest";
 const mocks = vi.hoisted(() => ({
   store: {
     reapExpiredLeases: vi.fn(),
+    expireAgedPendingJobs: vi.fn(),
     leaseBatch: vi.fn(),
     heartbeat: vi.fn(),
+    extendLease: vi.fn(),
     complete: vi.fn(),
     fail: vi.fn(),
+    withLeaseFence: vi.fn(),
   },
 }));
 
-vi.mock("../src/lib/jobs/store", () => mocks.store);
+vi.mock("../src/lib/jobs/store", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/jobs/store")>();
+  return {
+    ...mocks.store,
+    StaleLeaseError: actual.StaleLeaseError,
+  };
+});
 
 import { runOnce } from "../src/lib/jobs/runner";
+import { StaleLeaseError } from "../src/lib/jobs/store";
 import { registerHandler, __resetRegistryForTests } from "../src/lib/jobs/registry";
 import type { JobRecord } from "../src/lib/jobs/types";
 
@@ -25,6 +35,7 @@ function makeJob(overrides: Partial<JobRecord> = {}): JobRecord {
     priority: 0,
     runAt: new Date(),
     leaseId: "lease_1",
+    leaseGeneration: 1,
     leaseOwner: "worker_1",
     leaseExpiresAt: new Date(Date.now() + 30_000),
     heartbeatAt: new Date(),
@@ -46,6 +57,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   __resetRegistryForTests();
   mocks.store.reapExpiredLeases.mockResolvedValue({ requeued: 0, deadLettered: 0 });
+  mocks.store.expireAgedPendingJobs.mockResolvedValue(0);
 });
 
 describe("jobs/runner — runOnce", () => {
@@ -54,7 +66,7 @@ describe("jobs/runner — runOnce", () => {
 
     const summary = await runOnce();
 
-    expect(summary).toEqual({ leased: 0, completed: 0, retried: 0, deadLettered: 0, cancelled: 0, reaped: 3 });
+    expect(summary).toEqual({ leased: 0, completed: 0, retried: 0, deadLettered: 0, cancelled: 0, reaped: 3, agedOut: 0 });
     expect(mocks.store.leaseBatch).not.toHaveBeenCalled();
   });
 
@@ -67,16 +79,18 @@ describe("jobs/runner — runOnce", () => {
     const summary = await runOnce({ heartbeatIntervalMs: 60_000 });
 
     expect(handler).toHaveBeenCalledTimes(1);
-    expect(mocks.store.complete).toHaveBeenCalledWith("job_1", "lease_1", { ok: true }, expect.any(Number));
+    expect(mocks.store.complete).toHaveBeenCalledWith("job_1", "lease_1", { ok: true }, expect.any(Number), 1);
     expect(summary.leased).toBe(1);
     expect(summary.completed).toBe(1);
   });
 
-  it("passes payload/attempts through to the handler's context", async () => {
+  it("passes payload/attempts/leaseGeneration and applyEffect through to the handler's context", async () => {
     const handler = vi.fn().mockResolvedValue({});
     registerHandler("test_queue", handler);
-    mocks.store.leaseBatch.mockResolvedValue([makeJob({ payload: { foo: "bar" }, attempts: 3, maxAttempts: 5 })]);
-    mocks.store.complete.mockResolvedValue(makeJob());
+    mocks.store.leaseBatch.mockResolvedValue([
+      makeJob({ payload: { foo: "bar" }, attempts: 3, maxAttempts: 5, leaseGeneration: 4 }),
+    ]);
+    mocks.store.complete.mockResolvedValue(makeJob({ leaseGeneration: 4 }));
 
     await runOnce({ heartbeatIntervalMs: 60_000 });
 
@@ -84,7 +98,11 @@ describe("jobs/runner — runOnce", () => {
     expect(ctx.payload).toEqual({ foo: "bar" });
     expect(ctx.attempts).toBe(3);
     expect(ctx.maxAttempts).toBe(5);
+    expect(ctx.leaseId).toBe("lease_1");
+    expect(ctx.leaseGeneration).toBe(4);
+    expect(typeof ctx.applyEffect).toBe("function");
     expect(typeof ctx.heartbeat).toBe("function");
+    expect(typeof ctx.extendLease).toBe("function");
     expect(ctx.signal).toBeInstanceOf(AbortSignal);
   });
 
@@ -94,7 +112,7 @@ describe("jobs/runner — runOnce", () => {
 
     const summary = await runOnce({ queues: ["unregistered"] });
 
-    expect(mocks.store.fail).toHaveBeenCalledWith("job_1", "lease_1", expect.any(Error));
+    expect(mocks.store.fail).toHaveBeenCalledWith("job_1", "lease_1", expect.any(Error), undefined, 1);
     expect(summary.deadLettered).toBe(1);
   });
 
@@ -106,7 +124,7 @@ describe("jobs/runner — runOnce", () => {
 
     const summary = await runOnce({ heartbeatIntervalMs: 60_000 });
 
-    expect(mocks.store.fail).toHaveBeenCalledWith("job_1", "lease_1", expect.any(Error), expect.any(Number));
+    expect(mocks.store.fail).toHaveBeenCalledWith("job_1", "lease_1", expect.any(Error), expect.any(Number), 1);
     expect(summary.retried).toBe(1);
     expect(summary.deadLettered).toBe(0);
   });
@@ -229,30 +247,57 @@ describe("jobs/runner — runOnce", () => {
     expect(summary.completed).toBe(3);
   });
 
-  it("completes the job via store.complete even when the handler returns a large or unserializable result", async () => {
-    const oversizedResult = { blob: "x".repeat(200_000) };
-    const handler = vi.fn().mockResolvedValue(oversizedResult);
-    registerHandler("test_queue", handler);
-    mocks.store.leaseBatch.mockResolvedValue([makeJob()]);
-    mocks.store.complete.mockResolvedValue(
-      makeJob({
-        status: "completed",
-        result: {
-          truncated: true,
-          reason: "result_exceeds_max_bytes",
-          maxBytes: 65_536,
-          actualBytes: 200_011,
-          diagnostic: "job result size (200011 bytes) exceeded maxResultBytes (65536 bytes)",
-        },
-      }),
-    );
+  it("carries monotonic leaseGeneration into applyEffect and completes when lease is active", async () => {
+    const sideEffect = vi.fn().mockResolvedValue("written");
+    mocks.store.withLeaseFence.mockImplementation(async (fence, effect) => effect(fence));
+    registerHandler("test_queue", async (ctx) => {
+      const value = await ctx.applyEffect(async (fence) => {
+        expect(fence).toEqual({ jobId: "job_1", leaseId: "lease_1", leaseGeneration: 5 });
+        return sideEffect(fence.leaseGeneration);
+      });
+      return { value };
+    });
+    mocks.store.leaseBatch.mockResolvedValue([makeJob({ leaseGeneration: 5 })]);
+    mocks.store.complete.mockResolvedValue(makeJob({ status: "completed", leaseGeneration: 5 }));
 
     const summary = await runOnce({ heartbeatIntervalMs: 60_000 });
 
-    expect(mocks.store.complete).toHaveBeenCalledWith("job_1", "lease_1", oversizedResult, expect.any(Number));
-    expect(mocks.store.fail).not.toHaveBeenCalled();
+    expect(sideEffect).toHaveBeenCalledWith(5);
+    expect(mocks.store.complete).toHaveBeenCalledWith("job_1", "lease_1", { value: "written" }, expect.any(Number), 5);
     expect(summary.completed).toBe(1);
+  });
+
+  it("rejects side effects and skips complete/fail when the lease was replaced (StaleLeaseError)", async () => {
+    const sideEffect = vi.fn();
+    mocks.store.withLeaseFence.mockRejectedValue(
+      new StaleLeaseError({ jobId: "job_1", leaseId: "lease_1", leaseGeneration: 2 }),
+    );
+    registerHandler("test_queue", async (ctx) => {
+      await ctx.applyEffect(async () => {
+        sideEffect();
+      });
+      return { ok: true };
+    });
+    mocks.store.leaseBatch.mockResolvedValue([makeJob({ leaseGeneration: 2 })]);
+
+    const summary = await runOnce({ heartbeatIntervalMs: 60_000 });
+
+    expect(sideEffect).not.toHaveBeenCalled();
+    expect(mocks.store.complete).not.toHaveBeenCalled();
+    expect(mocks.store.fail).not.toHaveBeenCalled();
+    expect(summary.completed).toBe(0);
     expect(summary.retried).toBe(0);
     expect(summary.deadLettered).toBe(0);
+  });
+
+  it("rejects completion result when store.complete returns null due to a replaced lease", async () => {
+    registerHandler("test_queue", async () => ({ ok: true }));
+    mocks.store.leaseBatch.mockResolvedValue([makeJob({ leaseGeneration: 3 })]);
+    mocks.store.complete.mockResolvedValue(null);
+
+    const summary = await runOnce({ heartbeatIntervalMs: 60_000 });
+
+    expect(mocks.store.complete).toHaveBeenCalledWith("job_1", "lease_1", { ok: true }, expect.any(Number), 3);
+    expect(summary.completed).toBe(0);
   });
 });

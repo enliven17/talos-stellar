@@ -18,13 +18,14 @@ export type JobEvent =
   | "job_enqueued"
   | "job_leased"
   | "job_heartbeat"
+  | "job_lease_extended"
+  | "job_lease_extension_rejected"
   | "job_completed"
   | "job_retry_scheduled"
   | "job_dead_letter"
   | "job_cancelled"
   | "job_lease_reaped"
-  | "job_result_truncated"
-  | "job_error_truncated";
+  | "job_lease_fenced";
 
 export interface JobLogFields {
   jobId: string;
@@ -35,9 +36,7 @@ export interface JobLogFields {
   durationMs?: number;
   delayMs?: number;
   workerId?: string;
-  reason?: string;
-  actualBytes?: number;
-  maxBytes?: number;
+  leaseGeneration?: number;
 }
 
 export function logJobEvent(event: JobEvent, fields: JobLogFields): void {

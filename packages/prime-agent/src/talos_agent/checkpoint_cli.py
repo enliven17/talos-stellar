@@ -40,6 +40,7 @@ _CHECKPOINT_TABLES = (
     "loan_repayments",
     "dividends_log",
     "retry_state",
+    "task_failure_history",
 )
 
 

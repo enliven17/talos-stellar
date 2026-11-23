@@ -887,9 +887,12 @@ export const tlsJobs = pgTable(
     // Earliest time this job is eligible to be leased (supports delayed retry)
     runAt: timestamp("runAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
 
-    // Lease ownership — leaseId is a random token so a reaped-and-relaunched
-    // lease can never be mistaken for the original by a slow worker.
+    // Lease ownership — leaseId is a random token and leaseGeneration is a
+    // monotonic fencing token incremented on every lease claim (never reset),
+    // so a reaped-and-replaced lease can never be mistaken for the original by
+    // a slow worker applying side effects or finalizing results.
     leaseId: text("leaseId"),
+    leaseGeneration: integer("leaseGeneration").notNull().default(0),
     leaseOwner: text("leaseOwner"),
     leaseExpiresAt: timestamp("leaseExpiresAt", { mode: "date", precision: 3 }),
     heartbeatAt: timestamp("heartbeatAt", { mode: "date", precision: 3 }),
@@ -968,7 +971,7 @@ export const tlsOutboxEvents = pgTable(
     eventType: text("eventType").notNull(),             // e.g. "commerce_job.completed"
     payload: jsonb("payload").notNull().default({}),
 
-    // pending | leased | dispatched | dead_letter
+    // pending | leased | dispatched | dead_letter | quarantined
     status: text("status").notNull().default("pending"),
     runAt: timestamp("runAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
 
@@ -999,6 +1002,41 @@ export const tlsOutboxEvents = pgTable(
     uniqueIndex("tls_outbox_events_eventType_dedupeKey_unique")
       .on(t.eventType, t.dedupeKey)
       .where(sql`"dedupeKey" IS NOT NULL`),
+  ],
+);
+
+// Per-consumer delivery tracking for outbox events.
+//
+// Each registered consumer for an eventType gets its own delivery row
+// keyed by (eventId, consumerId). Successful consumers are marked `acked`
+// and skipped on subsequent retries when another consumer fails.
+//
+// Status lifecycle: pending -> acked
+//                           -> pending     (retry — nextRetryAt pushed out by backoff)
+//                           -> dead_letter (consumer retries exhausted)
+export const tlsOutboxDeliveries = pgTable(
+  "tls_outbox_deliveries",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    eventId: text("eventId")
+      .notNull()
+      .references(() => tlsOutboxEvents.id, { onDelete: "cascade" }),
+    consumerId: text("consumerId").notNull(),
+
+    // pending | acked | dead_letter
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("maxAttempts").notNull().default(8),
+    nextRetryAt: timestamp("nextRetryAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    lastError: text("lastError"),
+    ackedAt: timestamp("ackedAt", { mode: "date", precision: 3 }),
+
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("tls_outbox_deliveries_eventId_consumerId_unique").on(t.eventId, t.consumerId),
+    index("tls_outbox_deliveries_eventId_status_idx").on(t.eventId, t.status),
   ],
 );
 

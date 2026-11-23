@@ -19,6 +19,7 @@
  *     finalityStatus: "PENDING" | "CONFIRMING" | "CONFIRMED" | "FAILED" | "EXPIRED" | "NOT_FOUND"
  *     confirmedLedger: number | null    — set when CONFIRMED
  *     lastLedgerChecked: number | null  — most recent ledger polled
+ *     observationAge: number | null     — age in closed ledgers of the last trusted payment observation (0 = current ledger, null = unknown)
  *     pollCount:      number
  *     lastError:      string | null     — privacy-safe Horizon diagnostic only
  *     repairApplied:  boolean           — true once downstream repair ran
@@ -97,6 +98,11 @@ export async function GET(
 
     // 3a. Reconciler record found — return full finality status
     if (txRecord) {
+      const observationAge =
+        txRecord.confirmedLedger !== null && txRecord.lastLedgerChecked !== null
+          ? Math.max(0, txRecord.lastLedgerChecked - txRecord.confirmedLedger)
+          : null;
+
       return Response.json({
         jobId: job.id,
         txHash: txRecord.txHash,
@@ -104,6 +110,7 @@ export async function GET(
         finalityStatus: txRecord.finalityStatus,
         confirmedLedger: txRecord.confirmedLedger ?? null,
         lastLedgerChecked: txRecord.lastLedgerChecked ?? null,
+        observationAge,
         pollCount: txRecord.pollCount,
         lastError: txRecord.lastError ?? null,
         repairApplied: txRecord.repairApplied,

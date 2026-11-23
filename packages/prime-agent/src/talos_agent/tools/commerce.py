@@ -18,11 +18,17 @@ from talos_agent.payments import (
 from talos_agent.payments.x402_signer import X402Signer
 from talos_agent.commerce_quote import (
     DEFAULT_X402_CLOCK_SKEW_POLICY,
+    INVALID_QUOTE_RECEIPT,
     enforce_commerce_quote_expiry,
+    canonical_request_digest,
+    create_quote_acceptance_receipt,
+    normalize_stellar_network,
     parse_iso8601_timestamp,
     quote_clock_policy_diagnostics,
     quote_expiry_iso,
+    verify_quote_acceptance_receipt,
 )
+from talos_agent.idempotency import generate_idempotency_key
 from talos_agent.tools import context as _context
 from talos_agent.tools.permissions import (
     DataScope,
@@ -117,9 +123,31 @@ async def discover_services(target: str = "") -> dict:
     return {"category_searched": category, "services": services, "count": len(services)}
 
 
+# #1446: a submit that times out AFTER the x402 payment is signed leaves the
+# server potentially settled while nothing local records it. The old code let
+# the httpx.TimeoutException propagate, so the next retry signed a new payment
+# under a new idempotency key and could pay twice. The two constants below are
+# the distinct outcome shapes; the gate further down returns them verbatim on
+# a repeat purchase for the same (talos_id, service_type, payload).
+PAYMENT_OUTCOME_UNKNOWN = "payment_outcome_unknown"
+PURCHASE_TIMEOUT = "PURCHASE_TIMEOUT"
+
+
+def _canonical_purchase_payload(payload_dict: dict, talos_id: str, service_type: str) -> str:
+    """Stable digest for unknown-record lookup, independent of key ordering."""
+    return json.dumps(
+        {"talos_id": talos_id, "service_type": service_type, "payload": payload_dict},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 @tool(
     "purchase_service",
-    "Purchase a service or Playbook from anOther Talos via x402 (USDC on Arc). Handles 402→sign→submit flow.",
+    "Purchase a service or Playbook from another Talos via x402 USDC. "
+    "Returns a quote acceptance receipt bound to the seller, service, exact USDC "
+    "amount, Stellar network, and canonical request digest. Provide an existing "
+    "receipt as acceptance_receipt to reject reuse with different purchase details.",
 )
 async def purchase_service(
     talos_id: str, service_type: str = "", payload: str = "{}"
@@ -181,15 +209,39 @@ async def purchase_service(
 
     price = payment_details.get("price", 0)
     payee = payment_details.get("payee", "")
+    # Seller allowlist gate (issue #1443): check canonical seller identity
+    # before any paid request is constructed. Empty allowlist = legacy
+    # (no enforcement). Non-allowlisted sellers are rejected with an
+    # explicit requires_approval marker so the agent loop routes them
+    # through the existing operator approval flow rather than silently
+    # dispatching payment.
+    allowlist = getattr(_settings, "purchase_seller_allowlist", None)
+    # Defensive: only enforce when the setting is a real container of
+    # seller identifiers. MagicMock/test doubles and misconfigured
+    # settings fall through to legacy (no allowlist) behavior rather
+    # than accidentally blocking every seller.
+    if not isinstance(allowlist, (list, tuple, set, frozenset)):
+        allowlist = []
+    if allowlist and payee not in allowlist:
+        return {
+            "error": f"Seller {payee} is not in the autonomous purchase allowlist",
+            "code": "SELLER_NOT_ALLOWLISTED",
+            "requires_approval": True,
+            "seller": payee,
+        }
     # Prefer quote.amount when present (canonical A2A decimal) for display/budget.
     if isinstance(quote_obj, dict) and quote_obj.get("amount") is not None:
         try:
-            price = float(quote_obj["amount"])
+            price_str = str(quote_obj["amount"])
+            price = float(price_str)
         except (TypeError, ValueError):
             return {
                 "error": "Commerce quote amount is malformed",
                 "code": "INVALID_QUOTE",
             }
+
+    try:
+        amount_units = price_to_usdc_units(price_str)
     # Convert price to USDC smallest units before reserving or signing.
     try:
         amount_units = price_to_usdc_units(str(price))
@@ -199,6 +251,68 @@ async def purchase_service(
             "code": "INVALID_QUOTE",
         }
 
+    quote_network = quote_obj.get("network") if isinstance(quote_obj, dict) else None
+    response_network = payment_details.get("network", quote_network)
+    if quote_network is not None and quote_network != "stellar":
+        return {
+            "error": "Commerce quote uses an unsupported payment network",
+            "code": "INVALID_QUOTE",
+        }
+    configured_network = getattr(_deps().settings, "stellar_network", "testnet")
+    if not isinstance(configured_network, str):
+        configured_network = "testnet"
+    network = normalize_stellar_network(
+        response_network,
+        default=configured_network,
+    )
+    if network is None:
+        return {
+            "error": "Commerce quote uses an unsupported payment network",
+            "code": "INVALID_QUOTE",
+        }
+    if network != "stellar:testnet":
+        return {
+            "error": "Commerce quote network does not match the configured USDC asset",
+            "code": "INVALID_QUOTE",
+        }
+
+    receipt_service_type = service_type or payment_details.get("serviceName") or ""
+    if not isinstance(receipt_service_type, str):
+        return {
+            "error": "Commerce quote service name is malformed",
+            "code": "INVALID_QUOTE",
+        }
+
+    try:
+        request_digest = canonical_request_digest(payload_dict)
+    except (TypeError, ValueError):
+        return {
+            "error": "Commerce purchase request cannot be canonically encoded",
+            "code": INVALID_QUOTE_RECEIPT,
+        }
+    receipt = create_quote_acceptance_receipt(
+        seller_id=talos_id,
+        payee=payee,
+        service_type=receipt_service_type,
+        amount_units=amount_units,
+        network=network,
+        request_digest=request_digest,
+    )
+    if acceptance_receipt is not None:
+        receipt_error = verify_quote_acceptance_receipt(
+            acceptance_receipt,
+            seller_id=talos_id,
+            payee=payee,
+            service_type=receipt_service_type,
+            amount_units=amount_units,
+            network=network,
+            request_digest=request_digest,
+        )
+        if receipt_error is not None:
+            return receipt_error
+
+    # Check if purchase would exceed GTM budget
+    if spent_month + float(price) > gtm_budget:
     reserved, gtm_budget_units, aggregate_units = await _reserve_budget_units(amount_units)
     if not reserved:
         return {
@@ -225,10 +339,38 @@ async def purchase_service(
             "approval_id": result.get("id") if result else None,
             "price": price,
             "talos_id": talos_id,
+            "acceptance_receipt": receipt,
+        }
+
+    # #1446: before signing, refuse to re-sign if a previous purchase for this
+    # exact (talos_id, service_type, payload) is already in the unknown-
+    # fulfillment state. Return the existing record instead of paying twice.
+    canonical = _canonical_purchase_payload(payload_dict, talos_id, service_type)
+    existing_unknown = _deps().db.find_unknown_commerce_job(canonical)
+    if existing_unknown is not None:
+        return {
+            "status": PAYMENT_OUTCOME_UNKNOWN,
+            "code": PURCHASE_TIMEOUT,
+            "job_id": existing_unknown.get("job_id"),
+            "talos_id": talos_id,
+            "service_type": service_type,
+            "idempotency_key": existing_unknown.get("idempotency_key"),
+            "message": (
+                "A previous purchase for this payload has an unknown "
+                "payment outcome; reconcile it before retrying."
+            ),
         }
 
     # Step 2: Sign payment (EIP-3009)
     signer = _get_signer()
+    await signer.initialize()
+
+    sign_result = await signer.sign_payment(
+        payee=payee,
+        amount=amount_units,
+        asset_code="USDC",
+        asset_issuer=USDC_TESTNET_ISSUER,
+    )
     try:
         await signer.initialize()
         sign_result = await signer.sign_payment(
@@ -245,15 +387,54 @@ async def purchase_service(
         await _release_budget_units(amount_units)
         return sign_result
 
-    # Step 3: POST with X-PAYMENT header
+    # #1446: generate the idempotency key BEFORE submit so it is known and
+    # storable on a timeout — the server may have settled under this key even
+    # though we never saw a response.
+    idempotency_key = generate_idempotency_key()
+
+    # Step 3: POST with X-PAYMENT header. Only timeout/transport errors around
+    # the submit are treated as "outcome unknown" — server-error JSON below
+    # is a definitive payment failure and stays unchanged.
     try:
         submit_result = await _deps().api.submit_commerce(
             talos_id,
             payment_header=sign_result["payment_header"],
             payload=payload_dict,
+            idempotency_key=idempotency_key,
         )
-    except Exception:
-        await _release_budget_units(amount_units)
+    except Exception as exc:
+        import httpx
+        if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+            # Persist a recoverable unknown record; the same canonical digest
+            # blocks a second payment on the next call for this payload.
+            _deps().db.add_commerce_job(
+                job_id=f"unknown-{idempotency_key}",
+                talos_id=talos_id,
+                service_type=service_type,
+                payload={
+                    **payload_dict,
+                    "_canonical": canonical,
+                    "_idempotency_key": idempotency_key,
+                    "_status": "payment_outcome_unknown",
+                },
+            )
+            log.warning(
+                "prime_agent_commerce_payment_outcome_unknown",
+                talos_id=talos_id,
+                service_type=service_type,
+                idempotency_key=idempotency_key,
+            )
+            return {
+                "status": PAYMENT_OUTCOME_UNKNOWN,
+                "code": PURCHASE_TIMEOUT,
+                "talos_id": talos_id,
+                "service_type": service_type,
+                "idempotency_key": idempotency_key,
+                "message": (
+                    "Payment may have settled but no response was received; "
+                    "reconcile before retrying."
+                ),
+            }
         raise
 
     if not submit_result:
@@ -274,6 +455,7 @@ async def purchase_service(
     expiry_iso = quote_expiry_iso(payment_details)
     if expiry_iso:
         tracked_payload.setdefault("_quote_expires_at", expiry_iso)
+    tracked_payload["_quote_acceptance_receipt"] = receipt
     _deps().db.add_commerce_job(job_id, talos_id, service_type, tracked_payload)
 
     # Commit budget reservation (release reserved units, persist actual spending)
@@ -289,6 +471,7 @@ async def purchase_service(
             "talos_id": talos_id,
             "service_type": service_type,
             "result": submit_result["result"],
+            "acceptance_receipt": receipt,
         }
 
     return {
@@ -297,6 +480,7 @@ async def purchase_service(
         "price": price,
         "talos_id": talos_id,
         "service_type": service_type,
+        "acceptance_receipt": receipt,
     }
 
 

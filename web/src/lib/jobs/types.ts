@@ -37,6 +37,8 @@ export interface JobRecord<TPayload = unknown> {
   priority: number;
   runAt: Date;
   leaseId: string | null;
+  /** Monotonic fencing token incremented on every lease claim and never reset. */
+  leaseGeneration: number;
   leaseOwner: string | null;
   leaseExpiresAt: Date | null;
   heartbeatAt: Date | null;
@@ -69,18 +71,44 @@ export interface HeartbeatResult {
   cancelled: boolean;
 }
 
+/**
+ * Monotonic fencing token identifying a specific lease claim for a job.
+ * Carried into result-side effects so a worker whose lease was replaced
+ * cannot apply stale effects or overwrite a newer worker's state.
+ */
+export interface LeaseFence {
+  jobId: string;
+  leaseId: string;
+  leaseGeneration: number;
+}
+
 export interface JobContext<TPayload = unknown> {
   id: string;
   queue: string;
   attempts: number;
   maxAttempts: number;
   payload: TPayload;
+  /** Active lease token for this claim. */
+  leaseId: string;
+  /** Monotonic lease generation fencing token for this claim. */
+  leaseGeneration: number;
+  /**
+   * Executes a result-side effect only if this worker's lease generation is
+   * still active. Throws `StaleLeaseError` if the lease was replaced or lost.
+   */
+  applyEffect: <T>(effect: (fence: LeaseFence) => Promise<T>) => Promise<T>;
   /**
    * Extends the lease and checks for cooperative cancellation. Long-running
    * handlers should call this periodically and abort (via `signal`) when
    * `cancelled` is true or `ok` is false.
    */
-  heartbeat: () => Promise<HeartbeatResult>;
+  heartbeat: (leaseDurationMs?: number) => Promise<HeartbeatResult>;
+  /**
+   * Additively extends the current lease expiry by `extensionMs` after
+   * validating extension limits against current expiry and job state.
+   * Rejects contradictory requests without modifying the held lease.
+   */
+  extendLease: (extensionMs: number) => Promise<ExtendLeaseResult>;
   /** Aborts when cancellation is requested or the process is shutting down. */
   signal: AbortSignal;
 }
@@ -96,6 +124,8 @@ export interface RunOnceSummary {
   deadLettered: number;
   cancelled: number;
   reaped: number;
+  /** Pending jobs expired by queue-age deadline (never ran; attempts unchanged). */
+  agedOut: number;
 }
 
 /**
@@ -125,4 +155,84 @@ export interface BoundErrorOutcome {
   truncated: boolean;
   actualBytes: number;
   maxBytes: number;
+}
+
+export type BulkRetryReason =
+  | "eligible"
+  | "not_found"
+  | "status_not_failed"
+  | "cancelled_excluded"
+  | "queue_mismatch"
+  | "retry_class_mismatch"
+  | "fatal_retry_class";
+
+export type BulkRetrySkipReason =
+  | Exclude<BulkRetryReason, "eligible">
+  | "revision_mismatch"
+  | "invalid_revision";
+
+export interface BulkRetryFilter {
+  /** Explicit job IDs to evaluate. When omitted, scans matching jobs up to `limit`. */
+  jobIds?: string[];
+  queue?: string;
+  retryClass?: RetryClass;
+  /** Include `cancelled` jobs in addition to `dead_letter`. Defaults to false. */
+  includeCancelled?: boolean;
+  /** Allow retrying `fatal` retryClass jobs. Defaults to false. */
+  allowFatal?: boolean;
+  /** Max jobs to scan when `jobIds` is not supplied (default 50, max 200). */
+  limit?: number;
+}
+
+export interface BulkRetryCandidate {
+  id: string;
+  queue: string;
+  status: JobStatus;
+  retryClass: RetryClass;
+  attempts: number;
+  maxAttempts: number;
+  lastError: string | null;
+  revision: string;
+  reason: "eligible";
+}
+
+export interface BulkRetryExcluded {
+  id: string;
+  queue: string | null;
+  status: JobStatus | null;
+  retryClass: RetryClass | null;
+  revision: string | null;
+  reason: Exclude<BulkRetryReason, "eligible">;
+}
+
+export interface BulkRetryPreview {
+  dryRun: true;
+  totalEvaluated: number;
+  eligibleCount: number;
+  ineligibleCount: number;
+  countsByReason: Partial<Record<BulkRetryReason, number>>;
+  eligible: BulkRetryCandidate[];
+  ineligible: BulkRetryExcluded[];
+}
+
+export interface BulkRetrySelection {
+  id: string;
+  /** Unchanged job revision token returned by `previewBulkRetry` (`updatedAt` ISO string). */
+  revision: string;
+}
+
+export interface BulkRetrySkippedItem {
+  id: string;
+  expectedRevision: string;
+  currentRevision: string | null;
+  reason: BulkRetrySkipReason;
+}
+
+export interface BulkRetryExecutionResult {
+  dryRun: false;
+  requestedCount: number;
+  requeuedCount: number;
+  skippedCount: number;
+  requeued: JobRecord[];
+  skipped: BulkRetrySkippedItem[];
 }

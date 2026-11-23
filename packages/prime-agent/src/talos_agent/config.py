@@ -572,6 +572,15 @@ class Settings(BaseSettings):
         default=True, description="Redact sensitive values in replay event payloads"
     )
 
+    # Task failure history persistence (bounded per agent/task)
+    task_failure_max_history: int = Field(
+        default=100,
+        ge=1,
+        le=1000,
+        validation_alias="TALOS_TASK_FAILURE_MAX_HISTORY",
+        description="Maximum number of failure records retained per task.",
+    )
+
     def __init__(self, **kwargs):
         overrides = _json_config_source()
         overrides.update(kwargs)

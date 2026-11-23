@@ -317,6 +317,13 @@ async def _legacy_agent_loop(
             console.print("[yellow]Agent hit max iterations limit.[/yellow]")
             _cycle_outcome = "max_iterations"
 
+    except asyncio.CancelledError:
+        # Terminal cancellation is not a failure — record it distinctly so
+        # cycle summaries do not report a cancelled cycle as "completed".
+        _cycle_error_type = "CancelledError"
+        _cycle_error_category = "cancelled"
+        _cycle_outcome = "cancelled"
+        raise
     except Exception as exc:
         _cycle_error_type = type(exc).__name__
         _cycle_error_category = "loop_error"
@@ -547,6 +554,13 @@ async def _routed_agent_loop(
             console.print("[yellow]Agent hit max iterations limit.[/yellow]")
             _cycle_outcome = "max_iterations"
 
+    except asyncio.CancelledError:
+        # Terminal cancellation is not a failure — record it distinctly so
+        # cycle summaries do not report a cancelled cycle as "completed".
+        _cycle_error_type = "CancelledError"
+        _cycle_error_category = "cancelled"
+        _cycle_outcome = "cancelled"
+        raise
     except Exception as exc:
         _cycle_error_type = type(exc).__name__
         _cycle_error_category = "loop_error"
@@ -604,6 +618,10 @@ def _emit_cycle_summary(
 
     This function must be called exactly once per cycle — both success and
     failure paths must reach it.
+
+    ``outcome`` is one of ``completed``, ``shutdown`` (cooperative stop via
+    the shutdown event), ``cancelled`` (asyncio cancellation),
+    ``max_iterations``, ``provider_failure``, or ``error``.
     """
     ended_at = datetime.now(timezone.utc).isoformat()
     tool_calls = len(tool_names)

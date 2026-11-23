@@ -119,6 +119,13 @@ export const MAX_PAYLOAD_BYTES = parsePositiveIntEnv(
   { min: 1, max: 10_485_760 },
 );
 
+/** Maximum response body size (bytes) to capture from outbound webhook delivery responses. */
+export const MAX_RESPONSE_BYTES = parsePositiveIntEnv(
+  "WEBHOOK_MAX_RESPONSE_BYTES",
+  10_000,
+  { min: 1, max: 10_485_760 },
+);
+
 // ─── Lease settings (same pattern as commerce jobs) ──────────────
 
 /** Default lease TTL (seconds) for a claimed delivery. */
@@ -142,6 +149,12 @@ export const CURRENT_SIGNATURE_VERSION = 1;
 
 /** Supported signature versions for verification. */
 export const SUPPORTED_SIGNATURE_VERSIONS = [1];
+
+/** HTTP header carrying the versioned HMAC signature(s) and timestamp. */
+export const WEBHOOK_SIGNATURE_HEADER = "X-Webhook-Signature";
+
+/** HTTP header carrying the comma-separated signing key identifier(s). */
+export const WEBHOOK_KEY_ID_HEADER = "X-Webhook-Key-Id";
 
 // ─── Secret rotation ─────────────────────────────────────────────
 

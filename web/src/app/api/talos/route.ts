@@ -103,6 +103,10 @@ async function _GET(request: NextRequest) {
     if (!parsedCategory.ok) return parsedCategory.response;
     const categoryFilter = parsedCategory.category;
 
+    const parsedAddress = parseDirectoryAddressFilter(searchParams.get("address"));
+    if (!parsedAddress.ok) return parsedAddress.response;
+    const addressFilter = parsedAddress.address;
+
     // -----------------------------------------------------------------------
     // Numeric filter validation
     // -----------------------------------------------------------------------
@@ -163,6 +167,15 @@ async function _GET(request: NextRequest) {
       // Apply category filter
       if (categoryFilter !== null) {
         conditions.push(ilike(tlsTalos.category, categoryFilter));
+      }
+
+      if (addressFilter !== null) {
+        conditions.push(or(
+          eq(tlsTalos.walletPublicKey, addressFilter),
+          eq(tlsTalos.creatorPublicKey, addressFilter),
+          eq(tlsTalos.investorPublicKey, addressFilter),
+          eq(tlsTalos.treasuryPublicKey, addressFilter),
+        )!);
       }
 
       if (currentCursor) {

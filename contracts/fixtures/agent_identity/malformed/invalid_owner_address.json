@@ -1,0 +1,9 @@
+{
+  "kind": "AgentIdentity",
+  "registry_id": "GDN5AZ5KL6ZUN4W7SLRUXA3ZXCF4V6POZPV2QKDVDHM7QAN6R54IB3BV",
+  "talos_id": 1,
+  "name": "vega",
+  "owner": "ZZZZZZ",
+  "network": "testnet",
+  "exported_at": 1700000000
+}

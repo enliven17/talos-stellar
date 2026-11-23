@@ -972,8 +972,10 @@ def restore(artifact, passphrase, confirm, agent_id, restore_root):
     """Restore agent state from an encrypted backup artifact.
 
     By default this is a dry run that prints the manifest. Pass --confirm
-    to actually replace the local SQLite state. Any existing files are
-    backed up to `.pre-restore` siblings first.
+    to actually replace the local SQLite state. The artifact is staged in
+    an isolated candidate directory and its SQLite integrity, schema, and
+    agent identity are verified before any live database is replaced. Any
+    existing files are backed up to `.pre-restore` siblings first.
     """
     from pathlib import Path as _Path
     from talos_agent.backup_service import (
