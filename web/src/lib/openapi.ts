@@ -3259,7 +3259,12 @@ Verifies and settles the payment on-chain, then records the purchase and revenue
                       properties: {
                         totalValue: { type: "string" },
                         activeTalos: { type: "integer" },
-                        totalRevenue: { type: "string" },
+                        totalRevenue: {
+                          type: "string",
+                          nullable: true,
+                          description:
+                            "Formatted sum of observed revenue. `null` when no revenue observation exists; `\"$0.00\"` is a verified zero.",
+                        },
                         pendingCount: { type: "integer" },
                       },
                     },
@@ -3267,7 +3272,22 @@ Verifies and settles the payment on-chain, then records the purchase and revenue
                     approvalHistory: { type: "array", items: { type: "object", additionalProperties: true } },
                     activities: { type: "array", items: { type: "object", additionalProperties: true } },
                     agents: { type: "array", items: { type: "object", additionalProperties: true } },
-                    revenueStreams: { type: "array", items: { type: "object", additionalProperties: true } },
+                    revenueStreams: {
+                      type: "array",
+                      description:
+                        "One entry per agent with at least one revenue observation. Agents without observations are omitted rather than reported as $0.",
+                      items: {
+                        type: "object",
+                        properties: {
+                          talosId: { type: "string" },
+                          talosName: { type: "string" },
+                          totalRevenue: { type: "number", nullable: true },
+                          observationCount: { type: "integer" },
+                          bySource: { type: "object", additionalProperties: { type: "number" } },
+                          recentTx: { type: "array", items: { type: "object", additionalProperties: true } },
+                        },
+                      },
+                    },
                     talosManagement: { type: "array", items: { type: "object", additionalProperties: true } },
                   },
                 },
