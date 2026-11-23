@@ -198,7 +198,26 @@ async def purchase_service(
 
     price = payment_details.get("price", 0)
     payee = payment_details.get("payee", "")
-    price_str = str(price)
+    # Seller allowlist gate (issue #1443): check canonical seller identity
+    # before any paid request is constructed. Empty allowlist = legacy
+    # (no enforcement). Non-allowlisted sellers are rejected with an
+    # explicit requires_approval marker so the agent loop routes them
+    # through the existing operator approval flow rather than silently
+    # dispatching payment.
+    allowlist = getattr(_settings, "purchase_seller_allowlist", None)
+    # Defensive: only enforce when the setting is a real container of
+    # seller identifiers. MagicMock/test doubles and misconfigured
+    # settings fall through to legacy (no allowlist) behavior rather
+    # than accidentally blocking every seller.
+    if not isinstance(allowlist, (list, tuple, set, frozenset)):
+        allowlist = []
+    if allowlist and payee not in allowlist:
+        return {
+            "error": f"Seller {payee} is not in the autonomous purchase allowlist",
+            "code": "SELLER_NOT_ALLOWLISTED",
+            "requires_approval": True,
+            "seller": payee,
+        }
     # Prefer quote.amount when present (canonical A2A decimal) for display/budget.
     if isinstance(quote_obj, dict) and quote_obj.get("amount") is not None:
         try:
