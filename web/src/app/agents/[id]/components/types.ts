@@ -76,6 +76,7 @@ export interface TalosDetail {
   service: ServiceInfo | null;
   jobStats: JobStats;
   recentJobs: RecentJob[];
+  observedAt?: string | null;
 }
 
 export const TABS = [
@@ -127,6 +128,7 @@ export interface DistPreview {
     sharePercent: string;
     estimatedUsdc: string;
   }[];
+  observedAt?: string | null;
 }
 
 /** Buyback stats preview */
@@ -137,4 +139,5 @@ export interface BuybackPreview {
   totalBuybackExecuted: number;
   operatorMitosBalance: number;
   circulatingSupply: number;
+  observedAt?: string | null;
 }

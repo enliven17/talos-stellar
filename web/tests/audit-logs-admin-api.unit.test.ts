@@ -106,4 +106,52 @@ describe("GET /api/admin/audit-logs", () => {
     expect(body.error).toBe("Internal server error");
     expect(JSON.stringify(body)).not.toMatch(/db down/);
   });
+
+  it("exports CSV with a bounded safe filename while preserving Unicode in the response body", async () => {
+    mocks.auditLog.listAuditLogs.mockResolvedValue({
+      logs: [
+        {
+          id: "log_1",
+          talosId: 'actor-🚀-Ümlaut"; filename="evil.csv',
+          method: "POST",
+          path: "/api/talos/🚀/sign",
+          statusCode: 403,
+          denialReason: "insufficient_scopes_Ωμέγα",
+          scopesRequired: ["wallet:sign"],
+          ipAddress: "127.0.0.1",
+          sequenceNumber: 0,
+          previousHash: "GENESIS",
+          entryHash: "a".repeat(64),
+          chainVersion: "1",
+          createdAt: "2026-10-17T12:00:00.000Z",
+        },
+      ],
+      nextCursor: null,
+    });
+
+    const res = await listRoute(
+      authed(
+        `/api/admin/audit-logs?format=csv&talosId=${encodeURIComponent('actor-🚀-Ümlaut"; filename="evil.csv')}&q=${encodeURIComponent("🚀")}`,
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("text/csv; charset=utf-8");
+    const disposition = res.headers.get("Content-Disposition") ?? "";
+    expect(disposition).toMatch(
+      /^attachment; filename="audit-logs-filtered-\d{8}T\d{6}Z\.csv"$/,
+    );
+    expect(disposition).not.toContain("evil.csv");
+    expect(disposition).not.toContain("🚀");
+
+    const text = await res.text();
+    expect(text).toContain("/api/talos/🚀/sign");
+    expect(text).toContain("insufficient_scopes_Ωμέγα");
+  });
+
+  it("rejects an unsupported export format with 400", async () => {
+    const res = await listRoute(authed("/api/admin/audit-logs?format=xml"));
+    expect(res.status).toBe(400);
+    expect(mocks.auditLog.listAuditLogs).not.toHaveBeenCalled();
+  });
 });

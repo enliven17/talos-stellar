@@ -18,6 +18,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useWallet } from "@/components/wallet-gate";
+import { AgentLifecycleChecklist } from "@/components/agent-lifecycle-checklist";
+import type { LifecycleChecklist } from "@/lib/governance/lifecycle";
 
 type LifecycleState =
   | "proposed"
@@ -73,6 +75,7 @@ interface LifecycleSnapshot {
   viewerRoles: string[];
   inFlightJobs: number;
   pendingProposals: { id: string; title: string; type: string }[];
+  checklist?: LifecycleChecklist;
   run: RunRecord | null;
   events: LifecycleEvent[];
   nextCursor: number | null;
@@ -397,6 +400,17 @@ export function AgentLifecyclePanel({ talosId }: { talosId: string }) {
           )}
         </div>
       )}
+
+      {/* ── Lifecycle Checklist ─────────────────────────────────── */}
+      <AgentLifecycleChecklist
+        talosId={talosId}
+        checklist={snapshot.checklist}
+        onActionClick={onActionClick}
+        isOwner={
+          snapshot.viewerRoles.includes("creator") ||
+          snapshot.viewerRoles.includes("operator")
+        }
+      />
 
       {/* ── Actions ──────────────────────────────────────────────── */}
       <div>
