@@ -14,22 +14,36 @@
  *   if (!result.ok) return rateLimitResponse(result);
  */
 
-import { getRateLimitStore } from "@/lib/rate-limit-store";
+import {
+  getRateLimitStore,
+  type OperationClass,
+  type RateLimitStoreIncrementOptions,
+} from "@/lib/rate-limit-store";
 import { logger } from "@/lib/logger";
+import {
+  computeRetryAfterSeconds,
+  formatResetEpochSeconds,
+  isValidResetAt,
+  type RetryAfterOptions,
+} from "@/lib/retry-after";
 
 export interface RateLimitOptions {
   /** Max requests allowed per window */
   limit: number;
   /** Window duration in milliseconds */
   windowMs: number;
+  /** Operation class determining fail-open vs fail-closed policy during store outage */
+  operationClass?: OperationClass;
+  /** Custom bounded grace period override in milliseconds */
+  graceTtlMs?: number;
 }
 
 export interface RateLimitResult {
   ok: boolean;
   limit: number;
   remaining: number;
-  /** Unix milliseconds when the window resets */
-  resetAt: number;
+  /** Unix milliseconds when the window resets, or `null` when unknown */
+  resetAt: number | null;
   /**
    * Human-readable policy bucket that produced this result.
    * One of: "auth" | "read" | "write-key" | "write-ip"
@@ -46,42 +60,70 @@ export interface RateLimitResult {
  */
 export async function rateLimit(
   key: string,
-  { limit, windowMs }: RateLimitOptions,
+  { limit, windowMs, operationClass, graceTtlMs }: RateLimitOptions,
 ): Promise<RateLimitResult> {
   const store = getRateLimitStore();
 
   let count: number;
-  let resetAt: number;
+  let resetAt: number | null;
 
   try {
-    ({ count, resetAt } = await store.increment(key, windowMs));
+    ({ count, resetAt } = await store.increment(key, windowMs, {
+      operationClass,
+      graceTtlMs,
+    }));
   } catch (err) {
-    // Last-resort safety valve: if the store itself throws unexpectedly,
-    // log the error and allow the request through (fail-open).
+    // Fail closed for payment and privileged operations even if the store itself throws
+    if (operationClass === "payment" || operationClass === "privileged") {
+      logger.error(
+        { err, key, operationClass },
+        "rate-limit: store.increment threw unexpectedly, denying request (fail-closed)",
+      );
+      const now = Date.now();
+      return { ok: false, limit, remaining: 0, resetAt: now + windowMs };
+    }
+
+    // Safety valve for standard/read: log and allow the request through (fail-open).
     logger.error({ err, key }, "rate-limit: store.increment threw unexpectedly, allowing request");
     const now = Date.now();
-    return { ok: true, limit, remaining: 1, resetAt: now + windowMs };
+    const candidate =
+      typeof windowMs === "number" && Number.isFinite(windowMs) && windowMs > 0
+        ? now + windowMs
+        : null;
+    return {
+      ok: true,
+      limit,
+      remaining: 1,
+      resetAt: isValidResetAt(candidate) ? candidate : null,
+    };
   }
 
   return {
     ok: count <= limit,
     limit,
     remaining: Math.max(0, limit - count),
-    resetAt,
+    resetAt: isValidResetAt(resetAt) ? resetAt : null,
   };
 }
 
-/** Build a 429 Response with standard rate-limit and Retry-After headers. */
-export function rateLimitResponse(result: RateLimitResult): Response {
-  const retryAfterSec = Math.max(1, Math.ceil((result.resetAt - Date.now()) / 1_000));
+/** Build a 429 Response with standard rate-limit and bounded Retry-After headers. */
+export function rateLimitResponse(
+  result: RateLimitResult,
+  options?: RetryAfterOptions,
+): Response {
+  const retryAfterSec = computeRetryAfterSeconds(result.resetAt, options);
+  const resetHeader = formatResetEpochSeconds(result.resetAt);
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "X-RateLimit-Limit": String(result.limit),
     "X-RateLimit-Remaining": String(result.remaining),
-    "X-RateLimit-Reset": String(Math.ceil(result.resetAt / 1_000)),
     "Retry-After": String(retryAfterSec),
   };
+
+  if (resetHeader !== null) {
+    headers["X-RateLimit-Reset"] = resetHeader;
+  }
 
   if (result.policy) {
     headers["X-RateLimit-Policy"] = result.policy;
@@ -93,17 +135,19 @@ export function rateLimitResponse(result: RateLimitResult): Response {
   );
 }
 
-/** Attach rate-limit headers to an existing Response (non-mutating). */
+/** Attach rate-limit headers to an existing Response (mutates headers). */
 export function applyRateLimitHeaders(
   response: Response,
   result: RateLimitResult,
 ): Response {
   response.headers.set("X-RateLimit-Limit", String(result.limit));
   response.headers.set("X-RateLimit-Remaining", String(result.remaining));
-  response.headers.set(
-    "X-RateLimit-Reset",
-    String(Math.ceil(result.resetAt / 1_000)),
-  );
+  const resetHeader = formatResetEpochSeconds(result.resetAt);
+  if (resetHeader !== null) {
+    response.headers.set("X-RateLimit-Reset", resetHeader);
+  } else {
+    response.headers.delete("X-RateLimit-Reset");
+  }
   if (result.policy) {
     response.headers.set("X-RateLimit-Policy", result.policy);
   }
@@ -130,8 +174,10 @@ export interface EndpointPolicy {
 function envInt(name: string, fallback: number): number {
   const v = process.env[name];
   if (!v) return fallback;
-  const n = parseInt(v, 10);
-  return isNaN(n) ? fallback : n;
+  const trimmed = v.trim();
+  if (!/^\d+$/.test(trimmed)) return fallback;
+  const n = Number(trimmed);
+  return Number.isSafeInteger(n) && n > 0 ? n : fallback;
 }
 
 export const RATE_LIMIT_POLICIES = {

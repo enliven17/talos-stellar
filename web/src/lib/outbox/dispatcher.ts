@@ -1,12 +1,55 @@
 import * as store from "./store";
 import { getRegisteredConsumers } from "./registry";
 import { outboxConfig } from "./config";
+import { boundRetryDelayMs } from "./retry";
 import type { DispatchSummary } from "./types";
+
+const MAX_TRACKED_RETRY_COOLDOWNS = 10_000;
+
+/**
+ * In-process monotonic retry deadlines (`eventId -> monotonicMs`).
+ * Guards against backward system-clock jumps causing a failed backlog to be
+ * immediately re-dispatched before its bounded relative backoff has elapsed.
+ */
+const retryNotBeforeMonotonicMs = new Map<string, number>();
+
+function defaultMonotonicNowMs(): number {
+  return performance.now();
+}
+
+function pruneExpiredCooldowns(nowMonotonicMs: number): void {
+  for (const [id, deadline] of retryNotBeforeMonotonicMs) {
+    if (deadline <= nowMonotonicMs) retryNotBeforeMonotonicMs.delete(id);
+  }
+}
+
+function recordRetryCooldown(eventId: string, nowMonotonicMs: number, delayMs: number): void {
+  const bounded = boundRetryDelayMs(delayMs);
+  if (bounded <= 0) {
+    retryNotBeforeMonotonicMs.delete(eventId);
+    return;
+  }
+  if (retryNotBeforeMonotonicMs.size >= MAX_TRACKED_RETRY_COOLDOWNS) {
+    pruneExpiredCooldowns(nowMonotonicMs);
+    if (retryNotBeforeMonotonicMs.size >= MAX_TRACKED_RETRY_COOLDOWNS) {
+      const oldestKey = retryNotBeforeMonotonicMs.keys().next().value;
+      if (oldestKey !== undefined) retryNotBeforeMonotonicMs.delete(oldestKey);
+    }
+  }
+  retryNotBeforeMonotonicMs.set(eventId, nowMonotonicMs + bounded);
+}
+
+/** Test-only helper to clear in-process monotonic retry state between cases. */
+export function __resetMonotonicRetryStateForTests(): void {
+  retryNotBeforeMonotonicMs.clear();
+}
 
 export interface DispatchOnceOptions {
   batchSize?: number;
   workerId?: string;
   leaseDurationMs?: number;
+  /** Optional monotonic clock source in milliseconds (defaults to `performance.now()`). */
+  monotonicNowMs?: () => number;
 }
 
 /**
@@ -28,6 +71,7 @@ export interface DispatchOnceOptions {
  */
 export async function dispatchOnce(opts: DispatchOnceOptions = {}): Promise<DispatchSummary> {
   const summary: DispatchSummary = { leased: 0, dispatched: 0, retried: 0, deadLettered: 0, reaped: 0, pruned: 0 };
+  const monotonicNow = opts.monotonicNowMs ?? defaultMonotonicNowMs;
 
   const reaped = await store.reapExpiredLeases();
   summary.reaped = reaped.requeued + reaped.deadLettered;
@@ -36,6 +80,8 @@ export async function dispatchOnce(opts: DispatchOnceOptions = {}): Promise<Disp
   const batch = await store.leaseBatch(opts.batchSize ?? outboxConfig.batchSize, opts.workerId, opts.leaseDurationMs);
   summary.leased = batch.length;
 
+  const supportedVersions = opts.supportedPayloadVersions ?? outboxConfig.supportedPayloadVersions ?? DEFAULT_SUPPORTED_PAYLOAD_VERSIONS;
+
   await Promise.all(
     batch.map(async (event) => {
       const leaseId = event.leaseId!; // guaranteed by leaseBatch()
@@ -43,6 +89,7 @@ export async function dispatchOnce(opts: DispatchOnceOptions = {}): Promise<Disp
 
       if (consumers.length === 0) {
         await store.fail(event.id, leaseId, new Error(`No consumer registered for event type "${event.eventType}"`));
+        retryNotBeforeMonotonicMs.delete(event.id);
         summary.deadLettered += 1;
         return;
       }

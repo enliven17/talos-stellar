@@ -1,0 +1,23 @@
+{
+  "spec_version": 1,
+  "description": "Migration compatibility manifest for TalosRegistry storage keys. Maps every DataKey variant from its v1 (SCHEMA_GENESIS = 1) representation to its v2 (SCHEMA_TIMELOCK_DEFAULTS = 2) representation. Only TimelockConfig changes semantics (implicit unwrap_or default -> explicitly persisted); all other keys are byte-identical across the upgrade, so ownership (CreatorOf) and name-bearing records (Talos) are preserved.",
+  "contracts": ["TalosRegistry"],
+  "from_version": 1,
+  "to_version": 2,
+  "key_mappings": [
+    {"key": "NextTalosId",        "v1": "u32 counter",        "v2": "u32 counter",        "changed": false},
+    {"key": "Talos",              "v1": "Talos(u32) struct",  "v2": "Talos(u32) struct",  "changed": false},
+    {"key": "CreatorOf",           "v1": "CreatorOf(u32) addr","v2": "CreatorOf(u32) addr","changed": false},
+    {"key": "ProtocolWallet",      "v1": "Address",           "v2": "Address",            "changed": false},
+    {"key": "ProtocolFeeBps",      "v1": "u32",               "v2": "u32",                 "changed": false},
+    {"key": "PendingAdmin",        "v1": "Address",           "v2": "Address",             "changed": false},
+    {"key": "TimelockConfig",      "v1": "implicit_default",  "v2": "explicit_persisted",  "changed": true},
+    {"key": "TimelockProposal",    "v1": "TimelockProposal(u64) struct", "v2": "TimelockProposal(u64) struct", "changed": false},
+    {"key": "NextTimelockId",      "v1": "u64",               "v2": "u64",                 "changed": false},
+    {"key": "LastTouched",         "v1": "LastTouched(u32) u32","v2": "LastTouched(u32) u32","changed": false},
+    {"key": "Guardians",           "v1": "Vec<Address>",       "v2": "Vec<Address>",        "changed": false},
+    {"key": "PauseState",          "v1": "PauseState(PauseDomain) struct", "v2": "PauseState(PauseDomain) struct", "changed": false},
+    {"key": "PauseController",     "v1": "PauseController(u32) Address", "v2": "PauseController(u32) Address", "changed": false},
+    {"key": "ResumeController",    "v1": "ResumeController(u32) Address","v2": "ResumeController(u32) Address","changed": false}
+  ]
+}
