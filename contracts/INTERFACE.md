@@ -137,14 +137,14 @@ time, and an expired proposal cannot be accepted.
 
 ### TalosDividends
 
-| Capability          | Description                                                                               |
-|---------------------|-------------------------------------------------------------------------------------------|
-| `epoch_commitment`  | `commit_epoch` — admin-gated distribution round creation.                                 |
-| `pull_claims`       | `claim_dividend` — patron-initiated O(1) claim per epoch.                                 |
-| `expiry_recovery`   | `recover_expired` — admin sweeps unclaimed funds after the claim window.                  |
-| `rounding_dust`     | `get_rounding_dust` — remainder from integer share division, stored once.                 |
-| `interface_query`   | `version` / `interface_id` / `supports_version` / `interface_features`.                  |
-| `dry_run_estimator` | `estimate_distribution` — stateless dry-run estimator returning per-role amounts and rounding remainder. Requires no signing key or live contract invocation. |
+| Capability             | Description                                                                 |
+|------------------------|-----------------------------------------------------------------------------|
+| `epoch_commitment`     | `commit_epoch` — admin-gated distribution round creation.                   |
+| `pull_claims`          | `claim_dividend` — patron-initiated O(1) claim per epoch.                   |
+| `expiry_recovery`      | `recover_expired` — admin sweeps unclaimed funds after the claim window.    |
+| `rounding_dust`        | `get_rounding_dust` — remainder from integer share division, stored once.   |
+| `interface_query`      | `version` / `interface_id` / `supports_version` / `interface_features`.    |
+| `unclaimed_liabilities`| `get_epoch_liability` / `get_total_unclaimed` — bounded reads of per-epoch and aggregate unclaimed amounts; distinguishes empty rounds from fully-claimed rounds without iterating recipients. |
 
 #### Storage & Input Bounds
 
