@@ -9,7 +9,7 @@ export interface AvailabilityResponse {
   agentOnline: boolean;
   /** ISO-8601 string, or null if never seen */
   agentLastSeen: string | null;
-  /** Lifecycle status: "Active" | "Paused" | "Retired" */
+  /** Lifecycle status: "Active" | "Paused" | "Draining" | "Retired" */
   status: string;
 }
 
@@ -19,7 +19,7 @@ export interface AvailabilityResponse {
  * Returns the availability snapshot for a single agent:
  *   - agentOnline  — whether the agent is currently considered online
  *   - agentLastSeen — wall-clock timestamp of the last heartbeat (null if never)
- *   - status       — lifecycle status ("Active" | "Paused" | "Retired")
+ *   - status       — lifecycle status ("Active" | "Paused" | "Draining" | "Retired")
  *
  * This is a lightweight, public read endpoint. It deliberately returns only
  * non-sensitive fields. Secrets, payment proofs, and wallet keys are never
