@@ -60,6 +60,7 @@ import {
   formatAssociationConflictError,
   TxAssociationConflictError,
 } from "../src/lib/reconciler/state-machine";
+import { isTrustedObservation } from "../src/lib/reconciler/horizon";
 import type { TxRecord, ReconcilerConfig, HorizonPollResult } from "../src/lib/reconciler/types";
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────

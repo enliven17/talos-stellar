@@ -69,39 +69,17 @@ Transitions are purely functional and validated (`validateTransition`) before an
 9. **Network Identity Pinning & Rejection**: Transactions are pinned to a specific Stellar network identity (passphrase). Any Horizon observation whose network passphrase does not match the pinned network is rejected: the record remains active (in `PENDING` or `CONFIRMING`), `pollCount` is incremented, and `lastError` logs the rejection (`Rejected observation from foreign network...`) without altering financial settlement state or triggering downstream repair.
 10. **Terminal Immutability**: Any attempt to transition out of a terminal state is rejected with an illegal transition error (`Illegal transition: cannot leave terminal state "<state>"`).
 
-### Provider Failure Reason Codes & Horizon Error Classification
+### Payment Observation Age & Staleness
 
-When Horizon polling encounters an error, the polling layer maps the failure to a bounded, stable machine-readable reason code (`reasonCode`) exposed on `HorizonPollResult` when `outcome === "error"`. Bounded cardinality prevents metric and log dimension explosion while preserving existing retryability and missing-transaction semantics.
+The reconciler exposes the age and freshness of the last trusted payment observation:
 
-#### Reason Code Mappings
-
-| Category | HTTP / Transport Trigger | Stable Reason Code | Retryable | Description |
-|---|---|---|---|---|
-| `authorization` | HTTP 401 | `UNAUTHORIZED` | `false` | Missing, expired, or invalid credentials/API key. |
-| `authorization` | HTTP 403 | `FORBIDDEN` | `false` | Permission denied or IP/origin blocked. |
-| `throttling` | HTTP 429 | `RATE_LIMITED` | `true` | Horizon rate limit exceeded; requests throttled. |
-| `provider_failure` | HTTP 503 | `PROVIDER_UNAVAILABLE` | `true` | Horizon service temporarily unavailable. |
-| `provider_failure` | HTTP 502 | `BAD_GATEWAY` | `true` | Upstream gateway or reverse proxy error. |
-| `provider_failure` | HTTP 504 | `GATEWAY_TIMEOUT` | `true` | Upstream gateway timed out contacting Horizon. |
-| `provider_failure` | HTTP 500 / 5xx | `PROVIDER_ERROR` | `true` | Internal Horizon server error. |
-| `provider_failure` | Connection reset, timeout, refused | `NETWORK_ERROR` | `true` | Network transport blip or unreachable host (`httpStatus === null`). |
-| `client_error` | HTTP 400 | `BAD_REQUEST` | `false` | Malformed Horizon query parameter. |
-| `unknown` | Other unclassified status | `UNKNOWN` | `false` | Fallback unclassified error. |
-
-#### Invariants & Semantic Guarantees
-
-- **Missing-Transaction Semantics**: HTTP 404 responses are preserved as `{ outcome: "not_found" }`. They do not produce an `error` outcome and follow the normal `notFoundThreshold` state machine progression to `NOT_FOUND`.
-- **Retryability Semantics**: Transient failures (429, 5xx, and network transport drops) are consistently flagged `retryable: true`. Authentication and client misconfigurations (401, 403, 400) are flagged `retryable: false`.
-- **Diagnostic Safety**: `lastError` continues to carry safe, sanitized diagnostic strings without exposing secrets or credentials.
-
-#### Classification Utilities
-
-The module exports helper utilities to inspect and categorize reason codes:
-- `classifyHorizonError(err, httpStatus)`: Normalizes any thrown error or status code into a stable `HorizonProviderFailureReasonCode`.
-- `getFailureCategory(reasonCode)`: Maps reason codes to broad categories (`"authorization" | "throttling" | "provider_failure" | "unknown"`).
-- `isAuthorizationFailure(reasonCodeOrPoll)`: Guard for 401/403 authorization failures.
-- `isThrottlingFailure(reasonCodeOrPoll)`: Guard for 429 throttling / rate-limiting.
-- `isProviderFailure(reasonCodeOrPoll)`: Guard for upstream 5xx and network transport failures.
+- **Trusted Observations**: A payment observation is trusted only when Horizon confirms or fails a transaction within a verified closed ledger (`isTrustedObservation`). 404 (`NOT_FOUND`) and network/server errors (`error`) do not constitute trusted observations.
+- **Distinguishing Zero Age from Unknown Age**:
+  - **Zero age (`0`)**: The payment was observed in the *current* ledger (`currentLedger === confirmedLedger`).
+  - **Unknown age (`null`)**: No trusted observation exists yet (e.g., transaction is `PENDING` before first on-chain detection, or current ledger is unavailable). `0` and `null` are strictly distinguished.
+- **Stale Observation Visibility without Mutating Terminal Records**:
+  - When the ledger gap between `currentLedger` and `confirmedLedger` exceeds `staleObservationThreshold`, `getPaymentObservation` reports `status: "stale"` and `isStale: true`.
+  - Terminal records (`CONFIRMED`, `FAILED`, `EXPIRED`, `NOT_FOUND`) remain immutable (`computeTransition` returns `null`). Stale observation status is visible for telemetry, monitoring, and operator review without regressing or altering settled terminal records.
 
 ---
 
@@ -120,6 +98,7 @@ All configuration is loaded from environment variables at startup in `src/lib/re
 | `STELLAR_NETWORK_PASSPHRASE` | `Test SDF Network ; September 2015` | Pinned Stellar network identity (passphrase) to reconcile against. If unset, derives from `STELLAR_NETWORK` (`"mainnet"` vs `"testnet"`). |
 | `RECONCILER_CONFIRMATION_DEPTH` | `1` | Number of closed ledgers required after first-seen before transitioning from `CONFIRMING` to `CONFIRMED`. |
 | `RECONCILER_CONCURRENCY_LIMIT` | `5` | Maximum number of concurrent Horizon/DB operations allowed during tick queue draining. |
+| `RECONCILER_STALE_OBSERVATION_THRESHOLD` | `120` | Maximum ledger sequence difference before a payment observation is considered stale. |
 | `ADMIN_API_KEY` | — | Bearer token required for administrative endpoints (`/api/admin/reconciler/*`). |
 
 ---
@@ -358,6 +337,7 @@ curl -X GET http://localhost:3000/api/talos/talos_123/jobs/job_456/payment-statu
   "finalityStatus": "CONFIRMED",
   "confirmedLedger": 1234567,
   "lastLedgerChecked": 1234568,
+  "observationAge": 1,
   "pollCount": 2,
   "lastError": null,
   "repairApplied": true,

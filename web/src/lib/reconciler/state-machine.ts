@@ -27,8 +27,10 @@ import type {
   JobCreditDecision,
   HorizonPollResult,
   ReconcilerConfig,
+  PaymentObservation,
 } from "./types";
 import { TERMINAL_STATES } from "./types";
+import { isTrustedObservation } from "./horizon";
 
 // ─── Guard ───────────────────────────────────────────────────────────────────
 
@@ -361,137 +363,133 @@ export function validateTransition(
   return null;
 }
 
-// ─── Association conflict detection ──────────────────────────────────────────
+// ─── Observation Age and Staleness ────────────────────────────────────────────
 
 /**
- * Error thrown when a single payment identity (txHash) is associated with
- * an incompatible job or source.
- */
-export class TxAssociationConflictError extends Error {
-  readonly conflict: TxAssociationConflict;
-
-  constructor(conflict: TxAssociationConflict) {
-    super(conflict.reason);
-    this.name = "TxAssociationConflictError";
-    this.conflict = conflict;
-  }
-}
-
-/**
- * Normalise a Stellar transaction hash so payment identity comparisons are
- * case- and whitespace-insensitive.
- */
-export function normalizePaymentIdentity(txHash: string): string {
-  return txHash.trim().toLowerCase();
-}
-
-/**
- * Format a non-sensitive diagnostic string suitable for persisting in
- * `tls_stellar_tx_records.last_error`.
- */
-export function formatAssociationConflictError(
-  conflict: TxAssociationConflict,
-): string {
-  return `ASSOCIATION_CONFLICT: ${conflict.reason}`;
-}
-
-/**
- * Detect whether two associations for the same payment identity (`txHash`)
- * bind it to incompatible jobs/sources.
+ * Compute the age of the last trusted payment observation in ledgers.
  *
- * Returns `null` when the payment identities differ or when both associations
- * agree on `(sourceType, sourceId)`.  Returns a `TxAssociationConflict` when
- * the same `txHash` is linked to a different `sourceType` or `sourceId`.
+ * Age is defined as (currentLedger - observedLedger).
+ *
+ * Key invariants:
+ * - Distinguishes unknown age (null) from zero age (0).
+ * - Zero age (0): the payment was observed in the current closed ledger.
+ * - Unknown age (null): no trusted observation exists (e.g. pending record before
+ *   Horizon inclusion, not_found, transient error, or missing current ledger).
+ * - Future/nonmonotonic anomaly (null): currentLedger < observedLedger is treated
+ *   as an untrusted anomaly and returns null rather than a negative age.
+ *
+ * @param recordOrPoll The TxRecord or HorizonPollResult to inspect.
+ * @param currentLedger Current closed ledger sequence number from Horizon.
  */
-export function detectAssociationConflict(
-  existing: TxAssociation,
-  incoming: TxAssociation,
-  now: Date = new Date(),
-): TxAssociationConflict | null {
-  const existingHash = normalizePaymentIdentity(existing.txHash);
-  const incomingHash = normalizePaymentIdentity(incoming.txHash);
-
-  if (!existingHash || existingHash !== incomingHash) {
+export function getObservationAge(
+  recordOrPoll: TxRecord | HorizonPollResult | null | undefined,
+  currentLedger?: number | null,
+): number | null {
+  if (recordOrPoll === null || recordOrPoll === undefined) {
+    return null;
+  }
+  if (currentLedger === null || currentLedger === undefined) {
+    return null;
+  }
+  if (!Number.isFinite(currentLedger) || currentLedger <= 0) {
     return null;
   }
 
-  const existingSourceId = existing.sourceId ?? null;
-  const incomingSourceId = incoming.sourceId ?? null;
+  let observedLedger: number | null = null;
+  if ("finalityStatus" in recordOrPoll) {
+    observedLedger = recordOrPoll.confirmedLedger ?? null;
+  } else if ("outcome" in recordOrPoll) {
+    if (isTrustedObservation(recordOrPoll)) {
+      observedLedger = recordOrPoll.ledger;
+    }
+  }
 
-  if (
-    existing.sourceType === incoming.sourceType &&
-    existingSourceId === incomingSourceId
-  ) {
+  if (observedLedger === null || observedLedger === undefined) {
+    return null;
+  }
+  if (!Number.isFinite(observedLedger) || observedLedger <= 0) {
     return null;
   }
 
-  const reason =
-    `Conflicting transaction association for txHash=${existingHash}: ` +
-    `existing=${existing.sourceType}:${existingSourceId ?? "null"}, ` +
-    `incoming=${incoming.sourceType}:${incomingSourceId ?? "null"}`;
+  const age = currentLedger - observedLedger;
+  if (age < 0) {
+    return null;
+  }
+  return age;
+}
 
+/**
+ * Check whether the last trusted payment observation is stale.
+ *
+ * An observation is stale when its age is known and strictly exceeds the
+ * threshold. If age is unknown (null), returns false.
+ *
+ * @param recordOrPoll The TxRecord or HorizonPollResult to inspect.
+ * @param currentLedger Current closed ledger sequence number from Horizon.
+ * @param threshold Maximum age in ledgers before observation is stale.
+ */
+export function isObservationStale(
+  recordOrPoll: TxRecord | HorizonPollResult | null | undefined,
+  currentLedger: number | null | undefined,
+  threshold: number,
+): boolean {
+  if (!Number.isFinite(threshold) || threshold < 0) {
+    return false;
+  }
+  const age = getObservationAge(recordOrPoll, currentLedger);
+  if (age === null) {
+    return false;
+  }
+  return age > threshold;
+}
+
+/**
+ * Returns a complete descriptor of the payment observation, including its
+ * ledger, age, and staleness status.
+ *
+ * Invariant: keeps stale observation status visible (status: "stale", isStale: true)
+ * without altering or mutating terminal records.
+ *
+ * @param recordOrPoll The TxRecord or HorizonPollResult to inspect.
+ * @param currentLedger Current closed ledger sequence number from Horizon.
+ * @param threshold Maximum age in ledgers before observation is stale (default: 120).
+ */
+export function getPaymentObservation(
+  recordOrPoll: TxRecord | HorizonPollResult | null | undefined,
+  currentLedger: number | null | undefined,
+  threshold: number = 120,
+): PaymentObservation {
+  if (!recordOrPoll) {
+    return {
+      ledger: null,
+      age: null,
+      status: "unknown",
+      isStale: false,
+    };
+  }
+
+  const age = getObservationAge(recordOrPoll, currentLedger);
+  const ledger =
+    "finalityStatus" in recordOrPoll
+      ? recordOrPoll.confirmedLedger ?? null
+      : isTrustedObservation(recordOrPoll)
+      ? recordOrPoll.ledger
+      : null;
+
+  if (age === null) {
+    return {
+      ledger,
+      age: null,
+      status: "unknown",
+      isStale: false,
+    };
+  }
+
+  const isStale = age > threshold;
   return {
-    txHash: existingHash,
-    existingSourceType: existing.sourceType,
-    existingSourceId,
-    incomingSourceType: incoming.sourceType,
-    incomingSourceId,
-    reason,
-    detectedAt: now,
+    ledger,
+    age,
+    status: isStale ? "stale" : "fresh",
+    isStale,
   };
-}
-
-/**
- * Check a candidate `TxRecord` against a collection of existing associations.
- * Returns the first detected conflict, or `null` if all associations are
- * compatible.
- */
-export function hasConflictingAssociation(
-  record: Pick<TxRecord, "txHash" | "sourceType" | "sourceId">,
-  existingAssociations: readonly TxAssociation[],
-  now: Date = new Date(),
-): TxAssociationConflict | null {
-  const incoming: TxAssociation = {
-    txHash: record.txHash,
-    sourceType: record.sourceType,
-    sourceId: record.sourceId ?? null,
-  };
-
-  for (const existing of existingAssociations) {
-    const conflict = detectAssociationConflict(existing, incoming, now);
-    if (conflict) return conflict;
-  }
-
-  return null;
-}
-
-/**
- * Pure pre-credit gate for commerce jobs.
- *
- * Rejects crediting if:
- *   1. The payment identity (`txHash`) has any conflicting association.
- *   2. The transaction record has not reached `CONFIRMED` finality.
- */
-export function canCreditJob(
-  record: Pick<TxRecord, "txHash" | "sourceType" | "sourceId" | "finalityStatus">,
-  existingAssociations: readonly TxAssociation[],
-  now: Date = new Date(),
-): JobCreditDecision {
-  const conflict = hasConflictingAssociation(record, existingAssociations, now);
-  if (conflict) {
-    return {
-      allowed: false,
-      reason: conflict.reason,
-      conflict,
-    };
-  }
-
-  if (record.finalityStatus !== "CONFIRMED") {
-    return {
-      allowed: false,
-      reason: `Cannot credit job while transaction finalityStatus is "${record.finalityStatus}"`,
-    };
-  }
-
-  return { allowed: true };
 }

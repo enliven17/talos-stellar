@@ -6,16 +6,7 @@
  */
 export { startReconciler, stopReconciler, runOneTick, registerTx, getStats, isRunning } from "./scheduler";
 export { reconcilerConfig, loadReconcilerConfig } from "./config";
-export {
-  pollTransaction,
-  fetchCurrentLedger,
-  classifyHorizonError,
-  getFailureCategory,
-  isAuthorizationFailure,
-  isThrottlingFailure,
-  isProviderFailure,
-  extractHttpStatus,
-} from "./horizon";
+export { pollTransaction, fetchCurrentLedger, isTrustedObservation } from "./horizon";
 export { applyRepair } from "./repair";
 export {
   buildPaymentRepairPlan,
