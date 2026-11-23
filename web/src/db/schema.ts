@@ -529,6 +529,19 @@ export const tlsWebhookSubscriptions = pgTable(
     eventTypes: text("event_types").array().notNull().default([]),
     description: text("description"),
     active: boolean("active").notNull().default(true),
+    paused: boolean("paused").notNull().default(false),
+
+    /**
+     * Destination verification status ('pending' | 'verified' | 'failed').
+     * NULL = legacy subscription created before verification existed (treated as verified).
+     */
+    destinationVerificationStatus: text("destination_verification_status"),
+    /** Opaque verification challenge token for active handshake. */
+    destinationVerificationToken: text("destination_verification_token"),
+    /** Bounded lifetime of the verification challenge / validity window. */
+    destinationVerificationExpiresAt: timestamp("destination_verification_expires_at", { mode: "date", precision: 3 }),
+    /** Wall-clock time when the destination handshake was successfully verified. */
+    destinationVerifiedAt: timestamp("destination_verified_at", { mode: "date", precision: 3 }),
 
     createdAt: timestamp("created_at", { mode: "date", precision: 3 }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
@@ -536,6 +549,7 @@ export const tlsWebhookSubscriptions = pgTable(
   (t) => [
     index("tls_webhook_subscriptions_talos_id_idx").on(t.talosId),
     index("tls_webhook_subscriptions_previous_expires_idx").on(t.previousSecretExpiresAt),
+    index("tls_webhook_subscriptions_verification_expires_idx").on(t.destinationVerificationExpiresAt),
   ],
 );
 
@@ -593,6 +607,9 @@ export const tlsStellarTxRecords = pgTable(
 
     // The Stellar transaction hash being tracked (unique per record)
     txHash: text("tx_hash").notNull(),
+
+    // Pinned Stellar network identity (network passphrase) against which this payment is tracked
+    networkPassphrase: text("network_passphrase"),
 
     // Which subsystem originated the tx: "commerce_job" | "token_purchase" | "other"
     sourceType: text("source_type").notNull().default("other"),
@@ -908,6 +925,27 @@ export const tlsJobs = pgTable(
   ],
 );
 
+export const tlsJobAttempts = pgTable(
+  "tls_job_attempts",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    jobId: text("jobId").notNull().references(() => tlsJobs.id, { onDelete: "cascade" }),
+    attemptNumber: integer("attemptNumber").notNull(),
+    workerId: text("workerId"),
+    leaseId: text("leaseId"),
+    startedAt: timestamp("startedAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+    completedAt: timestamp("completedAt", { mode: "date", precision: 3 }),
+    durationMs: integer("durationMs"),
+    terminalReason: text("terminalReason").notNull(),
+    error: text("error"),
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tls_job_attempts_jobId_idx").on(t.jobId),
+    index("tls_job_attempts_job_attempt_idx").on(t.jobId, t.attemptNumber),
+  ],
+);
+
 // ─── Transactional Outbox (Domain Events) ──────────────────────────
 //
 // Written atomically (same db.transaction) alongside the domain mutation
@@ -945,6 +983,9 @@ export const tlsOutboxEvents = pgTable(
     dedupeKey: text("dedupeKey"),
 
     lastError: text("lastError"),
+
+    // Lineage link to original failed attempt when requeued from dead_letter. Nullable.
+    originalEventId: text("originalEventId"),
 
     createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
     updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull().$onUpdate(() => new Date()),
@@ -1011,6 +1052,50 @@ export const tlsQuotaUsage = pgTable(
   ],
 );
 
+// Optional per-scope usage breakdown. The total counter above remains the
+// source of truth for quota enforcement; this table is observability only.
+export const tlsQuotaScopeUsage = pgTable(
+  "tls_quota_scope_usage",
+  {
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    resource: text("resource").notNull(),
+    scope: text("scope").notNull(),
+    windowStart: timestamp("windowStart", { mode: "date", precision: 3 }).notNull(),
+    count: integer("count").notNull().default(0),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("tls_quota_scope_usage_key").on(t.talosId, t.resource, t.scope, t.windowStart),
+    index("tls_quota_scope_usage_talosId_resource_idx").on(t.talosId, t.resource),
+  ],
+);
+
+// ─── Quota Adjustment Audit Trail ────────────────────────────────
+//
+// Append-only record of every quota policy change: who (actor), why (reason),
+// the prior policy and the new policy. Never stores API credentials; free-text
+// fields are redacted before insert (see lib/quota-audit.ts).
+
+export const tlsQuotaAdjustments = pgTable(
+  "tls_quota_adjustments",
+  {
+    id: text("id").primaryKey().$defaultFn(() => createId()),
+    talosId: text("talosId").notNull().references(() => tlsTalos.id, { onDelete: "cascade" }),
+    resource: text("resource").notNull(),
+    actor: text("actor").notNull(),
+    reason: text("reason").notNull(),
+    priorPolicy: jsonb("priorPolicy").notNull(),
+    newPolicy: jsonb("newPolicy").notNull(),
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tls_quota_adjustments_talosId_createdAt_idx").on(t.talosId, t.createdAt),
+  ],
+);
+
 // ─── Backup Runs (DR audit trail) ──────────────────────────────────
 
 export const tlsBackupRuns = pgTable(
@@ -1058,13 +1143,16 @@ export const tlsLeaderboardAggregates = pgMaterializedView(
 
 export const capabilities = pgTable("capabilities", {
   id: uuid("id").primaryKey().defaultRandom(),
-  name: text("name").notNull().unique(),
+  name: text("name").notNull(),
+  version: integer("version").notNull().default(1),
   description: text("description").notNull(),
   category: text("category").notNull(),
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { mode: "date" }).defaultNow().notNull(),
-});
+}, (t) => [
+  uniqueIndex("capabilities_name_version_unique").on(t.name, t.version),
+]);
 
 export const marketplaceItems = pgTable("marketplace_items", {
   id: uuid("id").primaryKey().defaultRandom(),

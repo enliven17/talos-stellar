@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   jobs: {
     listJobs: vi.fn(),
     getJob: vi.fn(),
+    getJobAttempts: vi.fn(),
     requeue: vi.fn(),
     requestCancel: vi.fn(),
   },
@@ -14,6 +15,7 @@ vi.mock("@/lib/jobs", () => mocks.jobs);
 
 import { GET as listRoute } from "@/app/api/admin/jobs/route";
 import { GET as getRoute } from "@/app/api/admin/jobs/[id]/route";
+import { GET as getAttemptsRoute } from "@/app/api/admin/jobs/[id]/attempts/route";
 import { POST as retryRoute } from "@/app/api/admin/jobs/[id]/retry/route";
 import { POST as cancelRoute } from "@/app/api/admin/jobs/[id]/cancel/route";
 
@@ -84,15 +86,47 @@ describe("GET /api/admin/jobs", () => {
 });
 
 describe("GET /api/admin/jobs/:id", () => {
-  it("returns the job", async () => {
+  it("returns the job and its attemptsHistory", async () => {
     mocks.jobs.getJob.mockResolvedValue({ id: "job_1", status: "completed" });
+    mocks.jobs.getJobAttempts.mockResolvedValue([
+      { id: "att_1", jobId: "job_1", attemptNumber: 1, terminalReason: "completed" },
+    ]);
     const res = await getRoute(authed("/api/admin/jobs/job_1"), { params: Promise.resolve({ id: "job_1" }) });
     expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.id).toBe("job_1");
+    expect(body.attemptsHistory).toHaveLength(1);
+    expect(body.attemptsHistory[0].terminalReason).toBe("completed");
   });
 
   it("returns 404 for a missing job", async () => {
     mocks.jobs.getJob.mockResolvedValue(null);
     const res = await getRoute(authed("/api/admin/jobs/missing"), { params: Promise.resolve({ id: "missing" }) });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("GET /api/admin/jobs/:id/attempts", () => {
+  it("returns the attempt history for a job", async () => {
+    mocks.jobs.getJob.mockResolvedValue({ id: "job_1", status: "completed" });
+    mocks.jobs.getJobAttempts.mockResolvedValue([
+      { id: "att_1", jobId: "job_1", attemptNumber: 1, terminalReason: "completed" },
+    ]);
+    const res = await getAttemptsRoute(authed("/api/admin/jobs/job_1/attempts"), {
+      params: Promise.resolve({ id: "job_1" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.jobId).toBe("job_1");
+    expect(body.attempts).toHaveLength(1);
+    expect(body.attempts[0].id).toBe("att_1");
+  });
+
+  it("returns 404 if job does not exist", async () => {
+    mocks.jobs.getJob.mockResolvedValue(null);
+    const res = await getAttemptsRoute(authed("/api/admin/jobs/missing/attempts"), {
+      params: Promise.resolve({ id: "missing" }),
+    });
     expect(res.status).toBe(404);
   });
 });

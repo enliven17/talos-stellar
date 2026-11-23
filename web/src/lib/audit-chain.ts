@@ -34,13 +34,36 @@ export interface AuditChainEntry {
 }
 
 /**
+ * Validate that all numeric fields in the canonical audit payload are finite.
+ * Rejects NaN, Infinity, and -Infinity before JSON serialization, which would
+ * otherwise silently coerce nonfinite numbers to null.
+ */
+function assertFiniteAuditNumbers(entry: AuditChainEntry): void {
+  if (typeof entry.sequenceNumber !== "number" || !Number.isFinite(entry.sequenceNumber)) {
+    throw new RangeError(
+      `Audit entry canonical payload contains nonfinite sequenceNumber: ${String(entry.sequenceNumber)}`,
+    );
+  }
+  if (typeof entry.statusCode !== "number" || !Number.isFinite(entry.statusCode)) {
+    throw new RangeError(
+      `Audit entry canonical payload contains nonfinite statusCode: ${String(entry.statusCode)}`,
+    );
+  }
+}
+
+/**
  * Deterministic JSON serialization with fixed property order.
  *
  * This produces the canonical form used for hashing. Every value is
  * stringified according to its type; no pretty-printing or key reordering
  * is allowed after this function runs.
+ *
+ * @throws {RangeError} If any numeric field in the canonical payload is nonfinite
+ *   (`NaN`, `Infinity`, or `-Infinity`).
  */
 export function canonicalize(entry: AuditChainEntry): string {
+  assertFiniteAuditNumbers(entry);
+
   return JSON.stringify({
     sequenceNumber: entry.sequenceNumber,
     talosId: entry.talosId,
@@ -57,6 +80,8 @@ export function canonicalize(entry: AuditChainEntry): string {
  * prefixed with the domain separator.
  *
  *   hash = SHA-256(domain:canonical_json)
+ *
+ * @throws {RangeError} If the entry's canonical payload contains nonfinite numbers.
  */
 export function computeEntryHash(entry: AuditChainEntry): string {
   const payload = `${AUDIT_CHAIN_DOMAIN}:${canonicalize(entry)}`;
@@ -145,484 +170,38 @@ export interface VerifyChainRangeOptions {
 }
 
 export interface ChainVerificationResult {
+  /** True only when the chain is complete and every link verifies. */
   valid: boolean;
+  /**
+   * Distinct outcome classification:
+   *   - "valid":      all chained rows verified, no gaps.
+   *   - "incomplete": a predecessor is missing (gap in sequence numbers or
+   *                   the chain starts after GENESIS). Evidence is missing,
+   *                   not proven tampered.
+   *   - "mismatch":   contradictory evidence (hash/linkage does not match
+   *                   recomputed values). Indicates tampering.
+   */
+  status: "valid" | "incomplete" | "mismatch";
   totalEntries: number;
   verifiedEntries: number;
   brokenAtSequence: number | null;
+  /** Sequence number expected at the point a gap was detected. */
+  missingFromSequence: number | null;
   chainVersion: string | null;
 }
 
-export interface ChainRangeVerificationResult extends ChainVerificationResult {
-  status: ChainVerificationStatus;
-  complete: boolean;
-  incompleteReason: ChainFailureReason | null;
-  failureReason: ChainFailureReason | null;
-  startSequence: number | null;
-  endSequence: number | null;
-  predecessorSequence: number | null;
-  predecessorHash: string | null;
-}
-
-function toTimestampMs(value: Date | string): number {
-  const ms = value instanceof Date ? value.getTime() : new Date(value).getTime();
-  return ms;
-}
-
-function isChainedRow(
-  row: AuditChainRow,
-): row is AuditChainRow & {
-  sequenceNumber: number;
-  entryHash: string;
-  previousHash: string;
-  chainVersion: string;
-} {
-  return (
-    row.sequenceNumber !== null &&
-    Boolean(row.entryHash) &&
-    Boolean(row.previousHash) &&
-    Boolean(row.chainVersion)
-  );
-}
-
-/**
- * Verify a sequence of audit log entries over a selected time range against
- * the hash chain, validating the predecessor boundary and record ordering,
- * and distinguishing an incomplete range from a broken chain.
- *
- * Each chained entry must satisfy:
- *   1. Records are chronologically and sequentially ordered (non-decreasing
- *      createdAt, strictly increasing sequenceNumber) and within [from, to].
- *   2. The first chained entry in the window links cleanly to `predecessor`
- *      (or GENESIS when sequenceNumber === 0 and predecessor is null/absent).
- *      If sequenceNumber > 0 and no predecessor is provided, the range is
- *      reported as `incomplete` (`missing_predecessor`) rather than `broken`,
- *      while the remaining internal chain links are still verified for tampering.
- *   3. Each entry's `previousHash` matches the preceding entry's `entryHash`.
- *   4. Each entry's `entryHash` matches `computeEntryHash(entry)`.
- *   5. `sequenceNumber` advances by +1 with no gaps.
- */
-export function verifyChainRange(
-  rows: AuditChainRow[],
-  options: VerifyChainRangeOptions = {},
-): ChainRangeVerificationResult {
-  const fromMs =
-    options.from !== undefined && options.from !== null
-      ? toTimestampMs(options.from)
-      : null;
-  const toMs =
-    options.to !== undefined && options.to !== null
-      ? toTimestampMs(options.to)
-      : null;
-
-  if (
-    (fromMs !== null && Number.isNaN(fromMs)) ||
-    (toMs !== null && Number.isNaN(toMs)) ||
-    (fromMs !== null && toMs !== null && fromMs > toMs)
-  ) {
-    return {
-      valid: false,
-      status: "incomplete",
-      complete: false,
-      incompleteReason: "out_of_order_records",
-      failureReason: "out_of_order_records",
-      totalEntries: rows.length,
-      verifiedEntries: 0,
-      brokenAtSequence: null,
-      chainVersion: null,
-      startSequence: null,
-      endSequence: null,
-      predecessorSequence: options.predecessor?.sequenceNumber ?? null,
-      predecessorHash: options.predecessor?.entryHash ?? null,
-    };
-  }
-
-  const predecessor = options.predecessor;
-  const predecessorSequence = predecessor?.sequenceNumber ?? null;
-  const predecessorHash = predecessor?.entryHash ?? null;
-
-  if (rows.length === 0) {
-    if (options.truncated) {
-      return {
-        valid: false,
-        status: "incomplete",
-        complete: false,
-        incompleteReason: "truncated_range",
-        failureReason: "truncated_range",
-        totalEntries: 0,
-        verifiedEntries: 0,
-        brokenAtSequence: null,
-        chainVersion: null,
-        startSequence: null,
-        endSequence: null,
-        predecessorSequence,
-        predecessorHash,
-      };
-    }
-
-    return {
-      valid: true,
-      status: "valid",
-      complete: true,
-      incompleteReason: null,
-      failureReason: null,
-      totalEntries: 0,
-      verifiedEntries: 0,
-      brokenAtSequence: null,
-      chainVersion: null,
-      startSequence: null,
-      endSequence: null,
-      predecessorSequence,
-      predecessorHash,
-    };
-  }
-
-  let previousEntryHash: string | null = null;
-  let expectedSequence: number | null = null;
-  let lastTimestampMs: number | null = null;
-  let verifiedCount = 0;
-  let startSequence: number | null = null;
-  let endSequence: number | null = null;
-  let lastChainVersion: string | null = null;
-  let missingPredecessor = false;
-
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-
-    // Skip legacy rows that predate the hash chain
-    if (!isChainedRow(row)) {
-      continue;
-    }
-
-    const rowMs = row.createdAt.getTime();
-    if (
-      Number.isNaN(rowMs) ||
-      (fromMs !== null && rowMs < fromMs) ||
-      (toMs !== null && rowMs > toMs) ||
-      (lastTimestampMs !== null && rowMs < lastTimestampMs)
-    ) {
-      return {
-        valid: false,
-        status: "broken",
-        complete: false,
-        incompleteReason: null,
-        failureReason: "out_of_order_records",
-        totalEntries: rows.length,
-        verifiedEntries: verifiedCount,
-        brokenAtSequence: row.sequenceNumber,
-        chainVersion: row.chainVersion,
-        startSequence,
-        endSequence,
-        predecessorSequence,
-        predecessorHash,
-      };
-    }
-
-    if (startSequence === null) {
-      startSequence = row.sequenceNumber;
-
-      // Validate predecessor boundary on the first chained record in the range
-      if (predecessor !== undefined && predecessor !== null) {
-        if (
-          predecessor.sequenceNumber === null ||
-          !predecessor.entryHash ||
-          (predecessor.createdAt &&
-            predecessor.createdAt.getTime() > rowMs) ||
-          (fromMs !== null &&
-            predecessor.createdAt &&
-            predecessor.createdAt.getTime() >= fromMs)
-        ) {
-          return {
-            valid: false,
-            status: "broken",
-            complete: false,
-            incompleteReason: null,
-            failureReason: "predecessor_mismatch",
-            totalEntries: rows.length,
-            verifiedEntries: 0,
-            brokenAtSequence: row.sequenceNumber,
-            chainVersion: row.chainVersion,
-            startSequence,
-            endSequence,
-            predecessorSequence,
-            predecessorHash,
-          };
-        }
-
-        if (row.sequenceNumber === 0 || row.previousHash === GENESIS_HASH) {
-          return {
-            valid: false,
-            status: "broken",
-            complete: false,
-            incompleteReason: null,
-            failureReason: "unexpected_genesis",
-            totalEntries: rows.length,
-            verifiedEntries: 0,
-            brokenAtSequence: row.sequenceNumber,
-            chainVersion: row.chainVersion,
-            startSequence,
-            endSequence,
-            predecessorSequence,
-            predecessorHash,
-          };
-        }
-
-        if (
-          row.sequenceNumber !== predecessor.sequenceNumber + 1 ||
-          row.previousHash !== predecessor.entryHash
-        ) {
-          return {
-            valid: false,
-            status: "broken",
-            complete: false,
-            incompleteReason: null,
-            failureReason: "predecessor_mismatch",
-            totalEntries: rows.length,
-            verifiedEntries: 0,
-            brokenAtSequence: row.sequenceNumber,
-            chainVersion: row.chainVersion,
-            startSequence,
-            endSequence,
-            predecessorSequence,
-            predecessorHash,
-          };
-        }
-
-        expectedSequence = row.sequenceNumber;
-        previousEntryHash = predecessor.entryHash;
-      } else if (predecessor === null) {
-        // Caller explicitly established there is no prior entry before the window:
-        // the first chained record MUST be genesis (sequenceNumber 0, previousHash GENESIS).
-        if (row.sequenceNumber !== 0) {
-          return {
-            valid: false,
-            status: "incomplete",
-            complete: false,
-            incompleteReason: "missing_predecessor",
-            failureReason: "missing_predecessor",
-            totalEntries: rows.length,
-            verifiedEntries: 0,
-            brokenAtSequence: null,
-            chainVersion: row.chainVersion,
-            startSequence,
-            endSequence: row.sequenceNumber,
-            predecessorSequence,
-            predecessorHash,
-          };
-        }
-        if (row.previousHash !== GENESIS_HASH) {
-          return {
-            valid: false,
-            status: "broken",
-            complete: false,
-            incompleteReason: null,
-            failureReason: "previous_hash_mismatch",
-            totalEntries: rows.length,
-            verifiedEntries: 0,
-            brokenAtSequence: row.sequenceNumber,
-            chainVersion: row.chainVersion,
-            startSequence,
-            endSequence,
-            predecessorSequence,
-            predecessorHash,
-          };
-        }
-        expectedSequence = 0;
-        previousEntryHash = null;
-      } else {
-        // predecessor === undefined: caller did not provide predecessor context
-        if (row.sequenceNumber === 0) {
-          if (row.previousHash !== GENESIS_HASH) {
-            return {
-              valid: false,
-              status: "broken",
-              complete: false,
-              incompleteReason: null,
-              failureReason: "previous_hash_mismatch",
-              totalEntries: rows.length,
-              verifiedEntries: 0,
-              brokenAtSequence: row.sequenceNumber,
-              chainVersion: row.chainVersion,
-              startSequence,
-              endSequence,
-              predecessorSequence,
-              predecessorHash,
-            };
-          }
-          expectedSequence = 0;
-          previousEntryHash = null;
-        } else {
-          // Range starts at sequenceNumber > 0 without predecessor boundary context.
-          // If it claims GENESIS at sequenceNumber > 0, that's a broken chain.
-          if (row.previousHash === GENESIS_HASH) {
-            return {
-              valid: false,
-              status: "broken",
-              complete: false,
-              incompleteReason: null,
-              failureReason: "unexpected_genesis",
-              totalEntries: rows.length,
-              verifiedEntries: 0,
-              brokenAtSequence: row.sequenceNumber,
-              chainVersion: row.chainVersion,
-              startSequence,
-              endSequence,
-              predecessorSequence,
-              predecessorHash,
-            };
-          }
-          missingPredecessor = true;
-          expectedSequence = row.sequenceNumber;
-          previousEntryHash = row.previousHash;
-        }
-      }
-    } else {
-      // Subsequent chained entry in the window
-      if (expectedSequence !== null && row.sequenceNumber < expectedSequence) {
-        return {
-          valid: false,
-          status: "broken",
-          complete: false,
-          incompleteReason: null,
-          failureReason: "out_of_order_records",
-          totalEntries: rows.length,
-          verifiedEntries: verifiedCount,
-          brokenAtSequence: row.sequenceNumber,
-          chainVersion: row.chainVersion,
-          startSequence,
-          endSequence,
-          predecessorSequence,
-          predecessorHash,
-        };
-      }
-
-      if (expectedSequence !== null && row.sequenceNumber !== expectedSequence) {
-        return {
-          valid: false,
-          status: "broken",
-          complete: false,
-          incompleteReason: null,
-          failureReason: "sequence_gap",
-          totalEntries: rows.length,
-          verifiedEntries: verifiedCount,
-          brokenAtSequence: row.sequenceNumber,
-          chainVersion: row.chainVersion,
-          startSequence,
-          endSequence,
-          predecessorSequence,
-          predecessorHash,
-        };
-      }
-
-      const expectedPreviousHash = previousEntryHash ?? GENESIS_HASH;
-      if (row.previousHash !== expectedPreviousHash) {
-        return {
-          valid: false,
-          status: "broken",
-          complete: false,
-          incompleteReason: null,
-          failureReason: "previous_hash_mismatch",
-          totalEntries: rows.length,
-          verifiedEntries: verifiedCount,
-          brokenAtSequence: row.sequenceNumber,
-          chainVersion: row.chainVersion,
-          startSequence,
-          endSequence,
-          predecessorSequence,
-          predecessorHash,
-        };
-      }
-    }
-
-    // Validate entryHash integrity
-    const entry: AuditChainEntry = {
-      sequenceNumber: row.sequenceNumber,
-      talosId: row.talosId,
-      method: row.method,
-      path: row.path,
-      statusCode: row.statusCode,
-      ipAddress: row.ipAddress,
-      createdAt: row.createdAt.toISOString(),
-    };
-
-    const recomputed = computeEntryHash(entry);
-    if (recomputed !== row.entryHash) {
-      return {
-        valid: false,
-        status: "broken",
-        complete: false,
-        incompleteReason: null,
-        failureReason: "entry_hash_mismatch",
-        totalEntries: rows.length,
-        verifiedEntries: verifiedCount,
-        brokenAtSequence: row.sequenceNumber,
-        chainVersion: row.chainVersion,
-        startSequence,
-        endSequence,
-        predecessorSequence,
-        predecessorHash,
-      };
-    }
-
-    previousEntryHash = row.entryHash;
-    expectedSequence = row.sequenceNumber + 1;
-    lastTimestampMs = rowMs;
-    endSequence = row.sequenceNumber;
-    lastChainVersion = row.chainVersion;
-    verifiedCount++;
-  }
-
-  if (missingPredecessor) {
-    return {
-      valid: false,
-      status: "incomplete",
-      complete: false,
-      incompleteReason: "missing_predecessor",
-      failureReason: "missing_predecessor",
-      totalEntries: rows.length,
-      verifiedEntries: verifiedCount,
-      brokenAtSequence: null,
-      chainVersion: lastChainVersion,
-      startSequence,
-      endSequence,
-      predecessorSequence,
-      predecessorHash,
-    };
-  }
-
-  if (options.truncated) {
-    return {
-      valid: false,
-      status: "incomplete",
-      complete: false,
-      incompleteReason: "truncated_range",
-      failureReason: "truncated_range",
-      totalEntries: rows.length,
-      verifiedEntries: verifiedCount,
-      brokenAtSequence: null,
-      chainVersion: lastChainVersion,
-      startSequence,
-      endSequence,
-      predecessorSequence,
-      predecessorHash,
-    };
-  }
-
-  return {
-    valid: true,
-    status: "valid",
-    complete: true,
-    incompleteReason: null,
-    failureReason: null,
-    totalEntries: rows.length,
-    verifiedEntries: verifiedCount,
-    brokenAtSequence: null,
-    chainVersion: lastChainVersion ?? rows[rows.length - 1].chainVersion,
-    startSequence,
-    endSequence,
-    predecessorSequence,
-    predecessorHash,
-  };
-}
+export type ChainRow = {
+  sequenceNumber: number | null;
+  entryHash: string | null;
+  previousHash: string | null;
+  chainVersion: string | null;
+  talosId: string;
+  method: string;
+  path: string;
+  statusCode: number;
+  ipAddress: string | null;
+  createdAt: Date;
+};
 
 /**
  * Verify a sequence of audit log entries against the hash chain from genesis.
@@ -631,14 +210,20 @@ export function verifyChainRange(
  *   1. entryHash === computeEntryHash(entry)
  *   2. previousHash === entryHash of the preceding entry (or GENESIS for seq 0)
  *   3. sequenceNumber is sequential (0, 1, 2, ...)
+ *
+ * A missing predecessor (sequence gap, or chain not starting at 0) is reported
+ * as "incomplete" so operators can distinguish missing evidence from
+ * contradictory hashes, which are reported as "mismatch".
  */
-export function verifyChain(rows: AuditChainRow[]): ChainVerificationResult {
+export function verifyChain(rows: ChainRow[]): ChainVerificationResult {
   if (rows.length === 0) {
     return {
       valid: true,
+      status: "valid",
       totalEntries: 0,
       verifiedEntries: 0,
       brokenAtSequence: null,
+      missingFromSequence: null,
       chainVersion: null,
     };
   }
@@ -646,6 +231,30 @@ export function verifyChain(rows: AuditChainRow[]): ChainVerificationResult {
   let previousEntryHash: string | null = null;
   let chainIndex = 0;
   let verifiedCount = 0;
+
+  const mismatch = (seq: number, version: string | null): ChainVerificationResult => ({
+    valid: false,
+    status: "mismatch",
+    totalEntries: rows.length,
+    verifiedEntries: verifiedCount,
+    brokenAtSequence: seq,
+    missingFromSequence: null,
+    chainVersion: version,
+  });
+
+  const incomplete = (
+    missingFrom: number,
+    seq: number | null,
+    version: string | null,
+  ): ChainVerificationResult => ({
+    valid: false,
+    status: "incomplete",
+    totalEntries: rows.length,
+    verifiedEntries: verifiedCount,
+    brokenAtSequence: seq,
+    missingFromSequence: missingFrom,
+    chainVersion: version,
+  });
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -655,27 +264,23 @@ export function verifyChain(rows: AuditChainRow[]): ChainVerificationResult {
       continue;
     }
 
-    // Validate sequence number is sequential within the chain
-    if (row.sequenceNumber !== chainIndex) {
-      return {
-        valid: false,
-        totalEntries: rows.length,
-        verifiedEntries: verifiedCount,
-        brokenAtSequence: row.sequenceNumber,
-        chainVersion: row.chainVersion,
-      };
+    // A sequence number ahead of the expected one means predecessor(s) are
+    // absent: incomplete evidence, not a contradiction. Reported as a gap at
+    // the first missing sequence number, never as tampering.
+    if (row.sequenceNumber > chainIndex) {
+      return incomplete(chainIndex, row.sequenceNumber, row.chainVersion);
+    }
+
+    // A sequence number behind the expected one is a duplicate/out-of-order
+    // row, which contradicts the chain.
+    if (row.sequenceNumber < chainIndex) {
+      return mismatch(row.sequenceNumber, row.chainVersion);
     }
 
     // Validate previousHash linkage
     const expectedPreviousHash = previousEntryHash ?? GENESIS_HASH;
     if (row.previousHash !== expectedPreviousHash) {
-      return {
-        valid: false,
-        totalEntries: rows.length,
-        verifiedEntries: verifiedCount,
-        brokenAtSequence: row.sequenceNumber,
-        chainVersion: row.chainVersion,
-      };
+      return mismatch(row.sequenceNumber, row.chainVersion);
     }
 
     // Validate entryHash integrity
@@ -691,13 +296,7 @@ export function verifyChain(rows: AuditChainRow[]): ChainVerificationResult {
 
     const recomputed = computeEntryHash(entry);
     if (recomputed !== row.entryHash) {
-      return {
-        valid: false,
-        totalEntries: rows.length,
-        verifiedEntries: verifiedCount,
-        brokenAtSequence: row.sequenceNumber,
-        chainVersion: row.chainVersion,
-      };
+      return mismatch(row.sequenceNumber, row.chainVersion);
     }
 
     previousEntryHash = row.entryHash;
@@ -707,9 +306,11 @@ export function verifyChain(rows: AuditChainRow[]): ChainVerificationResult {
 
   return {
     valid: true,
+    status: "valid",
     totalEntries: rows.length,
     verifiedEntries: verifiedCount,
     brokenAtSequence: null,
+    missingFromSequence: null,
     chainVersion: rows[rows.length - 1].chainVersion,
   };
 }
