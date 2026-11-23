@@ -24,6 +24,11 @@ and the Rust Wasm target. The optional Stellar CLI is reported as a warning;
 missing or outdated required tools make the command exit with a non-zero code.
 Run its mocked platform-independent checks with `pnpm doctor:test`.
 
+The supported Node.js, pnpm, Python, Rust, and schema versions are recorded in
+[`compatibility.json`](compatibility.json) and checked with
+`pnpm run compat:check`. See [`docs/compatibility.md`](docs/compatibility.md)
+when adding support for a new toolchain or schema version.
+
 For the Rust contracts, also add the Wasm target:
 
 ```bash
