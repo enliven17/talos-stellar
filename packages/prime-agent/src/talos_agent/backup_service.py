@@ -17,6 +17,13 @@ Reuses:
 Bounded:
     - SQLite backup uses the official sqlite3.Connection.backup() API,
       which is bounded by the source DB size (no unbounded read).
+    - Plaintext backup envelope is capped at MAX_PLAINTEXT_BYTES (10 MiB)
+      to prevent accidental disk-fill from rogue input.
+    - Decompressed restore bytes are capped at MAX_DECOMPRESSED_RESTORE_BYTES
+      (10 MiB), independently enforced during extraction. This prevents a
+      maliciously crafted artifact (compressed bomb, recursive expansion, or
+      manifest lying about file sizes) from exhausting disk or memory.
+      The check happens before writing files to disk, so restore fails fast.
     - Web API calls reuse `http.request_with_retry` (3 attempts, exp
       backoff with jitter).
     - Single-concurrency: a per-root lock file in `.talos-agent/locks/`
@@ -53,7 +60,6 @@ import structlog
 
 from talos_agent.config import APP_DIR
 from talos_agent.crypto import decrypt_with_password, encrypt_with_password
-from talos_agent.db import get_db_path
 
 log = structlog.get_logger(__name__)
 
@@ -64,6 +70,14 @@ BACKUP_ENCRYPTION_LABEL = "AES-256-GCM#PBKDF2-SHA256#200000"
 # state is easily a few MiB. We allow generous headroom but still defend
 # against accidental disk-fill from rogue input.
 MAX_PLAINTEXT_BYTES = 10 * 1024 * 1024
+
+# Cap decompressed restore bytes: independently enforce a ceiling on the
+# cumulative size of all files extracted during restore. This prevents a
+# maliciously crafted artifact (compressed bomb, recursive expansion, or
+# manifest lying about file sizes) from exhausting disk or memory during
+# extraction. Set to match MAX_PLAINTEXT_BYTES so restore honors the same
+# envelope limit that backup enforces at creation time.
+MAX_DECOMPRESSED_RESTORE_BYTES = MAX_PLAINTEXT_BYTES
 
 
 @dataclass
@@ -177,6 +191,69 @@ def _sqlite_hot_backup(source: Path, dest: Path) -> None:
         src.close()
 
 
+def _get_schema_version(db_path: Path) -> int:
+    """Read the schema version (PRAGMA user_version) from a database."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA user_version;")
+        return int(cursor.fetchone()[0])
+    finally:
+        conn.close()
+
+
+def _get_current_schema_version() -> int:
+    """Get the current schema version from the migrations module."""
+    from talos_agent.db.migrations import _MIGRATIONS
+    return max(m[0] for m in _MIGRATIONS)
+
+
+def check_schema_compatibility(
+    backup_schema_version: int,
+    *,
+    current_schema_version: int | None = None,
+) -> dict:
+    """Check if a backup's schema version is compatible with the current agent.
+
+    Returns a dict with:
+    - "compatible": bool — True if the backup can be restored without data loss
+    - "backup_schema_version": int — schema version in the backup
+    - "current_schema_version": int — schema version of the running agent
+    - "required_migrations": list[int] — migration versions that would need to run
+    - "unsupported_downgrade": bool — True if backup is newer than current agent
+    - "message": str — human-readable explanation
+    """
+    if current_schema_version is None:
+        current_schema_version = _get_current_schema_version()
+
+    if backup_schema_version > current_schema_version:
+        return {
+            "compatible": False,
+            "backup_schema_version": backup_schema_version,
+            "current_schema_version": current_schema_version,
+            "required_migrations": [],
+            "unsupported_downgrade": True,
+            "message": (
+                f"Backup schema version {backup_schema_version} is newer than "
+                f"current agent schema version {current_schema_version}. "
+                f"Restoring would require an unsupported downgrade."
+            ),
+        }
+
+    required_migrations = list(range(backup_schema_version + 1, current_schema_version + 1))
+    return {
+        "compatible": True,
+        "backup_schema_version": backup_schema_version,
+        "current_schema_version": current_schema_version,
+        "required_migrations": required_migrations,
+        "unsupported_downgrade": False,
+        "message": (
+            f"Backup schema version {backup_schema_version} is compatible. "
+            f"{len(required_migrations)} migration(s) would run on first use: {required_migrations or 'none'}."
+        ),
+    }
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -186,6 +263,22 @@ def _now_iso() -> str:
 # ────────────────────────────────────────────────────────────────────
 
 
+def _get_active_db_path(agent_id: str | None = None) -> Path:
+    """Return the active db path, honoring monkeypatched APP_DIR in backup_service or db."""
+    try:
+        from talos_agent.db import get_db_path
+        p = get_db_path(agent_id)
+        if not p.exists() and APP_DIR != Path("~/.talos-agent").expanduser():
+            alt = APP_DIR / (f"agent-{agent_id}.db" if agent_id else "talos-agent.db")
+            if alt.exists():
+                return alt
+        return p
+    except Exception:
+        if agent_id:
+            return APP_DIR / f"agent-{agent_id}.db"
+        return APP_DIR / "talos-agent.db"
+
+
 def collect_agent_files(agent_id: str | None = None) -> list[Path]:
     """Files to include in an agent-scoped backup (paths only).
 
@@ -193,7 +286,7 @@ def collect_agent_files(agent_id: str | None = None) -> list[Path]:
         agent_id=None  → include the default `talos-agent.db`
         agent_id="..."  → include `agent-<id>.db`
     """
-    paths = [get_db_path(agent_id)]
+    paths = [_get_active_db_path(agent_id)]
     return [p for p in paths if p.exists()]
 
 
@@ -211,6 +304,20 @@ def build_backup(
     if len(password) > 1024:
         raise BackupError("Backup passphrase too long (max 1024 chars)")
 
+    # Reject if the output path aliases the live database file (directly or via symlink)
+    # Resolve both paths to their absolute canonical forms.
+    out_resolved = out_path.resolve(strict=False)
+    db_path = _get_active_db_path(agent_id)
+    try:
+        db_resolved = db_path.resolve(strict=False)
+    except Exception:
+        db_resolved = db_path.absolute()
+    if out_resolved == db_resolved:
+        raise BackupError(
+            "Backup output path cannot alias the active database file",
+            code="ALIAS_REJECTED",
+        )
+
     sources = collect_agent_files(agent_id)
     if not sources:
         raise BackupError(f"No agent state found at {APP_DIR}", code="BAD_INPUT")
@@ -224,9 +331,12 @@ def build_backup(
         try:
             files_meta: dict[str, dict[str, Any]] = {}
             db_row_counts: dict[str, int] = {}
+            db_schema_versions: dict[str, int] = {}
             body_bytes: dict[str, str] = {}  # path → base64
             running_size = 0
             for src in sources:
+                # Capture schema version from the live DB before hot backup.
+                db_schema_versions[src.name] = _get_schema_version(src)
                 # Hot backup to a staging copy, NOT modifying the live DB.
                 safe_name = _safe_filename(f"db/{src.name}")
                 dest = staging / safe_name
@@ -274,15 +384,19 @@ def build_backup(
                 json.dumps(manifest_inner, sort_keys=True).encode("utf8")
             )
 
+            # Include schema versions per database in the top-level database metadata.
+            database_meta = {
+                "signalVersion": sqlite3.sqlite_version,
+                "rowCountsSqlite": db_row_counts,
+                "schemaVersions": db_schema_versions,
+            }
+
             run = BackupRun(
                 version=BACKUP_FORMAT_VERSION,
                 encryption=BACKUP_ENCRYPTION_LABEL,
                 scope=scope,
                 timestamp=_now_iso(),
-                database={
-                    "signalVersion": sqlite3.sqlite_version,
-                    "rowCountsSqlite": db_row_counts,
-                },
+                database=database_meta,
                 files=files_meta,
                 manifest={
                     "sha256": manifest_sha,
@@ -304,6 +418,7 @@ def build_backup(
                 "encryption": run.encryption,
                 "scope": run.scope,
                 "timestamp": run.timestamp,
+                "agent_id": agent_id,
                 "database": run.database,
                 "filesMeta": run.files,
                 "body": ordered_files,
@@ -329,7 +444,19 @@ def build_backup(
             encrypted = encrypt_with_password(plaintext.decode("utf8"), password)
 
             # Stream ciphertext to disk in chunks (same envelope; verify/restore unchanged).
-            stream_encrypted_artifact(encrypted, out_path)
+            # #1452: a failure here leaves <out>.incomplete on disk (see
+            # stream_encrypted_artifact) and surfaces a bounded code so the
+            # caller can distinguish a partial write from an auth/verify error.
+            try:
+                stream_encrypted_artifact(encrypted, out_path)
+            except BackupError:
+                raise
+            except Exception as exc:
+                raise BackupError(
+                    f"Backup write failed; partial artifact preserved at "
+                    f"{out_path.with_suffix(out_path.suffix + '.incomplete')}: {exc}",
+                    code="INCOMPLETE_WRITE",
+                ) from exc
 
             log.info(
                 "prime_agent_backup_completed",
@@ -455,6 +582,37 @@ def prune_backups(
 
     return deleted
 
+
+def preview_database_retention(
+    db_path: Path | None = None,
+    agent_id: str | None = None,
+    *,
+    record_class: str | None = None,
+    cutoff_iso: str | None = None,
+):
+    """Preview local SQLite database retention candidates grouped by record class (#1451).
+
+    Reads directly from the specified database (or default/per-agent DB) without modifying
+    or deleting any rows.
+    """
+    from talos_agent.db.facade import LocalDB
+    from talos_agent.db.retention import preview_state_retention
+
+    target = db_path or _get_active_db_path(agent_id)
+    if not target.exists():
+        raise BackupError(f"Database not found at {target}", code="BAD_INPUT")
+
+    db = LocalDB(path=target)
+    try:
+        return preview_state_retention(
+            db._conn,
+            record_class_filter=record_class,
+            cutoff_iso=cutoff_iso,
+        )
+    finally:
+        db.close()
+
+
 # ────────────────────────────────────────────────────────────────────
 # Verify
 # ────────────────────────────────────────────────────────────────────
@@ -498,18 +656,37 @@ def stream_encrypted_artifact(
             os.chmod(out_path, stat.S_IRUSR | stat.S_IWUSR)
         except OSError:
             pass
-    finally:
+    except BaseException:
+        # #1452: a failed write must leave a recoverable artifact, not a
+        # deleted one. Rename the partial to an explicit `.incomplete` suffix
+        # so an operator can inspect it, and so verify_backup / prune never
+        # mistake it for a verified backup.
         if tmp.exists():
             try:
-                tmp.unlink()
+                os.replace(tmp, out_path.with_suffix(out_path.suffix + ".incomplete"))
             except OSError:
-                pass
+                # If even the rename fails, try to unlink so we do not leave
+                # a `.partial` that looks like a resumable artifact.
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+        raise
     return written
 
 
 
 def verify_backup(*, artifact_path: Path, password: str) -> BackupRun:
-    """Read + decrypt + sanity-check without writing."""
+    """Read + decrypt + sanity-check without writing.
+
+    #1452: refuses a `.incomplete` artifact up front. A partial write is never
+    a verified backup, so this path never presents one as such.
+    """
+    if artifact_path.name.endswith(".incomplete"):
+        raise BackupError(
+            f"Refusing to verify an incomplete backup artifact: {artifact_path}",
+            code="INCOMPLETE_WRITE",
+        )
     if not artifact_path.exists():
         raise BackupError(f"Artifact not found: {artifact_path}", code="BAD_INPUT")
     blob = artifact_path.read_text(encoding="utf8")
@@ -553,6 +730,22 @@ def verify_backup(*, artifact_path: Path, password: str) -> BackupRun:
         # We didn't bake the sha into the plaintext, but we capture and compare
         # externally so `backup-doctor` can flag mismatch.
         pass
+
+    # Extract schema versions from backup metadata.
+    database_meta = data.get("database", {})
+    backup_schema_versions = database_meta.get("schemaVersions", {})
+    # For backward compatibility, also check manifest for a single schemaVersion.
+    if not backup_schema_versions and "schemaVersion" in data.get("manifest", {}):
+        # Legacy format: single schemaVersion in manifest (SQLite version, not user_version).
+        # We can't determine the actual schema version from this, so we leave it empty.
+        pass
+
+    # Compute compatibility for each database in the backup.
+    schema_compatibility = {}
+    for db_name, backup_version in backup_schema_versions.items():
+        compat = check_schema_compatibility(backup_version)
+        schema_compatibility[db_name] = compat
+
     log.info(
         "prime_agent_backup_verified",
         artifact=str(artifact_path),
@@ -562,12 +755,14 @@ def verify_backup(*, artifact_path: Path, password: str) -> BackupRun:
     )
     # Filter to BackupRun dataclass fields; the wire payload carries
     # additional keys (body, filesMeta) that BackupRun does not accept.
+    # Attach schema compatibility report to database metadata.
+    database_meta["schemaCompatibility"] = schema_compatibility
     return BackupRun(
         version=data.get("version", BACKUP_FORMAT_VERSION),
         encryption=data.get("encryption", BACKUP_ENCRYPTION_LABEL),
         scope=data.get("scope", "agent"),
         timestamp=data.get("timestamp", ""),
-        database=data.get("database", {}),
+        database=database_meta,
         files=files_section,
         manifest=data["manifest"],
     )
@@ -585,6 +780,7 @@ def restore_backup(
     confirm: bool,
     agent_id: str | None = None,
     restore_root: Path | None = None,
+    allow_agent_mismatch: bool = False,
 ) -> BackupRun:
     """Restore SQLite state from an artifact.
 
@@ -612,6 +808,16 @@ def restore_backup(
     # metadata without exposing raw bytes yet.
     verified = verify_backup(artifact_path=artifact_path, password=password)
 
+    # Check schema compatibility before proceeding with restore.
+    # This prevents unsupported downgrades without changing local state.
+    schema_compat = verified.database.get("schemaCompatibility", {})
+    for compat in schema_compat.values():
+        if not compat.get("compatible", True) and compat.get("unsupported_downgrade", False):
+            raise BackupError(
+                f"Unsupported schema downgrade: {compat['message']}",
+                code="UNSUPPORTED_DOWNGRADE",
+            )
+
     target_root = restore_root or APP_DIR
     target_root.mkdir(parents=True, exist_ok=True)
 
@@ -623,12 +829,42 @@ def restore_backup(
     body: dict = payload.get("body") or {}
     files_meta: dict = payload.get("filesMeta") or verified.files
 
+    # ── Agent-identifier guard (issue #1454) ─────────────────────────────
+    # Compare the archive's recorded agent_id with the caller's selected
+    # agent_id before any state is written. Behaviour:
+    #   - Both present and equal   → proceed (same-agent restore)
+    #   - Both present and differ  → raise AGENT_ID_MISMATCH unless the
+    #                                caller explicitly opts into migration
+    #                                via allow_agent_mismatch=True
+    #   - Either side missing      → proceed (legacy archive, or caller did
+    #                                not specify a target agent)
+    # Never mixes state silently: mismatch fails closed.
+    archive_agent_id = payload.get("agent_id")
+    if (
+        agent_id
+        and archive_agent_id
+        and agent_id != archive_agent_id
+    ):
+        if not allow_agent_mismatch:
+            raise BackupError(
+                f"Archive agent_id {archive_agent_id!r} does not match "
+                f"selected agent {agent_id!r}. Refusing to mix state; "
+                f"pass allow_agent_mismatch=True to migrate explicitly.",
+                code="AGENT_ID_MISMATCH",
+            )
+        log.warning(
+            "prime_agent_restore_agent_mismatch_allowed",
+            archive_agent_id=archive_agent_id,
+            selected_agent_id=agent_id,
+        )
+
     with single_flight("agent_restore"):
         staging_root = APP_DIR / "restore-staging"
         staging_root.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(prefix="restore-", dir=str(staging_root)))
         try:
             placed: list[tuple[Path, Path, int]] = []
+            cumulative_decompressed_bytes = 0
             for name, meta in files_meta.items():
                 safe = _safe_filename(name)
                 if not safe.startswith("db/"):
@@ -643,6 +879,17 @@ def restore_backup(
                         code="BAD_INPUT",
                     )
                 raw = _b64_decode(body[safe])
+                
+                # Bound decompressed bytes independently of archive size.
+                # Check cumulative size BEFORE writing to disk to fail fast.
+                cumulative_decompressed_bytes += len(raw)
+                if cumulative_decompressed_bytes > MAX_DECOMPRESSED_RESTORE_BYTES:
+                    raise BackupError(
+                        f"Decompressed restore size {cumulative_decompressed_bytes}B exceeds "
+                        f"MAX_DECOMPRESSED_RESTORE_BYTES={MAX_DECOMPRESSED_RESTORE_BYTES}B",
+                        code="BAD_INPUT",
+                    )
+                
                 expected_sha = meta.get("sha256")
                 expected_size = meta.get("size_bytes")
                 if expected_sha:
@@ -719,8 +966,9 @@ async def trigger_web_backup(
     backup call.
     """
 
-    from talos_agent.http import request_with_retry
     import httpx
+
+    from talos_agent.http import request_with_retry
 
     async def send() -> httpx.Response:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
@@ -740,17 +988,18 @@ async def trigger_web_backup(
 
 # Re-export so callers can hit a single object.
 __all__ = [
-    "BACKUP_FORMAT_VERSION",
     "BACKUP_ENCRYPTION_LABEL",
+    "BACKUP_FORMAT_VERSION",
     "MAX_PLAINTEXT_BYTES",
-    "BackupRun",
-    "BackupError",
     "BackupBusyError",
+    "BackupError",
+    "BackupRun",
     "build_backup",
-    "verify_backup",
-    "restore_backup",
-    "trigger_web_backup",
+    "check_schema_compatibility",
     "collect_agent_files",
     "default_backup_dir",
     "prune_backups",
+    "restore_backup",
+    "trigger_web_backup",
+    "verify_backup",
 ]
