@@ -237,6 +237,62 @@ describe("Financial Snapshot & Data States", () => {
       expect(screen.queryByText("$0.00 Total Treasury")).toBeNull();
     });
 
+    it("renders unavailable placeholders when no revenue observations exist", () => {
+      render(
+        <TabRevenue
+          talos={{ ...mockTalos, revenue: "", revenueHistory: [] }}
+          address="GPATRON1"
+          isConnected={false}
+          distPreview={null}
+          distLoading={false}
+          onLoadDistPreview={vi.fn()}
+          onDistribute={vi.fn()}
+          buybackPreview={null}
+          buybackLoading={false}
+          buybackForm={{ usdcAmount: "", mitosAmount: "" }}
+          onBuybackFormChange={vi.fn()}
+          onLoadBuybackPreview={vi.fn()}
+          onBuyback={vi.fn()}
+        />
+      );
+
+      expect(screen.getByTestId("revenue-total").textContent).toBe("—");
+      expect(screen.getByTestId("revenue-this-month").textContent).toBe("—");
+      expect(screen.getByTestId("revenue-average-monthly").textContent).toBe("—");
+      expect(screen.queryByText("$0")).toBeNull();
+      expect(screen.getByTestId("agent-empty-revenue")).not.toBeNull();
+    });
+
+    it("renders a verified zero when revenue history contains a zero observation", () => {
+      render(
+        <TabRevenue
+          talos={{
+            ...mockTalos,
+            revenue: "$0",
+            revenueHistory: [{ month: "Jan", amount: 0 }],
+          }}
+          address="GPATRON1"
+          isConnected={false}
+          distPreview={null}
+          distLoading={false}
+          onLoadDistPreview={vi.fn()}
+          onDistribute={vi.fn()}
+          buybackPreview={null}
+          buybackLoading={false}
+          buybackForm={{ usdcAmount: "", mitosAmount: "" }}
+          onBuybackFormChange={vi.fn()}
+          onLoadBuybackPreview={vi.fn()}
+          onBuyback={vi.fn()}
+        />
+      );
+
+      expect(screen.getByTestId("revenue-total").textContent).toBe("$0");
+      expect(screen.getByTestId("revenue-this-month").textContent).toBe("$0");
+      expect(screen.getByTestId("revenue-average-monthly").textContent).toBe("$0");
+      expect(screen.getByText("$0.0K")).not.toBeNull();
+      expect(screen.queryByTestId("agent-empty-revenue")).toBeNull();
+    });
+
     it("renders buyback panel with snapshot timestamp and safe metric values", () => {
       const buybackPreview: BuybackPreview = {
         totalRevenue: 5000,
