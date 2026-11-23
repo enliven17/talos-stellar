@@ -49,6 +49,8 @@ type Svc = {
   currency: string;
   chains: string[];
   createdAt: Date;
+  agentOnline: boolean;
+  agentLastSeen: Date | null;
 };
 
 function makeService(
@@ -63,6 +65,8 @@ function makeService(
     price: "1",
     currency: "USDC",
     chains: ["stellar"],
+    agentOnline: true,
+    agentLastSeen: new Date("2026-08-01T00:00:00.000Z"),
     ...overrides,
   };
 }
@@ -195,6 +199,27 @@ describe("default behaviour (pagination params omitted)", () => {
         }),
       ],
       nextCursor: null,
+    });
+  });
+
+  it("returns explicit unknown availability when no heartbeat has been observed", async () => {
+    mocks.mockDb.select.mockReturnValue(
+      buildChain([
+        makeService({
+          id: "svc-unknown",
+          createdAt: new Date("2026-08-01T00:00:00.000Z"),
+          agentOnline: false,
+          agentLastSeen: null,
+        }),
+      ]),
+    );
+
+    const res = await servicesGET(req({}));
+    const body = await res.json();
+    expect(body.data[0].availability).toEqual({
+      state: "unknown",
+      freshness: "unknown",
+      lastObservedAt: null,
     });
   });
 
