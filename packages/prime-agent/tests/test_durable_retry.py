@@ -150,13 +150,13 @@ def test_durable_backoff_max_backoff_cap(db: LocalDB):
 
 
 def test_durable_backoff_jitter_bounds(db: LocalDB):
-    """With jitter=0.2, 100 samples of next_delay must fall within ±20 % of base delay."""
+    """With jitter=0.2, delay stays between eligibility and 20% above it."""
     b = DurableBackoff("jitter", db, base_delay=5.0, initial_backoff=100.0, jitter=0.2)
     b.failure()  # fail_count=1 → nominal=100.0
 
     delays = [b.next_delay() for _ in range(100)]
     for d in delays:
-        assert 80.0 <= d <= 120.0, f"delay {d} out of ±20% band"
+        assert 100.0 <= d <= 120.0, f"delay {d} outside eligibility-to-jitter band"
     assert len(set(delays)) == 1, "same task attempt should produce stable jitter"
 
 
