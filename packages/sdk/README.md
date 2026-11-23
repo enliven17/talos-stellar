@@ -1022,33 +1022,15 @@ switch (error.code) {
 
 ---
 
-### Synthetic event-stream fault fixtures
+### Total request deadline
 
-The SDK exports a deterministic, network-free fixture kit for exercising SSE
-and reconnect behavior:
-
-```typescript
-import {
-  getEventStreamFaultFixture,
-  createSyntheticEventStreamTransport,
-  TalosEventStream,
-} from "@talos-protocol/sdk";
-
-const fixture = getEventStreamFaultFixture("reconnect-race")!;
-const transport = createSyntheticEventStreamTransport(fixture);
-const stream = new TalosEventStream("http://synthetic.invalid", {
-  fetch: transport.fetch,
-  maxReconnectAttempts: 1,
-  jitter: false,
-});
-```
-
-The kit includes `truncated-frame`, `history-gap`, and `reconnect-race`
-fixtures. Fixtures are immutable, deterministic, and contain no secrets or
-network endpoints. History gaps expose missing numeric event IDs; reconnect
-fixtures replay synthetic frames and verify `Last-Event-ID` handling.
-
----
+`timeoutMs` is one wall-clock budget for the complete SDK call, not a fresh
+timeout for every fetch attempt. It covers request signing, retry backoff,
+fetch, response-body parsing, and (for `purchaseServiceWithPayment`) the x402
+challenge and proof hops. When the budget expires, outstanding work is
+aborted and the call rejects with `TalosTimeoutError`; no later retry is sent.
+A per-call `timeoutMs` overrides the client default, and `timeoutMs: 0`
+disables the deadline for that call.
 
 ### Retry policy resolution and mechanics
 
@@ -1096,7 +1078,7 @@ const typedPolicy = resolveRetryOptions({
 const client = new TalosClient({
   baseUrl: "https://talos-stellar.vercel.app",
   apiKey: process.env.TALOS_KEY!,
-  timeoutMs: 30_000, // per-request AbortController timeout
+  timeoutMs: 30_000, // total request deadline, including retries and signing
 
   // Status-code driven policy (active by default):
   retryPolicy: {
