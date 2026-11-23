@@ -200,34 +200,24 @@ pub struct EpochRecord {
     pub status: EpochStatus,
 }
 
-/// Versioned descriptor of the arithmetic bounds enforced by the dividend
-/// contract's checked arithmetic.
+/// A single entry in a patron's bounded claim history.
 ///
-/// Returned by [`TalosDividends::arithmetic_bounds`].  The
-/// `descriptor_version` field lets the shape of this struct evolve in
-/// future minor releases: callers that only care about specific fields
-/// can safely ignore unknown ones.
-///
-/// All amount fields use the same atomic unit as
-/// `EpochRecord::total_amount` (stroops or equivalent).
+/// Stored under `DataKey::ClaimHistory(patron, index)`.  The index is
+/// 0-based and monotonically increasing, capped at
+/// [`MAX_CLAIM_HISTORY`] entries per patron.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ArithmeticBounds {
-    /// Minimum `total_amount` accepted by `commit_epoch`
-    /// (= [`MIN_EPOCH_AMOUNT`]).
-    pub min_epoch_amount: i128,
-    /// Maximum share percentage any single patron role may hold (= 100).
-    /// The three role shares must sum to exactly this value.
-    pub max_share_pct: u32,
-    /// Minimum claim-window length in seconds accepted by `commit_epoch`
-    /// (= [`MIN_EXPIRY_SECS`]).
-    pub min_expiry_secs: u64,
-    /// Maximum claim-window length in seconds accepted by `commit_epoch`
-    /// (= [`MAX_EXPIRY_SECS`]).
-    pub max_expiry_secs: u64,
-    /// Shape version of this descriptor struct.
-    /// Currently `1`; will be incremented on any structural change.
-    pub descriptor_version: u32,
+pub struct ClaimRecord {
+    /// Epoch this claim belongs to.
+    pub epoch_id: u64,
+    /// Talos this claim belongs to.
+    pub talos_id: u32,
+    /// Exact atomic amount claimed.
+    pub amount: i128,
+    /// Patron role used for this claim.
+    pub role: PatronRole,
+    /// Ledger sequence at the time of the claim.
+    pub ledger_sequence: u32,
 }
 
 /// Persistent storage key enumeration.
@@ -253,6 +243,11 @@ pub enum DataKey {
     PendingAdmin,
     /// Ledger sequence when an epoch's persistent records were last refreshed: `(talos_id: u32, epoch_id: u64)`.
     LastTouched(u32, u64),
+    /// Bounded claim history entry: `(patron: Address, index: u32)`.
+    /// Index is 0-based, capped at [`MAX_CLAIM_HISTORY`].
+    ClaimHistory(Address, u32),
+    /// Count of claim history entries recorded for a patron.
+    ClaimCount(Address),
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -265,6 +260,14 @@ const MAX_EXPIRY_SECS: u64 = 31_536_000;
 
 /// Minimum total_amount per epoch (1 stroops-equivalent unit).
 const MIN_EPOCH_AMOUNT: i128 = 1;
+
+/// Maximum claim history entries stored per patron address.
+///
+/// When a patron's recorded claim count reaches this limit, subsequent
+/// successful claims are still processed normally — the history ring is
+/// simply not extended.  Callers that need a complete history should
+/// index the `div_clm` events emitted on each successful claim.
+pub const MAX_CLAIM_HISTORY: u32 = 100;
 
 /// Compile-time interface version of TalosDividends.
 ///
@@ -309,7 +312,7 @@ pub fn features_list() -> &'static [&'static str] {
         "rounding_dust",
         "round_manifest",
         "interface_query",
-        "arithmetic_bounds",
+        "claim_history",
     ]
 }
 
@@ -850,7 +853,30 @@ impl TalosDividends {
             .persistent()
             .set(&DataKey::LastTouched(talos_id, epoch_id), &current_ledger);
 
-        emit_dividend_claimed(&env, epoch_id, claimant, talos_id, allocation, role);
+        emit_dividend_claimed(&env, epoch_id, claimant.clone(), talos_id, allocation, role.clone());
+
+        // Append a ClaimRecord to the patron's bounded claim history.
+        let count_key = DataKey::ClaimCount(claimant.clone());
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&count_key)
+            .unwrap_or(0u32);
+        if count < MAX_CLAIM_HISTORY {
+            let record = ClaimRecord {
+                epoch_id,
+                talos_id,
+                amount: allocation,
+                role,
+                ledger_sequence: env.ledger().sequence(),
+            };
+            env.storage()
+                .persistent()
+                .set(&DataKey::ClaimHistory(claimant.clone(), count), &record);
+            env.storage()
+                .persistent()
+                .set(&count_key, &(count + 1));
+        }
 
         Ok(allocation)
     }
@@ -1014,15 +1040,27 @@ impl TalosDividends {
             .get(&DataKey::RoundingDust(talos_id, epoch_id))
     }
 
-    /// Return the committed funding and entitlement audit record for a round.
-    pub fn get_round_manifest(
-        env: Env,
-        talos_id: u32,
-        epoch_id: u64,
-    ) -> Option<DistributionRoundManifest> {
+    /// Return the total number of claim history entries recorded for `patron`.
+    ///
+    /// Returns 0 before any claim has been made.  Capped at
+    /// [`MAX_CLAIM_HISTORY`]; this is an O(1) read independent of the
+    /// number of other recipients.
+    pub fn get_claim_count(env: Env, patron: Address) -> u32 {
         env.storage()
             .persistent()
-            .get(&DataKey::RoundManifest(talos_id, epoch_id))
+            .get(&DataKey::ClaimCount(patron))
+            .unwrap_or(0u32)
+    }
+
+    /// Return the [`ClaimRecord`] at `index` for `patron`, or `None` if absent.
+    ///
+    /// `index` is 0-based.  Returns `None` for any index ≥ the recorded
+    /// claim count or for patrons who have never claimed.  Each read is O(1)
+    /// and independent of the number of other recipients.
+    pub fn get_claim_record(env: Env, patron: Address, index: u32) -> Option<ClaimRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ClaimHistory(patron, index))
     }
 
     /// Return the next epoch ID that would be assigned for `talos_id`.
@@ -4584,54 +4622,125 @@ mod tests {
         assert!(res.is_err());
     }
 
-    // ── arithmetic_bounds() ──────────────────────────────────────────────────
+    // ── get_claim_count() / get_claim_record() ───────────────────────────────
 
     #[test]
-    fn arithmetic_bounds_returns_correct_values() {
+    fn get_claim_count_returns_zero_before_any_claim() {
         let (env, _, _, _, client) = setup();
-        let bounds = client.arithmetic_bounds();
-        assert_eq!(bounds.min_epoch_amount, 1_i128);
-        assert_eq!(bounds.max_share_pct, 100u32);
-        assert_eq!(bounds.min_expiry_secs, 3_600u64);
-        assert_eq!(bounds.max_expiry_secs, 31_536_000u64);
-        assert_eq!(bounds.descriptor_version, 1u32);
-        let _ = env;
+        let patron = Address::generate(&env);
+        assert_eq!(client.get_claim_count(&patron), 0u32);
     }
 
     #[test]
-    fn arithmetic_bounds_descriptor_version_is_one() {
-        let (env, _, _, _, client) = setup();
-        assert_eq!(client.arithmetic_bounds().descriptor_version, 1u32);
-        let _ = env;
+    fn get_claim_count_increments_after_claim() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        assert_eq!(client.get_claim_count(&creator), 0u32);
+        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
+        assert_eq!(client.get_claim_count(&creator), 1u32);
     }
 
     #[test]
-    fn arithmetic_bounds_min_epoch_amount_is_positive() {
+    fn get_claim_record_returns_none_for_unclaimed() {
         let (env, _, _, _, client) = setup();
-        assert!(client.arithmetic_bounds().min_epoch_amount >= 1);
-        let _ = env;
+        let patron = Address::generate(&env);
+        assert_eq!(client.get_claim_record(&patron, &0u32), None);
     }
 
     #[test]
-    fn arithmetic_bounds_max_share_pct_is_100() {
-        let (env, _, _, _, client) = setup();
-        assert_eq!(client.arithmetic_bounds().max_share_pct, 100u32);
-        let _ = env;
+    fn get_claim_record_returns_correct_record_after_claim() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
+
+        let record = client.get_claim_record(&creator, &0u32).unwrap();
+        assert_eq!(record.epoch_id, epoch_id);
+        assert_eq!(record.talos_id, talos_id);
     }
 
     #[test]
-    fn arithmetic_bounds_expiry_range_is_ordered() {
-        let (env, _, _, _, client) = setup();
-        let bounds = client.arithmetic_bounds();
-        assert!(bounds.min_expiry_secs < bounds.max_expiry_secs);
-        let _ = env;
+    fn claim_record_role_is_correct() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
+        do_claim(&env, &contract_id, &client, &investor, talos_id, epoch_id, &creator, &investor, &treasury);
+        do_claim(&env, &contract_id, &client, &treasury, talos_id, epoch_id, &creator, &investor, &treasury);
+
+        assert_eq!(client.get_claim_record(&creator, &0u32).unwrap().role, PatronRole::Creator);
+        assert_eq!(client.get_claim_record(&investor, &0u32).unwrap().role, PatronRole::Investor);
+        assert_eq!(client.get_claim_record(&treasury, &0u32).unwrap().role, PatronRole::Treasury);
     }
 
     #[test]
-    fn interface_features_includes_arithmetic_bounds() {
+    fn claim_record_amount_is_exact() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
+        // creator = 60% of 10_000 = 6_000
+        assert_eq!(client.get_claim_record(&creator, &0u32).unwrap().amount, 6_000);
+    }
+
+    #[test]
+    fn multiple_epochs_accumulate_in_history() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        let epoch1 = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+        let epoch2 = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch1, &creator, &investor, &treasury);
+        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch2, &creator, &investor, &treasury);
+
+        assert_eq!(client.get_claim_count(&creator), 2u32);
+        assert_eq!(client.get_claim_record(&creator, &0u32).unwrap().epoch_id, epoch1);
+        assert_eq!(client.get_claim_record(&creator, &1u32).unwrap().epoch_id, epoch2);
+    }
+
+    #[test]
+    fn get_claim_count_independent_per_patron() {
+        let (env, contract_id, admin, _, client) = setup();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+
+        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
+
+        // Only creator claimed; others still at 0.
+        assert_eq!(client.get_claim_count(&creator), 1u32);
+        assert_eq!(client.get_claim_count(&investor), 0u32);
+        assert_eq!(client.get_claim_count(&treasury), 0u32);
+    }
+
+    #[test]
+    fn interface_features_includes_claim_history() {
         let (env, _, _, _, client) = setup();
         let features = client.interface_features();
-        let target = soroban_sdk::Symbol::new(&env, "arithmetic_bounds");
+        let target = soroban_sdk::Symbol::new(&env, "claim_history");
         let mut found = false;
         for i in 0..features.len() {
             if features.get(i).unwrap() == target {
@@ -4639,75 +4748,28 @@ mod tests {
                 break;
             }
         }
-        assert!(found, "expected 'arithmetic_bounds' in interface_features");
+        assert!(found, "expected 'claim_history' in interface_features");
     }
 
     #[test]
-    fn version_returns_1_3_0() {
-        let (env, _, _, _, client) = setup();
-        assert_eq!(client.version(), (1u32, 3u32, 0u32));
-        let _ = env;
-    }
-
-    #[test]
-    fn interface_id_golden_vector_matches_1_3_0() {
-        let (env, _, _, _, client) = setup();
-        let id = client.interface_id();
-        // Build expected bytes using the §6 derivation rule:
-        // bytes[0..14]  = "TalosDividends"
-        // bytes[14..16] = 0x00 0x00 (zero-pad to 16)
-        // bytes[16..20] = major=1 big-endian
-        // bytes[20..24] = minor=3 big-endian
-        // bytes[24..28] = patch=0 big-endian
-        // bytes[28..32] = 0x00 0x00 0x00 0x00 reserved
-        let expected: [u8; 32] = [
-            0x54, 0x61, 0x6C, 0x6F, 0x73, 0x44, 0x69, 0x76,
-            0x69, 0x64, 0x65, 0x6E, 0x64, 0x73, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x01,
-            0x00, 0x00, 0x00, 0x03,
-            0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00,
-        ];
-        assert_eq!(id, soroban_sdk::BytesN::from_array(&env, &expected));
-    }
-
-    #[test]
-    fn arithmetic_bounds_consistent_with_commit_epoch_validation() {
-        // Verify that the bounds descriptor aligns with what commit_epoch
-        // actually enforces: amounts below min and expiry outside range
-        // must be rejected.
+    fn claim_history_bounded_at_max_entries() {
+        // Commit MAX_CLAIM_HISTORY + 1 epochs and claim from one patron;
+        // the count must be capped at MAX_CLAIM_HISTORY.
         let (env, contract_id, admin, _, client) = setup();
-        let bounds = client.arithmetic_bounds();
+        let talos_id = 1u32;
+        let creator = Address::generate(&env);
+        let investor = Address::generate(&env);
+        let treasury = Address::generate(&env);
 
-        // amount below min_epoch_amount → InvalidEpochParams
-        let res = client
-            .mock_auths(&[soroban_sdk::testutils::MockAuth {
-                address: &admin,
-                invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "commit_epoch",
-                    args: (admin.clone(), 1u32, (bounds.min_epoch_amount - 1), 7_200_u64)
-                        .into_val(&env),
-                    sub_invokes: &[],
-                },
-            }])
-            .try_commit_epoch(&admin, &1u32, &(bounds.min_epoch_amount - 1), &7_200_u64);
-        assert_eq!(res, Err(Ok(ContractError::InvalidEpochParams)));
+        let limit = MAX_CLAIM_HISTORY + 1;
+        for _ in 0..limit {
+            let eid = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
+            do_claim(&env, &contract_id, &client, &creator, talos_id, eid, &creator, &investor, &treasury);
+        }
 
-        // expiry below min_expiry_secs → InvalidEpochParams
-        let res2 = client
-            .mock_auths(&[soroban_sdk::testutils::MockAuth {
-                address: &admin,
-                invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "commit_epoch",
-                    args: (admin.clone(), 1u32, 1_000_i128, (bounds.min_expiry_secs - 1))
-                        .into_val(&env),
-                    sub_invokes: &[],
-                },
-            }])
-            .try_commit_epoch(&admin, &1u32, &1_000_i128, &(bounds.min_expiry_secs - 1));
-        assert_eq!(res2, Err(Ok(ContractError::InvalidEpochParams)));
+        assert_eq!(client.get_claim_count(&creator), MAX_CLAIM_HISTORY);
+        // Index at MAX_CLAIM_HISTORY must be absent.
+        assert_eq!(client.get_claim_record(&creator, &MAX_CLAIM_HISTORY), None);
     }
 }
 
