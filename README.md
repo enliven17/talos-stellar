@@ -321,3 +321,7 @@ Response is always `Cache-Control: no-store`.
 
 **Recommended monitoring** — wire a free [UptimeRobot](https://uptimerobot.com) or [Better Uptime](https://betteruptime.com) monitor to `GET /api/health` on a 1-minute interval. Alert on HTTP 503 for outages, and also inspect `status: "degraded"` in the JSON body so Horizon issues are visible without being treated as hard liveness failures.
 
+## Handsoff notes
+
+<!-- handsoff-issue-1384 -->
+- #1384: feat(contracts): expose a read-only registry metadata schema descriptor

@@ -16,6 +16,8 @@ export interface DeadLetterView {
   maxAttempts: number;
   /** Sanitized, truncated last consumer error; null if none was recorded. */
   lastError: string | null;
+  /** Link to original failed attempt when requeued; null for initial failures. */
+  originalEventId: string | null;
   createdAt: string;
   /** When the row last changed, i.e. when it was dead-lettered. */
   deadLetteredAt: string;
@@ -75,6 +77,7 @@ export function toDeadLetterView(event: OutboxEvent): DeadLetterView {
     attempts: event.attempts,
     maxAttempts: event.maxAttempts,
     lastError: sanitizeOutboxError(event.lastError),
+    originalEventId: event.originalEventId ?? null,
     createdAt: iso(event.createdAt),
     deadLetteredAt: iso(event.updatedAt),
   };

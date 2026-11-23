@@ -168,6 +168,29 @@ export const DEFAULT_SECRET_ROTATION_GRACE_SECONDS = parsePositiveIntEnv(
   },
 );
 
+// ─── Destination verification ─────────────────────────────────────
+
+/** Default challenge token expiration window (seconds). Default 10 minutes (600s). */
+export const WEBHOOK_VERIFICATION_CHALLENGE_TTL_SECONDS = parsePositiveIntEnv(
+  "WEBHOOK_VERIFICATION_CHALLENGE_TTL_SECONDS",
+  600,
+  { min: 60, max: 86_400 },
+);
+
+/** Default bounded validity window for a verified destination (seconds). Default 30 days. */
+export const WEBHOOK_VERIFICATION_TTL_SECONDS = parsePositiveIntEnv(
+  "WEBHOOK_VERIFICATION_TTL_SECONDS",
+  2_592_000,
+  { min: 300, max: 31_536_000 },
+);
+
+/** Timeout (ms) for the destination verification handshake HTTP request. Default 5000ms. */
+export const WEBHOOK_VERIFICATION_TIMEOUT_MS = parsePositiveIntEnv(
+  "WEBHOOK_VERIFICATION_TIMEOUT_MS",
+  5_000,
+  { min: 1_000, max: 60_000 },
+);
+
 // ─── Encryption ──────────────────────────────────────────────────
 
 /** Derive the AES-256-GCM encryption key for webhook secrets from an env var. */
