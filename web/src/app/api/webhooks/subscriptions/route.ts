@@ -18,6 +18,7 @@ import { z } from "zod/v4";
 import { parseBody } from "@/lib/schemas";
 import { deriveSigningKeyId, encryptSecret } from "@/lib/webhooks/signing";
 import { validateUrl } from "@/lib/security/ssrf";
+import { parseJsonBody as parseBody, performDestinationHandshake } from "@/lib/webhooks/verification";
 
 // ─── Auth helper (same pattern as jobs routes) ───────────────────
 
@@ -90,6 +91,7 @@ async function _POST(request: NextRequest) {
         secretCiphertext,
         eventTypes: data.eventTypes,
         description: data.description ?? null,
+        destinationVerificationStatus: "pending",
       })
       .returning();
 
@@ -97,6 +99,34 @@ async function _POST(request: NextRequest) {
       { subscriptionId: subscription.id, talosId: callerTalosId, eventCount: data.eventTypes.length },
       "webhook_subscription_created",
     );
+
+    // Destination verification handshake: deliveries stay disabled until the
+    // destination echoes a signed challenge. Failure never fails creation; the
+    // caller can retry via POST /api/webhooks/subscriptions/:id/verify.
+    let verification: {
+      status: string;
+      verifiedAt: Date | null;
+      expiresAt: Date | null;
+      error: string | null;
+    } = { status: "pending", verifiedAt: null, expiresAt: null, error: null };
+    try {
+      const result = await performDestinationHandshake({
+        subscriptionId: subscription.id,
+        talosId: callerTalosId,
+        url: data.url,
+        secretPlaintext: data.secret,
+        signatureVersion: subscription.signatureVersion ?? 1,
+      });
+      verification = {
+        status: result.status,
+        verifiedAt: result.verifiedAt ?? null,
+        expiresAt: result.expiresAt ?? null,
+        error: result.error ?? null,
+      };
+    } catch (err) {
+      logger.warn({ subscriptionId: subscription.id, err }, "webhook_destination_handshake_error");
+      verification.error = "Destination verification could not be completed";
+    }
 
     // Return the subscription without the secret
     return Response.json(

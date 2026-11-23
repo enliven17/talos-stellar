@@ -3,8 +3,10 @@ import { vi, describe, it, expect, beforeEach } from "vitest";
 const mocks = vi.hoisted(() => ({
   store: {
     reapExpiredLeases: vi.fn(),
+    expireAgedPendingJobs: vi.fn(),
     leaseBatch: vi.fn(),
     heartbeat: vi.fn(),
+    extendLease: vi.fn(),
     complete: vi.fn(),
     fail: vi.fn(),
   },
@@ -46,6 +48,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   __resetRegistryForTests();
   mocks.store.reapExpiredLeases.mockResolvedValue({ requeued: 0, deadLettered: 0 });
+  mocks.store.expireAgedPendingJobs.mockResolvedValue(0);
 });
 
 describe("jobs/runner — runOnce", () => {
@@ -54,7 +57,7 @@ describe("jobs/runner — runOnce", () => {
 
     const summary = await runOnce();
 
-    expect(summary).toEqual({ leased: 0, completed: 0, retried: 0, deadLettered: 0, cancelled: 0, reaped: 3 });
+    expect(summary).toEqual({ leased: 0, completed: 0, retried: 0, deadLettered: 0, cancelled: 0, reaped: 3, agedOut: 0 });
     expect(mocks.store.leaseBatch).not.toHaveBeenCalled();
   });
 
@@ -85,6 +88,7 @@ describe("jobs/runner — runOnce", () => {
     expect(ctx.attempts).toBe(3);
     expect(ctx.maxAttempts).toBe(5);
     expect(typeof ctx.heartbeat).toBe("function");
+    expect(typeof ctx.extendLease).toBe("function");
     expect(ctx.signal).toBeInstanceOf(AbortSignal);
   });
 
@@ -139,6 +143,49 @@ describe("jobs/runner — runOnce", () => {
     expect(summary.completed).toBe(0);
   });
 
+  it("aborts signal and drops handler result without completing when heartbeat is rejected after deadline elapsed", async () => {
+    let observedAbortedInHandler = false;
+    const handler = vi.fn().mockImplementation(async (ctx) => {
+      const hb = await ctx.heartbeat();
+      expect(hb.ok).toBe(false);
+      observedAbortedInHandler = ctx.signal.aborted;
+      return { ok: true };
+    });
+    registerHandler("test_queue", handler);
+    mocks.store.leaseBatch.mockResolvedValue([makeJob()]);
+    mocks.store.heartbeat.mockResolvedValue({ ok: false, cancelled: false });
+
+    const summary = await runOnce({ heartbeatIntervalMs: 60_000 });
+
+    expect(observedAbortedInHandler).toBe(true);
+    expect(mocks.store.complete).not.toHaveBeenCalled();
+    expect(mocks.store.fail).not.toHaveBeenCalled();
+    expect(summary.completed).toBe(0);
+    expect(summary.retried).toBe(0);
+    expect(summary.deadLettered).toBe(0);
+  });
+
+  it("aborts signal and suppresses fail() when handler throws after heartbeat rejection due to expired lease", async () => {
+    const handler = vi.fn().mockImplementation(async (ctx) => {
+      const hb = await ctx.heartbeat();
+      if (!hb.ok) {
+        throw new Error("aborted due to lost lease");
+      }
+      return { ok: true };
+    });
+    registerHandler("test_queue", handler);
+    mocks.store.leaseBatch.mockResolvedValue([makeJob()]);
+    mocks.store.heartbeat.mockResolvedValue({ ok: false, cancelled: false });
+
+    const summary = await runOnce({ heartbeatIntervalMs: 60_000 });
+
+    expect(mocks.store.complete).not.toHaveBeenCalled();
+    expect(mocks.store.fail).not.toHaveBeenCalled();
+    expect(summary.completed).toBe(0);
+    expect(summary.retried).toBe(0);
+    expect(summary.deadLettered).toBe(0);
+  });
+
   it("counts a job cancelled mid-run and does not complete/fail it", async () => {
     const handler = vi.fn().mockImplementation(async (ctx) => {
       await ctx.heartbeat();
@@ -184,5 +231,32 @@ describe("jobs/runner — runOnce", () => {
     expect(handler).toHaveBeenCalledTimes(3);
     expect(summary.leased).toBe(3);
     expect(summary.completed).toBe(3);
+  });
+
+  it("completes the job via store.complete even when the handler returns a large or unserializable result", async () => {
+    const oversizedResult = { blob: "x".repeat(200_000) };
+    const handler = vi.fn().mockResolvedValue(oversizedResult);
+    registerHandler("test_queue", handler);
+    mocks.store.leaseBatch.mockResolvedValue([makeJob()]);
+    mocks.store.complete.mockResolvedValue(
+      makeJob({
+        status: "completed",
+        result: {
+          truncated: true,
+          reason: "result_exceeds_max_bytes",
+          maxBytes: 65_536,
+          actualBytes: 200_011,
+          diagnostic: "job result size (200011 bytes) exceeded maxResultBytes (65536 bytes)",
+        },
+      }),
+    );
+
+    const summary = await runOnce({ heartbeatIntervalMs: 60_000 });
+
+    expect(mocks.store.complete).toHaveBeenCalledWith("job_1", "lease_1", oversizedResult, expect.any(Number));
+    expect(mocks.store.fail).not.toHaveBeenCalled();
+    expect(summary.completed).toBe(1);
+    expect(summary.retried).toBe(0);
+    expect(summary.deadLettered).toBe(0);
   });
 });

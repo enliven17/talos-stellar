@@ -186,17 +186,6 @@ export async function rotateWebhookSecret(opts: {
   const previousSecretExpiresAt = new Date(now.getTime() + graceSeconds * 1000);
   const activeKeyId = deriveSigningKeyId(plaintext);
 
-  let newCiphertext: string;
-  try {
-    newCiphertext = encryptSecret(plaintext);
-  } catch (err) {
-    logger.error({ err }, "webhook_secret_encrypt_failed");
-    return {
-      error: "Failed to encrypt webhook secret. Check WEBHOOK_SECRET_ENCRYPTION_KEY.",
-      status: 500,
-    };
-  }
-
   const existing = await db
     .select({
       id: tlsWebhookSubscriptions.id,

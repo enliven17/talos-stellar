@@ -78,6 +78,7 @@ async function _POST(
         fencingToken: tlsWebhookDeliveries.fencingToken,
         status: tlsWebhookDeliveries.status,
         subscriptionId: tlsWebhookDeliveries.subscriptionId,
+        attempts: tlsWebhookDeliveries.attempts,
       });
 
     if (!claimed) {
