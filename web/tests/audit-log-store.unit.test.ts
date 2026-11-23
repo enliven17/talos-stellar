@@ -1,7 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { db } from "@/db";
-import { tlsApiAuditLogs } from "@/db/schema";
-import { listAuditLogs } from "../src/lib/audit-log/store";
+import {
+  computeEntryHash,
+  GENESIS_HASH,
+  AUDIT_CHAIN_VERSION,
+  verifyAuditCheckpointBundle,
+} from "../src/lib/audit-chain";
+import {
+  listAuditLogs,
+  exportAuditCheckpointBundle,
+} from "../src/lib/audit-log/store";
 
 const { mockDb } = vi.hoisted(() => ({
   mockDb: {
@@ -139,5 +146,338 @@ describe("listAuditLogs", () => {
     mockDb.limit.mockRejectedValueOnce(new Error("Database connection failed"));
 
     await expect(listAuditLogs({})).rejects.toThrow("Database connection failed");
+  });
+
+  describe("filter validation before query execution", () => {
+    it("rejects oversized or empty talosId (actor) without executing a query", async () => {
+      await expect(
+        listAuditLogs({ talosId: "a".repeat(MAX_TALOS_ID_LEN + 1) }),
+      ).rejects.toMatchObject({
+        name: "AuditLogFilterError",
+        code: "INVALID_AUDIT_FILTER",
+        message: `talosId must be 1–${MAX_TALOS_ID_LEN} characters`,
+      });
+
+      await expect(listAuditLogs({ talosId: "   " })).rejects.toBeInstanceOf(
+        AuditLogFilterError,
+      );
+      expect(mockDb.select).not.toHaveBeenCalled();
+    });
+
+    it("rejects malformed or oversized method (action) without executing a query", async () => {
+      await expect(
+        listAuditLogs({ method: "TRACE" as never }),
+      ).rejects.toMatchObject({
+        name: "AuditLogFilterError",
+        code: "INVALID_AUDIT_FILTER",
+      });
+
+      await expect(
+        listAuditLogs({ method: "G".repeat(32) as never }),
+      ).rejects.toBeInstanceOf(AuditLogFilterError);
+      expect(mockDb.select).not.toHaveBeenCalled();
+    });
+
+    it("rejects oversized or malformed cursor without executing a query", async () => {
+      await expect(
+        listAuditLogs({ cursor: "2026-01-01T00:00:00.000Z".padEnd(MAX_CURSOR_LEN + 1, "0") }),
+      ).rejects.toMatchObject({
+        name: "AuditLogFilterError",
+        code: "INVALID_AUDIT_FILTER",
+        message: `cursor must be at most ${MAX_CURSOR_LEN} characters`,
+      });
+
+      await expect(
+        listAuditLogs({ cursor: "not-a-timestamp" }),
+      ).rejects.toBeInstanceOf(AuditLogFilterError);
+      expect(mockDb.select).not.toHaveBeenCalled();
+    });
+
+    it("rejects oversized q/denialReason and invalid date ranges without executing a query", async () => {
+      await expect(
+        listAuditLogs({ q: "x".repeat(MAX_Q_LEN + 1) }),
+      ).rejects.toBeInstanceOf(AuditLogFilterError);
+
+      await expect(
+        listAuditLogs({ denialReason: "x".repeat(MAX_Q_LEN + 1) }),
+      ).rejects.toBeInstanceOf(AuditLogFilterError);
+
+      await expect(
+        listAuditLogs({
+          from: "2026-02-01T00:00:00.000Z",
+          to: "2026-01-01T00:00:00.000Z",
+        }),
+      ).rejects.toBeInstanceOf(AuditLogFilterError);
+
+      expect(mockDb.select).not.toHaveBeenCalled();
+    });
+
+    it("accepts filters at exact maximum allowed lengths", async () => {
+      mockDb.limit.mockResolvedValueOnce([]);
+
+      await listAuditLogs({
+        talosId: "a".repeat(MAX_TALOS_ID_LEN),
+        method: "OPTIONS",
+        q: "q".repeat(MAX_Q_LEN),
+        denialReason: "r".repeat(MAX_Q_LEN),
+        cursor: "2026-10-17T12:00:00.000Z",
+      });
+
+      expect(mockDb.select).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+describe("verifyAuditChainRange", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function makeChainedRow(seq: number, prevHash: string, createdAtIso: string) {
+    const entry: AuditChainEntry = {
+      sequenceNumber: seq,
+      talosId: "t-1",
+      method: "POST",
+      path: "/api/talos/t-1/sign",
+      statusCode: 200,
+      ipAddress: "127.0.0.1",
+      createdAt: createdAtIso,
+    };
+    return {
+      sequenceNumber: seq,
+      previousHash: prevHash,
+      entryHash: computeEntryHash(entry),
+      chainVersion: AUDIT_CHAIN_VERSION,
+      talosId: entry.talosId,
+      method: entry.method,
+      path: entry.path,
+      statusCode: entry.statusCode,
+      ipAddress: entry.ipAddress,
+      createdAt: new Date(createdAtIso),
+    };
+  }
+
+  it("queries predecessor before `from` and verifies a valid mid-chain range", async () => {
+    const r0 = makeChainedRow(0, GENESIS_HASH, "2026-01-01T00:00:00.000Z");
+    const r1 = makeChainedRow(1, r0.entryHash, "2026-01-01T00:00:01.000Z");
+    const r2 = makeChainedRow(2, r1.entryHash, "2026-01-01T00:00:02.000Z");
+    const r3 = makeChainedRow(3, r2.entryHash, "2026-01-01T00:00:03.000Z");
+
+    // 1st query: predecessor before `from`
+    mockDb.limit.mockResolvedValueOnce([
+      {
+        sequenceNumber: r1.sequenceNumber,
+        entryHash: r1.entryHash,
+        createdAt: r1.createdAt,
+      },
+    ]);
+    // 2nd query: ordered rows in `[from, to]`
+    mockDb.limit.mockResolvedValueOnce([r2, r3]);
+
+    const result = await verifyAuditChainRange({
+      talosId: "t-1",
+      from: "2026-01-01T00:00:02.000Z",
+      to: "2026-01-01T00:00:03.000Z",
+      limit: 100,
+    });
+
+    expect(mockDb.limit).toHaveBeenNthCalledWith(1, 1);
+    expect(mockDb.limit).toHaveBeenNthCalledWith(2, 101);
+    expect(result.valid).toBe(true);
+    expect(result.status).toBe("valid");
+    expect(result.complete).toBe(true);
+    expect(result.verifiedEntries).toBe(2);
+    expect(result.predecessorSequence).toBe(1);
+    expect(result.startSequence).toBe(2);
+    expect(result.endSequence).toBe(3);
+  });
+
+  it("reports incomplete when predecessor is missing before `from` for non-genesis range", async () => {
+    const r0 = makeChainedRow(0, GENESIS_HASH, "2026-01-01T00:00:00.000Z");
+    const r1 = makeChainedRow(1, r0.entryHash, "2026-01-01T00:00:01.000Z");
+    const r2 = makeChainedRow(2, r1.entryHash, "2026-01-01T00:00:02.000Z");
+
+    // Predecessor missing from DB (e.g. pruned or incomplete store)
+    mockDb.limit.mockResolvedValueOnce([]);
+    mockDb.limit.mockResolvedValueOnce([r1, r2]);
+
+    const result = await verifyAuditChainRange({
+      talosId: "t-1",
+      from: "2026-01-01T00:00:01.000Z",
+      to: "2026-01-01T00:00:02.000Z",
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.status).toBe("incomplete");
+    expect(result.complete).toBe(false);
+    expect(result.incompleteReason).toBe("missing_predecessor");
+    expect(result.brokenAtSequence).toBeNull();
+  });
+
+  it("reports incomplete when the time range is truncated by limit", async () => {
+    const r0 = makeChainedRow(0, GENESIS_HASH, "2026-01-01T00:00:00.000Z");
+    const r1 = makeChainedRow(1, r0.entryHash, "2026-01-01T00:00:01.000Z");
+
+    // No `from` filter -> no predecessor query; returns 2 rows for limit=1 (limit+1=2)
+    mockDb.limit.mockResolvedValueOnce([r0, r1]);
+
+    const result = await verifyAuditChainRange({
+      talosId: "t-1",
+      to: "2026-01-01T00:00:05.000Z",
+      limit: 1,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.status).toBe("incomplete");
+    expect(result.complete).toBe(false);
+    expect(result.incompleteReason).toBe("truncated_range");
+    expect(result.verifiedEntries).toBe(1);
+    expect(result.brokenAtSequence).toBeNull();
+  });
+
+  it("reports broken when predecessor hash does not match the range start", async () => {
+    const r0 = makeChainedRow(0, GENESIS_HASH, "2026-01-01T00:00:00.000Z");
+    const r1 = makeChainedRow(1, r0.entryHash, "2026-01-01T00:00:01.000Z");
+
+    mockDb.limit.mockResolvedValueOnce([
+      {
+        sequenceNumber: 0,
+        entryHash: "tampered-predecessor-hash",
+        createdAt: r0.createdAt,
+      },
+    ]);
+    mockDb.limit.mockResolvedValueOnce([r1]);
+
+    const result = await verifyAuditChainRange({
+      talosId: "t-1",
+      from: "2026-01-01T00:00:01.000Z",
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.status).toBe("broken");
+    expect(result.failureReason).toBe("predecessor_mismatch");
+    expect(result.brokenAtSequence).toBe(1);
+  });
+});
+
+describe("exportAuditCheckpointBundle", () => {
+  const hmacSecret = "store-checkpoint-secret-123";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function makeSyntheticDbRows(count: number, talosId = "t-1") {
+    const rows = [];
+    let prevHash = GENESIS_HASH;
+    for (let i = 0; i < count; i++) {
+      const createdAt = new Date(Date.UTC(2026, 0, 1, 12, 0, i));
+      const entryHash = computeEntryHash({
+        sequenceNumber: i,
+        talosId,
+        method: "POST",
+        path: `/api/talos/${talosId}/sign`,
+        statusCode: 200,
+        ipAddress: "127.0.0.1",
+        createdAt: createdAt.toISOString(),
+      });
+      rows.push({
+        id: `row_${i}`,
+        talosId,
+        method: "POST",
+        path: `/api/talos/${talosId}/sign`,
+        statusCode: 200,
+        denialReason: null,
+        scopesRequired: ["wallet:sign"],
+        ipAddress: "127.0.0.1",
+        sequenceNumber: i,
+        previousHash: prevHash,
+        entryHash,
+        chainVersion: AUDIT_CHAIN_VERSION,
+        createdAt,
+      });
+      prevHash = entryHash;
+    }
+    return rows;
+  }
+
+  it("queries bounded chained rows, builds a signed bundle, and verifies offline without DB access", async () => {
+    const dbRows = makeSyntheticDbRows(3);
+    // Descending order returned from DB when no lower bound is given
+    mockDb.limit.mockResolvedValueOnce([...dbRows].reverse());
+
+    const bundle = await exportAuditCheckpointBundle({
+      talosId: "t-1",
+      limit: 5,
+      hmacSecret,
+      exportedAt: "2026-01-01T13:00:00.000Z",
+    });
+
+    expect(mockDb.limit).toHaveBeenCalledWith(6);
+    expect(bundle.talosId).toBe("t-1");
+    expect(bundle.boundaries.entryCount).toBe(3);
+    expect(bundle.boundaries.startSequence).toBe(0);
+    expect(bundle.boundaries.endSequence).toBe(2);
+    expect(bundle.boundaries.truncated).toBe(false);
+    expect(bundle.chainRoot).toBe(dbRows[2].entryHash);
+
+    const verified = verifyAuditCheckpointBundle(bundle, {
+      hmacSecret,
+      expectedTalosId: "t-1",
+    });
+    expect(verified.valid).toBe(true);
+    expect(verified.verifiedEntries).toBe(3);
+  });
+
+  it("marks truncated=true when DB returns limit + 1 rows and preserves contiguous boundaries", async () => {
+    const dbRows = makeSyntheticDbRows(4);
+    // Simulate DB returning 3 rows (limit=2 -> limit+1=3) for tail query (seq 3, 2, 1)
+    mockDb.limit.mockResolvedValueOnce([dbRows[3], dbRows[2], dbRows[1]]);
+
+    const bundle = await exportAuditCheckpointBundle({
+      talosId: "t-1",
+      limit: 2,
+      hmacSecret,
+    });
+
+    expect(mockDb.limit).toHaveBeenCalledWith(3);
+    expect(bundle.boundaries.truncated).toBe(true);
+    expect(bundle.boundaries.entryCount).toBe(2);
+    expect(bundle.boundaries.startSequence).toBe(2);
+    expect(bundle.boundaries.endSequence).toBe(3);
+    expect(bundle.boundaries.previousChainHash).toBe(dbRows[1].entryHash);
+
+    const verified = verifyAuditCheckpointBundle(bundle, {
+      hmacSecret,
+      expectedPreviousChainHash: dbRows[1].entryHash,
+    });
+    expect(verified.valid).toBe(true);
+    expect(verified.verifiedEntries).toBe(2);
+  });
+
+  it("rejects invalid filter boundaries (empty talosId, negative sequence, reversed sequence or date range)", async () => {
+    await expect(
+      exportAuditCheckpointBundle({ talosId: "   " }),
+    ).rejects.toThrow(/talosId is required/);
+
+    await expect(
+      exportAuditCheckpointBundle({ talosId: "t-1", fromSequence: -1 }),
+    ).rejects.toThrow(/fromSequence must be a non-negative integer/);
+
+    await expect(
+      exportAuditCheckpointBundle({
+        talosId: "t-1",
+        fromSequence: 10,
+        toSequence: 5,
+      }),
+    ).rejects.toThrow(/fromSequence must be less than or equal to toSequence/);
+
+    await expect(
+      exportAuditCheckpointBundle({
+        talosId: "t-1",
+        from: "2026-02-01T00:00:00.000Z",
+        to: "2026-01-01T00:00:00.000Z",
+      }),
+    ).rejects.toThrow(/from must be earlier than or equal to to/);
   });
 });

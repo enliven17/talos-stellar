@@ -30,11 +30,13 @@ Request
 
 The Redis backend uses `INCR` followed by `PEXPIREAT` in a single pipelined send. `INCR` is atomic in Redis, so concurrent requests across any number of instances increment the same counter without races or double-counting.
 
-### Fail-open / Fail-closed
+### Fail-open / Fail-closed & Bounded Grace Policy
 
-By default (`RATE_LIMIT_FAIL_CLOSED=false`), if Redis is unreachable the store silently falls back to in-memory. This keeps traffic flowing during a Redis blip but means quotas are temporarily process-local.
-
-Set `RATE_LIMIT_FAIL_CLOSED=true` to deny all traffic when Redis is unavailable (strict shared-quota enforcement).
+Store outage handling distinguishes between operation classes and enforces bounded grace:
+- **Payment paths** (`/buy-token`, `/jobs`, `/revenue/distribute`, `/purchase`): Strictly **fail-closed** during store outages to prevent unmetered financial operations and double-spend abuse.
+- **Privileged/Auth paths** (auth routes, `/admin`, `/ops`, `/internal`): Strictly **fail-closed** during store outages.
+- **Standard / Read paths**: Fail-open with temporary fallback to the process-local in-memory store for a bounded grace duration (`RATE_LIMIT_GRACE_TTL_MS`, default: 60s). Once the grace ceiling is exceeded, all traffic fails closed until the store recovers.
+- Set `RATE_LIMIT_FAIL_CLOSED=true` to invert standard paths and deny all requests immediately when Redis is unreachable.
 
 ---
 
@@ -61,9 +63,9 @@ Every API response includes:
 |---|---|
 | `X-RateLimit-Limit` | Quota for this bucket |
 | `X-RateLimit-Remaining` | Remaining requests in the current window |
-| `X-RateLimit-Reset` | Unix timestamp (seconds) when the window resets |
+| `X-RateLimit-Reset` | Unix timestamp (seconds) when the window resets (omitted when reset time is unknown or invalid) |
 | `X-RateLimit-Policy` | Which bucket applies to this request: `auth`, `read`, `write-key`, or `write-ip` |
-| `Retry-After` | Seconds until the client may retry (429 responses only) |
+| `Retry-After` | Finite positive integer seconds until the client may retry (429 responses only; capped at `QUOTA_MAX_RETRY_AFTER_SECONDS`, default `3600`; falls back to `QUOTA_UNKNOWN_RESET_RETRY_AFTER_SECONDS`, default `60`, when reset time is unknown) |
 
 ### Policy values
 
@@ -105,6 +107,10 @@ RATE_LIMIT_READ_WINDOW_MS=60000
 RATE_LIMIT_WRITE_KEY_LIMIT=30
 RATE_LIMIT_WRITE_IP_LIMIT=30
 RATE_LIMIT_WRITE_WINDOW_MS=60000
+
+# Retry-After cap & unknown-reset fallback (seconds, range 1–86400)
+QUOTA_MAX_RETRY_AFTER_SECONDS=3600
+QUOTA_UNKNOWN_RESET_RETRY_AFTER_SECONDS=60
 ```
 
 ### Trusted proxy depth
@@ -199,7 +205,7 @@ Rate-limit events are emitted via `pino` at the `warn` level:
 { "level": "warn", "key": "read:1.2.3.4", "err": { "message": "..." }, "msg": "rate-limit: Redis unavailable, falling back to memory store" }
 ```
 
-On fail-closed denial (no Redis), the process logs at `error` level and returns `{ count: MAX_SAFE_INTEGER }` so any quota is immediately exceeded.
+On fail-closed denial (no Redis), the process logs at `warn`/`error` level and returns `{ count: MAX_SAFE_INTEGER, resetAt: null }` so any quota is immediately exceeded, `Retry-After` uses the documented finite fallback (`QUOTA_UNKNOWN_RESET_RETRY_AFTER_SECONDS`, default `60`s), and `X-RateLimit-Reset` is omitted.
 
 Alert recommendations (Sentry / log drain):
 - `msg = "rate-limit: Redis unavailable"` — Redis connectivity issue

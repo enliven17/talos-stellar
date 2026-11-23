@@ -1,7 +1,7 @@
-import { and, count, desc, eq, isNotNull, lt, sql } from "drizzle-orm";
+import { and, count, desc, eq, gt, isNotNull, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { tlsOutboxEvents } from "@/db/schema";
-import type { OutboxEvent, OutboxStatus, WriteEventInput } from "./types";
+import { tlsOutboxDeliveries, tlsOutboxEvents } from "@/db/schema";
+import type { OutboxConsumerDelivery, OutboxEvent, OutboxStatus, WriteEventInput } from "./types";
 import { decideRetry } from "./retry";
 import { outboxConfig } from "./config";
 import { logOutboxEvent, truncateError } from "./metrics";
@@ -11,6 +11,10 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 function toEvent(row: typeof tlsOutboxEvents.$inferSelect): OutboxEvent {
   return row as unknown as OutboxEvent;
+}
+
+function toConsumerDelivery(row: typeof tlsOutboxDeliveries.$inferSelect): OutboxConsumerDelivery {
+  return row as unknown as OutboxConsumerDelivery;
 }
 
 /**
@@ -42,13 +46,23 @@ export async function writeOutboxEvent<TPayload = unknown>(
     if (existing) return toEvent(existing) as OutboxEvent<TPayload>;
   }
 
+  const rawPayload = (input.payload ?? {}) as Record<string, unknown>;
+  const payloadToStore =
+    typeof rawPayload === "object" && rawPayload !== null && !Array.isArray(rawPayload)
+      ? {
+          version: input.payloadVersion ?? (typeof rawPayload.version === "number" ? rawPayload.version : DEFAULT_OUTBOX_PAYLOAD_VERSION),
+          ...rawPayload,
+          ...(input.payloadVersion !== undefined ? { version: input.payloadVersion } : {}),
+        }
+      : rawPayload;
+
   const [row] = await tx
     .insert(tlsOutboxEvents)
     .values({
       aggregateType: input.aggregateType,
       aggregateId: input.aggregateId,
       eventType: input.eventType,
-      payload: (input.payload ?? {}) as Record<string, unknown>,
+      payload: payloadToStore,
       maxAttempts: input.maxAttempts ?? outboxConfig.defaultMaxAttempts,
       dedupeKey: input.dedupeKey ?? null,
     })
@@ -98,12 +112,19 @@ export async function leaseBatch(
   return rows.map(toEvent);
 }
 
-/** Marks a leased event dispatched. No-ops (returns null) if the lease was lost. */
+/** Marks an unexpired lease dispatched. No-ops (returns null) if the lease was lost or expired. */
 export async function ack(eventId: string, leaseId: string): Promise<OutboxEvent | null> {
   const [row] = await db
     .update(tlsOutboxEvents)
     .set({ status: "dispatched", dispatchedAt: sql`now()`, leaseId: null, leaseOwner: null, leaseExpiresAt: null })
-    .where(and(eq(tlsOutboxEvents.id, eventId), eq(tlsOutboxEvents.leaseId, leaseId), eq(tlsOutboxEvents.status, "leased")))
+    .where(
+      and(
+        eq(tlsOutboxEvents.id, eventId),
+        eq(tlsOutboxEvents.leaseId, leaseId),
+        eq(tlsOutboxEvents.status, "leased"),
+        gt(tlsOutboxEvents.leaseExpiresAt, sql`now()`),
+      ),
+    )
     .returning();
   if (!row) return null;
   logOutboxEvent("outbox_event_dispatched", { eventId, eventType: row.eventType, attempts: row.attempts });
@@ -111,7 +132,12 @@ export async function ack(eventId: string, leaseId: string): Promise<OutboxEvent
 }
 
 /** Records a consumer failure and either reschedules (pending) or dead-letters. No-ops if the lease was lost. */
-export async function fail(eventId: string, leaseId: string, error: unknown): Promise<OutboxEvent | null> {
+export async function fail(
+  eventId: string,
+  leaseId: string,
+  error: unknown,
+  opts?: { fatal?: boolean },
+): Promise<OutboxEvent | null> {
   const current = await db
     .select()
     .from(tlsOutboxEvents)
@@ -121,7 +147,9 @@ export async function fail(eventId: string, leaseId: string, error: unknown): Pr
   if (!current) return null;
 
   const lastError = truncateError(error);
-  const decision = decideRetry({ attempts: current.attempts, maxAttempts: current.maxAttempts });
+  const decision = opts?.fatal
+    ? ({ action: "dead_letter" } as const)
+    : decideRetry({ attempts: current.attempts, maxAttempts: current.maxAttempts });
 
   if (decision.action === "dead_letter") {
     const [row] = await db
@@ -134,25 +162,237 @@ export async function fail(eventId: string, leaseId: string, error: unknown): Pr
     return toEvent(row);
   }
 
-  const runAt = new Date(Date.now() + decision.delayMs);
+  const delayMs = boundRetryDelayMs(decision.delayMs);
+  const runAt = sql`now() + (${delayMs}::text || ' milliseconds')::interval`;
+  const [row] = await db
+    .update(tlsOutboxEvents)
+    .set({ status: "pending", runAt, lastError, leaseId: null, leaseOwner: null, leaseExpiresAt: null, updatedAt: sql`now()` })
+    .where(and(eq(tlsOutboxEvents.id, eventId), eq(tlsOutboxEvents.leaseId, leaseId), eq(tlsOutboxEvents.status, "leased")))
+    .returning();
+  if (!row) return null;
+  logOutboxEvent("outbox_event_retry_scheduled", { eventId, eventType: row.eventType, attempts: row.attempts, delayMs });
+  return toEvent(row);
+}
+
+// ─── Per-consumer delivery tracking ────────────────────────────────
+
+/** Loads all persisted per-consumer delivery records for an outbox event. */
+export async function getConsumerDeliveries(eventId: string): Promise<OutboxConsumerDelivery[]> {
+  const rows = await db
+    .select()
+    .from(tlsOutboxDeliveries)
+    .where(eq(tlsOutboxDeliveries.eventId, eventId));
+  return rows.map(toConsumerDelivery);
+}
+
+async function getLeasedEvent(eventId: string, leaseId: string): Promise<typeof tlsOutboxEvents.$inferSelect | null> {
+  return db
+    .select()
+    .from(tlsOutboxEvents)
+    .where(and(eq(tlsOutboxEvents.id, eventId), eq(tlsOutboxEvents.leaseId, leaseId), eq(tlsOutboxEvents.status, "leased")))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+}
+
+/**
+ * Persists a consumer acknowledgement for a leased event.
+ * No-ops (returns null) if the lease was lost.
+ */
+export async function ackConsumer(
+  eventId: string,
+  consumerId: string,
+  leaseId: string,
+): Promise<OutboxConsumerDelivery | null> {
+  const leased = await getLeasedEvent(eventId, leaseId);
+  if (!leased) return null;
+
+  const existing = await db
+    .select()
+    .from(tlsOutboxDeliveries)
+    .where(and(eq(tlsOutboxDeliveries.eventId, eventId), eq(tlsOutboxDeliveries.consumerId, consumerId)))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+
+  let row: typeof tlsOutboxDeliveries.$inferSelect | undefined;
+  if (existing) {
+    [row] = await db
+      .update(tlsOutboxDeliveries)
+      .set({
+        status: "acked",
+        attempts: existing.attempts + 1,
+        lastError: null,
+        ackedAt: sql`now()`,
+      })
+      .where(eq(tlsOutboxDeliveries.id, existing.id))
+      .returning();
+  } else {
+    [row] = await db
+      .insert(tlsOutboxDeliveries)
+      .values({
+        eventId,
+        consumerId,
+        status: "acked",
+        attempts: 1,
+        maxAttempts: leased.maxAttempts,
+        lastError: null,
+        ackedAt: new Date(),
+      })
+      .returning();
+  }
+
+  if (!row) return null;
+  logOutboxEvent("outbox_consumer_acked", { eventId, eventType: leased.eventType, consumerId, attempts: row.attempts });
+  return toConsumerDelivery(row);
+}
+
+/**
+ * Persists a consumer failure and either schedules a per-consumer retry or
+ * dead-letters that consumer. No-ops (returns null) if the lease was lost.
+ */
+export async function failConsumer(
+  eventId: string,
+  consumerId: string,
+  leaseId: string,
+  error: unknown,
+): Promise<OutboxConsumerDelivery | null> {
+  const leased = await getLeasedEvent(eventId, leaseId);
+  if (!leased) return null;
+
+  const existing = await db
+    .select()
+    .from(tlsOutboxDeliveries)
+    .where(and(eq(tlsOutboxDeliveries.eventId, eventId), eq(tlsOutboxDeliveries.consumerId, consumerId)))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+
+  const nextAttempts = (existing?.attempts ?? 0) + 1;
+  const maxAttempts = existing?.maxAttempts ?? leased.maxAttempts;
+  const lastError = truncateError(error);
+  const decision = decideRetry({ attempts: nextAttempts, maxAttempts });
+  const nextStatus = decision.action === "dead_letter" ? "dead_letter" : "pending";
+  const nextRetryAt = decision.action === "retry" ? new Date(Date.now() + decision.delayMs) : new Date();
+
+  let row: typeof tlsOutboxDeliveries.$inferSelect | undefined;
+  if (existing) {
+    [row] = await db
+      .update(tlsOutboxDeliveries)
+      .set({
+        status: nextStatus,
+        attempts: nextAttempts,
+        nextRetryAt,
+        lastError,
+      })
+      .where(eq(tlsOutboxDeliveries.id, existing.id))
+      .returning();
+  } else {
+    [row] = await db
+      .insert(tlsOutboxDeliveries)
+      .values({
+        eventId,
+        consumerId,
+        status: nextStatus,
+        attempts: nextAttempts,
+        maxAttempts,
+        nextRetryAt,
+        lastError,
+      })
+      .returning();
+  }
+
+  if (!row) return null;
+  if (decision.action === "dead_letter") {
+    logOutboxEvent("outbox_consumer_dead_letter", {
+      eventId,
+      eventType: leased.eventType,
+      consumerId,
+      attempts: row.attempts,
+      maxAttempts: row.maxAttempts,
+    });
+  } else {
+    logOutboxEvent("outbox_consumer_retry_scheduled", {
+      eventId,
+      eventType: leased.eventType,
+      consumerId,
+      attempts: row.attempts,
+      delayMs: decision.delayMs,
+    });
+  }
+  return toConsumerDelivery(row);
+}
+
+/**
+ * Releases a leased event back to `pending` at the given `runAt` so remaining
+ * unacknowledged consumers can be retried without re-running acked consumers.
+ * No-ops (returns null) if the lease was lost.
+ */
+export async function rescheduleForRetry(
+  eventId: string,
+  leaseId: string,
+  runAt: Date,
+  error: unknown,
+): Promise<OutboxEvent | null> {
+  const lastError = truncateError(error);
   const [row] = await db
     .update(tlsOutboxEvents)
     .set({ status: "pending", runAt, lastError, leaseId: null, leaseOwner: null, leaseExpiresAt: null })
     .where(and(eq(tlsOutboxEvents.id, eventId), eq(tlsOutboxEvents.leaseId, leaseId), eq(tlsOutboxEvents.status, "leased")))
     .returning();
   if (!row) return null;
-  logOutboxEvent("outbox_event_retry_scheduled", { eventId, eventType: row.eventType, attempts: row.attempts, delayMs: decision.delayMs });
+  logOutboxEvent("outbox_event_retry_scheduled", {
+    eventId,
+    eventType: row.eventType,
+    attempts: row.attempts,
+    delayMs: Math.max(0, runAt.getTime() - Date.now()),
+  });
   return toEvent(row);
 }
 
-/** Admin action: requeue a dead_letter event (resets attempts, clears lastError, runAt = now). */
+/**
+ * Transitions a leased event directly to `dead_letter` (used when all remaining
+ * consumers have exhausted their retry budgets). No-ops if the lease was lost.
+ */
+export async function deadLetter(eventId: string, leaseId: string, error: unknown): Promise<OutboxEvent | null> {
+  const lastError = truncateError(error);
+  const [row] = await db
+    .update(tlsOutboxEvents)
+    .set({ status: "dead_letter", lastError, leaseId: null, leaseOwner: null, leaseExpiresAt: null })
+    .where(and(eq(tlsOutboxEvents.id, eventId), eq(tlsOutboxEvents.leaseId, leaseId), eq(tlsOutboxEvents.status, "leased")))
+    .returning();
+  if (!row) return null;
+  logOutboxEvent("outbox_event_dead_letter", {
+    eventId,
+    eventType: row.eventType,
+    attempts: row.attempts,
+    maxAttempts: row.maxAttempts,
+  });
+  return toEvent(row);
+}
+
+/**
+ * Admin action: requeue a dead_letter event (resets attempts, clears lastError, runAt = now).
+ * Also resets dead-lettered consumer deliveries to pending while preserving already-acked
+ * consumers so they are not redispatched.
+ */
 export async function requeue(eventId: string): Promise<OutboxEvent | null> {
   const [row] = await db
     .update(tlsOutboxEvents)
-    .set({ status: "pending", attempts: 0, lastError: null, runAt: sql`now()` })
+    .set({
+      status: "pending",
+      attempts: 0,
+      lastError: null,
+      runAt: sql`now()`,
+      originalEventId: sql`COALESCE(${tlsOutboxEvents.originalEventId}, ${tlsOutboxEvents.id})`,
+    })
     .where(and(eq(tlsOutboxEvents.id, eventId), eq(tlsOutboxEvents.status, "dead_letter")))
     .returning();
-  return row ? toEvent(row) : null;
+  if (!row) return null;
+
+  await db
+    .update(tlsOutboxDeliveries)
+    .set({ status: "pending", attempts: 0, lastError: null, nextRetryAt: sql`now()` })
+    .where(and(eq(tlsOutboxDeliveries.eventId, eventId), eq(tlsOutboxDeliveries.status, "dead_letter")));
+
+  return toEvent(row);
 }
 
 /**
@@ -204,6 +444,22 @@ export async function pruneDispatched(retentionDays: number = outboxConfig.reten
   return rows.length;
 }
 
+/** Admin preview: reports candidate counts and oldest retained timestamp for pruning. */
+export async function previewPruneDispatched(retentionDays: number = outboxConfig.retentionDays): Promise<{ count: number; oldestRetainedTimestamp: Date | null }> {
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+
+  const result = await db
+    .select({ count: count(), oldest: sql`min(${tlsOutboxEvents.dispatchedAt})` })
+    .from(tlsOutboxEvents)
+    .where(and(eq(tlsOutboxEvents.status, "dispatched"), lt(tlsOutboxEvents.dispatchedAt, cutoff)));
+
+  const row = result[0];
+  return {
+    count: Number(row.count),
+    oldestRetainedTimestamp: row.oldest ? new Date(row.oldest) : null,
+  };
+}
+
 // ─── Admin inspection ──────────────────────────────────────────────
 
 export interface ListEventsFilter {
@@ -236,6 +492,82 @@ export async function listEvents(filter: ListEventsFilter = {}): Promise<{ event
 export async function getEvent(eventId: string): Promise<OutboxEvent | null> {
   const row = await db.select().from(tlsOutboxEvents).where(eq(tlsOutboxEvents.id, eventId)).limit(1).then((r) => r[0] ?? null);
   return row ? toEvent(row) : null;
+}
+
+// ─── Consumer lag diagnostics ──────────────────────────────────────────────
+
+/**
+ * Per-consumer lag stats returned by getLagDiagnostics.
+ *
+ * "consumer" here is the registered eventType string — it identifies the
+ * logical consumer bucket without exposing event IDs or payload content.
+ */
+export interface ConsumerLagStats {
+  /** The eventType that identifies this consumer. */
+  eventType: string;
+  /** Total pending (not yet leased) events for this eventType. */
+  pendingCount: number;
+  /**
+   * Age in milliseconds of the oldest pending event (runAt relative to now).
+   * null when pendingCount is 0.
+   */
+  oldestPendingAgeMs: number | null;
+}
+
+/** Overall lag diagnostics snapshot. */
+export interface LagDiagnostics {
+  /** Total pending events across all consumers. */
+  totalPending: number;
+  /**
+   * Age in milliseconds of the single oldest pending event across all consumers.
+   * null when there are no pending events.
+   */
+  oldestPendingAgeMs: number | null;
+  /** Per-eventType breakdown, sorted by pendingCount descending. */
+  byConsumer: ConsumerLagStats[];
+}
+
+/**
+ * Report oldest pending age and bounded counts per known consumer (eventType).
+ *
+ * Uses aggregate SQL — never reads event IDs or payload data as metric labels,
+ * so the diagnostics surface is safe to log and expose via an operator endpoint.
+ *
+ * @param maxConsumers  Cap on how many distinct eventTypes are returned (default 50).
+ *                      Prevents unbounded result sets when many event types exist.
+ */
+export async function getLagDiagnostics(maxConsumers = 50): Promise<LagDiagnostics> {
+  // One query: group pending events by eventType, aggregate count + min(runAt).
+  // "pending" covers both status=pending and any that have never been leased.
+  const rows = await db
+    .select({
+      eventType: tlsOutboxEvents.eventType,
+      pendingCount: count(),
+      oldestRunAt: sql<string>`min(${tlsOutboxEvents.runAt})`,
+    })
+    .from(tlsOutboxEvents)
+    .where(eq(tlsOutboxEvents.status, "pending"))
+    .groupBy(tlsOutboxEvents.eventType)
+    .orderBy(desc(count()), tlsOutboxEvents.eventType)
+    .limit(maxConsumers);
+
+  const now = Date.now();
+
+  const byConsumer: ConsumerLagStats[] = rows.map((r) => {
+    const pendingCount = Number(r.pendingCount);
+    const oldestRunAt = r.oldestRunAt ? new Date(r.oldestRunAt).getTime() : null;
+    const oldestPendingAgeMs =
+      oldestRunAt !== null ? Math.max(0, now - oldestRunAt) : null;
+    return { eventType: r.eventType, pendingCount, oldestPendingAgeMs };
+  });
+
+  const totalPending = byConsumer.reduce((sum, c) => sum + c.pendingCount, 0);
+  const oldestPendingAgeMs =
+    byConsumer.length > 0
+      ? Math.max(...byConsumer.map((c) => c.oldestPendingAgeMs ?? 0))
+      : null;
+
+  return { totalPending, oldestPendingAgeMs, byConsumer };
 }
 
 /**

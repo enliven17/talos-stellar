@@ -415,4 +415,62 @@ describe("GET /api/talos/:id/jobs/:jobId/payment-status", () => {
     const body = await res.json();
     expect(body.confirmedLedger).toBeNull();
   });
+
+  it("exposes observationAge as 0 (zero age) when observed in current ledger", async () => {
+    const res = await getStatus(
+      makeJob(),
+      makeTxRecord({
+        finalityStatus: "CONFIRMED",
+        confirmedLedger: 1060,
+        lastLedgerChecked: 1060,
+      }),
+    );
+    const body = await res.json();
+    expect(body.observationAge).toBe(0);
+    expect(body.observationAge).not.toBeNull();
+  });
+
+  it("exposes observationAge as null (unknown age) when confirmedLedger is null", async () => {
+    const res = await getStatus(
+      makeJob(),
+      makeTxRecord({
+        finalityStatus: "PENDING",
+        confirmedLedger: null,
+        lastLedgerChecked: 1060,
+      }),
+    );
+    const body = await res.json();
+    expect(body.observationAge).toBeNull();
+  });
+
+  it("strictly distinguishes zero observation age from unknown observation age", async () => {
+    const zeroRes = await getStatus(
+      makeJob(),
+      makeTxRecord({ confirmedLedger: 1060, lastLedgerChecked: 1060 }),
+    );
+    const unknownRes = await getStatus(
+      makeJob(),
+      makeTxRecord({ confirmedLedger: null, lastLedgerChecked: 1060 }),
+    );
+
+    const zeroBody = await zeroRes.json();
+    const unknownBody = await unknownRes.json();
+
+    expect(zeroBody.observationAge).toBe(0);
+    expect(unknownBody.observationAge).toBeNull();
+    expect(zeroBody.observationAge === unknownBody.observationAge).toBe(false);
+  });
+
+  it("exposes positive observationAge when lastLedgerChecked > confirmedLedger", async () => {
+    const res = await getStatus(
+      makeJob(),
+      makeTxRecord({
+        finalityStatus: "CONFIRMED",
+        confirmedLedger: 1060,
+        lastLedgerChecked: 1075,
+      }),
+    );
+    const body = await res.json();
+    expect(body.observationAge).toBe(15);
+  });
 });

@@ -46,9 +46,13 @@ import {
   needsRepair,
   validateTransition,
   isTerminal,
+  detectAssociationConflict,
+  formatAssociationConflictError,
+  TxAssociationConflictError,
 } from "./state-machine";
 import { pollTransaction, fetchCurrentLedger } from "./horizon";
 import { applyRepair } from "./repair";
+import { recordEvidence } from "./evidence";
 import type {
   TxRecord,
   ReconcilerConfig,
@@ -432,6 +436,11 @@ async function processRecord(
         return;
       }
 
+      // Record evidence in the bounded audit trail
+      if (update.evidence) {
+        recordEvidence(update.evidence, config.maxEvidenceEntries);
+      }
+
       logger.info(
         {
           txHash: record.txHash,
@@ -441,6 +450,9 @@ async function processRecord(
           to: update.finalityStatus,
           currentLedger,
           confirmedLedger: update.confirmedLedger ?? record.confirmedLedger,
+          observationSource: update.observationSource,
+          transitionReason: update.transitionReason,
+          ledger: update.evidence?.ledger,
         },
         "reconciler_state_transition",
       );
@@ -457,6 +469,10 @@ async function processRecord(
         confirmedLedger: update.confirmedLedger ?? record.confirmedLedger,
         pollCount: update.pollCount ?? record.pollCount,
         lastError: update.lastError !== undefined ? update.lastError : record.lastError,
+        networkPassphrase:
+          update.networkPassphrase !== undefined
+            ? update.networkPassphrase
+            : (record.networkPassphrase ?? config.networkPassphrase ?? null),
         updatedAt: update.updatedAt ?? now,
       })
       .where(eq(tlsStellarTxRecords.id, record.id));
@@ -563,8 +579,14 @@ async function processRecord(
 /**
  * Register a new transaction hash for finality tracking.
  *
- * Idempotent: if the txHash already exists, returns the existing record id
- * without throwing.
+ * Idempotent for compatible associations: if the txHash already exists with
+ * the same `(sourceType, sourceId)`, returns the existing record id without
+ * throwing or duplicating any financial effect.
+ *
+ * Conflict detection: if the txHash is already associated with a different
+ * `sourceType` or `sourceId`, records the conflict on the existing record's
+ * `lastError` without inserting a duplicate row and throws
+ * `TxAssociationConflictError`.
  */
 export async function registerTx(opts: {
   txHash: string;
@@ -573,19 +595,65 @@ export async function registerTx(opts: {
   ledgerSubmitted?: number;
   /** If omitted, defaults to now + 1 hour */
   expiresAt?: Date;
+  /** Pinned Stellar network identity (passphrase). Defaults to reconcilerConfig.networkPassphrase */
+  networkPassphrase?: string;
 }): Promise<string> {
   const { txHash, sourceType, sourceId, ledgerSubmitted } = opts;
   const expiresAt = opts.expiresAt ?? new Date(Date.now() + 60 * 60 * 1000);
+  const networkPassphrase =
+    normalizeNetworkPassphrase(opts.networkPassphrase ?? reconcilerConfig.networkPassphrase);
 
-  // Check for existing record first (upsert not needed; conflict = idempotent)
+  // Check for existing record first
   const existing = await db
-    .select({ id: tlsStellarTxRecords.id })
+    .select({
+      id: tlsStellarTxRecords.id,
+      txHash: tlsStellarTxRecords.txHash,
+      sourceType: tlsStellarTxRecords.sourceType,
+      sourceId: tlsStellarTxRecords.sourceId,
+    })
     .from(tlsStellarTxRecords)
     .where(eq(tlsStellarTxRecords.txHash, txHash))
     .limit(1)
     .then((r) => r[0] ?? null);
 
   if (existing) {
+    const conflict = detectAssociationConflict(
+      {
+        txHash: existing.txHash ?? txHash,
+        sourceType: (existing.sourceType ?? sourceType) as TxRecord["sourceType"],
+        sourceId: existing.sourceId ?? null,
+      },
+      {
+        txHash,
+        sourceType,
+        sourceId: sourceId ?? null,
+      },
+    );
+
+    if (conflict) {
+      const now = new Date();
+      await db
+        .update(tlsStellarTxRecords)
+        .set({
+          lastError: formatAssociationConflictError(conflict),
+          updatedAt: now,
+        })
+        .where(eq(tlsStellarTxRecords.id, existing.id));
+
+      logger.warn(
+        {
+          txHash: conflict.txHash,
+          existingSourceType: conflict.existingSourceType,
+          existingSourceId: conflict.existingSourceId,
+          incomingSourceType: conflict.incomingSourceType,
+          incomingSourceId: conflict.incomingSourceId,
+        },
+        "reconciler_tx_association_conflict",
+      );
+
+      throw new TxAssociationConflictError(conflict);
+    }
+
     return existing.id;
   }
 
@@ -593,6 +661,7 @@ export async function registerTx(opts: {
   await db.insert(tlsStellarTxRecords).values({
     id,
     txHash,
+    networkPassphrase,
     sourceType,
     sourceId: sourceId ?? null,
     finalityStatus: "PENDING",
@@ -603,7 +672,7 @@ export async function registerTx(opts: {
   });
 
   logger.info(
-    { txHash, sourceType, sourceId, id },
+    { txHash, sourceType, sourceId, id, networkPassphrase },
     "reconciler_tx_registered",
   );
 

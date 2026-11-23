@@ -656,6 +656,13 @@ class LocalDB:
         )
         self._conn.commit()
 
+    def list_durable_execution_ids(self) -> set[str]:
+        """Return persisted scheduler identities without changing scheduler state."""
+        rows = self._conn.execute(
+            "SELECT task_name FROM schedules UNION SELECT task_name FROM retry_state"
+        ).fetchall()
+        return {row["task_name"] for row in rows}
+
     # ── Activity Log ───────────────────────────────────────
 
     def add_activity(self, type_: str, content: str, channel: str) -> None:

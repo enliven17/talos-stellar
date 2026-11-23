@@ -1,4 +1,39 @@
-export type OutboxStatus = "pending" | "leased" | "dispatched" | "dead_letter";
+export type OutboxStatus = "pending" | "leased" | "dispatched" | "dead_letter" | "quarantined";
+
+/** One structural problem found when validating a payload against its declared schema. */
+export interface PayloadValidationIssue {
+  /** Dotted path into the payload, e.g. "amount" or "items.0.id" ("" = root). */
+  path: string;
+  /** Machine-readable code (e.g. "invalid_type"). */
+  code: string;
+  /** Short, bounded human-readable message. Never contains payload values. */
+  message: string;
+}
+
+/** Bounded validation summary persisted on a quarantined event. */
+export interface PayloadValidationSummary {
+  schemaVersion: number;
+  /** Total issues found (may exceed `issues.length` when truncated). */
+  issueCount: number;
+  issues: PayloadValidationIssue[];
+  truncated: boolean;
+}
+
+export type OutboxConsumerStatus = "pending" | "acked" | "dead_letter";
+
+export interface OutboxConsumerDelivery {
+  id: string;
+  eventId: string;
+  consumerId: string;
+  status: OutboxConsumerStatus;
+  attempts: number;
+  maxAttempts: number;
+  nextRetryAt: Date;
+  lastError: string | null;
+  ackedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
 
 export interface OutboxEvent<TPayload = unknown> {
   id: string;
@@ -15,6 +50,7 @@ export interface OutboxEvent<TPayload = unknown> {
   maxAttempts: number;
   dedupeKey: string | null;
   lastError: string | null;
+  originalEventId: string | null;
   createdAt: Date;
   updatedAt: Date;
   dispatchedAt: Date | null;
@@ -25,17 +61,29 @@ export interface WriteEventInput<TPayload = unknown> {
   aggregateId: string;
   eventType: string;
   payload: TPayload;
+  payloadVersion?: number;
   maxAttempts?: number;
   dedupeKey?: string;
 }
 
 export type Consumer<TPayload = unknown> = (event: OutboxEvent<TPayload>) => Promise<void>;
 
+export interface RegisterConsumerOptions {
+  id?: string;
+}
+
+export interface RegisteredConsumer<TPayload = unknown> {
+  id: string;
+  handler: Consumer<TPayload>;
+}
+
 export interface DispatchSummary {
   leased: number;
   dispatched: number;
   retried: number;
   deadLettered: number;
+  /** Events whose payload violated the declared schema; never retried. */
+  quarantined: number;
   reaped: number;
   pruned: number;
 }

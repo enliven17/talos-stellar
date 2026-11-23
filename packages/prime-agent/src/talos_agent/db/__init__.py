@@ -6,6 +6,7 @@ re-exported here so existing code continues to work unchanged.
 
 from __future__ import annotations
 
+from talos_agent.config import APP_DIR
 from talos_agent.db.facade import LocalDB
 from talos_agent.db.migrations import (
     DB_PATH,
@@ -31,6 +32,8 @@ from talos_agent.db.repos import (
 from talos_agent.db.repos.retry import normalize_error_code
 
 __all__ = [
+    # Config
+    "APP_DIR",
     # Façade
     "LocalDB",
     # Migrations
@@ -53,4 +56,10 @@ __all__ = [
     "ReplayRepo",
     "RetryRepo",
     "SpendingRepo",
+    # Retention Preview (#1451)
+    "RecordClass",
+    "StateRetentionPreviewReport",
+    "TableRetentionPreview",
+    "preview_state_retention",
+    "preview_table_retention",
 ]

@@ -119,6 +119,13 @@ export const MAX_PAYLOAD_BYTES = parsePositiveIntEnv(
   { min: 1, max: 10_485_760 },
 );
 
+/** Maximum response body size (bytes) to capture from outbound webhook delivery responses. */
+export const MAX_RESPONSE_BYTES = parsePositiveIntEnv(
+  "WEBHOOK_MAX_RESPONSE_BYTES",
+  10_000,
+  { min: 1, max: 10_485_760 },
+);
+
 // ─── Lease settings (same pattern as commerce jobs) ──────────────
 
 /** Default lease TTL (seconds) for a claimed delivery. */
@@ -143,6 +150,12 @@ export const CURRENT_SIGNATURE_VERSION = 1;
 /** Supported signature versions for verification. */
 export const SUPPORTED_SIGNATURE_VERSIONS = [1];
 
+/** HTTP header carrying the versioned HMAC signature(s) and timestamp. */
+export const WEBHOOK_SIGNATURE_HEADER = "X-Webhook-Signature";
+
+/** HTTP header carrying the comma-separated signing key identifier(s). */
+export const WEBHOOK_KEY_ID_HEADER = "X-Webhook-Key-Id";
+
 // ─── Secret rotation ─────────────────────────────────────────────
 
 /** Minimum allowed grace window (5 minutes). */
@@ -159,6 +172,29 @@ export const DEFAULT_SECRET_ROTATION_GRACE_SECONDS = parsePositiveIntEnv(
     min: MIN_SECRET_ROTATION_GRACE_SECONDS,
     max: MAX_SECRET_ROTATION_GRACE_SECONDS,
   },
+);
+
+// ─── Destination verification ─────────────────────────────────────
+
+/** Default challenge token expiration window (seconds). Default 10 minutes (600s). */
+export const WEBHOOK_VERIFICATION_CHALLENGE_TTL_SECONDS = parsePositiveIntEnv(
+  "WEBHOOK_VERIFICATION_CHALLENGE_TTL_SECONDS",
+  600,
+  { min: 60, max: 86_400 },
+);
+
+/** Default bounded validity window for a verified destination (seconds). Default 30 days. */
+export const WEBHOOK_VERIFICATION_TTL_SECONDS = parsePositiveIntEnv(
+  "WEBHOOK_VERIFICATION_TTL_SECONDS",
+  2_592_000,
+  { min: 300, max: 31_536_000 },
+);
+
+/** Timeout (ms) for the destination verification handshake HTTP request. Default 5000ms. */
+export const WEBHOOK_VERIFICATION_TIMEOUT_MS = parsePositiveIntEnv(
+  "WEBHOOK_VERIFICATION_TIMEOUT_MS",
+  5_000,
+  { min: 1_000, max: 60_000 },
 );
 
 // ─── Encryption ──────────────────────────────────────────────────

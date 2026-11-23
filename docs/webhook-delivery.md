@@ -41,8 +41,11 @@ The webhook delivery system enables TALOS agents to send signed event notificati
    - Content-Type: application/json
 
 6. **Result Recording**: The worker submits the result via `POST /api/webhooks/deliveries/:id/result`, which:
-   - On success (2xx/3xx/4xx): marks delivery as `delivered`
-   - On failure (5xx/network error): increments attempt count, schedules retry with exponential backoff, or moves to `dead_letter` when max attempts are exhausted
+   - Accepts `fencingToken`, `statusCode`, optional `error`/`responseBody`, and optional `attempt`
+   - Binds acknowledgements to the delivery attempt: if `attempt` is provided and does not match the delivery's current `attempts` count (`attempt < delivery.attempts` returns `Stale attempt acknowledgement`; `attempt > delivery.attempts` returns `Attempt mismatch`), the acknowledgement is rejected with HTTP `409 Conflict`, preserving the active lease and status intact
+   - Applies the update atomically guarded by `(id, fencingToken, attempts)` so concurrent advancement between read and write also returns HTTP `409 Conflict` without mutating the newer attempt
+   - On success (2xx/3xx/4xx): marks delivery as `delivered` and releases the lease
+   - On failure (5xx/network error): increments attempt count, schedules retry with exponential backoff, or moves to `dead_letter` when max attempts are exhausted, and releases the lease
 
 ---
 
@@ -58,6 +61,7 @@ The webhook delivery system enables TALOS agents to send signed event notificati
 | `PATCH` | `api/webhooks/subscriptions/:id` | Update subscription |
 | `DELETE` | `api/webhooks/subscriptions/:id` | Delete subscription |
 | `POST` | `api/webhooks/subscriptions/:id/rotate` | Rotate the signing secret (dual-sign grace window) |
+| `POST` | `api/webhooks/subscriptions/:id/verify` | Perform or complete destination verification handshake |
 
 ### Operator UI (`/webhooks`)
 
@@ -114,8 +118,12 @@ All configuration is via environment variables:
 | `WEBHOOK_BACKOFF_MAX_MS` | `60000` | Backoff ceiling (ms) |
 | `WEBHOOK_DELIVERY_TIMEOUT_MS` | `10000` | HTTP request timeout (ms) |
 | `WEBHOOK_MAX_PAYLOAD_BYTES` | `64000` | Maximum payload size (bytes) |
+| `WEBHOOK_MAX_RESPONSE_BYTES` | `10000` | Maximum response-body capture size (bytes) |
 | `WEBHOOK_LEASE_TTL_SECONDS` | `300` | Delivery lease duration (s) |
 | `WEBHOOK_HEARTBEAT_EXTEND_SECONDS` | `300` | Heartbeat extension (s) |
+| `WEBHOOK_VERIFICATION_CHALLENGE_TTL_SECONDS` | `600` | Bounded challenge token expiration window (s) |
+| `WEBHOOK_VERIFICATION_TTL_SECONDS` | `2592000` | Bounded verification validity lifetime (s) |
+| `WEBHOOK_VERIFICATION_TIMEOUT_MS` | `5000` | HTTP timeout for verification handshake (ms) |
 
 ### Generating the Encryption Key
 
@@ -129,15 +137,25 @@ This produces a 64-character hex string. Set it as `WEBHOOK_SECRET_ENCRYPTION_KE
 
 ## Signature Format
 
-Outgoing webhook payloads are signed using HMAC-SHA256:
+Outgoing webhook payloads are signed using HMAC-SHA256 and include deterministic,
+non-reversible signing key identifiers (`whkid_<16-hex>`):
 
 ```
 X-Webhook-Signature: v1=<hmac>,t=<unix_timestamp>
+X-Webhook-Key-Id: whkid_<active_key_id>
+```
+
+During a controlled rotation overlap window, both headers list the active key
+first followed by the overlapping previous key in matching positional order:
+
+```
+X-Webhook-Signature: v1=<hmac_current>,v1=<hmac_previous>,t=<unix_timestamp>
+X-Webhook-Key-Id: whkid_<current_key_id>,whkid_<previous_key_id>
 ```
 
 The recipient should:
-1. Parse the `v1=<hmac>` and `t=<timestamp>` parts
-2. Verify the HMAC using the shared secret
+1. Parse the `v1=<hmac>` and `t=<timestamp>` parts (and optionally `X-Webhook-Key-Id`)
+2. Verify the HMAC using the matching shared secret (or key-ID map via `verifySignatureWithDetails`)
 3. Reject timestamps older than 5 minutes (replay protection)
 
 ---
@@ -257,23 +275,26 @@ consumers that still verify with the previous secret.
 
 1. **Rotate** — `POST /api/webhooks/subscriptions/:id/rotate`
    - Body: `{ "secret": "<new>" }` **or** `{ "generate": true }`
-   - Optional: `{ "graceSeconds": 86400 }` (default 24h, min 5m, max 30d)
+   - Optional: `{ "overlapSeconds": 86400 }` (or `graceSeconds` alias; bounded to `[300, 2592000]` seconds — min 5m, max 30d, default 24h; out-of-bounds values are rejected with HTTP `400`)
    - Current ciphertext moves to `previous_secret_ciphertext`
-   - New secret becomes current; `previous_secret_expires_at` is set
+   - New secret becomes current; `previous_secret_expires_at` (`overlapExpiresAt`) is set
+   - Response includes deterministic key identifiers `activeKeyId` and `previousKeyId` (`whkid_<16-hex>`)
    - When `generate: true`, the plaintext is returned **once** in the response
-2. **Overlap** — Deliveries dual-sign with both secrets:
-   `X-Webhook-Signature: v1=<current>,v1=<previous>,t=<ts>`
+2. **Overlap** — Deliveries dual-sign with both secrets and advertise both key IDs:
+   - `X-Webhook-Signature: v1=<current>,v1=<previous>,t=<ts>`
+   - `X-Webhook-Key-Id: whkid_<current>,whkid_<previous>`
+   - Consumers holding either key (or a `Record<keyId, secret>` map with `verifySignatureWithDetails`) verify in-flight and overlapping deliveries without downtime
 3. **Finalize** (optional, early) — `POST .../rotate` with `{ "finalize": true }`
    clears the previous secret before grace expiry
-4. **Lazy expiry** — After `previous_secret_expires_at`, previous is ignored even
-   if not explicitly finalized
+4. **Lazy expiry** — At or after `previous_secret_expires_at`, the previous key is omitted from `X-Webhook-Signature` and `X-Webhook-Key-Id` even if not explicitly finalized
 
 ### Compatibility
 
-- Existing single-signature consumers continue to work (first `v1=` matches)
-- Consumers that already accept `secret: string[]` (SDK) can hold both keys
+- Existing single-signature consumers continue to work (`X-Webhook-Signature` format is unchanged and first `v1=` matches)
+- Consumers that already accept `secret: string[]` (SDK) or a key-ID map (`Record<string, string>`) can verify in-flight deliveries across rotation
 - `PATCH /subscriptions/:id` with `{ "secret": "..." }` uses the same rotation path
-- Secrets are never logged; API responses never include ciphertext
+- `POST /subscriptions` returns `activeKeyId` and `rotationActive: false`; `GET /subscriptions` includes `secretRotatedAt`, `previousSecretExpiresAt`, and `rotationActive`
+- Secrets are never logged; API responses never include ciphertext or raw secrets (except one-time `generate: true` rotate)
 
 ### Env
 
@@ -287,3 +308,29 @@ Migration `0019_webhook_secret_rotation.sql` adds:
 - `previous_secret_ciphertext`
 - `previous_secret_expires_at`
 - `secret_rotated_at`
+
+---
+
+## Destination Verification Handshake
+
+Before enabling outbound webhook deliveries to a configured URL, Talos verifies control of the destination endpoint via a challenge-response handshake.
+
+### Flow
+
+1. **Creation / URL Update** — When a subscription is created (`POST /api/webhooks/subscriptions`) or its `url` is updated (`PATCH /api/webhooks/subscriptions/:id`), its `destination_verification_status` starts at `pending`. Creation automatically attempts an initial handshake.
+2. **Handshake Request** — Talos sends a signed `POST` request to the destination URL via SSRF-guarded `safeFetch`:
+   - Headers: `X-Webhook-Event: endpoint.verification`, `X-Webhook-Challenge: <challenge>`, `X-Webhook-Signature: v1=<hmac>,t=<ts>`
+   - Body: `{ "type": "endpoint.verification", "challenge": "whver_...", "subscriptionId": "...", "talosId": "...", "timestamp": ... }`
+3. **Challenge Echo** — The destination must return an HTTP `2xx` response echoing the challenge (either JSON `{ "challenge": "whver_..." }` or plain text matching the challenge token).
+4. **Retry / Out-of-Band Completion** — Operators can trigger or complete verification via `POST /api/webhooks/subscriptions/:id/verify`:
+   - Empty body: re-runs the outbound HTTP handshake.
+   - `{ "token": "whver_..." }`: completes verification using the active challenge token before `WEBHOOK_VERIFICATION_CHALLENGE_TTL_SECONDS` expires.
+5. **Bounded Lifetime & Delivery Gating** — Verified destinations remain valid for `WEBHOOK_VERIFICATION_TTL_SECONDS`. Unverified or expired subscriptions are skipped by `emitWebhookEvent()` and rejected with `destination_unverified` by `attemptDelivery()`. Legacy rows with `NULL` status remain deliverable for backward compatibility.
+
+### Migration
+
+Migration `0023_webhook_destination_verification.sql` adds:
+- `destination_verification_status`
+- `destination_verification_token`
+- `destination_verification_expires_at`
+- `destination_verified_at`
