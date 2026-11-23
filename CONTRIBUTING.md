@@ -24,6 +24,13 @@ and the Rust Wasm target. The optional Stellar CLI is reported as a warning;
 missing or outdated required tools make the command exit with a non-zero code.
 Run its mocked platform-independent checks with `pnpm doctor:test`.
 
+Run `pnpm paths:check` to verify the checkout has no tracked paths that differ
+only by case. Git stores paths case-sensitively, but Windows and default macOS
+volumes do not, so such a pair silently loses a file after checkout on those
+platforms. The check lists every conflicting path, sorted deterministically,
+and exits non-zero until one side is renamed. Its tests run with
+`pnpm test:path-collisions`.
+
 For the Rust contracts, also add the Wasm target:
 
 ```bash
