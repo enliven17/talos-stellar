@@ -200,24 +200,26 @@ pub struct EpochRecord {
     pub status: EpochStatus,
 }
 
-/// A single entry in a patron's bounded claim history.
+/// Result of a dry-run distribution calculation returned by
+/// [`TalosDividends::estimate_distribution`].
 ///
-/// Stored under `DataKey::ClaimHistory(patron, index)`.  The index is
-/// 0-based and monotonically increasing, capped at
-/// [`MAX_CLAIM_HISTORY`] entries per patron.
+/// All amounts are in the same atomic unit as `EpochRecord::total_amount`.
+/// `rounding_remainder` is the integer truncation dust that would not be
+/// distributed to any role; it equals
+/// `total_amount - creator_amount - investor_amount - treasury_amount`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClaimRecord {
-    /// Epoch this claim belongs to.
-    pub epoch_id: u64,
-    /// Talos this claim belongs to.
-    pub talos_id: u32,
-    /// Exact atomic amount claimed.
-    pub amount: i128,
-    /// Patron role used for this claim.
-    pub role: PatronRole,
-    /// Ledger sequence at the time of the claim.
-    pub ledger_sequence: u32,
+pub struct DistributionEstimate {
+    /// Input total used for the calculation.
+    pub total_amount: i128,
+    /// Creator's allocation (`total_amount * creator_share / 100`).
+    pub creator_amount: i128,
+    /// Investor's allocation (`total_amount * investor_share / 100`).
+    pub investor_amount: i128,
+    /// Treasury's allocation (`total_amount * treasury_share / 100`).
+    pub treasury_amount: i128,
+    /// Integer remainder not distributed to any role.
+    pub rounding_remainder: i128,
 }
 
 /// Persistent storage key enumeration.
@@ -312,7 +314,7 @@ pub fn features_list() -> &'static [&'static str] {
         "rounding_dust",
         "round_manifest",
         "interface_query",
-        "claim_history",
+        "dry_run_estimator",
     ]
 }
 
@@ -1040,27 +1042,62 @@ impl TalosDividends {
             .get(&DataKey::RoundingDust(talos_id, epoch_id))
     }
 
-    /// Return the total number of claim history entries recorded for `patron`.
+    /// Perform a dry-run distribution calculation using synthetic inputs.
     ///
-    /// Returns 0 before any claim has been made.  Capped at
-    /// [`MAX_CLAIM_HISTORY`]; this is an O(1) read independent of the
-    /// number of other recipients.
-    pub fn get_claim_count(env: Env, patron: Address) -> u32 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::ClaimCount(patron))
-            .unwrap_or(0u32)
-    }
+    /// Computes per-role allocations and the integer rounding remainder for
+    /// the supplied `total_amount` and patron share percentages.  No ledger
+    /// state is read or written, no signing key is required, and no live
+    /// contract invocation is performed.  The arithmetic is identical to the
+    /// logic inside `claim_dividend`, so estimates are bit-exact with live
+    /// claims.
+    ///
+    /// # Arguments
+    /// * `total_amount`    — gross amount to distribute; must be ≥ [`MIN_EPOCH_AMOUNT`].
+    /// * `creator_share`   — creator's percentage (0–100).
+    /// * `investor_share`  — investor's percentage (0–100).
+    /// * `treasury_share`  — treasury's percentage (0–100).
+    ///
+    /// All three share values must sum to exactly 100.
+    ///
+    /// # Panics / Errors
+    /// - [`ContractError::InvalidPatronShares`] — shares do not sum to 100.
+    /// - [`ContractError::InvalidEpochParams`]  — `total_amount < MIN_EPOCH_AMOUNT`.
+    /// - [`ContractError::ZeroAllocation`]      — a share rounds to zero.
+    /// - [`ContractError::Overflow`]            — intermediate multiplication overflows.
+    pub fn estimate_distribution(
+        env: Env,
+        total_amount: i128,
+        creator_share: u32,
+        investor_share: u32,
+        treasury_share: u32,
+    ) -> Result<DistributionEstimate, ContractError> {
+        let _ = env;
 
-    /// Return the [`ClaimRecord`] at `index` for `patron`, or `None` if absent.
-    ///
-    /// `index` is 0-based.  Returns `None` for any index ≥ the recorded
-    /// claim count or for patrons who have never claimed.  Each read is O(1)
-    /// and independent of the number of other recipients.
-    pub fn get_claim_record(env: Env, patron: Address, index: u32) -> Option<ClaimRecord> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::ClaimHistory(patron, index))
+        if total_amount < MIN_EPOCH_AMOUNT {
+            return Err(ContractError::InvalidEpochParams);
+        }
+
+        let share_sum = creator_share
+            .checked_add(investor_share)
+            .and_then(|s| s.checked_add(treasury_share))
+            .ok_or(ContractError::Overflow)?;
+        if share_sum != 100 {
+            return Err(ContractError::InvalidPatronShares);
+        }
+
+        let creator_amount = compute_allocation(total_amount, creator_share)?;
+        let investor_amount = compute_allocation(total_amount, investor_share)?;
+        let treasury_amount = compute_allocation(total_amount, treasury_share)?;
+        let rounding_remainder =
+            compute_rounding_dust(total_amount, creator_share, investor_share, treasury_share)?;
+
+        Ok(DistributionEstimate {
+            total_amount,
+            creator_amount,
+            investor_amount,
+            treasury_amount,
+            rounding_remainder,
+        })
     }
 
     /// Return the next epoch ID that would be assigned for `talos_id`.
@@ -4622,125 +4659,114 @@ mod tests {
         assert!(res.is_err());
     }
 
-    // ── get_claim_count() / get_claim_record() ───────────────────────────────
+    // ── estimate_distribution() ──────────────────────────────────────────────
 
     #[test]
-    fn get_claim_count_returns_zero_before_any_claim() {
+    fn estimate_distribution_happy_path_60_25_15() {
         let (env, _, _, _, client) = setup();
-        let patron = Address::generate(&env);
-        assert_eq!(client.get_claim_count(&patron), 0u32);
+        let est = client
+            .estimate_distribution(&10_000_i128, &60u32, &25u32, &15u32)
+            .unwrap();
+        assert_eq!(est.total_amount, 10_000);
+        assert_eq!(est.creator_amount, 6_000);
+        assert_eq!(est.investor_amount, 2_500);
+        assert_eq!(est.treasury_amount, 1_500);
+        assert_eq!(est.rounding_remainder, 0);
+        let _ = env;
     }
 
     #[test]
-    fn get_claim_count_increments_after_claim() {
-        let (env, contract_id, admin, _, client) = setup();
-        let talos_id = 1u32;
-        let creator = Address::generate(&env);
-        let investor = Address::generate(&env);
-        let treasury = Address::generate(&env);
-        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
-
-        assert_eq!(client.get_claim_count(&creator), 0u32);
-        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
-        assert_eq!(client.get_claim_count(&creator), 1u32);
-    }
-
-    #[test]
-    fn get_claim_record_returns_none_for_unclaimed() {
+    fn estimate_distribution_with_rounding() {
         let (env, _, _, _, client) = setup();
-        let patron = Address::generate(&env);
-        assert_eq!(client.get_claim_record(&patron, &0u32), None);
+        // 101 * 60/100 = 60, 101 * 25/100 = 25, 101 * 15/100 = 15 → sum=100, remainder=1
+        let est = client
+            .estimate_distribution(&101_i128, &60u32, &25u32, &15u32)
+            .unwrap();
+        assert_eq!(est.total_amount, 101);
+        assert_eq!(est.creator_amount + est.investor_amount + est.treasury_amount + est.rounding_remainder, 101);
+        assert!(est.rounding_remainder > 0);
+        let _ = env;
     }
 
     #[test]
-    fn get_claim_record_returns_correct_record_after_claim() {
-        let (env, contract_id, admin, _, client) = setup();
-        let talos_id = 1u32;
-        let creator = Address::generate(&env);
-        let investor = Address::generate(&env);
-        let treasury = Address::generate(&env);
-        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
-
-        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
-
-        let record = client.get_claim_record(&creator, &0u32).unwrap();
-        assert_eq!(record.epoch_id, epoch_id);
-        assert_eq!(record.talos_id, talos_id);
+    fn estimate_distribution_invalid_shares_not_100() {
+        let (env, _, _, _, client) = setup();
+        let res = client.try_estimate_distribution(&10_000_i128, &60u32, &25u32, &14u32);
+        assert_eq!(res, Err(Ok(ContractError::InvalidPatronShares)));
+        let _ = env;
     }
 
     #[test]
-    fn claim_record_role_is_correct() {
-        let (env, contract_id, admin, _, client) = setup();
-        let talos_id = 1u32;
-        let creator = Address::generate(&env);
-        let investor = Address::generate(&env);
-        let treasury = Address::generate(&env);
-        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
-
-        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
-        do_claim(&env, &contract_id, &client, &investor, talos_id, epoch_id, &creator, &investor, &treasury);
-        do_claim(&env, &contract_id, &client, &treasury, talos_id, epoch_id, &creator, &investor, &treasury);
-
-        assert_eq!(client.get_claim_record(&creator, &0u32).unwrap().role, PatronRole::Creator);
-        assert_eq!(client.get_claim_record(&investor, &0u32).unwrap().role, PatronRole::Investor);
-        assert_eq!(client.get_claim_record(&treasury, &0u32).unwrap().role, PatronRole::Treasury);
+    fn estimate_distribution_invalid_total_amount_zero() {
+        let (env, _, _, _, client) = setup();
+        let res = client.try_estimate_distribution(&0_i128, &60u32, &25u32, &15u32);
+        assert_eq!(res, Err(Ok(ContractError::InvalidEpochParams)));
+        let _ = env;
     }
 
     #[test]
-    fn claim_record_amount_is_exact() {
-        let (env, contract_id, admin, _, client) = setup();
-        let talos_id = 1u32;
-        let creator = Address::generate(&env);
-        let investor = Address::generate(&env);
-        let treasury = Address::generate(&env);
-        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
-
-        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
-        // creator = 60% of 10_000 = 6_000
-        assert_eq!(client.get_claim_record(&creator, &0u32).unwrap().amount, 6_000);
+    fn estimate_distribution_sums_to_total_plus_remainder() {
+        let (env, _, _, _, client) = setup();
+        for total in [100_i128, 999, 10_000, 1_000_003] {
+            let est = client
+                .estimate_distribution(&total, &60u32, &25u32, &15u32)
+                .unwrap();
+            assert_eq!(
+                est.creator_amount + est.investor_amount + est.treasury_amount + est.rounding_remainder,
+                total
+            );
+        }
+        let _ = env;
     }
 
     #[test]
-    fn multiple_epochs_accumulate_in_history() {
-        let (env, contract_id, admin, _, client) = setup();
-        let talos_id = 1u32;
-        let creator = Address::generate(&env);
-        let investor = Address::generate(&env);
-        let treasury = Address::generate(&env);
-
-        let epoch1 = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
-        let epoch2 = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
-
-        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch1, &creator, &investor, &treasury);
-        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch2, &creator, &investor, &treasury);
-
-        assert_eq!(client.get_claim_count(&creator), 2u32);
-        assert_eq!(client.get_claim_record(&creator, &0u32).unwrap().epoch_id, epoch1);
-        assert_eq!(client.get_claim_record(&creator, &1u32).unwrap().epoch_id, epoch2);
+    fn estimate_distribution_does_not_modify_state() {
+        let (env, _, _, _, client) = setup();
+        // Call twice; no state to observe. Verify both return identical results.
+        let est1 = client
+            .estimate_distribution(&10_000_i128, &60u32, &25u32, &15u32)
+            .unwrap();
+        let est2 = client
+            .estimate_distribution(&10_000_i128, &60u32, &25u32, &15u32)
+            .unwrap();
+        assert_eq!(est1, est2);
+        let _ = env;
     }
 
     #[test]
-    fn get_claim_count_independent_per_patron() {
-        let (env, contract_id, admin, _, client) = setup();
-        let talos_id = 1u32;
-        let creator = Address::generate(&env);
-        let investor = Address::generate(&env);
-        let treasury = Address::generate(&env);
-        let epoch_id = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
-
-        do_claim(&env, &contract_id, &client, &creator, talos_id, epoch_id, &creator, &investor, &treasury);
-
-        // Only creator claimed; others still at 0.
-        assert_eq!(client.get_claim_count(&creator), 1u32);
-        assert_eq!(client.get_claim_count(&investor), 0u32);
-        assert_eq!(client.get_claim_count(&treasury), 0u32);
+    fn estimate_distribution_min_amount() {
+        let (env, _, _, _, client) = setup();
+        // total=100, shares 60/25/15 → exact distribution, remainder=0
+        let est = client
+            .estimate_distribution(&100_i128, &60u32, &25u32, &15u32)
+            .unwrap();
+        assert_eq!(est.creator_amount, 60);
+        assert_eq!(est.investor_amount, 25);
+        assert_eq!(est.treasury_amount, 15);
+        assert_eq!(est.rounding_remainder, 0);
+        let _ = env;
     }
 
     #[test]
-    fn interface_features_includes_claim_history() {
+    fn estimate_distribution_large_amount() {
+        let (env, _, _, _, client) = setup();
+        // Use a large but safe value: i128::MAX / 100 avoids overflow in * 60
+        let large = i128::MAX / 100;
+        let est = client
+            .estimate_distribution(&large, &60u32, &25u32, &15u32)
+            .unwrap();
+        assert_eq!(
+            est.creator_amount + est.investor_amount + est.treasury_amount + est.rounding_remainder,
+            large
+        );
+        let _ = env;
+    }
+
+    #[test]
+    fn interface_features_includes_dry_run_estimator() {
         let (env, _, _, _, client) = setup();
         let features = client.interface_features();
-        let target = soroban_sdk::Symbol::new(&env, "claim_history");
+        let target = soroban_sdk::Symbol::new(&env, "dry_run_estimator");
         let mut found = false;
         for i in 0..features.len() {
             if features.get(i).unwrap() == target {
@@ -4748,28 +4774,18 @@ mod tests {
                 break;
             }
         }
-        assert!(found, "expected 'claim_history' in interface_features");
+        assert!(found, "expected 'dry_run_estimator' in interface_features");
     }
 
     #[test]
-    fn claim_history_bounded_at_max_entries() {
-        // Commit MAX_CLAIM_HISTORY + 1 epochs and claim from one patron;
-        // the count must be capped at MAX_CLAIM_HISTORY.
-        let (env, contract_id, admin, _, client) = setup();
-        let talos_id = 1u32;
-        let creator = Address::generate(&env);
-        let investor = Address::generate(&env);
-        let treasury = Address::generate(&env);
-
-        let limit = MAX_CLAIM_HISTORY + 1;
-        for _ in 0..limit {
-            let eid = commit_default_epoch(&env, &contract_id, &client, &admin, talos_id);
-            do_claim(&env, &contract_id, &client, &creator, talos_id, eid, &creator, &investor, &treasury);
-        }
-
-        assert_eq!(client.get_claim_count(&creator), MAX_CLAIM_HISTORY);
-        // Index at MAX_CLAIM_HISTORY must be absent.
-        assert_eq!(client.get_claim_record(&creator, &MAX_CLAIM_HISTORY), None);
+    fn estimate_distribution_no_signing_required() {
+        let (env, _, _, _, client) = setup();
+        // No mock_auths — read-only, no auth needed.
+        let est = client
+            .estimate_distribution(&10_000_i128, &60u32, &25u32, &15u32)
+            .unwrap();
+        assert_eq!(est.creator_amount, 6_000);
+        let _ = env;
     }
 }
 

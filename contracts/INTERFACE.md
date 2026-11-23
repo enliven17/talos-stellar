@@ -137,14 +137,14 @@ time, and an expired proposal cannot be accepted.
 
 ### TalosDividends
 
-| Capability        | Description                                                                                   |
-|-------------------|-----------------------------------------------------------------------------------------------|
-| `epoch_commitment`| `commit_epoch` — admin-gated distribution round creation.                                     |
-| `pull_claims`     | `claim_dividend` — patron-initiated O(1) claim per epoch.                                     |
-| `expiry_recovery` | `recover_expired` — admin sweeps unclaimed funds after the claim window.                      |
-| `rounding_dust`   | `get_rounding_dust` — remainder from integer share division, stored once.                     |
-| `interface_query` | `version` / `interface_id` / `supports_version` / `interface_features`.                      |
-| `claim_history`   | `get_claim_count` / `get_claim_record` — bounded per-patron claim history (capped at `MAX_CLAIM_HISTORY = 100`). Each entry carries a stable claim reference (epoch_id, talos_id) and exact atomic amount. Reads are O(1) independent of other recipients. |
+| Capability          | Description                                                                               |
+|---------------------|-------------------------------------------------------------------------------------------|
+| `epoch_commitment`  | `commit_epoch` — admin-gated distribution round creation.                                 |
+| `pull_claims`       | `claim_dividend` — patron-initiated O(1) claim per epoch.                                 |
+| `expiry_recovery`   | `recover_expired` — admin sweeps unclaimed funds after the claim window.                  |
+| `rounding_dust`     | `get_rounding_dust` — remainder from integer share division, stored once.                 |
+| `interface_query`   | `version` / `interface_id` / `supports_version` / `interface_features`.                  |
+| `dry_run_estimator` | `estimate_distribution` — stateless dry-run estimator returning per-role amounts and rounding remainder. Requires no signing key or live contract invocation. |
 
 #### Storage & Input Bounds
 
