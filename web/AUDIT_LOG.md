@@ -7,6 +7,7 @@ Operator-facing searchable view of `tls_api_audit_logs` (API key auth events).
 | Method | Path | Auth |
 |--------|------|------|
 | `GET` | `/api/admin/audit-logs` | `Authorization: Bearer <ADMIN_API_KEY>` |
+| `GET` | `/api/talos/:id/audit/verify` | `Authorization: Bearer <AGENT_API_KEY>` |
 
 UI: `/admin/audit` (stores the admin key in `sessionStorage` only).
 

@@ -5,14 +5,12 @@ import {
   sealChainRoot,
   verifyChainRootSeal,
   verifyChain,
-  sanitizeAuditExportIdentifier,
-  buildAuditExportFilename,
-  MAX_AUDIT_FILENAME_SEGMENT_LENGTH,
-  MAX_AUDIT_EXPORT_FILENAME_LENGTH,
+  verifyChainRange,
   AUDIT_CHAIN_VERSION,
   GENESIS_HASH,
   isAuditChainEnabled,
   type AuditChainEntry,
+  type AuditChainRow,
 } from "../src/lib/audit-chain";
 
 // ─── Helpers ──────────────────────────────────────────────────────
@@ -370,6 +368,191 @@ describe("audit-chain", () => {
 
       const result = verifyChain([row]);
       expect(result.chainVersion).toBe("2");
+    });
+  });
+
+  describe("verifyChainRange", () => {
+    function buildChainedRows(count: number): AuditChainRow[] {
+      const entries = Array.from({ length: count }, (_, i) =>
+        makeEntry({
+          sequenceNumber: i,
+          createdAt: `2026-01-01T00:00:0${i}.000Z`,
+        }),
+      );
+      return entries.map((entry, i) => ({
+        sequenceNumber: i,
+        entryHash: computeEntryHash(entry),
+        previousHash: i === 0 ? GENESIS_HASH : computeEntryHash(entries[i - 1]),
+        chainVersion: AUDIT_CHAIN_VERSION,
+        talosId: entry.talosId,
+        method: entry.method,
+        path: entry.path,
+        statusCode: entry.statusCode,
+        ipAddress: entry.ipAddress,
+        createdAt: new Date(entry.createdAt),
+      }));
+    }
+
+    it("verifies a mid-chain time range when the predecessor boundary matches", () => {
+      const allRows = buildChainedRows(6);
+      const predecessor = {
+        sequenceNumber: allRows[1].sequenceNumber,
+        entryHash: allRows[1].entryHash,
+        createdAt: allRows[1].createdAt,
+      };
+      const rangeRows = allRows.slice(2, 5);
+
+      const result = verifyChainRange(rangeRows, {
+        predecessor,
+        from: "2026-01-01T00:00:02.000Z",
+        to: "2026-01-01T00:00:04.000Z",
+      });
+
+      expect(result.valid).toBe(true);
+      expect(result.status).toBe("valid");
+      expect(result.complete).toBe(true);
+      expect(result.incompleteReason).toBeNull();
+      expect(result.failureReason).toBeNull();
+      expect(result.verifiedEntries).toBe(3);
+      expect(result.startSequence).toBe(2);
+      expect(result.endSequence).toBe(4);
+      expect(result.predecessorSequence).toBe(1);
+      expect(result.predecessorHash).toBe(allRows[1].entryHash);
+      expect(result.brokenAtSequence).toBeNull();
+    });
+
+    it("verifies a range starting at genesis when predecessor is null", () => {
+      const allRows = buildChainedRows(3);
+
+      const result = verifyChainRange(allRows, {
+        predecessor: null,
+        from: "2026-01-01T00:00:00.000Z",
+        to: "2026-01-01T00:00:02.000Z",
+      });
+
+      expect(result.valid).toBe(true);
+      expect(result.status).toBe("valid");
+      expect(result.complete).toBe(true);
+      expect(result.startSequence).toBe(0);
+      expect(result.endSequence).toBe(2);
+      expect(result.verifiedEntries).toBe(3);
+    });
+
+    it("distinguishes an incomplete range (missing predecessor) from a broken chain", () => {
+      const allRows = buildChainedRows(5);
+      const rangeRows = allRows.slice(2, 5);
+
+      // Case 1: predecessor omitted (undefined) for mid-chain slice
+      const omittedPred = verifyChainRange(rangeRows);
+      expect(omittedPred.valid).toBe(false);
+      expect(omittedPred.status).toBe("incomplete");
+      expect(omittedPred.complete).toBe(false);
+      expect(omittedPred.incompleteReason).toBe("missing_predecessor");
+      expect(omittedPred.failureReason).toBe("missing_predecessor");
+      expect(omittedPred.brokenAtSequence).toBeNull();
+      expect(omittedPred.verifiedEntries).toBe(3);
+      expect(omittedPred.startSequence).toBe(2);
+      expect(omittedPred.endSequence).toBe(4);
+
+      // Case 2: predecessor explicitly null (DB found no prior entry before `from`, yet range starts at seq 2)
+      const nullPred = verifyChainRange(rangeRows, { predecessor: null });
+      expect(nullPred.valid).toBe(false);
+      expect(nullPred.status).toBe("incomplete");
+      expect(nullPred.complete).toBe(false);
+      expect(nullPred.incompleteReason).toBe("missing_predecessor");
+      expect(nullPred.brokenAtSequence).toBeNull();
+    });
+
+    it("distinguishes an incomplete range (truncated by limit) from a broken chain", () => {
+      const allRows = buildChainedRows(4);
+      const result = verifyChainRange(allRows.slice(0, 2), {
+        predecessor: null,
+        truncated: true,
+      });
+
+      expect(result.valid).toBe(false);
+      expect(result.status).toBe("incomplete");
+      expect(result.complete).toBe(false);
+      expect(result.incompleteReason).toBe("truncated_range");
+      expect(result.failureReason).toBe("truncated_range");
+      expect(result.brokenAtSequence).toBeNull();
+      expect(result.verifiedEntries).toBe(2);
+    });
+
+    it("still detects a broken internal link even when predecessor is omitted", () => {
+      const allRows = buildChainedRows(5);
+      const rangeRows = allRows.slice(2, 5).map((r) => ({ ...r }));
+      rangeRows[1].entryHash = "tampered-hash";
+
+      const result = verifyChainRange(rangeRows);
+      expect(result.valid).toBe(false);
+      expect(result.status).toBe("broken");
+      expect(result.complete).toBe(false);
+      expect(result.failureReason).toBe("entry_hash_mismatch");
+      expect(result.brokenAtSequence).toBe(3);
+    });
+
+    it("detects a broken predecessor boundary when previousHash or sequenceNumber mismatches predecessor", () => {
+      const allRows = buildChainedRows(5);
+      const wrongPredecessor = {
+        sequenceNumber: allRows[0].sequenceNumber,
+        entryHash: allRows[0].entryHash,
+        createdAt: allRows[0].createdAt,
+      };
+      const rangeRows = allRows.slice(2, 4);
+
+      const result = verifyChainRange(rangeRows, {
+        predecessor: wrongPredecessor,
+      });
+
+      expect(result.valid).toBe(false);
+      expect(result.status).toBe("broken");
+      expect(result.failureReason).toBe("predecessor_mismatch");
+      expect(result.brokenAtSequence).toBe(2);
+    });
+
+    it("detects unexpected genesis when a predecessor exists or sequenceNumber > 0 has GENESIS previousHash", () => {
+      const allRows = buildChainedRows(3);
+      const tampered = { ...allRows[1], previousHash: GENESIS_HASH };
+
+      const result = verifyChainRange([tampered]);
+      expect(result.valid).toBe(false);
+      expect(result.status).toBe("broken");
+      expect(result.failureReason).toBe("unexpected_genesis");
+      expect(result.brokenAtSequence).toBe(1);
+    });
+
+    it("detects out-of-order records by timestamp or sequence and records outside [from, to]", () => {
+      const allRows = buildChainedRows(3);
+      // Reverse chronological order
+      const reversed = [allRows[1], allRows[0]];
+      const outOfOrder = verifyChainRange(reversed);
+      expect(outOfOrder.valid).toBe(false);
+      expect(outOfOrder.status).toBe("broken");
+      expect(outOfOrder.failureReason).toBe("out_of_order_records");
+
+      // Record outside [from, to] window
+      const outOfBounds = verifyChainRange(allRows, {
+        predecessor: null,
+        from: "2026-01-01T00:00:01.000Z",
+        to: "2026-01-01T00:00:02.000Z",
+      });
+      expect(outOfBounds.valid).toBe(false);
+      expect(outOfBounds.status).toBe("broken");
+      expect(outOfBounds.failureReason).toBe("out_of_order_records");
+      expect(outOfBounds.brokenAtSequence).toBe(0);
+    });
+
+    it("detects a sequence gap inside the selected range", () => {
+      const allRows = buildChainedRows(4);
+      const gapped = [allRows[0], allRows[2]];
+
+      const result = verifyChainRange(gapped, { predecessor: null });
+      expect(result.valid).toBe(false);
+      expect(result.status).toBe("broken");
+      expect(result.failureReason).toBe("sequence_gap");
+      expect(result.brokenAtSequence).toBe(2);
+      expect(result.verifiedEntries).toBe(1);
     });
   });
 

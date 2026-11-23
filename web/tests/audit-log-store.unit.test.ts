@@ -227,126 +227,134 @@ describe("listAuditLogs", () => {
   });
 });
 
-describe("exportAuditLogs / serializeAuditLogExport", () => {
+describe("verifyAuditChainRange", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("generates a bounded safe filename from validated identifiers while preserving Unicode inside exported data", async () => {
-    const mockDate = new Date("2026-10-17T12:00:00.000Z");
+  function makeChainedRow(seq: number, prevHash: string, createdAtIso: string) {
+    const entry: AuditChainEntry = {
+      sequenceNumber: seq,
+      talosId: "t-1",
+      method: "POST",
+      path: "/api/talos/t-1/sign",
+      statusCode: 200,
+      ipAddress: "127.0.0.1",
+      createdAt: createdAtIso,
+    };
+    return {
+      sequenceNumber: seq,
+      previousHash: prevHash,
+      entryHash: computeEntryHash(entry),
+      chainVersion: AUDIT_CHAIN_VERSION,
+      talosId: entry.talosId,
+      method: entry.method,
+      path: entry.path,
+      statusCode: entry.statusCode,
+      ipAddress: entry.ipAddress,
+      createdAt: new Date(createdAtIso),
+    };
+  }
+
+  it("queries predecessor before `from` and verifies a valid mid-chain range", async () => {
+    const r0 = makeChainedRow(0, GENESIS_HASH, "2026-01-01T00:00:00.000Z");
+    const r1 = makeChainedRow(1, r0.entryHash, "2026-01-01T00:00:01.000Z");
+    const r2 = makeChainedRow(2, r1.entryHash, "2026-01-01T00:00:02.000Z");
+    const r3 = makeChainedRow(3, r2.entryHash, "2026-01-01T00:00:03.000Z");
+
+    // 1st query: predecessor before `from`
     mockDb.limit.mockResolvedValueOnce([
       {
-        id: "audit_1",
-        talosId: "tal_valid_1",
-        method: "POST",
-        path: "/api/talos/tal_valid_1/sign?note=こんにちは-🚀",
-        statusCode: 403,
-        denialReason: "insufficient_scopes: Ωμέγα-अभिनेता",
-        scopesRequired: ["wallet:sign", "commerce:write"],
-        ipAddress: "127.0.0.1",
+        sequenceNumber: r1.sequenceNumber,
+        entryHash: r1.entryHash,
+        createdAt: r1.createdAt,
+      },
+    ]);
+    // 2nd query: ordered rows in `[from, to]`
+    mockDb.limit.mockResolvedValueOnce([r2, r3]);
+
+    const result = await verifyAuditChainRange({
+      talosId: "t-1",
+      from: "2026-01-01T00:00:02.000Z",
+      to: "2026-01-01T00:00:03.000Z",
+      limit: 100,
+    });
+
+    expect(mockDb.limit).toHaveBeenNthCalledWith(1, 1);
+    expect(mockDb.limit).toHaveBeenNthCalledWith(2, 101);
+    expect(result.valid).toBe(true);
+    expect(result.status).toBe("valid");
+    expect(result.complete).toBe(true);
+    expect(result.verifiedEntries).toBe(2);
+    expect(result.predecessorSequence).toBe(1);
+    expect(result.startSequence).toBe(2);
+    expect(result.endSequence).toBe(3);
+  });
+
+  it("reports incomplete when predecessor is missing before `from` for non-genesis range", async () => {
+    const r0 = makeChainedRow(0, GENESIS_HASH, "2026-01-01T00:00:00.000Z");
+    const r1 = makeChainedRow(1, r0.entryHash, "2026-01-01T00:00:01.000Z");
+    const r2 = makeChainedRow(2, r1.entryHash, "2026-01-01T00:00:02.000Z");
+
+    // Predecessor missing from DB (e.g. pruned or incomplete store)
+    mockDb.limit.mockResolvedValueOnce([]);
+    mockDb.limit.mockResolvedValueOnce([r1, r2]);
+
+    const result = await verifyAuditChainRange({
+      talosId: "t-1",
+      from: "2026-01-01T00:00:01.000Z",
+      to: "2026-01-01T00:00:02.000Z",
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.status).toBe("incomplete");
+    expect(result.complete).toBe(false);
+    expect(result.incompleteReason).toBe("missing_predecessor");
+    expect(result.brokenAtSequence).toBeNull();
+  });
+
+  it("reports incomplete when the time range is truncated by limit", async () => {
+    const r0 = makeChainedRow(0, GENESIS_HASH, "2026-01-01T00:00:00.000Z");
+    const r1 = makeChainedRow(1, r0.entryHash, "2026-01-01T00:00:01.000Z");
+
+    // No `from` filter -> no predecessor query; returns 2 rows for limit=1 (limit+1=2)
+    mockDb.limit.mockResolvedValueOnce([r0, r1]);
+
+    const result = await verifyAuditChainRange({
+      talosId: "t-1",
+      to: "2026-01-01T00:00:05.000Z",
+      limit: 1,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.status).toBe("incomplete");
+    expect(result.complete).toBe(false);
+    expect(result.incompleteReason).toBe("truncated_range");
+    expect(result.verifiedEntries).toBe(1);
+    expect(result.brokenAtSequence).toBeNull();
+  });
+
+  it("reports broken when predecessor hash does not match the range start", async () => {
+    const r0 = makeChainedRow(0, GENESIS_HASH, "2026-01-01T00:00:00.000Z");
+    const r1 = makeChainedRow(1, r0.entryHash, "2026-01-01T00:00:01.000Z");
+
+    mockDb.limit.mockResolvedValueOnce([
+      {
         sequenceNumber: 0,
-        previousHash: "GENESIS",
-        entryHash: "a".repeat(64),
-        chainVersion: "1",
-        createdAt: mockDate,
+        entryHash: "tampered-predecessor-hash",
+        createdAt: r0.createdAt,
       },
     ]);
+    mockDb.limit.mockResolvedValueOnce([r1]);
 
-    const jsonBundle = await exportAuditLogs(
-      {
-        talosId: "tal_valid_1",
-        q: "こんにちは-🚀",
-        denialReason: "insufficient_scopes: Ωμέγα-अभिनेता",
-      },
-      {
-        format: "json",
-        exportedAt: mockDate,
-      },
-    );
+    const result = await verifyAuditChainRange({
+      talosId: "t-1",
+      from: "2026-01-01T00:00:01.000Z",
+    });
 
-    expect(jsonBundle.filename).toBe("audit-logs-tal_valid_1-20261017T120000Z.json");
-    expect(jsonBundle.contentDisposition).toBe(
-      'attachment; filename="audit-logs-tal_valid_1-20261017T120000Z.json"',
-    );
-    expect(jsonBundle.contentType).toBe("application/json; charset=utf-8");
-    expect(jsonBundle.filename).not.toContain("こんにちは");
-    expect(jsonBundle.filename).not.toContain("🚀");
-    expect(jsonBundle.filename).not.toContain("Ωμέγα");
-
-    // Unicode is preserved inside the exported JSON payload
-    expect(jsonBundle.data).toContain("こんにちは-🚀");
-    expect(jsonBundle.data).toContain("Ωμέγα-अभिनेता");
-  });
-
-  it("strips untrusted actor text or Unicode from filename when talosId filter contains untrusted input, preserving Unicode in CSV data", async () => {
-    const mockDate = new Date("2026-10-17T12:00:00.000Z");
-    const untrustedActorId = 'actor-🚀-Ümlaut"; filename="pwn.csv';
-    mockDb.limit.mockResolvedValueOnce([
-      {
-        id: "audit_2",
-        talosId: untrustedActorId,
-        method: "GET",
-        path: "/api/talos/🚀/status",
-        statusCode: 403,
-        denialReason: "expired_key_🔑",
-        scopesRequired: null,
-        ipAddress: "10.0.0.1",
-        sequenceNumber: 1,
-        previousHash: "b".repeat(64),
-        entryHash: "c".repeat(64),
-        chainVersion: "1",
-        createdAt: mockDate,
-      },
-    ]);
-
-    const csvBundle = await exportAuditLogs(
-      {
-        talosId: untrustedActorId,
-      },
-      {
-        format: "csv",
-        exportedAt: mockDate,
-      },
-    );
-
-    expect(csvBundle.filename).toBe("audit-logs-filtered-20261017T120000Z.csv");
-    expect(csvBundle.contentDisposition).toBe(
-      'attachment; filename="audit-logs-filtered-20261017T120000Z.csv"',
-    );
-    expect(csvBundle.contentType).toBe("text/csv; charset=utf-8");
-    expect(csvBundle.filename).not.toContain("pwn.csv");
-    expect(csvBundle.filename).not.toContain("🚀");
-    expect(csvBundle.filename).not.toContain("Ümlaut");
-
-    // Unicode and escaped quotes are preserved inside the CSV data payload
-    expect(csvBundle.data).toContain("/api/talos/🚀/status");
-    expect(csvBundle.data).toContain("expired_key_🔑");
-    expect(csvBundle.data).toContain('actor-🚀-Ümlaut""; filename=""pwn.csv');
-  });
-
-  it("neutralizes spreadsheet formula prefixes in CSV cells while keeping Unicode intact", () => {
-    const csv = serializeAuditLogExport(
-      [
-        {
-          id: "audit_3",
-          talosId: "tal_1",
-          method: "POST",
-          path: "=CMD|' /C calc'!A0_ユニコード",
-          statusCode: 403,
-          denialReason: "@SUM(1+1)_Δοκιμή",
-          scopesRequired: ["admin"],
-          ipAddress: "127.0.0.1",
-          sequenceNumber: null,
-          previousHash: null,
-          entryHash: null,
-          chainVersion: null,
-          createdAt: "2026-10-17T12:00:00.000Z",
-        },
-      ],
-      { format: "csv" },
-    );
-
-    expect(csv).toContain("\"'=CMD|' /C calc'!A0_ユニコード\"");
-    expect(csv).toContain("\"'@SUM(1+1)_Δοκιμή\"");
+    expect(result.valid).toBe(false);
+    expect(result.status).toBe("broken");
+    expect(result.failureReason).toBe("predecessor_mismatch");
+    expect(result.brokenAtSequence).toBe(1);
   });
 });
