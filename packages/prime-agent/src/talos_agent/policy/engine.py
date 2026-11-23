@@ -32,7 +32,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from talos_agent.policy.patterns import compile_glob
+from talos_agent.policy.actions import KNOWN_ACTIONS
 from talos_agent.policy.schema import (
     ActionSpec,
     ConditionTrace,
@@ -388,13 +388,31 @@ class PolicyEngine:
         digest of the decision payload for audit trail purposes and an
         explainable :class:`PolicyDecisionTrace`.
 
-        When the engine is **disabled**, this method always returns
-        ``APPROVE`` with an evidence note and a disabled-engine trace.
+        Unknown action categories are denied before policy evaluation, even
+        when the engine is disabled. Known actions are approved when disabled.
         """
         self._evaluation_count += 1
         evaluation_time = now or datetime.now(timezone.utc)
         if evaluation_time.tzinfo is None or evaluation_time.utcoffset() is None:
             raise ValueError("policy evaluation now must be timezone-aware")
+
+        if spec.action not in KNOWN_ACTIONS:
+            reason = (
+                f"Unknown policy action category: {spec.action or '<empty>'}; "
+                "action denied."
+            )
+            self._deny_count += 1
+            trace = PolicyDecisionTrace(
+                action=spec.action,
+                decision=PolicyDecision.DENY.value,
+                engine_enabled=self._enabled,
+                summary=reason,
+            )
+            return PolicyResult(
+                decision=PolicyDecision.DENY,
+                evidence=(reason,),
+                trace=trace,
+            )
 
         if not self._enabled:
             trace = PolicyDecisionTrace.disabled(spec.action)
