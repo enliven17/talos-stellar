@@ -293,6 +293,53 @@ def enforce_commerce_quote_expiry(
     }
 
 
+def quote_clock_policy_diagnostics(
+    payment_details: Mapping[str, Any] | None,
+    *,
+    now: datetime | None = None,
+    clock: ClockProtocol | None = None,
+    policy: X402ClockSkewPolicy | None = None,
+) -> dict[str, Any]:
+    """Read-only diagnostics for the x402 clock-policy applied to a quote.
+
+    Calls :func:`enforce_commerce_quote_expiry` exactly once — the existing
+    verdict — so this module does not introduce a second expiry rule. The
+    additional fields below are display-only:
+
+    - ``max_clock_skew_secs`` / ``min_remaining_validity_secs`` — the configured
+      safety margin from ``policy`` (or ``None`` when no policy was supplied).
+    - ``remaining_validity_secs`` — ``expires_at - now`` as a float, or ``None``
+      when the quote has no parseable expiry. **Not clamped** to be
+      non-negative: a caller that wants to display "expired 12s ago" can.
+    - ``verdict`` — the ``code`` from the existing verdict (``None`` when safe).
+    - ``expires_at`` — the ISO expiry string, if present.
+
+    Never includes payment headers, signatures, seeds, or the quote body.
+    """
+    verdict = enforce_commerce_quote_expiry(
+        payment_details,
+        now=now,
+        clock=clock,
+        policy=policy,
+    )
+    raw_expiry = extract_quote_expires_at(payment_details)
+    expires_at = parse_iso8601_timestamp(raw_expiry)
+    if expires_at is not None:
+        now_utc = _now_utc(now, clock)
+        remaining = (expires_at - now_utc).total_seconds()
+    else:
+        remaining = None
+    return {
+        "verdict": verdict.get("code") if isinstance(verdict, Mapping) else None,
+        "expires_at": _expiry_iso(expires_at) if expires_at is not None else None,
+        "max_clock_skew_secs": policy.max_clock_skew_secs if policy is not None else None,
+        "min_remaining_validity_secs": (
+            policy.min_remaining_validity_secs if policy is not None else None
+        ),
+        "remaining_validity_secs": remaining,
+    }
+
+
 def quote_expiry_iso(payment_details: Mapping[str, Any] | None) -> str | None:
     """Return normalized UTC Zulu expiry string when parseable, else None."""
     raw = extract_quote_expires_at(payment_details)

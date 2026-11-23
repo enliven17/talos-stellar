@@ -35,6 +35,7 @@ By default, only read-only / side-effect-free tools are exposed:
 | `check_x_mentions` | Read X mentions |
 | `check_post_performance` | Read post engagement |
 | `poll_service_result` | Poll a purchased service result |
+| `reconcile_purchases` | Compare local purchases with API payment finality |
 | `plan_purchase` | Plan a purchase (no execution) |
 | `normalize_providers` | Normalize provider names |
 

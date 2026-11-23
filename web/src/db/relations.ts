@@ -16,6 +16,8 @@ import {
   tlsBenchmarkResults,
   tlsWebhookSubscriptions,
   tlsWebhookDeliveries,
+  tlsJobs,
+  tlsJobAttempts,
 } from "./schema";
 
 export const talosRelations = relations(tlsTalos, ({ many, one }) => ({
@@ -95,5 +97,16 @@ export const webhookDeliveryRelations = relations(tlsWebhookDeliveries, ({ one }
   subscription: one(tlsWebhookSubscriptions, {
     fields: [tlsWebhookDeliveries.subscriptionId],
     references: [tlsWebhookSubscriptions.id],
+  }),
+}));
+
+export const jobRelations = relations(tlsJobs, ({ many }) => ({
+  attempts: many(tlsJobAttempts),
+}));
+
+export const jobAttemptRelations = relations(tlsJobAttempts, ({ one }) => ({
+  job: one(tlsJobs, {
+    fields: [tlsJobAttempts.jobId],
+    references: [tlsJobs.id],
   }),
 }));
